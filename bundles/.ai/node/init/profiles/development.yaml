@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-16T09:38:06Z:bc7e8709afb4c6182548195bac5c26b6b80b8f7218b529fddd46c343164f7812:7WKsNEuuG4I4fZwW+7d/bGhecYXJI5BeBHJxXClircQpi1SJv/X3a+9seGUBwaTJXP9eP2WdE3cKoSAdmKFKCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T15:56:56Z:e33b5925038dd9606465f23f560f9e9535139032db3ba5bc3098af12dc73b3b3:iZjbplpgE3LHZ00Ql4fifR6HLHwqryzy/poCi/LLz0Ox6meUML3KBrG9q9xYfykyh7vwmEGHhaXH2YzR6SRLCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -458,7 +458,7 @@ policies:
       - "node_modules/"
       - "target/"
   external_content:
-    schema: 1
+    schema: 2
     roots: {}
     # Operator-staged trees the retained platform chain imports: the pinned
     # development platform and the authoring build-support inputs. Init

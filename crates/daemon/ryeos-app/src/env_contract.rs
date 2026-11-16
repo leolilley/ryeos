@@ -48,6 +48,7 @@ const ENGINE_PLAN_NAMES: &[&str] = &[
     "RYEOS_CHAIN_ROOT_ID",
     "RYEOS_EXTERNAL_ROOT",
     "RYEOS_EXTERNAL_DELIVERY",
+    "RYEOS_EXTERNAL_DESCRIPTORS",
 ];
 
 const DAEMON_CALLBACK_NAMES: &[&str] = &[
@@ -775,6 +776,10 @@ mod tests {
                     (
                         "RYEOS_EXTERNAL_DELIVERY".to_string(),
                         "\"private_descriptor_root\"".to_string(),
+                    ),
+                    (
+                        "RYEOS_EXTERNAL_DESCRIPTORS".to_string(),
+                        "{\"schema\":\"ryeos.external_realization_descriptors.v1\",\"realizations\":{\"harness\":7}}".to_string(),
                     ),
                 ],
             )

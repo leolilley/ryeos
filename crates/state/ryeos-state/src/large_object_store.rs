@@ -16,6 +16,32 @@
 //! and the damaged copy stays as evidence (counted against the budget, never
 //! evicted) until an operator purges it with the node stopped.
 //!
+//! An object is content; the execute bit is a manifest fact. For an object
+//! some manifest marks executable the store keeps a second published inode
+//! under `executables/` at mode 0555, made once from the verified primary
+//! (reflink where the filesystem offers it, else one copy), re-verified
+//! against the same sidecar and chunk trail, and published atomically. A
+//! generation hard-links whichever inode its manifest's mode calls for, so
+//! an executable costs at most one extra inode per object rather than one
+//! copy per generation. Leases are keyed by hash and cover both inodes;
+//! scrub verifies both and quarantines both on damage; sweep and eviction
+//! remove both and count both inodes' bytes in full (a reflink-shared inode
+//! cannot be told from a real copy by length, so accounting is conservative).
+//!
+//! A node may also hold an object by reference, in place, when the bytes sit
+//! in an import root the node proved it cannot alter. A reference object has
+//! no copy here: the store keeps its sidecar and a versioned reference
+//! record naming the root (by name and measured identity), the relative
+//! path, and the file's identity, size, change time and mode. Every lease
+//! re-checks that identity through the opened descriptor before handing the
+//! file out, scrub reads through the reference, and a reference scrub finds
+//! damaged is quarantined by name with nothing moved. References count
+//! nothing against the budget, are never swept, and leave only by an
+//! explicit unregister. An owned object of the same hash always wins, so a
+//! re-import as owned bytes cures a reference whose proof lapsed. Which root
+//! is usable now is the installed [`ReferenceRoots`] resolver's answer; the
+//! store never reads node policy.
+//!
 //! This store is policy-blind: it does not know what a manifest is. Callers
 //! hand it the reachable root set; the manifest objects that define
 //! reachability live in [`crate::objects::external_large_content_manifest`].
@@ -33,6 +59,9 @@ use sha2::{Digest as _, Sha256};
 use crate::objects::{LARGE_CONTENT_CHUNK_BYTES, MAX_LARGE_CONTENT_FILE_BYTES};
 
 pub const LARGE_OBJECT_SIDECAR_SCHEMA: &str = "ryeos.large_object_sidecar.v1";
+/// Schema of a reference record. A record of any other version has no reader.
+pub const LARGE_OBJECT_REFERENCE_SCHEMA: &str = "ryeos.large_object_reference.v1";
+const MAX_REFERENCE_RECORD_BYTES: u64 = 64 * 1024;
 
 /// Default node budget for the store as a whole. Large content is the point
 /// of this tier: the ceiling is generous and eviction is honest loss — a
@@ -41,10 +70,12 @@ pub const DEFAULT_LARGE_OBJECT_STORE_BUDGET_BYTES: u64 = 512 * 1024 * 1024 * 102
 
 const OBJECTS_DIR: &str = "objects";
 const SIDECARS_DIR: &str = "sidecars";
+const EXECUTABLES_DIR: &str = "executables";
 const STAGING_DIR: &str = ".staging";
 const LOCKS_DIR: &str = ".locks";
 const LEASES_DIR: &str = ".leases";
 const QUARANTINE_DIR: &str = "quarantine";
+const REFERENCES_DIR: &str = "references";
 /// Damaged copies of one hash the quarantine keeps before scrub refuses to
 /// quarantine it again; an operator purge empties it.
 const MAX_QUARANTINED_COPIES: u32 = 64;
@@ -86,6 +117,174 @@ impl LargeObjectSidecar {
         Ok(())
     }
 }
+
+/// Where one in-place object lives: the root it was registered from and its
+/// facts at registration. The root is named and also identified by its
+/// measured filesystem identity, so a root renamed or replaced in policy no
+/// longer matches an old record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LargeObjectReference {
+    pub schema: String,
+    pub file_sha256: String,
+    pub size: u64,
+    pub root_name: String,
+    pub root_identity: lillux::PinnedDirectoryIdentity,
+    pub relative_path: String,
+    pub file_identity: lillux::PinnedRegularFileIdentity,
+    pub changed_seconds: i64,
+    pub changed_nanoseconds: i64,
+    /// Permission bits of the file at registration.
+    pub mode: u32,
+}
+
+impl LargeObjectReference {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.schema != LARGE_OBJECT_REFERENCE_SCHEMA {
+            bail!("large-object reference schema is not current");
+        }
+        require_store_hash(&self.file_sha256)?;
+        if self.size == 0 || self.size > MAX_LARGE_CONTENT_FILE_BYTES {
+            bail!("large-object reference size is outside the admitted bounds");
+        }
+        if self.root_name.is_empty()
+            || self.root_name.len() > 128
+            || !self
+                .root_name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            bail!("large-object reference root name is invalid");
+        }
+        crate::objects::validate_canonical_project_relative_path(&self.relative_path)?;
+        if !self.root_identity.names_an_inode() || !self.file_identity.names_an_inode() {
+            bail!("large-object reference names no inode");
+        }
+        Ok(())
+    }
+}
+
+/// Why a reference object is refused. The text of each code is stable: an
+/// operator or a caller matches on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferenceRefusalCode {
+    /// No resolver of reference roots is installed in this process.
+    RootsUnavailable,
+    /// The root is unknown, or no longer proven at an accepted grade.
+    RootUnproven,
+    /// The root is no longer the directory the object was registered from.
+    RootChanged,
+    /// The file is absent or is no longer the file that was registered.
+    FileChanged,
+    /// Scrub found the file's bytes no longer match their hash.
+    Quarantined,
+}
+
+impl ReferenceRefusalCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RootsUnavailable => "reference_roots_unavailable",
+            Self::RootUnproven => "reference_root_unproven",
+            Self::RootChanged => "reference_root_changed",
+            Self::FileChanged => "reference_file_changed",
+            Self::Quarantined => "reference_quarantined",
+        }
+    }
+}
+
+/// A large object held by reference was refused by name. Re-import it
+/// (as owned bytes if the root can no longer be proven) to serve it again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LargeObjectReferenceRefused {
+    pub file_sha256: String,
+    pub code: ReferenceRefusalCode,
+    pub detail: String,
+}
+
+impl std::fmt::Display for LargeObjectReferenceRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.file_sha256.is_empty() {
+            return write!(
+                f,
+                "the import root cannot hold files in place ({}): {}",
+                self.code.as_str(),
+                self.detail
+            );
+        }
+        write!(
+            f,
+            "large object {} is held by reference and refused ({}): {}. Re-import the bytes \
+             (`ryeos external-content import`, as owned bytes if the root can no longer be \
+             proven) to serve it again",
+            self.file_sha256,
+            self.code.as_str(),
+            self.detail
+        )
+    }
+}
+
+impl std::error::Error for LargeObjectReferenceRefused {}
+
+/// A root the resolver found usable now: its directory, opened and
+/// measured, and the identity it measured.
+pub struct ReferenceRoot {
+    pub directory: lillux::PinnedDirectory,
+    pub identity: lillux::PinnedDirectoryIdentity,
+}
+
+/// Why a root is not usable now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferenceRootRefusal {
+    pub code: ReferenceRefusalCode,
+    pub detail: String,
+}
+
+/// The node's answer to which import roots may hold reference objects now.
+/// The store is policy-blind: the installed resolver decides, from signed
+/// policy and the measurement taken at node start, and a root it cannot
+/// vouch for yields a refusal, never a silent pass.
+pub trait ReferenceRoots: Send + Sync {
+    fn open_root(&self, name: &str) -> Result<ReferenceRoot, ReferenceRootRefusal>;
+}
+
+static INSTALLED_REFERENCE_ROOTS: std::sync::RwLock<Option<std::sync::Arc<dyn ReferenceRoots>>> =
+    std::sync::RwLock::new(None);
+
+/// Install the process's resolver of reference roots, replacing any earlier
+/// one. A node installs it once, after measuring its roots at start.
+pub fn install_reference_roots(roots: std::sync::Arc<dyn ReferenceRoots>) {
+    *INSTALLED_REFERENCE_ROOTS
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(roots);
+}
+
+fn installed_reference_roots() -> Option<std::sync::Arc<dyn ReferenceRoots>> {
+    INSTALLED_REFERENCE_ROOTS
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+/// Where an object to register lives, as the import resolved it.
+#[derive(Debug, Clone, Copy)]
+pub struct ReferenceSource<'a> {
+    pub root_name: &'a str,
+    pub root_identity: lillux::PinnedDirectoryIdentity,
+    pub relative_path: &'a str,
+}
+
+/// What the quarantine marker of a reference object records: which record
+/// scrub condemned. A record registered afterwards differs and is not held
+/// by it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReferenceQuarantineMarker {
+    schema: String,
+    file_sha256: String,
+    record_sha256: String,
+}
+
+const REFERENCE_QUARANTINE_MARKER_SCHEMA: &str = "ryeos.large_object_reference_quarantine.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IngestedLargeObject {
@@ -139,11 +338,21 @@ pub struct LeasedLargeObject {
     path: PathBuf,
     file: fs::File,
     _lease: lillux::locks::ForkClosedLockFile,
+    reference: bool,
 }
 
 impl LeasedLargeObject {
+    /// A path for diagnostics. For a reference object it is the path
+    /// relative to its root; callers read through [`Self::file`].
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Whether this is a reference object: the descriptor is a file in an
+    /// import root the store does not own, so it can be read but never
+    /// hard-linked, renamed or evicted by the store.
+    pub fn is_reference(&self) -> bool {
+        self.reference
     }
 
     pub fn file(&self) -> &fs::File {
@@ -205,6 +414,24 @@ pub enum LargeObjectIntegrityFinding {
         file_sha256: String,
         error: String,
     },
+    /// The object's executable inode no longer hashes to the object's name.
+    ExecutableInodeDamaged {
+        file_sha256: String,
+        computed: String,
+    },
+    /// A reference object cannot be read through its root: the root is not
+    /// usable, or the file is gone or no longer the registered file.
+    ReferenceUnavailable {
+        file_sha256: String,
+        code: String,
+        detail: String,
+    },
+    /// A reference object's file is not the file that was registered (its
+    /// inode, size, change time or mode differs), though it was readable.
+    ReferenceIdentityChanged {
+        file_sha256: String,
+        detail: String,
+    },
     /// An entry in the object namespace that the store did not write: not a
     /// regular file, or not named by a 64-hex digest. Scrub reports it and
     /// leaves it alone; sweep still refuses until an operator removes it.
@@ -221,7 +448,10 @@ impl LargeObjectIntegrityFinding {
     /// beside a matching whole-file hash means the sidecar is what is wrong,
     /// and an unreadable object may be a transient I/O fault.
     pub fn is_byte_damage(&self) -> bool {
-        matches!(self, Self::FileHashMismatch { .. })
+        matches!(
+            self,
+            Self::FileHashMismatch { .. } | Self::ExecutableInodeDamaged { .. }
+        )
     }
 }
 
@@ -242,6 +472,8 @@ pub struct LargeObjectQuarantinePurgeReport {
     pub objects: usize,
     pub bytes: u64,
     pub sidecars: usize,
+    /// Quarantine markers of reference objects. A marker holds no bytes.
+    pub reference_markers: usize,
 }
 
 /// A launch, lease or residency check named a large object that scrub took
@@ -271,10 +503,13 @@ pub struct LargeObjectStore {
     root: lillux::PinnedDirectory,
     objects: lillux::PinnedDirectory,
     sidecars: lillux::PinnedDirectory,
+    executables: lillux::PinnedDirectory,
     staging: lillux::PinnedDirectory,
     locks: lillux::PinnedDirectory,
     leases: lillux::PinnedDirectory,
+    references: lillux::PinnedDirectory,
     chunk_bytes: u64,
+    reference_roots: Option<std::sync::Arc<dyn ReferenceRoots>>,
 }
 
 impl LargeObjectStore {
@@ -292,10 +527,13 @@ impl LargeObjectStore {
         Ok(Some(Self {
             objects: open(OBJECTS_DIR)?,
             sidecars: open(SIDECARS_DIR)?,
+            executables: open(EXECUTABLES_DIR)?,
             staging: open(STAGING_DIR)?,
             locks: open(LOCKS_DIR)?,
             leases: open(LEASES_DIR)?,
+            references: open(REFERENCES_DIR)?,
             chunk_bytes: LARGE_CONTENT_CHUNK_BYTES,
+            reference_roots: None,
             root,
         }))
     }
@@ -322,10 +560,13 @@ impl LargeObjectStore {
         Ok(Self {
             objects: root.open_or_create_child(OsStr::new(OBJECTS_DIR), 0o700)?,
             sidecars: root.open_or_create_child(OsStr::new(SIDECARS_DIR), 0o700)?,
+            executables: root.open_or_create_child(OsStr::new(EXECUTABLES_DIR), 0o700)?,
             staging: root.open_or_create_child(OsStr::new(STAGING_DIR), 0o700)?,
             locks: root.open_or_create_child(OsStr::new(LOCKS_DIR), 0o700)?,
             leases: root.open_or_create_child(OsStr::new(LEASES_DIR), 0o700)?,
+            references: root.open_or_create_child(OsStr::new(REFERENCES_DIR), 0o700)?,
             chunk_bytes,
+            reference_roots: None,
             root,
         })
     }
@@ -334,23 +575,31 @@ impl LargeObjectStore {
         self.chunk_bytes
     }
 
+    /// Resolve reference roots through `roots` instead of the process's
+    /// installed resolver. For tests and for callers that hold their own.
+    pub fn with_reference_roots(mut self, roots: std::sync::Arc<dyn ReferenceRoots>) -> Self {
+        self.reference_roots = Some(roots);
+        self
+    }
+
     pub fn filesystem_capacity(&self) -> anyhow::Result<lillux::FilesystemCapacity> {
         self.objects.filesystem_capacity()
     }
 
     pub fn total_stored_bytes(&self) -> anyhow::Result<u64> {
         let mut total = 0_u64;
-        for entry in self.objects.entries_no_follow()? {
-            if entry.entry_type != lillux::PinnedEntryType::Regular {
-                anyhow::bail!("large-object namespace contains a non-regular entry");
+        for directory in [&self.objects, &self.executables] {
+            for entry in directory.entries_no_follow()? {
+                if entry.entry_type != lillux::PinnedEntryType::Regular {
+                    anyhow::bail!("large-object namespace contains a non-regular entry");
+                }
+                let file = directory
+                    .open_regular(&entry.name, false)?
+                    .ok_or_else(|| anyhow::anyhow!("large object disappeared during accounting"))?;
+                total = total
+                    .checked_add(file.metadata()?.len())
+                    .ok_or_else(|| anyhow::anyhow!("large-object store byte count overflow"))?;
             }
-            let file = self
-                .objects
-                .open_regular(&entry.name, false)?
-                .ok_or_else(|| anyhow::anyhow!("large object disappeared during accounting"))?;
-            total = total
-                .checked_add(file.metadata()?.len())
-                .ok_or_else(|| anyhow::anyhow!("large-object store byte count overflow"))?;
         }
         total
             .checked_add(self.quarantined_bytes()?)
@@ -360,20 +609,22 @@ impl LargeObjectStore {
     /// Bytes held as quarantined evidence. They are part of
     /// `total_stored_bytes` and of a sweep's total, but never a candidate.
     pub fn quarantined_bytes(&self) -> anyhow::Result<u64> {
-        let Some(quarantine) = self.quarantine_child(OBJECTS_DIR)? else {
-            return Ok(0);
-        };
         let mut total = 0_u64;
-        for entry in quarantine.entries_no_follow()? {
-            if entry.entry_type != lillux::PinnedEntryType::Regular {
-                bail!("large-object quarantine contains a non-regular entry");
-            }
-            let Some(file) = quarantine.open_regular(&entry.name, false)? else {
+        for child in [OBJECTS_DIR, EXECUTABLES_DIR] {
+            let Some(quarantine) = self.quarantine_child(child)? else {
                 continue;
             };
-            total = total
-                .checked_add(file.metadata()?.len())
-                .ok_or_else(|| anyhow::anyhow!("large-object quarantine byte count overflow"))?;
+            for entry in quarantine.entries_no_follow()? {
+                if entry.entry_type != lillux::PinnedEntryType::Regular {
+                    bail!("large-object quarantine contains a non-regular entry");
+                }
+                let Some(file) = quarantine.open_regular(&entry.name, false)? else {
+                    continue;
+                };
+                total = total.checked_add(file.metadata()?.len()).ok_or_else(|| {
+                    anyhow::anyhow!("large-object quarantine byte count overflow")
+                })?;
+            }
         }
         Ok(total)
     }
@@ -383,6 +634,11 @@ impl LargeObjectStore {
     /// an absent object is absent.
     pub fn is_quarantined(&self, file_sha256: &str) -> anyhow::Result<bool> {
         require_store_hash(file_sha256)?;
+        Ok(self.owned_copy_is_quarantined(file_sha256)?
+            || self.reference_is_quarantined(file_sha256)?)
+    }
+
+    fn owned_copy_is_quarantined(&self, file_sha256: &str) -> anyhow::Result<bool> {
         let Some(quarantine) = self.quarantine_child(OBJECTS_DIR)? else {
             return Ok(false);
         };
@@ -394,12 +650,18 @@ impl LargeObjectStore {
     /// The refusal for an object that is not in the store: typed when scrub
     /// quarantined it, so the caller can name the cure.
     fn absent_object_error(&self, file_sha256: &str) -> anyhow::Error {
-        match self.is_quarantined(file_sha256) {
+        match self.owned_copy_is_quarantined(file_sha256) {
             Ok(true) => LargeObjectQuarantined {
                 file_sha256: file_sha256.to_owned(),
             }
             .into(),
-            Ok(false) => anyhow::anyhow!("large object {file_sha256} is absent"),
+            Ok(false) => match self.reference_refusal(file_sha256) {
+                Ok(Some(refused)) => refused.into(),
+                Ok(None) => anyhow::anyhow!("large object {file_sha256} is absent"),
+                Err(error) => error.context(format!(
+                    "large object {file_sha256} is absent and its reference is unreadable"
+                )),
+            },
             Err(error) => error.context(format!(
                 "large object {file_sha256} is absent and its quarantine is unreadable"
             )),
@@ -440,7 +702,7 @@ impl LargeObjectStore {
         require_store_hash(file_sha256)?;
         match self.objects.open_regular(OsStr::new(file_sha256), false)? {
             Some(file) => Ok(Some(file.metadata()?.len())),
-            None => Ok(None),
+            None => self.reference_resident_size(file_sha256),
         }
     }
 
@@ -481,6 +743,16 @@ impl LargeObjectStore {
             .ok_or_else(|| anyhow::anyhow!("large object {file_sha256} has no sidecar"))?;
         if sidecar.size != expected_size {
             bail!("large-object sidecar size contradicts retained bytes");
+        }
+        if self
+            .objects
+            .entry_no_follow(OsStr::new(file_sha256))?
+            .is_none()
+            && let Some((record, _)) = self.read_reference_record(file_sha256)?
+        {
+            // A reference object is served only while its file is still the
+            // registered one, so residency asks the same question a lease does.
+            drop(self.open_reference_file(&record)?);
         }
         Ok(sidecar)
     }
@@ -546,6 +818,7 @@ impl LargeObjectStore {
             }
             metadata
         };
+        let source_before = lillux::observe_open_file_identity(&source)?;
         let source_len = metadata.len();
         if source_len == 0 {
             bail!(
@@ -623,23 +896,13 @@ impl LargeObjectStore {
                 source_label
             );
         }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt as _;
-            let after = source.metadata()?;
-            let unchanged = metadata.dev() == after.dev()
-                && metadata.ino() == after.ino()
-                && metadata.size() == after.size()
-                && metadata.mtime() == after.mtime()
-                && metadata.mtime_nsec() == after.mtime_nsec()
-                && metadata.ctime() == after.ctime()
-                && metadata.ctime_nsec() == after.ctime_nsec()
-                && metadata.mode() == after.mode()
-                && copied == after.size();
-            if !unchanged {
-                bail!("large-content source {source_label} changed during ingest");
-            }
-        }
+        ensure_source_unchanged(
+            source_before,
+            lillux::observe_open_file_identity(&source)?,
+            copied,
+            source_len,
+            source_label,
+        )?;
         staged.sync_all()?;
         let (file_sha256, chunk_hashes) = hasher.finish();
         if let Some(expected) = expected_sha256
@@ -1018,7 +1281,7 @@ impl LargeObjectStore {
         require_store_hash(file_sha256)?;
         let name = OsStr::new(file_sha256);
         let Some(first) = self.objects.open_regular(name, false)? else {
-            return Ok(None);
+            return self.try_lease_reference(file_sha256, expected_size);
         };
         let lease =
             open_registered_lock(|| self.leases.open_regular_create(name, true, false, 0o600))?;
@@ -1050,7 +1313,156 @@ impl LargeObjectStore {
             path,
             file: second,
             _lease: lease,
+            reference: false,
         }))
+    }
+
+    /// Like `lease_object`, but the returned handle is the object's
+    /// executable inode (mode 0555), made on first use. The lease is the same
+    /// hash-keyed lease, so it covers both inodes.
+    pub fn lease_executable_object(
+        &self,
+        file_sha256: &str,
+        expected_size: u64,
+    ) -> anyhow::Result<LeasedLargeObject> {
+        let leased = self.lease_object(file_sha256, expected_size)?;
+        if leased.is_reference() {
+            // A reference object has no store-made executable inode: the
+            // file stays where its root keeps it, and its mode is its own.
+            return Ok(leased);
+        }
+        let (_, primary, lease) = leased.into_parts();
+        self.ensure_executable_inode(file_sha256, expected_size, &primary)?;
+        let name = OsStr::new(file_sha256);
+        let executable = self
+            .executables
+            .open_regular(name, false)?
+            .ok_or_else(|| anyhow::anyhow!("executable inode of {file_sha256} is absent"))?;
+        let size = executable.metadata()?.len();
+        if size != expected_size {
+            bail!(
+                "executable inode of {file_sha256} is {size} bytes; the manifest sealed {expected_size}"
+            );
+        }
+        Ok(LeasedLargeObject {
+            path: self.executables.descriptor_child_path(name)?,
+            file: executable,
+            _lease: lease,
+            reference: false,
+        })
+    }
+
+    /// Whether the store owns a copy of the object, as opposed to holding it
+    /// only by reference. Inspection only.
+    pub fn has_owned_object(&self, file_sha256: &str) -> anyhow::Result<bool> {
+        require_store_hash(file_sha256)?;
+        Ok(self
+            .objects
+            .entry_no_follow(OsStr::new(file_sha256))?
+            .is_some())
+    }
+
+    /// Whether the object has a published executable inode. Inspection only.
+    pub fn has_executable_inode(&self, file_sha256: &str) -> anyhow::Result<bool> {
+        require_store_hash(file_sha256)?;
+        Ok(self
+            .executables
+            .open_regular(OsStr::new(file_sha256), false)?
+            .is_some())
+    }
+
+    /// Make the executable inode once. The caller holds the object's shared
+    /// lease, so eviction cannot remove the primary meanwhile. The inode is
+    /// built in staging from the primary (reflink or one copy), verified
+    /// against the sidecar's chunk trail, then published atomically.
+    fn ensure_executable_inode(
+        &self,
+        file_sha256: &str,
+        expected_size: u64,
+        primary: &fs::File,
+    ) -> anyhow::Result<()> {
+        let name = OsStr::new(file_sha256);
+        if self.executables.open_regular(name, false)?.is_some() {
+            return Ok(());
+        }
+        let staging_name = OsString::from(format!("exec-{file_sha256}"));
+        let lock = open_registered_lock(|| {
+            self.locks
+                .open_regular_create(&staging_name, true, false, 0o600)
+        })?;
+        flock_exclusive_blocking(&lock)?;
+        if self.executables.open_regular(name, false)?.is_some() {
+            return Ok(());
+        }
+        let sidecar = self
+            .sidecar(file_sha256)?
+            .ok_or_else(|| anyhow::anyhow!("large object {file_sha256} has no sidecar"))?;
+        if let Some(stale) = self.staging.open_regular(&staging_name, false)? {
+            self.staging.remove_if_same(&staging_name, &stale)?;
+        }
+        let mut copy_allowance = expected_size;
+        self.staging.materialize_private_regular_child(
+            &staging_name,
+            primary,
+            expected_size,
+            0o555,
+            &mut copy_allowance,
+        )?;
+        let published = (|| -> anyhow::Result<()> {
+            let mut staged = self
+                .staging
+                .open_regular(&staging_name, false)?
+                .ok_or_else(|| anyhow::anyhow!("executable staging disappeared"))?;
+            let findings = self.derive_byte_findings(&mut staged, file_sha256, Some(&sidecar))?;
+            if !findings.is_empty() {
+                bail!(
+                    "executable inode of large object {file_sha256} failed verification: {findings:?}"
+                );
+            }
+            match self.executables.rename_regular_from_atomic(
+                name,
+                &self.staging,
+                &staging_name,
+                &staged,
+            ) {
+                Ok(()) => {}
+                Err(error) => {
+                    if self.executables.open_regular(name, false)?.is_some() {
+                        let _ = self.staging.remove_if_same(&staging_name, &staged);
+                        return Ok(());
+                    }
+                    return Err(anyhow::Error::from(error)
+                        .context(format!("publishing executable inode of {file_sha256}")));
+                }
+            }
+            self.executables.sync()?;
+            Ok(())
+        })();
+        if published.is_err()
+            && let Some(staged) = self.staging.open_regular(&staging_name, false)?
+        {
+            let _ = self.staging.remove_if_same(&staging_name, &staged);
+        }
+        published
+    }
+
+    /// Hard-link a stored object's executable inode into a caller-owned
+    /// directory. `expected` must be the handle from `lease_executable_object`.
+    pub fn link_executable_object_into(
+        &self,
+        file_sha256: &str,
+        target_directory: &lillux::PinnedDirectory,
+        target_name: &std::ffi::OsStr,
+        expected: &fs::File,
+    ) -> anyhow::Result<()> {
+        require_store_hash(file_sha256)?;
+        target_directory.link_regular_from(
+            target_name,
+            &self.executables,
+            OsStr::new(file_sha256),
+            expected,
+        )?;
+        Ok(())
     }
 
     /// Hard-link a stored object into a caller-owned directory (same
@@ -1111,7 +1523,10 @@ impl LargeObjectStore {
                 continue;
             };
             report.inspected_objects = report.inspected_objects.saturating_add(1);
-            let bytes = file.metadata()?.len();
+            let mut bytes = file.metadata()?.len();
+            if let Some(executable) = self.executables.open_regular(OsStr::new(&name), false)? {
+                bytes = bytes.saturating_add(executable.metadata()?.len());
+            }
             report.total_bytes_before = report.total_bytes_before.saturating_add(bytes);
             if roots.contains(&name) {
                 report.retained_roots += 1;
@@ -1163,6 +1578,10 @@ impl LargeObjectStore {
             let Some(object) = self.objects.open_regular(OsStr::new(&name), false)? else {
                 continue;
             };
+            if let Some(executable) = self.executables.open_regular(OsStr::new(&name), false)? {
+                self.executables
+                    .remove_if_same(OsStr::new(&name), &executable)?;
+            }
             self.objects.remove_if_same(OsStr::new(&name), &object)?;
             if let Some(sidecar) = self.sidecars.open_regular(OsStr::new(&name), false)? {
                 let _ = self.sidecars.remove_if_same(OsStr::new(&name), &sidecar);
@@ -1275,6 +1694,34 @@ impl LargeObjectStore {
                 report.findings.extend(scrubbed.findings);
             }
         }
+        for entry in self.references.entries_no_follow()? {
+            let name = entry
+                .name
+                .to_str()
+                .filter(|name| lillux::cas::valid_hash(name))
+                .map(str::to_owned);
+            let (lillux::PinnedEntryType::Regular, Some(name)) = (entry.entry_type, name) else {
+                report
+                    .findings
+                    .push(LargeObjectIntegrityFinding::ForeignEntry {
+                        name: escaped_entry_name(&entry.name),
+                        entry_type: entry_type_name(entry.entry_type).to_owned(),
+                    });
+                continue;
+            };
+            let scrubbed = self.scrub_reference_leased(&name, true)?;
+            if scrubbed.quarantined {
+                report.quarantined.push(name.clone());
+            }
+            if scrubbed.findings.is_empty() {
+                report.objects_verified += 1;
+                if let Ok(Some(record)) = self.reference(&name) {
+                    report.bytes_verified = report.bytes_verified.saturating_add(record.size);
+                }
+            } else {
+                report.findings.extend(scrubbed.findings);
+            }
+        }
         Ok(report)
     }
 
@@ -1287,6 +1734,82 @@ impl LargeObjectStore {
         Ok(self.scrub_leased(file_sha256, false)?.findings)
     }
 
+    /// Re-derive one inode's size, chunk trail and whole-file hash and report
+    /// every disagreement with the sidecar and the object's name. Reads one
+    /// chunk at a time; never moves anything.
+    fn derive_byte_findings(
+        &self,
+        object: &mut fs::File,
+        file_sha256: &str,
+        sidecar: Option<&LargeObjectSidecar>,
+    ) -> anyhow::Result<Vec<LargeObjectIntegrityFinding>> {
+        let mut findings = Vec::new();
+        let actual = object.metadata()?.len();
+        if let Some(sidecar) = sidecar
+            && sidecar.size != actual
+        {
+            findings.push(LargeObjectIntegrityFinding::SizeMismatch {
+                file_sha256: file_sha256.to_string(),
+                sidecar: sidecar.size,
+                actual,
+            });
+        }
+
+        let chunk_size = sidecar
+            .map(|sidecar| sidecar.chunk_size)
+            .filter(|size| *size > 0)
+            .unwrap_or(self.chunk_bytes);
+        let mut hasher = ChunkedHasher::new(chunk_size);
+        let mut buffer = vec![0u8; INGEST_IO_BUFFER_BYTES.min(chunk_size.max(4096) as usize)];
+        object.seek(SeekFrom::Start(0))?;
+        loop {
+            let read = match object.read(&mut buffer) {
+                Ok(read) => read,
+                Err(error) => {
+                    findings.push(LargeObjectIntegrityFinding::UnreadableObject {
+                        file_sha256: file_sha256.to_string(),
+                        error: error.to_string(),
+                    });
+                    return Ok(findings);
+                }
+            };
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        let (computed, chunk_hashes) = hasher.finish();
+        if computed != file_sha256 {
+            findings.push(LargeObjectIntegrityFinding::FileHashMismatch {
+                file_sha256: file_sha256.to_string(),
+                computed,
+            });
+        }
+        if let Some(sidecar) = sidecar {
+            for (index, (stored, derived)) in sidecar
+                .chunk_hashes
+                .iter()
+                .zip(chunk_hashes.iter())
+                .enumerate()
+            {
+                if stored != derived {
+                    findings.push(LargeObjectIntegrityFinding::ChunkMismatch {
+                        file_sha256: file_sha256.to_string(),
+                        chunk_index: index as u64,
+                    });
+                }
+            }
+            if sidecar.chunk_hashes.len() != chunk_hashes.len() {
+                findings.push(LargeObjectIntegrityFinding::SizeMismatch {
+                    file_sha256: file_sha256.to_string(),
+                    sidecar: sidecar.size,
+                    actual,
+                });
+            }
+        }
+        Ok(findings)
+    }
+
     fn scrub_leased(&self, file_sha256: &str, quarantine: bool) -> anyhow::Result<ScrubbedObject> {
         require_store_hash(file_sha256)?;
         let mut findings = Vec::new();
@@ -1296,6 +1819,14 @@ impl LargeObjectStore {
         })?;
         flock_shared_blocking(&lease)?;
         let Some(mut object) = self.objects.open_regular(OsStr::new(file_sha256), false)? else {
+            if self
+                .references
+                .entry_no_follow(OsStr::new(file_sha256))?
+                .is_some()
+            {
+                drop(lease);
+                return self.scrub_reference_leased(file_sha256, quarantine);
+            }
             return Ok(ScrubbedObject {
                 findings: vec![LargeObjectIntegrityFinding::UnreadableObject {
                     file_sha256: file_sha256.to_string(),
@@ -1320,70 +1851,35 @@ impl LargeObjectStore {
                 None
             }
         };
-        let actual = object.metadata()?.len();
-        if let Some(sidecar) = &sidecar
-            && sidecar.size != actual
+        findings.extend(self.derive_byte_findings(&mut object, file_sha256, sidecar.as_ref())?);
+        if findings.iter().any(|finding| {
+            matches!(
+                finding,
+                LargeObjectIntegrityFinding::UnreadableObject { .. }
+            )
+        }) {
+            return Ok(ScrubbedObject {
+                findings,
+                quarantined: false,
+            });
+        }
+        if let Some(executable) = self
+            .executables
+            .open_regular(OsStr::new(file_sha256), false)?
         {
-            findings.push(LargeObjectIntegrityFinding::SizeMismatch {
-                file_sha256: file_sha256.to_string(),
-                sidecar: sidecar.size,
-                actual,
-            });
-        }
-
-        let chunk_size = sidecar
-            .as_ref()
-            .map(|sidecar| sidecar.chunk_size)
-            .filter(|size| *size > 0)
-            .unwrap_or(self.chunk_bytes);
-        let mut hasher = ChunkedHasher::new(chunk_size);
-        let mut buffer = vec![0u8; INGEST_IO_BUFFER_BYTES.min(chunk_size.max(4096) as usize)];
-        object.seek(SeekFrom::Start(0))?;
-        loop {
-            let read = match object.read(&mut buffer) {
-                Ok(read) => read,
-                Err(error) => {
-                    findings.push(LargeObjectIntegrityFinding::UnreadableObject {
-                        file_sha256: file_sha256.to_string(),
-                        error: error.to_string(),
-                    });
-                    return Ok(ScrubbedObject {
-                        findings,
-                        quarantined: false,
-                    });
-                }
-            };
-            if read == 0 {
-                break;
-            }
-            hasher.update(&buffer[..read]);
-        }
-        let (computed, chunk_hashes) = hasher.finish();
-        if computed != file_sha256 {
-            findings.push(LargeObjectIntegrityFinding::FileHashMismatch {
-                file_sha256: file_sha256.to_string(),
-                computed,
-            });
-        }
-        if let Some(sidecar) = &sidecar {
-            for (index, (stored, derived)) in sidecar
-                .chunk_hashes
-                .iter()
-                .zip(chunk_hashes.iter())
-                .enumerate()
+            let mut executable = executable;
+            for finding in
+                self.derive_byte_findings(&mut executable, file_sha256, sidecar.as_ref())?
             {
-                if stored != derived {
-                    findings.push(LargeObjectIntegrityFinding::ChunkMismatch {
-                        file_sha256: file_sha256.to_string(),
-                        chunk_index: index as u64,
-                    });
-                }
-            }
-            if sidecar.chunk_hashes.len() != chunk_hashes.len() {
-                findings.push(LargeObjectIntegrityFinding::SizeMismatch {
-                    file_sha256: file_sha256.to_string(),
-                    sidecar: sidecar.size,
-                    actual,
+                findings.push(match finding {
+                    LargeObjectIntegrityFinding::FileHashMismatch {
+                        file_sha256,
+                        computed,
+                    } => LargeObjectIntegrityFinding::ExecutableInodeDamaged {
+                        file_sha256,
+                        computed,
+                    },
+                    other => other,
                 });
             }
         }
@@ -1399,9 +1895,10 @@ impl LargeObjectStore {
         })
     }
 
-    /// Move a byte-damaged object, then its sidecar, out of the served
-    /// namespaces into quarantine under the first free copy name. The object
-    /// moves first: from that instant no lease can bind it. Returns false
+    /// Move a byte-damaged object's executable inode (when it has one), then
+    /// the object, then its sidecar, out of the served namespaces into
+    /// quarantine under the first free copy name. Once the object has moved
+    /// no lease can bind it. Returns false
     /// when the name no longer holds the scrubbed inode.
     fn quarantine_object(&self, file_sha256: &str, object: &fs::File) -> anyhow::Result<bool> {
         let name = OsStr::new(file_sha256);
@@ -1417,6 +1914,21 @@ impl LargeObjectStore {
         let quarantined_sidecars =
             quarantine.open_or_create_child(OsStr::new(SIDECARS_DIR), 0o700)?;
         let copy = free_quarantine_name(&quarantined_objects, file_sha256)?;
+        // The executable inode moves first: a crash between the two moves
+        // must never leave a stale executable inode beside a re-ingested
+        // clean primary.
+        if let Some(executable) = self.executables.open_regular(name, false)? {
+            let quarantined_executables =
+                quarantine.open_or_create_child(OsStr::new(EXECUTABLES_DIR), 0o700)?;
+            quarantined_executables
+                .rename_regular_from_atomic(OsStr::new(&copy), &self.executables, name, &executable)
+                .map_err(anyhow::Error::from)
+                .with_context(|| {
+                    format!("quarantining the executable inode of large object {file_sha256}")
+                })?;
+            self.executables.sync()?;
+            quarantined_executables.sync()?;
+        }
         quarantined_objects
             .rename_regular_from_atomic(OsStr::new(&copy), &self.objects, name, object)
             .map_err(anyhow::Error::from)
@@ -1449,7 +1961,12 @@ impl LargeObjectStore {
             dry_run,
             ..LargeObjectQuarantinePurgeReport::default()
         };
-        for (child, is_objects) in [(OBJECTS_DIR, true), (SIDECARS_DIR, false)] {
+        for (child, is_objects) in [
+            (OBJECTS_DIR, true),
+            (EXECUTABLES_DIR, true),
+            (SIDECARS_DIR, false),
+            (REFERENCES_DIR, false),
+        ] {
             let Some(directory) = self.quarantine_child(child)? else {
                 continue;
             };
@@ -1470,6 +1987,8 @@ impl LargeObjectStore {
                 if is_objects {
                     report.objects = report.objects.saturating_add(1);
                     report.bytes = report.bytes.saturating_add(bytes);
+                } else if child == REFERENCES_DIR {
+                    report.reference_markers = report.reference_markers.saturating_add(1);
                 } else {
                     report.sidecars = report.sidecars.saturating_add(1);
                 }
@@ -1479,6 +1998,646 @@ impl LargeObjectStore {
             }
         }
         Ok(report)
+    }
+}
+
+/// What scrub found about a reference object, and whether it quarantined it.
+impl LargeObjectStore {
+    fn installed_roots(&self) -> Option<std::sync::Arc<dyn ReferenceRoots>> {
+        self.reference_roots
+            .clone()
+            .or_else(installed_reference_roots)
+    }
+
+    fn refused(
+        &self,
+        file_sha256: &str,
+        code: ReferenceRefusalCode,
+        detail: impl Into<String>,
+    ) -> LargeObjectReferenceRefused {
+        LargeObjectReferenceRefused {
+            file_sha256: file_sha256.to_owned(),
+            code,
+            detail: detail.into(),
+        }
+    }
+
+    /// The reference record of `file_sha256` and its stored bytes, or `None`
+    /// when no record exists. A record is read only at its current version.
+    fn read_reference_record(
+        &self,
+        file_sha256: &str,
+    ) -> anyhow::Result<Option<(LargeObjectReference, Vec<u8>)>> {
+        require_store_hash(file_sha256)?;
+        let Some(file) = self
+            .references
+            .open_regular(OsStr::new(file_sha256), false)?
+        else {
+            return Ok(None);
+        };
+        let mut bytes = Vec::new();
+        file.take(MAX_REFERENCE_RECORD_BYTES + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_REFERENCE_RECORD_BYTES {
+            bail!("large-object reference record for {file_sha256} is oversized");
+        }
+        let record: LargeObjectReference = serde_json::from_slice(&bytes)
+            .with_context(|| format!("parse large-object reference record {file_sha256}"))?;
+        record.validate()?;
+        if lillux::canonical_json(&serde_json::to_value(&record)?)?.as_bytes() != bytes {
+            bail!("large-object reference record {file_sha256} is not canonically encoded");
+        }
+        if record.file_sha256 != file_sha256 {
+            bail!("large-object reference record identity contradicts its store key");
+        }
+        Ok(Some((record, bytes)))
+    }
+
+    /// The reference record for `file_sha256`, if the store holds one.
+    pub fn reference(&self, file_sha256: &str) -> anyhow::Result<Option<LargeObjectReference>> {
+        Ok(self
+            .read_reference_record(file_sha256)?
+            .map(|(record, _)| record))
+    }
+
+    /// Every reference record the store holds, in hash order.
+    pub fn list_references(&self) -> anyhow::Result<Vec<LargeObjectReference>> {
+        let mut records = Vec::new();
+        for entry in self.references.entries_no_follow()? {
+            let Some(name) = entry
+                .name
+                .to_str()
+                .filter(|name| lillux::cas::valid_hash(name))
+            else {
+                continue;
+            };
+            if let Some(record) = self.reference(name)? {
+                records.push(record);
+            }
+        }
+        records.sort_by(|left, right| left.file_sha256.cmp(&right.file_sha256));
+        Ok(records)
+    }
+
+    fn reference_marker_digest(&self, file_sha256: &str) -> anyhow::Result<Option<String>> {
+        let Some(quarantine) = self.quarantine_child(REFERENCES_DIR)? else {
+            return Ok(None);
+        };
+        let Some(file) = quarantine.open_regular(OsStr::new(file_sha256), false)? else {
+            return Ok(None);
+        };
+        let mut bytes = Vec::new();
+        file.take(MAX_REFERENCE_RECORD_BYTES)
+            .read_to_end(&mut bytes)?;
+        let marker: ReferenceQuarantineMarker = serde_json::from_slice(&bytes)
+            .with_context(|| format!("parse reference quarantine marker {file_sha256}"))?;
+        if marker.schema != REFERENCE_QUARANTINE_MARKER_SCHEMA || marker.file_sha256 != file_sha256
+        {
+            bail!("reference quarantine marker {file_sha256} is not current");
+        }
+        Ok(Some(marker.record_sha256))
+    }
+
+    /// Whether scrub quarantined the reference record the store holds now.
+    /// A record registered after the damage differs from the one condemned.
+    fn reference_is_quarantined(&self, file_sha256: &str) -> anyhow::Result<bool> {
+        let Some(condemned) = self.reference_marker_digest(file_sha256)? else {
+            return Ok(false);
+        };
+        let Some((_, bytes)) = self.read_reference_record(file_sha256)? else {
+            return Ok(false);
+        };
+        Ok(lillux::cas::sha256_hex(&bytes) == condemned)
+    }
+
+    /// The resolved, identity-checked root of `record`.
+    fn reference_root(
+        &self,
+        record: &LargeObjectReference,
+    ) -> Result<ReferenceRoot, LargeObjectReferenceRefused> {
+        let hash = &record.file_sha256;
+        let Some(roots) = self.installed_roots() else {
+            return Err(self.refused(
+                hash,
+                ReferenceRefusalCode::RootsUnavailable,
+                "this process has no resolver of reference roots",
+            ));
+        };
+        let root = roots
+            .open_root(&record.root_name)
+            .map_err(|refusal| self.refused(hash, refusal.code, refusal.detail))?;
+        if root.identity != record.root_identity {
+            return Err(self.refused(
+                hash,
+                ReferenceRefusalCode::RootChanged,
+                format!(
+                    "root `{}` is no longer the directory this object was registered from",
+                    record.root_name
+                ),
+            ));
+        }
+        Ok(root)
+    }
+
+    /// Why a reference object is not served, or `None` when it has no
+    /// record or is served.
+    fn reference_refusal(
+        &self,
+        file_sha256: &str,
+    ) -> anyhow::Result<Option<LargeObjectReferenceRefused>> {
+        let Some((record, _)) = self.read_reference_record(file_sha256)? else {
+            return Ok(None);
+        };
+        if self.reference_is_quarantined(file_sha256)? {
+            return Ok(Some(self.refused(
+                file_sha256,
+                ReferenceRefusalCode::Quarantined,
+                "scrub found the file's bytes no longer match their hash",
+            )));
+        }
+        if let Err(refused) = self.reference_root(&record) {
+            return Ok(Some(refused));
+        }
+        if self
+            .sidecars
+            .entry_no_follow(OsStr::new(file_sha256))?
+            .is_none()
+        {
+            return Ok(Some(self.refused(
+                file_sha256,
+                ReferenceRefusalCode::FileChanged,
+                "the reference has no sidecar, so it is not resident",
+            )));
+        }
+        Ok(None)
+    }
+
+    /// The size of a resident reference object. It is resident when its
+    /// record and its sidecar both exist, scrub has not quarantined it, and
+    /// its root is usable now. A reference whose root is not usable is not
+    /// resident, so an upload or a re-import of the bytes proceeds.
+    fn reference_resident_size(&self, file_sha256: &str) -> anyhow::Result<Option<u64>> {
+        let Some((record, _)) = self.read_reference_record(file_sha256)? else {
+            return Ok(None);
+        };
+        if self
+            .sidecars
+            .entry_no_follow(OsStr::new(file_sha256))?
+            .is_none()
+            || self.reference_is_quarantined(file_sha256)?
+            || self.reference_root(&record).is_err()
+        {
+            return Ok(None);
+        }
+        Ok(Some(record.size))
+    }
+
+    /// Open the file a reference names, through its root's pinned directory
+    /// and without following a link, and require it to be the registered
+    /// file: same filesystem identity and inode, size, change time and mode.
+    fn open_reference_file(&self, record: &LargeObjectReference) -> anyhow::Result<fs::File> {
+        let root = self.reference_root(record)?;
+        let hash = &record.file_sha256;
+        let changed =
+            |detail: String| self.refused(hash, ReferenceRefusalCode::FileChanged, detail);
+        let Some(pinned) = root
+            .directory
+            .open_pinned_regular_descendant(Path::new(&record.relative_path), false)?
+        else {
+            return Err(changed(format!(
+                "`{}` is absent from root `{}`",
+                record.relative_path, record.root_name
+            ))
+            .into());
+        };
+        let file = pinned.try_clone_descriptor()?;
+        self.reference_identity_difference(record, &file)?
+            .map_or(Ok(file), |difference| Err(changed(difference).into()))
+    }
+
+    /// How `file` differs from the file `record` registered, or `None`.
+    fn reference_identity_difference(
+        &self,
+        record: &LargeObjectReference,
+        file: &fs::File,
+    ) -> anyhow::Result<Option<String>> {
+        let observed = lillux::observe_open_file_identity(file)?;
+        if lillux::pinned_regular_file_identity(file)? != record.file_identity {
+            return Ok(Some(format!(
+                "`{}` is a different inode than the one registered",
+                record.relative_path
+            )));
+        }
+        if observed.size() != record.size {
+            return Ok(Some(format!(
+                "`{}` is {} bytes; {} were registered",
+                record.relative_path,
+                observed.size(),
+                record.size
+            )));
+        }
+        if observed.changed_seconds() != record.changed_seconds
+            || observed.changed_nanoseconds() != record.changed_nanoseconds
+        {
+            return Ok(Some(format!(
+                "`{}` changed after it was registered",
+                record.relative_path
+            )));
+        }
+        if observed.mode() & 0o7777 != record.mode {
+            return Ok(Some(format!(
+                "`{}` has a different mode than when it was registered",
+                record.relative_path
+            )));
+        }
+        Ok(None)
+    }
+
+    fn try_lease_reference(
+        &self,
+        file_sha256: &str,
+        expected_size: u64,
+    ) -> anyhow::Result<Option<LeasedLargeObject>> {
+        let Some((record, _)) = self.read_reference_record(file_sha256)? else {
+            return Ok(None);
+        };
+        if self
+            .sidecars
+            .entry_no_follow(OsStr::new(file_sha256))?
+            .is_none()
+        {
+            // A record without its sidecar is not resident.
+            return Ok(None);
+        }
+        if self.reference_is_quarantined(file_sha256)? {
+            return Err(self
+                .refused(
+                    file_sha256,
+                    ReferenceRefusalCode::Quarantined,
+                    "scrub found the file's bytes no longer match their hash",
+                )
+                .into());
+        }
+        let name = OsStr::new(file_sha256);
+        let lease =
+            open_registered_lock(|| self.leases.open_regular_create(name, true, false, 0o600))?;
+        flock_shared_blocking(&lease)?;
+        let _ = lease.set_modified(std::time::SystemTime::now());
+        let file = self.open_reference_file(&record)?;
+        if record.size != expected_size {
+            bail!(
+                "large object {file_sha256} is {} bytes; the manifest sealed {expected_size}",
+                record.size
+            );
+        }
+        Ok(Some(LeasedLargeObject {
+            path: PathBuf::from(&record.relative_path),
+            file,
+            _lease: lease,
+            reference: true,
+        }))
+    }
+
+    /// Require that root `name`, measured as `expected`, can hold reference
+    /// objects now: the installed resolver vouches for it and it is the same
+    /// directory. A registration refuses to start otherwise.
+    pub fn require_reference_root(
+        &self,
+        name: &str,
+        expected: &lillux::PinnedDirectoryIdentity,
+    ) -> anyhow::Result<()> {
+        let refused = |code, detail: String| LargeObjectReferenceRefused {
+            file_sha256: String::new(),
+            code,
+            detail,
+        };
+        let Some(roots) = self.installed_roots() else {
+            return Err(refused(
+                ReferenceRefusalCode::RootsUnavailable,
+                "this process has no resolver of reference roots".to_owned(),
+            )
+            .into());
+        };
+        let root = roots
+            .open_root(name)
+            .map_err(|refusal| refused(refusal.code, refusal.detail))?;
+        if &root.identity != expected {
+            return Err(refused(
+                ReferenceRefusalCode::RootChanged,
+                format!("root `{name}` is not the directory the import opened"),
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    /// Hold the file `source` names by reference instead of copying it, in
+    /// one streaming pass: whole-file sha256 and the chunk trail, through
+    /// the same hasher and stability rules as [`Self::ingest_open_regular`].
+    /// The sidecar is published first and the reference record last, so a
+    /// record without its sidecar never exists. An owned object of the same
+    /// hash already resident makes this a dedup that writes nothing. No bytes
+    /// are copied.
+    pub fn register_reference(
+        &self,
+        mut file: fs::File,
+        expected_source: PinnedLargeObjectSourceIdentity,
+        source: ReferenceSource<'_>,
+        expected_sha256: Option<&str>,
+    ) -> anyhow::Result<IngestedLargeObject> {
+        if let Some(expected) = expected_sha256 {
+            require_store_hash(expected)?;
+        }
+        let label = source.relative_path;
+        crate::objects::validate_canonical_project_relative_path(label)?;
+        let before = lillux::observe_open_file_identity(&file)?;
+        lillux::observe_open_regular_file(&file)?;
+        if lillux::pinned_regular_file_identity(&file)? != expected_source.file
+            || before.size() != expected_source.size
+        {
+            bail!("reference source {label} descriptor does not match its admitted inode identity");
+        }
+        let source_len = before.size();
+        if source_len == 0 || source_len > MAX_LARGE_CONTENT_FILE_BYTES {
+            bail!("reference source {label} is {source_len} bytes, outside the admitted bounds");
+        }
+        let staging_key = staging_key_for_source(expected_source)?;
+        let lock_name = format!("reference-{staging_key}");
+        let lock = open_registered_lock(|| {
+            self.locks
+                .open_regular_create(OsStr::new(&lock_name), true, false, 0o600)
+        })?;
+        flock_exclusive_blocking(&lock)?;
+
+        let mut hasher = ChunkedHasher::new(self.chunk_bytes);
+        file.seek(SeekFrom::Start(0))?;
+        let mut buffer = vec![0u8; INGEST_IO_BUFFER_BYTES];
+        let mut read_total = 0u64;
+        loop {
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            read_total = read_total
+                .checked_add(read as u64)
+                .ok_or_else(|| anyhow::anyhow!("reference byte count overflow"))?;
+            if read_total > source_len {
+                bail!("reference source {label} grew while it was hashed");
+            }
+            hasher.update(&buffer[..read]);
+        }
+        let after = lillux::observe_open_file_identity(&file)?;
+        ensure_source_unchanged(before, after, read_total, source_len, label)?;
+        let (file_sha256, chunk_hashes) = hasher.finish();
+        if let Some(expected) = expected_sha256
+            && expected != file_sha256
+        {
+            bail!("reference source {label} hashed to {file_sha256}, expected {expected}");
+        }
+        let ingested = |deduplicated: bool| IngestedLargeObject {
+            file_sha256: file_sha256.clone(),
+            size: source_len,
+            chunk_size: self.chunk_bytes,
+            chunk_hashes: chunk_hashes.clone(),
+            deduplicated,
+            resumed_bytes: 0,
+        };
+        let sidecar = LargeObjectSidecar {
+            schema: LARGE_OBJECT_SIDECAR_SCHEMA.to_string(),
+            file_sha256: file_sha256.clone(),
+            size: source_len,
+            chunk_size: self.chunk_bytes,
+            chunk_hashes: chunk_hashes.clone(),
+        };
+        // An owned copy needs no reference and does not depend on a root.
+        if self
+            .objects
+            .open_regular(OsStr::new(&file_sha256), false)?
+            .is_some()
+        {
+            self.publish_sidecar(&sidecar)?;
+            return Ok(ingested(true));
+        }
+        let record = LargeObjectReference {
+            schema: LARGE_OBJECT_REFERENCE_SCHEMA.to_owned(),
+            file_sha256: file_sha256.clone(),
+            size: source_len,
+            root_name: source.root_name.to_owned(),
+            root_identity: source.root_identity,
+            relative_path: source.relative_path.to_owned(),
+            file_identity: expected_source.file,
+            changed_seconds: before.changed_seconds(),
+            changed_nanoseconds: before.changed_nanoseconds(),
+            mode: before.mode() & 0o7777,
+        };
+        record.validate()?;
+        self.publish_sidecar(&sidecar)?;
+        let bytes = lillux::canonical_json(&serde_json::to_value(&record)?)?.into_bytes();
+        let name = OsStr::new(&file_sha256);
+        let mut replaced = false;
+        if self
+            .references
+            .atomic_create_regular(name, &bytes, 0o444, crate::STATE_TEMP_PURPOSE)?
+            .is_none()
+        {
+            let existing = self.read_reference_record(&file_sha256)?;
+            match existing {
+                Some((current, _)) if current == record => replaced = true,
+                _ => {
+                    // The same bytes now live at another place or identity:
+                    // the new registration supersedes the old record.
+                    if let Some(old) = self.references.open_regular(name, false)? {
+                        self.references.remove_if_same(name, &old)?;
+                    }
+                    self.references
+                        .atomic_create_regular(name, &bytes, 0o444, crate::STATE_TEMP_PURPOSE)?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("concurrent reference publication of {file_sha256}")
+                        })?;
+                }
+            }
+        }
+        self.references.sync()?;
+        self.touch_recency(&file_sha256)?;
+        drop(lock);
+        Ok(ingested(replaced))
+    }
+
+    /// Remove the reference record of `file_sha256`, and its quarantine
+    /// marker, without touching the file it names. The sidecar goes too
+    /// unless an owned object of the same hash still uses it. Refused while
+    /// a lease holds the object. Returns whether a record existed.
+    pub fn unregister_reference(&self, file_sha256: &str) -> anyhow::Result<bool> {
+        require_store_hash(file_sha256)?;
+        let name = OsStr::new(file_sha256);
+        let lock_name = format!("reference-unregister-{file_sha256}");
+        let lock = open_registered_lock(|| {
+            self.locks
+                .open_regular_create(OsStr::new(&lock_name), true, false, 0o600)
+        })?;
+        flock_exclusive_blocking(&lock)?;
+        let Some(record) = self.references.open_regular(name, false)? else {
+            return Ok(false);
+        };
+        let lease =
+            open_registered_lock(|| self.leases.open_regular_create(name, true, false, 0o600))?;
+        if !flock_exclusive_nonblocking(&lease)? {
+            bail!(
+                "large object {file_sha256} is leased by a running execution; unregister it after the execution ends"
+            );
+        }
+        self.references.remove_if_same(name, &record)?;
+        self.references.sync()?;
+        if let Some(quarantine) = self.quarantine_child(REFERENCES_DIR)?
+            && let Some(marker) = quarantine.open_regular(name, false)?
+        {
+            quarantine.remove_if_same(name, &marker)?;
+            quarantine.sync()?;
+        }
+        let owned = self.objects.open_regular(name, false)?.is_some();
+        if !owned && let Some(sidecar) = self.sidecars.open_regular(name, false)? {
+            self.sidecars.remove_if_same(name, &sidecar)?;
+            self.sidecars.sync()?;
+        }
+        if !owned {
+            let _ = self.leases.remove_if_same(name, &lease);
+        }
+        Ok(true)
+    }
+
+    /// Scrub one reference object by reading its file through the reference.
+    /// Never moves anything: byte damage is marked by name.
+    fn scrub_reference_leased(
+        &self,
+        file_sha256: &str,
+        quarantine: bool,
+    ) -> anyhow::Result<ScrubbedObject> {
+        require_store_hash(file_sha256)?;
+        let name = OsStr::new(file_sha256);
+        let lease =
+            open_registered_lock(|| self.leases.open_regular_create(name, true, false, 0o600))?;
+        flock_shared_blocking(&lease)?;
+        let unreadable = |error: String| ScrubbedObject {
+            findings: vec![LargeObjectIntegrityFinding::UnreadableObject {
+                file_sha256: file_sha256.to_string(),
+                error,
+            }],
+            quarantined: false,
+        };
+        let Some((record, record_bytes)) = self.read_reference_record(file_sha256)? else {
+            return Ok(unreadable(
+                "reference absent while leased for scrub".to_owned(),
+            ));
+        };
+        let mut findings = Vec::new();
+        let sidecar = match self.sidecar(file_sha256) {
+            Ok(Some(sidecar)) => Some(sidecar),
+            Ok(None) => {
+                findings.push(LargeObjectIntegrityFinding::MissingSidecar {
+                    file_sha256: file_sha256.to_string(),
+                });
+                None
+            }
+            Err(error) => {
+                findings.push(LargeObjectIntegrityFinding::MalformedSidecar {
+                    file_sha256: file_sha256.to_string(),
+                    error: format!("{error:#}"),
+                });
+                None
+            }
+        };
+        let root = match self.reference_root(&record) {
+            Ok(root) => root,
+            Err(refused) => {
+                findings.push(LargeObjectIntegrityFinding::ReferenceUnavailable {
+                    file_sha256: file_sha256.to_string(),
+                    code: refused.code.as_str().to_owned(),
+                    detail: refused.detail,
+                });
+                return Ok(ScrubbedObject {
+                    findings,
+                    quarantined: false,
+                });
+            }
+        };
+        let Some(pinned) = root
+            .directory
+            .open_pinned_regular_descendant(Path::new(&record.relative_path), false)?
+        else {
+            findings.push(LargeObjectIntegrityFinding::ReferenceUnavailable {
+                file_sha256: file_sha256.to_string(),
+                code: ReferenceRefusalCode::FileChanged.as_str().to_owned(),
+                detail: format!(
+                    "`{}` is absent from root `{}`",
+                    record.relative_path, record.root_name
+                ),
+            });
+            return Ok(ScrubbedObject {
+                findings,
+                quarantined: false,
+            });
+        };
+        let mut file = pinned.try_clone_descriptor()?;
+        if let Some(detail) = self.reference_identity_difference(&record, &file)? {
+            findings.push(LargeObjectIntegrityFinding::ReferenceIdentityChanged {
+                file_sha256: file_sha256.to_string(),
+                detail,
+            });
+        }
+        findings.extend(self.derive_byte_findings(&mut file, file_sha256, sidecar.as_ref())?);
+        if findings.iter().any(|finding| {
+            matches!(
+                finding,
+                LargeObjectIntegrityFinding::UnreadableObject { .. }
+            )
+        }) {
+            return Ok(ScrubbedObject {
+                findings,
+                quarantined: false,
+            });
+        }
+        let quarantined = quarantine
+            && findings
+                .iter()
+                .any(LargeObjectIntegrityFinding::is_byte_damage)
+            && self.mark_reference_quarantined(file_sha256, &record_bytes)?;
+        drop(lease);
+        Ok(ScrubbedObject {
+            findings,
+            quarantined,
+        })
+    }
+
+    /// Quarantine a byte-damaged reference by name: a marker that condemns
+    /// the exact record scrub read. Nothing is moved, because the file is not
+    /// the store's. Returns false when the record changed since it was read.
+    fn mark_reference_quarantined(
+        &self,
+        file_sha256: &str,
+        record_bytes: &[u8],
+    ) -> anyhow::Result<bool> {
+        match self.read_reference_record(file_sha256)? {
+            Some((_, current)) if current == record_bytes => {}
+            _ => return Ok(false),
+        }
+        let quarantine = self
+            .root
+            .open_or_create_child(OsStr::new(QUARANTINE_DIR), 0o700)?;
+        let markers = quarantine.open_or_create_child(OsStr::new(REFERENCES_DIR), 0o700)?;
+        let marker = ReferenceQuarantineMarker {
+            schema: REFERENCE_QUARANTINE_MARKER_SCHEMA.to_owned(),
+            file_sha256: file_sha256.to_owned(),
+            record_sha256: lillux::cas::sha256_hex(record_bytes),
+        };
+        let bytes = lillux::canonical_json(&serde_json::to_value(&marker)?)?.into_bytes();
+        let name = OsStr::new(file_sha256);
+        if let Some(old) = markers.open_regular(name, false)? {
+            markers.remove_if_same(name, &old)?;
+        }
+        markers.atomic_create_regular(name, &bytes, 0o444, crate::STATE_TEMP_PURPOSE)?;
+        markers.sync()?;
+        quarantine.sync()?;
+        Ok(true)
     }
 }
 
@@ -1527,6 +2686,22 @@ fn same_inode(left: &fs::File, right: &fs::File) -> anyhow::Result<bool> {
         let _ = (left, right);
         bail!("large-object inode identity is unavailable on this platform")
     }
+}
+
+/// The shared rule of ingest and registration for a source that stays in
+/// place: its whole observed identity is unchanged across the read, and the
+/// read saw exactly the bytes it was admitted at.
+fn ensure_source_unchanged(
+    before: lillux::OpenFileIdentity,
+    after: lillux::OpenFileIdentity,
+    read: u64,
+    admitted_len: u64,
+    label: &str,
+) -> anyhow::Result<()> {
+    if before != after || read != after.size() || read != admitted_len {
+        bail!("large-content source {label} changed during ingest");
+    }
+    Ok(())
 }
 
 fn staging_key_for_source(source: PinnedLargeObjectSourceIdentity) -> anyhow::Result<String> {
@@ -2259,6 +3434,7 @@ mod tests {
                 objects: 1,
                 bytes: 24,
                 sidecars: 1,
+                reference_markers: 0,
             }
         );
         assert!(store.is_quarantined(&damaged.file_sha256).unwrap());
@@ -2299,6 +3475,105 @@ mod tests {
         let linked = fs::metadata(dir.path().join("mount/segment-0")).unwrap();
         assert_eq!(linked.ino(), leased.file().metadata().unwrap().ino());
         assert_eq!(linked.len(), 24);
+    }
+
+    #[test]
+    fn an_executable_object_links_one_shared_inode_with_its_own_mode() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let (dir, store) = store(8);
+        let ingested = ingest(&store, &write_source(&dir, "tool.bin", &[7u8; 24]), None).unwrap();
+        let hash = ingested.file_sha256.clone();
+        let plain = store.lease_object(&hash, 24).unwrap();
+        let executable = store.lease_executable_object(&hash, 24).unwrap();
+        let again = store.lease_executable_object(&hash, 24).unwrap();
+        let plain_meta = plain.file().metadata().unwrap();
+        let exec_meta = executable.file().metadata().unwrap();
+        assert_ne!(plain_meta.ino(), exec_meta.ino());
+        assert_eq!(exec_meta.ino(), again.file().metadata().unwrap().ino());
+        assert_eq!(exec_meta.permissions().mode() & 0o777, 0o555);
+        assert_eq!(plain_meta.permissions().mode() & 0o777, 0o444);
+
+        let first = lillux::PinnedDirectory::open_or_create(&dir.path().join("gen-a")).unwrap();
+        let second = lillux::PinnedDirectory::open_or_create(&dir.path().join("gen-b")).unwrap();
+        for target in [&first, &second] {
+            store
+                .link_executable_object_into(
+                    &hash,
+                    target,
+                    std::ffi::OsStr::new("tool"),
+                    executable.file(),
+                )
+                .unwrap();
+        }
+        let a = fs::metadata(dir.path().join("gen-a/tool")).unwrap();
+        let b = fs::metadata(dir.path().join("gen-b/tool")).unwrap();
+        assert_eq!(a.ino(), b.ino());
+        assert_eq!(a.ino(), exec_meta.ino());
+        assert_eq!(a.permissions().mode() & 0o777, 0o555);
+        assert_eq!(
+            fs::read(dir.path().join("gen-a/tool")).unwrap(),
+            vec![7u8; 24]
+        );
+        // The extra inode is counted in full beside the primary.
+        assert_eq!(store.total_stored_bytes().unwrap(), 48);
+    }
+
+    #[test]
+    fn scrub_detects_and_quarantines_a_damaged_executable_inode() {
+        use std::io::{Seek as _, Write as _};
+        use std::os::unix::fs::PermissionsExt as _;
+        let (dir, store) = store(8);
+        let ingested = ingest(&store, &write_source(&dir, "tool.bin", &[9u8; 24]), None).unwrap();
+        let hash = ingested.file_sha256.clone();
+        drop(store.lease_executable_object(&hash, 24).unwrap());
+        assert!(store.scrub_all().unwrap().findings.is_empty());
+
+        let path = dir.path().join("large-objects/executables").join(&hash);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.seek(SeekFrom::Start(3)).unwrap();
+        file.write_all(&[0xff]).unwrap();
+        file.sync_all().unwrap();
+
+        let report = store.scrub_all().unwrap();
+        assert!(report.findings.iter().any(|finding| matches!(
+            finding,
+            LargeObjectIntegrityFinding::ExecutableInodeDamaged { .. }
+        )));
+        assert_eq!(report.quarantined, vec![hash.clone()]);
+        assert_eq!(store.object_size(&hash).unwrap(), None);
+        assert!(!store.has_executable_inode(&hash).unwrap());
+        assert!(
+            dir.path()
+                .join("large-objects/quarantine/executables")
+                .join(&hash)
+                .exists()
+        );
+        assert!(
+            dir.path()
+                .join("large-objects/quarantine/objects")
+                .join(&hash)
+                .exists()
+        );
+        assert_eq!(store.quarantined_bytes().unwrap(), 48);
+        let purged = store.purge_quarantine(false).unwrap();
+        assert_eq!(purged.bytes, 48);
+        assert_eq!(store.quarantined_bytes().unwrap(), 0);
+    }
+
+    #[test]
+    fn sweep_removes_the_executable_inode_with_the_object() {
+        let (dir, store) = store(8);
+        let ingested = ingest(&store, &write_source(&dir, "tool.bin", &[5u8; 32]), None).unwrap();
+        let hash = ingested.file_sha256.clone();
+        drop(store.lease_executable_object(&hash, 32).unwrap());
+        assert!(store.has_executable_inode(&hash).unwrap());
+        let report = store.sweep_to_budget(0, &BTreeSet::new()).unwrap();
+        assert_eq!(report.evicted, vec![(hash.clone(), 64)]);
+        assert_eq!(report.total_bytes_after, 0);
+        assert!(!store.has_executable_inode(&hash).unwrap());
+        assert_eq!(store.object_size(&hash).unwrap(), None);
+        assert_eq!(store.total_stored_bytes().unwrap(), 0);
     }
 
     #[test]
@@ -2629,5 +3904,528 @@ mod tests {
                 .is_err()
         );
         assert!(!staging_path(&dir, &file_sha256).exists());
+    }
+
+    // ---- reference objects: held in place, never copied ----
+
+    /// A resolver over one directory, named `image`, that vouches for it.
+    struct DirectoryRoots {
+        path: PathBuf,
+        refusal: Option<ReferenceRootRefusal>,
+    }
+
+    impl ReferenceRoots for DirectoryRoots {
+        fn open_root(&self, name: &str) -> Result<ReferenceRoot, ReferenceRootRefusal> {
+            if let Some(refusal) = &self.refusal {
+                return Err(refusal.clone());
+            }
+            if name != "image" {
+                return Err(ReferenceRootRefusal {
+                    code: ReferenceRefusalCode::RootUnproven,
+                    detail: format!("root `{name}` is unknown"),
+                });
+            }
+            let directory = lillux::PinnedDirectory::open(&self.path).unwrap().unwrap();
+            let identity = directory.identity().unwrap();
+            Ok(ReferenceRoot {
+                directory,
+                identity,
+            })
+        }
+    }
+
+    struct Referenced {
+        dir: tempfile::TempDir,
+        store: LargeObjectStore,
+        root: PathBuf,
+        bytes: Vec<u8>,
+        sha256: String,
+    }
+
+    fn root_identity(root: &Path) -> lillux::PinnedDirectoryIdentity {
+        lillux::PinnedDirectory::open(root)
+            .unwrap()
+            .unwrap()
+            .identity()
+            .unwrap()
+    }
+
+    fn register(
+        store: &LargeObjectStore,
+        root: &Path,
+        relative: &str,
+        expected_sha256: Option<&str>,
+    ) -> anyhow::Result<IngestedLargeObject> {
+        let file = fs::File::open(root.join(relative))?;
+        let identity = PinnedLargeObjectSourceIdentity {
+            file: lillux::pinned_regular_file_identity(&file)?,
+            size: file.metadata()?.len(),
+        };
+        store.register_reference(
+            file,
+            identity,
+            ReferenceSource {
+                root_name: "image",
+                root_identity: root_identity(root),
+                relative_path: relative,
+            },
+            expected_sha256,
+        )
+    }
+
+    fn referenced() -> Referenced {
+        let (dir, store) = store(8);
+        let root = dir.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let bytes = b"0123456789abcdefXYZ".to_vec();
+        fs::write(root.join("image.bin"), &bytes).unwrap();
+        let store = store.with_reference_roots(std::sync::Arc::new(DirectoryRoots {
+            path: root.clone(),
+            refusal: None,
+        }));
+        let registered = register(&store, &root, "image.bin", None).unwrap();
+        assert_eq!(registered.file_sha256, lillux::cas::sha256_hex(&bytes));
+        Referenced {
+            dir,
+            store,
+            root,
+            sha256: registered.file_sha256,
+            bytes,
+        }
+    }
+
+    fn refusal_code(error: &anyhow::Error) -> &'static str {
+        error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<LargeObjectReferenceRefused>())
+            .map(|refused| refused.code.as_str())
+            .unwrap_or("not a reference refusal")
+    }
+
+    #[test]
+    fn a_reference_is_resident_and_leased_without_a_copy() {
+        let held = referenced();
+        let store = &held.store;
+        assert_eq!(store.object_size(&held.sha256).unwrap(), Some(19));
+        assert!(!store.has_owned_object(&held.sha256).unwrap());
+        // No bytes entered the store: nothing counts against the budget.
+        assert_eq!(store.total_stored_bytes().unwrap(), 0);
+        let sidecar = store.verify_resident_object(&held.sha256, 19).unwrap();
+        assert_eq!(sidecar.chunk_hashes.len(), 3);
+        let record = store.reference(&held.sha256).unwrap().unwrap();
+        assert_eq!(record.schema, LARGE_OBJECT_REFERENCE_SCHEMA);
+        assert_eq!(record.root_name, "image");
+        assert_eq!(record.relative_path, "image.bin");
+        for leased in [
+            store.lease_object(&held.sha256, 19).unwrap(),
+            store.lease_executable_object(&held.sha256, 19).unwrap(),
+        ] {
+            assert!(leased.is_reference());
+            let mut read = Vec::new();
+            leased
+                .file()
+                .try_clone()
+                .unwrap()
+                .read_to_end(&mut read)
+                .unwrap();
+            assert_eq!(read, held.bytes);
+        }
+        // The store never links a file it does not own.
+        let leased = store.lease_object(&held.sha256, 19).unwrap();
+        let target =
+            lillux::PinnedDirectory::open_or_create(&held.dir.path().join("target")).unwrap();
+        assert!(
+            store
+                .link_object_into(&held.sha256, &target, OsStr::new("linked"), leased.file())
+                .is_err()
+        );
+        // The wrong size is refused like an owned object's.
+        assert!(store.lease_object(&held.sha256, 20).is_err());
+    }
+
+    #[test]
+    fn a_changed_file_identity_refuses_the_lease_by_name() {
+        let held = referenced();
+        // A different inode at the same path, same bytes.
+        let moved = held.root.join("image.bin");
+        fs::rename(&moved, held.root.join("aside")).unwrap();
+        fs::write(&moved, &held.bytes).unwrap();
+        let error = held
+            .store
+            .lease_object(&held.sha256, 19)
+            .err()
+            .expect("a replaced file is refused");
+        assert_eq!(refusal_code(&error), "reference_file_changed");
+        assert_eq!(
+            refusal_code(
+                &held
+                    .store
+                    .verify_resident_object(&held.sha256, 19)
+                    .unwrap_err()
+            ),
+            "reference_file_changed"
+        );
+        // The same file written in place is a changed change time.
+        fs::remove_file(&moved).unwrap();
+        fs::rename(held.root.join("aside"), &moved).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let mut file = fs::OpenOptions::new().write(true).open(&moved).unwrap();
+        file.write_all(&held.bytes).unwrap();
+        drop(file);
+        let error = held.store.lease_object(&held.sha256, 19).err().unwrap();
+        assert_eq!(refusal_code(&error), "reference_file_changed");
+    }
+
+    #[test]
+    fn a_changed_root_or_an_unproven_root_refuses_residency_and_lease() {
+        let held = referenced();
+        let unproven = LargeObjectStore::open_with_chunk_bytes(
+            &lillux::PinnedDirectory::open(held.dir.path())
+                .unwrap()
+                .unwrap(),
+            8,
+        )
+        .unwrap()
+        .with_reference_roots(std::sync::Arc::new(DirectoryRoots {
+            path: held.root.clone(),
+            refusal: Some(ReferenceRootRefusal {
+                code: ReferenceRefusalCode::RootUnproven,
+                detail: "the proof no longer holds".to_owned(),
+            }),
+        }));
+        assert_eq!(unproven.object_size(&held.sha256).unwrap(), None);
+        let error = unproven.lease_object(&held.sha256, 19).err().unwrap();
+        assert_eq!(refusal_code(&error), "reference_root_unproven");
+        assert_eq!(
+            refusal_code(
+                &unproven
+                    .verify_resident_object(&held.sha256, 19)
+                    .unwrap_err()
+            ),
+            "reference_root_unproven"
+        );
+        // A root that is another directory than the registered one.
+        let other = held.dir.path().join("other");
+        fs::create_dir(&other).unwrap();
+        let swapped = LargeObjectStore::open_with_chunk_bytes(
+            &lillux::PinnedDirectory::open(held.dir.path())
+                .unwrap()
+                .unwrap(),
+            8,
+        )
+        .unwrap()
+        .with_reference_roots(std::sync::Arc::new(DirectoryRoots {
+            path: other,
+            refusal: None,
+        }));
+        let error = swapped.lease_object(&held.sha256, 19).err().unwrap();
+        assert_eq!(refusal_code(&error), "reference_root_changed");
+        // No resolver at all is a refusal too, never a silent pass.
+        let unresolved = LargeObjectStore::open_with_chunk_bytes(
+            &lillux::PinnedDirectory::open(held.dir.path())
+                .unwrap()
+                .unwrap(),
+            8,
+        )
+        .unwrap();
+        let error = unresolved.lease_object(&held.sha256, 19).err().unwrap();
+        assert_eq!(refusal_code(&error), "reference_roots_unavailable");
+        // Owned bytes of the same hash cure it: they are served regardless.
+        let source = write_source(&held.dir, "owned.bin", &held.bytes);
+        ingest(&unproven, &source, None).unwrap();
+        assert!(
+            !unproven
+                .lease_object(&held.sha256, 19)
+                .unwrap()
+                .is_reference()
+        );
+    }
+
+    #[test]
+    fn a_record_without_its_sidecar_is_not_resident() {
+        let held = referenced();
+        let name = OsStr::new(&held.sha256);
+        let sidecar = held
+            .store
+            .sidecars
+            .open_regular(name, false)
+            .unwrap()
+            .unwrap();
+        held.store.sidecars.remove_if_same(name, &sidecar).unwrap();
+        assert_eq!(held.store.object_size(&held.sha256).unwrap(), None);
+        assert!(
+            held.store
+                .try_lease_object(&held.sha256, 19)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(held.store.staged_bytes(&held.sha256).unwrap(), 0);
+    }
+
+    #[test]
+    fn references_count_nothing_against_the_budget_and_are_never_swept() {
+        let held = referenced();
+        let store = &held.store;
+        let owned_bytes = b"owned bytes, and a few more".to_vec();
+        let source = write_source(&held.dir, "owned.bin", &owned_bytes);
+        let owned = ingest(store, &source, None).unwrap();
+        assert_eq!(
+            store.total_stored_bytes().unwrap(),
+            owned_bytes.len() as u64
+        );
+        let report = store.sweep_to_budget(0, &BTreeSet::new()).unwrap();
+        assert_eq!(report.evicted.len(), 1);
+        assert_eq!(report.evicted[0].0, owned.file_sha256);
+        assert_eq!(report.total_bytes_before, owned_bytes.len() as u64);
+        assert_eq!(report.total_bytes_after, 0);
+        assert_eq!(store.object_size(&held.sha256).unwrap(), Some(19));
+        assert_eq!(store.total_stored_bytes().unwrap(), 0);
+    }
+
+    #[test]
+    fn scrub_reads_through_the_reference_and_catches_a_changed_byte() {
+        let held = referenced();
+        let clean = held.store.scrub_all().unwrap();
+        assert_eq!(clean.objects_verified, 1, "{clean:?}");
+        assert!(clean.findings.is_empty(), "{clean:?}");
+        assert_eq!(clean.bytes_verified, 19);
+        assert!(held.store.scrub_object(&held.sha256).unwrap().is_empty());
+
+        let path = held.root.join("image.bin");
+        let mut damaged = held.bytes.clone();
+        damaged[3] ^= 0x40;
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        fs::write(&path, &damaged).unwrap();
+        let findings = held.store.scrub_object(&held.sha256).unwrap();
+        assert!(
+            findings
+                .iter()
+                .any(LargeObjectIntegrityFinding::is_byte_damage),
+            "{findings:?}"
+        );
+        // Inspection alone quarantines nothing.
+        assert!(
+            held.store
+                .lease_object(&held.sha256, 19)
+                .err()
+                .map(|error| refusal_code(&error) != "reference_quarantined")
+                .unwrap()
+        );
+
+        let report = held.store.scrub_all().unwrap();
+        assert_eq!(report.quarantined, vec![held.sha256.clone()]);
+        // Quarantine is a marker by name: the file is exactly where it was.
+        assert_eq!(fs::read(&path).unwrap(), damaged);
+        assert_eq!(held.store.quarantined_bytes().unwrap(), 0);
+        assert!(held.store.is_quarantined(&held.sha256).unwrap());
+        assert_eq!(held.store.object_size(&held.sha256).unwrap(), None);
+        let error = held.store.lease_object(&held.sha256, 19).err().unwrap();
+        assert_eq!(refusal_code(&error), "reference_quarantined");
+        let error = held
+            .store
+            .verify_resident_object(&held.sha256, 19)
+            .unwrap_err();
+        assert_eq!(refusal_code(&error), "reference_quarantined");
+
+        // Purge removes the marker and counts it, never touching the file.
+        let preview = held.store.purge_quarantine(true).unwrap();
+        assert_eq!((preview.reference_markers, preview.objects), (1, 0));
+        let purged = held.store.purge_quarantine(false).unwrap();
+        assert_eq!(purged.reference_markers, 1);
+        assert_eq!(fs::read(&path).unwrap(), damaged);
+        assert!(!held.store.is_quarantined(&held.sha256).unwrap());
+    }
+
+    #[test]
+    fn registering_clean_bytes_again_is_not_held_by_an_earlier_quarantine() {
+        let held = referenced();
+        let path = held.root.join("image.bin");
+        let mut damaged = held.bytes.clone();
+        damaged[0] ^= 1;
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        fs::write(&path, &damaged).unwrap();
+        held.store.scrub_all().unwrap();
+        assert!(held.store.is_quarantined(&held.sha256).unwrap());
+        // The file is repaired and registered again: a new record the marker
+        // does not condemn.
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        fs::write(&path, &held.bytes).unwrap();
+        register(&held.store, &held.root, "image.bin", Some(&held.sha256)).unwrap();
+        assert!(!held.store.is_quarantined(&held.sha256).unwrap());
+        assert!(
+            held.store
+                .lease_object(&held.sha256, 19)
+                .unwrap()
+                .is_reference()
+        );
+    }
+
+    #[test]
+    fn unregister_removes_the_record_and_never_the_file() {
+        let held = referenced();
+        let store = &held.store;
+        // A running execution holds the object: unregister is refused.
+        let leased = store.lease_object(&held.sha256, 19).unwrap();
+        assert!(store.unregister_reference(&held.sha256).is_err());
+        drop(leased);
+        assert!(store.unregister_reference(&held.sha256).unwrap());
+        assert!(held.root.join("image.bin").exists());
+        assert_eq!(store.object_size(&held.sha256).unwrap(), None);
+        assert_eq!(store.sidecar(&held.sha256).unwrap(), None);
+        assert!(store.reference(&held.sha256).unwrap().is_none());
+        assert!(!store.unregister_reference(&held.sha256).unwrap());
+        let error = store.lease_object(&held.sha256, 19).err().unwrap();
+        assert_eq!(
+            error.to_string(),
+            format!("large object {} is absent", held.sha256)
+        );
+    }
+
+    #[test]
+    fn unregister_keeps_the_sidecar_an_owned_copy_uses() {
+        let held = referenced();
+        let source = write_source(&held.dir, "owned.bin", &held.bytes);
+        // The owned import of the same hash is served and wins.
+        ingest(&held.store, &source, None).unwrap();
+        assert!(held.store.unregister_reference(&held.sha256).unwrap());
+        assert!(held.store.has_owned_object(&held.sha256).unwrap());
+        held.store.verify_resident_object(&held.sha256, 19).unwrap();
+    }
+
+    #[test]
+    fn registration_refuses_a_source_that_is_not_the_admitted_file() {
+        let held = referenced();
+        let wrong = "0".repeat(64);
+        assert!(register(&held.store, &held.root, "image.bin", Some(&wrong)).is_err());
+        // An absolute or parent-relative path is not a root-relative one.
+        let file = fs::File::open(held.root.join("image.bin")).unwrap();
+        let identity = PinnedLargeObjectSourceIdentity {
+            file: lillux::pinned_regular_file_identity(&file).unwrap(),
+            size: 19,
+        };
+        let error = held.store.register_reference(
+            file,
+            identity,
+            ReferenceSource {
+                root_name: "image",
+                root_identity: root_identity(&held.root),
+                relative_path: "../escape",
+            },
+            None,
+        );
+        assert!(error.is_err());
+    }
+
+    struct ReferenceSink<'a> {
+        store: &'a LargeObjectStore,
+        reference: Option<(&'a str, lillux::PinnedDirectoryIdentity)>,
+    }
+
+    impl crate::ExternalLargeContentSink for ReferenceSink<'_> {
+        fn store_large_file(
+            &mut self,
+            file: fs::File,
+            identity: PinnedLargeObjectSourceIdentity,
+            relative_path: &str,
+            expected_sha256: Option<&str>,
+        ) -> anyhow::Result<IngestedLargeObject> {
+            match self.reference {
+                Some((root_name, root_identity)) => self.store.register_reference(
+                    file,
+                    identity,
+                    ReferenceSource {
+                        root_name,
+                        root_identity,
+                        relative_path,
+                    },
+                    expected_sha256,
+                ),
+                None => {
+                    self.store
+                        .ingest_open_regular(file, identity, relative_path, expected_sha256)
+                }
+            }
+        }
+
+        fn store_content_file(
+            &mut self,
+            _file: fs::File,
+            _relative_path: &str,
+            _expected_size: u64,
+        ) -> anyhow::Result<(String, u64)> {
+            anyhow::bail!("this fixture has only large files")
+        }
+    }
+
+    #[test]
+    fn registration_yields_the_manifest_an_owned_import_yields() {
+        // A file in the large tier, with the chunk size the manifest admits.
+        let size = crate::objects::MAX_EXTERNAL_CONTENT_FILE_BYTES + 3 * MIB + 17;
+        let bytes: Vec<u8> = (0..size).map(|index| (index % 251) as u8).collect();
+        let owned_dir = tempfile::tempdir().unwrap();
+        let reference_dir = tempfile::tempdir().unwrap();
+        let root = reference_dir.path().join("root");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("image.bin"), &bytes).unwrap();
+        fs::set_permissions(
+            root.join("image.bin"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        let owned_store = LargeObjectStore::open_with_chunk_bytes(
+            &lillux::PinnedDirectory::open_or_create(owned_dir.path()).unwrap(),
+            MIB,
+        )
+        .unwrap();
+        let reference_store = LargeObjectStore::open_with_chunk_bytes(
+            &lillux::PinnedDirectory::open_or_create(reference_dir.path()).unwrap(),
+            MIB,
+        )
+        .unwrap();
+        let ignore = crate::ignore::IgnoreMatcher::from_config(&crate::ignore::IgnoreConfig {
+            patterns: Vec::new(),
+        })
+        .unwrap();
+        let capture =
+            |store: &LargeObjectStore,
+             reference: Option<(&str, lillux::PinnedDirectoryIdentity)>| {
+                let file = fs::File::open(root.join("image.bin")).unwrap();
+                let identity = PinnedLargeObjectSourceIdentity {
+                    file: lillux::pinned_regular_file_identity(&file).unwrap(),
+                    size: file.metadata().unwrap().len(),
+                };
+                let policy = crate::LargeContentCapturePolicy::new(
+                    "image.bin".to_owned(),
+                    &ignore,
+                    crate::LargeContentCaptureBounds {
+                        max_depth: 4,
+                        max_entries: 4,
+                        max_file_bytes: size,
+                        max_total_bytes: size,
+                    },
+                )
+                .unwrap();
+                let mut sink = ReferenceSink { store, reference };
+                crate::capture_large_file(file, identity, "image.bin", None, &policy, &mut sink)
+                    .unwrap()
+            };
+        let owned = capture(&owned_store, None);
+        let reference_store =
+            reference_store.with_reference_roots(std::sync::Arc::new(DirectoryRoots {
+                path: root.clone(),
+                refusal: None,
+            }));
+        let referenced = capture(&reference_store, Some(("image", root_identity(&root))));
+        assert_eq!(owned, referenced);
+        assert_eq!(
+            lillux::canonical_json(&owned.to_value().unwrap()).unwrap(),
+            lillux::canonical_json(&referenced.to_value().unwrap()).unwrap()
+        );
+        assert_eq!(owned.entries[0].mode, Some(0o755));
+        // The reference store holds nothing of the file's bytes.
+        assert_eq!(reference_store.total_stored_bytes().unwrap(), 0);
+        assert!(owned_store.total_stored_bytes().unwrap() >= size);
+        let entry = &referenced.entries[0];
+        reference_store.verify_manifest_commitment(entry).unwrap();
     }
 }

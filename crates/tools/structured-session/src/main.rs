@@ -1229,6 +1229,13 @@ fn run(lifecycle: &mut BridgeLifecycle) -> Result<()> {
         serde_json::from_str(&required_env("RYEOS_EXTERNAL_DELIVERY")?)
             .context("decode external realization delivery")?;
     require_absolute_normalized("external realization root", &external_root)?;
+    // The launch owner may hand a file realization over as its own inherited
+    // descriptor instead of placing it in the runtime view. Adopt those
+    // descriptors first, once, before anything else can name their numbers.
+    let retained_files = adopt_retained_realization_files(
+        optional_env(ryeos_state::objects::EXTERNAL_REALIZATION_DESCRIPTORS_ENV)?.as_deref(),
+        &external_realizations,
+    )?;
     let (executable, workload_argv0, mut workload_handles) =
         resolve_pinned_executable_with_delivery(
             std::path::Path::new(&external_root),
@@ -1236,6 +1243,7 @@ fn run(lifecycle: &mut BridgeLifecycle) -> Result<()> {
             &profile.workload_realization_id,
             executable_name,
             external_delivery,
+            &retained_files,
         )?;
     let executable_search = optional_env("RYEOS_EXECUTABLE_SEARCH")?;
     let (executable_path, mut inherited_descriptors) =
@@ -1254,6 +1262,7 @@ fn run(lifecycle: &mut BridgeLifecycle) -> Result<()> {
             &external_realizations,
             session_process_environment.as_deref(),
             external_delivery,
+            &retained_files,
             delivered_secrets,
         )?;
     inherited_descriptors.append(&mut environment_descriptors);
@@ -1824,6 +1833,58 @@ fn verify_runtime_configuration(
     Ok(())
 }
 
+/// File realizations the launch owner delivered as their own inherited
+/// descriptor, by realization id. Each holds the one file itself: nothing of
+/// it exists in the runtime view, so it has no root, mount or sibling.
+#[derive(Default)]
+struct RetainedRealizationFiles(BTreeMap<String, lillux::InheritedDescriptorAuthority>);
+
+impl RetainedRealizationFiles {
+    fn get(&self, realization_id: &str) -> Option<&lillux::InheritedDescriptorAuthority> {
+        self.0.get(realization_id)
+    }
+
+    #[cfg(test)]
+    fn from_authorities(
+        files: impl IntoIterator<Item = (String, lillux::InheritedDescriptorAuthority)>,
+    ) -> Self {
+        Self(files.into_iter().collect())
+    }
+}
+
+/// Decode the descriptor delivery document and adopt each descriptor it
+/// names. A document naming anything but a pinned file of the sealed set is
+/// refused, as is a descriptor that is not a regular file.
+fn adopt_retained_realization_files(
+    encoded: Option<&str>,
+    sealed_realizations: &str,
+) -> Result<RetainedRealizationFiles> {
+    let Some(encoded) = encoded else {
+        return Ok(RetainedRealizationFiles::default());
+    };
+    let realizations = ryeos_state::objects::ExternalContentRealizationSet::from_value(
+        &serde_json::from_str(sealed_realizations)
+            .context("decode sealed external realizations for descriptor delivery")?,
+    )?;
+    let document =
+        ryeos_state::objects::ExternalRealizationDescriptors::decode(encoded, &realizations)
+            .context("decode external realization descriptor delivery")?;
+    let mut files = BTreeMap::new();
+    for (id, descriptor) in document.realizations {
+        // SAFETY: the launch owner inherited exactly this descriptor into
+        // this process for this delivery, and nothing here owns its number
+        // yet. Lillux takes sole ownership and prevents further inheritance
+        // until it is deliberately retained for the workload.
+        let authority = unsafe { lillux::take_inherited_descriptor_authority(descriptor) }
+            .map_err(anyhow::Error::msg)?;
+        if authority.mount_entry_kind()? != lillux::secure_fs::OpenMountEntryKind::Regular {
+            bail!("delivered realization descriptor is not a regular file");
+        }
+        files.insert(id, authority);
+    }
+    Ok(RetainedRealizationFiles(files))
+}
+
 fn external_realization_root(
     external_root: &std::path::Path,
     mount_root: ryeos_state::objects::ExternalContentMountRoot,
@@ -1864,6 +1925,7 @@ fn resolve_pinned_executable(
         realization_id,
         executable_name,
         ryeos_state::objects::ExternalRealizationDelivery::FixedNamespace,
+        &RetainedRealizationFiles::default(),
     )
 }
 
@@ -1873,6 +1935,7 @@ fn resolve_pinned_executable_with_delivery(
     realization_id: &str,
     executable_name: &std::path::Path,
     delivery: ryeos_state::objects::ExternalRealizationDelivery,
+    retained: &RetainedRealizationFiles,
 ) -> Result<(
     std::path::PathBuf,
     std::path::PathBuf,
@@ -1927,6 +1990,20 @@ fn resolve_pinned_executable_with_delivery(
             .any(|component| !matches!(component, std::path::Component::Normal(_)))
     {
         bail!("workload realization mount is not a safe relative path");
+    }
+    if let Some(file) = retained.get(&realization.id) {
+        // The realization is its own descriptor: there is no root, mount or
+        // directory to pin. The workload runs that exact file, and its argv[0]
+        // is the descriptor spelling it was started from.
+        if realization.kind != ryeos_state::objects::ExternalContentKind::File
+            || executable_name.components().count() != 1
+            || mount.file_name() != Some(executable_name.as_os_str())
+        {
+            bail!("delivered file realization does not match the workload executable");
+        }
+        file.require_executable_regular()?;
+        let path = file.path().to_path_buf();
+        return Ok((path.clone(), path, vec![file.clone()]));
     }
     let external_root = external_realization_root(external_root, realization.mount_root, delivery)?;
     // The executable and its argv[0] resource path must share one pinned root,
@@ -2165,6 +2242,7 @@ fn resolve_session_process_environment(
         sealed_realizations,
         encoded,
         ryeos_state::objects::ExternalRealizationDelivery::FixedNamespace,
+        &RetainedRealizationFiles::default(),
         None,
     )?;
     Ok((environment, handles))
@@ -2176,6 +2254,7 @@ fn resolve_session_process_environment_with_delivery(
     sealed_realizations: &str,
     encoded: Option<&str>,
     external_delivery: ryeos_state::objects::ExternalRealizationDelivery,
+    retained: &RetainedRealizationFiles,
     delivered_secrets: Option<DeliveredSessionSecrets>,
 ) -> Result<(
     BTreeMap<String, String>,
@@ -2325,13 +2404,33 @@ fn resolve_session_process_environment_with_delivery(
                     .ok_or_else(|| {
                         anyhow!("session process environment names an absent realization")
                     })?;
-                if realization.kind != ryeos_state::objects::ExternalContentKind::Tree
-                    || realization.mode != ryeos_state::objects::ExternalContentMode::Pinned
+                if realization.mode != ryeos_state::objects::ExternalContentMode::Pinned {
+                    bail!("session process environment requires a pinned realization");
+                }
+                let is_file = realization.kind == ryeos_state::objects::ExternalContentKind::File;
+                if is_file
+                    && (relative_path != "."
+                        || path_kind
+                            != ryeos_state::objects::SessionProcessEnvironmentPathKind::File)
                 {
-                    bail!("session process environment requires a pinned tree realization");
+                    bail!(
+                        "session process environment addresses a file realization only as the file itself"
+                    );
+                }
+                if let Some(file) = retained.get(&realization.id) {
+                    // The file was delivered as its own descriptor: its path
+                    // is that descriptor, with no view or namespace spelling.
+                    let value = file
+                        .path()
+                        .to_str()
+                        .ok_or_else(|| anyhow!("delivered realization path is not UTF-8"))?
+                        .to_owned();
+                    handles.push(file.clone());
+                    resolved.insert(name, value);
+                    continue;
                 }
                 let mut relative = std::path::PathBuf::from(&realization.mount);
-                if relative_path != "." {
+                if !is_file && relative_path != "." {
                     relative.push(&relative_path);
                 }
                 let external_root = external_realization_root(
@@ -7161,6 +7260,7 @@ server.serve_forever()
             "fixture",
             std::path::Path::new("worker"),
             delivery,
+            &RetainedRealizationFiles::default(),
         )
         .unwrap();
         let search = json!([{"realization_id":"fixture", "relative_directory":"bin"}]).to_string();
@@ -7182,6 +7282,7 @@ server.serve_forever()
                 &sealed,
                 Some(&bindings),
                 delivery,
+                &RetainedRealizationFiles::default(),
                 None,
             )
             .unwrap();
@@ -7201,6 +7302,134 @@ server.serve_forever()
             ),
             (2, 1, 1)
         );
+    }
+
+    fn delivered_file_authority(
+        directory: &std::path::Path,
+        mode: u32,
+    ) -> (lillux::InheritedDescriptorAuthority, std::path::PathBuf) {
+        let path = directory.join("harness");
+        std::fs::write(&path, b"worker").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        (
+            lillux::secure_fs::inherited_readable_duplicate_of_open_regular_file(&file).unwrap(),
+            path,
+        )
+    }
+
+    fn delivered_file_fixture() -> String {
+        json!([{
+            "id":"fixture", "kind":"file", "mode":"pinned",
+            "manifest_hash":"a".repeat(64), "entry_count":1, "total_bytes":6,
+            "mount_root":"project", "mount":"bin/worker"
+        }])
+        .to_string()
+    }
+
+    #[test]
+    fn a_realization_delivered_as_its_own_descriptor_needs_no_root_or_view() {
+        use std::os::unix::fs::MetadataExt as _;
+        let source = tempfile::tempdir().unwrap();
+        let (authority, source_path) = delivered_file_authority(source.path(), 0o500);
+        let retained =
+            RetainedRealizationFiles::from_authorities([("fixture".to_owned(), authority)]);
+        let sealed = delivered_file_fixture();
+        // No root exists anywhere: the descriptor is the whole realization.
+        let absent_root = source.path().join("no-such-root");
+        let delivery = ryeos_state::objects::ExternalRealizationDelivery::PrivateDescriptorRoot;
+        let (executable, argv0, handles) = resolve_pinned_executable_with_delivery(
+            &absent_root,
+            &sealed,
+            "fixture",
+            std::path::Path::new("worker"),
+            delivery,
+            &retained,
+        )
+        .unwrap();
+        assert!(executable.starts_with("/proc/self/fd"));
+        assert_eq!(argv0, executable);
+        assert_eq!(handles.len(), 1);
+        // Running the descriptor path runs the very inode of the source.
+        assert_eq!(
+            std::fs::metadata(&executable).unwrap().ino(),
+            std::fs::metadata(&source_path).unwrap().ino()
+        );
+        let bindings = descriptor_environment_fixture(json!({"FIXTURE_FILE":{
+            "kind":"realization_path", "realization_id":"fixture",
+            "relative_path":".", "path_kind":"file"
+        }}));
+        let (environment, environment_handles, _) =
+            resolve_session_process_environment_with_delivery(
+                source.path(),
+                &absent_root,
+                &sealed,
+                Some(&bindings),
+                delivery,
+                &retained,
+                None,
+            )
+            .unwrap();
+        assert_eq!(environment["FIXTURE_FILE"], executable.to_str().unwrap());
+        assert_eq!(environment_handles.len(), 1);
+        assert_eq!(
+            std::fs::read(&environment["FIXTURE_FILE"]).unwrap(),
+            b"worker"
+        );
+    }
+
+    #[test]
+    fn a_delivered_file_refuses_a_name_mismatch_a_non_executable_and_a_sub_path() {
+        let source = tempfile::tempdir().unwrap();
+        let (authority, _) = delivered_file_authority(source.path(), 0o500);
+        let retained =
+            RetainedRealizationFiles::from_authorities([("fixture".to_owned(), authority)]);
+        let sealed = delivered_file_fixture();
+        let delivery = ryeos_state::objects::ExternalRealizationDelivery::PrivateDescriptorRoot;
+        assert!(
+            resolve_pinned_executable_with_delivery(
+                source.path(),
+                &sealed,
+                "fixture",
+                std::path::Path::new("other"),
+                delivery,
+                &retained,
+            )
+            .is_err()
+        );
+        let plain = tempfile::tempdir().unwrap();
+        let (data_only, _) = delivered_file_authority(plain.path(), 0o400);
+        let retained =
+            RetainedRealizationFiles::from_authorities([("fixture".to_owned(), data_only)]);
+        assert!(
+            resolve_pinned_executable_with_delivery(
+                source.path(),
+                &sealed,
+                "fixture",
+                std::path::Path::new("worker"),
+                delivery,
+                &retained,
+            )
+            .is_err()
+        );
+        for (relative, kind) in [("sub", "file"), (".", "directory")] {
+            let bindings = descriptor_environment_fixture(json!({"FIXTURE_FILE":{
+                "kind":"realization_path", "realization_id":"fixture",
+                "relative_path":relative, "path_kind":kind
+            }}));
+            assert!(
+                resolve_session_process_environment_with_delivery(
+                    source.path(),
+                    source.path(),
+                    &sealed,
+                    Some(&bindings),
+                    delivery,
+                    &retained,
+                    None,
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]
@@ -7690,6 +7919,7 @@ server.serve_forever()
             "[]",
             Some(&secret_bindings()),
             ryeos_state::objects::ExternalRealizationDelivery::FixedNamespace,
+            &RetainedRealizationFiles::default(),
             Some(delivered),
         )
         .unwrap();
@@ -7712,6 +7942,7 @@ server.serve_forever()
                 "[]",
                 Some(encoded),
                 ryeos_state::objects::ExternalRealizationDelivery::FixedNamespace,
+                &RetainedRealizationFiles::default(),
                 delivered,
             )
             .unwrap_err()
@@ -7746,6 +7977,7 @@ server.serve_forever()
                 "[]",
                 None,
                 ryeos_state::objects::ExternalRealizationDelivery::FixedNamespace,
+                &RetainedRealizationFiles::default(),
                 Some(delivered(&["API_KEY"])),
             )
             .is_err()

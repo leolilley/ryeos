@@ -1194,20 +1194,30 @@ impl AdmittedPersistentSessionCapsule {
         }
         validate_session_process_environment(&self.process_environment)?;
         for value in self.process_environment.values() {
-            let SessionProcessEnvironmentValue::RealizationPath { realization_id, .. } = value
+            let SessionProcessEnvironmentValue::RealizationPath {
+                realization_id,
+                relative_path,
+                path_kind,
+            } = value
             else {
                 continue;
             };
-            if realized
+            let Some(realization) = realized
                 .as_ref()
                 .and_then(|set| set.iter().find(|item| item.id == *realization_id))
-                .is_none_or(|realization| {
-                    realization.kind != super::ExternalContentKind::Tree
-                        || realization.mode != super::ExternalContentMode::Pinned
-                })
+                .filter(|realization| realization.mode == super::ExternalContentMode::Pinned)
+            else {
+                anyhow::bail!(
+                    "session process environment realization `{realization_id}` is absent or not pinned"
+                );
+            };
+            // A file realization has no interior: its only addressable path
+            // is the file itself.
+            if realization.kind == super::ExternalContentKind::File
+                && (relative_path != "." || *path_kind != SessionProcessEnvironmentPathKind::File)
             {
                 anyhow::bail!(
-                    "session process environment realization `{realization_id}` is absent or not a pinned tree"
+                    "session process environment realization `{realization_id}` is a file and can be addressed only as the file itself"
                 );
             }
         }

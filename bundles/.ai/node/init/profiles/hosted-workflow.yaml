@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-14T07:17:08Z:c60f26d149dc020587988972811ffea82d3c7d3ff7b7f9ec3a9591e9a03874fe:hKHDUg2dzddyUZ16OL10Zf8Biw8EjleMO3nigyvyMe0J3flAMJycmHQBLLDHQ4es8fAkNw1ESV25Wg52IYB1DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T13:27:47Z:502146850568638d0ba3bf2476cf9cccaabed481afb1cd5866099cf4d393d41a:jgvdF3yQVxb3EWr312kibto+u0kydwfykjWW2IiwFOkryVLY+0FKfMbG410I9vIvZRTL6sl7OmiIGhTq+jBnDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - codex
@@ -375,7 +375,7 @@ policies:
       - "node_modules/"
       - "target/"
   external_content:
-    schema: 1
+    schema: 2
     roots: {}
     limits:
       max_depth: 11

@@ -862,7 +862,7 @@ mod tests {
     #[test]
     fn offline_root_authority_digest_binds_only_the_selected_node_root() {
         let mut policy = ExternalContentImportPolicyRecord {
-            schema: 1,
+            schema: 2,
             declared_roots: std::collections::BTreeMap::new(),
             roots: std::collections::BTreeMap::from([
                 (
@@ -870,6 +870,7 @@ mod tests {
                     ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportRoot {
                         path: std::path::PathBuf::from("/srv/ryeos-offline"),
                         root_identity: directory_identity(7, 11),
+                        in_place: None,
                     },
                 ),
                 (
@@ -877,6 +878,7 @@ mod tests {
                     ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportRoot {
                         path: std::path::PathBuf::from("/srv/unrelated"),
                         root_identity: directory_identity(8, 12),
+                        in_place: None,
                     },
                 ),
             ]),

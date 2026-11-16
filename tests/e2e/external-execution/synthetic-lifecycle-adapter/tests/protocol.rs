@@ -365,6 +365,7 @@ fn install_live_engine(
                 ExternalContentImportRoot {
                     path: grant.archive_root.clone(),
                     root_identity,
+                    in_place: None,
                 },
             );
             ManagedExternalContentPolicy {
@@ -378,7 +379,7 @@ fn install_live_engine(
         },
     };
     let import_policy = ExternalContentImportPolicyRecord {
-        schema: 1,
+        schema: 2,
         roots,
         declared_roots: std::collections::BTreeMap::new(),
         limits: ExternalContentImportLimits {

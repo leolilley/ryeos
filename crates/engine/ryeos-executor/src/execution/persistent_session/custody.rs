@@ -100,7 +100,17 @@ impl PreparedTrustedSessionCustody {
                     "trusted pooled external delivery differs from original private workspace"
                 );
                 let expected_root = required_child(runtime, "external-content-cache")?;
-                for (entry, (root, generation)) in actual.iter().zip(generations) {
+                for (entry, generation) in actual.iter().zip(generations) {
+                    // A reference file realization has no cache generation: it
+                    // is held through its leased descriptor, so there is no
+                    // materialization custody to record for it.
+                    let Some((root, generation)) = generation else {
+                        ensure!(
+                            entry.kind == ryeos_state::objects::ExternalContentKind::File,
+                            "trusted pooled reference realization is not a file"
+                        );
+                        continue;
+                    };
                     require_same_directory(root, &expected_root)?;
                     require_same_directory(
                         generation,

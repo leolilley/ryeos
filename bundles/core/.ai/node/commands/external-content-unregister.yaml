@@ -1,0 +1,11 @@
+# ryeos:signed:2026-11-16T13:27:47Z:b934e8950fd781e76e2cf66d637496cfcc4b4bcd2f054ffd4872b30dc315d9d1:kBfI8ruQQJ8HJrByNJ/OfOWHp6oFVuF9FTM6w0hrQ3ImOadgt1O+/6wKNks1KUtWo+EybPBa+/D8aPbXyHy2Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-content, unregister]
+description: Remove one in-place large-object reference without touching the file in its root
+forms:
+  - slots:
+      - field: file_sha256
+help:
+  usage: ryeos external-content unregister <file-sha256>
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/unregister
