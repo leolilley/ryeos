@@ -88,6 +88,7 @@ fn cognition_in_contents(state: &AppState, thread_id: &str) -> Vec<String> {
             thread_id: Some(thread_id.to_string()),
             after_chain_seq: None,
             limit: 200,
+            event_types: None,
         })
         .expect("replay");
     res.events

@@ -93,6 +93,11 @@ pub struct EventReplayParams {
     pub after_chain_seq: Option<i64>,
     #[serde(default = "default_replay_limit")]
     pub limit: usize,
+    /// Return only events of these types. `None` returns every type. Each
+    /// name must be a known event type; the limit and the byte budget count
+    /// only the events that match.
+    #[serde(default)]
+    pub event_types: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -272,6 +277,7 @@ impl EventStoreService {
                 MAX_REPLAY_LIMIT
             );
         }
+        let event_types = validate_replay_event_types(params.event_types.as_deref())?;
         let (chain_root_id, thread_id) = match (&params.chain_root_id, &params.thread_id) {
             (Some(chain_root_id), thread_id) => (chain_root_id.clone(), thread_id.clone()),
             (None, Some(thread_id)) => {
@@ -284,12 +290,13 @@ impl EventStoreService {
             (None, None) => bail!("events.replay requires chain_root_id or thread_id"),
         };
 
-        let page = self.state_store.replay_events(
+        let page = self.state_store.replay_events_of_types(
             &chain_root_id,
             thread_id.as_deref(),
             params.after_chain_seq,
             params.limit,
             MAX_REPLAY_SERIALIZED_BYTES,
+            event_types.as_deref(),
         )?;
         let next_cursor = if page.has_more {
             page.events.last().map(|event| event.chain_seq)
@@ -308,6 +315,28 @@ impl EventStoreService {
     pub fn chain_head_thread(&self, chain_root_id: &str) -> Result<Option<String>> {
         self.state_store.chain_head_thread(chain_root_id)
     }
+}
+
+/// Most event type names one replay may list.
+const MAX_REPLAY_EVENT_TYPES: usize = 64;
+
+/// The names of a replay's type filter, each checked against the event
+/// vocabulary. An empty list is refused: it would match nothing, and a caller
+/// that wants every type passes none.
+fn validate_replay_event_types(event_types: Option<&[String]>) -> Result<Option<Vec<String>>> {
+    let Some(event_types) = event_types else {
+        return Ok(None);
+    };
+    if event_types.is_empty() || event_types.len() > MAX_REPLAY_EVENT_TYPES {
+        bail!("events.replay event_types must list 1..={MAX_REPLAY_EVENT_TYPES} names");
+    }
+    let mut names = BTreeSet::new();
+    for name in event_types {
+        ryeos_runtime::RuntimeEventType::parse(name)
+            .with_context(|| format!("events.replay event_types names unknown type '{name}'"))?;
+        names.insert(name.clone());
+    }
+    Ok(Some(names.into_iter().collect()))
 }
 
 fn validate_idempotency_key(key: &str) -> Result<()> {
@@ -625,6 +654,24 @@ mod tests {
             )
             .contains("per turn")
         );
+    }
+
+    #[test]
+    fn replay_type_filters_name_known_events_only() {
+        assert_eq!(validate_replay_event_types(None).unwrap(), None);
+        let names = vec!["thread_usage".to_owned(), "cognition_in".to_owned()];
+        assert_eq!(
+            validate_replay_event_types(Some(&names)).unwrap(),
+            Some(vec!["cognition_in".to_owned(), "thread_usage".to_owned()])
+        );
+        for bad in [
+            Vec::new(),
+            vec!["not_an_event".to_owned()],
+            vec!["cognition_in".to_owned(), "".to_owned()],
+            (0..65).map(|_| "thread_usage".to_owned()).collect(),
+        ] {
+            assert!(validate_replay_event_types(Some(&bad)).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

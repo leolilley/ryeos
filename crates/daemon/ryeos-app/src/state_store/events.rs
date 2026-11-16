@@ -311,14 +311,36 @@ impl StateStore {
         limit: usize,
         max_serialized_bytes: usize,
     ) -> Result<PersistedEventPage> {
+        self.replay_events_of_types(
+            chain_root_id,
+            thread_id,
+            after_seq,
+            limit,
+            max_serialized_bytes,
+            None,
+        )
+    }
+
+    /// [`Self::replay_events`] limited to the given event types (`None` keeps
+    /// every type); the limit and byte budget count only matching events.
+    pub fn replay_events_of_types(
+        &self,
+        chain_root_id: &str,
+        thread_id: Option<&str>,
+        after_seq: Option<i64>,
+        limit: usize,
+        max_serialized_bytes: usize,
+        event_types: Option<&[String]>,
+    ) -> Result<PersistedEventPage> {
         let g = self.lock()?;
-        let page = queries::replay_events_bounded(
+        let page = queries::replay_events_of_types_bounded(
             g.state_db.projection(),
             chain_root_id,
             thread_id,
             after_seq,
             limit,
             max_serialized_bytes,
+            event_types,
         )?;
         drop(g);
         let events = page

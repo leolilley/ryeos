@@ -923,10 +923,18 @@ impl CallbackClient {
     /// (compose-context, sub-dispatch); prefer [`Self::replay_thread`] over the
     /// continuation path for rehydration so sibling-branch events don't pollute
     /// the transcript.
-    pub async fn replay_chain(&self, chain_root_id: &str) -> Result<ReplayResponse> {
+    ///
+    /// `event_types` limits the replay to those event type names; `None`
+    /// returns every type. The daemon refuses a name it does not know.
+    pub async fn replay_chain(
+        &self,
+        chain_root_id: &str,
+        event_types: Option<&[&str]>,
+    ) -> Result<ReplayResponse> {
         self.replay_paged(
             "chain_root_id",
             chain_root_id,
+            event_types,
             &mut RuntimeReplayBudget::default(),
         )
         .await
@@ -935,8 +943,16 @@ impl CallbackClient {
     /// Resume-critical: fold ONE thread's own events (thread-scoped), paginated.
     /// Used to fold the linear continuation path turn-by-turn — thread scoping
     /// structurally excludes child/sibling threads that share the chain root.
-    pub async fn replay_thread(&self, thread_id: &str) -> Result<ReplayResponse> {
-        self.replay_thread_with_budget(thread_id, &mut RuntimeReplayBudget::default())
+    ///
+    /// `event_types` limits the replay to those event type names; `None`
+    /// returns every type. Events of other types then neither come back nor
+    /// count against the replay budget.
+    pub async fn replay_thread(
+        &self,
+        thread_id: &str,
+        event_types: Option<&[&str]>,
+    ) -> Result<ReplayResponse> {
+        self.replay_thread_with_budget(thread_id, event_types, &mut RuntimeReplayBudget::default())
             .await
     }
 
@@ -946,9 +962,11 @@ impl CallbackClient {
     pub async fn replay_thread_with_budget(
         &self,
         thread_id: &str,
+        event_types: Option<&[&str]>,
         budget: &mut RuntimeReplayBudget,
     ) -> Result<ReplayResponse> {
-        self.replay_paged("thread_id", thread_id, budget).await
+        self.replay_paged("thread_id", thread_id, event_types, budget)
+            .await
     }
 
     /// Page through `after_chain_seq` cursors for a single replay scope
@@ -958,6 +976,7 @@ impl CallbackClient {
         &self,
         scope_key: &str,
         scope_value: &str,
+        event_types: Option<&[&str]>,
         budget: &mut RuntimeReplayBudget,
     ) -> Result<ReplayResponse> {
         let client = self.inner.as_ref().ok_or_else(|| {
@@ -981,6 +1000,9 @@ impl CallbackClient {
             );
             if let Some(cursor) = after_chain_seq {
                 params.insert("after_chain_seq".to_string(), serde_json::json!(cursor));
+            }
+            if let Some(event_types) = event_types {
+                params.insert("event_types".to_string(), serde_json::json!(event_types));
             }
             let raw: Value = client
                 .replay_events(Value::Object(params))
@@ -2145,7 +2167,7 @@ mod tests {
             "/project",
             "tat-test",
         );
-        let resp = client.replay_chain("C-1").await.unwrap();
+        let resp = client.replay_chain("C-1", None).await.unwrap();
         let types: Vec<&str> = resp.events.iter().map(|e| e.event_type.as_str()).collect();
         assert_eq!(
             types,

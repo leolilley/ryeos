@@ -2066,6 +2066,67 @@ fn frame_event(storage_class: &str, refs: &[String]) -> NewEventRecord {
 }
 
 #[test]
+fn replay_returns_only_the_requested_event_types_and_counts_only_those() {
+    let thread_id = "T-replay-filter";
+    let store = running_thread_for_attachments(thread_id);
+    let events = [
+        "cognition_in",
+        "observation",
+        "cognition_out",
+        "observation",
+    ]
+    .map(|event_type| NewEventRecord {
+        event_type: event_type.into(),
+        storage_class: "indexed".into(),
+        payload: json!({"kind": event_type}),
+    });
+    store
+        .append_events_if_thread_running(thread_id, thread_id, &events)
+        .unwrap()
+        .unwrap();
+    let types = |page: &PersistedEventPage| {
+        page.events
+            .iter()
+            .map(|event| event.event_type.clone())
+            .collect::<Vec<_>>()
+    };
+    let wanted = ["observation".to_owned()];
+    let page = store
+        .replay_events_of_types(
+            thread_id,
+            Some(thread_id),
+            None,
+            10,
+            1024 * 1024,
+            Some(&wanted),
+        )
+        .unwrap();
+    assert_eq!(types(&page), ["observation", "observation"]);
+    assert!(!page.has_more);
+
+    // The limit counts only matching events, so a page of one still reports
+    // the second match as more.
+    let page = store
+        .replay_events_of_types(
+            thread_id,
+            Some(thread_id),
+            None,
+            1,
+            1024 * 1024,
+            Some(&wanted),
+        )
+        .unwrap();
+    assert_eq!(types(&page), ["observation"]);
+    assert!(page.has_more);
+
+    let everything = store
+        .replay_events_of_types(thread_id, Some(thread_id), None, 20, 1024 * 1024, None)
+        .unwrap();
+    assert!(types(&everything).contains(&"thread_created".to_owned()));
+    assert_eq!(types(&everything), replayed_event_types(&store, thread_id));
+}
+
+#[test]
 fn an_append_stores_the_attachments_its_events_name() {
     let thread_id = "T-attach-store";
     let store = running_thread_for_attachments(thread_id);

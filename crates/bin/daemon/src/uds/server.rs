@@ -5538,6 +5538,7 @@ mod tests {
                 thread_id: Some("T-events-1".to_string()),
                 after_chain_seq: None,
                 limit: 10,
+                event_types: None,
             })
             .unwrap();
         let events = replay.events;
@@ -5665,6 +5666,7 @@ mod tests {
                 thread_id: Some("T-ephemeral-1".to_string()),
                 after_chain_seq: None,
                 limit: 100,
+                event_types: None,
             })
             .unwrap();
         assert!(
@@ -5738,6 +5740,7 @@ mod tests {
                 thread_id: Some("T-journal-1".to_string()),
                 after_chain_seq: None,
                 limit: 100,
+                event_types: None,
             })
             .unwrap();
         assert!(
@@ -5797,6 +5800,7 @@ mod tests {
                 thread_id: Some("T-floor-1".to_string()),
                 after_chain_seq: None,
                 limit: 100,
+                event_types: None,
             })
             .unwrap();
         assert!(

@@ -306,6 +306,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
             chain_root_id: Some(chain_root_id.clone()),
             after_chain_seq: after,
             limit: REPLAY_PAGE_EVENTS,
+            event_types: None,
         })?;
         Ok(EventPage {
             events: page

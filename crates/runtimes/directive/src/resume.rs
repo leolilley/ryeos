@@ -93,6 +93,18 @@ pub(crate) fn directive_tool_operation_id(
 /// rather than silently truncating (which would drop conversation history).
 const MAX_CONTINUATION_PATH: usize = 10_000;
 
+/// The event types a recovery reads. Everything else a thread records, such
+/// as launch audit and accounting transitions, is neither fetched nor counted
+/// against the replay budget.
+const RECOVERY_EVENT_TYPES: [&str; 6] = [
+    "cognition_in",
+    "cognition_out",
+    "tool_call_start",
+    "tool_call_result",
+    "thread_usage",
+    "provider_retry",
+];
+
 pub async fn load_resume_state(
     callback: &CallbackClient,
     previous_thread_id: &str,
@@ -114,7 +126,7 @@ pub async fn load_resume_state(
     let mut replay_budget = RuntimeReplayBudget::default();
     for thread_id in &path {
         let page = callback
-            .replay_thread_with_budget(thread_id, &mut replay_budget)
+            .replay_thread_with_budget(thread_id, Some(&RECOVERY_EVENT_TYPES), &mut replay_budget)
             .await?;
         source_thread_ids.extend(std::iter::repeat_n(thread_id.clone(), page.events.len()));
         events.extend(page.events);

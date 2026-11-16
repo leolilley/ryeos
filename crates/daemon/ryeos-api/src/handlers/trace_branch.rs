@@ -79,6 +79,7 @@ fn durable_event_by_ref(
             chain_root_id: Some(expected.chain_root_id.clone()),
             after_chain_seq: Some(expected.chain_seq - 1),
             limit: 1,
+            event_types: None,
         })
         .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
     let Some(event) = result.events.into_iter().next() else {

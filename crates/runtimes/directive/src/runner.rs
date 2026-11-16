@@ -4596,14 +4596,19 @@ impl Runner {
         match self.callback.emit_thread_usage(usage).await {
             Ok(()) => Ok(()),
             Err(append_error) => {
-                let replay = self.callback.replay_thread(&self.thread_id).await.map_err(
-                    |replay_error| {
+                let replay = self
+                    .callback
+                    .replay_thread(
+                        &self.thread_id,
+                        Some(&[RuntimeEventType::ThreadUsage.as_str()]),
+                    )
+                    .await
+                    .map_err(|replay_error| {
                         anyhow::anyhow!(
                             "resume-critical callback emit_thread_usage failed: {append_error}; \
                              ACK recovery replay also failed: {replay_error}"
                         )
-                    },
-                )?;
+                    })?;
                 if replay.events.iter().rev().any(|event| {
                     event.event_type == RuntimeEventType::ThreadUsage.as_str()
                         && event.payload == expected
