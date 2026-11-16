@@ -10,8 +10,8 @@
 //! ## Running the daemon suite
 //!
 //! The harness initializes nodes from the authored `core`,
-//! `core-scheduling`, `standard` and `full` init profiles. Every profile
-//! except `core` installs the scheduling bundle (`service:scheduler/*`) and
+//! `core-scheduling`, `standard` and `standard-central-auth` init profiles.
+//! Every profile except `core` installs the scheduling bundle (`service:scheduler/*`) and
 //! all but `core-scheduling` also install the directive bundle
 //! (`service:model-providers/*`). A daemon refuses to start when an installed
 //! operational service has no compiled handler, so the suite runs with the
@@ -44,10 +44,12 @@
 //! `fast_fixture::direct_host_isolation`). Per-scope containment is
 //! qualified only against an administrator-prepared host-backed node.
 
+pub mod callback_probe;
 #[cfg(all(unix, feature = "crash-qualification-test-support"))]
 pub mod dedicated_command_cut;
 pub mod fast_fixture;
 pub mod mock_provider;
+pub mod remote_delegation;
 #[cfg(all(unix, feature = "crash-qualification-test-support"))]
 pub mod runtime_phase_cut;
 
@@ -698,19 +700,74 @@ fn fixture_trusted_signer_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/trusted_signers")
 }
 
-/// Configure a tempdir as an app root: pre-populate
-/// `<app-root>/.ai/config/keys/trusted/` with the fixture trusted signers
-/// so the core bundle's items verify under the daemon's trust store.
+/// Pin `verifying_key` in the node signer registry under `app_root`.
+///
+/// The record is signed by the app root's node key and rendered with a
+/// fixed timestamp so fixture bytes are stable across runs. When the app
+/// root has no node identity yet, one is created first. Returns the pinned
+/// fingerprint.
+pub fn pin_signer(
+    app_root: &Path,
+    verifying_key: &lillux::crypto::VerifyingKey,
+    role: ryeos_engine::trust::SignerRole,
+    scope: ryeos_engine::trust::SignerScope,
+) -> String {
+    let fingerprint = lillux::signature::compute_fingerprint(verifying_key);
+    let label = format!("fixture {}", &fingerprint[..12]);
+    let key_path = app_root.join(".ai/node/identity/private_key.pem");
+    if !key_path.exists() {
+        return ryeos_engine::test_support::pin_signer(
+            app_root,
+            verifying_key,
+            &label,
+            role,
+            scope,
+        );
+    }
+    let node_key = lillux::crypto::load_signing_key(&key_path).expect("load fixture node key");
+    ryeos_engine::test_support::pin_signer_chained(
+        app_root,
+        &node_key,
+        verifying_key,
+        &label,
+        role,
+        scope,
+        Some(fast_fixture::FAST_FIXTURE_TIME),
+    )
+}
+
+/// Pin the fixture bundle signers (the keys in `tests/fixtures/trusted_signers`)
+/// into the app root's signer registry so the core bundle's items verify
+/// under the daemon's trust store.
 pub fn populate_trusted_keys(app_root: &Path) {
-    let trusted_dst = app_root.join(".ai/config/keys/trusted");
-    std::fs::create_dir_all(&trusted_dst).expect("create app-root trusted keys dir");
+    use lillux::crypto::DecodePublicKey as _;
     for entry in
         std::fs::read_dir(fixture_trusted_signer_dir()).expect("read fixture trusted_signers")
     {
         let entry = entry.expect("trusted_signer entry");
-        let name = entry.file_name();
-        std::fs::copy(entry.path(), trusted_dst.join(&name)).expect("copy fixture trusted signer");
+        let text = std::fs::read_to_string(entry.path()).expect("read fixture trusted signer");
+        let doc: toml::Value = toml::from_str(&text).expect("parse fixture trusted signer");
+        let pem = doc["public_key"]["pem"]
+            .as_str()
+            .expect("fixture trusted signer public_key.pem");
+        let vk = lillux::crypto::VerifyingKey::from_public_key_pem(pem)
+            .expect("decode fixture trusted signer key");
+        pin_signer(
+            app_root,
+            &vk,
+            ryeos_engine::trust::SignerRole::Publisher,
+            ryeos_engine::trust::SignerScope::everywhere(),
+        );
     }
+}
+
+/// Trust store holding the fixture bundle signers, loaded from a fresh
+/// node signer registry in a leaked temporary app root.
+pub fn fixture_trust_store() -> ryeos_engine::trust::TrustStore {
+    let app_root = tempfile::tempdir().expect("fixture app root").keep();
+    populate_trusted_keys(&app_root);
+    ryeos_engine::trust::TrustStore::load_node_registry(&app_root)
+        .expect("load fixture signer registry")
 }
 
 /// A live ryeosd daemon child process bound to `bind`, with state under
@@ -746,7 +803,7 @@ enum FastBundleSelection {
     CoreOnly,
     CoreScheduling,
     Standard,
-    Full,
+    StandardCentralAuth,
 }
 
 impl DaemonHarness {
@@ -797,7 +854,7 @@ impl DaemonHarness {
         // the workspace tree.
         let (core_bundle_tmp, app_root) = copy_core_to_temp();
 
-        // Plant app-root operator identity + trust docs and daemon-local node
+        // Plant app-root operator identity + signer records and daemon-local node
         // key / vault / public identity so the daemon's startup
         // `repair_daemon_local` invariants pass. The fixture is
         // intentionally pre-applied rather than relying on (now-gone)
@@ -879,7 +936,7 @@ impl DaemonHarness {
 
     /// Spawn a fresh daemon using the fast fixture: state and user-space
     /// are pre-populated with deterministic keys, vault keypair, and
-    /// self-signed trust docs (mirrors `bootstrap::init` byte-equivalent
+    /// node-signed signer registry records (mirrors `bootstrap::init`
     /// state). Daemon launches WITHOUT `` since
     /// initialization is already complete — any drift surfaces as a
     /// loud failure rather than silent re-init.
@@ -893,9 +950,7 @@ impl DaemonHarness {
             None,
             None,
             FastBundleSelection::Standard,
-            |state_path, _user_space, fixture| {
-                fast_fixture::register_standard_composition(state_path, fixture)
-            },
+            |_state_path, _user_space, _fixture| Ok(()),
             |_| {},
         )
         .await
@@ -951,7 +1006,27 @@ impl DaemonHarness {
         Self::start_fast_with_optional_identities(
             None,
             None,
-            FastBundleSelection::Full,
+            FastBundleSelection::Standard,
+            plant,
+            tweak,
+        )
+        .await
+    }
+
+    /// Like [`start_fast_with`], but under the authored Standard-central-auth
+    /// composition: Core, Scheduling, the workflow bundles and central-auth.
+    pub async fn start_fast_standard_central_auth_with<S, F>(
+        plant: S,
+        tweak: F,
+    ) -> anyhow::Result<(Self, fast_fixture::FastFixture)>
+    where
+        S: FnOnce(&Path, &Path, &fast_fixture::FastFixture) -> anyhow::Result<()>,
+        F: FnOnce(&mut Command),
+    {
+        Self::start_fast_with_optional_identities(
+            None,
+            None,
+            FastBundleSelection::StandardCentralAuth,
             plant,
             tweak,
         )
@@ -973,7 +1048,7 @@ impl DaemonHarness {
         Self::start_fast_with_optional_identities(
             Some(node_key),
             None,
-            FastBundleSelection::Full,
+            FastBundleSelection::Standard,
             plant,
             tweak,
         )
@@ -996,7 +1071,7 @@ impl DaemonHarness {
         Self::start_fast_with_optional_identities(
             Some(node_key),
             Some(user_key),
-            FastBundleSelection::Full,
+            FastBundleSelection::Standard,
             plant,
             tweak,
         )
@@ -1028,10 +1103,10 @@ impl DaemonHarness {
                     .exact_bundles()
                     .expect("Standard profile has an exact bundle inventory"),
             )?,
-            FastBundleSelection::Full => copy_core_to_temp_prepared(
-                fast_fixture::FastFixtureProfile::Full
+            FastBundleSelection::StandardCentralAuth => copy_core_to_temp_prepared(
+                fast_fixture::FastFixtureProfile::StandardCentralAuth
                     .exact_bundles()
-                    .expect("Full profile has an exact bundle inventory"),
+                    .expect("Standard-central-auth profile has an exact bundle inventory"),
             )?,
         };
 
@@ -1039,7 +1114,9 @@ impl DaemonHarness {
             FastBundleSelection::CoreOnly => fast_fixture::FastFixtureProfile::Core,
             FastBundleSelection::CoreScheduling => fast_fixture::FastFixtureProfile::CoreScheduling,
             FastBundleSelection::Standard => fast_fixture::FastFixtureProfile::Standard,
-            FastBundleSelection::Full => fast_fixture::FastFixtureProfile::Full,
+            FastBundleSelection::StandardCentralAuth => {
+                fast_fixture::FastFixtureProfile::StandardCentralAuth
+            }
         };
         let fixture = match (node_key, user_key) {
             (Some(node_key), Some(user_key)) => {
@@ -1072,8 +1149,14 @@ impl DaemonHarness {
         // The harness copies `bundles/core` to `state_path`. Register it
         // so `bootstrap::verify_initialized` sees at least one bundle.
         fast_fixture::register_core_bundle_at_state(&state_path, &fixture)?;
-        if matches!(bundle_selection, FastBundleSelection::Full) {
-            fast_fixture::register_full_composition(&state_path, &fixture)?;
+        match bundle_selection {
+            FastBundleSelection::Standard => {
+                fast_fixture::register_standard_composition(&state_path, &fixture)?
+            }
+            FastBundleSelection::StandardCentralAuth => {
+                fast_fixture::register_standard_central_auth_composition(&state_path, &fixture)?
+            }
+            FastBundleSelection::CoreOnly | FastBundleSelection::CoreScheduling => {}
         }
         plant(&state_path, user_space.path(), &fixture)?;
         fast_fixture::validate_profile_bundle_records(&state_path, &fixture, selected_profile)?;
@@ -1508,8 +1591,14 @@ impl DaemonHarness {
             .context("observe daemon exit after orderly stop request")?;
         anyhow::ensure!(
             status.success(),
-            "daemon orderly stop exited with {status}; stderr log {}",
-            self.stderr_log_path.display()
+            "daemon orderly stop exited with {status}; stderr log {}\n--- stderr tail ---\n{}",
+            self.stderr_log_path.display(),
+            std::fs::read_to_string(&self.stderr_log_path)
+                .map(|log| {
+                    let lines: Vec<&str> = log.lines().collect();
+                    lines[lines.len().saturating_sub(40)..].join("\n")
+                })
+                .unwrap_or_default()
         );
         Ok(())
     }

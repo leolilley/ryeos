@@ -26,7 +26,9 @@ use tokio::task;
 
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{ExecutionCompletion, ProjectContext};
-use ryeos_engine::protocol_vocabulary::{CallbackChannel, EnvInjectionSource, produce_env_value};
+use ryeos_engine::protocol_vocabulary::{
+    CallbackChannel, EnvInjectionSource, produce_optional_env_value,
+};
 use ryeos_engine::subprocess_spec::SubprocessBuildRequest;
 
 use ryeos_app::callback_token::launch_token_ttl;
@@ -117,6 +119,11 @@ pub struct ExecutionParams {
     /// Fresh direct-program evidence captured before capability projection,
     /// vault access, executor compilation, or callback credential minting.
     pub(crate) finalized_direct: Option<FinalizedDirectAdmission>,
+    /// The operator grant admitted at launch for a root that declared host
+    /// authority, after launch trust. `None` for every confined launch and
+    /// for every reconstructed or recovered launch: a host-direct run is never
+    /// rebuilt from durable state, so its plan refuses without this.
+    pub host_access: Option<ryeos_app::host_access::AdmittedHostAccess>,
 }
 
 /// Tracks execution state for explicit cleanup, with a conservative Drop net.
@@ -302,6 +309,18 @@ impl ExecutionGuard {
         outcome_code: &str,
         error: serde_json::Value,
     ) -> ExecutionCleanupOutcome {
+        self.fail_thread_with_error_retaining(outcome_code, error, None)
+    }
+
+    /// [`Self::fail_thread_with_error`] whose failed terminal also commits a
+    /// retained (unpublished) result generation, keeping it reachable from
+    /// thread history after the workspace journal closes.
+    fn fail_thread_with_error_retaining(
+        &mut self,
+        outcome_code: &str,
+        error: serde_json::Value,
+        result_generation: Option<&ryeos_state::objects::WorkspaceGenerationPair>,
+    ) -> ExecutionCleanupOutcome {
         self.revoke_callback_token();
         self.revoke_thread_auth_token();
         if self.thread_finalized {
@@ -352,9 +371,13 @@ impl ExecutionGuard {
                 final_cost: None,
                 summary_json: None,
             };
-            let finalize = match self.launch_owner.as_deref() {
-                Some(owner) => self.state.threads.finalize_thread_owned(&params, owner),
-                None => self.state.threads.finalize_thread(&params),
+            let finalize = match (self.launch_owner.as_deref(), result_generation) {
+                (Some(owner), Some(generation)) => self
+                    .state
+                    .threads
+                    .finalize_thread_owned_retaining_generation(&params, owner, generation),
+                (Some(owner), None) => self.state.threads.finalize_thread_owned(&params, owner),
+                (None, _) => self.state.threads.finalize_thread(&params),
             };
             match finalize {
                 Ok(_) => {
@@ -1911,7 +1934,7 @@ fn post_execution_foldback(
             launch_owner,
             head_ref,
             expected_hash,
-            &generation.snapshot_hash,
+            &generation,
         )?;
     }
     Ok(crate::execution::PendingProjectResult {
@@ -3146,6 +3169,40 @@ fn admitted_root_requires_process_scope(
         })
 }
 
+/// A host-direct grant that requires a scope seals the launch's containment
+/// as a cgroup scope, so cancel and recovery reach every descendant. Any
+/// stronger requirement already sealed stands.
+fn with_host_access_containment(
+    sealed: ryeos_app::thread_lifecycle::ProcessContainmentRequirement,
+    host_access: Option<&ryeos_app::host_access::AdmittedHostAccess>,
+) -> ryeos_app::thread_lifecycle::ProcessContainmentRequirement {
+    match sealed {
+        ryeos_app::thread_lifecycle::ProcessContainmentRequirement::None
+            if ryeos_app::host_access::requires_scope(host_access) =>
+        {
+            ryeos_app::thread_lifecycle::ProcessContainmentRequirement::CgroupScope
+        }
+        other => other,
+    }
+}
+
+/// Open the bundle state namespace a direct launch's sealed capabilities name,
+/// or `None` when they name none. The caps were sealed by admission, which
+/// judged both the signed manifest and the caller's `use` grant.
+fn open_direct_bundle_state_home(
+    state: &AppState,
+    engine: &ryeos_engine::engine::Engine,
+    effective_caps: &[String],
+) -> Result<Option<ryeos_engine::isolation::IsolationBundleStateHome>> {
+    ryeos_app::bundle_state_home::open_for_sealed_caps(
+        &state.config.app_root,
+        &state.identity,
+        &engine.registered_bundle_generation_fingerprint(),
+        effective_caps,
+    )
+    .map_err(|refusal| anyhow::anyhow!("{}: {refusal}", refusal.code()))
+}
+
 // Execution plumbing: each argument is a distinct leg of the thread's
 // auth/provenance context, threaded verbatim — a struct would rename,
 // not simplify. Restructure with a compiler in the loop, not here.
@@ -3172,6 +3229,7 @@ fn build_protocol_launch_env(
     launch_owner: &str,
     scoped_producer_grant: Option<AdmittedScopedProducerGrant>,
     remote_consumer_grant: Option<AdmittedRemoteConsumerGrant>,
+    bundle_state_home: Option<&ryeos_engine::isolation::IsolationBundleStateHome>,
 ) -> Result<ProtocolLaunchEnv> {
     let callback_socket_requested = protocol
         .descriptor
@@ -3347,6 +3405,18 @@ fn build_protocol_launch_env(
         item_ref,
         thread_id: thread_id.to_string(),
         project_path: project_path.to_path_buf(),
+        // Under enforced isolation the workload sees the fixed mount
+        // destination; otherwise there is no mount and it uses the real
+        // directory.
+        bundle_state_home: bundle_state_home.map(|home| {
+            if state.isolation.is_enforced() {
+                std::path::PathBuf::from(
+                    ryeos_engine::isolation::BUNDLE_STATE_ISOLATION_DESTINATION,
+                )
+            } else {
+                home.namespace_dir.clone()
+            }
+        }),
         runtime_state_root: callback_project_path.to_path_buf(),
         acting_principal: acting_principal.to_string(),
         cas_root,
@@ -3360,8 +3430,10 @@ fn build_protocol_launch_env(
 
     let mut bindings = Vec::with_capacity(protocol.descriptor.env_injections.len());
     for injection in &protocol.descriptor.env_injections {
-        let value = match produce_env_value(injection.source, &request) {
-            Ok(value) => value,
+        // A launch without a bundle state home sets no state-home variable.
+        let value = match produce_optional_env_value(injection.source, &request) {
+            Ok(Some(value)) => value,
+            Ok(None) => continue,
             Err(error) => {
                 if let Some(token) = callback_token.as_deref() {
                     state.callback_tokens.invalidate(token);
@@ -3970,8 +4042,19 @@ fn restore_process_workspace_output_generation(
     )
 }
 
+/// A large object scrub quarantined surfaces here, at store redemption after
+/// thread birth. Keep it the typed operator-correctable refusal rather than an
+/// internal failure; the thread is still failed by the caller.
+pub(crate) fn classify_prepared_input_error(error: anyhow::Error) -> anyhow::Error {
+    match super::external_content::classify_quarantined_large_object(&error) {
+        Some(typed) => anyhow::Error::new(typed),
+        None => error,
+    }
+}
+
 pub(crate) fn prepare_process_inputs(
     state: &AppState,
+    isolation: &ryeos_engine::isolation::IsolationRuntime,
     provenance: &ExecutionProvenance,
     thread_id: &str,
     retained_resolution: &ryeos_engine::resolution::ResolutionOutput,
@@ -4043,7 +4126,7 @@ pub(crate) fn prepare_process_inputs(
     let root_selection = select_process_input_root(
         project_class,
         has_bindings,
-        state.isolation.is_enforced(),
+        isolation.is_enforced(),
         candidate_integration,
         restore_outputs,
     );
@@ -4079,7 +4162,7 @@ pub(crate) fn prepare_process_inputs(
         project_class,
         root_selection,
         has_bindings,
-        state.isolation.is_enforced(),
+        isolation.is_enforced(),
     );
     let budget =
         (private_copy || pinned_read_only_private_root || candidate_integration_private_root)
@@ -4272,6 +4355,7 @@ fn admitted_direct_project_root(params: &ExecutionParams) -> Result<Option<&Path
 
 fn admitted_root_launch_metadata(
     state: &AppState,
+    isolation: &ryeos_engine::isolation::IsolationRuntime,
     params: &ExecutionParams,
     project_authority: ryeos_state::objects::ExecutionProjectAuthority,
     finalized: FinalizedDirectAdmission,
@@ -4387,7 +4471,7 @@ fn admitted_root_launch_metadata(
     prepared_plan.preflight_external_execution(state, protocol, &resume.project_authority)?;
     let execution_closure = prepared_plan.admit_execution_closure(
         &cas,
-        state.isolation.as_ref(),
+        isolation,
         protocol,
         &params.provenance.request_engine().node_trust_store,
         admitted_project_root.as_deref(),
@@ -4399,6 +4483,11 @@ fn admitted_root_launch_metadata(
         .with_admitted_execution_closure(execution_closure)
         .with_resume_context(resume)
         .with_sealed_root_request(sealed);
+    metadata = super::launch::with_root_covering_authority(
+        metadata,
+        &params.acting_principal,
+        params.handler_context.as_ref(),
+    );
     // External guest requirements were checked above and admit no controller
     // device resources. Host architecture/availability is not guest authority.
     let selected_resources = match prepared_plan.execution_plan().endpoint_requirement {
@@ -4486,11 +4575,19 @@ pub(crate) fn finalize_direct_effective_program(
     }
 
     let mut resolution = admission.resolution_output().clone();
-    let roots = engine.resolution_roots(
-        admission
-            .resolution_workspace()
-            .map(std::path::Path::to_path_buf),
-    );
+    let roots = engine
+        .resolution_roots(
+            admission
+                .resolution_workspace()
+                .map(std::path::Path::to_path_buf),
+        )
+        .with_logical_project_root(
+            admission
+                .verified_subject()
+                .resolved
+                .logical_project_root
+                .clone(),
+        );
     // A declaring kind captures here exactly as the managed path does. A
     // direct launch dispatched as a child (`parent_thread_id`) may reuse the
     // parent's outer sealed realization set under the existing inheritance
@@ -4917,18 +5014,14 @@ fn validate_recovered_direct_request_authority(
 /// same CAS member identity without binding a controller-native executable.
 fn capture_direct_command(
     state: &AppState,
+    isolation: &ryeos_engine::isolation::IsolationRuntime,
     engine: &ryeos_engine::engine::Engine,
     resolution: &ryeos_engine::resolution::ResolutionOutput,
     prepared: &mut thread_lifecycle::PreparedItemPlan,
 ) -> Result<()> {
     match prepared.execution_plan().endpoint_requirement {
         ryeos_engine::contracts::ExecutionEndpointRequirement::Local {} => {
-            prepared.bind_realization_command(
-                state,
-                engine,
-                resolution,
-                state.isolation.as_ref(),
-            )?;
+            prepared.bind_realization_command(state, engine, resolution, isolation)?;
         }
         ryeos_engine::contracts::ExecutionEndpointRequirement::External { .. } => {
             let authority = state.state_store.pinned_state_authority()?;
@@ -4938,7 +5031,7 @@ fn capture_direct_command(
                 &guard,
                 engine,
                 resolution,
-                state.isolation.verified_command_file_bytes(),
+                isolation.verified_command_file_bytes(),
             )?;
         }
     }
@@ -4999,6 +5092,10 @@ pub async fn run_and_wait(
     let finalized_direct = params.finalized_direct.take().ok_or_else(|| {
         anyhow::anyhow!("fresh direct launch has no pre-authorized effective program")
     })?;
+    // The node's shared isolation runtime for a confined launch; the
+    // per-launch host-direct view for an operator-granted host-authority root.
+    let wait_launch_isolation =
+        super::host_access_gate::launch_isolation(&state, params.host_access.as_ref())?;
     // Block-scoped: the sealed-bytes source holds non-Send descriptor state
     // and plan build is fully synchronous, so it must be statically dead
     // before this future's next await point.
@@ -5013,7 +5110,7 @@ pub async fn run_and_wait(
         thread_lifecycle::prepare_item_plan(
             &engine,
             &params.resolved,
-            state.isolation.as_ref(),
+            wait_launch_isolation.as_ref(),
             params.lifecycle_authority,
             admission_isolation_live_access_authority.as_ref(),
             sealed_dependency_bytes
@@ -5030,6 +5127,10 @@ pub async fn run_and_wait(
             },
         )?
     };
+    super::host_access_gate::require_plan_matches_admission(
+        prepared_plan.execution_plan(),
+        params.host_access.as_ref(),
+    )?;
     prepared_plan.bind_finalized_execution_endpoint(
         &state,
         &engine,
@@ -5037,6 +5138,7 @@ pub async fn run_and_wait(
     )?;
     capture_direct_command(
         &state,
+        wait_launch_isolation.as_ref(),
         &engine,
         finalized_direct.program.resolution(),
         &mut prepared_plan,
@@ -5056,13 +5158,17 @@ pub async fn run_and_wait(
         .context("acquire direct admission CAS mutation authority")?;
     let (wait_launch_metadata, mut wait_external) = admitted_root_launch_metadata(
         &state,
+        wait_launch_isolation.as_ref(),
         &params,
         wait_project_authority.clone(),
         finalized_direct,
         &mut prepared_plan,
         protocol,
     )?;
-    let wait_requires_process_scope = admitted_root_requires_process_scope(&wait_launch_metadata)?;
+    let wait_requires_process_scope = with_host_access_containment(
+        admitted_root_requires_process_scope(&wait_launch_metadata)?,
+        params.host_access.as_ref(),
+    );
     let dispatch_effect_identity = if let Some(prepared) = params.effect_authority.as_ref() {
         if !params
             .resolved
@@ -5270,20 +5376,21 @@ pub async fn run_and_wait(
         source: wait_bound_source,
     } = prepare_process_inputs(
         &state,
+        wait_launch_isolation.as_ref(),
         &params.provenance,
         &created.thread_id,
         &wait_external.retained_resolution,
         &effective_path,
         super::source_closure::direct_source_placement(
             &prepared_plan,
-            state.isolation.is_enforced(),
+            wait_launch_isolation.is_enforced(),
         ),
         super::persistent_session::tool_supports_private_descriptor_realizations(
             &protocol.descriptor,
-            state.isolation.as_ref(),
+            wait_launch_isolation.as_ref(),
         ),
     )
-    .map_err(|error| guard.fail_before_spawn(error))?;
+    .map_err(|error| guard.fail_before_spawn(classify_prepared_input_error(error)))?;
     let wait_bound_external = wait_bound_external.map(Arc::new);
     let wait_bound_source = wait_bound_source.map(Arc::new);
     effective_path = process_path;
@@ -5328,7 +5435,7 @@ pub async fn run_and_wait(
     super::external_content::bind_prepared_realization_command(
         &mut prepared_plan,
         wait_bound_external.as_deref(),
-        state.isolation.as_ref(),
+        wait_launch_isolation.as_ref(),
     )
     .map_err(|error| guard.fail_before_spawn(error))?;
 
@@ -5384,6 +5491,9 @@ pub async fn run_and_wait(
         &params.resolved.root_raw_content_digest,
     )
     .map_err(|error| guard.fail_before_spawn(error))?;
+    let wait_bundle_state_home =
+        open_direct_bundle_state_home(&state, &engine, &params.effective_caps)
+            .map_err(|error| guard.fail_before_spawn(error))?;
     let ProtocolLaunchEnv {
         bindings: mut protocol_env_bindings,
         callback_token,
@@ -5408,6 +5518,7 @@ pub async fn run_and_wait(
         &wait_launch_owner,
         wait_scoped_producer_grant.clone(),
         wait_remote_consumer_grant,
+        wait_bundle_state_home.as_ref(),
     )
     .map_err(|error| guard.fail_before_spawn(error))?;
     if let Some(bound) = wait_bound_external.as_ref() {
@@ -5445,7 +5556,7 @@ pub async fn run_and_wait(
         &state.config.app_root,
     )
     .map_err(|error| guard.fail_before_spawn(error))?;
-    let wait_isolation = state.isolation.clone();
+    let wait_isolation = wait_launch_isolation.clone();
     let wait_isolation_daemon_socket_path = isolation_daemon_socket_path;
     if super::process_attachment::finalize_requested_stop_if_present(&state, &tid)? {
         return Err(guard.fail_before_spawn(anyhow::anyhow!(
@@ -5479,7 +5590,6 @@ pub async fn run_and_wait(
     } else {
         None
     };
-    let wait_node_trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
     let wait_isolation_workspace =
         process_isolation_workspace(process_project_class(&params.provenance), &effective_path);
     let wait_selected_resources = state
@@ -5575,9 +5685,9 @@ pub async fn run_and_wait(
             isolation_immutable_project: wait_isolation_immutable_project,
             isolation_workspace_view: wait_workspace_view,
             isolation_live_access_authority: wait_isolation_live_access_authority,
+            bundle_state_home: wait_bundle_state_home,
             isolation_external_read_only_mounts: wait_external_mounts,
             isolation_target_channels: wait_scoped_relay_channels,
-            isolation_node_trusted_keys_dir: wait_node_trusted_keys_dir,
             isolation_workspace: wait_isolation_workspace,
             inherited_fds: Vec::new(),
             external_realizations_env: wait_external_sealed_env,
@@ -5890,8 +6000,22 @@ pub async fn run_and_wait(
                     completion: &completion,
                     daemon_mediated_source_capture: candidate_integration_completion.is_some(),
                 })
-                .inspect_err(|_| {
-                    guard.fail_thread("foldback_failed");
+                .inspect_err(|error| {
+                    // A HEAD advance refused before any write leaves the bound
+                    // generation retained: report it, distinct from a broken
+                    // fold-back.
+                    match super::HeadAdvanceNotApplied::find(error) {
+                        Some(not_applied) => {
+                            guard.fail_thread_with_error_retaining(
+                                super::HEAD_ADVANCE_NOT_APPLIED,
+                                not_applied.error_payload(),
+                                Some(&not_applied.retained),
+                            );
+                        }
+                        None => {
+                            guard.fail_thread("foldback_failed");
+                        }
+                    }
                 })?;
                 let generation = pending.generation().clone();
                 pending_project_result = Some(pending);
@@ -6137,6 +6261,10 @@ pub async fn run_detached(
     let finalized_direct = params.finalized_direct.take().ok_or_else(|| {
         anyhow::anyhow!("fresh direct launch has no pre-authorized effective program")
     })?;
+    // The node's shared isolation runtime for a confined launch; the
+    // per-launch host-direct view for an operator-granted host-authority root.
+    let bg_launch_isolation =
+        super::host_access_gate::launch_isolation(&state, params.host_access.as_ref())?;
     // Block-scoped: the sealed-bytes source holds non-Send descriptor state
     // and plan build is fully synchronous, so it must be statically dead
     // before this future's next await point.
@@ -6151,7 +6279,7 @@ pub async fn run_detached(
         thread_lifecycle::prepare_item_plan(
             &engine,
             &params.resolved,
-            state.isolation.as_ref(),
+            bg_launch_isolation.as_ref(),
             params.lifecycle_authority,
             admission_isolation_live_access_authority.as_ref(),
             sealed_dependency_bytes
@@ -6168,6 +6296,10 @@ pub async fn run_detached(
             },
         )?
     };
+    super::host_access_gate::require_plan_matches_admission(
+        prepared_plan.execution_plan(),
+        params.host_access.as_ref(),
+    )?;
     prepared_plan.bind_finalized_execution_endpoint(
         &state,
         &engine,
@@ -6175,6 +6307,7 @@ pub async fn run_detached(
     )?;
     capture_direct_command(
         &state,
+        bg_launch_isolation.as_ref(),
         &engine,
         finalized_direct.program.resolution(),
         &mut prepared_plan,
@@ -6193,6 +6326,7 @@ pub async fn run_detached(
         .context("acquire detached direct admission CAS mutation authority")?;
     let (bg_launch_metadata, mut bg_fresh_external) = admitted_root_launch_metadata(
         &state,
+        bg_launch_isolation.as_ref(),
         &params,
         bg_project_authority.clone(),
         finalized_direct,
@@ -6308,20 +6442,21 @@ pub async fn run_detached(
         source: bg_bound_source,
     } = prepare_process_inputs(
         &state,
+        bg_launch_isolation.as_ref(),
         &params.provenance,
         &created.thread_id,
         &bg_fresh_external.retained_resolution,
         &effective_path,
         super::source_closure::direct_source_placement(
             &prepared_plan,
-            state.isolation.is_enforced(),
+            bg_launch_isolation.is_enforced(),
         ),
         super::persistent_session::tool_supports_private_descriptor_realizations(
             &protocol.descriptor,
-            state.isolation.as_ref(),
+            bg_launch_isolation.as_ref(),
         ),
     )
-    .map_err(|error| guard.fail_before_spawn(error))?;
+    .map_err(|error| guard.fail_before_spawn(classify_prepared_input_error(error)))?;
     effective_path = process_path;
     if let Some(lifeline) = process_input_lifeline {
         guard.track_process_input_dir(lifeline);
@@ -6362,7 +6497,7 @@ pub async fn run_detached(
     super::external_content::bind_prepared_realization_command(
         &mut prepared_plan,
         bg_bound_external.as_ref(),
-        state.isolation.as_ref(),
+        bg_launch_isolation.as_ref(),
     )
     .map_err(|error| guard.fail_before_spawn(error))?;
 
@@ -6393,6 +6528,9 @@ pub async fn run_detached(
         )));
     }
     let launch_timeout_secs = prepared_plan.timeout_secs;
+    let bg_bundle_state_home =
+        open_direct_bundle_state_home(&state, &engine, &params.effective_caps)
+            .map_err(|error| guard.fail_before_spawn(error))?;
     let ProtocolLaunchEnv {
         bindings: mut protocol_env_bindings,
         callback_token,
@@ -6417,6 +6555,7 @@ pub async fn run_detached(
         &detached_launch_owner,
         None,
         None,
+        bg_bundle_state_home.as_ref(),
     )
     .map_err(|error| guard.fail_before_spawn(error))?;
     if let Some(bound) = bg_bound_external.as_ref() {
@@ -6492,6 +6631,7 @@ pub async fn run_detached(
         bg_isolation_project_authority,
         bg_isolation_immutable_project,
         bg_isolation_live_access_authority,
+        bg_bundle_state_home,
         isolation_daemon_socket_path,
         bg_temp_dir,
         bg_process_input_dir,
@@ -6500,6 +6640,7 @@ pub async fn run_detached(
         bg_bound_external,
         bg_bound_source,
         bg_runtime_state_dir,
+        params.host_access.clone(),
         DetachedDispatchKind::Detached,
         Some(
             ryeos_state::objects::ThreadStatus::Created
@@ -6580,11 +6721,12 @@ impl DetachedDispatchKind {
         bg_project_path, bg_state_root, bg_isolation_workspace,
         bg_project_authority,
         bg_candidate_operation_authority,
-        bg_isolation_project_authority, bg_isolation_immutable_project, bg_isolation_daemon_socket_path, bg_temp_dir,
+        bg_isolation_project_authority, bg_isolation_immutable_project, bg_bundle_state_home, bg_isolation_daemon_socket_path, bg_temp_dir,
         bg_process_input_dir,
         bg_skip_resume_snapshot_pin, bg_terminal_publication, bg_external_realizations,
         bg_source_closure,
         bg_runtime_state_dir,
+        bg_host_access,
         prior_status_for_mark_running,
         bg_cb_token, bg_tat_token, launch_claim
     ),
@@ -6622,6 +6764,7 @@ async fn dispatch_detached_bg_task(
     bg_isolation_live_access_authority: Option<
         ryeos_engine::isolation::IsolationLiveAccessAuthority,
     >,
+    bg_bundle_state_home: Option<ryeos_engine::isolation::IsolationBundleStateHome>,
     bg_isolation_daemon_socket_path: Option<PathBuf>,
     mut bg_temp_dir: Option<Arc<TempDirGuard>>,
     bg_process_input_dir: Option<Arc<TempDirGuard>>,
@@ -6630,6 +6773,7 @@ async fn dispatch_detached_bg_task(
     bg_external_realizations: Option<super::external_content::BoundExternalRealizations>,
     bg_source_closure: Option<super::source_closure::BoundSourceClosure>,
     bg_runtime_state_dir: PathBuf,
+    bg_host_access: Option<ryeos_app::host_access::AdmittedHostAccess>,
     dispatch_kind: DetachedDispatchKind,
     prior_status_for_mark_running: Option<String>,
     bg_cb_token: Option<String>,
@@ -6703,7 +6847,7 @@ async fn dispatch_detached_bg_task(
     let bg_requires_process_scope = match admitted_root_requires_process_scope(
         &admitted_launch_metadata,
     ) {
-        Ok(required) => required,
+        Ok(required) => with_host_access_containment(required, bg_host_access.as_ref()),
         Err(error) => {
             tracing::error!(thread_id = %bg_thread_id, %error, "invalid retained process-scope requirement");
             let _ = fail_settled_unattached_thread(
@@ -6767,7 +6911,26 @@ async fn dispatch_detached_bg_task(
         !bg_skip_resume_snapshot_pin && bg_project_authority.requires_project_foldback();
     let bg_records_terminal_generation = bg_project_authority.records_terminal_project_generation();
     let state_root_for_spawn = bg_state_root;
-    let isolation_for_spawn = bg_state.isolation.clone();
+    // A host-direct root runs under its per-launch view; a host-direct plan
+    // without a launch-time admission (a recovered launch) refuses.
+    let isolation_for_spawn = match super::host_access_gate::require_plan_matches_admission(
+        bg_prepared_plan.execution_plan(),
+        bg_host_access.as_ref(),
+    )
+    .and_then(|()| super::host_access_gate::launch_isolation(&bg_state, bg_host_access.as_ref()))
+    {
+        Ok(isolation) => isolation,
+        Err(error) => {
+            tracing::error!(thread_id = %bg_thread_id, %error, "host-direct launch refused");
+            let _ = fail_settled_unattached_thread(
+                &bg_state,
+                &bg_thread_id,
+                "host_access_refused",
+                &launch_owner,
+            );
+            return;
+        }
+    };
     let isolation_daemon_socket_path_for_spawn = bg_isolation_daemon_socket_path;
     let spawn_workspace_lifeline = bg_process_input_dir.clone().or_else(|| bg_temp_dir.clone());
 
@@ -6810,7 +6973,6 @@ async fn dispatch_detached_bg_task(
         }
     }
 
-    let bg_node_trusted_keys_dir = bg_state.config.runtime_root().trusted_keys_dir();
     let bg_spawn_state = bg_state.clone();
     let bg_accounting_scope = admitted_launch_metadata.accounting_scope.clone();
     let bg_spawn_launch_owner = launch_owner.clone();
@@ -6970,9 +7132,9 @@ async fn dispatch_detached_bg_task(
             isolation_immutable_project: bg_isolation_immutable_project,
             isolation_workspace_view: bg_workspace_view,
             isolation_live_access_authority: bg_isolation_live_access_authority,
+            bundle_state_home: bg_bundle_state_home,
             isolation_external_read_only_mounts: bg_external_mounts,
             isolation_target_channels: bg_scoped_relay_channels,
-            isolation_node_trusted_keys_dir: bg_node_trusted_keys_dir,
             isolation_workspace: bg_isolation_workspace,
             inherited_fds: Vec::new(),
             external_realizations_env: bg_external_sealed_env,
@@ -7436,10 +7598,19 @@ async fn dispatch_detached_bg_task(
                                 error = format!("{error:#}"),
                                 "authoritative fold-back failed; refusing successful settlement"
                             );
-                            if let Err(cleanup_error) = fail_thread_static_owned(
+                            let not_applied = super::HeadAdvanceNotApplied::find(&error);
+                            let (outcome_code, failure) = match not_applied {
+                                Some(not_applied) => {
+                                    (super::HEAD_ADVANCE_NOT_APPLIED, not_applied.error_payload())
+                                }
+                                None => ("foldback_failed", json!({ "code": "foldback_failed" })),
+                            };
+                            if let Err(cleanup_error) = fail_thread_static_owned_with_error(
                                 &bg_state,
                                 &bg_thread_id,
-                                "foldback_failed",
+                                outcome_code,
+                                failure,
+                                not_applied.map(|not_applied| &not_applied.retained),
                                 &launch_owner,
                             ) {
                                 tracing::error!(
@@ -7700,6 +7871,25 @@ fn fail_thread_static_owned(
     outcome_code: &str,
     launch_owner: &str,
 ) -> Result<ExecutionCleanupOutcome> {
+    fail_thread_static_owned_with_error(
+        state,
+        thread_id,
+        outcome_code,
+        json!({ "code": outcome_code }),
+        None,
+        launch_owner,
+    )
+}
+
+/// [`fail_thread_static_owned`] with an explicit error payload.
+fn fail_thread_static_owned_with_error(
+    state: &AppState,
+    thread_id: &str,
+    outcome_code: &str,
+    error_payload: serde_json::Value,
+    result_generation: Option<&ryeos_state::objects::WorkspaceGenerationPair>,
+    launch_owner: &str,
+) -> Result<ExecutionCleanupOutcome> {
     match super::process_attachment::finalize_requested_stop_if_present(state, thread_id) {
         Ok(true) => return Ok(ExecutionCleanupOutcome::DurableStopSettled),
         Ok(false) => {}
@@ -7716,13 +7906,21 @@ fn fail_thread_static_owned(
         status: "failed".to_string(),
         outcome_code: Some(outcome_code.to_string()),
         result: None,
-        error: Some(json!({ "code": outcome_code })),
+        error: Some(error_payload),
         metadata: None,
         artifacts: Vec::new(),
         final_cost: None,
         summary_json: None,
     };
-    match state.threads.finalize_thread_owned(&params, launch_owner) {
+    let finalized = match result_generation {
+        Some(generation) => state.threads.finalize_thread_owned_retaining_generation(
+            &params,
+            launch_owner,
+            generation,
+        ),
+        None => state.threads.finalize_thread_owned(&params, launch_owner),
+    };
+    match finalized {
         Ok(_) => Ok(ExecutionCleanupOutcome::Finalized),
         Err(error) => {
             let terminal = state
@@ -8430,6 +8628,7 @@ pub fn execution_params_from_sealed_root_request(
         parent_thread_id: None,
         effect_authority: None,
         finalized_direct: None,
+        host_access: None,
     })
 }
 
@@ -8556,6 +8755,7 @@ pub(crate) fn candidate_evaluation_provenance_from_resume_context(
         base_authority,
     )?;
     let base_plan_context = ryeos_engine::contracts::PlanContext {
+        logical_project_root: base_provenance.logical_project_root(),
         requested_by: resume.requested_by.clone(),
         project_context: ProjectContext::LocalPath {
             path: base.effective_path.clone(),
@@ -8998,6 +9198,7 @@ async fn run_existing_recovered_thread(
         source: bg_source_closure,
     } = prepare_process_inputs(
         &state,
+        state.isolation.as_ref(),
         &params.provenance,
         &thread_id,
         retained_resolution,
@@ -9009,7 +9210,9 @@ async fn run_existing_recovered_thread(
         recovered_private_view_realizations,
     )
     .map_err(|error| {
-        guard.fail_before_spawn(error.context("recovery_input_materialization_failed"))
+        guard.fail_before_spawn(
+            classify_prepared_input_error(error).context("recovery_input_materialization_failed"),
+        )
     })?;
     if effective_project_root.is_some() {
         prepared_plan
@@ -9152,7 +9355,8 @@ async fn run_existing_recovered_thread(
                         ),
                     )
                 }
-                error @ ryeos_app::vault::VaultReadError::AuthorityViolation(_) => {
+                error @ (ryeos_app::vault::VaultReadError::AuthorityViolation(_)
+                | ryeos_app::vault::VaultReadError::NameRefused(_)) => {
                     guard.fail_thread("vault_read_failed");
                     ResumeError::VaultRead(guard.fail_before_spawn(error.into()))
                 }
@@ -9183,6 +9387,9 @@ async fn run_existing_recovered_thread(
         .state_store
         .get_launch_metadata(&thread_id)?
         .context("recovered direct root has no retained launch metadata")?;
+    let bg_bundle_state_home =
+        open_direct_bundle_state_home(&state, &engine, &params.effective_caps)
+            .map_err(|error| guard.fail_before_spawn(error))?;
     let ProtocolLaunchEnv {
         bindings: mut protocol_env_bindings,
         callback_token,
@@ -9220,6 +9427,7 @@ async fn run_existing_recovered_thread(
             &protocol,
             &params.resolved.root_raw_content_digest,
         )?,
+        bg_bundle_state_home.as_ref(),
     )
     .map_err(|error| guard.fail_before_spawn(error.context("protocol_contract_failed")))?;
     if let Some(bound) = bg_external_realizations.as_ref() {
@@ -9301,6 +9509,7 @@ async fn run_existing_recovered_thread(
         bg_isolation_project_authority,
         bg_isolation_immutable_project,
         bg_isolation_live_access_authority,
+        bg_bundle_state_home,
         isolation_daemon_socket_path,
         bg_temp_dir,
         bg_process_input_dir,
@@ -9309,6 +9518,7 @@ async fn run_existing_recovered_thread(
         bg_external_realizations,
         bg_source_closure,
         bg_runtime_state_dir,
+        None,
         dispatch_kind,
         Some(prior_status),
         bg_cb_token,

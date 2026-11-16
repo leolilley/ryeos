@@ -55,7 +55,8 @@ use crate::runtime_db::runtime_snapshot_bootstrap_termination::{
     BootstrapTerminationClaim, BootstrapTerminationPhase, BootstrapTerminationRecord,
 };
 use crate::runtime_db::runtime_snapshot_qualification::{
-    SnapshotQualificationAttemptClaim, SnapshotQualificationPhase, SnapshotQualificationRecord,
+    RetainedQualificationGeneration, SnapshotQualificationAttemptClaim, SnapshotQualificationPhase,
+    SnapshotQualificationRecord,
 };
 use crate::runtime_db::runtime_snapshot_qualification_termination::{
     QualificationTerminationClaim, QualificationTerminationPhase, QualificationTerminationRecord,
@@ -77,7 +78,7 @@ pub enum SnapshotProductionSource {
     CapturedProduct {
         witness_hash: String,
         source: ProductWitnessSource,
-        source_occurrence_id: String,
+        occurrence: CapturedSourceOccurrence,
     },
     BundleMaterialization {
         materialization_binding_id: String,
@@ -87,12 +88,140 @@ pub enum SnapshotProductionSource {
     },
 }
 
+/// Where the source sandbox a captured product is uploaded into comes from.
+pub enum CapturedSourceOccurrence {
+    /// The node's own ready bootstrap source for this exact product, joined
+    /// exactly as a materialized source is.
+    Bootstrap { bootstrap_operation_id: String },
+    /// A sandbox the operator created outside the node and names here. Kept
+    /// only until the external snapshot driver is retired; the node cannot
+    /// check where it came from.
+    OperatorNamed { source_occurrence_id: String },
+}
+
 pub struct SnapshotBootstrapRequest {
     pub binding_id: String,
-    pub materialization_binding_id: String,
-    pub coordinate_digest: String,
-    pub attestation_hash: String,
+    pub source: SnapshotBootstrapSource,
     pub maximum_lifetime_seconds: u32,
+}
+
+/// The retained source a bootstrap sandbox is created for.
+pub enum SnapshotBootstrapSource {
+    CapturedProduct {
+        witness_hash: String,
+        source: ProductWitnessSource,
+    },
+    BundleMaterialization {
+        materialization_binding_id: String,
+        coordinate_digest: String,
+        attestation_hash: String,
+    },
+}
+
+/// The current exact source and guest-owner identity of a bootstrap or
+/// produce request, read under `guard`.
+fn current_captured_product_source(
+    state: &AppState,
+    context: &HandlerContext,
+    witness_hash: &str,
+    source: &ProductWitnessSource,
+    source_ceiling: u64,
+    authority: &ryeos_state::PinnedStateAuthority,
+    guard: &ryeos_state::CasMutationGuard,
+) -> Result<(RuntimeSnapshotSource, GuestOwnerRuntimeManifestIdentity)> {
+    let limits = state
+        .node_policy
+        .require::<NodeObjectClosurePolicy>()?
+        .closure_limits()?;
+    let witness =
+        crate::operator_external_content::product_receipt::load_bounded_current_product_source(
+            state,
+            authority,
+            guard,
+            limits,
+            &context.fingerprint,
+            witness_hash,
+            source,
+            source_ceiling,
+        )?;
+    ensure!(
+        witness.evidence.declaration.shape == ProductShape::Tree
+            && witness.evidence.declaration.storage == ProductStorage::Content,
+        "snapshot source is not an ordinary retained product tree"
+    );
+    let manifest = load_exact_cas_object_with_cas(
+        &authority.cas_store()?,
+        &witness.evidence.manifest_hash,
+        limits.max_object_bytes,
+    )?;
+    let identity =
+        derive_guest_owner_runtime_manifest_identity(&manifest, state.identity.verifying_key())?;
+    ensure!(
+        identity.manifest_hash == witness.evidence.manifest_hash
+            && witness.attestation_hash == witness_hash,
+        "snapshot product differs from its current witness"
+    );
+    Ok((
+        RuntimeSnapshotSource::CapturedProduct {
+            product_witness_hash: witness.attestation_hash,
+        },
+        identity,
+    ))
+}
+
+fn current_bootstrap_source(
+    state: &AppState,
+    context: &HandlerContext,
+    request: &SnapshotBootstrapSource,
+    source_ceiling: u64,
+    authority: &ryeos_state::PinnedStateAuthority,
+    guard: &ryeos_state::CasMutationGuard,
+) -> Result<(RuntimeSnapshotSource, GuestOwnerRuntimeManifestIdentity)> {
+    match request {
+        SnapshotBootstrapSource::CapturedProduct {
+            witness_hash,
+            source,
+        } => current_captured_product_source(
+            state,
+            context,
+            witness_hash,
+            source,
+            source_ceiling,
+            authority,
+            guard,
+        ),
+        SnapshotBootstrapSource::BundleMaterialization {
+            materialization_binding_id,
+            coordinate_digest,
+            attestation_hash,
+        } => {
+            let current = crate::operator_guest_runtime_materialization::load_current_guest_owner_materialization(
+                state,
+                context,
+                materialization_binding_id,
+                coordinate_digest,
+                attestation_hash,
+                authority,
+                guard,
+            )?;
+            ensure!(
+                current.source.maximum_owner_bytes <= source_ceiling,
+                "bootstrap materialization exceeds signed source ceiling"
+            );
+            ensure!(
+                current.attestation_hash == *attestation_hash,
+                "bootstrap materialization differs from its current attestation"
+            );
+            Ok((
+                RuntimeSnapshotSource::BundleMaterialization {
+                    materialization_attestation_hash: current.attestation_hash,
+                    source_coordinate_digest: coordinate_digest.clone(),
+                    materialization_binding_digest: current.source.materialization_binding_digest,
+                },
+                current.identity,
+            ))
+        }
+    }
 }
 
 /// Create only a source occurrence. A bound create response is not readiness,
@@ -132,26 +261,14 @@ fn bootstrap_source_checked(
     let source_ceiling = staging_source_ceiling(state, context, &request.binding_id)?;
     let authority = state.state_store.pinned_state_authority()?;
     let guard = authority.acquire_shared_guard()?;
-    let current =
-        crate::operator_guest_runtime_materialization::load_current_guest_owner_materialization(
-            state,
-            context,
-            &request.materialization_binding_id,
-            &request.coordinate_digest,
-            &request.attestation_hash,
-            &authority,
-            &guard,
-        )?;
-    ensure!(
-        current.source.maximum_owner_bytes <= source_ceiling,
-        "bootstrap materialization exceeds signed source ceiling"
-    );
-    let source = RuntimeSnapshotSource::BundleMaterialization {
-        materialization_attestation_hash: current.attestation_hash,
-        source_coordinate_digest: request.coordinate_digest.clone(),
-        materialization_binding_digest: current.source.materialization_binding_digest,
-    };
-    let identity = current.identity;
+    let (source, identity) = current_bootstrap_source(
+        state,
+        context,
+        &request.source,
+        source_ceiling,
+        &authority,
+        &guard,
+    )?;
     drop(guard);
     let access = binding.credential_access()?;
     let credential = access.decode(state.vault.placement_credential(&access)?)?;
@@ -195,18 +312,16 @@ fn bootstrap_source_checked(
     // New contact rechecks current source authority; historical retained
     // materialization bytes alone do not authorize a fresh provider POST.
     let contact_guard = authority.acquire_shared_guard()?;
-    let again =
-        crate::operator_guest_runtime_materialization::load_current_guest_owner_materialization(
-            state,
-            context,
-            &request.materialization_binding_id,
-            &request.coordinate_digest,
-            &request.attestation_hash,
-            &authority,
-            &contact_guard,
-        )?;
+    let again = current_bootstrap_source(
+        state,
+        context,
+        &request.source,
+        source_ceiling,
+        &authority,
+        &contact_guard,
+    )?;
     ensure!(
-        again.identity == identity && again.attestation_hash == request.attestation_hash,
+        again == (intent.source.clone(), identity.clone()),
         "bootstrap source changed before contact admission"
     );
     // Keep the CAS/head mutation guard through the one-shot provider attempt.
@@ -843,7 +958,40 @@ fn create_qualification_occurrence_checked(
         );
     }
     intent.validate_for(&source.intent, &locator)?;
-    let reserved = state.state_store.reserve_snapshot_qualification(&intent)?;
+    // Retain the exact generation this occurrence is made under: both signed
+    // bindings and the producer's lifecycle closure. Its termination resolves
+    // through them, so a later recompose or bundle replacement cannot strand
+    // the occurrence. The shared guard keeps the published closure from a
+    // CAS sweep until the journal roots it.
+    let retention_authority = state.state_store.pinned_state_authority()?;
+    let retention_guard = retention_authority.acquire_shared_guard()?;
+    let lifecycle_capture = state
+        .external_placement_backends
+        .lifecycle_escrow_capture(producer)?;
+    let published_lifecycle = crate::external_artifacts::publish_retained_lifecycle_artifacts(
+        &state.state_store,
+        &context.fingerprint,
+        &lifecycle_capture,
+    )?;
+    let generation = RetainedQualificationGeneration {
+        production: producer.retained_generation()?,
+        qualification: qualification.retained_generation()?,
+        lifecycle_root_hash: published_lifecycle.root_hash().to_owned(),
+    };
+    let reserved = state
+        .state_store
+        .reserve_snapshot_qualification(&intent, &generation)?;
+    retention_authority.ensure_guard(&retention_guard)?;
+    drop(retention_guard);
+    // Prove the retained closure rebuilds the termination backend before the
+    // one-shot provider mutation is claimed.
+    let _termination = crate::external_artifacts::RecoveredQualificationLifecycle::from_generation(
+        state,
+        &generation,
+        producer,
+        qualification,
+        &credential,
+    )?;
     let claim = state
         .state_store
         .claim_snapshot_qualification_attempt(&intent.operation_id)?;
@@ -988,6 +1136,134 @@ pub fn verify_qualification_occurrence(
     )
 }
 
+/// A verify was refused before its one attempt was claimed because the
+/// restored occurrence is not running yet (or any more).
+pub const OCCURRENCE_NOT_RUNNING: &str = "occurrence_not_running";
+
+/// What the provider reports of a restored qualification occurrence.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct QualificationOccurrenceObservation {
+    pub qualification_operation_id: String,
+    pub occurrence_id: String,
+    pub running: bool,
+    /// `running`, the provider's status word, or `absent`.
+    pub status: String,
+}
+
+/// Read-only: ask the provider whether the exact restored occurrence of a
+/// bound qualification is running. Claims nothing and changes no journal.
+pub fn observe_qualification_occurrence(
+    state: &AppState,
+    context: &HandlerContext,
+    qualification_operation_id: &str,
+) -> Result<QualificationOccurrenceObservation> {
+    crate::operator_authority::require_admitted_operator(state, context)?;
+    let qualified = state
+        .state_store
+        .snapshot_qualification_operation(qualification_operation_id)?
+        .context("snapshot qualification operation is absent")?;
+    ensure!(
+        qualified.intent.owner_principal == context.fingerprint
+            && qualified.phase == SnapshotQualificationPhase::OccurrenceBound,
+        "snapshot qualification has no operator-owned bound occurrence"
+    );
+    let occurrence = qualified
+        .occurrence
+        .clone()
+        .context("restored occurrence is absent")?;
+    let qualification = state
+        .node_config
+        .runtime_snapshot_qualification
+        .iter()
+        .find(|binding| binding.digest() == qualified.intent.qualification_profile_digest)
+        .context("current signed snapshot qualification binding is absent")?;
+    let producer = state
+        .node_config
+        .runtime_snapshot_production
+        .iter()
+        .find(|binding| {
+            binding.id() == qualification.production_binding_id()
+                && binding.digest() == qualification.production_binding_digest()
+        })
+        .context("qualification lost its exact signed producer binding")?;
+    observe_restored_occurrence(
+        state,
+        producer,
+        qualification,
+        &qualified.intent,
+        &occurrence,
+    )
+}
+
+fn observe_restored_occurrence(
+    state: &AppState,
+    producer: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+    qualification: &crate::node_config::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding,
+    intent: &RuntimeSnapshotQualificationIntent,
+    occurrence: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationOccurrence,
+) -> Result<QualificationOccurrenceObservation> {
+    use ryeos_external_execution_contract::runtime_snapshot::{
+        RUNTIME_SNAPSHOT_QUALIFICATION_READINESS_PROTOCOL,
+        RuntimeSnapshotQualificationReadinessAdapterResponse,
+        RuntimeSnapshotQualificationReadinessRequest,
+    };
+    ensure!(
+        !occurrence.contact_deadline_exceeded,
+        "restored occurrence was created late"
+    );
+    let access = producer.credential_access()?;
+    let credential = access.decode(state.vault.placement_credential(&access)?)?;
+    let request = RuntimeSnapshotQualificationReadinessRequest {
+        protocol: RUNTIME_SNAPSHOT_QUALIFICATION_READINESS_PROTOCOL.into(),
+        qualification_intent: intent.clone(),
+        occurrence: occurrence.clone(),
+        provider_spec_digest: qualification.provider_spec_digest().into(),
+    };
+    let deadline = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(
+        u64::from(qualification.contact_timeout_seconds()),
+    ));
+    let observed = state
+        .external_placement_backends
+        .observe_snapshot_qualification_occurrence(
+            producer,
+            qualification,
+            &credential,
+            &request,
+            deadline,
+        )?;
+    let (running, status) = match observed.value {
+        RuntimeSnapshotQualificationReadinessAdapterResponse::Running { .. } => {
+            // A running answer that arrived late says nothing about now.
+            (!observed.deadline_exceeded, "running".to_owned())
+        }
+        RuntimeSnapshotQualificationReadinessAdapterResponse::NotRunning { status, .. } => {
+            (false, status)
+        }
+    };
+    Ok(QualificationOccurrenceObservation {
+        qualification_operation_id: intent.operation_id.clone(),
+        occurrence_id: occurrence.occurrence_id.clone(),
+        running,
+        status,
+    })
+}
+
+fn occurrence_not_running(observation: &QualificationOccurrenceObservation) -> anyhow::Error {
+    crate::handler_error::HandlerError::Structured {
+        code: OCCURRENCE_NOT_RUNNING.to_owned(),
+        status: 409,
+        body: serde_json::json!({
+            "error": OCCURRENCE_NOT_RUNNING,
+            "message": "the restored occurrence is not running; its one verifier attempt was not claimed",
+            "qualification_operation_id": observation.qualification_operation_id,
+            "occurrence_id": observation.occurrence_id,
+            "status": observation.status,
+            "fix": "observe it with `ryeos external-content observe-runtime-snapshot-qualification` and verify once it is running",
+        }),
+    }
+    .into()
+}
+
 fn verify_qualification_occurrence_under_contact_gate(
     state: &AppState,
     context: &HandlerContext,
@@ -1076,10 +1352,10 @@ fn verify_qualification_occurrence_under_contact_gate(
             .context("restored verifier deadline overflow")?,
     };
     intent.operation_id = intent.derived_operation_id()?;
-    if let Some(existing) = state
+    let retained = state
         .state_store
-        .restored_verifier_attempt(&intent.operation_id)?
-    {
+        .restored_verifier_attempt(&intent.operation_id)?;
+    if let Some(existing) = &retained {
         intent.purpose = existing.intent.purpose.clone();
         intent.attempt_deadline_ms = existing.intent.attempt_deadline_ms;
         ensure!(
@@ -1088,6 +1364,22 @@ fn verify_qualification_occurrence_under_contact_gate(
         );
     }
     intent.validate_for(&source.intent, &locator, &qualified.intent, &occurrence)?;
+    // The one deterministic attempt is spent by the verifier upload. A
+    // sandbox the provider is still creating would burn it, so a fresh
+    // attempt is claimed only after a running observation; a retained one
+    // is reconciled as it stands.
+    if retained.is_none() {
+        let observation = observe_restored_occurrence(
+            state,
+            producer,
+            qualification,
+            &qualified.intent,
+            &occurrence,
+        )?;
+        if !observation.running {
+            return Err(occurrence_not_running(&observation));
+        }
+    }
     let reserved = state
         .state_store
         .reserve_restored_verifier_attempt(&intent)?;
@@ -1891,21 +2183,14 @@ fn terminate_qualification_occurrence_under_contact_gate(
         .occurrence
         .clone()
         .context("qualification termination occurrence is absent")?;
-    let qualification = state
-        .node_config
-        .runtime_snapshot_qualification
-        .iter()
-        .find(|binding| binding.digest() == qualified.intent.qualification_profile_digest)
-        .context("current signed snapshot qualification binding is absent")?;
-    let producer = state
-        .node_config
-        .runtime_snapshot_production
-        .iter()
-        .find(|binding| {
-            binding.id() == qualification.production_binding_id()
-                && binding.digest() == qualification.production_binding_digest()
-        })
-        .context("qualification termination lost exact producer binding")?;
+    // Terminate through the generation the occurrence was created under, not
+    // whatever node config pins now: a recompose since then must not strand it.
+    let generation = state
+        .state_store
+        .retained_snapshot_qualification_generation(qualification_operation_id)?
+        .context("qualification termination lost its retained signed generation")?;
+    let qualification = &generation.qualification.recovered_binding()?;
+    let producer = &generation.production.recovered_binding()?;
     ensure!(
         qualified.intent.adapter_artifact_hash == producer.adapter_artifact_hash()
             && qualified.intent.provider_spec_digest == qualification.provider_spec_digest()
@@ -1913,11 +2198,6 @@ fn terminate_qualification_occurrence_under_contact_gate(
             && qualified.intent.provider_id == producer.backend(),
         "qualification termination differs from signed provider authority"
     );
-    let access = producer.credential_access()?;
-    let credential = access.decode(state.vault.placement_credential(&access)?)?;
-    state
-        .external_placement_backends
-        .preflight_snapshot_qualification_create(producer, qualification, &credential)?;
     let now = lillux::time::timestamp_millis();
     let mut intent = RuntimeSnapshotQualificationTerminationIntent {
         schema: 1,
@@ -1941,8 +2221,22 @@ fn terminate_qualification_occurrence_under_contact_gate(
             intent == existing.intent,
             "retained qualification termination changed signed coordinates"
         );
+        // A settled occurrence no longer roots its lifecycle closure, which a
+        // CAS sweep may since have reclaimed: answer from the journal alone.
+        if existing.phase == QualificationTerminationPhase::Terminal {
+            return Ok(existing);
+        }
     }
     intent.validate_for(&qualified.intent, &occurrence)?;
+    let access = producer.credential_access()?;
+    let credential = access.decode(state.vault.placement_credential(&access)?)?;
+    let lifecycle = crate::external_artifacts::RecoveredQualificationLifecycle::from_generation(
+        state,
+        &generation,
+        producer,
+        qualification,
+        &credential,
+    )?;
     match invocation.authenticate_consumer(state, qualification_operation_id)? {
         Some(admission) => {
             state
@@ -1979,16 +2273,14 @@ fn terminate_qualification_occurrence_under_contact_gate(
     let deadline = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(
         u64::from(qualification.contact_timeout_seconds()),
     ));
-    let attempted = state
-        .external_placement_backends
-        .terminate_snapshot_qualification_occurrence(
-            producer,
-            qualification,
-            &credential,
-            &request,
-            first_contact,
-            deadline,
-        );
+    let attempted = lifecycle.terminate(
+        producer,
+        qualification,
+        &credential,
+        &request,
+        first_contact,
+        deadline,
+    );
     match attempted {
         Ok(output) => match output.value {
             RuntimeSnapshotQualificationTerminationAdapterResponse::Terminal {
@@ -2571,54 +2863,22 @@ fn produce_checked(
         .context("current signed snapshot producer binding is absent")?;
     let source_ceiling = staging_source_ceiling(state, context, &request.binding_id)?;
 
-    let limits = state
-        .node_policy
-        .require::<NodeObjectClosurePolicy>()?
-        .closure_limits()?;
     let authority = state.state_store.pinned_state_authority()?;
     let guard = authority.acquire_shared_guard()?;
     let (source, exact_identity) = match &request.source {
         SnapshotProductionSource::CapturedProduct {
             witness_hash,
             source,
-            source_occurrence_id: _,
-        } => {
-            let witness = crate::operator_external_content::product_receipt::load_bounded_current_product_source(
-                state,
-                &authority,
-                &guard,
-                limits,
-                &context.fingerprint,
-                witness_hash,
-                source,
-                source_ceiling,
-            )?;
-            ensure!(
-                witness.evidence.declaration.shape == ProductShape::Tree
-                    && witness.evidence.declaration.storage == ProductStorage::Content,
-                "snapshot source is not an ordinary retained product tree"
-            );
-            let manifest = load_exact_cas_object_with_cas(
-                &authority.cas_store()?,
-                &witness.evidence.manifest_hash,
-                limits.max_object_bytes,
-            )?;
-            let identity = derive_guest_owner_runtime_manifest_identity(
-                &manifest,
-                state.identity.verifying_key(),
-            )?;
-            ensure!(
-                identity.manifest_hash == witness.evidence.manifest_hash
-                    && witness.attestation_hash == *witness_hash,
-                "snapshot product differs from its current witness"
-            );
-            (
-                RuntimeSnapshotSource::CapturedProduct {
-                    product_witness_hash: witness.attestation_hash,
-                },
-                identity,
-            )
-        }
+            occurrence: _,
+        } => current_captured_product_source(
+            state,
+            context,
+            witness_hash,
+            source,
+            source_ceiling,
+            &authority,
+            &guard,
+        )?,
         SnapshotProductionSource::BundleMaterialization {
             materialization_binding_id,
             coordinate_digest,
@@ -2722,10 +2982,20 @@ fn produce_checked(
         bootstrap,
     ) = match &request.source {
         SnapshotProductionSource::CapturedProduct {
-            source_occurrence_id,
+            occurrence:
+                CapturedSourceOccurrence::OperatorNamed {
+                    source_occurrence_id,
+                },
             ..
         } => (source_occurrence_id.clone(), None, None, None, None),
-        SnapshotProductionSource::BundleMaterialization {
+        SnapshotProductionSource::CapturedProduct {
+            occurrence:
+                CapturedSourceOccurrence::Bootstrap {
+                    bootstrap_operation_id,
+                },
+            ..
+        }
+        | SnapshotProductionSource::BundleMaterialization {
             bootstrap_operation_id,
             ..
         } => {
@@ -2741,7 +3011,7 @@ fn produce_checked(
                     && bootstrap.intent.adapter_artifact_hash == binding.adapter_artifact_hash()
                     && bootstrap.intent.settings_digest == binding.settings_digest()
                     && bootstrap.intent.guest_runtime_manifest_hash == exact_identity.manifest_hash,
-                "materialized snapshot differs from exact ready bootstrap source"
+                "snapshot source differs from exact ready bootstrap source"
             );
             let occurrence = bootstrap
                 .occurrence

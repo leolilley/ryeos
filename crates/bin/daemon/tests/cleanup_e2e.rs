@@ -570,6 +570,56 @@ async fn daemon_startup_proves_bundle_yamls_parse() {
     );
 }
 
+// ── Node state signed by a pinned non-node key is refused at startup ──
+//   Everything under the app root's `.ai/node/` is node state. A route there
+//   signed by the fixture publisher (a pinned, item-trusted key) must not
+//   load: startup refuses it with `node_document_wrong_signer`.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn app_root_route_signed_by_publisher_is_refused_at_startup() {
+    let result = DaemonHarness::start_fast_with(
+        |state_path, _user_space, fixture| {
+            let routes_dir = state_path.join(".ai").join("node").join("routes");
+            std::fs::create_dir_all(&routes_dir)?;
+            let body = r#"id: planted/publisher
+path: /planted/publisher
+methods:
+  - GET
+auth: none
+limits:
+  body_bytes_max: 1024
+  timeout_ms: 1000
+  concurrent_max: 1
+response:
+  mode: json
+  body_b64: e30=
+"#;
+            let signed = lillux::signature::sign_content_at(
+                body,
+                &fixture.publisher,
+                "#",
+                None,
+                common::fast_fixture::FAST_FIXTURE_TIME,
+            );
+            std::fs::write(routes_dir.join("planted.yaml"), signed)?;
+            Ok(())
+        },
+        |_cmd| {},
+    )
+    .await;
+
+    match result {
+        Ok(_) => panic!("daemon must refuse an app-root route signed by a non-node key"),
+        Err(e) => {
+            let err_msg = format!("{:#}", e);
+            assert!(
+                err_msg.contains("node_document_wrong_signer"),
+                "error should name node_document_wrong_signer, got: {err_msg}"
+            );
+        }
+    }
+}
+
 // ── Test 13: legacy structural fields rejected by daemon startup ──
 //   Node config identity is derived from the path. A node YAML body that still
 //   declares `section` must fail during startup rather than being tolerated as

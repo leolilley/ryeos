@@ -31,6 +31,10 @@ pub struct Request {
     /// when only one scope is given.
     #[serde(deserialize_with = "ryeos_runtime::scalar_or_vec::deserialize")]
     pub scopes: Vec<String>,
+    /// Requested grant lifetime in seconds. Absent: the local-client maximum
+    /// from the node's authorization policy. Above it: refused.
+    #[serde(default)]
+    pub lifetime_secs: Option<u64>,
 }
 
 #[derive(serde::Serialize)]
@@ -40,6 +44,8 @@ pub struct Response {
     pub scopes: Vec<String>,
     pub granted_by: String,
     pub created_at: String,
+    /// RFC 3339 UTC time at which the grant stops authenticating.
+    pub expires_at: String,
 }
 
 pub async fn handle(
@@ -72,9 +78,7 @@ pub async fn handle(
     )
     .map_err(|error| HandlerError::Internal(format!("load configured operator: {error:#}")))?;
     if fingerprint == configured_operator.fingerprint() {
-        return Err(HandlerError::Forbidden(
-            "configured-operator authorization and class changes are offline-only".to_string(),
-        ));
+        return Err(super::grant_terms::operator_grant_refusal());
     }
 
     // 3. Validate label is non-empty.
@@ -139,8 +143,14 @@ pub async fn handle(
 
     // 8. Create the authorized-key TOML. Online delegation is deliberately
     // create-only: an API caller may not replace or reclassify an existing
-    // local-client, remote-node, remote-operator, or bootstrap grant.
+    // local-client, remote-node, remote-principal, or bootstrap grant.
     let now = lillux::time::iso8601_now();
+    let terms = super::grant_terms::issuance_terms(
+        &state,
+        ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient,
+        req.lifetime_secs,
+        super::grant_terms::caller_authorized_by(&ctx),
+    )?;
     // Grants live where the authenticator reads them.
     let auth_dir = state.config.authorized_keys_dir.clone();
 
@@ -152,6 +162,7 @@ pub async fn handle(
         &req.label,
         &ctx.fingerprint,
         &now,
+        &terms,
         state.identity.signing_key(),
     )
     .map_err(|e| {
@@ -174,6 +185,7 @@ pub async fn handle(
         scopes: normalized,
         granted_by: ctx.fingerprint,
         created_at: now,
+        expires_at: super::grant_terms::expiry_text(terms.expires_at),
     };
 
     serde_json::to_value(response).map_err(|e| HandlerError::Internal(e.to_string()))
@@ -300,7 +312,7 @@ mod tests {
         let grantee = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
         let public = grantee.verifying_key();
         let scope = "ryeos.execute.service.vault/list".to_string();
-        let ctx = HandlerContext::new("caller".to_string(), vec![scope.clone()], true);
+        let ctx = HandlerContext::new(format!("fp:{}", "a".repeat(64)), vec![scope.clone()], true);
         let response = handle(
             Request {
                 public_key: format!(
@@ -309,6 +321,7 @@ mod tests {
                 ),
                 label: "grantee".to_string(),
                 scopes: vec![scope],
+                lifetime_secs: None,
             },
             ctx,
             state.clone(),
@@ -327,5 +340,125 @@ mod tests {
             loaded.is_some(),
             "grant must be loadable from the configured dir"
         );
+    }
+
+    fn grant_request(scope: &str, lifetime_secs: Option<u64>) -> (Request, String) {
+        use base64::Engine as _;
+        let grantee = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
+        let public = grantee.verifying_key();
+        let fingerprint = lillux::signature::compute_fingerprint(&public);
+        (
+            Request {
+                public_key: format!(
+                    "ed25519:{}",
+                    base64::engine::general_purpose::STANDARD.encode(public.as_bytes())
+                ),
+                label: "grantee".to_string(),
+                scopes: vec![scope.to_string()],
+                lifetime_secs,
+            },
+            fingerprint,
+        )
+    }
+
+    fn caller(scope: &str) -> HandlerContext {
+        HandlerContext::new(
+            format!("fp:{}", "a".repeat(64)),
+            vec![scope.to_string()],
+            true,
+        )
+        .with_signed_request_digest(Some("b".repeat(64)))
+    }
+
+    #[tokio::test]
+    async fn authorize_key_writes_policy_default_expiry_and_records_who_asked() {
+        let (_tmp, _owner, state) = crate::test_support::build_test_state();
+        let state = Arc::new(state);
+        let scope = "ryeos.execute.service.vault/list";
+        let (request, fingerprint) = grant_request(scope, None);
+        let before = lillux::time::unix_secs_now();
+        handle(request, caller(scope), state.clone()).await.unwrap();
+        let grant = ryeos_node_runtime::identity::load_verified_authorized_key(
+            &fingerprint,
+            &state.config.authorized_keys_dir,
+            &state.identity,
+        )
+        .unwrap()
+        .unwrap();
+        let maximum = ryeos_node_runtime::node_policy::sections::authorization::NodeAuthorizationPolicy::standard()
+            .max_lifetime_secs
+            .local_client;
+        let ryeos_node_runtime::identity::GrantExpiry::At(expires) = grant.expires_at else {
+            panic!("a delegated grant must carry an expiry");
+        };
+        assert!(expires >= before + maximum && expires <= before + maximum + 60);
+        assert_eq!(
+            grant.authorized_by.principal,
+            format!("fp:{}", "a".repeat(64))
+        );
+        assert_eq!(
+            grant.authorized_by.request_digest.as_deref(),
+            Some("b".repeat(64).as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn authorize_key_refuses_lifetime_over_maximum_with_a_typed_error() {
+        let (_tmp, _owner, state) = crate::test_support::build_test_state();
+        let state = Arc::new(state);
+        let scope = "ryeos.execute.service.vault/list";
+        let maximum = ryeos_node_runtime::node_policy::sections::authorization::NodeAuthorizationPolicy::standard()
+            .max_lifetime_secs
+            .local_client;
+        let (request, fingerprint) = grant_request(scope, Some(maximum + 1));
+        let error = handle(request, caller(scope), state.clone())
+            .await
+            .unwrap_err();
+        match error {
+            HandlerError::Structured { code, status, .. } => {
+                assert_eq!(code, "grant_lifetime_exceeds_policy");
+                assert_eq!(status, 400);
+            }
+            other => panic!("expected a typed refusal, got {other:?}"),
+        }
+        assert!(
+            ryeos_node_runtime::identity::load_verified_authorized_key(
+                &fingerprint,
+                &state.config.authorized_keys_dir,
+                &state.identity,
+            )
+            .unwrap()
+            .is_none(),
+            "a refused request must write no grant"
+        );
+    }
+
+    #[tokio::test]
+    async fn authorize_key_refuses_the_configured_operator_with_a_typed_conflict() {
+        use base64::Engine as _;
+        let (_tmp, _owner, state) = crate::test_support::build_test_state();
+        let state = Arc::new(state);
+        let scope = "ryeos.execute.service.vault/list";
+        let operator = ryeos_node_runtime::identity::NodeIdentity::load(
+            &state.config.operator_signing_key_path,
+        )
+        .unwrap();
+        let request = Request {
+            public_key: format!(
+                "ed25519:{}",
+                base64::engine::general_purpose::STANDARD
+                    .encode(operator.verifying_key().as_bytes())
+            ),
+            label: "operator".to_string(),
+            scopes: vec![scope.to_string()],
+            lifetime_secs: None,
+        };
+        match handle(request, caller(scope), state).await.unwrap_err() {
+            HandlerError::Structured { code, status, .. } => {
+                assert_eq!(code, "grant_is_operator");
+                assert_eq!(status, 409);
+            }
+            other => panic!("expected a typed refusal, got {other:?}"),
+        }
     }
 }

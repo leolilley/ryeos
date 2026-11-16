@@ -421,7 +421,6 @@ impl UiCompositionReplay {
                     return Err("transfer destination tabs collide with current composition".into());
                 }
             }
-            super::transfer_reservation::UiTransferDestinationPlacement::SharedDock { .. } => {}
         }
         if reservation.mounts.iter().any(|mount| {
             self.composition
@@ -567,21 +566,6 @@ impl UiCompositionReplay {
                         Ok(())
                     },
                 )?;
-            }
-            super::transfer_export::UiTransferExportContent::SharedDock { edge, mount, .. } => {
-                let edge = match edge {
-                    super::model::RyeOsDockEdge::Top => "top",
-                    super::model::RyeOsDockEdge::Left => "left",
-                    super::model::RyeOsDockEdge::Right => "right",
-                    super::model::RyeOsDockEdge::Bottom => "bottom",
-                };
-                let removed = staged
-                    .composition
-                    .remove_shared_dock(edge)
-                    .ok_or("MOVE shared dock is absent")?;
-                if removed.view().instance_key() != &mount.source_instance {
-                    return Err("MOVE shared dock changed its instance".into());
-                }
             }
         }
         staged.reconcile_subject_mounts()?;
@@ -890,38 +874,6 @@ impl UiCompositionReplay {
                         Ok(())
                     },
                 )?;
-            }
-            (
-                UiTransferDestinationPlacement::SharedDock { edge },
-                UiTransferExportContent::SharedDock {
-                    visible,
-                    size,
-                    mount,
-                    ..
-                },
-            ) => {
-                let destination = &reservation.mounts[0];
-                staged.composition.install_shared_dock(
-                    edge,
-                    mount.view_ref.clone(),
-                    destination.binding.clone(),
-                    if export.mode == UiTransferExportMode::Copy {
-                        crate::surface::ViewKindSpec(mount.view_ref.clone())
-                            .to_view_spec()
-                            .initial_local_state()
-                    } else {
-                        mount.local.clone()
-                    },
-                    *visible,
-                    *size,
-                )?;
-                if staged
-                    .composition
-                    .mount(&destination.destination_instance)
-                    .is_none()
-                {
-                    return Err("activated shared dock differs from reserved instance".into());
-                }
             }
             _ => return Err("activation placement differs from signed export kind".into()),
         }
@@ -1339,7 +1291,7 @@ impl UiCompositionReplay {
                                         if sets.iter().any(|set|matches!(&set.source_owner,UiViewMountOwner::Surface{surface_instance_id,..} if surface_instance_id==destination_surface_instance_id))))
                             })
                     } else if let Some(request) = operation.composition() {
-                        // Shared dock freezes do not freeze other shared mounts.
+                        // A freeze does not fence unrelated mounts.
                         match &request.mutation {
                             CompositionMutation::SetSubject { mount, .. }
                             | CompositionMutation::FocusView { mount } => instances.contains(mount),
@@ -1368,7 +1320,6 @@ impl UiCompositionReplay {
                             .source_instance
                             .mount_owner()
                             .is_some_and(|owner| owns_surface(&owner)),
-                        UiTransferExportContent::SharedDock { .. } => false,
                     }
                 }
                 SeatEventKind::Facet { key, .. } => {

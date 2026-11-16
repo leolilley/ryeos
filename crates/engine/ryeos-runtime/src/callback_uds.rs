@@ -676,14 +676,12 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
         thread_id: &str,
         event_type: &str,
         payload: Value,
-        storage_class: &str,
     ) -> Result<Value, CallbackError> {
         let mut params = json!({
             "thread_id": thread_id,
             "event": {
                 "event_type": event_type,
                 "payload": payload,
-                "storage_class": storage_class,
             }
         });
         self.inject_callback_token(&mut params);

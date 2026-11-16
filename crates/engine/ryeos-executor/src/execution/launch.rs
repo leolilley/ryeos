@@ -44,8 +44,8 @@ mod terminal;
 
 use runtime_request::{SpawnRuntimeParams, spawn_runtime};
 use terminal::{
-    fallback_finalization, is_thread_terminal_status, reconcile_terminal_finalization,
-    runtime_terminal_status,
+    fallback_finalization, head_advance_not_applied_finalization, is_thread_terminal_status,
+    reconcile_terminal_finalization, runtime_terminal_status,
 };
 
 const MAX_SIGNED_EXECUTOR_MANIFEST_REF_BYTES: u64 = 256 * 1024;
@@ -2657,7 +2657,7 @@ pub fn verify_native_executor_chain_attestation_for_engine(
 fn build_verified_loader_for_thread(
     engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
     node_config_root: Option<&Path>,
-    node_trusted_keys_dir: &Path,
+    trusted_signers: &[ryeos_engine::trust::TrustedSignerEntry],
 ) -> anyhow::Result<ryeos_runtime::verified_loader::VerifiedLoader> {
     let project_root = engine_roots
         .authoritative_project_root()?
@@ -2672,12 +2672,13 @@ fn build_verified_loader_for_thread(
             project_root,
             node_config_root.map(Path::to_path_buf),
             bundle_roots,
-            node_trusted_keys_dir,
-        ),
+            trusted_signers,
+        )
+        .map(|loader| loader.with_logical_project_of(engine_roots)),
         None => ryeos_runtime::verified_loader::VerifiedLoader::new_projectless_with_node_config(
             node_config_root.map(Path::to_path_buf),
             bundle_roots,
-            node_trusted_keys_dir,
+            trusted_signers,
         ),
     }
 }
@@ -2685,7 +2686,7 @@ fn build_verified_loader_for_thread(
 fn build_verified_loader_for_thread_under_project_authority(
     engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
     node_config_root: Option<&Path>,
-    node_trusted_keys_dir: &Path,
+    trusted_signers: &[ryeos_engine::trust::TrustedSignerEntry],
     project_materialization: &ryeos_state::PinnedProjectMaterialization,
 ) -> anyhow::Result<ryeos_runtime::verified_loader::VerifiedLoader> {
     let project_root = engine_roots
@@ -2702,19 +2703,19 @@ fn build_verified_loader_for_thread_under_project_authority(
         .into_iter()
         .map(Path::to_path_buf)
         .collect();
-    ryeos_runtime::verified_loader::VerifiedLoader::new_with_node_config_under_project_authority(
+    ryeos_runtime::verified_loader::VerifiedLoader::new_with_node_config(
         project_root,
-        project_materialization,
         node_config_root.map(Path::to_path_buf),
         bundle_roots,
-        node_trusted_keys_dir,
+        trusted_signers,
     )
+    .map(|loader| loader.with_logical_project_of(engine_roots))
 }
 
 fn load_limits_snapshot_under_current_authority(
     roots: &ryeos_engine::item_resolution::ResolutionRoots,
     node_config_root: Option<&Path>,
-    node_trusted_keys_dir: &Path,
+    trusted_signers: &[ryeos_engine::trust::TrustedSignerEntry],
     project_materialization: Option<&ryeos_state::PinnedProjectMaterialization>,
     declaration: &ryeos_engine::runtime_registry::RuntimeLimitsDecl,
 ) -> anyhow::Result<LimitsConfigSnapshot> {
@@ -2723,7 +2724,7 @@ fn load_limits_snapshot_under_current_authority(
             let loader = build_verified_loader_for_thread_under_project_authority(
                 roots,
                 node_config_root,
-                node_trusted_keys_dir,
+                trusted_signers,
                 materialization,
             )?;
             load_limits_config_snapshot_under_project_authority(
@@ -2734,7 +2735,7 @@ fn load_limits_snapshot_under_current_authority(
         }
         None => {
             let loader =
-                build_verified_loader_for_thread(roots, node_config_root, node_trusted_keys_dir)?;
+                build_verified_loader_for_thread(roots, node_config_root, trusted_signers)?;
             load_limits_config_snapshot(&loader, declaration)
         }
     }
@@ -2791,7 +2792,7 @@ fn execution_control_snapshot_status(
     snapshot: &ExecutionControlSnapshot,
     roots: &ryeos_engine::item_resolution::ResolutionRoots,
     node_config_root: Option<&Path>,
-    node_trusted_keys_dir: &Path,
+    trusted_signers: &[ryeos_engine::trust::TrustedSignerEntry],
     project_materialization: Option<&ryeos_state::PinnedProjectMaterialization>,
 ) -> ExecutionControlProofStatus {
     let project = project_materialization.map(|materialization| {
@@ -2818,21 +2819,12 @@ fn execution_control_snapshot_status(
     if policy_status == ExecutionControlProofStatus::ImmutableAuthorityMismatch {
         return policy_status;
     }
-    let Ok(current_node_trust) =
-        ryeos_runtime::verified_loader::VerifiedLoader::node_trust_identity_from(
-            node_trusted_keys_dir,
-        )
-    else {
-        return combine_execution_control_status(
-            policy_status,
-            ExecutionControlProofStatus::MutableAuthorityChanged,
-        );
-    };
+    let current_signers_digest = ryeos_engine::trust::trusted_signers_digest(trusted_signers);
     let Some(limits_proof) = snapshot.limits.dependency_proof.as_ref() else {
         return policy_status;
     };
     let limits_status = if let Some(materialization) = project_materialization {
-        if !limits_proof.trust_identities_match(None, &current_node_trust) {
+        if !limits_proof.trusted_signers_match(&current_signers_digest) {
             ExecutionControlProofStatus::MutableAuthorityChanged
         } else {
             match limits_proof.revalidate_under_project_authority_status(
@@ -2852,22 +2844,19 @@ fn execution_control_snapshot_status(
             }
         }
     } else {
-        let Ok(loader) =
-            build_verified_loader_for_thread(roots, node_config_root, node_trusted_keys_dir)
-        else {
+        if build_verified_loader_for_thread(roots, node_config_root, trusted_signers).is_err() {
             return combine_execution_control_status(
                 policy_status,
                 ExecutionControlProofStatus::MutableAuthorityChanged,
             );
-        };
-        if limits_proof.trust_identities_match(
-            Some(&loader.effective_trust_identity()),
-            &current_node_trust,
-        ) && limits_proof.revalidate_mutable_against(
-            roots.authoritative_project_root().ok().flatten(),
-            node_config_root,
-            true,
-        ) {
+        }
+        if limits_proof.trusted_signers_match(&current_signers_digest)
+            && limits_proof.revalidate_mutable_against(
+                roots.authoritative_project_root().ok().flatten(),
+                node_config_root,
+                true,
+            )
+        {
             ExecutionControlProofStatus::Current
         } else {
             ExecutionControlProofStatus::MutableAuthorityChanged
@@ -2896,14 +2885,14 @@ fn execution_control_snapshot_is_current(
     snapshot: &ExecutionControlSnapshot,
     roots: &ryeos_engine::item_resolution::ResolutionRoots,
     node_config_root: Option<&Path>,
-    node_trusted_keys_dir: &Path,
+    trusted_signers: &[ryeos_engine::trust::TrustedSignerEntry],
     project_materialization: Option<&ryeos_state::PinnedProjectMaterialization>,
 ) -> anyhow::Result<bool> {
     match execution_control_snapshot_status(
         snapshot,
         roots,
         node_config_root,
-        node_trusted_keys_dir,
+        trusted_signers,
         project_materialization,
     ) {
         ExecutionControlProofStatus::Current => Ok(true),
@@ -2921,7 +2910,7 @@ async fn load_execution_control_snapshot_cached(
     item_ref: &ryeos_engine::canonical_ref::CanonicalRef,
     subject_authority: &ryeos_engine::contracts::SubjectResolutionAuthority,
     node_config_root: Option<&Path>,
-    node_trusted_keys_dir: &Path,
+    trusted_signers: &[ryeos_engine::trust::TrustedSignerEntry],
     project_materialization: Option<&ryeos_state::PinnedProjectMaterialization>,
     runtime_limits: &ryeos_engine::runtime_registry::RuntimeLimitsDecl,
 ) -> anyhow::Result<Arc<ExecutionControlSnapshot>> {
@@ -2942,18 +2931,15 @@ async fn load_execution_control_snapshot_cached(
             })
         })
         .collect::<Vec<_>>();
-    let node_trust_identity =
-        ryeos_runtime::verified_loader::VerifiedLoader::node_trust_identity_from(
-            node_trusted_keys_dir,
-        )?;
+    let trusted_signers_digest = ryeos_engine::trust::trusted_signers_digest(trusted_signers);
     let key_value = serde_json::json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "item_ref": item_ref.to_string(),
         "subject_authority": subject_authority,
         "request_engine_generation_identity": request_snapshot.request_engine_generation_identity,
         "registry_fingerprint": request_snapshot.registry_fingerprint,
         "effective_trust_identity": request_snapshot.effective_trust_identity,
-        "node_trust_identity": node_trust_identity,
+        "trusted_signers_digest": trusted_signers_digest,
         "node_config_layer": node_config_root.is_some(),
         "runtime_limits": runtime_limits,
         "roots": root_identity,
@@ -2974,7 +2960,7 @@ async fn load_execution_control_snapshot_cached(
                     &value,
                     roots,
                     node_config_root,
-                    node_trusted_keys_dir,
+                    trusted_signers,
                     project_materialization,
                 )? {
                     crate::resolved_config_cache::emit_metric(
@@ -3013,7 +2999,7 @@ async fn load_execution_control_snapshot_cached(
                     &value,
                     roots,
                     node_config_root,
-                    node_trusted_keys_dir,
+                    trusted_signers,
                     project_materialization,
                 )? {
                     crate::resolved_config_cache::emit_metric(
@@ -3042,7 +3028,7 @@ async fn load_execution_control_snapshot_cached(
                 let load_trust = request_snapshot.trust_store.clone();
                 let load_project_materialization = project_materialization.cloned();
                 let load_node_config_root = node_config_root.map(Path::to_path_buf);
-                let load_node_trusted_keys_dir = node_trusted_keys_dir.to_path_buf();
+                let load_trusted_signers = trusted_signers.to_vec();
                 let load_runtime_limits = runtime_limits.clone();
                 let loaded = tokio::task::spawn_blocking(move || {
                     let policy = ryeos_engine::execution_policy::ExecutionPolicyResolver::new(
@@ -3066,7 +3052,7 @@ async fn load_execution_control_snapshot_cached(
                     let limits = load_limits_snapshot_under_current_authority(
                         &load_roots,
                         load_node_config_root.as_deref(),
-                        &load_node_trusted_keys_dir,
+                        &load_trusted_signers,
                         load_project_materialization.as_ref(),
                         &load_runtime_limits,
                     )?;
@@ -3091,7 +3077,7 @@ async fn load_execution_control_snapshot_cached(
                     &snapshot,
                     roots,
                     node_config_root,
-                    node_trusted_keys_dir,
+                    trusted_signers,
                     project_materialization,
                 ) {
                     Ok(current) => current,
@@ -3155,7 +3141,7 @@ async fn load_execution_control_snapshot_cached(
                 let limits = load_limits_snapshot_under_current_authority(
                     roots,
                     node_config_root,
-                    node_trusted_keys_dir,
+                    trusted_signers,
                     project_materialization,
                     runtime_limits,
                 )?;
@@ -3164,7 +3150,7 @@ async fn load_execution_control_snapshot_cached(
                     &snapshot,
                     roots,
                     node_config_root,
-                    node_trusted_keys_dir,
+                    trusted_signers,
                     project_materialization,
                 )? {
                     return Ok(snapshot);
@@ -3176,6 +3162,18 @@ async fn load_execution_control_snapshot_cached(
             anyhow::bail!("execution control authority changed repeatedly while loading");
         }
     }
+}
+
+/// The stop policy a managed launch records at attachment. A policy already
+/// on the row is kept: a same-node continuation seeds its source's policy and
+/// a same-thread relaunch keeps its own. A row without one (a fresh launch,
+/// or a remote handoff successor, whose seed carries no node-local policy)
+/// records what this node's signed execution config resolves.
+fn attach_stop_policy(
+    recorded: Option<ryeos_engine::contracts::CancellationMode>,
+    resolved: &ryeos_engine::execution_policy::ResolvedExecutionPolicy,
+) -> ryeos_engine::contracts::CancellationMode {
+    recorded.unwrap_or_else(|| resolved.stop_policy())
 }
 
 pub struct NativeLaunchResult {
@@ -3401,9 +3399,14 @@ fn machine_continuation_checkpoint_resume_mode(
 /// exists, its exact capability closure wins and live sources are never reopened.
 #[derive(Clone, Copy)]
 pub enum CapabilityPolicy<'a> {
-    /// At first admission, run with exactly the union of live composed sources.
-    /// Recovery/continuation instead preserves the admitted capsule verbatim.
-    AdmissionDefault,
+    /// Root admission: a thread never holds capability its caller did not lend.
+    /// Every composed *declared* cap (the item's own `requires.capabilities.declared`
+    /// plus its `extends` ancestors) must be covered by `caller_scopes`; the
+    /// thread then runs with exactly `declared ∪ runtime_manifest` — never the
+    /// caller's full scopes. Manifest runtime authority is minted from the signed
+    /// bundle manifest and needs no caller coverage. Recovery/continuation
+    /// instead preserves the admitted capsule verbatim.
+    RootAdmission { caller_scopes: &'a [String] },
     /// Continuation / native-resume: the live composed caps MUST equal the caps
     /// the predecessor captured (no silent privilege drift); run with them.
     ExactPinned(&'a [String]),
@@ -3429,6 +3432,290 @@ fn union_cap_sources(declared: Vec<String>, runtime_manifest: Vec<String>) -> Ve
         .collect()
 }
 
+/// The scopes a principal lends to the work it launches: a local principal's
+/// grant scopes, or a delegated principal's delegated scopes.
+pub fn principal_caller_scopes(
+    principal: &ryeos_engine::contracts::EffectivePrincipal,
+) -> &[String] {
+    match principal {
+        ryeos_engine::contracts::EffectivePrincipal::Local(principal) => &principal.scopes,
+        ryeos_engine::contracts::EffectivePrincipal::Delegated(principal) => {
+            &principal.delegated_scopes
+        }
+    }
+}
+
+/// The covering authority recorded on a thread: the acting principal plus the
+/// digest of the authorized-key grant it authenticated under (`None` for a
+/// caller that is not grant-backed). Scheduled fires carry the grant hash their
+/// schedule pinned through the same handler context.
+pub fn covering_authority_for(
+    acting_principal: &str,
+    handler_context: Option<&ryeos_app::handler_context::HandlerContext>,
+) -> ryeos_app::launch_metadata::CoveringAuthority {
+    ryeos_app::launch_metadata::CoveringAuthority {
+        principal: acting_principal.to_owned(),
+        grant_digest: handler_context
+            .and_then(|context| context.authenticated_grant_authority.as_ref())
+            .map(|authority| authority.principal_grant_hash.clone()),
+    }
+}
+
+/// Record the covering authority on a root launch's metadata unless it already
+/// carries one: a continuation keeps the authority that covered its seed, and a
+/// fresh root records its caller. Every launch driver must pass through this so
+/// that revoking an authorized-key grant can find the live threads it covered.
+pub(crate) fn with_root_covering_authority(
+    metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata,
+    acting_principal: &str,
+    handler_context: Option<&ryeos_app::handler_context::HandlerContext>,
+) -> ryeos_app::launch_metadata::RuntimeLaunchMetadata {
+    if metadata.covering_authority.is_some() {
+        return metadata;
+    }
+    metadata.with_covering_authority(covering_authority_for(acting_principal, handler_context))
+}
+
+/// Typed 403 refusal naming the item, the caller, every uncovered cap, and the cure.
+fn caller_capability_not_covered_error(
+    item_ref: &str,
+    caller_principal: &str,
+    uncovered: &[String],
+) -> DispatchError {
+    let caps = uncovered
+        .iter()
+        .map(|cap| format!("`{cap}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    DispatchError::LaunchPolicyForbidden {
+        code: "caller_capability_not_covered".to_owned(),
+        message: format!(
+            "caller `{caller_principal}` does not hold every capability `{item_ref}` declares: \
+             uncovered {caps}. A thread never holds authority its caller did not lend; \
+             grant the caller {caps} (a route principal holds what its signed route lists under \
+             `authority.capabilities`, within its bundle manifest's \
+             `runtime_authority.route_capabilities`; a schedule holds its registered \
+             `capabilities`), or narrow the item's `requires.capabilities.declared`"
+        ),
+        binding: None,
+    }
+}
+
+fn caller_capability_not_covered(
+    item_ref: &str,
+    caller_principal: &str,
+    uncovered: &[String],
+) -> BuildAndLaunchError {
+    BuildAndLaunchError::LaunchPreparation(Box::new(caller_capability_not_covered_error(
+        item_ref,
+        caller_principal,
+        uncovered,
+    )))
+}
+
+/// Refuse, before any thread exists, a root launch whose caller does not cover
+/// every capability the composed item declares: the same judgement root
+/// admission makes at launch, run on the exact admitted resolution so a
+/// synchronous caller learns of the refusal instead of an accepted-then-failed
+/// thread. Reserved or malformed declarations are refused here as launch
+/// would refuse them.
+pub fn preflight_root_caller_coverage(
+    composed: &ryeos_engine::resolution::KindComposedView,
+    caller_scopes: &[String],
+    caller_principal: &str,
+    item_ref: &str,
+) -> Result<(), DispatchError> {
+    require_declared_caps_covered(
+        derive_effective_caps(composed),
+        caller_scopes,
+        caller_principal,
+        item_ref,
+    )
+}
+
+/// Refuse unless `caller_scopes` cover every cap in `declared` (an item's
+/// composed `requires.capabilities.declared`). Reserved and malformed
+/// declarations are refused as launch refuses them.
+pub fn require_declared_caps_covered(
+    declared: Vec<String>,
+    caller_scopes: &[String],
+    caller_principal: &str,
+    item_ref: &str,
+) -> Result<(), DispatchError> {
+    ryeos_bundle::runtime_authority::reject_disallowed_composed_grants(&declared).map_err(
+        |error| DispatchError::CapabilityRejected {
+            reason: error.to_string(),
+        },
+    )?;
+    let uncovered = uncovered_by_caller(caller_scopes, &declared);
+    if uncovered.is_empty() {
+        return Ok(());
+    }
+    Err(caller_capability_not_covered_error(
+        item_ref,
+        caller_principal,
+        &uncovered,
+    ))
+}
+
+/// The capabilities the composed item at `item_ref` declares, resolved from the
+/// engine without a launch. This is the declaration root admission will judge,
+/// read for callers that must refuse a mismatch before the launch exists (a
+/// schedule registration).
+pub fn composed_declared_caps(
+    engine: &ryeos_engine::engine::Engine,
+    plan_context: &ryeos_engine::contracts::PlanContext,
+    item_ref: &ryeos_engine::canonical_ref::CanonicalRef,
+    materialized_project_root: Option<PathBuf>,
+) -> Result<Vec<String>, ryeos_engine::error::EngineError> {
+    let resolved = engine.resolve(plan_context, item_ref)?;
+    let attestation = engine.verify_attested(plan_context, resolved)?;
+    let closure = engine.resolve_verified_resolution_closure(
+        plan_context,
+        &attestation,
+        materialized_project_root,
+    )?;
+    let (resolution, _, _) = closure.into_parts();
+    Ok(derive_effective_caps(&resolution.composed))
+}
+
+/// Every cap in `caps` that no caller scope covers, sorted and de-duplicated.
+fn uncovered_by_caller<'c>(
+    caller_scopes: &[String],
+    caps: impl IntoIterator<Item = &'c String>,
+) -> Vec<String> {
+    caps.into_iter()
+        .filter(|cap| {
+            !caller_scopes
+                .iter()
+                .any(|scope| ryeos_state::capability::pattern_covers(scope, cap))
+        })
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// Root admission: refuse unless the caller covers every declared cap, then run
+/// with exactly `declared ∪ runtime_manifest` (see [`CapabilityPolicy::RootAdmission`]).
+fn apply_root_admission(
+    caller_scopes: &[String],
+    caller_principal: &str,
+    declared: Vec<String>,
+    runtime_manifest: Vec<String>,
+    item_ref: &str,
+) -> Result<Vec<String>, BuildAndLaunchError> {
+    let uncovered = uncovered_by_caller(caller_scopes, &declared);
+    if !uncovered.is_empty() {
+        return Err(caller_capability_not_covered(
+            item_ref,
+            caller_principal,
+            &uncovered,
+        ));
+    }
+    // A state home opens only for a caller whose own grant carries the `use`
+    // capability of that namespace; the minted access cap is the item's side.
+    for cap in &runtime_manifest {
+        if let Some((bundle_id, namespace, _)) =
+            ryeos_bundle::runtime_authority::parse_bundle_state_access_cap(cap)
+        {
+            ryeos_app::bundle_state_home::authorize_caller(
+                caller_scopes,
+                &bundle_id,
+                &namespace,
+                caller_principal,
+            )
+            .map_err(state_home_launch_error)?;
+        }
+    }
+    Ok(union_cap_sources(declared, runtime_manifest))
+}
+
+/// Map a state home refusal onto the typed launch refusal carrying its code.
+fn state_home_launch_error(
+    refusal: ryeos_bundle::runtime_authority::StateHomeRefusal,
+) -> BuildAndLaunchError {
+    BuildAndLaunchError::LaunchPreparation(Box::new(state_home_dispatch_error(&refusal)))
+}
+
+/// The typed dispatch refusal for a state home refusal: its code, its message
+/// naming the fix, and the class a caller maps to a status.
+pub(crate) fn state_home_dispatch_error(
+    refusal: &ryeos_bundle::runtime_authority::StateHomeRefusal,
+) -> DispatchError {
+    use ryeos_bundle::runtime_authority::StateHomeRefusal;
+
+    let code = refusal.code().to_owned();
+    let message = refusal.to_string();
+    let prepared = |classification: &str| DispatchError::LaunchPreparationFailed {
+        code: code.clone(),
+        message: message.clone(),
+        classification: classification.to_owned(),
+        binding: None,
+        details: Box::default(),
+    };
+    match refusal {
+        StateHomeRefusal::Undeclared { .. } => prepared("configuration"),
+        StateHomeRefusal::NamespaceInvalid { .. } => prepared("caller"),
+        StateHomeRefusal::NamespaceDenied { .. } => DispatchError::LaunchPolicyForbidden {
+            code,
+            message,
+            binding: None,
+        },
+        StateHomeRefusal::Unavailable { .. } => prepared("unavailable"),
+    }
+}
+
+/// Open the one bundle state namespace a launch's sealed capabilities name.
+fn open_launch_bundle_state_home(
+    state: &AppState,
+    engine: &ryeos_engine::engine::Engine,
+    effective_caps: &[String],
+) -> Result<Option<ryeos_engine::isolation::IsolationBundleStateHome>, BuildAndLaunchError> {
+    ryeos_app::bundle_state_home::open_for_sealed_caps(
+        &state.config.app_root,
+        &state.identity,
+        &engine.registered_bundle_generation_fingerprint(),
+        effective_caps,
+    )
+    .map_err(state_home_launch_error)
+}
+
+/// Operator follow-up gate: the sender must cover every sealed cap the
+/// follow-up will run with. Caps in the manifest runtime-authority namespace
+/// are minted from the signed bundle manifest (a composed item can never
+/// declare them), so they need no sender coverage.
+fn require_sender_covers_sealed_caps(
+    sender: &ryeos_engine::contracts::EffectivePrincipal,
+    sealed_caps: &[String],
+    item_ref: &str,
+) -> Result<(), BuildAndLaunchError> {
+    let uncovered = uncovered_by_caller(
+        principal_caller_scopes(sender),
+        sealed_caps.iter().filter(|cap| {
+            !ryeos_bundle::runtime_authority::composed_grant_overlaps_manifest_runtime_authority(
+                cap,
+            )
+        }),
+    );
+    if uncovered.is_empty() {
+        return Ok(());
+    }
+    let sender_fingerprint = match sender {
+        ryeos_engine::contracts::EffectivePrincipal::Local(principal) => {
+            principal.fingerprint.as_str()
+        }
+        ryeos_engine::contracts::EffectivePrincipal::Delegated(principal) => {
+            principal.caller_fingerprint.as_str()
+        }
+    };
+    Err(caller_capability_not_covered(
+        item_ref,
+        sender_fingerprint,
+        &uncovered,
+    ))
+}
+
 /// Apply a [`CapabilityPolicy`] to the freshly-resolved cap sources, returning the
 /// caps the launch should actually run with (callback token + envelope + launch
 /// metadata all consume the result). `child_execute_cap` is the canonical execute
@@ -3439,10 +3726,17 @@ fn apply_capability_policy(
     runtime_manifest: Vec<String>,
     policy: CapabilityPolicy<'_>,
     item_ref: &str,
+    caller_principal: &str,
     child_execute_cap: &str,
 ) -> Result<Vec<String>, BuildAndLaunchError> {
     match policy {
-        CapabilityPolicy::AdmissionDefault => Ok(union_cap_sources(declared, runtime_manifest)),
+        CapabilityPolicy::RootAdmission { caller_scopes } => apply_root_admission(
+            caller_scopes,
+            caller_principal,
+            declared,
+            runtime_manifest,
+            item_ref,
+        ),
         CapabilityPolicy::ExactPinned(captured) => {
             let composed = union_cap_sources(declared, runtime_manifest);
             let recomputed: BTreeSet<&str> = composed.iter().map(String::as_str).collect();
@@ -3474,7 +3768,7 @@ fn apply_capability_policy(
 /// Recover the exact capability closure sealed at first admission.
 ///
 /// `ExactPinned` is an additional consistency assertion supplied by native
-/// resume/continuation metadata. `AdmissionDefault` and `FollowChildHybrid`
+/// resume/continuation metadata. `RootAdmission` and `FollowChildHybrid`
 /// have already been evaluated before the capsule was persisted, so replaying
 /// either policy would re-enter mutable item/manifest authority and is
 /// deliberately forbidden.
@@ -3551,6 +3845,24 @@ fn apply_follow_child_hybrid(
             });
         }
         effective.insert(cap);
+    }
+
+    // A state home is the exception: it was opened for the parent's caller, and
+    // a follow child has no caller of its own to present the `use` cap. The
+    // child may keep only a namespace the parent itself already held.
+    for cap in &runtime_manifest {
+        if let Some((bundle_id, namespace, _)) =
+            ryeos_bundle::runtime_authority::parse_bundle_state_access_cap(cap)
+            && !parent_effective_caps.contains(cap)
+        {
+            return Err(state_home_launch_error(
+                ryeos_bundle::runtime_authority::StateHomeRefusal::NamespaceDenied {
+                    bundle_id,
+                    namespace,
+                    caller: "the follow child's parent launch".to_owned(),
+                },
+            ));
+        }
     }
 
     // Child-owned manifest runtime authority (bundle-events / runtime-vault),
@@ -4067,7 +4379,15 @@ async fn prepare_managed_launch_authority(
     })?;
     let subject_resolution_authority = root_admission.resolution_subject_authority().clone();
     let resolution_project_root = root_admission.resolution_workspace();
-    let engine_roots = engine.resolution_roots(resolution_project_root.map(Path::to_path_buf));
+    let engine_roots = engine
+        .resolution_roots(resolution_project_root.map(Path::to_path_buf))
+        .with_logical_project_root(
+            root_admission
+                .verified_subject()
+                .resolved
+                .logical_project_root
+                .clone(),
+        );
     let bundle_roots: Vec<PathBuf> = engine_roots
         .authoritative_bundle_roots()
         .map_err(|error| BuildAndLaunchError::Internal(anyhow::anyhow!(error)))?
@@ -4919,13 +5239,26 @@ async fn prepare_managed_launch_authority(
         .map_err(|error| BuildAndLaunchError::CapabilityRejected {
             reason: error.to_string(),
         })?;
-        let runtime_capability_caps = crate::dispatch::mint_runtime_capability_caps(
+        let mut runtime_capability_caps = crate::dispatch::mint_runtime_capability_caps(
             resolution.composed.composed.get("requires"),
             &params.resolved.resolved_item,
             resolution.effective_trust_class,
             engine,
         )
         .map_err(|reason| BuildAndLaunchError::CapabilityRejected { reason })?;
+        // A bundle state access cap joins the minted set only when the signed
+        // manifest backs the namespace this launch resolves. Whether the
+        // caller may open it is judged by the capability policy below.
+        runtime_capability_caps.extend(
+            ryeos_app::runtime_capability_admission::mint_state_home_cap(
+                resolution.composed.composed.get("requires"),
+                &params.resolved.resolved_item,
+                resolution.effective_trust_class,
+                engine,
+                params.parameters,
+            )
+            .map_err(state_home_launch_error)?,
+        );
         let child_execute_cap = ryeos_runtime::authorizer::canonical_cap(
             &params.resolved.resolved_item.canonical_ref.kind,
             &params.resolved.resolved_item.canonical_ref.bare_id,
@@ -4936,6 +5269,7 @@ async fn prepare_managed_launch_authority(
             runtime_capability_caps,
             params.capability_policy,
             &params.resolved.item_ref,
+            params.acting_principal,
             &child_execute_cap,
         )?
     };
@@ -5258,6 +5592,14 @@ async fn prepare_managed_launch_authority(
             item_ref: params.resolved.item_ref.clone(),
             secrets: missing_secrets_from_requirements(&names, &secret_requirements),
         },
+        // An authorization refusal carrying the ceiling's own code.
+        VaultReadError::NameRefused(refusal) => {
+            BuildAndLaunchError::LaunchPreparation(Box::new(DispatchError::LaunchPolicyForbidden {
+                code: refusal.code().to_owned(),
+                message: refusal.to_string(),
+                binding: None,
+            }))
+        }
         error @ VaultReadError::AuthorityViolation(_) => {
             BuildAndLaunchError::Internal(anyhow::anyhow!("vault read refused: {error}"))
         }
@@ -5489,6 +5831,12 @@ async fn prepare_managed_launch_authority(
                 executor_ref: Some(executor_ref.clone()),
                 runtime_ref: Some(selected_runtime.canonical_ref.to_string()),
             });
+        // A continuation keeps the authority that covered its seed (the
+        // admitting principal, or the operator follow-up's sender); a fresh
+        // root records the caller that lent it its declared caps and, when that
+        // caller authenticated under an authorized-key grant, the grant digest.
+        metadata =
+            with_root_covering_authority(metadata, params.acting_principal, params.handler_context);
         if let Some(native_resume) = native_resume {
             metadata = metadata.with_native_resume(native_resume);
         }
@@ -5775,14 +6123,7 @@ async fn condition_workspace_output_authority(
     }
     let context = crate::executor::ExecutionContext {
         principal_fingerprint: params.acting_principal.to_owned(),
-        caller_scopes: match &params.resolved.plan_context.requested_by {
-            ryeos_engine::contracts::EffectivePrincipal::Local(principal) => {
-                principal.scopes.clone()
-            }
-            ryeos_engine::contracts::EffectivePrincipal::Delegated(principal) => {
-                principal.delegated_scopes.clone()
-            }
-        },
+        caller_scopes: principal_caller_scopes(&params.resolved.plan_context.requested_by).to_vec(),
         engine: engine.clone(),
         plan_ctx: params.resolved.plan_context.clone(),
         requested_call: None,
@@ -6428,6 +6769,7 @@ async fn run_claimed_thread_row_inner(
         source: bound_source_closure,
     } = super::runner::prepare_process_inputs(
         state,
+        state.isolation.as_ref(),
         provenance,
         &thread_id,
         resolution,
@@ -6435,7 +6777,11 @@ async fn run_claimed_thread_row_inner(
         super::source_closure::SourceMountPlacement::Project,
         false,
     )
-    .map_err(BuildAndLaunchError::Internal)?;
+    .map_err(|error| {
+        super::external_content::classify_quarantined_large_object(&error)
+            .map(BuildAndLaunchError::from)
+            .unwrap_or_else(|| BuildAndLaunchError::Internal(error))
+    })?;
     let post_publication_timer = launch_timings
         .as_ref()
         .map(|timings| timings.top_level("post_publication_launch_setup"));
@@ -6479,7 +6825,15 @@ async fn run_claimed_thread_row_inner(
         .ok_or_else(|| anyhow::anyhow!("managed launch has no exact root admission"))?;
     let subject_resolution_authority = root_admission.resolution_subject_authority().clone();
     let resolution_project_root = root_admission.resolution_workspace();
-    let engine_roots = engine.resolution_roots(resolution_project_root.map(Path::to_path_buf));
+    let engine_roots = engine
+        .resolution_roots(resolution_project_root.map(Path::to_path_buf))
+        .with_logical_project_root(
+            root_admission
+                .verified_subject()
+                .resolved
+                .logical_project_root
+                .clone(),
+        );
     let effective_request_snapshot = match resolved
         .root_admission
         .as_ref()
@@ -6500,7 +6854,8 @@ async fn run_claimed_thread_row_inner(
     // 2. Compute limits (root execution: depth = 0)
     let root_item_ref = ryeos_engine::canonical_ref::CanonicalRef::parse(&resolved.item_ref)
         .map_err(|e| anyhow::anyhow!("build_and_launch: invalid root item ref: {e}"))?;
-    let node_trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
+    let trusted_signers =
+        ryeos_engine::launch_envelope_types::trusted_signer_entries(&engine.node_trust_store);
     let node_config_root = engine.node_config_root();
     let execution_controls = load_execution_control_snapshot_cached(
         engine,
@@ -6509,7 +6864,7 @@ async fn run_claimed_thread_row_inner(
         &root_item_ref,
         &subject_resolution_authority,
         node_config_root.as_deref(),
-        &node_trusted_keys_dir,
+        &trusted_signers,
         provenance.pinned_materialization(),
         &selected_runtime.yaml.limits,
     )
@@ -7128,14 +7483,7 @@ async fn run_claimed_thread_row_inner(
     let envelope = LaunchEnvelopeBuilder::new(
         cap.invocation_id.clone(),
         thread_id.clone(),
-        EnvelopeRoots {
-            project_root: process_project_path.clone(),
-            bundle_roots,
-            node_trusted_keys_dir,
-            // Deliberate runtime state-root override, carried so the runtime
-            // can target its state writes (thread state, transcripts, thread
-            // knowledge) away from the source project.
-        },
+        EnvelopeRoots::new(process_project_path.clone(), bundle_roots, trusted_signers),
         EnvelopeRequest {
             // Strip runtime-control fields from prompt inputs. Parent
             // budget/depth now travels out-of-band, but rejecting prompt leaks
@@ -7228,6 +7576,16 @@ async fn run_claimed_thread_row_inner(
     let callback_owned = envelope.callback.clone();
     let thread_id_owned = thread_id.to_string();
     let duration = hard_limits.duration_seconds;
+    // A stop policy already recorded on the row (a continuation seed or a
+    // same-thread relaunch) is authoritative; otherwise this launch records
+    // the policy its signed execution config resolves.
+    let stop_policy = attach_stop_policy(
+        state
+            .state_store
+            .get_launch_metadata(&thread_id)?
+            .and_then(|metadata| metadata.cancellation_mode),
+        execution_policy,
+    );
     let descriptor_clone = verified_protocol.descriptor.clone();
     let runtime_item_ref = selected_runtime.canonical_ref.clone();
     let observation_declarations = selected_runtime.yaml.observability.child_records.clone();
@@ -7292,6 +7650,7 @@ async fn run_claimed_thread_row_inner(
     let isolation_state_root = provenance
         .state_root_override()
         .map(std::path::Path::to_path_buf);
+    let bundle_state_home = open_launch_bundle_state_home(state, engine, &effective_caps)?;
     let isolation_workspace_lifeline =
         admitted_input_lifeline.or_else(|| provenance.workspace_lifeline());
     let cas_root_owned = state
@@ -7367,6 +7726,7 @@ async fn run_claimed_thread_row_inner(
             project_state_scope: project_state_scope.as_deref(),
             live_access: isolation_live_access,
             state_root: isolation_state_root.as_deref(),
+            bundle_state_home: bundle_state_home.as_ref(),
             workspace_lifeline: isolation_workspace_lifeline,
             owns_workspace,
             envelope: &envelope,
@@ -7393,6 +7753,7 @@ async fn run_claimed_thread_row_inner(
             is_resume,
             rearm_native_resume_budget_after_attach,
             selected_resources,
+            stop_policy,
         });
         drop(spawn_work_timer);
         drop(spawn_worker_total_timer);
@@ -7736,25 +8097,43 @@ async fn run_claimed_thread_row_inner(
         // Preserve the runtime's failure testimony and destroy the controller
         // workspace after terminalization; only a completed authenticated
         // import may enter the ordinary retained-generation freeze owner.
+        // A HEAD advance refused before any write is a terminal fact: the
+        // thread fails `head_advance_not_applied` below, with the retained
+        // generation joining that failed terminal.
+        let mut head_advance_not_applied = None;
         let result_generation = if owns_workspace && !external_candidate_without_completion {
-            super::prepare_stopped_managed_runtime_terminal_project_result(
+            match super::prepare_stopped_managed_runtime_terminal_project_result(
                 state,
                 provenance,
                 &thread_id,
                 launch_owner,
-            )
-            .map_err(|error| {
-                tracing::error!(
-                    thread_id = %thread_id,
-                    launch_owner,
-                    item_ref = %resolved.item_ref,
-                    error = %format!("{error:#}"),
-                    "failed to prepare stopped managed runtime terminal project result"
-                );
-                BuildAndLaunchError::Internal(
-                    error.context("prepare stopped managed runtime terminal project result"),
-                )
-            })?
+            ) {
+                Ok(generation) => generation,
+                Err(error) => match super::HeadAdvanceNotApplied::find(&error) {
+                    Some(not_applied) => {
+                        tracing::warn!(
+                            thread_id = %thread_id,
+                            launch_owner,
+                            error = %not_applied,
+                            "stopped managed runtime HEAD advance was not applied; failing with the retained generation"
+                        );
+                        head_advance_not_applied = Some(not_applied.clone());
+                        Some(not_applied.retained.clone())
+                    }
+                    None => {
+                        tracing::error!(
+                            thread_id = %thread_id,
+                            launch_owner,
+                            item_ref = %resolved.item_ref,
+                            error = %format!("{error:#}"),
+                            "failed to prepare stopped managed runtime terminal project result"
+                        );
+                        return Err(BuildAndLaunchError::Internal(error.context(
+                            "prepare stopped managed runtime terminal project result",
+                        )));
+                    }
+                },
+            }
         } else {
             None
         };
@@ -7898,7 +8277,19 @@ async fn run_claimed_thread_row_inner(
             );
         }
         let observed_runtime_status = runtime_result.status;
-        let fallback = fallback_finalization(&thread_id, &runtime_result, terminal_status);
+        let fallback = match head_advance_not_applied.as_ref() {
+            // An operator stop still settles as that stop.
+            Some(not_applied)
+                if !matches!(
+                    terminal_status,
+                    ryeos_state::objects::ThreadStatus::Killed
+                        | ryeos_state::objects::ThreadStatus::Cancelled
+                ) =>
+            {
+                head_advance_not_applied_finalization(&thread_id, &runtime_result, not_applied)
+            }
+            _ => fallback_finalization(&thread_id, &runtime_result, terminal_status),
+        };
         runtime_result = fallback.runtime_result;
         let mut hosted_root_terminalization =
             if state.state_store.dedicated_session(&thread_id)?.is_some() {
@@ -8537,6 +8928,7 @@ async fn prepare_follow_child_launch_inner(
         parent_thread_id: None,
         effect_authority: None,
         finalized_direct: None,
+        host_access: None,
     };
 
     let project_path = execution.provenance.effective_path().to_path_buf();
@@ -8755,11 +9147,20 @@ async fn prepare_successor_launch(
                 successor_thread_id,
             )?,
         ),
-        SuccessorMode::Operator => (
-            false,
-            CapabilityPolicy::AdmissionDefault,
-            CheckpointResumeMode::None,
-        ),
+        SuccessorMode::Operator => {
+            // The follow-up runs with the predecessor's sealed caps exactly,
+            // and only a sender that covers them may drive it.
+            require_sender_covers_sealed_caps(
+                &resume.requested_by,
+                &resume.effective_caps,
+                &resume.item_ref,
+            )?;
+            (
+                false,
+                CapabilityPolicy::ExactPinned(resume.effective_caps.as_slice()),
+                CheckpointResumeMode::None,
+            )
+        }
         SuccessorMode::Follow => {
             return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
                 "follow successor authority cannot be prepared by this path"
@@ -8898,7 +9299,11 @@ pub async fn prepare_operator_successor_launch(
     let successor_metadata = source_metadata
         .continuation_successor_seed(resume.clone())
         .with_continuation_source(source_thread_id)
-        .with_sealed_root_request(sealed);
+        .with_sealed_root_request(sealed)
+        .with_covering_authority(covering_authority_for(
+            &handler_context.fingerprint,
+            Some(handler_context),
+        ));
     let mut prepared = prepare_successor_launch(
         state,
         successor_thread_id,
@@ -9608,7 +10013,8 @@ async fn launch_claimed_successor(
 
     // Machine: fold the chain with NO new stimulus and assert the predecessor's
     // captured caps equal the capsule. Operator: inject the seeded input while
-    // preserving that same sealed capability closure.
+    // preserving that same sealed capability closure, which the follow-up
+    // sender must cover.
     let (suppress_stimulus, capability_policy) = match mode {
         // Machine and Follow both fold the chain and assert captured capability
         // identity; they differ only in checkpoint sourcing. Operator injects
@@ -9617,7 +10023,17 @@ async fn launch_claimed_successor(
             true,
             CapabilityPolicy::ExactPinned(resume.effective_caps.as_slice()),
         ),
-        SuccessorMode::Operator => (false, CapabilityPolicy::AdmissionDefault),
+        SuccessorMode::Operator => {
+            require_sender_covers_sealed_caps(
+                &resume.requested_by,
+                &resume.effective_caps,
+                &resume.item_ref,
+            )?;
+            (
+                false,
+                CapabilityPolicy::ExactPinned(resume.effective_caps.as_slice()),
+            )
+        }
     };
 
     let launch_params = BuildAndLaunchParams {
@@ -11922,6 +12338,48 @@ mod tests {
     use super::*;
     use crate::execution::limits::{LimitCaps, LimitValues};
 
+    fn grant_backed_context(digest: &str) -> ryeos_app::handler_context::HandlerContext {
+        ryeos_app::handler_context::HandlerContext::new_with_grant_authority(
+            "fp:grantee".to_owned(),
+            vec![],
+            ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient,
+            None,
+            ryeos_engine::principal_contract::AuthenticatedGrantAuthority {
+                principal_grant_hash: digest.to_owned(),
+                forwarding: None,
+            },
+        )
+    }
+
+    #[test]
+    fn a_fresh_root_records_the_grant_digest_it_authenticated_under() {
+        let digest = "ab".repeat(32);
+        let context = grant_backed_context(&digest);
+        let metadata = with_root_covering_authority(
+            ryeos_app::launch_metadata::RuntimeLaunchMetadata::default(),
+            "fp:grantee",
+            Some(&context),
+        );
+        let authority = metadata.covering_authority.expect("covering authority");
+        assert_eq!(authority.principal, "fp:grantee");
+        assert_eq!(authority.grant_digest.as_deref(), Some(digest.as_str()));
+    }
+
+    #[test]
+    fn a_seeded_covering_authority_is_kept() {
+        let seeded = ryeos_app::launch_metadata::CoveringAuthority {
+            principal: "fp:seed".to_owned(),
+            grant_digest: None,
+        };
+        let metadata = with_root_covering_authority(
+            ryeos_app::launch_metadata::RuntimeLaunchMetadata::default()
+                .with_covering_authority(seeded.clone()),
+            "fp:grantee",
+            Some(&grant_backed_context(&"cd".repeat(32))),
+        );
+        assert_eq!(metadata.covering_authority, Some(seeded));
+    }
+
     #[test]
     fn retained_launch_error_keeps_only_typed_bounded_stage_diagnostics() {
         let secret = format!(
@@ -12315,23 +12773,369 @@ mod tests {
             caps(runtime_manifest),
             policy,
             "i",
+            "fp:caller",
             child_execute_cap,
         )
     }
 
+    fn refusal_parts(error: BuildAndLaunchError) -> (String, String) {
+        match error {
+            BuildAndLaunchError::LaunchPreparation(inner) => match *inner {
+                DispatchError::LaunchPolicyForbidden { code, message, .. } => (code, message),
+                other => panic!("expected typed launch-policy refusal, got {other:?}"),
+            },
+            other => panic!("expected typed launch-policy refusal, got {other:?}"),
+        }
+    }
+
     #[test]
-    fn capability_policy_fresh_unions_both_sources() {
-        // Fresh runs with the union of caller-delegated and manifest caps.
+    fn root_admission_runs_with_exactly_declared_and_manifest_caps() {
+        // A caller that covers the declared cap runs the thread with exactly
+        // declared and manifest caps, not the caller's wider scopes.
+        let scopes = caps(&["ryeos.execute.tool.*", "ryeos.execute.service.*"]);
         let out = apply_policy(
             &["ryeos.execute.tool.echo"],
             &["ryeos.get.vault.child/oauth"],
-            CapabilityPolicy::AdmissionDefault,
+            CapabilityPolicy::RootAdmission {
+                caller_scopes: &scopes,
+            },
             "",
         )
         .unwrap();
         assert_eq!(
             out,
             caps(&["ryeos.execute.tool.echo", "ryeos.get.vault.child/oauth"])
+        );
+    }
+
+    const STATE_ACCESS: &str = "ryeos.write.bundle-state.central-auth/realm-a";
+
+    #[test]
+    fn bundle_state_namespace_needs_the_callers_own_use_grant() {
+        // The caller's grant, not anything the item composed, opens the home.
+        let granted = caps(&["ryeos.use.bundle-state.central-auth/realm-a"]);
+        let out = apply_policy(
+            &[],
+            &[STATE_ACCESS],
+            CapabilityPolicy::RootAdmission {
+                caller_scopes: &granted,
+            },
+            "",
+        )
+        .unwrap();
+        assert_eq!(out, caps(&[STATE_ACCESS]));
+
+        // A grant for a sibling namespace, an execute wildcard, or nothing at
+        // all is refused with the typed code, naming the cure.
+        for scopes in [
+            caps(&["ryeos.use.bundle-state.central-auth/realm-b"]),
+            caps(&["ryeos.execute.*"]),
+            caps(&[]),
+        ] {
+            let error = apply_policy(
+                &[],
+                &[STATE_ACCESS],
+                CapabilityPolicy::RootAdmission {
+                    caller_scopes: &scopes,
+                },
+                "",
+            )
+            .unwrap_err();
+            let (code, message) = refusal_parts(error);
+            assert_eq!(code, "bundle_state_namespace_denied");
+            assert!(
+                message.contains("ryeos.use.bundle-state.central-auth/realm-a")
+                    && message.contains("fp:caller"),
+                "{message}"
+            );
+        }
+        // A wildcard use grant for the bundle covers every namespace.
+        let wildcard = caps(&["ryeos.use.bundle-state.central-auth/*"]);
+        assert!(
+            apply_policy(
+                &[],
+                &[STATE_ACCESS],
+                CapabilityPolicy::RootAdmission {
+                    caller_scopes: &wildcard,
+                },
+                "",
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn follow_child_keeps_only_a_state_namespace_its_parent_held() {
+        let execute = "ryeos.execute.tool.child/run";
+        let parent_with = caps(&[execute, STATE_ACCESS]);
+        let kept = apply_policy(
+            &[],
+            &[STATE_ACCESS],
+            CapabilityPolicy::FollowChildHybrid {
+                parent_effective_caps: &parent_with,
+            },
+            execute,
+        )
+        .unwrap();
+        assert_eq!(kept, caps(&[STATE_ACCESS]));
+
+        // A parent that held no namespace (or another one) cannot hand the
+        // child a home: the child has no caller to present the use cap.
+        for parent in [
+            caps(&[execute]),
+            caps(&[execute, "ryeos.write.bundle-state.central-auth/realm-b"]),
+        ] {
+            let error = apply_policy(
+                &[],
+                &[STATE_ACCESS],
+                CapabilityPolicy::FollowChildHybrid {
+                    parent_effective_caps: &parent,
+                },
+                execute,
+            )
+            .unwrap_err();
+            let (code, _) = refusal_parts(error);
+            assert_eq!(code, "bundle_state_namespace_denied");
+        }
+    }
+
+    #[test]
+    fn exact_pinned_continuation_reuses_the_sealed_state_access() {
+        // The sealed set already carries the access cap the first admission
+        // minted after the caller check; a continuation has no caller scopes
+        // and must neither re-judge them nor drift.
+        let sealed = caps(&[STATE_ACCESS]);
+        let out = apply_policy(
+            &[],
+            &[STATE_ACCESS],
+            CapabilityPolicy::ExactPinned(&sealed),
+            "",
+        )
+        .unwrap();
+        assert_eq!(out, sealed);
+    }
+
+    #[test]
+    fn state_home_refusals_carry_their_codes_and_statuses() {
+        use ryeos_bundle::runtime_authority::StateHomeRefusal;
+
+        for (refusal, code, status) in [
+            (
+                StateHomeRefusal::Undeclared {
+                    bundle_id: "b".into(),
+                    detail: "d".into(),
+                },
+                "bundle_state_home_undeclared",
+                422,
+            ),
+            (
+                StateHomeRefusal::NamespaceInvalid { detail: "d".into() },
+                "bundle_state_namespace_invalid",
+                400,
+            ),
+            (
+                StateHomeRefusal::NamespaceDenied {
+                    bundle_id: "b".into(),
+                    namespace: "n".into(),
+                    caller: "fp:x".into(),
+                },
+                "bundle_state_namespace_denied",
+                403,
+            ),
+            (
+                StateHomeRefusal::Unavailable { detail: "d".into() },
+                "bundle_state_home_unavailable",
+                503,
+            ),
+        ] {
+            let BuildAndLaunchError::LaunchPreparation(inner) = state_home_launch_error(refusal)
+            else {
+                panic!("a state home refusal is a launch-preparation refusal");
+            };
+            assert_eq!(inner.code(), code);
+            assert_eq!(inner.http_status().as_u16(), status, "{code}");
+        }
+    }
+
+    #[test]
+    fn root_admission_refuses_every_uncovered_declared_cap() {
+        let scopes = caps(&["ryeos.execute.tool.echo"]);
+        let error = apply_policy(
+            &[
+                "ryeos.execute.tool.echo",
+                "ryeos.execute.service.bundle/list",
+                "ryeos.fetch.knowledge.x/y",
+            ],
+            &[],
+            CapabilityPolicy::RootAdmission {
+                caller_scopes: &scopes,
+            },
+            "",
+        )
+        .unwrap_err();
+        let (code, message) = refusal_parts(error);
+        assert_eq!(code, "caller_capability_not_covered");
+        assert!(message.contains("`ryeos.execute.service.bundle/list`"));
+        assert!(message.contains("`ryeos.fetch.knowledge.x/y`"));
+        assert!(!message.contains("`ryeos.execute.tool.echo`"));
+        assert!(message.contains("fp:caller"));
+        assert!(message.contains("narrow the item's `requires.capabilities.declared`"));
+    }
+
+    #[test]
+    fn preflight_coverage_refuses_with_the_code_root_admission_would_use() {
+        let scopes = caps(&["ryeos.execute.tool.echo"]);
+        let error = require_declared_caps_covered(
+            caps(&[
+                "ryeos.execute.tool.echo",
+                "ryeos.execute.service.bundle/list",
+            ]),
+            &scopes,
+            "route:arc/ingest",
+            "directive:arc/ingest",
+        )
+        .unwrap_err();
+        let DispatchError::LaunchPolicyForbidden { code, message, .. } = error else {
+            panic!("expected a launch-policy refusal");
+        };
+        assert_eq!(code, "caller_capability_not_covered");
+        assert!(message.contains("route:arc/ingest"));
+        assert!(message.contains("`ryeos.execute.service.bundle/list`"));
+        assert!(!message.contains("`ryeos.execute.tool.echo`"));
+        assert!(message.contains("authority.capabilities"));
+        assert!(message.contains("narrow the item's `requires.capabilities.declared`"));
+    }
+
+    #[test]
+    fn preflight_coverage_admits_a_covering_caller_and_refuses_reserved_declarations() {
+        assert!(
+            require_declared_caps_covered(
+                caps(&["ryeos.execute.tool.echo"]),
+                &caps(&["ryeos.execute.tool.*"]),
+                "fp:caller",
+                "directive:x",
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            require_declared_caps_covered(
+                caps(&["ryeos.get.vault.child/oauth"]),
+                &caps(&["*"]),
+                "fp:caller",
+                "directive:x",
+            ),
+            Err(DispatchError::CapabilityRejected { .. })
+        ));
+    }
+
+    #[test]
+    fn root_admission_wildcard_caller_covers_and_effective_set_stays_exact() {
+        let scopes = caps(&["*"]);
+        let out = apply_policy(
+            &["ryeos.execute.tool.echo"],
+            &[],
+            CapabilityPolicy::RootAdmission {
+                caller_scopes: &scopes,
+            },
+            "",
+        )
+        .unwrap();
+        assert_eq!(out, caps(&["ryeos.execute.tool.echo"]));
+    }
+
+    #[test]
+    fn root_admission_manifest_runtime_caps_need_no_caller_coverage() {
+        let scopes: Vec<String> = Vec::new();
+        let out = apply_policy(
+            &[],
+            &["ryeos.get.vault.child/oauth"],
+            CapabilityPolicy::RootAdmission {
+                caller_scopes: &scopes,
+            },
+            "",
+        )
+        .unwrap();
+        assert_eq!(out, caps(&["ryeos.get.vault.child/oauth"]));
+        // A scope-less caller still cannot cover a declared cap.
+        assert!(
+            apply_policy(
+                &["ryeos.execute.tool.echo"],
+                &[],
+                CapabilityPolicy::RootAdmission {
+                    caller_scopes: &scopes,
+                },
+                "",
+            )
+            .is_err()
+        );
+    }
+
+    fn local_sender(scopes: &[&str]) -> ryeos_engine::contracts::EffectivePrincipal {
+        ryeos_engine::contracts::EffectivePrincipal::Local(ryeos_engine::contracts::Principal {
+            fingerprint: "fp:sender".to_owned(),
+            scopes: caps(scopes),
+        })
+    }
+
+    #[test]
+    fn operator_follow_up_requires_sender_to_cover_sealed_caps() {
+        let sealed = caps(&[
+            "ryeos.execute.tool.echo",
+            "ryeos.runtime.dedicated_session.start",
+            "ryeos.get.vault.child/oauth",
+        ]);
+        // Covering sender (wildcards count); manifest runtime caps need no cover.
+        require_sender_covers_sealed_caps(
+            &local_sender(&["ryeos.execute.tool.*", "ryeos.runtime.dedicated_session.*"]),
+            &sealed,
+            "directive:d",
+        )
+        .unwrap();
+        // Uncovering sender is refused with the typed code and every missing cap.
+        let (code, message) = refusal_parts(
+            require_sender_covers_sealed_caps(
+                &local_sender(&["ryeos.execute.tool.echo"]),
+                &sealed,
+                "directive:d",
+            )
+            .unwrap_err(),
+        );
+        assert_eq!(code, "caller_capability_not_covered");
+        assert!(message.contains("`ryeos.runtime.dedicated_session.start`"));
+        assert!(message.contains("fp:sender"));
+        assert!(!message.contains("ryeos.get.vault.child/oauth"));
+    }
+
+    #[test]
+    fn operator_follow_up_pins_sealed_caps_and_refuses_item_drift() {
+        // The operator follow-up uses the machine-continuation pin: the sealed
+        // set is what runs, and a live item whose caps changed is refused.
+        let sealed = caps(&["ryeos.execute.tool.echo", "ryeos.get.vault.child/oauth"]);
+        let out = apply_policy(
+            &["ryeos.execute.tool.echo"],
+            &["ryeos.get.vault.child/oauth"],
+            CapabilityPolicy::ExactPinned(&sealed),
+            "",
+        )
+        .unwrap();
+        assert_eq!(out, sealed);
+        let error = apply_policy(
+            &["ryeos.execute.tool.echo", "ryeos.execute.tool.extra"],
+            &["ryeos.get.vault.child/oauth"],
+            CapabilityPolicy::ExactPinned(&sealed),
+            "",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("continuation capability drift"));
+        // The admitted capsule path never re-unions live sources.
+        assert_eq!(
+            recover_admitted_effective_caps(
+                &sealed,
+                CapabilityPolicy::ExactPinned(&sealed),
+                "tool:echo"
+            )
+            .unwrap(),
+            sealed
         );
     }
 
@@ -12362,7 +13166,7 @@ mod tests {
         assert_eq!(
             recover_admitted_effective_caps(
                 &admitted,
-                CapabilityPolicy::AdmissionDefault,
+                CapabilityPolicy::RootAdmission { caller_scopes: &[] },
                 "tool:echo"
             )
             .unwrap(),
@@ -13620,6 +14424,33 @@ mod tests {
                 expected_substr,
             );
         }
+    }
+
+    #[test]
+    fn a_handoff_successor_records_the_target_policy_and_a_continuation_keeps_its_own() {
+        use ryeos_engine::contracts::CancellationMode;
+        // The target node's own signed execution config.
+        let target_policy =
+            ryeos_engine::execution_policy::ExecutionPolicyResolver::resolve_from_value_for_item(
+                &serde_json::json!({
+                    "defaults": { "cancellation_mode": "graceful", "cancellation_grace_secs": 2 }
+                }),
+                &ryeos_engine::canonical_ref::CanonicalRef::parse("directive:x").unwrap(),
+                None,
+                None,
+            )
+            .unwrap();
+        // A remote handoff successor's seed carries no node-local policy, so
+        // it records the target's, never the source's.
+        assert_eq!(
+            attach_stop_policy(None, &target_policy),
+            CancellationMode::Graceful { grace_secs: 2 }
+        );
+        // A same-node continuation seeds its source's policy, which is kept.
+        assert_eq!(
+            attach_stop_policy(Some(CancellationMode::Hard), &target_policy),
+            CancellationMode::Hard
+        );
     }
 
     #[test]

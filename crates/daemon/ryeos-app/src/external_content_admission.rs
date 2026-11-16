@@ -36,6 +36,110 @@ pub struct ExternalContentBindingUnavailable {
     pub consumer_ref: String,
 }
 
+/// A consumer resolved at an exact generation has declarations with no
+/// current operator binding.
+///
+/// Pinned-project bindings are deliberately generation-scoped: a new project
+/// snapshot or a re-signed consumer changes the consumer authority, so every
+/// earlier binding stops authorizing it. That is correct, but the operator
+/// must learn which declarations failed and how to renew them, not read an
+/// untyped launch failure. The node never renews a binding on its own.
+#[derive(Debug, Clone)]
+pub struct ContentBindingMissing {
+    pub consumer_ref: String,
+    pub project_snapshot_hash: Option<String>,
+    pub effective_consumer_digest: Option<String>,
+    /// Every declaration the preview observed, with its status. Only those
+    /// not `ready` block admission.
+    pub declarations: Vec<ExternalContentPinPreview>,
+}
+
+impl std::fmt::Display for ContentBindingMissing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message())
+    }
+}
+
+impl std::error::Error for ContentBindingMissing {}
+
+impl ContentBindingMissing {
+    pub const CODE: &'static str = "content_binding_missing";
+
+    pub fn from_preview(
+        consumer: &ryeos_state::objects::ExternalContentConsumerAuthority,
+        preview: &ExternalContentValidationPreview,
+    ) -> Self {
+        let (project_snapshot_hash, effective_consumer_digest) = match consumer {
+            ryeos_state::objects::ExternalContentConsumerAuthority::InstalledBundle { .. } => {
+                (None, None)
+            }
+            ryeos_state::objects::ExternalContentConsumerAuthority::PinnedProject {
+                project_snapshot_hash,
+                effective_consumer_digest,
+                ..
+            } => (
+                Some(project_snapshot_hash.clone()),
+                Some(effective_consumer_digest.clone()),
+            ),
+        };
+        Self {
+            consumer_ref: consumer.consumer_ref().to_owned(),
+            project_snapshot_hash,
+            effective_consumer_digest,
+            declarations: preview.declarations.clone(),
+        }
+    }
+
+    pub fn code(&self) -> &'static str {
+        Self::CODE
+    }
+
+    /// The exact operator commands that inspect and renew the binding.
+    pub fn fix(&self) -> String {
+        match &self.project_snapshot_hash {
+            Some(snapshot) => format!(
+                "run `ryeos external-content bindings {consumer} pinned_project {snapshot}` to see each declaration and its prior binding, then `ryeos external-content rebind <prior-binding-hash> {snapshot}` for each missing one",
+                consumer = self.consumer_ref,
+            ),
+            None => format!(
+                "run `ryeos external-content bindings {} installed_bundle` to see each declaration, then stage and `ryeos external-content bind` the missing manifest",
+                self.consumer_ref
+            ),
+        }
+    }
+
+    fn message(&self) -> String {
+        let missing = self
+            .declarations
+            .iter()
+            .filter(|declaration| declaration.status != "ready")
+            .map(|declaration| format!("{} ({})", declaration.id, declaration.status))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "{} has no current content binding for: {missing}; {}",
+            self.consumer_ref,
+            self.fix()
+        )
+    }
+
+    pub fn handler_error(&self) -> crate::handler_error::HandlerError {
+        crate::handler_error::HandlerError::Structured {
+            code: Self::CODE.to_owned(),
+            status: 409,
+            body: serde_json::json!({
+                "code": Self::CODE,
+                "error": self.message(),
+                "consumer_ref": self.consumer_ref,
+                "project_snapshot_hash": self.project_snapshot_hash,
+                "effective_consumer_digest": self.effective_consumer_digest,
+                "declarations": self.declarations,
+                "fix": self.fix(),
+            }),
+        }
+    }
+}
+
 fn require_admission_binding(
     state: &AppState,
     cas: &lillux::CasStore,
@@ -1889,5 +1993,88 @@ mod content_contract_tests {
         );
         contract.large_content.as_mut().unwrap().max_total_bytes = None;
         check(Some(&contract), &combined).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod content_binding_missing_tests {
+    use super::*;
+
+    fn preview() -> ExternalContentValidationPreview {
+        let declaration = |id: &str, status: &str| ExternalContentPinPreview {
+            id: id.to_owned(),
+            expected_digest: Some("e".repeat(64)),
+            observed_digest: Some("e".repeat(64)),
+            binding_digest: None,
+            status: status.to_owned(),
+        };
+        ExternalContentValidationPreview {
+            declarations: vec![
+                declaration("checker-runtime", "missing_binding"),
+                declaration("subject", "ready"),
+                declaration("checker-code", "missing_manifest"),
+            ],
+            ready_for_admission: false,
+        }
+    }
+
+    #[test]
+    fn missing_binding_refusal_names_each_declaration_and_the_cure() {
+        let consumer = ryeos_state::objects::ExternalContentConsumerAuthority::pinned_project(
+            "tool:codex/qualification/consumer-runtime-verifier".to_owned(),
+            "a".repeat(64),
+            "b".repeat(64),
+            "c".repeat(64),
+            None,
+        )
+        .unwrap();
+        let missing = ContentBindingMissing::from_preview(&consumer, &preview());
+        assert_eq!(missing.code(), "content_binding_missing");
+        assert_eq!(
+            missing.project_snapshot_hash.as_deref(),
+            Some("b".repeat(64).as_str())
+        );
+        assert_eq!(
+            missing.effective_consumer_digest.as_deref(),
+            Some("c".repeat(64).as_str())
+        );
+        let message = missing.to_string();
+        assert!(message.contains("checker-runtime (missing_binding)"));
+        assert!(message.contains("checker-code (missing_manifest)"));
+        assert!(!message.contains("subject (ready)"));
+        assert!(message.contains(&format!(
+            "ryeos external-content bindings tool:codex/qualification/consumer-runtime-verifier pinned_project {}",
+            "b".repeat(64)
+        )));
+        assert!(message.contains("ryeos external-content rebind <prior-binding-hash>"));
+
+        // Wrapped in context by any caller, it still reaches the service
+        // boundary as a typed 409 carrying every declaration.
+        let error = anyhow::Error::new(missing).context("qualification preparation");
+        let Some(crate::handler_error::HandlerError::Structured { code, status, body }) =
+            crate::handler_error::extract_handler_error(&error)
+        else {
+            panic!("missing content binding must stay typed");
+        };
+        assert_eq!(code, "content_binding_missing");
+        assert_eq!(status, 409);
+        assert_eq!(body["declarations"].as_array().unwrap().len(), 3);
+        assert_eq!(body["project_snapshot_hash"], "b".repeat(64));
+    }
+
+    #[test]
+    fn installed_bundle_refusal_names_the_installed_inventory() {
+        let consumer = ryeos_state::objects::ExternalContentConsumerAuthority::installed_bundle(
+            "worker:provider/hosted".to_owned(),
+            "a".repeat(64),
+        )
+        .unwrap();
+        let missing = ContentBindingMissing::from_preview(&consumer, &preview());
+        assert!(missing.project_snapshot_hash.is_none());
+        assert!(
+            missing.fix().contains(
+                "ryeos external-content bindings worker:provider/hosted installed_bundle"
+            )
+        );
     }
 }

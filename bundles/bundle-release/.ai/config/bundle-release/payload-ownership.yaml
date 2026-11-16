@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-29T07:27:16Z:d455fad901548406dd6629fa2e202062dc1978ec25d261108e7b143edcd011a9:ba+WkUmzL8bMXgkuIbp/1JZ+rdY/BXgklj2PBJztB+T86s7oROiqXsyQOyVQE5ICLN51OKo198XB9p9IlIwBDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-15T02:27:40Z:dfc220877120dd67f33a38e084ae46f19c9d50e11bc1613ae244a4808044f622:UUdxmW3Dm94KcOExG52qZiZsyDiCtO/DiTeKGrKR9vqgqpKAmIktkfFDPQ4PmrIQJLp84GAL0OEtXbCcHuZ7AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: bundle-release
 version: "2.0.0"
 description: Exact publisher-authored ownership of native payloads, Cargo feature compositions and daemon-linked host features by RyeOS bundle.
@@ -21,11 +21,11 @@ payload_ownership:
   # Payload-free bundles that contribute daemon-linked host features.
   host_only_bundles:
     - bundle_name: scheduling
-      bundle_sets: [central-host, core-scheduling, development, full, hosted-workflow, local-inference, release-artifacts, standard, standard-central-auth]
+      bundle_sets: [central-host, core-scheduling, development, hosted-workflow, local-inference, release-artifacts, standard, standard-central-auth]
       host_features: [scheduling]
   bundles:
     - bundle_name: browser
-      bundle_sets: [development, full, release-artifacts]
+      bundle_sets: [development, release-artifacts, standard]
       host_features: []
       payloads:
         - binary: ryeos-browser-tools
@@ -33,7 +33,7 @@ payload_ownership:
           build_class: release
           cargo_features: []
     - bundle_name: codex
-      bundle_sets: [development, f5r-controller, full, hosted-workflow, release-artifacts]
+      bundle_sets: [development, hosted-controller, hosted-workflow, release-artifacts, standard]
       host_features: []
       payloads:
         - binary: codex-runtime-verifier
@@ -73,7 +73,7 @@ payload_ownership:
           build_class: static
           cargo_features: []
     - bundle_name: core
-      bundle_sets: [bundle-source, central-host, core, core-knowledge, core-scheduling, core-workflow, development, f5r-controller, full, hosted-workflow, local-inference, release-artifacts, release-authority, standard, standard-central-auth]
+      bundle_sets: [bundle-source, central-host, core, core-knowledge, core-scheduling, core-workflow, development, hosted-controller, hosted-workflow, local-inference, release-artifacts, release-authority, standard, standard-central-auth]
       host_features: []
       payloads:
         - binary: rye-composer-extends-chain
@@ -129,7 +129,7 @@ payload_ownership:
           build_class: static
           cargo_features: []
     - bundle_name: directive
-      bundle_sets: [central-host, development, full, hosted-workflow, local-inference, release-artifacts, standard, standard-central-auth]
+      bundle_sets: [central-host, development, hosted-workflow, local-inference, release-artifacts, standard, standard-central-auth]
       host_features: [model-provider-setup]
       payloads:
         - binary: ryeos-directive-launch-preparer
@@ -141,7 +141,7 @@ payload_ownership:
           build_class: release
           cargo_features: []
     - bundle_name: graph
-      bundle_sets: [central-host, core-workflow, development, f5r-controller, full, hosted-workflow, local-inference, release-artifacts, release-authority, standard, standard-central-auth]
+      bundle_sets: [central-host, core-workflow, development, hosted-controller, hosted-workflow, local-inference, release-artifacts, release-authority, standard, standard-central-auth]
       host_features: []
       payloads:
         - binary: ryeos-graph-effective-validator
@@ -161,7 +161,7 @@ payload_ownership:
           build_class: release
           cargo_features: []
     - bundle_name: knowledge
-      bundle_sets: [central-host, core-knowledge, development, f5r-controller, full, hosted-workflow, local-inference, release-artifacts, standard, standard-central-auth]
+      bundle_sets: [central-host, core-knowledge, development, hosted-controller, hosted-workflow, local-inference, release-artifacts, standard, standard-central-auth]
       host_features: []
       payloads:
         - binary: ryeos-knowledge-runtime
@@ -181,7 +181,7 @@ payload_ownership:
           build_class: static
           cargo_features: []
     - bundle_name: render-sandbox
-      bundle_sets: [development, f5r-controller, release-artifacts]
+      bundle_sets: [development, hosted-controller, release-artifacts]
       host_features: []
       payloads:
         - binary: ryeos-external-guest-restoration-verifier
@@ -193,7 +193,7 @@ payload_ownership:
           build_class: static
           cargo_features: []
     - bundle_name: ryeos-ui
-      bundle_sets: [development, full, release-artifacts]
+      bundle_sets: [development, release-artifacts, standard]
       host_features: []
       payloads:
         - binary: ryeos-tui
@@ -205,7 +205,7 @@ payload_ownership:
           build_class: release
           cargo_features: []
     - bundle_name: web
-      bundle_sets: [central-host, development, full, release-artifacts]
+      bundle_sets: [central-host, development, release-artifacts, standard]
       host_features: []
       payloads:
         - binary: ryeos-web-tools

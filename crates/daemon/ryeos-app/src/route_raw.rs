@@ -18,8 +18,25 @@ pub struct RawRouteSpec {
     pub execute: Option<RawExecute>,
     #[serde(default)]
     pub request: RawRequest,
+    /// Authority the route lends the principal of a launch it starts when no
+    /// human caller stands behind the request (`auth: none` or `auth: hmac`).
+    /// A request, not a grant: the route bundle's signed manifest bounds it.
+    #[serde(default)]
+    pub authority: Option<RawRouteAuthority>,
     #[serde(default)]
     pub source_file: std::path::PathBuf,
+}
+
+/// The authority a signed route asks for its principal.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RawRouteAuthority {
+    /// Capabilities the principal holds for the launches the route starts.
+    /// They must cover every capability the launched item declares, and each
+    /// must be backed by the bundle manifest's `runtime_authority`
+    /// (`route_capabilities`, or `operator_vault` for the operator-vault
+    /// capability).
+    pub capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

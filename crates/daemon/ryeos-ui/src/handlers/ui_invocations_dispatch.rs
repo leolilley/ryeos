@@ -1518,6 +1518,7 @@ pub(crate) fn prepare_item_ref(
     .map_err(|e| HandlerError::Internal(format!("resolve project context: {e}")))?;
 
     let plan_ctx = ryeos_engine::contracts::PlanContext {
+        logical_project_root: None,
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
             ryeos_engine::contracts::Principal {
                 fingerprint: ctx.fingerprint.clone(),
@@ -1686,6 +1687,7 @@ async fn execute_prepared_item_ref(
     let resolved_authority = ryeos_app::execution_policy::resolve_standard_local_live_authority(
         &project_root,
         authority_scopes.to_vec(),
+        &exec_ctx.principal_fingerprint,
         &state.isolation,
     )
     .map_err(|error| HandlerError::Forbidden(format!("{error:#}")))?;
@@ -2005,6 +2007,8 @@ mod tests {
             session_id: "session-1".to_string(),
             created_at: now,
             expires_at: now + Duration::from_secs(60),
+            absolute_expires_at: now + Duration::from_secs(60),
+            idle_timeout: Duration::from_secs(60),
             principal_id: "fp:test".to_string(),
             granted_caps: vec!["ui.read".to_string()],
             user_principal_id,
@@ -2038,7 +2042,7 @@ mod tests {
             "root",
             "config:test/shared",
             json!({"kind":"shared_presentation","config":{
-                "category":"ui","shared_presentation":{"schema":1,"title":"RyeOS","launcher":"launch",
+                "category":"ui","shared_presentation":{"schema":2,"title":"RyeOS","launcher":"launch",
                     "dialogs":[{"id":"launch","title":"Launch","view":"view:test/work"}],"capabilities":{"sources":[],"affordances":[]}}
             }}),
         );

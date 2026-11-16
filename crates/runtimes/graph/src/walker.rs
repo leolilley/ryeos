@@ -416,7 +416,7 @@ impl Walker {
     ///
     /// Mirrors `record_callback_warning` in the directive runner.
     /// Use after every event-emission attempt so event-store rejection
-    /// (event_type drift, storage_class drift, transient transport
+    /// (event_type drift, transient transport
     /// failures) lands in `RuntimeResult.warnings` instead of being
     /// silently discarded.
     ///

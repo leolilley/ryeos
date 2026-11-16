@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
+use ryeos_node_runtime::node_policy::sections::event_storage::EventStoragePolicy;
 use ryeos_runtime::{
     CognitionInAssembler, MAX_RUNTIME_EVENT_BATCH_BYTES, MAX_RUNTIME_EVENT_BATCH_ITEMS,
     MAX_RUNTIME_EVENT_PAYLOAD_BYTES,
@@ -15,11 +16,12 @@ pub struct EventStoreService {
     state_store: Arc<StateStore>,
 }
 
+/// One runtime-appended event. It carries no storage class: the daemon
+/// decides it from the node's signed `event_storage` policy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EventAppendItem {
     pub event_type: String,
-    pub storage_class: String,
     #[serde(default)]
     pub payload: Value,
 }
@@ -78,11 +80,19 @@ impl EventStoreService {
         Self { state_store }
     }
 
-    pub fn append(&self, params: &EventAppendParams) -> Result<PersistedEventRecord> {
-        let result = self.append_batch(&EventAppendBatchParams {
-            thread_id: params.thread_id.clone(),
-            events: vec![params.event.clone()],
-        })?;
+    /// Append one runtime event, stored under `storage`'s class for it.
+    pub fn append(
+        &self,
+        params: &EventAppendParams,
+        storage: &EventStoragePolicy,
+    ) -> Result<PersistedEventRecord> {
+        let result = self.append_batch(
+            &EventAppendBatchParams {
+                thread_id: params.thread_id.clone(),
+                events: vec![params.event.clone()],
+            },
+            storage,
+        )?;
         result
             .persisted
             .into_iter()
@@ -90,16 +100,22 @@ impl EventStoreService {
             .ok_or_else(|| anyhow::anyhow!("append returned no persisted event"))
     }
 
+    /// Append a runtime event batch. Each event is stored under the class the
+    /// node's signed `event_storage` policy gives it.
     #[tracing::instrument(
         level = "debug",
         name = "event:append_batch",
-        skip(self, params),
+        skip(self, params, storage),
         fields(
             thread_id = %params.thread_id,
             count = params.events.len(),
         )
     )]
-    pub fn append_batch(&self, params: &EventAppendBatchParams) -> Result<EventAppendBatchResult> {
+    pub fn append_batch(
+        &self,
+        params: &EventAppendBatchParams,
+        storage: &EventStoragePolicy,
+    ) -> Result<EventAppendBatchResult> {
         validate_runtime_event_batch(&params.events)?;
         let thread = self
             .state_store
@@ -122,16 +138,10 @@ impl EventStoreService {
             .events
             .iter()
             .map(|event| {
-                validate_event_type(&event.event_type)?;
-                validate_storage_class(&event.storage_class)?;
-                validate_event_storage_class(
-                    &event.event_type,
-                    &event.storage_class,
-                    &event.payload,
-                )?;
+                let storage_class = stored_storage_class(event, storage)?;
                 Ok(NewEventRecord {
                     event_type: event.event_type.clone(),
-                    storage_class: event.storage_class.clone(),
+                    storage_class: storage_class.as_str().to_owned(),
                     payload: event.payload.clone(),
                 })
             })
@@ -306,48 +316,17 @@ fn validate_event_type(event_type: &str) -> Result<()> {
     ryeos_runtime::RuntimeEventType::parse(event_type).map(|_| ())
 }
 
-fn validate_storage_class(storage_class: &str) -> Result<()> {
-    ryeos_runtime::StorageClass::parse(storage_class).map(|_| ())
-}
-
-fn validate_event_storage_class(
-    event_type: &str,
-    storage_class: &str,
-    payload: &Value,
-) -> Result<()> {
-    if ryeos_runtime::StorageClass::parse(storage_class)? != ryeos_runtime::StorageClass::Ephemeral
-    {
-        return Ok(());
-    }
-
-    if is_ephemeral_allowed(event_type, payload) {
-        Ok(())
-    } else {
-        bail!("event_type {event_type} cannot use ephemeral storage_class")
-    }
-}
-
-fn is_ephemeral_allowed(event_type: &str, payload: &Value) -> bool {
-    use ryeos_runtime::{RuntimeEventType, StorageClass};
-    // Lock-step with the runtime's `storage_class_for_payload`. The event-type
-    // vocabulary is the typed enum, not raw strings.
-    match RuntimeEventType::parse(event_type) {
-        // Types whose nature is always live-only (token deltas, stream snapshots,
-        // reasoning, foreach progress) — sourced from the enum so a new ephemeral
-        // variant is covered automatically.
-        Ok(t) if t.storage_class() == StorageClass::Ephemeral => true,
-        // cognition_out is indexed by default, but progressive streaming payloads
-        // (delta / tool_use_partial / complete tool_use) are live-only. The durable
-        // tool-call record is the turn-complete `cognition_out{tool_calls}`, never
-        // the mid-stream `tool_use`. (Payload keys are JSON field names, not event
-        // types, so they stay string-keyed.)
-        Ok(RuntimeEventType::CognitionOut) => {
-            payload.get("delta").is_some()
-                || payload.get("tool_use_partial").is_some()
-                || payload.get("tool_use").is_some()
-        }
-        _ => false,
-    }
+/// The class one runtime event is stored under: the node's signed
+/// `event_storage` policy decides for progressive events, and every other
+/// event is indexed (a `cognition_out` streaming fragment excepted, whose
+/// turn-complete record is the durable one).
+fn stored_storage_class(
+    event: &EventAppendItem,
+    storage: &EventStoragePolicy,
+) -> Result<ryeos_runtime::StorageClass> {
+    validate_event_type(&event.event_type)?;
+    let event_type = ryeos_runtime::RuntimeEventType::parse(&event.event_type)?;
+    Ok(storage.class_for(event_type, &event.payload))
 }
 
 #[cfg(test)]
@@ -355,36 +334,79 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn stored(event_type: &str, payload: Value) -> Result<&'static str> {
+        stored_storage_class(
+            &EventAppendItem {
+                event_type: event_type.to_owned(),
+                payload,
+            },
+            &EventStoragePolicy::as_shipped(),
+        )
+        .map(ryeos_runtime::StorageClass::as_str)
+    }
+
     #[test]
-    fn progressive_cognition_out_allows_ephemeral() {
-        // Lock-step with the runtime: delta / tool_use_partial / complete tool_use.
+    fn progressive_cognition_out_is_stored_ephemeral() {
+        // Shared rule with the runtime: delta / tool_use_partial / complete tool_use.
         for payload in [
             json!({"delta": "hi"}),
             json!({"tool_use_partial": {"id": "x"}}),
             json!({"tool_use": {"id": "x", "name": "f", "arguments": {}}}),
         ] {
-            assert!(
-                is_ephemeral_allowed("cognition_out", &payload),
-                "cognition_out {payload} should allow ephemeral"
+            assert_eq!(
+                stored("cognition_out", payload.clone()).unwrap(),
+                "ephemeral",
+                "cognition_out {payload}"
             );
-            // And the validator accepts an ephemeral storage_class for it.
-            assert!(validate_event_storage_class("cognition_out", "ephemeral", &payload).is_ok());
         }
     }
 
     #[test]
-    fn durable_cognition_out_rejects_ephemeral() {
-        // A turn-complete cognition_out (tool_calls array) or interrupted seal must
-        // be indexed; claiming ephemeral is rejected.
+    fn durable_cognition_out_is_stored_indexed() {
+        // A turn-complete cognition_out (tool_calls array) or interrupted seal is
+        // the durable record.
         for payload in [
             json!({"content": "done", "tool_calls": []}),
             json!({"content": "partial", "interrupted": true}),
         ] {
-            assert!(!is_ephemeral_allowed("cognition_out", &payload));
-            assert!(validate_event_storage_class("cognition_out", "ephemeral", &payload).is_err());
-            // Indexed is always fine.
-            assert!(validate_event_storage_class("cognition_out", "indexed", &payload).is_ok());
+            assert_eq!(stored("cognition_out", payload).unwrap(), "indexed");
         }
+    }
+
+    #[test]
+    fn the_policy_decides_progressive_events() {
+        for (event_type, class) in [
+            ("token_delta", "ephemeral"),
+            ("stream_snapshot", "ephemeral"),
+            ("cognition_reasoning", "ephemeral"),
+            ("observation", "journal_only"),
+            ("graph_foreach_iteration", "journal_only"),
+        ] {
+            assert_eq!(
+                stored(event_type, json!({})).unwrap(),
+                class,
+                "{event_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn floor_events_are_stored_indexed() {
+        assert_eq!(stored("thread_completed", json!({})).unwrap(), "indexed");
+        assert!(stored("not_an_event", json!({})).is_err());
+    }
+
+    #[test]
+    fn an_event_carrying_a_storage_class_is_refused() {
+        // The wire has no storage class; a runtime that still sends one is
+        // refused rather than silently ignored.
+        let error = serde_json::from_value::<EventAppendItem>(json!({
+            "event_type": "observation",
+            "storage_class": "ephemeral",
+            "payload": {},
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("storage_class"), "{error}");
     }
 
     #[test]
@@ -395,7 +417,6 @@ mod tests {
         ] {
             let event = |payload| EventAppendItem {
                 event_type: event_type.to_string(),
-                storage_class: "indexed".to_string(),
                 payload,
             };
             assert!(
@@ -429,13 +450,6 @@ mod tests {
     }
 
     #[test]
-    fn always_ephemeral_types_come_from_the_enum() {
-        for et in ["token_delta", "stream_snapshot", "cognition_reasoning"] {
-            assert!(is_ephemeral_allowed(et, &json!({})));
-        }
-    }
-
-    #[test]
     fn runtime_cannot_forge_daemon_authored_evidence() {
         for event_type in [
             ryeos_state::event_types::HOOK_OBSERVATION_RECORDED,
@@ -459,7 +473,6 @@ mod tests {
     fn runtime_cannot_forge_state_anchor_milestones() {
         let error = validate_runtime_event_batch(&[EventAppendItem {
             event_type: ryeos_state::event_types::MILESTONE.to_string(),
-            storage_class: "indexed".to_string(),
             payload: json!({
                 "kind": "state_anchor",
                 "payload": {
@@ -481,7 +494,6 @@ mod tests {
             .cloned()
             .map(|payload| EventAppendItem {
                 event_type: "cognition_in".to_string(),
-                storage_class: "indexed".to_string(),
                 payload,
             })
             .collect::<Vec<_>>();

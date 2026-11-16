@@ -48,8 +48,14 @@ pub enum LifecycleAdapterInvocation {
     ObserveSnapshotReadiness,
     QualifySnapshotCreate,
     QualifySnapshotVerify,
+    /// Read-only observation of a restored qualification occurrence before
+    /// its one verifier attempt is claimed.
+    QualifySnapshotObserve,
     QualifySnapshotTerminate,
     ObserveSnapshotTermination,
+    /// Read-only listing of the resources one provider owner scope holds.
+    /// It mutates nothing, so process creation is denied as for the relay.
+    ListProviderResources,
 }
 
 /// Complete bounded protocol observation, not permission to continue startup.
@@ -89,8 +95,10 @@ impl LifecycleAdapterInvocation {
             Self::ObserveSnapshotReadiness => "observe-snapshot-readiness",
             Self::QualifySnapshotCreate => "qualify-snapshot-create",
             Self::QualifySnapshotVerify => "qualify-snapshot-verify",
+            Self::QualifySnapshotObserve => "qualify-snapshot-observe",
             Self::QualifySnapshotTerminate => "qualify-snapshot-terminate",
             Self::ObserveSnapshotTermination => "observe-snapshot-termination",
+            Self::ListProviderResources => "list-provider-resources",
         }
     }
 
@@ -101,8 +109,10 @@ impl LifecycleAdapterInvocation {
                 | Self::ProduceSnapshotUpload
                 | Self::ProduceSnapshotCreate
                 | Self::RelayFile
+                | Self::QualifySnapshotObserve
                 | Self::AdmitLease
                 | Self::AwaitLeaseReady
+                | Self::ListProviderResources
         )
     }
 }
@@ -239,6 +249,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn inventory_runs_without_process_creation() {
+        let invocation = LifecycleAdapterInvocation::ListProviderResources;
+        assert!(invocation.requires_no_process_creation());
+        assert_eq!(invocation.argument(), "list-provider-resources");
+        assert_eq!(
+            invocation.maximum_response_bytes(),
+            MAX_LIFECYCLE_RESPONSE_BYTES
+        );
+    }
+
+    #[test]
     fn only_verifier_observation_has_the_larger_evidence_envelope() {
         assert!(
             LifecycleAdapterInvocation::QualifySnapshotVerify.maximum_response_bytes()
@@ -329,6 +350,7 @@ mod tests {
             output_limit_exceeded: None,
             stdout_truncated: false,
             stderr_truncated: false,
+            process_creation_busy: None,
         }
     }
 
@@ -409,6 +431,7 @@ mod tests {
                 output_limit_exceeded: None,
                 stdout_truncated: false,
                 stderr_truncated: false,
+                process_creation_busy: None,
             };
             let error = lifecycle_adapter_output(LifecycleAdapterInvocation::Operate, result)
                 .err()

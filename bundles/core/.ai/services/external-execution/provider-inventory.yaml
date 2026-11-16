@@ -1,0 +1,7 @@
+# ryeos:signed:2026-11-13T10:01:45Z:aa9cef5c96c4afa9c9ad9d05ea7f8e3fbc552245cb62cddccaee99c5a91b0edf:hl/z6cN16xHLbZBCmODG3+9vnJLIQSgj8w6ZaLqWBqt2/vAFxpOZne51Va61Yc3EEnmnHdDtEY4HFIAAtvveDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: external-execution.provider-inventory
+required_caps: ["ryeos.execute.service.external-execution/provider-inventory"]
+schema:
+  binding: string
+description: "List, read only, the sandboxes and snapshots the provider holds for one installed binding's owner scope (binding is <section>/<id>, an external_execution or runtime_snapshot_production binding), using its adapter and vault credential. Each row is joined with the node's journals and classed known_live, leaked (the node's record ended, the provider still runs it), unknown (no node record) or gone (the node holds it open, the provider no longer runs it). Nothing is deleted. The result is stored as a node-signed receipt whose digest settle-unknown-allocation cites."

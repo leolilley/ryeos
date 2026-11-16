@@ -27,6 +27,43 @@ const MAX_POLICY_DEPTH: usize = 1;
 const OPERATOR_SECTIONS_FILE: &str = "_operator-sections.yaml";
 const OPERATOR_SECTIONS_KEY: &str = "sections";
 
+/// The installed generation lacks a section this release registers. Every
+/// registered section is mandatory and has no code fallback, so the node
+/// does not load. The cure is the stopped-node policy generation
+/// replacement: it takes each newly required section from this release's
+/// profile and carries operator-applied sections forward.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodePolicySectionsMissing {
+    pub directory: PathBuf,
+    pub sections: Vec<String>,
+}
+
+impl std::fmt::Display for NodePolicySectionsMissing {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let sections = self
+            .sections
+            .iter()
+            .map(|section| format!("`{section}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        write!(
+            formatter,
+            "the node policy generation at {} has no {sections} section, which this release \
+             requires; with the daemon stopped, replace the generation from this release's \
+             profile with `{POLICY_GENERATION_RESET_COMMAND}` (the new section comes from \
+             the profile, and operator-applied sections carry forward)",
+            self.directory.display(),
+        )
+    }
+}
+
+impl std::error::Error for NodePolicySectionsMissing {}
+
+/// The stopped-node command that replaces a policy generation from the
+/// release's profile, as an operator types it.
+pub const POLICY_GENERATION_RESET_COMMAND: &str = "ryeos node reset policy-generation \
+     --node-profile <profile> --host-class <host-class> --source <source> --confirm";
+
 /// Publisher-authored initial policy generation. `exact_bundles` is the exact
 /// bundle inventory selected by this node profile, not a minimum dependency
 /// list.
@@ -390,6 +427,7 @@ fn validate_policy_generation(
             );
         }
     }
+    super::sections::host_access::check_generation(&policies)?;
     for section in operator_sections.iter().flatten() {
         if !policies.contains_key(section) {
             bail!(
@@ -477,7 +515,7 @@ pub fn prepare_policy_member_replacement(
     let SignedPolicyBodies {
         mut policies,
         operator_sections,
-    } = read_signed_policy_bodies(app_root, &directory, trust_store)?;
+    } = read_signed_policy_bodies(&directory, trust_store)?;
     if !policies.contains_key(section) {
         bail!("node policy generation has no `{section}` member to replace");
     }
@@ -543,8 +581,8 @@ pub fn prepare_schema_cut_carrying_operator_policy(
 ) -> Result<NodePolicyUpdate> {
     let directory = lillux::PinnedDirectory::open(&policy_directory(app_root))?
         .context("node has no existing policy generation to replace")?;
-    validate_schema_cut_directory_occupant(app_root, &directory, trust_store)?;
-    let installed = read_signed_policy_bodies(app_root, &directory, trust_store)?;
+    validate_schema_cut_directory_occupant(&directory, trust_store)?;
+    let installed = read_signed_policy_bodies(&directory, trust_store)?;
     for name in choices.keep.iter().chain(&choices.reset) {
         validate_policy_name("policy carry section", name)?;
     }
@@ -654,15 +692,16 @@ pub fn validate_schema_cut_policy_occupant(
 ) -> Result<()> {
     let directory = lillux::PinnedDirectory::open(&policy_directory(app_root))?
         .context("node has no existing policy generation to replace")?;
-    validate_schema_cut_directory_occupant(app_root, &directory, trust_store)
+    validate_schema_cut_directory_occupant(&directory, trust_store)
 }
 
 fn validate_schema_cut_directory_occupant(
-    app_root: &Path,
     directory: &lillux::PinnedDirectory,
     trust_store: &ryeos_engine::trust::TrustStore,
 ) -> Result<()> {
-    let node_fingerprint = crate::identity::node_identity_fingerprint(app_root)?;
+    let node_key = trust_store
+        .node_verifying_key()
+        .context("node trust registry has no node key")?;
     let entries = directory.entries_no_follow_bounded(MAX_POLICY_FILES)?;
     if entries.is_empty() {
         bail!("existing node policy generation is empty");
@@ -686,10 +725,7 @@ fn validate_schema_cut_directory_occupant(
         let file = directory
             .open_pinned_regular(&entry.name, false)?
             .context("existing node policy entry disappeared")?;
-        let verified = crate::node_document::verify_pinned_signed_yaml(&file, trust_store)?;
-        if verified.signer_fingerprint != node_fingerprint {
-            bail!("existing policy generation is not signed by the current node identity");
-        }
+        crate::node_document::verify_node_signed_document_file(&file, node_key)?;
         if names.insert(name.to_owned(), ()).is_some() {
             bail!("existing node policy generation contains duplicate section names");
         }
@@ -698,7 +734,7 @@ fn validate_schema_cut_directory_occupant(
 }
 
 fn load_policy_generation_from_directory(
-    app_root: &Path,
+    _app_root: &Path,
     directory: &lillux::PinnedDirectory,
     trust_store: &ryeos_engine::trust::TrustStore,
     policy_table: &NodePolicyTable,
@@ -706,7 +742,20 @@ fn load_policy_generation_from_directory(
     let SignedPolicyBodies {
         policies,
         operator_sections,
-    } = read_signed_policy_bodies(app_root, directory, trust_store)?;
+    } = read_signed_policy_bodies(directory, trust_store)?;
+    let missing = policy_table
+        .sections()
+        .map(|section| section.name())
+        .filter(|name| !policies.contains_key(*name))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(NodePolicySectionsMissing {
+            directory: directory.path().to_path_buf(),
+            sections: missing,
+        }
+        .into());
+    }
     validate_policy_generation(policy_table, policies, operator_sections, directory.path())
 }
 
@@ -719,11 +768,12 @@ struct SignedPolicyBodies {
 /// Signature/shape verification shared by strict loading and explicit cuts.
 /// Raw bodies never grant launch authority without full section compilation.
 fn read_signed_policy_bodies(
-    app_root: &Path,
     directory: &lillux::PinnedDirectory,
     trust_store: &ryeos_engine::trust::TrustStore,
 ) -> Result<SignedPolicyBodies> {
-    let node_fingerprint = crate::identity::node_identity_fingerprint(app_root)?;
+    let node_key = trust_store
+        .node_verifying_key()
+        .context("node trust registry has no node key")?;
     let entries = directory.entries_no_follow_bounded(MAX_POLICY_FILES)?;
     let mut policies = BTreeMap::new();
     let mut operator_sections = None;
@@ -753,15 +803,7 @@ fn read_signed_policy_bodies(
         let file = directory
             .open_pinned_regular(&entry.name, false)?
             .with_context(|| format!("node policy disappeared: {}", path.display()))?;
-        let verified = crate::node_document::verify_pinned_signed_yaml(&file, trust_store)?;
-        if verified.signer_fingerprint != node_fingerprint {
-            bail!(
-                "node policy {} is signed by {}, expected current node {}",
-                path.display(),
-                verified.signer_fingerprint,
-                node_fingerprint
-            );
-        }
+        let verified = crate::node_document::verify_node_signed_document_file(&file, node_key)?;
         if is_operator_record {
             operator_sections = Some(
                 parse_operator_sections(&verified.body)
@@ -780,6 +822,29 @@ fn read_signed_policy_bodies(
         policies,
         operator_sections,
     })
+}
+
+/// Read one node-signed policy member as a raw body, verifying only that
+/// member's signature against the node's own key. Offline operations that
+/// need a single section while the node is stopped use it; it neither
+/// compiles the other sections nor admits a body the section's own parser
+/// would refuse (the caller parses it).
+pub fn load_signed_policy_member(
+    app_root: &Path,
+    node: &crate::identity::NodeIdentity,
+    section: &str,
+) -> Result<Value> {
+    validate_policy_name("node policy section", section)?;
+    let directory = lillux::PinnedDirectory::open(&policy_directory(app_root))?
+        .context("node has no explicit signed policy generation")?;
+    let trust_store =
+        ryeos_engine::trust::TrustStore::from_registry(*node.verifying_key(), Vec::new())
+            .context("build the node-key trust root")?;
+    let mut bodies = read_signed_policy_bodies(&directory, &trust_store)?;
+    bodies
+        .policies
+        .remove(section)
+        .with_context(|| format!("node policy generation has no `{section}` member"))
 }
 
 /// Publish one complete validated generation. The caller must hold the same
@@ -803,9 +868,6 @@ pub fn publish_policy_update(
             current_node_fingerprint
         );
     }
-    if !trust_store.is_trusted(&current_node_fingerprint) {
-        bail!("current node identity is absent from the supplied trust store");
-    }
     let node_root_path = app_root.join(ryeos_engine::AI_DIR).join("node");
     let node_root = lillux::PinnedDirectory::open_or_create(&node_root_path)
         .context("pin node root for policy publication")?;
@@ -820,7 +882,7 @@ pub fn publish_policy_update(
             let current = current
                 .as_ref()
                 .context("node policy generation disappeared before replacement")?;
-            let observed = read_signed_policy_bodies(app_root, current, trust_store)?;
+            let observed = read_signed_policy_bodies(current, trust_store)?;
             let found = generation_digest(&observed.policies, observed.operator_sections.as_ref())?;
             if &found != expected {
                 bail!(
@@ -833,7 +895,6 @@ pub fn publish_policy_update(
         }
         ExpectedPolicyGeneration::PresentSchemaCut => {
             validate_schema_cut_directory_occupant(
-                app_root,
                 current.as_ref().expect("presence checked above"),
                 trust_store,
             )?;
@@ -1058,15 +1119,15 @@ mod tests {
     }
 
     #[test]
-    fn f5r_controller_declares_products_root_admitted_at_init() {
+    fn hosted_controller_declares_products_root_admitted_at_init() {
         let table = NodePolicyTable::new();
         let app_root = tempfile::tempdir().unwrap();
-        let selected = authored_profile("f5r-controller")
+        let selected = authored_profile("hosted-controller")
             .for_host_class("hosted")
             .unwrap();
         let admitted = selected.admit_import_roots(app_root.path()).unwrap();
         let generation = admitted
-            .validated_generation(&table, Path::new("f5r-controller.yaml"))
+            .validated_generation(&table, Path::new("hosted-controller.yaml"))
             .unwrap();
         let roots = &generation.policies()["external_content"]["roots"];
         assert_eq!(
@@ -1088,8 +1149,8 @@ mod tests {
         let declared: [(&str, &[&str]); 4] = [
             ("core", &["hosted", "local"]),
             ("core-scheduling", &["hosted", "local"]),
-            ("f5r-controller", &["hosted", "hosted_enforced", "local"]),
-            ("standard", &["hosted", "local"]),
+            ("hosted-controller", &["hosted", "hosted_enforced", "local"]),
+            ("standard", &["hosted", "local", "local_unconfined"]),
         ];
         for (name, classes) in declared {
             let profile = authored_profile(name);
@@ -1153,8 +1214,11 @@ mod tests {
             .typed_policy(&table, path)
             .unwrap();
         assert!(!local.required_process_scope_capabilities().is_empty());
-        // A profile without a hosted variant declares only its local class.
-        assert_eq!(authored_profile("full").host_classes().unwrap(), ["local"]);
+        // A profile without a hosted variant declares its local classes only.
+        assert_eq!(
+            authored_profile("local-inference").host_classes().unwrap(),
+            ["local", "local_unconfined"]
+        );
         assert_eq!(
             authored_profile("hosted-node").host_classes().unwrap(),
             ["hosted"]
@@ -1163,24 +1227,20 @@ mod tests {
 
     #[test]
     fn explicit_member_cut_preserves_other_policies_and_checks_exact_predecessor() {
-        use ryeos_engine::trust::{TrustStore, TrustedSigner};
+        use ryeos_engine::trust::TrustStore;
         let root = tempfile::tempdir().unwrap();
         let node = root.path().join(ryeos_engine::AI_DIR).join("node");
         let identity_path = node.join("identity/private_key.pem");
         std::fs::create_dir_all(identity_path.parent().unwrap()).unwrap();
         let identity = NodeIdentity::create(&identity_path).unwrap();
-        let trust = TrustStore::from_signers(vec![TrustedSigner {
-            fingerprint: identity.fingerprint().to_owned(),
-            verifying_key: *identity.verifying_key(),
-            label: None,
-        }]);
+        let trust = TrustStore::from_registry(*identity.verifying_key(), Vec::new()).unwrap();
         let directory = policy_directory(root.path());
         std::fs::create_dir_all(&directory).unwrap();
         let profile_path = ryeos_engine::test_support::workspace_root()
-            .join("bundles/.ai/node/init/profiles/full.yaml");
+            .join("bundles/.ai/node/init/profiles/standard.yaml");
         let profile: NodeInitProfile =
             serde_yaml::from_str(&std::fs::read_to_string(profile_path).unwrap()).unwrap();
-        let mut policies = profile.policies;
+        let mut policies = profile.for_host_class("local").unwrap().policies;
         let replacement = policies["isolation"].clone();
         policies.insert(
             "isolation".into(),
@@ -1306,7 +1366,7 @@ mod tests {
 
     impl CarryFixture {
         fn new() -> Self {
-            use ryeos_engine::trust::{TrustStore, TrustedSigner};
+            use ryeos_engine::trust::TrustStore;
             let root = tempfile::tempdir().unwrap();
             let identity_path = root
                 .path()
@@ -1314,13 +1374,9 @@ mod tests {
                 .join("node/identity/private_key.pem");
             std::fs::create_dir_all(identity_path.parent().unwrap()).unwrap();
             let identity = NodeIdentity::create(&identity_path).unwrap();
-            let trust = TrustStore::from_signers(vec![TrustedSigner {
-                fingerprint: identity.fingerprint().to_owned(),
-                verifying_key: *identity.verifying_key(),
-                label: None,
-            }]);
+            let trust = TrustStore::from_registry(*identity.verifying_key(), Vec::new()).unwrap();
             let table = NodePolicyTable::new();
-            let profile = authored_profile("full")
+            let profile = authored_profile("standard")
                 .for_host_class("local")
                 .unwrap()
                 .validated_generation(&table, Path::new("profile.yaml"))
@@ -1573,5 +1629,81 @@ mod tests {
         // the next replacement drop earlier, unknown operator changes.
         fixture.install(&policies, None);
         assert_eq!(apply().operator_sections(), None);
+    }
+
+    #[test]
+    fn a_generation_missing_a_registered_section_refuses_with_the_cure() {
+        let fixture = CarryFixture::new();
+        let section = crate::node_policy::sections::event_storage::SECTION_NAME;
+        let mut installed = fixture.profile.policies().clone();
+        installed.remove(section);
+        fixture.install(&installed, Some(&[]));
+        let error = load_policy_generation(fixture.root.path(), &fixture.trust, &fixture.table)
+            .expect_err("a generation without a registered section does not load");
+        let missing = error
+            .downcast_ref::<NodePolicySectionsMissing>()
+            .expect("the refusal is typed");
+        assert_eq!(missing.sections, vec![section.to_owned()]);
+        let message = error.to_string();
+        assert!(
+            message.contains(POLICY_GENERATION_RESET_COMMAND) && message.contains(section),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_replacement_takes_a_newly_required_section_from_the_profile() {
+        let fixture = CarryFixture::new();
+        let section = crate::node_policy::sections::event_storage::SECTION_NAME;
+        let mut installed = fixture.profile.policies().clone();
+        installed.remove(section);
+        installed.insert("ingest_ignore".into(), operator_ingest_ignore());
+
+        // Recorded generation: the operator's section carries forward and the
+        // new section comes from the profile, with or without naming it.
+        fixture.install(&installed, Some(&["ingest_ignore"]));
+        for choices in [
+            PolicyCarryChoices::default(),
+            PolicyCarryChoices {
+                reset: sections(&[section]),
+                ..Default::default()
+            },
+        ] {
+            let cut = fixture.cut(&choices).unwrap();
+            assert_eq!(cut.policies()[section], fixture.profile.policies()[section]);
+            assert_eq!(cut.policies()["ingest_ignore"], operator_ingest_ignore());
+            assert_eq!(cut.operator_sections(), Some(&sections(&["ingest_ignore"])));
+        }
+        // A section the installed generation lacks cannot be kept.
+        let refused = fixture
+            .cut(&PolicyCarryChoices {
+                keep: sections(&[section]),
+                ..Default::default()
+            })
+            .expect_err("an absent section cannot be kept")
+            .to_string();
+        assert!(refused.contains("section to keep"), "{refused}");
+
+        // Unrecorded generation: only sections it holds that differ from the
+        // profile need a choice; the new section is not one of them.
+        fixture.install(&installed, None);
+        let refused = format!(
+            "{:#}",
+            fixture
+                .cut(&PolicyCarryChoices::default())
+                .expect_err("the unrecorded difference still needs a choice")
+        );
+        assert!(
+            refused.contains("ingest_ignore") && !refused.contains(section),
+            "{refused}"
+        );
+        let cut = fixture
+            .cut(&PolicyCarryChoices {
+                keep: sections(&["ingest_ignore"]),
+                reset: sections(&[section]),
+            })
+            .unwrap();
+        assert_eq!(cut.policies()[section], fixture.profile.policies()[section]);
+        assert_eq!(cut.policies()["ingest_ignore"], operator_ingest_ignore());
     }
 }

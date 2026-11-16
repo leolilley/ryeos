@@ -141,6 +141,7 @@ fn admit_signed_codex_worker() -> anyhow::Result<admitted_worker_evidence::Admit
         .zip(roots.iter().cloned())
         .map(
             |(name, canonical_root)| ryeos_engine::item_resolution::RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
                 name: name.to_owned(),
                 canonical_root,
             },
@@ -158,6 +159,7 @@ fn admit_signed_codex_worker() -> anyhow::Result<admitted_worker_evidence::Admit
     let signed = state.engine.with_checked_bundle_generation(|generation| {
         let resolution =
             generation.effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
+                logical_project_root: None,
                 item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(
                     "worker:codex/external-hosted-authoring",
                 )?,
@@ -479,7 +481,7 @@ async fn prepare_public_ordinary_fixture(recorded: bool) -> anyhow::Result<Ordin
         })?;
         // Reuse normal signed node-config admission before the existing
         // test-only vault provisioner; no raw reserved vault key is authored.
-        let trust = ryeos_engine::trust::TrustStore::load(None, &state.join(".ai/config"))?;
+        let trust = ryeos_engine::trust::TrustStore::load_node_registry(state)?;
         let loader = ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader { app_root: state, trust_store: &trust };
         let table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
         let policy = ryeos_node_runtime::node_policy::load_snapshot(state, &trust, &table)?;

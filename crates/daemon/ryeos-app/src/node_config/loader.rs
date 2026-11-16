@@ -32,12 +32,12 @@ use super::{
     SectionCardinality, SectionLoadPhase, SectionSignerPolicy, SectionTraversal,
 };
 use crate::route_raw::RawRouteSpec;
-#[cfg(test)]
-use ryeos_node_runtime::node_config_source::strip_signature;
 use ryeos_node_runtime::node_config_source::{
     VerifiedNodeConfigItem, check_bundle_collisions, scan_yaml_files, scan_yaml_files_recursive,
-    verify_and_parse,
+    verify_and_parse_in_space,
 };
+#[cfg(test)]
+use ryeos_node_runtime::node_config_source::{strip_signature, verify_and_parse};
 use ryeos_node_runtime::node_policy::sections::command_registration::CommandRegistrationAuthority;
 
 /// Full loader for domain node-config items.
@@ -304,16 +304,30 @@ impl<'a> NodeConfigLoader<'a> {
                     SectionTraversal::Flat => scan_yaml_files(&section_dir, false)?,
                 };
                 for path in yaml_files {
-                    let verified =
-                        verify_and_parse(&path, &section_dir, section_name, self.trust_store)
-                            .with_context(|| {
-                                format!(
-                                    "failed to verify node config item {} in section '{}'",
-                                    path.path().display(),
-                                    section_name
-                                )
-                            })?;
-                    verify_section_signer(section, &verified, &node_fingerprint)?;
+                    let signer_space = match scan_root.source {
+                        NodeConfigSource::Node { .. } => ryeos_engine::trust::SignerSpace::Node,
+                        NodeConfigSource::Bundle { .. } => ryeos_engine::trust::SignerSpace::Bundle,
+                    };
+                    let verified = verify_and_parse_in_space(
+                        &path,
+                        &section_dir,
+                        section_name,
+                        self.trust_store,
+                        signer_space,
+                    )
+                    .with_context(|| {
+                        format!(
+                            "failed to verify node config item {} in section '{}'",
+                            path.path().display(),
+                            section_name
+                        )
+                    })?;
+                    verify_section_signer(
+                        section,
+                        &verified,
+                        &node_fingerprint,
+                        &scan_root.source,
+                    )?;
                     let record = section
                         .parse(verified.context(), verified.body())
                         .with_context(|| {
@@ -384,21 +398,34 @@ fn section_scan_roots(
     Ok(roots)
 }
 
+/// Bind a node-config item to the one key allowed to sign it.
+///
+/// Every item under the app root's `.ai/node/` is node state, written only by
+/// the node, so it must be signed by the current node key whatever the
+/// section's policy. Bundle-root items of a `Trusted` section (routes and
+/// commands shipped by a publisher) keep their publisher signatures.
 fn verify_section_signer(
     section: &dyn NodeConfigSection,
     item: &VerifiedNodeConfigItem,
     node_fingerprint: &str,
+    source: &NodeConfigSource,
 ) -> Result<()> {
-    if section.load_spec().signer == SectionSignerPolicy::CurrentNode
-        && item.signer_fingerprint() != node_fingerprint
-    {
-        bail!(
-            "node-config item {} in section `{}` must be signed by current node {}; got {}",
-            item.path().display(),
-            section.name(),
+    let node_only = section.load_spec().signer == SectionSignerPolicy::CurrentNode
+        || matches!(source, NodeConfigSource::Node { .. });
+    if node_only {
+        ryeos_engine::trust::require_document_signer(
+            item.path(),
+            item.signer_fingerprint(),
             node_fingerprint,
-            item.signer_fingerprint()
-        );
+            "node",
+            ryeos_engine::trust::NODE_DOCUMENT_CURE,
+        )
+        .with_context(|| {
+            format!(
+                "node-config item in section `{}` must be signed by the current node",
+                section.name()
+            )
+        })?;
     }
     Ok(())
 }
@@ -509,10 +536,7 @@ mod tests {
             .find(|p| p.join("bundles").is_dir())
             .unwrap()
             .to_path_buf();
-        let trust = TrustStore::load_from_dir(
-            &workspace.join("crates/bin/daemon/tests/fixtures/trusted_signers"),
-        )
-        .unwrap();
+        let trust = ryeos_engine::test_support::live_trust_store();
         let system = temp_system_with_command_registration_policy(&workspace);
         let identity = ryeos_node_runtime::identity::NodeIdentity::load(
             &system.path().join(".ai/node/identity/private_key.pem"),
@@ -742,12 +766,12 @@ mod tests {
         assert_eq!(section.source_scope(), NodeConfigSourceScope::AppRootOnly);
         let files = scan_yaml_files(&dir, false).unwrap();
         let verified = verify_and_parse(&files[0], &dir, SECTION_NAME, &trust).unwrap();
-        assert!(verify_section_signer(&section, &verified, &"f".repeat(64)).is_err());
-        let record = section.parse(verified.context(), verified.body()).unwrap();
-        let mut builder = NodeConfigSnapshotBuilder::new(&[], command_policy([])).unwrap();
         let source = NodeConfigSource::Node {
             command_registration_caps: Vec::new(),
         };
+        assert!(verify_section_signer(&section, &verified, &"f".repeat(64), &source).is_err());
+        let record = section.parse(verified.context(), verified.body()).unwrap();
+        let mut builder = NodeConfigSnapshotBuilder::new(&[], command_policy([])).unwrap();
         builder.admit(record, &verified, &source).unwrap();
         assert!(
             builder
@@ -900,10 +924,7 @@ mod tests {
             .find(|p| p.join("bundles").is_dir())
             .unwrap()
             .to_path_buf();
-        let trust = TrustStore::load_from_dir(
-            &workspace.join("crates/bin/daemon/tests/fixtures/trusted_signers"),
-        )
-        .unwrap();
+        let trust = ryeos_engine::test_support::live_trust_store();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("current.yaml");
         fs::copy(
@@ -1252,8 +1273,7 @@ mod tests {
             .find(|p| p.join("bundles").is_dir())
             .expect("workspace root with bundles/ directory")
             .to_path_buf();
-        let trusted_dir = workspace.join("crates/bin/daemon/tests/fixtures/trusted_signers");
-        let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load test trust store");
+        let trust_store = ryeos_engine::test_support::live_trust_store();
 
         let system = temp_system_with_command_registration_policy(&workspace);
         let ryeos_ui = temp_bundle_with_node_section(&workspace.join("bundles/ryeos-ui"), "routes");

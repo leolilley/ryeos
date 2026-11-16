@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-09T04:33:06Z:495832f1f3a3812900166829b88365970221957f5acfeb06dee0db0d39ded9e9:Bi4M9arxk+AC60WxAJBj6v96gDmfaqcLPaDmXOhVSNVtr++3/8TQTYzLss4TLM1OVpK+zhULreOpkvnqBG6IDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T01:39:38Z:b9e6ba260ef0900881a54855e857091377da354ebd1e798849d9ee21a947849b:UrnaPgtXKp7b/Z9PvlIwtf0tNiwjdrIuzLUCjMghh1PWJqR0OJm5eJ6mSJ1qHiitCJLiGk8B/etRN5/p3pytAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - remote
 - execute
@@ -27,7 +27,7 @@ defaults:
       kind: here
     environment:
       kind: project_overlay
-      include_operator_vault: true
+      include_operator_vault: false
       name_policy:
         kind: declared_required
     project:

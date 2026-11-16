@@ -354,7 +354,7 @@ config_schema:
     let session_response = br#"{"additionalProperties":false,"properties":{"thread":{"additionalProperties":false,"properties":{"id":{"type":"string"}},"required":["id"],"type":"object"}},"required":["thread"],"type":"object"}"#;
     let turn_response = br#"{"additionalProperties":false,"properties":{"turn":{"additionalProperties":false,"properties":{"id":{"type":"string"}},"required":["id"],"type":"object"}},"required":["turn"],"type":"object"}"#;
     let mut profile = serde_json::json!({
-        "schema_version": 11,
+        "schema_version": ryeos_state::objects::STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION,
         "external_candidate": joined_external_candidate_requirement(),
         "transport": "stdio_jsonrpc",
         "http_sse": null,

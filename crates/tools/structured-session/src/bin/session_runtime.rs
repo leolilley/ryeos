@@ -211,11 +211,9 @@ fn run() -> Result<RuntimeResult> {
     std::io::stdin().read_to_end(&mut bytes)?;
     let envelope: LaunchEnvelope =
         serde_json::from_slice(&bytes).context("decode launch envelope")?;
-    if envelope.schema_version()
-        != ryeos_engine::launch_envelope_types::MANAGED_LAUNCH_ENVELOPE_SCHEMA_VERSION
-    {
-        bail!("unsupported managed launch envelope schema");
-    }
+    envelope
+        .validate_wire()
+        .map_err(|reason| anyhow!("{reason}"))?;
     let config: WorkerExecutionConfig = serde_json::from_value(
         envelope
             .runtime_data

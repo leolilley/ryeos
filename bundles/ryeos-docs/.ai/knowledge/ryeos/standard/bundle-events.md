@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:37Z:1c926ceecdff2878925db9a22dcd7aeeb5cff36772ac0d15a4bd1382d73b0772:VjlqiOERvh0yfs9NsJEBSpBj2eLGvGwjqreSDzyUaqGbxAqu49Ru0DE0sZfUKl6++3iu2LIKJiwbux28YYBGCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T06:02:00Z:6a142ad1bf2344cac341a7c59d34f4e241d8faecda011f5568f3a7317b268fa2:9MJb9ar96sLw3gGd6W18ak1sHwUhOcH/o2mW/VcgvBMOsVK9hpd2kwqtq2i/7GUnQwI1SLMhOSa0Irko16NeCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [bundle-events, runtime-authority, manifest, capabilities, vault]
@@ -27,7 +27,9 @@ Access is gated by capabilities. The important rule:
 
 This is the manifest runtime-authority model — see
 `ryeos/future/tool-runtime-authority`. Authority is always minted by the daemon
-from signed metadata, never accepted from runtime-declared input.
+from signed metadata, never accepted from runtime-declared input. The family set
+also includes the node-owned bundle state home, whose declaration, caller grant
+and isolation mount are described in `ryeos/standard/bundle-state-home`.
 
 ## Capability shape
 
@@ -70,6 +72,24 @@ Event kinds are **concrete-only, on both sides**: manifest validation rejects
 matched by exact id at mint and compose time — spell every event kind out.
 Pattern grammar exists only for item-authoring namespaces; that rule is
 stated in `knowledge:ryeos/standard/item-authoring` § "Wildcard semantics".
+
+## Attribution: which field to trust
+
+Every appended event carries an `attribution` record. The daemon fills it from
+server-held state; the append request has no attribution fields and an unknown
+field is refused.
+
+- `actor` — the principal that launched the appending thread (`fp:<64 hex>`,
+  `session:<id>`, or a schedule's principal). Taken from the thread row for the
+  callback's thread, never from the request. **This is the authoritative field
+  for deciding who did something.** If the daemon cannot resolve it, the append
+  is refused with `bundle_event_actor_unresolved` and nothing is written.
+- `tool` — the item ref of the tool that appended. It says which code ran, not
+  who invoked it; anyone allowed to run the tool produces the same `tool`.
+
+`RYEOSD_ACTING_PRINCIPAL` in a tool's environment names the caller for
+information only. Do not copy it into an event payload as proof; rely on
+`attribution.actor`.
 
 ## Declaring authority in the manifest
 

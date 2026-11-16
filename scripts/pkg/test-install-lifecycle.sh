@@ -265,3 +265,131 @@ EOF
     [[ "$(<"$test_dir/policy-argv")" == $'init-policy-preflight\n--app-root\n'"$state_root"$'\n--schema-cut' ]]
 )
 printf 'installer selected-bundle policy preflight: passed\n'
+
+# --prefix installs a development node beside a real install. Layout,
+# refusals and lifecycle argv only: nothing is installed and no sudo runs.
+# Restore the real lifecycle helpers stubbed by the shutdown cases above.
+source "$test_root/scripts/pkg/install-local-direct.sh"
+ryeos_term_suspend() { :; }
+ryeos_term_info() { :; }
+test_default_node=/home/operator/.local/share/ryeos
+test_fail_log="$test_dir/prefix-failures"
+ryeos_term_fail() { printf '%s\n' "$*" >> "$test_fail_log"; }
+
+# default_prefix_is_unchanged: /usr is the packaged layout found via PATH.
+(
+    resolve_install_layout /usr "" "$test_default_node"
+    [[ "$bin_dir" == /usr/bin && "$share_dir" == /usr/share/ryeos \
+        && "$doc_dir" == /usr/share/doc/ryeos && "$ryeos_cmd" == ryeos \
+        && "$install_on_path" == 1 ]]
+)
+
+# prefix_sets_bin_share_and_doc_dirs
+(
+    resolve_install_layout /opt/ryeos-dev/ /srv/dev-node "$test_default_node"
+    [[ "$install_prefix" == /opt/ryeos-dev && "$bin_dir" == /opt/ryeos-dev/bin \
+        && "$share_dir" == /opt/ryeos-dev/share/ryeos \
+        && "$doc_dir" == /opt/ryeos-dev/share/doc/ryeos \
+        && "$ryeos_cmd" == /opt/ryeos-dev/bin/ryeos && "$install_on_path" == 0 ]]
+)
+
+expect_prefix_refused() {
+    local expected_message="$1"
+    shift
+    : > "$test_fail_log"
+    if ( resolve_install_layout "$@" ); then
+        echo "prefix layout accepted: $*" >&2
+        exit 1
+    fi
+    grep -qF -- "$expected_message" "$test_fail_log" || {
+        echo "prefix refusal for $* did not name: $expected_message" >&2
+        cat "$test_fail_log" >&2
+        exit 1
+    }
+}
+
+# prefix_requires_app_root, and never the default node.
+expect_prefix_refused --app-root /opt/ryeos-dev "" "$test_default_node"
+expect_prefix_refused 'refuses the default node' \
+    /opt/ryeos-dev "$test_default_node/" "$test_default_node"
+expect_prefix_refused 'absolute path' opt/ryeos-dev /srv/dev-node "$test_default_node"
+expect_prefix_refused 'shadows /usr/bin' /usr/local /srv/dev-node "$test_default_node"
+expect_prefix_refused 'shadows /usr/bin' /usr/local/ /srv/dev-node "$test_default_node"
+expect_prefix_refused 'dedicated prefix' / /srv/dev-node "$test_default_node"
+for test_prefix in /opt/../usr /opt/./ryeos-dev /opt//ryeos-dev /opt/ryeos-dev/..; do
+    expect_prefix_refused 'normalized absolute path' "$test_prefix" /srv/dev-node "$test_default_node"
+done
+
+# prefix_requires_root_owned_hierarchy: the same boundary Lillux enforces for
+# the package namespace. A group/world-writable directory is refused for any
+# uid, so this holds whether or not the test runs as root.
+require_root_owned_hierarchy /usr 0
+require_root_owned_hierarchy /usr/ryeos-test-absent-prefix/share 1
+if require_root_owned_hierarchy /usr/ryeos-test-absent-prefix/share 0; then
+    echo 'absent prefix accepted where it must exist' >&2
+    exit 1
+fi
+mkdir "$test_dir/open-prefix"
+chmod 0777 "$test_dir/open-prefix"
+if require_root_owned_hierarchy "$test_dir/open-prefix" 1; then
+    echo 'world-writable prefix accepted' >&2
+    exit 1
+fi
+ln -s /usr "$test_dir/linked-prefix"
+if require_root_owned_hierarchy "$test_dir/linked-prefix" 1; then
+    echo 'symlinked prefix accepted' >&2
+    exit 1
+fi
+
+# prefix_uses_absolute_ryeos: lifecycle calls run the prefix's own client,
+# across the sudo/login boundary and without it.
+(
+    resolve_install_layout /opt/ryeos-dev /srv/dev-node "$test_default_node"
+    init_app_root=/srv/dev-node
+    invoking_user=selected_operator
+    id() { printf '%s\n' installer; }
+    getent() { printf 'selected_operator:x:1000:1000::/unused:/bin/bash\n'; }
+    run_timeout() { printf '%s\n' "$@" > "$test_log"; }
+    ryeos_user 30 stop --force
+    printf -v expected_command 'exec env %q %q stop --force' \
+        "RYEOS_APP_ROOT=/srv/dev-node" /opt/ryeos-dev/bin/ryeos
+    [[ "$(tail -n 1 "$test_log")" == "$expected_command" ]]
+
+    id() { printf '%s\n' selected_operator; }
+    ryeos_user 10 node status
+    [[ "$(sed -n 2p "$test_log")" == /opt/ryeos-dev/bin/ryeos ]]
+)
+
+# A supervised prefix upgrade needs the prefix's own installed client, not
+# whatever `ryeos` PATH resolves.
+(
+    target_dir="$test_release"
+    restart_daemon=1
+    run_init=1
+    host_upgrade_command() {
+        if [[ "$1" == --inspect ]]; then printf 'supervised\n'; else printf 'up\n'; fi
+    }
+    ryeos_cmd="$test_dir/absent-prefix/bin/ryeos"
+    if ( prepare_host_upgrade ) 2>/dev/null; then
+        echo 'supervised prefix upgrade accepted a missing prefix client' >&2
+        exit 1
+    fi
+    ryeos_cmd="$test_release/ryeos"
+    prepare_host_upgrade
+    [[ "$host_upgrade_desired" == up ]]
+)
+
+# prefix_skips_path_shadow_move and the entrypoint wiring: the main flow is
+# not sourceable, so guard the exact lines that carry the prefix.
+installer="$test_root/scripts/pkg/install-local-direct.sh"
+grep -qx 'if \[\[ \$cleanup_shadows -eq 1 && \$install_on_path -eq 1 \]\]; then' "$installer"
+grep -qx '    "${init_as\[@\]}" "\$ryeos_cmd" "${init_args\[@\]}" "${trust_args\[@\]}" || init_status=\$?' "$installer"
+grep -qx 'elif \[\[ \$restart_daemon -eq 1 \]\] && command -v "\$ryeos_cmd" >/dev/null 2>&1; then' "$installer"
+if grep -nE '^[^#]*(bin_dir|share_dir|doc_dir)="/usr' "$installer"; then
+    echo 'installer still hard-codes an install directory' >&2
+    exit 1
+fi
+layout_line="$(sed -n '/^resolve_install_layout "\$install_prefix_argument"/=' "$installer")"
+target_line="$(sed -n '/^target_dir="\$cargo_target_root\/release"/=' "$installer")"
+[[ -n "$layout_line" && -n "$target_line" && "$layout_line" -lt "$target_line" ]]
+printf 'installer prefix layout: passed\n'

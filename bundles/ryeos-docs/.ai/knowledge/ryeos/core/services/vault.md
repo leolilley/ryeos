@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:35Z:11510f27ac0cebcbd8976f02dadb1b84c55e85f822ee6981aa4f8bbcd9b8e108:UrwNrRsi8k/Wa0pWbd1OKfUXyIUjiVEaXGBEZXUkiOkckCllYu629KExFTuP6vjXp//qo6P1N+kPQUJVAZsgBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T11:33:58Z:439779439ed9a7e6294b453fa21420c0ac43dcee0362edc6e42f824e558b480b:w/yZbmr25ewwlbQXWZ0/+aK/I2tA645t+YX9YtSEiWmrA0UUN4ljdoV56juFitHvSAiEdTq4ZFHREe86Fz+BCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/services
 tags: [service, vault, secrets, remote]
@@ -14,11 +14,30 @@ Vault services mutate or read sealed node secrets:
 - `vault/list`
 - `vault/delete`
 
-In v1, the vault is a **single node-level store** protected by service
-capabilities and daemon vault key material. It is not a per-principal
+The vault is a **single node-level store** protected by service capabilities,
+daemon vault key material and per-name ceilings. It is not a per-principal
 namespace. Remote vault commands proxy to these same routes on the target
-node, so granting `ryeos.execute.service.vault.*` to a remote caller is
-operator-level access to the target node vault.
+node, where the ceilings judge the principal the remote admitted (the
+delegated user, or the calling node when no delegation is held).
+
+Per-name ceilings come from the node's signed `sealed_vault_names` policy:
+
+- `vault/set` and `vault/delete` require the caller to be a **writer** of the
+  name; otherwise they refuse with 403 `vault_name_not_writable`.
+- `vault/list` returns only the names the caller may receive or write.
+- A name with no entry in the policy is **operator-only**: only the configured
+  local operator may receive or write it, and any other caller is refused with
+  403 `vault_name_has_no_ceiling`. `ryeos node doctor` warns
+  (`vault_names_without_ceiling`) for each stored name in this state.
+- Delivery into a launch requires the principal to be a **recipient**, refused
+  with 403 `vault_name_not_delivered`. The recipient judged is the admitted
+  caller and its own scopes, sealed into the launch's vault environment
+  authority at admission and inherited by children and continuations; a launch
+  under any other principal receives no operator-vault name.
+
+Each refusal names the fix, `ryeos node policy-apply sealed_vault_names
+<source.yaml>` on a stopped node. See
+[Secrets & credentials](../../standard/secrets.md#per-name-vault-ceilings).
 
 The current sealed backend is one bounded encrypted envelope. Every read,
 runtime-vault get/list, and read-modify-write operation opens and validates the
@@ -72,6 +91,16 @@ if any declared secret is missing. Sources are checked in this order:
 
 Only declared names are injected into the subprocess environment. The
 daemon never pours the whole vault into a tool process.
+
+Delivery from the operator vault is operator authority. An execution policy
+that exposes it (a project overlay with `include_operator_vault: true`, or the
+`operator` vault namespace) requires the fixed capability
+`ryeos.use.vault.operator` at preauthorization; without it the daemon refuses
+with `operator_vault_capability_required` before any launch or secret read.
+The configured operator's bootstrap `*` grant covers it. Remote caller nodes
+and narrower principals need it granted explicitly, and it should not be
+granted to remote caller nodes by default. See
+[Secrets & credentials](../../standard/secrets.md#who-may-read-the-operator-vault).
 
 ```yaml
 category: agent-kiwi/oauth/connect

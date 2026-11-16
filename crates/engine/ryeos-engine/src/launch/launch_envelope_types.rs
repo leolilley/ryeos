@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use crate::effective_program::FinalizedEffectiveProgram;
 use crate::resolution::EffectiveDefinitionDigest;
 use crate::resolution::ResolutionOutput;
+use crate::trust::{TrustStore, TrustedSignerEntry, trusted_signers_digest};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
@@ -35,7 +36,7 @@ pub use ryeos_accounting::UsdNanos;
 /// and the runtime would have no way to tell which to trust. Now there
 /// is exactly one root snapshot — `resolution.root` — and every consumer
 /// reads `path` / `digest` / `kind` / `item_id` from there.
-pub const MANAGED_LAUNCH_ENVELOPE_SCHEMA_VERSION: u32 = 3;
+pub const MANAGED_LAUNCH_ENVELOPE_SCHEMA_VERSION: u32 = 4;
 
 fn deserialize_required_nullable<'de, D, T>(
     deserializer: D,
@@ -101,6 +102,18 @@ pub struct LaunchEnvelope {
 impl LaunchEnvelope {
     pub fn schema_version(&self) -> u32 {
         self.schema_version
+    }
+
+    /// Refuse an envelope of another schema version or whose signer list does
+    /// not match its sealed digest. Runtimes call this before using any field.
+    pub fn validate_wire(&self) -> Result<(), String> {
+        if self.schema_version != MANAGED_LAUNCH_ENVELOPE_SCHEMA_VERSION {
+            return Err(format!(
+                "unsupported managed launch envelope schema version {} (this runtime requires {})",
+                self.schema_version, MANAGED_LAUNCH_ENVELOPE_SCHEMA_VERSION
+            ));
+        }
+        self.roots.validate_trusted_signers()
     }
 
     pub fn resolution(&self) -> &ResolutionOutput {
@@ -271,10 +284,49 @@ pub struct EnvelopeRoots {
     /// a private exact-input view; it is never fresh resolution authority.
     pub project_root: PathBuf,
     pub bundle_roots: Vec<PathBuf>,
-    /// Node trusted-keys dir (`<app_root>/.ai/config/keys/trusted`).
-    /// Runtimes that load an admitted config surface take node trust from this
-    /// directory, never from bundle roots or ambient environment variables.
-    pub node_trusted_keys_dir: PathBuf,
+    /// Signers the runtime trusts, as scoped entries taken from the node's
+    /// verified signer registry. Runtimes build their trust store from this
+    /// list alone; they never read trust directories from disk.
+    pub trusted_signers: Vec<TrustedSignerEntry>,
+    /// Digest of `trusted_signers` (see [`trusted_signers_digest`]). Sealed
+    /// by the daemon at launch; an envelope whose list does not hash to it is
+    /// refused.
+    pub trusted_signers_digest: String,
+}
+
+impl EnvelopeRoots {
+    /// Build roots from a signer list, computing the sealed digest.
+    pub fn new(
+        project_root: PathBuf,
+        bundle_roots: Vec<PathBuf>,
+        trusted_signers: Vec<TrustedSignerEntry>,
+    ) -> Self {
+        let trusted_signers_digest = trusted_signers_digest(&trusted_signers);
+        Self {
+            project_root,
+            bundle_roots,
+            trusted_signers,
+            trusted_signers_digest,
+        }
+    }
+
+    /// Refuse roots whose signer list does not hash to the sealed digest.
+    pub fn validate_trusted_signers(&self) -> Result<(), String> {
+        let observed = trusted_signers_digest(&self.trusted_signers);
+        if observed != self.trusted_signers_digest {
+            return Err(format!(
+                "launch envelope trusted signer list does not match its sealed digest: \
+                 envelope={}, observed={}",
+                self.trusted_signers_digest, observed
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Scoped signer entries for a trust store, in the form launch envelopes carry.
+pub fn trusted_signer_entries(store: &TrustStore) -> Vec<TrustedSignerEntry> {
+    store.signer_entries()
 }
 
 /// Intentionally open payload — shape is kind-defined.
@@ -632,11 +684,7 @@ mod tests {
             schema_version: MANAGED_LAUNCH_ENVELOPE_SCHEMA_VERSION,
             invocation_id: "inv-abc".to_string(),
             thread_id: "T-test".to_string(),
-            roots: EnvelopeRoots {
-                project_root: PathBuf::from("/project"),
-                bundle_roots: vec![],
-                node_trusted_keys_dir: PathBuf::from("/app-root/.ai/config/keys/trusted"),
-            },
+            roots: EnvelopeRoots::new(PathBuf::from("/project"), vec![], vec![]),
             request: EnvelopeRequest {
                 inputs: serde_json::json!({}),
                 previous_thread_id: None,
@@ -959,11 +1007,7 @@ cost:
         let envelope = LaunchEnvelopeBuilder::new(
             "inv-builder".to_string(),
             "T-builder".to_string(),
-            EnvelopeRoots {
-                project_root: PathBuf::from("/project"),
-                bundle_roots: vec![],
-                node_trusted_keys_dir: PathBuf::from("/app-root/.ai/config/keys/trusted"),
-            },
+            EnvelopeRoots::new(PathBuf::from("/project"), vec![], vec![]),
             EnvelopeRequest::simple(serde_json::json!({"key": "value"})),
             EnvelopePolicy::new(vec!["ryeos.execute.*".to_string()], HardLimits::default()),
             EnvelopeCallback::new(PathBuf::from("/tmp/ryeosd.sock"), "token-abc".to_string()),
@@ -986,5 +1030,14 @@ cost:
         let json = serde_json::to_string(&envelope).unwrap();
         let parsed: LaunchEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.thread_id, "T-builder");
+    }
+
+    #[test]
+    fn roots_refuse_signer_list_that_does_not_match_digest() {
+        let mut roots = EnvelopeRoots::new(PathBuf::from("/project"), vec![], vec![]);
+        roots.validate_trusted_signers().unwrap();
+        roots.trusted_signers_digest = "sha256:deadbeef".to_string();
+        let err = roots.validate_trusted_signers().unwrap_err();
+        assert!(err.contains("sealed digest"), "{err}");
     }
 }

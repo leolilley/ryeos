@@ -6,7 +6,7 @@
 pub enum AuthorizedKeyPrincipalClass {
     LocalClient,
     RemoteNode,
-    RemoteOperator,
+    RemotePrincipal,
 }
 
 impl AuthorizedKeyPrincipalClass {
@@ -14,12 +14,12 @@ impl AuthorizedKeyPrincipalClass {
         match self {
             Self::LocalClient => "local_client",
             Self::RemoteNode => "remote_node",
-            Self::RemoteOperator => "remote_operator",
+            Self::RemotePrincipal => "remote_principal",
         }
     }
 
     pub const fn is_remote(self) -> bool {
-        matches!(self, Self::RemoteNode | Self::RemoteOperator)
+        matches!(self, Self::RemoteNode | Self::RemotePrincipal)
     }
 }
 
@@ -28,6 +28,14 @@ impl AuthorizedKeyPrincipalClass {
 pub struct ForwardingAuthorityEvidence {
     pub source_node_fingerprint: String,
     pub source_node_grant_hash: String,
+    /// Digest of the principal-signed delegation the forwarded request
+    /// carried, when the source node acted for the principal under one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation_digest: Option<String>,
+    /// Unix time after which that delegation no longer admits anything.
+    /// Present exactly when `delegation_digest` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation_not_after: Option<u64>,
 }
 
 /// Stable grant-generation evidence produced by authenticated RyeOS request
@@ -44,7 +52,7 @@ impl AuthenticatedGrantAuthority {
     pub fn validate_for_class(&self, class: AuthorizedKeyPrincipalClass) -> anyhow::Result<()> {
         validate_sha256("principal grant hash", &self.principal_grant_hash)?;
         match (class, self.forwarding.as_ref()) {
-            (AuthorizedKeyPrincipalClass::RemoteOperator, Some(forwarding)) => {
+            (AuthorizedKeyPrincipalClass::RemotePrincipal, Some(forwarding)) => {
                 validate_sha256(
                     "forwarding source-node fingerprint",
                     &forwarding.source_node_fingerprint,
@@ -53,12 +61,28 @@ impl AuthenticatedGrantAuthority {
                     "forwarding source-node grant hash",
                     &forwarding.source_node_grant_hash,
                 )?;
+                match (
+                    forwarding.delegation_digest.as_deref(),
+                    forwarding.delegation_not_after,
+                ) {
+                    (Some(digest), Some(_)) => {
+                        validate_sha256("forwarding delegation digest", digest)?;
+                    }
+                    (None, None) => {}
+                    _ => anyhow::bail!(
+                        "forwarding delegation digest and expiry must be recorded together"
+                    ),
+                }
             }
-            (AuthorizedKeyPrincipalClass::RemoteOperator, None) => {
-                anyhow::bail!("remote-operator grant authority requires source-node grant evidence")
+            (AuthorizedKeyPrincipalClass::RemotePrincipal, None) => {
+                anyhow::bail!(
+                    "remote-principal grant authority requires source-node grant evidence"
+                )
             }
             (_, Some(_)) => {
-                anyhow::bail!("only remote-operator grant authority may carry source-node evidence")
+                anyhow::bail!(
+                    "only remote-principal grant authority may carry source-node evidence"
+                )
             }
             (_, None) => {}
         }

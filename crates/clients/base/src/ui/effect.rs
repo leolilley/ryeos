@@ -135,12 +135,6 @@ pub enum UiTransferContactRequest {
         preparation: ryeos_ui_presentation_contract::transfer::TransferEvidence,
         surface_instance_id: crate::ids::SurfaceInstanceId,
     },
-    AcceptSharedDock {
-        transfer: ryeos_ui_presentation_contract::transfer::TransferIdentity,
-        inbound: ryeos_ui_presentation_contract::transfer::TransferEvidence,
-        preparation: ryeos_ui_presentation_contract::transfer::TransferEvidence,
-        edge: String,
-    },
     Commit {
         transfer: ryeos_ui_presentation_contract::transfer::TransferIdentity,
     },
@@ -160,7 +154,6 @@ impl UiTransferContactRequest {
         match self {
             Self::AcceptView { .. } => "accept_view",
             Self::AcceptTabs { .. } => "accept_tabs",
-            Self::AcceptSharedDock { .. } => "accept_shared_dock",
             Self::Commit { .. } => "commit",
             Self::Abort { .. } => "abort",
             Self::Activate { .. } => "activate",
@@ -172,7 +165,6 @@ impl UiTransferContactRequest {
         match self {
             Self::AcceptView { transfer, .. }
             | Self::AcceptTabs { transfer, .. }
-            | Self::AcceptSharedDock { transfer, .. }
             | Self::Commit { transfer }
             | Self::Abort { transfer }
             | Self::Activate { transfer }
@@ -183,10 +175,9 @@ impl UiTransferContactRequest {
     pub fn actor_seat(&self) -> &ryeos_ui_presentation_contract::transfer::TransferSeat {
         let transfer = self.transfer();
         match self {
-            Self::AcceptView { .. }
-            | Self::AcceptTabs { .. }
-            | Self::AcceptSharedDock { .. }
-            | Self::Activate { .. } => &transfer.destination,
+            Self::AcceptView { .. } | Self::AcceptTabs { .. } | Self::Activate { .. } => {
+                &transfer.destination
+            }
             Self::Commit { .. } | Self::Abort { .. } | Self::CancelFreeze { .. } => {
                 &transfer.source
             }

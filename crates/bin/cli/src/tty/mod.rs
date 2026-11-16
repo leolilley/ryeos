@@ -86,6 +86,14 @@ impl Console {
         out.flush()
     }
 
+    /// Ask the operator a question on stderr, leaving the cursor on the line
+    /// for the answer.
+    pub fn prompt(&self, question: &str) -> io::Result<()> {
+        let mut err = io::stderr().lock();
+        write!(err, "{question}")?;
+        err.flush()
+    }
+
     pub fn success(&self, status: &StatusBanner) -> io::Result<()> {
         self.status(status)
     }

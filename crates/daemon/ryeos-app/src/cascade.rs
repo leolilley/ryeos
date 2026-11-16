@@ -36,8 +36,9 @@ pub enum CascadeMode {
 /// honour SIGTERM at their own boundary (a graph at its next node, a directive
 /// by cutting its stream), so a forced SIGKILL after a fixed grace would kill a
 /// long node mid-flight and settle it `failed` instead of `cancelled`. `kill` is
-/// SIGKILL; a graceful `cancel` is SIGTERM unless the tool declared it can only
-/// be hard-stopped (`Hard` cancellation mode), in which case a one-shot SIGKILL.
+/// SIGKILL; a graceful `cancel` is SIGTERM unless the launch's recorded stop
+/// policy is `Hard` (declared by the item or set by its execution config), in
+/// which case a one-shot SIGKILL.
 /// A hung target is escalated by the operator with an explicit `kill`.
 fn cancel_signal(mode: CascadeMode, cancellation_mode: Option<CancellationMode>) -> i32 {
     match mode {

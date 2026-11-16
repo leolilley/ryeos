@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T01:27:14Z:46e29a44d939376716ad1c6e0c116a9abb34e77f618afbe4c29d1e14a267a41e:vOun74ngMWEmiEeTQxoVP5Cs0fsU4B+HvZA9EBlS24v35RZzOA9zeiIXjywZtar6kkXuzlv0Y0saTctiumBlAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-15T02:27:40Z:908b4e07c67d6e9ef311e43d6a9fce379d337978ab522e41afb715721cd7fd2d:dKsgmY2roEB9Q7PwsxRXqqHrYx+8oHhzerMiRmWJqSDqixYy9h4TxHnuBWdk5kRwZUFB3D7Tpb6PV3GXMWnZDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, init, setup, bundles, trust, publisher, ryeos-node]
@@ -24,11 +24,13 @@ Defaults are `/usr/share/ryeos` for source and the XDG data dir
 (`~/.local/share/ryeos`) for the app root, overridable via `--app-root`
 or `RYEOS_APP_ROOT`. Every fresh initialization requires
 `--node-profile <name>` to select a complete publisher-signed init profile from
-`<source>/.ai/node/init/profiles/<name>.yaml`. Packaged full installs use
-`--node-profile full --host-class local`; each lean distribution uses its exact
+`<source>/.ai/node/init/profiles/<name>.yaml`. Packaged installs use
+`--node-profile standard --host-class local`; each lean distribution uses its exact
 same-named profile. `--host-class <class>` names which of the profile's
 declared host classes the node runs under (`local` on a host the operator
-runs, `hosted` in a hosting provider's container); the node holds that class's
+runs, with enforced isolation; `local_unconfined` on that host with no
+sandbox, an explicit opt-out init never selects for you; `hosted` in a hosting
+provider's container); the node holds that class's
 signed capability floor and isolation lane, and keeps the class for life.
 Neither selection is inferred from the bundles present in the source or from
 what the host proves, and absence fails rather than manufacturing an implicit
@@ -40,9 +42,12 @@ default.
 2. Create the app-root layout (`<app_root>/.ai/{node,state,bundles,config}`).
 3. Load-or-create the operator Ed25519 signing key.
 4. Load-or-create the node Ed25519 signing key.
-5. Write self-trust docs for both keys into the node trust store.
+5. Initialize the signer registry under `<app_root>/.ai/node/trust/` and
+   write the node-signed signer record for the operator key (the node key is
+   the implicit root and needs no record).
 6. Pin the official publisher key from hardcoded public key bytes.
-7. Pin any additional `--trust-file` publisher docs.
+7. Pin any additional `--trust-file` publisher docs (role publisher, space
+   bundle).
 8. Discover bundles in the source directory.
 9. Build the bundle plan and verify manifest dependency policy.
 10. If a node init profile was selected, verify its publisher signature, use
@@ -104,6 +109,8 @@ publishers enter the node trust store only through an explicit trust
 choice:
 
 - `ryeos init --trust-file <PUBLISHER_TRUST.toml>` pins a named publisher;
+- on an existing node, `ryeos trust pin --from <PUBLISHER_TRUST.toml> --role
+  publisher` pins one while the node is stopped;
 - development/custom containers may opt in to their baked publisher set with
   `RYEOS_TRUST_BAKED_PUBLISHERS=1`; and
 - the local source installer may opt in with `--trust-source-publishers`.
@@ -136,6 +143,13 @@ bundle generation is absent but the app root holds a node identity or a
 completed init, the entrypoint refuses instead of initializing it again under
 the image's profile. Signed offline operations on a hosted container are
 described in `deploy/composition-images.md`.
+
+A remote operator may sign only the offline operations the node's signed
+profile delegates (`maintenance.remote_offline_operations`); every other
+authority-bearing operation is refused `not_delegable`. Only the
+`hosted-controller` profile delegates any: `node.external-execution.compose`,
+`node.authorize-client`, `node.remote.pin` and `node.bundle.replace`. See
+"Wiring a hosted node without a shell" in `remote/remote-operations.md`.
 
 Release containers pass no packaged trust documents to `ryeos init`.
 Development opt-ins trust every publisher document in the selected source
@@ -182,7 +196,23 @@ while an incarnation debit is outstanding or the account's image does not fit
 the new policy; `ryeos node capacity reissue --reason "..."` settles the
 account, then the cutover is rerun.
 
-The `ingest_ignore` schema-1 to schema-2 change is one such clean cut. Schema 1
+A node whose generation lacks a mandatory section does not start, and
+`ryeos node doctor` reports `node_policy_section_missing` with the section's
+name. The `event_storage` section is one such addition. Its replacement needs
+no other choice on a node with the operator record, because a section the
+installed generation lacks always comes from the profile:
+
+```bash
+ryeos node reset policy-generation --node-profile <name> --host-class <class> \
+  --source <source> --reset-section event_storage --confirm
+```
+
+`--reset-section event_storage` states that choice explicitly; the cut takes
+the profile's body without it too. `--keep-section event_storage` is refused,
+because there is no installed section to keep. On a node without the record,
+any other section that differs from the profile still needs its own choice.
+
+The `ingest_ignore` schema-1 to schema-2 change is another such clean cut. Schema 1
 only carried `additional_patterns`; schema 2 carries the complete canonical
 `patterns` policy. During a package-source installation of this cut, use:
 

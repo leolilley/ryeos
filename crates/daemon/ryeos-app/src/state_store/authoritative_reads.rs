@@ -237,7 +237,10 @@ impl StateStore {
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db
-            .require_project_head_mutation_unfenced(principal_key, project_hash)?;
+            .require_project_head_mutation_unfenced(principal_key, project_hash)
+            .map_err(|error| {
+                ryeos_state::refs::ProjectHeadAdvanceRefusal::Fenced(format!("{error:#}"))
+            })?;
         g.state_db.advance_project_head_ref(
             principal_key,
             project_hash,
@@ -268,7 +271,10 @@ impl StateStore {
             bail!("stale launch owner cannot publish state for thread {thread_id}");
         }
         g.runtime_db
-            .require_project_head_mutation_unfenced(principal_key, project_hash)?;
+            .require_project_head_mutation_unfenced(principal_key, project_hash)
+            .map_err(|error| {
+                ryeos_state::refs::ProjectHeadAdvanceRefusal::Fenced(format!("{error:#}"))
+            })?;
         g.state_db.advance_project_head_ref(
             principal_key,
             project_hash,
@@ -347,6 +353,10 @@ impl StateStore {
         roots.extend(g.runtime_db.external_execution_cas_roots()?);
         roots.extend(g.runtime_db.scoped_child_observation_cas_roots()?);
         roots.extend(g.runtime_db.snapshot_bootstrap_lifecycle_roots()?);
+        roots.extend(
+            g.runtime_db
+                .snapshot_qualification_lifecycle_roots(lillux::time::timestamp_millis())?,
+        );
         Ok(roots.into_iter().collect())
     }
 

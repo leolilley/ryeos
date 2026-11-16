@@ -13,11 +13,11 @@ variable "IMAGE_PREFIX" { default = "ryeos" }
 variable "RELEASED_BUNDLES_DIR" { default = "" }
 variable "OFFICIAL_PUBLISHER_FP" { default = "" }
 
-target "f5r-controller-released" {
+target "hosted-controller-released" {
   context    = "."
   dockerfile = "Dockerfile.release"
   platforms  = ["linux/amd64"]
-  target     = "ryeos-f5r-controller-released"
+  target     = "ryeos-hosted-controller-released"
   contexts = {
     released-bundles = RELEASED_BUNDLES_DIR
   }
@@ -29,7 +29,7 @@ target "f5r-controller-released" {
     CARGO_BUILD_JOBS      = CARGO_BUILD_JOBS
     OFFICIAL_PUBLISHER_FP = OFFICIAL_PUBLISHER_FP
   }
-  tags = ["${IMAGE_PREFIX}-f5r-controller:release-v${VERSION}"]
+  tags = ["${IMAGE_PREFIX}-hosted-controller:release-v${VERSION}"]
   attest = [
     "type=provenance,mode=max",
     "type=sbom",

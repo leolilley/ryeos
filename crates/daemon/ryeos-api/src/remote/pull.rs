@@ -18,6 +18,7 @@ use lillux::cas::CasStore;
 use ryeos_state::objects::{ProjectFile, ProjectSnapshot, ProjectSnapshotPolicy, ProjectTree};
 use ryeos_state::{PinnedStateAuthority, StagedCasRootLease};
 
+use crate::objects_read_scope::ReadRoot;
 use crate::remote::client::RemoteClient;
 
 /// Result of pulling remote execution results.
@@ -79,6 +80,9 @@ impl From<lillux::CanonicalJsonError> for PullResultsError {
 ///
 /// # Arguments
 /// * `client` — RemoteClient connected to the remote node
+/// * `read_root` — The remote root the result snapshot is read under: the
+///   execution thread whose result it is, or the worker placement that
+///   produced it.
 /// * `authority` — One descriptor-pinned local state authority captured by the
 ///   caller for the complete push/execute/pull operation.
 /// * `pushed_snapshot_hash` — The snapshot we pushed (lineage anchor). The
@@ -91,6 +95,7 @@ impl From<lillux::CanonicalJsonError> for PullResultsError {
 /// * `base_tree` — The exact tree that was pushed (from PushResult.tree)
 pub async fn pull_results(
     client: &RemoteClient,
+    read_root: &ReadRoot,
     authority: &PinnedStateAuthority,
     pushed_snapshot_hash: &str,
     remote_snapshot_hash: &str,
@@ -112,6 +117,7 @@ pub async fn pull_results(
 
     let operation = pull_results_staged(
         client,
+        read_root,
         authority,
         &local_cas,
         &mut staged_roots,
@@ -129,6 +135,7 @@ pub async fn pull_results(
 // snapshot identities explicit so none can be silently substituted.
 async fn pull_results_staged(
     client: &RemoteClient,
+    read_root: &ReadRoot,
     authority: &PinnedStateAuthority,
     local_cas: &CasStore,
     staged_roots: &mut StagedCasRootLease,
@@ -146,7 +153,7 @@ async fn pull_results_staged(
         Some(value) => value,
         None => {
             let snapshot_objs = client
-                .objects_get(&[remote_snapshot_hash.to_string()], &[])
+                .objects_get(read_root, &[remote_snapshot_hash.to_string()], &[])
                 .await
                 .map_err(PullResultsError::Other)?;
             let value = snapshot_objs
@@ -218,7 +225,7 @@ async fn pull_results_staged(
     } else {
         Some(
             client
-                .objects_get(&missing_roots, &[])
+                .objects_get(read_root, &missing_roots, &[])
                 .await
                 .map_err(PullResultsError::Other)?,
         )
@@ -260,7 +267,7 @@ async fn pull_results_staged(
             Some(value) => value,
             None => {
                 let response = client
-                    .objects_get(std::slice::from_ref(object_hash), &[])
+                    .objects_get(read_root, std::slice::from_ref(object_hash), &[])
                     .await
                     .map_err(PullResultsError::Other)?;
                 let value = response.find_object(object_hash).ok_or_else(|| {
@@ -286,7 +293,8 @@ async fn pull_results_staged(
         if local_cas.has_blob(&file.blob_hash)? {
             continue;
         }
-        fetch_remote_blob_streaming(client, authority, staged_roots, local_cas, file).await?;
+        fetch_remote_blob_streaming(client, read_root, authority, staged_roots, local_cas, file)
+            .await?;
         fetched_count += 1;
     }
     let closure = ryeos_state::object_closure::collect_object_closure_with_cas_and_limits(
@@ -348,6 +356,7 @@ fn store_remote_object_bytes(
 
 async fn fetch_remote_blob_streaming(
     client: &RemoteClient,
+    read_root: &ReadRoot,
     authority: &PinnedStateAuthority,
     staged_roots: &mut StagedCasRootLease,
     local_cas: &CasStore,
@@ -360,6 +369,7 @@ async fn fetch_remote_blob_streaming(
         while offset < file.size {
             let chunk = client
                 .objects_get_blob_chunk(
+                    read_root,
                     &file.blob_hash,
                     offset,
                     crate::handlers::objects_get::MAX_BLOB_CHUNK_BYTES,

@@ -75,7 +75,9 @@ pub fn install_large_runtime_content(
 /// Run one async scenario on the thread and runtime shape the qualification
 /// verifiers need. The node Store is opened and closed on that thread, after
 /// the runtime has ended every task that could still hold the application.
-pub fn run_on_test_node<F, Fut>(scenario: F)
+/// A node named with a fixed `publisher` also admits Bundles that publisher
+/// signed, so several nodes can install one signed release.
+pub fn run_on_test_node<F, Fut>(publisher: Option<ryeos_engine::trust::TrustedSigner>, scenario: F)
 where
     F: FnOnce(PathBuf, ryeos_app::state::AppState) -> Fut + Send + 'static,
     Fut: Future<Output = ()>,
@@ -92,7 +94,8 @@ where
                 .unwrap();
             let root = tempfile::tempdir().unwrap();
             let (store_owner, state) =
-                ryeos_app::state::test_support::build_bound(root.path()).unwrap();
+                ryeos_app::state::test_support::build_bound_trusting(root.path(), publisher)
+                    .unwrap();
             // A failing scenario must still end its runtime's tasks and close
             // the Store, so one failure does not leave the native host dirty.
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

@@ -19,7 +19,7 @@ variable "IMAGE_TAG" { default = "composition-candidate" }
 variable "BUILD_CACHE_REF" { default = "" }
 
 group "composition" {
-  targets = ["core", "core-scheduling", "core-workflow", "core-knowledge", "standard", "central-host", "local-inference", "hosted-workflow", "bundle-source", "f5r-controller"]
+  targets = ["core", "core-scheduling", "core-workflow", "core-knowledge", "standard", "central-host", "local-inference", "hosted-workflow", "bundle-source", "hosted-controller"]
 }
 
 # Dependency compilation lives in an image layer (see Dockerfile.release), and a
@@ -30,7 +30,7 @@ function "cache_from" {
   params = [name]
   result = BUILD_CACHE_REF == "" ? [] : distinct([
     "type=registry,ref=${BUILD_CACHE_REF}:${name}",
-    "type=registry,ref=${BUILD_CACHE_REF}:f5r-controller",
+    "type=registry,ref=${BUILD_CACHE_REF}:hosted-controller",
   ])
 }
 
@@ -134,10 +134,10 @@ target "bundle-source" {
   tags     = ["${IMAGE_PREFIX}-bundle-source:${IMAGE_TAG}"]
 }
 
-target "f5r-controller" {
+target "hosted-controller" {
   inherits = ["_composition"]
-  cache-from = cache_from("f5r-controller")
-  cache-to   = cache_to("f5r-controller")
-  target   = "ryeos-f5r-controller"
-  tags     = ["${IMAGE_PREFIX}-f5r-controller:${IMAGE_TAG}"]
+  cache-from = cache_from("hosted-controller")
+  cache-to   = cache_to("hosted-controller")
+  target   = "ryeos-hosted-controller"
+  tags     = ["${IMAGE_PREFIX}-hosted-controller:${IMAGE_TAG}"]
 }

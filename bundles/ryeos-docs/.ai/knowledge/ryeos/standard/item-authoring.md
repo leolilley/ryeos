@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T01:04:15Z:2750abc2b63c54263a86a6a187490b325e20d0c78842e524c8ec5cd763a18047:2ri+ztCW2ls8B/Hdd5gEee7u42yHNxUI+83Rl6l5btZT4EPTm4Gv6TaVA4bMX0LPc8kJ3bgSnHlcBA8MpMKUDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T20:02:48Z:884d233b65a4d5d89fa4eb3476884e45c62da9e5674e9abc4fbc9f3589a1bbdb:n3nsuTwgojGYNPfr70r7LDXUC2cJVYI2sAk2vN3LVluyJvFDwVEXziu/eM8AELUwFuvv0M/BszVgyj7n6iiRDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [item-authoring, runtime-authority, manifest, capabilities, author_item]
@@ -137,6 +137,7 @@ On success the daemon:
 - derives the path from the kind schema's directory plus the bare id (rejecting
   symlinks and non-relative components),
 - parses and path-anchors the body against the kind schema,
+- checks the capability ceiling (below) before anything is signed,
 - appends a signed `ryeos:authored:` provenance comment (author = runtime, plus
   thread, invocation, parent item ref, acting principal, effective bundle id,
   target ref, and content digest),
@@ -147,17 +148,83 @@ required_capability }`.
 
 v1 supports live-filesystem project provenance only.
 
+### The capability ceiling
+
+An authoring run cannot write an item that declares more authority than the run
+itself holds. After the body is parsed and path-anchored, and before it is
+signed, the daemon collects every capability the item would carry and requires
+each to be covered (exact match or wildcard pattern) by the authoring run's
+effective caps:
+
+- the body's own `effective_caps` policy fact, at the path the kind schema
+  declares for it (for directives and graphs, `requires.capabilities.declared`);
+- when the body omits that declaration but `extends` a parent, the parent's
+  composed `effective_caps` — an item that inherits a broad parent carries the
+  broad parent's caps;
+- every manifest runtime capability the body requests under
+  `requires.capabilities.manifest.runtime_authority`.
+
+Kinds without an `effective_caps` policy fact (knowledge, for instance) carry no
+declared caps and are unaffected by the declared-caps part of the check. An
+uncovered capability is refused with code `authored_capability_not_covered`,
+naming the capability, the target ref and the authoring thread. The cure is in
+the message: the authoring run must hold that capability, or the body must drop
+it. An `extends` parent written as an `@alias` is refused too, because its caps
+cannot be bounded without the canonical ref.
+
+### Operator signature is the trusted path
+
+The operator's signature (`ryeos sign`) is the trusted path for items. An item
+the runtime authors is a machine draft: it is signed by the node's **authoring
+key** (not the node key, not the operator key) and tagged with
+`ryeos:authored:` provenance, and it stays a draft until the operator reviews
+it and signs it again with their own key. Inspection (`authorship` in
+`items.effective`) is how a reviewer tells the two apart.
+
+### The authoring key and its scope
+
+`ryeos init` generates the authoring key in its own key home,
+`<system>/.ai/node/authoring/signing/private_key.pem`, and pins it in the signer
+registry with role `authoring`, spaces `[project]` and **no kinds**
+(`kinds: []`). The home sits under the live-execution floor, so a run never
+reads or writes it. The daemon loads the key for each `runtime.author_item`
+call and signs the item with it; the response's `signer_fingerprint` is the
+authoring key's. If the key cannot be loaded the call is refused with
+`author_item_authoring_key_unavailable`; the cure is `ryeos init` on the stopped
+node, which creates and pins it. Nothing creates the key for an existing node
+except re-running `ryeos init`.
+
+Because the pinned scope admits no kind, an authored item is out of scope for
+every kind until the operator widens it. In project space an out-of-scope item
+resolves as `untrusted_project` and is refused at launch; it is a machine draft
+to read, not to run. Widening the scope per kind is the deliberate exception:
+
+```bash
+ryeos trust show <authoring-fingerprint>           # the record and its events
+ryeos trust scope <authoring-fingerprint> --kind knowledge
+```
+
+After that, authored `knowledge` items resolve as `trusted_project` and
+authored items of every other kind are still refused. The node key does not
+sign project items: its own scope is the node space only. The operator's
+signature (`ryeos sign`) stays the trusted path for everything else.
+
+The authoring key rotates with `ryeos node authoring rotate` (stopped node):
+the new key inherits the old key's scope, the old key is retired and the items
+it signed keep verifying. See [Identity Model](../core/identity-model.md).
+
 ### How authored items resolve and show up
 
-An authored item is signed by the **node** key, which the node trusts, so it
-resolves as `trusted_project` and launches wherever `trusted_project` is
-admitted, exactly like an operator-signed item. Launch trust does not tell them
-apart. Inspection does: `items.effective` returns an `authorship` row for the
-root, each extends ancestor and each referenced item, with
-`signer_fingerprint`, `signer_role` (`node` for this node's key, `other` for
-any other key, `none` when unsigned) and `runtime_authored`, which is true only
-when the node key signed the item and its signed bytes carry the
-`ryeos:authored:` provenance line.
+An authored item is signed by the **authoring** key. Whether it launches is the
+registry scope's decision (above), not a property of the item: launch trust
+does not tell an authored item from an operator-signed one once the scope
+admits its kind. Inspection does: `items.effective` returns an `authorship` row
+for the root, each extends ancestor and each referenced item, with
+`signer_fingerprint`, `signer_role` (`authoring` for a key pinned with the
+authoring role, `node` for this node's key, `other` for any other key, `none`
+when unsigned) and `runtime_authored`, which is true only when an authoring key
+signed the item and its signed bytes carry the `ryeos:authored:` provenance
+line. A node-signed item with the line is not runtime-authored.
 
 ## Invoking it: the `author-item` tool
 

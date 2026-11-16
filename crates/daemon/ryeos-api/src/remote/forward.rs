@@ -751,7 +751,13 @@ pub async fn execute_unary_forward(
     }
 
     // 3. Extract the explicitly requested result snapshot hash.
-    let Some(result_snapshot_hash) = extract_snapshot_hash(&remote_result) else {
+    let remote_thread_id = remote_result
+        .pointer("/thread/thread_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let (Some(result_snapshot_hash), Some(remote_thread_id)) =
+        (extract_snapshot_hash(&remote_result), remote_thread_id)
+    else {
         finish_sync_job_attempt_and_update_job(
             state,
             &attempt_id,
@@ -790,9 +796,14 @@ pub async fn execute_unary_forward(
         },
     )?;
 
-    // 4. Pull results and apply to local workspace.
+    // 4. Pull results and apply to local workspace. The result snapshot is
+    // read under the remote execution thread that produced it.
+    let read_root = crate::objects_read_scope::ReadRoot::ThreadResult {
+        thread_id: remote_thread_id,
+    };
     let pull_result = pull_results(
         client,
+        &read_root,
         &authority,
         &push_result.snapshot_hash,
         &result_snapshot_hash,
@@ -1183,18 +1194,14 @@ mod tests {
     #[test]
     fn projectless_push_captures_the_effective_source_target_policy() {
         let transfer_ignore = IgnoreMatcher::from_config(&ryeos_state::ignore::IgnoreConfig {
-            patterns: vec![
-                "target/".into(),
-                "/.ai/config/remotes/".into(),
-                ".env".into(),
-            ],
+            patterns: vec!["target/".into(), "/.ai/node/remotes/".into(), ".env".into()],
         })
         .unwrap();
         let policy = no_project_snapshot_policy(&transfer_ignore).unwrap();
 
         assert_eq!(
             policy.node_patterns,
-            vec![".env", "/.ai/config/remotes/", "target/"]
+            vec![".env", "/.ai/node/remotes/", "target/"]
         );
         policy.validate().unwrap();
     }

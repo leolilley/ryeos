@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-30T04:33:51Z:eb90835953c1a2e589f977bcd9f8847aaa469e5e414d9ff2b90dc6c776f192ae:TCkziKfCxcd3HJqu0Svm3uzY0mFNx4YXBhehEyb9P+qbbtpYq2k3TUD0+bt+nqqe4u9IIJkdSDE+yVSkSus0Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T11:33:58Z:2a11afcb29dad352cf5e2c91a23da443b37ebaa15e139adcae051eb95f38165a:aVTpPETBhAiLd1fArRE4tgfKrjirsA2jL8Lmk5LNoLJolvHiC+5QSObnrJJtD2lpEYHO9QdFd0nFqeCLLfs6Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "admitted-execution-recovery"
@@ -178,8 +178,11 @@ consumer must be requalified under the final installed generation; the A/B
 static-input qualifications remain evidence of their earlier verifier runs,
 not current four-slot `native-build` or `core-seed-build` permission.
 
-Dispatch-effect replay moves to operational epoch 15 for the schema-36
-contract. Capsule 34 first bound retained remote-verifier sources and complete
+Dispatch-effect replay moves to operational epoch 16 for the schema-37
+contract. Capsule 37 seals the admitted recipient principal and its own
+scopes into every vault-reading environment authority (project overlay and
+vault namespace); delivery judges that recipient, not the project's access
+ceiling. Capsule 34 first bound retained remote-verifier sources and complete
 production consumer inputs into the launch authority. Exact source retention
 and protected contact joins remain separate admission requirements. The
 supported explicit reset retires

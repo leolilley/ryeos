@@ -184,9 +184,11 @@ pub(crate) fn admit_or_verify(
             let plan: ryeos_engine::contracts::ExecutionPlan =
                 serde_json::from_value(execution_plan.clone())
                     .context("decode execution-realization admitted direct plan")?;
+            // A host-direct plan ran under its per-launch view, never the
+            // node's enforced lane; the realization records what ran.
             direct_execution_properties(
                 state.isolation.inspection(),
-                state.isolation.is_enforced(),
+                state.isolation.is_enforced() && !plan.execution_posture.is_host_direct(),
                 &plan,
                 selected_resources,
             )?

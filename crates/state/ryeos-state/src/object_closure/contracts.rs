@@ -1263,15 +1263,43 @@ fn links_persistent_session_capsule(value: &Value) -> Result<ContractLinks, Stri
         Some(Value::Null) => {}
         // A remote testimony's qualification attestation lives in the
         // origin's store; this node owns, and the capsule reaches, only its
-        // own acceptance of it.
+        // own acceptance of it and its own activation receipt and binding,
+        // as a local qualification reaches its receipt and binding through
+        // its attestation's purpose.
         Some(proof) => match proof.get("remote_testimony") {
-            Some(remote) if !remote.is_null() => super::push_required_object_edge(
-                remote,
-                "acceptance_hash",
-                ExpectedObject::Kind("attestation"),
-                None,
-                &mut links.object_edges,
-            )?,
+            Some(remote) if !remote.is_null() => {
+                super::push_required_object_edge(
+                    remote,
+                    "acceptance_hash",
+                    ExpectedObject::Kind("attestation"),
+                    None,
+                    &mut links.object_edges,
+                )?;
+                let join = proof
+                    .get("receiver_join")
+                    .filter(|join| !join.is_null())
+                    .ok_or_else(|| {
+                        "persistent-session remote runtime content has no receiver join".to_owned()
+                    })?;
+                for (field, kind) in [
+                    (
+                        "activation_receipt_hash",
+                        crate::objects::EXTERNAL_CONTENT_ACTIVATION_KIND,
+                    ),
+                    (
+                        "binding_hash",
+                        crate::objects::EXTERNAL_CONTENT_BINDING_KIND,
+                    ),
+                ] {
+                    super::push_required_object_edge(
+                        join,
+                        field,
+                        ExpectedObject::Kind(kind),
+                        None,
+                        &mut links.object_edges,
+                    )?;
+                }
+            }
             _ => super::push_required_object_edge(
                 proof,
                 "attestation_hash",

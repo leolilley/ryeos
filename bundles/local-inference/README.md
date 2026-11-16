@@ -103,7 +103,7 @@ Core's native Lillux backend for stronger confinement; RyeOS records whether
 confinement and isolated networking were actually enforced.
 
 Installing bundle bytes does not acquire model/runtime content. A fresh
-`full` initialization explicitly publishes the bounded
+`standard` initialization explicitly publishes the bounded
 publisher-authored acquisition and persistent-session baseline needed by the
 two exact fixture profiles. Activate either profile with the same generic
 operation:

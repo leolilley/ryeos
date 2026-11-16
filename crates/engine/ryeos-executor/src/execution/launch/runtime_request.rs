@@ -33,6 +33,9 @@ pub(super) struct SpawnRuntimeParams<'a> {
     pub project_state_scope: Option<&'a str>,
     pub live_access: Option<ryeos_engine::isolation::IsolationLiveAccessAuthority>,
     pub state_root: Option<&'a Path>,
+    /// The one node-owned bundle state namespace this launch opened, derived
+    /// from its sealed access capability.
+    pub bundle_state_home: Option<&'a ryeos_engine::isolation::IsolationBundleStateHome>,
     pub workspace_lifeline: Option<std::sync::Arc<ryeos_app::temp_dir_guard::TempDirGuard>>,
     /// Whether this launch owns the journal lifecycle for the supplied
     /// workspace. Callback children may borrow the path but never its owner
@@ -69,6 +72,10 @@ pub(super) struct SpawnRuntimeParams<'a> {
     /// later same-thread restart budget is a distinct recovery coordinate.
     pub rearm_native_resume_budget_after_attach: bool,
     pub selected_resources: ryeos_app::execution_resources::SelectedExecutionResources,
+    /// Stop policy recorded in launch metadata at attachment: the policy the
+    /// row already carries, else the one resolved from the signed execution
+    /// config for this launch.
+    pub stop_policy: ryeos_engine::contracts::CancellationMode,
 }
 
 pub(super) struct SpawnedRuntime {
@@ -190,6 +197,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         project_state_scope,
         live_access,
         state_root,
+        bundle_state_home,
         workspace_lifeline,
         owns_workspace,
         envelope,
@@ -213,6 +221,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         is_resume,
         rearm_native_resume_budget_after_attach,
         selected_resources,
+        stop_policy,
     } = params;
     // Only this bounded protocol/environment construction precedes all
     // isolation setup and process contact. An arbitrary error returned later
@@ -248,6 +257,16 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
             args: &["--project-path".to_string(), project_path_string],
             cwd: project_path,
             project_path,
+            // Under enforced isolation the workload sees the fixed mount
+            // destination; otherwise there is no mount and it uses the real
+            // directory.
+            bundle_state_home: bundle_state_home.map(|home| {
+                if isolation.is_enforced() {
+                    Path::new(ryeos_engine::isolation::BUNDLE_STATE_ISOLATION_DESTINATION)
+                } else {
+                    home.namespace_dir.as_path()
+                }
+            }),
             runtime_state_root: state_root.unwrap_or(project_path),
             project_state_scope,
             thread_id,
@@ -378,12 +397,12 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         network_authority_ceiling,
         live_access: live_access.as_ref(),
         state_root,
+        bundle_state_home,
         checkpoint_dir,
         checkpoint_authority,
         daemon_socket_path: isolation_daemon_socket_path,
         captured_callback_socket: false,
         bundle_roots: &envelope.roots.bundle_roots,
-        node_trusted_keys_dir: Some(&envelope.roots.node_trusted_keys_dir),
         verified_code: &[],
         verified_command: Some(verified_command),
         external_read_only_mounts: &admitted_mounts,
@@ -631,8 +650,9 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
     };
     // The runtime cannot self-attach before release. An existing identity at
     // this boundary is therefore an invariant violation, not an adoption race.
-    // Spawn metadata was seeded before launch; the empty attach metadata
-    // preserves it while establishing the immutable process identity.
+    // Spawn metadata was seeded before launch; the attach metadata carries
+    // only the stop policy, which merges into it while establishing the
+    // immutable process identity.
     let resource_occupancy_limit = process_identity.resource_occupancy_limit.clone();
     let resource_cleanup_allowance_ms = process_identity.resource_cleanup_allowance_ms;
     let held = HeldLaunch::new(
@@ -648,7 +668,10 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         .attach(AttachOptions {
             workspace_lifeline: workspace_lifeline.as_ref(),
             owns_workspace,
-            launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata::default(),
+            launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata {
+                cancellation_mode: Some(stop_policy),
+                ..ryeos_app::launch_metadata::RuntimeLaunchMetadata::default()
+            },
             rearm_resume_budget: rearm_native_resume_budget_after_attach,
         })
         .and_then(AttachedLaunch::authorize_release)

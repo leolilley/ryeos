@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-18T01:45:24Z:78cbcd1fdcc8ad76d38dfd80ae6f0cd62294324c76f6a8555d43c605875e2322:wcBf6Rz2iZdxA00WHrMQ/UTEZiO3+6J0bWcJiCv3FGDi8G1MhdDd1z0zGhgTsoWxQDrsEIuiu83Zeq6B6ERVDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-15T02:27:40Z:2534eb88fb8e057db095218e271af611ed07613eb68540a7774b19c0d0f58509:hRVhRBcxd0/Vj9FTw6gVhRjKh7kMEDjgeHJgwgC8BamQX7PhonKn8JqctRbcC5r7pcMk8yFi8/aGkgMmxCNVDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, install, setup, init, bundles, getting-started]
@@ -16,16 +16,16 @@ description: >
 ```bash
 # Install package, then initialize packaged bundles from /usr/share/ryeos
 yay -S ryeos
-ryeos init --node-profile full --host-class local
+ryeos init --node-profile standard --host-class local
 ryeos start
 ryeos node status
 ```
 
-For packaged installs, `ryeos init --node-profile full --host-class local` is the required
+For packaged installs, `ryeos init --node-profile standard --host-class local` is the required
 setup command. It
 uses `/usr/share/ryeos` as the default bundle source. Package install
 hooks validate `/usr/share/ryeos/*/.ai` and print `Initialize with:
-ryeos init --node-profile full --host-class local`.
+ryeos init --node-profile standard --host-class local`.
 
 ## Lifecycle surface
 
@@ -37,7 +37,7 @@ are local-node operations and ignore `RYEOSD_URL`.
 ## What `ryeos init` does
 
 `ryeos init` is implemented by `ryeos-node` and is authoritative for
-operator-owned setup. It creates layout, user key, node key, self-trust,
+operator-owned setup. It creates layout, user key, node key, operator signer record,
 official/additional publisher trust, discovers and plans bundles,
 installs and registers bundles, creates vault key material, materializes the
 selected complete policy generation, writes its read-only derived sync view,
@@ -80,16 +80,41 @@ invalid names are skipped; bundle names are not hardcoded.
 ```bash
 cargo build
 ./scripts/populate-bundles.sh --key .dev-keys/PUBLISHER_DEV.pem \
-  --owner "RyeOS Development" --bundle-set full --all
-ryeos init --source bundles --node-profile full --host-class local --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
+  --owner "RyeOS Development" --bundle-set standard --all
+ryeos init --source bundles --node-profile standard --host-class local --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
 ryeos start
 ```
+
+### A development node beside a real install
+
+`scripts/pkg/install-local-direct.sh --prefix DIR` installs the packaged layout
+under a separate root-owned prefix instead of `/usr`: binaries in `DIR/bin`,
+bundle sources in `DIR/share/ryeos`. A prefix install must name its own node
+with `--app-root` and refuses the default node at `~/.local/share/ryeos`, so
+the real install and its node are never touched.
+
+```bash
+scripts/pkg/install-local-direct.sh --prefix /opt/ryeos-dev \
+  --app-root "$HOME/.local/share/ryeos-dev" --trust-source-publishers
+/opt/ryeos-dev/bin/ryeos node status --app-root "$HOME/.local/share/ryeos-dev"
+```
+
+- The prefix is off `PATH` by design. Call `DIR/bin/ryeos` by its absolute
+  path; `ryeos start` finds its `ryeosd` beside it. The installer does not move
+  `PATH` shadows or check `PATH` for a prefix install.
+- Every existing directory from `/` down to the prefix must be owned by root
+  and not writable by group or others. The installer creates `DIR` and
+  `DIR/share` as root when they are missing, and refuses otherwise.
+- `/usr/local` is refused because `/usr/local/bin` shadows `/usr/bin` on `PATH`.
+- Init uses `DIR/share/ryeos` as its `--source`. Installs into the same prefix
+  serialise on its package lock; different prefixes do not share a lock.
 
 ## Directory layout after init/start
 
 ```text
-<system-space>/.ai/config/keys/signing/private_key.pem
-<system-space>/.ai/config/keys/trusted/<fp>.toml
+<system-space>/.ai/node/operator/signing/private_key.pem
+<system-space>/.ai/node/trust/signers/<fp>.yaml     # node-signed signer records
+<system-space>/.ai/node/trust/events/               # node-signed hash-chained key events
 
 <system-space>/.ai/bundles/<name>/.ai/
 <system-space>/.ai/node/identity/private_key.pem

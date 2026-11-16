@@ -60,11 +60,13 @@ impl CompiledRouteInvocation for CompiledBrowserSessionVerifier {
         let session_id =
             extract_session_cookie(&ctx.headers).ok_or(RouteDispatchError::Unauthorized)?;
 
-        let session = self
-            .ui
-            .browser_sessions
-            .get_session(&session_id)
-            .ok_or(RouteDispatchError::Unauthorized)?;
+        let session = match self.ui.browser_sessions.get_session(&session_id) {
+            Some(session) => session,
+            None if self.ui.browser_sessions.is_revoked(&session_id) => {
+                return Err(session_revoked());
+            }
+            None => return Err(RouteDispatchError::Unauthorized),
+        };
 
         Ok(RouteInvocationResult::Principal(RoutePrincipal {
             id: format!("session:{}", session.session_id),
@@ -82,6 +84,21 @@ impl CompiledRouteInvocation for CompiledBrowserSessionVerifier {
                 m
             },
         }))
+    }
+}
+
+/// The answer to a request carrying the cookie of a session an operator
+/// revoked: 401 with a stable code the browser can branch on.
+pub fn session_revoked() -> RouteDispatchError {
+    let body = serde_json::json!({
+        "error": "browser session revoked; launch a new session",
+        "error_code": "browser_session_revoked",
+    });
+    RouteDispatchError::Structured {
+        code: "browser_session_revoked".into(),
+        status: 401,
+        body,
+        thread_id: None,
     }
 }
 

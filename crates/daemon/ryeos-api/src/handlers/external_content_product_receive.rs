@@ -57,12 +57,12 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     }
     // This is node-owned receipt, not project-selected trust or a caller key
     // override. Recovery later retains the authenticated key in local testimony.
-    let remotes = crate::remote::config::load_remotes_layered(&state.config.app_root, None)?;
+    let remotes = crate::remote::config::load_remotes(&state.config.app_root)?;
     let remote = crate::remote::config::get_remote(&remotes, &req.remote)?;
     let key = remote
         .pinned_signing_key()
         .context("product origin has no pinned signing key")?;
-    let client = RemoteClient::from_remote_cfg(&state, &remote);
+    let client = RemoteClient::from_remote_cfg(&state, &remote)?;
     let imported = import_admitted_root_with_job(
         &state,
         &client,
@@ -252,8 +252,13 @@ async fn fetch_large_objects(
         // a resumed transfer is verified rather than trusted.
         let mut offset = 0_u64;
         let mut complete = false;
+        // The large objects belong to the admitted witness's closure, so they
+        // are read under that witness's admission.
+        let read_root = crate::objects_read_scope::ReadRoot::AdmittedSubject {
+            subject_hash: witness_hash.to_owned(),
+        };
         let streamed = client
-            .stream_large_object(hash, |bytes| {
+            .stream_large_object(&read_root, hash, |bytes| {
                 let progress = plan.store.stage_chunk(hash, expectation, offset, bytes)?;
                 offset += u64::try_from(bytes.len())?;
                 complete = progress.complete;

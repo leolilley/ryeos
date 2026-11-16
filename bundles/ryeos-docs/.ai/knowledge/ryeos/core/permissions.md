@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-12T23:57:18Z:8269383daade2b5a2957486f3531933bdcc30628e63501b7fa2028878a946a7e:z8B3jN/IOvc2/9kR4aqzispJoGhuShl00Ca9dHnF2+AVBCSrPgIyMdouVhhtZrKsfnWLPmSsGZ2ooBMuBTiVCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T12:28:44Z:977a6eb361e735da6847f203d1d9394b12bce7f5b1684cffe8a43964c16bbc6d:MVAU1DWDudhgpNqjfpf2hcclnp+3Rmq/C8kBN6OCRQhryZLe138ZPBKqdQ+B9oLoTi/HFHfZcEwvWHH7oG4tCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -176,6 +176,57 @@ capability set for the launched item. Across an `extends` chain, every direct
 child may only narrow the already-narrowed parent; authority discarded by an
 intermediate document cannot be recovered by the root.
 This is what the item is allowed to dispatch back to the daemon.
+
+#### Root admission: callers lend authority
+
+Items declare what they need; they never grant themselves authority. At root
+admission every cap in the composed `declared` set (an `extends` chain
+included) must be covered by the launching caller's scopes, with wildcards in
+the caller's grant working as everywhere else. The thread then runs with
+exactly its declared caps plus the runtime caps its own signed bundle manifest
+grants — never the caller's full scopes. Manifest runtime caps need no caller
+coverage: a bundle's signed manifest gives its runtime that authority.
+
+A caller that does not cover every declared cap is refused (403) with the
+typed code `caller_capability_not_covered`, which names the item, the caller,
+every uncovered cap and the cure: grant the caller the cap, or narrow the
+item's `requires.capabilities.declared`. The same rule applies to a scheduled
+fire (the schedule's stored caps are its scopes) and to an operator follow-up
+on a running thread: the follow-up runs with the thread's sealed caps exactly,
+and the sender must cover them.
+
+Launches with no human caller still have a caller: a principal whose authority
+is declared in signed data. There is no separate grant class for them.
+
+| Launch | The caller is | Its authority comes from |
+|---|---|---|
+| `auth: none` / `auth: hmac` route | the route (`route:<id>` / `webhook:hmac:<id>`) | the route's signed `authority.capabilities`, bounded by its bundle manifest's `runtime_authority.route_capabilities` (and `operator_vault` for the operator-vault capability) |
+| Schedule fire | the schedule's authenticated principal | the schedule's registered `capabilities` |
+| Browser session | the session's principal | the session's `granted_caps` |
+| Handler route | `route-handler:<bundle>:<route>` | its tool source cannot declare caps, so nothing needs covering |
+
+A route that declares no `authority` lends nothing, so it cannot launch an
+item that declares caps: the launch is refused with
+`caller_capability_not_covered`, naming the route principal and the uncovered
+caps. External-occurrence principals only attach to and exchange frames on an
+existing placement; they birth no thread. The route's declaration is a
+request: a route whose declared caps its bundle's signed manifest does not
+back is refused with 403 `route_authority_not_backed`, and the manifest list
+only counts when the manifest is verified by a trusted signer.
+
+Refusal does not wait for a thread. An accepted (`/execute/launch`,
+`--async`) or streamed launch, and a `launch`-mode route, check coverage during
+synchronous admission, so `caller_capability_not_covered` is the response and
+no thread row or id exists. Scheduler registration makes the same check
+against the schedule's `capabilities` when the item resolves under the
+schedule's project policy (projectless, or live-direct with a `project_root`),
+and refuses with the same code instead of registering a schedule every fire of
+which would be refused. A pinned-project schedule, or an item that does not
+resolve yet, is judged at fire time.
+
+The thread records the covering principal and, when the caller authenticated
+under an authorized-key grant, that grant's digest, so work running under a
+revoked grant can be found.
 
 ### 4. Effective Caps → Callback Tokens
 

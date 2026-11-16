@@ -533,7 +533,7 @@ pub(crate) fn with_installed_bundles<T>(
     read: impl FnOnce(&[PathBuf], &ryeos_engine::trust::TrustStore, &Path) -> Result<T>,
 ) -> Result<T> {
     let roots = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf());
-    let trust = ryeos_engine::trust::TrustStore::load(None, &roots.config())
+    let trust = ryeos_engine::trust::TrustStore::load_node_registry(roots.as_path())
         .context("load node trust store")?;
     let _bundle_generation_lock =
         ryeos_node_runtime::registry::BundleRegistryMutationLock::acquire_for_startup(app_root)
@@ -763,6 +763,125 @@ pub(crate) fn read_installed_binding(
     admit_signed_binding(app_root, id, &signed, identity)
 }
 
+/// Installed provider executables a structured-session placement pins.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProviderArtifactFacts {
+    pub(crate) configuration_adapter_artifact_hash: String,
+    pub(crate) configuration_adapter_artifact_bytes: u64,
+    pub(crate) connector_artifact_hash: String,
+    pub(crate) connector_artifact_bytes: u64,
+}
+
+/// Re-pin the installed placement binding to the installed lifecycle
+/// generation (`generation`) and, for a session workload, the installed
+/// provider executables (`provider`). Every operator-stated fact is carried,
+/// the credential generation among them. A generation whose settings schema
+/// differs cannot take the carried settings: that is refused with
+/// `recompose_settings_schema_changed`, because only the operator can state
+/// new settings. Signs and verifies, publishes nothing.
+pub(crate) fn repin_placement(
+    app_root: &Path,
+    installed: &InstalledExternalExecutionBinding,
+    generation: &crate::external_placement::InstalledLifecycleGeneration,
+    provider: Option<&ProviderArtifactFacts>,
+    identity: &ryeos_node_runtime::identity::NodeIdentity,
+) -> Result<crate::node_config::recompose::RepinOutcome<InstalledExternalExecutionBinding>> {
+    use crate::node_config::recompose::{RECOMPOSE_SETTINGS_SCHEMA_CHANGED, RecomposeRefusal};
+    let binding = crate::node_config::recompose::BindingRef {
+        section: SECTION_NAME.to_owned(),
+        id: installed.id.clone(),
+    };
+    let mut document = installed.document.clone();
+    if document.settings_schema_digest != generation.settings_schema_digest {
+        return Err(RecomposeRefusal {
+            code: RECOMPOSE_SETTINGS_SCHEMA_CHANGED,
+            binding,
+            detail: format!(
+                "the installed `{}` adapter declares settings schema {}, the binding's settings \
+                 were stated under {}",
+                document.backend,
+                generation.settings_schema_digest,
+                document.settings_schema_digest
+            ),
+            fix: format!(
+                "state the settings again: ryeos node external-execution compose --id {} ...",
+                installed.id
+            ),
+        }
+        .into());
+    }
+    super::require_relay_scope(
+        &document.controller_transport,
+        generation.relay_scope_setting.as_deref(),
+        &document.settings,
+    )?;
+    document.backend_artifact_hash = generation.backend_artifact_hash.clone();
+    document.backend_artifact_bytes = generation.backend_artifact_bytes;
+    document.supervisor_artifact_hash = generation.supervisor_artifact_hash.clone();
+    document.supervisor_artifact_bytes = generation.supervisor_artifact_bytes;
+    document.launcher_artifact_hash = generation.launcher_artifact_hash.clone();
+    document.launcher_artifact_bytes = generation.launcher_artifact_bytes;
+    let session = match &mut document.workload {
+        ExternalWorkloadBinding::StructuredSession(session) => Some((
+            &mut session.configuration_adapter_artifact_hash,
+            &mut session.configuration_adapter_artifact_bytes,
+            &mut session.connector_artifact_hash,
+            &mut session.connector_artifact_bytes,
+        )),
+        ExternalWorkloadBinding::QualificationStructuredSession(session) => Some((
+            &mut session.configuration_adapter_artifact_hash,
+            &mut session.configuration_adapter_artifact_bytes,
+            &mut session.connector_artifact_hash,
+            &mut session.connector_artifact_bytes,
+        )),
+        ExternalWorkloadBinding::DirectCommand {} => None,
+    };
+    if let Some((config_hash, config_bytes, connector_hash, connector_bytes)) = session {
+        let provider = provider.context("a session placement re-pins its provider executables")?;
+        *config_hash = provider.configuration_adapter_artifact_hash.clone();
+        *config_bytes = provider.configuration_adapter_artifact_bytes;
+        *connector_hash = provider.connector_artifact_hash.clone();
+        *connector_bytes = provider.connector_artifact_bytes;
+    }
+    let fields_changed = crate::node_config::recompose::changed_fields(
+        &serde_json::to_value(&installed.document)?,
+        &serde_json::to_value(&document)?,
+    );
+    if fields_changed.is_empty() {
+        return Ok(crate::node_config::recompose::RepinOutcome::unchanged(
+            installed.clone(),
+        ));
+    }
+    document.validate()?;
+    let signed = sign_node_document(&serde_yaml::to_string(&document)?, identity)?;
+    let new = admit_signed_binding(app_root, &installed.id, &signed, identity)?;
+    Ok(crate::node_config::recompose::RepinOutcome {
+        old: installed.clone(),
+        new,
+        signed: Some(signed),
+        fields_changed,
+    })
+}
+
+/// The provider declaration a session placement pins, if any.
+impl InstalledExternalExecutionBinding {
+    pub(crate) fn provider_declaration_id(&self) -> Option<&str> {
+        match &self.document.workload {
+            ExternalWorkloadBinding::StructuredSession(session) => {
+                Some(&session.provider_declaration_id)
+            }
+            ExternalWorkloadBinding::QualificationStructuredSession(session) => {
+                Some(&session.provider_declaration_id)
+            }
+            ExternalWorkloadBinding::DirectCommand {} => None,
+        }
+    }
+
+    pub(crate) fn backend(&self) -> &str {
+        &self.document.backend
+    }
+}
+
 /// What a snapshot producer takes from the placement binding it feeds.
 #[derive(Debug, Clone)]
 pub(crate) struct ProducerSourceFacts {
@@ -858,18 +977,13 @@ pub(crate) fn verify_node_signed(
         identity.fingerprint(),
         header.signer_fingerprint
     );
-    let trust =
-        ryeos_engine::trust::TrustStore::from_signers(vec![ryeos_engine::trust::TrustedSigner {
-            fingerprint: identity.fingerprint().to_owned(),
-            verifying_key: *identity.verifying_key(),
-            label: None,
-        }]);
-    let (class, _) = ryeos_engine::trust::verify_item_signature(signed, &header, &envelope, &trust)
-        .with_context(|| format!("verify {what} signature"))?;
-    ensure!(
-        class == ryeos_engine::contracts::TrustClass::Trusted,
-        "{what} signature is not trusted"
-    );
+    ryeos_engine::trust::verify_node_signed_document(
+        signed,
+        &header,
+        &envelope,
+        identity.verifying_key(),
+    )
+    .with_context(|| format!("verify {what} signature"))?;
     serde_yaml::from_str(&ryeos_node_runtime::node_config_source::strip_signature(
         signed,
     ))
@@ -956,10 +1070,12 @@ pub(crate) mod tests {
     const TEST_SIGNER_KEY: [u8; 32] = [91; 32];
 
     fn identity_in(root: &Path) -> ryeos_node_runtime::identity::NodeIdentity {
-        ryeos_node_runtime::identity::NodeIdentity::create(
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(
             &root.join(".ai/node/identity/private_key.pem"),
         )
-        .unwrap()
+        .unwrap();
+        ryeos_engine::test_support::write_node_public_identity(root, identity.verifying_key());
+        identity
     }
 
     fn program() -> AdmittedExternalCandidateProgram {
@@ -1938,6 +2054,78 @@ pub(crate) mod tests {
         assert_eq!(session.connector_artifact_bytes, connector_bytes);
         assert_eq!(session.configuration_adapter_artifact_hash, adapter_hash);
         assert_eq!(session.configuration_adapter_artifact_bytes, adapter_bytes);
+    }
+
+    #[test]
+    fn recompose_carries_every_placement_fact_and_repins_only_artifacts() {
+        use crate::node_config::recompose::PlacementArtifactSource as _;
+        let node = stopped_node();
+        let composed = compose_with_resolver(compose_request(&node, TEST_BACKEND_ID), |_| {
+            Ok(installed_artifacts(
+                &node,
+                Some(PROVIDER_ID),
+                vec![lifecycle(&"d".repeat(64))],
+            ))
+        })
+        .unwrap();
+        let identity = load_node_identity(node.root.path()).unwrap();
+        let before = read_installed_binding(node.root.path(), BINDING_ID, &identity).unwrap();
+
+        // A new adapter generation is installed; the provider is unchanged.
+        let resolved =
+            installed_artifacts(&node, Some(PROVIDER_ID), vec![lifecycle(&"f".repeat(64))]);
+        let generation = resolved.generation(TEST_BACKEND_ID).unwrap();
+        let provider = resolved.provider(PROVIDER_ID).unwrap();
+        let outcome = repin_placement(
+            node.root.path(),
+            &before,
+            &generation,
+            Some(&provider),
+            &identity,
+        )
+        .unwrap();
+        assert_eq!(outcome.fields_changed, ["backend_artifact_hash"]);
+        assert!(outcome.signed.is_some());
+        assert_ne!(outcome.new.digest, before.digest);
+        assert_eq!(
+            outcome.new.document.credential_generation,
+            composed.credential_generation
+        );
+        assert_eq!(outcome.new.capacity_owner, before.capacity_owner);
+        let mut expected = before.document.clone();
+        expected.backend_artifact_hash = "f".repeat(64);
+        assert!(outcome.new.document == expected);
+
+        // Nothing moved: nothing to publish.
+        let unchanged = repin_placement(
+            node.root.path(),
+            &outcome.new,
+            &generation,
+            Some(&provider),
+            &identity,
+        )
+        .unwrap();
+        assert!(unchanged.signed.is_none());
+
+        // A generation under another settings schema cannot take the carried
+        // settings.
+        let mut moved = generation.clone();
+        moved.settings_schema_digest = "4".repeat(64);
+        let error = repin_placement(
+            node.root.path(),
+            &before,
+            &moved,
+            Some(&provider),
+            &identity,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<crate::node_config::recompose::RecomposeRefusal>()
+                .unwrap()
+                .code,
+            crate::node_config::recompose::RECOMPOSE_SETTINGS_SCHEMA_CHANGED
+        );
     }
 
     #[test]

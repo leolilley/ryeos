@@ -89,7 +89,9 @@ impl<'a> EffectiveProgramProjectionSession<'a> {
         project_content: Option<&'a dyn AuthoritativeProjectContent>,
     ) -> Result<Self, DispatchError> {
         validate_projection_authority(plan_context, project_root)?;
-        let roots = engine.resolution_roots(project_root.map(PathBuf::from));
+        let roots = engine
+            .resolution_roots(project_root.map(PathBuf::from))
+            .with_logical_project_root(plan_context.effective_logical_project_root(project_root));
         let request_snapshot = match (project_root, project_content) {
             (Some(root), Some(content)) => engine
                 .effective_request_snapshot_under_project_authority(
@@ -579,7 +581,7 @@ fn capture_and_finalize_fresh_effective_program_once(
         Some(qualification_project_context_resolver.as_ref()),
         false,
     )
-    .map_err(DispatchError::Internal)?;
+    .map_err(admission_error)?;
     let captured_external = ryeos_app::external_content_admission::admit_external_realizations(
         state,
         engine,
@@ -589,7 +591,7 @@ fn capture_and_finalize_fresh_effective_program_once(
         subject_resolution_authority,
         inherited_external,
     )
-    .map_err(DispatchError::Internal)?;
+    .map_err(admission_error)?;
     let finalized = capture_and_finalize_with_hook_snapshots(
         engine,
         kind,
@@ -880,6 +882,13 @@ pub(crate) fn validate_captured_hook_plan_pre_spawn(
 ) -> Result<(), DispatchError> {
     ryeos_app::effective_program_preparation::validate_captured_hook_plan_pre_spawn(plan)
         .map_err(DispatchError::Internal)
+}
+
+/// Content admission failures stay internal, except a large object scrub
+/// quarantined: that is an operator-correctable refusal naming its cure.
+fn admission_error(error: anyhow::Error) -> DispatchError {
+    super::external_content::classify_quarantined_large_object(&error)
+        .unwrap_or_else(|| DispatchError::Internal(error))
 }
 
 #[cfg(test)]

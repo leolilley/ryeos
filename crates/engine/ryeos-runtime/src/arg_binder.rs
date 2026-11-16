@@ -179,11 +179,14 @@ fn bind_argv_with_command_and_contract_and_overlay(
             .filter(|required| !required.is_empty())
             .unwrap_or_else(|| "required positional argument".to_string());
         if forms.len() == 1 {
-            return Err(format!("command {:?} requires {required}", command.tokens));
+            return Err(format!(
+                "command {:?} requires {required}",
+                command.tokens.join(" ")
+            ));
         }
         return Err(format!(
             "command {:?} requires one of its positional forms",
-            command.tokens
+            command.tokens.join(" ")
         ));
     }
 
@@ -245,7 +248,7 @@ fn bind_argv_with_command_and_contract_and_overlay(
     };
     Err(format!(
         "positional arguments {positional_detail} do not match any positional form for alias {:?}",
-        command.tokens
+        command.tokens.join(" ")
     ))
 }
 
@@ -451,7 +454,7 @@ fn reject_undeclared_positionals(
     }
     Err(format!(
         "command {:?} does not declare positional forms but received {positionals} positional argument(s)",
-        command.tokens
+        command.tokens.join(" ")
     ))
 }
 

@@ -4,6 +4,8 @@
 //! This is intentionally separate from `json`: `service:ui/launch` returns a
 //! structured envelope so tests and service callers can inspect it, while the
 //! HTTP browser route must translate that envelope into `Set-Cookie` + redirect.
+//! A cookie with `max_age: 0` clears the cookie, which is how a session end
+//! reaches the browser.
 
 use std::sync::Arc;
 
@@ -193,6 +195,9 @@ fn cookie_header(cookie: &serde_json::Value) -> Result<String, RouteDispatchErro
         .unwrap_or(false);
 
     let mut header = format!("{name}={value}; Path={path}; SameSite={same_site}");
+    if let Some(max_age) = cookie.get("max_age").and_then(|v| v.as_u64()) {
+        header.push_str(&format!("; Max-Age={max_age}"));
+    }
     if http_only {
         header.push_str("; HttpOnly");
     }
@@ -227,6 +232,24 @@ fn extract_path_captures(path: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cookie_header_clears_a_cookie_with_zero_max_age() {
+        let header = cookie_header(&serde_json::json!({
+            "name": "ryeos_session",
+            "value": "",
+            "path": "/ui",
+            "same_site": "Strict",
+            "http_only": true,
+            "max_age": 0,
+        }))
+        .unwrap();
+
+        assert_eq!(
+            header,
+            "ryeos_session=; Path=/ui; SameSite=Strict; Max-Age=0; HttpOnly"
+        );
+    }
 
     #[test]
     fn cookie_header_formats_browser_session_cookie() {

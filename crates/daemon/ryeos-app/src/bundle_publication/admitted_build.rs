@@ -92,8 +92,13 @@ pub fn load_installed_payload_ownership(
     };
     let header = ryeos_engine::item_resolution::parse_signature_header(&raw, &envelope)
         .context("payload ownership has no valid signature envelope")?;
-    let (trust_class, _) =
-        ryeos_engine::trust::verify_item_signature(&raw, &header, &envelope, trust)?;
+    let (trust_class, _) = ryeos_engine::trust::verify_item_signature(
+        &raw,
+        &header,
+        &envelope,
+        trust,
+        &ryeos_engine::trust::SignerContext::bundle("config"),
+    )?;
     anyhow::ensure!(
         trust_class == ryeos_engine::contracts::TrustClass::Trusted,
         "payload ownership signer is not trusted"
@@ -847,7 +852,7 @@ mod input_contract_tests {
             binary: "rye-parser-yaml-document".into(),
             cargo_package: "ryeos-parser-bins".into(),
             build_class: "release".into(),
-            bundle_sets: vec!["full".into()],
+            bundle_sets: vec!["standard".into()],
             required_features: Vec::new(),
         };
         let full = OwnedPayload {

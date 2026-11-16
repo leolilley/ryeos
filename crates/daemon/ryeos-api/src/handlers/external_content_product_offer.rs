@@ -84,7 +84,7 @@ pub(crate) struct PushAuthority {
 
 /// Authenticate a push-form caller, in order: admitted operator class, the
 /// operator's current node-signed grant, then the origin resolved solely from
-/// the authenticated origin site through the layered remotes.
+/// the authenticated origin site through the pinned remotes.
 pub(crate) fn authenticate_push_origin(
     state: &AppState,
     ctx: &HandlerContext,
@@ -104,7 +104,7 @@ pub(crate) fn authenticate_push_origin(
             authority.origin_site_id
         );
     }
-    let remotes = crate::remote::config::load_remotes_layered(&state.config.app_root, None)?;
+    let remotes = crate::remote::config::load_remotes(&state.config.app_root)?;
     let (origin_key, expected_issuer) = resolve_push_origin(&remotes, site_id)?;
     Ok(PushAuthority {
         owner_principal: ctx.fingerprint.clone(),
@@ -475,7 +475,8 @@ mod tests {
         let key = signer.key();
         RemoteConfig {
             name: name.to_owned(),
-            url: format!("https://{name}.example.com"),
+            url: Some(format!("https://{name}.example.com")),
+            reachability: Default::default(),
             principal_id: format!("fp:{}", lillux::crypto::fingerprint(&key)),
             signing_key: format!(
                 "ed25519:{}",
@@ -483,7 +484,7 @@ mod tests {
             ),
             site_id: site_id.to_owned(),
             vault_fingerprint: "sha256:test".to_owned(),
-            ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
+            ingest_ignore: Some(ryeos_app::ignore::IgnoreConfig { patterns: vec![] }),
             project_bindings: HashMap::new(),
         }
     }
@@ -714,13 +715,13 @@ mod tests {
     }
 
     #[test]
-    fn push_authentication_refuses_every_non_remote_operator_shape() {
+    fn push_authentication_refuses_every_non_remote_principal_shape() {
         let root = tempfile::tempdir().unwrap();
         let (_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
         let refusals = [
             // Not signature-verified.
             context(
-                Some(AuthorizedKeyPrincipalClass::RemoteOperator),
+                Some(AuthorizedKeyPrincipalClass::RemotePrincipal),
                 Some("site:o"),
                 false,
             ),
@@ -734,7 +735,7 @@ mod tests {
             ),
             // A remote operator without the source-node forwarding proof.
             context(
-                Some(AuthorizedKeyPrincipalClass::RemoteOperator),
+                Some(AuthorizedKeyPrincipalClass::RemotePrincipal),
                 None,
                 true,
             ),

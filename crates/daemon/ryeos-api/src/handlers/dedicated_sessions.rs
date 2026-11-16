@@ -13,14 +13,17 @@ use crate::handler_context::HandlerContext;
 use crate::handler_error::HandlerError;
 use crate::registry::ServiceDescriptor;
 use ryeos_app::dedicated_session_service::{
-    CandidatePublicationAuthority, candidate_publication_operation_id,
-    candidate_publication_reservation_payload, candidate_publication_result_payload,
+    CANDIDATE_PUBLICATION_SUPERSEDED_EVENT, CandidatePublicationAuthority,
+    candidate_publication_operation_id, candidate_publication_reservation_payload,
+    candidate_publication_result_payload, candidate_publication_superseded_payload,
     verify_candidate_publication_reservation, verify_candidate_publication_result,
+    verify_candidate_publication_superseded,
 };
 use ryeos_app::persistent_session::ExclusiveRetirementOutcome;
 use ryeos_app::state::AppState;
 use ryeos_app::worker_handoff::WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT;
 use ryeos_executor::executor::ServiceAvailability;
+use ryeos_state::refs::ProjectHeadAdvanceRefusal;
 
 const MAX_HANDOFF_TERMINAL_ATTESTATION_BYTES: usize = 512 * 1024;
 
@@ -1329,10 +1332,7 @@ fn fold_rooted_source_handoff_terminal(
         return Ok(None);
     };
 
-    let report = crate::remote::config::load_remotes_layered_report(
-        &state.config.app_root,
-        Some(std::path::Path::new(&operation.source_project_path)),
-    )?;
+    let report = crate::remote::config::load_remotes_report(&state.config.app_root)?;
     let target =
         crate::remote::config::get_loaded_remote(&report.remotes, &operation.peer_remote_name)?;
     if target.config.site_id != operation.target_site_id {
@@ -1434,10 +1434,7 @@ fn validate_source_handoff_terminal(
     operation: &ryeos_app::worker_handoff::WorkerSessionHandoffJobOperation,
 ) -> Result<ValidatedSourceHandoffTerminal> {
     validate_source_handoff_job_coordinates(job, operation)?;
-    let report = crate::remote::config::load_remotes_layered_report(
-        &state.config.app_root,
-        Some(std::path::Path::new(&operation.source_project_path)),
-    )?;
+    let report = crate::remote::config::load_remotes_report(&state.config.app_root)?;
     let target =
         crate::remote::config::get_loaded_remote(&report.remotes, &operation.peer_remote_name)?;
     if target.config.site_id != operation.target_site_id {
@@ -2930,12 +2927,10 @@ async fn handoff_preflight(
         .get_launch_metadata(&source_thread_id)
         .map_err(internal)?
         .ok_or_else(|| internal("preflight source has no launch metadata"))?;
+    // The source's recorded stop policy is node-local and never transferred:
+    // every launch resolves its own from the signed execution config, so the
+    // target records the policy its own config grants when it attaches.
     source_metadata.validate().map_err(internal)?;
-    if source_metadata.cancellation_mode.is_some() {
-        return Err(HandlerError::BadRequest(
-            "portable worker handoff v1 has no rooted cancellation-policy transfer".into(),
-        ));
-    }
     let source_capsule = source_metadata
         .admitted_launch_capsule()
         .map_err(internal)?
@@ -2970,11 +2965,8 @@ async fn handoff_preflight(
         .ok_or_else(|| {
             HandlerError::BadRequest("preflight source has no stable project endpoint".into())
         })?;
-    let report = crate::remote::config::load_remotes_layered_report(
-        &state.config.app_root,
-        Some(&source_project_path),
-    )
-    .map_err(internal)?;
+    let report =
+        crate::remote::config::load_remotes_report(&state.config.app_root).map_err(internal)?;
     let loaded_remote = crate::remote::config::get_loaded_remote(&report.remotes, &req.remote)
         .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let binding =
@@ -3052,8 +3044,9 @@ async fn handoff_preflight(
         follow_delivery_reservation_attestation_hash,
     };
     request.validate().map_err(internal)?;
+    retain_preflight_read_grant(&state, &req.remote, &request).map_err(internal)?;
     let target_client =
-        crate::remote::client::RemoteClient::from_remote_cfg(&state, &loaded_remote.config);
+        crate::remote::client::RemoteClient::from_remote_cfg(&state, &loaded_remote.config)?;
     let target_value = target_client
         .execute_service_result_with_total_timeout(
             ryeos_app::worker_handoff::WORKER_PLACEMENT_PREFLIGHT_SERVICE,
@@ -3080,7 +3073,7 @@ async fn handoff_preflight(
         .validate_against(&request, &target_key)
         .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let target_node_client =
-        crate::remote::client::RemoteClient::from_remote_cfg(&state, &loaded_remote.config);
+        crate::remote::client::RemoteClient::from_remote_cfg(&state, &loaded_remote.config)?;
     let target_closure_options =
         crate::remote::client::NodeAdmittedObjectsClosureRequestOptions::for_node(
             &state,
@@ -3127,6 +3120,9 @@ async fn handoff_preflight(
     };
     let target_closure = target_node_client
         .objects_closure_get_with_total_timeout(
+            &crate::objects_read_scope::ReadRoot::Placement {
+                placement_id: request.preflight_id.clone(),
+            },
             std::slice::from_ref(&response.preflight_attestation_hash),
             target_fetch_options,
             WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT,
@@ -3234,6 +3230,55 @@ async fn handoff_preflight(
         "target_credential_generation":response.evidence.target_credential_generation,
         "status":"eligible",
     }))
+}
+
+/// Operation type of the retained record that lets the target read this
+/// node's preflight inputs while the preflight is in flight.
+const PREFLIGHT_READ_GRANT_OPERATION: &str = "worker_session_handoff_preflight_read_grant";
+
+/// The target reads the source chain head (and any follow reservation) back
+/// from this node while it answers the preflight, before the source preflight
+/// job exists. Retain, before contacting the target, exactly what the target
+/// may read and who it is, so the read is authorized by this node's own record
+/// of the placement rather than by the target's say-so.
+fn retain_preflight_read_grant(
+    state: &AppState,
+    remote: &str,
+    request: &ryeos_app::worker_handoff::WorkerPlacementPreflightRequest,
+) -> Result<()> {
+    let job_id = format!("worker-handoff-preflight-grant:{}", request.preflight_id);
+    if state
+        .state_store
+        .with_state_db(|db| db.get_sync_job(&job_id))?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let mut roots = vec![request.source_chain_head_hash.clone()];
+    roots.extend(
+        request
+            .follow_delivery_reservation_attestation_hash
+            .iter()
+            .cloned(),
+    );
+    state.state_store.with_state_db(|db| {
+        db.create_sync_job(&ryeos_state::NewSyncJob {
+            job_id: job_id.clone(),
+            operation_type: PREFLIGHT_READ_GRANT_OPERATION.to_owned(),
+            operation: json!({
+                "operation_type": PREFLIGHT_READ_GRANT_OPERATION,
+                "preflight_id": request.preflight_id,
+                "source_chain_head_hash": request.source_chain_head_hash,
+                "follow_delivery_reservation_attestation_hash":
+                    request.follow_delivery_reservation_attestation_hash,
+            }),
+            peer: Some(remote.to_owned()),
+            roots,
+            heads: vec![request.source_chain_head_hash.clone()],
+            max_attempts: 1,
+        })
+        .map(|_| ())
+    })
 }
 
 fn source_preflight_job_id(preflight_id: &str) -> String {
@@ -3374,12 +3419,10 @@ async fn handoff(
         .get_launch_metadata(&source_thread_id)
         .map_err(internal)?
         .ok_or_else(|| internal("handoff source has no launch metadata"))?;
+    // The source's recorded stop policy is node-local and never transferred:
+    // every launch resolves its own from the signed execution config, so the
+    // target records the policy its own config grants when it attaches.
     source_metadata.validate().map_err(internal)?;
-    if source_metadata.cancellation_mode.is_some() {
-        return Err(HandlerError::BadRequest(
-            "portable worker handoff v1 has no rooted cancellation-policy transfer".into(),
-        ));
-    }
     let source_capsule = source_metadata
         .admitted_launch_capsule()
         .map_err(internal)?
@@ -3414,11 +3457,8 @@ async fn handoff(
         .ok_or_else(|| {
             HandlerError::BadRequest("handoff source has no stable project endpoint".into())
         })?;
-    let report = crate::remote::config::load_remotes_layered_report(
-        &state.config.app_root,
-        Some(&source_project_path),
-    )
-    .map_err(internal)?;
+    let report =
+        crate::remote::config::load_remotes_report(&state.config.app_root).map_err(internal)?;
     let loaded_remote = crate::remote::config::get_loaded_remote(&report.remotes, &req.remote)
         .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let binding =
@@ -3748,7 +3788,7 @@ async fn handoff(
         source_accounting_frontier: source_accounting_frontier.clone(),
     };
     let target_client =
-        crate::remote::client::RemoteClient::from_remote_cfg(&state, &loaded_remote.config);
+        crate::remote::client::RemoteClient::from_remote_cfg(&state, &loaded_remote.config)?;
     let prepare_attempt =
         begin_worker_handoff_attempt(&state, &job_id, "target_prepare", "source-handoff")?;
     #[cfg(any(test, feature = "handoff-test-support"))]
@@ -3785,13 +3825,16 @@ async fn handoff(
             .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
 
         let target_node_client =
-            crate::remote::client::RemoteClient::from_remote_cfg(&state, &loaded_remote.config);
+            crate::remote::client::RemoteClient::from_remote_cfg(&state, &loaded_remote.config)?;
         let target_roots = vec![
             prepared.placement_attestation_hash.clone(),
             prepared.target_runtime_seed_hash.clone(),
         ];
         let target_closure = target_node_client
             .objects_closure_get_with_total_timeout(
+                &crate::objects_read_scope::ReadRoot::Placement {
+                    placement_id: prepare_request.operation_id.clone(),
+                },
                 &target_roots,
                 crate::remote::client::NodeAdmittedObjectsClosureRequestOptions::for_node(
                     &state,
@@ -4436,11 +4479,8 @@ async fn resume_committed_handoff_locked(
             "committed remote continuation contradicts source handoff progress",
         ));
     }
-    let report = crate::remote::config::load_remotes_layered_report(
-        &state.config.app_root,
-        Some(std::path::Path::new(&operation.source_project_path)),
-    )
-    .map_err(internal)?;
+    let report =
+        crate::remote::config::load_remotes_report(&state.config.app_root).map_err(internal)?;
     let loaded_remote =
         crate::remote::config::get_loaded_remote(&report.remotes, &operation.peer_remote_name)
             .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
@@ -4450,7 +4490,7 @@ async fn resume_committed_handoff_locked(
         ));
     }
     let target_client =
-        crate::remote::client::RemoteClient::from_remote_cfg(state, &loaded_remote.config);
+        crate::remote::client::RemoteClient::from_remote_cfg(state, &loaded_remote.config)?;
     let adopt_request = ryeos_app::worker_handoff::WorkerPlacementAdoptRequest {
         operation_id: operation.operation_id.clone(),
         chain_root_id: operation.chain_root_id.clone(),
@@ -4599,6 +4639,9 @@ async fn fetch_target_handoff_terminal_attestation(
     .map_err(internal)?;
     let response = target_client
         .objects_get_with_response_limit_and_total_timeout(
+            &crate::objects_read_scope::ReadRoot::Placement {
+                placement_id: operation.operation_id.clone(),
+            },
             &[terminal_attestation_hash.to_owned()],
             &[],
             MAX_HANDOFF_TERMINAL_ATTESTATION_BYTES,
@@ -4679,6 +4722,9 @@ async fn fetch_target_handoff_terminal_chain_closure(
     ];
     let response = target_client
         .objects_closure_get_with_total_timeout(
+            &crate::objects_read_scope::ReadRoot::Placement {
+                placement_id: operation.operation_id.clone(),
+            },
             &roots,
             crate::remote::client::NodeAdmittedObjectsClosureRequestOptions::for_node(
                 state,
@@ -5308,10 +5354,7 @@ pub async fn recover_durable_source_handoffs(state: &AppState) -> Result<usize> 
                 tracing::error!(job_id = %job.job_id, "source handoff durable progress contradicts signed chain authority");
                 continue;
             }
-            let report = crate::remote::config::load_remotes_layered_report(
-                &state.config.app_root,
-                Some(std::path::Path::new(&operation.source_project_path)),
-            )?;
+            let report = crate::remote::config::load_remotes_report(&state.config.app_root)?;
             let loaded_remote = crate::remote::config::get_loaded_remote(
                 &report.remotes,
                 &operation.peer_remote_name,
@@ -5321,7 +5364,7 @@ pub async fn recover_durable_source_handoffs(state: &AppState) -> Result<usize> 
                 continue;
             }
             let client =
-                crate::remote::client::RemoteClient::from_remote_cfg(state, &loaded_remote.config);
+                crate::remote::client::RemoteClient::from_remote_cfg(state, &loaded_remote.config)?;
             let request = ryeos_app::worker_handoff::WorkerPlacementAdoptRequest {
                 operation_id: operation.operation_id.clone(),
                 chain_root_id: operation.chain_root_id.clone(),
@@ -5464,10 +5507,7 @@ async fn recover_exported_source_writer_cut(
         .placement_attestation_hash
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("exported source handoff has no target placement"))?;
-    let report = crate::remote::config::load_remotes_layered_report(
-        &state.config.app_root,
-        Some(std::path::Path::new(&operation.source_project_path)),
-    )?;
+    let report = crate::remote::config::load_remotes_report(&state.config.app_root)?;
     let loaded_remote =
         crate::remote::config::get_loaded_remote(&report.remotes, &operation.peer_remote_name)?;
     if loaded_remote.config.site_id != operation.target_site_id {
@@ -5713,16 +5753,14 @@ async fn recover_pre_cut_source_handoff_abort(
         operation,
     )?;
 
-    let report = crate::remote::config::load_remotes_layered_report(
-        &state.config.app_root,
-        Some(std::path::Path::new(&operation.source_project_path)),
-    )?;
+    let report = crate::remote::config::load_remotes_report(&state.config.app_root)?;
     let loaded_remote =
         crate::remote::config::get_loaded_remote(&report.remotes, &operation.peer_remote_name)?;
     if loaded_remote.config.site_id != operation.target_site_id {
         anyhow::bail!("source handoff configured target site changed before abort");
     }
-    let client = crate::remote::client::RemoteClient::from_remote_cfg(state, &loaded_remote.config);
+    let client =
+        crate::remote::client::RemoteClient::from_remote_cfg(state, &loaded_remote.config)?;
     let request = ryeos_app::worker_handoff::WorkerPlacementAbortRequest {
         operation: operation.clone(),
         abort_chain_head_hash: abort_head_hash.clone(),
@@ -6354,6 +6392,66 @@ fn classify_candidate_publication_recovery(
 /// admitted base proves that this operation did not publish. The candidate
 /// proves success; a missing or different HEAD is irreducibly ambiguous and is
 /// terminalized as unknown rather than reopening an unsafe retry.
+/// Mirror every `publish_ready` session whose admitted base HEAD has moved
+/// into the report `ryeos node doctor` reads offline. It settles nothing:
+/// each such session settles to `base_superseded` on its owner's next
+/// publish. Best effort; the session rows and the signed HEAD stay the
+/// authority, and a failed mirror only leaves the doctor's view stale.
+pub fn mirror_stale_publication_report(state: &AppState) {
+    if let Err(error) = write_stale_publication_report(state) {
+        tracing::warn!(
+            error = %format!("{error:#}"),
+            "failed to mirror the stale publication report for node doctor"
+        );
+    }
+}
+
+fn write_stale_publication_report(state: &AppState) -> anyhow::Result<()> {
+    let mut stale = Vec::new();
+    for session in state
+        .state_store
+        .dedicated_sessions_in_state("publish_ready")?
+    {
+        let authority = match candidate_publication_authority(state, &session) {
+            Ok(authority) => authority,
+            Err(error) => {
+                tracing::warn!(
+                    chain_root_id = %session.chain_root_id,
+                    error = %error,
+                    "publish_ready session has no readable publication authority"
+                );
+                continue;
+            }
+        };
+        let current = state.state_store.with_state_db(|db| {
+            db.read_project_head(&authority.principal_key, &authority.project_hash)
+        })?;
+        if ryeos_app::stale_publication_report::base_has_moved(
+            current.as_deref(),
+            &authority.base_snapshot_hash,
+            &authority.candidate_snapshot_hash,
+        ) {
+            tracing::warn!(
+                chain_root_id = %session.chain_root_id,
+                candidate = %authority.candidate_snapshot_hash,
+                base = %authority.base_snapshot_hash,
+                current_head = ?current,
+                "publish_ready candidate's base HEAD has moved; it settles to base_superseded on the owner's next publish"
+            );
+            stale.push(
+                ryeos_app::stale_publication_report::StalePublishReadySession {
+                    chain_root_id: session.chain_root_id.clone(),
+                    placement_thread_id: session.placement_thread_id.clone(),
+                    candidate_snapshot_hash: authority.candidate_snapshot_hash.clone(),
+                    base_snapshot_hash: authority.base_snapshot_hash.clone(),
+                    current_head: current,
+                },
+            );
+        }
+    }
+    ryeos_app::stale_publication_report::write_report(&state.config.runtime_root().state(), stale)
+}
+
 pub async fn reconcile_candidate_publications(state: Arc<AppState>) -> anyhow::Result<()> {
     // Qualification journals the exact evaluator adoption before contacting
     // its separate recorded-service root. Startup either observes that exact
@@ -6432,7 +6530,19 @@ pub async fn reconcile_candidate_publications(state: Arc<AppState>) -> anyhow::R
             "unknown",
         )
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        if usize::from(published_fact) + usize::from(not_applied_fact) + usize::from(unknown_fact)
+        let superseded_fact = verify_candidate_publication_superseded(
+            &state,
+            &session,
+            &authority,
+            publication_root_id,
+            publication_operation_id,
+        )
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?
+        .is_some();
+        if usize::from(published_fact)
+            + usize::from(not_applied_fact)
+            + usize::from(unknown_fact)
+            + usize::from(superseded_fact)
             > 1
         {
             anyhow::bail!("candidate publication root contains contradictory terminal facts");
@@ -6473,6 +6583,14 @@ pub async fn reconcile_candidate_publications(state: Arc<AppState>) -> anyhow::R
                 publication_root_id,
                 publication_operation_id,
                 &format!("publication_unknown:{candidate}"),
+            )?;
+        } else if superseded_fact {
+            state.state_store.settle_dedicated_candidate_publication(
+                &session.placement_thread_id,
+                source_candidate,
+                publication_root_id,
+                publication_operation_id,
+                &format!("base_superseded:{candidate}"),
             )?;
         } else {
             // The reservation proves that HEAD may already have been
@@ -6585,6 +6703,7 @@ pub async fn reconcile_candidate_publications(state: Arc<AppState>) -> anyhow::R
             &session.placement_thread_id,
         );
     }
+    mirror_stale_publication_report(&state);
     Ok(())
 }
 
@@ -6818,32 +6937,94 @@ async fn resolve_approval(
             )));
         }
     };
-    let exact_expiry = delivery.as_object().is_some_and(|object| {
-        object.len() == 4
-            && object.get("resolved").and_then(Value::as_bool) == Some(false)
-            && object.get("outcome").and_then(Value::as_str) == Some("expired")
-            && object.get("request_id") == Some(&request_id)
-            && object.get("request_digest").and_then(Value::as_str)
-                == Some(req.request_digest.as_str())
-    });
-    if exact_expiry {
-        let projected = ryeos_app::dedicated_session_service::wait_for_exact_approval_state(
-            &state,
-            &placement_thread_id,
-            &req.approval_id,
-            approval.worker_boot_epoch,
-            &req.request_digest,
-            &reservation_token,
-            &decision_digest,
-            "expired",
-            lillux::time::Duration::from_secs(30),
-        )
-        .await
-        .map_err(internal)?;
-        if projected {
+    let unresolved_testimony = |outcome: &str| {
+        delivery.as_object().is_some_and(|object| {
+            object.len() == 4
+                && object.get("resolved").and_then(Value::as_bool) == Some(false)
+                && object.get("outcome").and_then(Value::as_str) == Some(outcome)
+                && object.get("request_id") == Some(&request_id)
+                && object.get("request_digest").and_then(Value::as_str)
+                    == Some(req.request_digest.as_str())
+        })
+    };
+    let exact_expiry = unresolved_testimony("expired");
+    let exact_absent = unresolved_testimony("absent");
+    if exact_absent {
+        // The worker forgets an expired approval once RyeOS acknowledges its
+        // expiry, so a decision reserved before that expiry was projected can
+        // arrive after it. Only this worker's own acknowledged expiry of this
+        // exact request explains the absence; it settles like a typed expiry.
+        if let Some(observed) =
+            ryeos_app::dedicated_session_service::observed_expiry_explaining_absent_delivery(
+                &state,
+                &session,
+                &req.approval_id,
+                approval.worker_boot_epoch,
+                &req.request_digest,
+                &reservation_token,
+                &decision_digest,
+                &request_id,
+            )
+            .map_err(internal)?
+        {
+            let expired_operation_id = ryeos_state::objects::canonical_value_digest(&json!({
+                "schema":"ryeos.hosted_approval_delivery_fact.v1",
+                "chain_root_id":session.chain_root_id,
+                "placement_thread_id":placement_thread_id,
+                "approval_id":req.approval_id,
+                "reservation_token":reservation_token,
+                "stage":"delivery_expired",
+            }))
+            .map_err(internal)?;
+            append_root_fact_once(
+                &state,
+                &session,
+                "hosted_approval.delivery_expired",
+                &expired_operation_id,
+                json!({
+                    "schema":1,
+                    "origin":"daemon_observed_io",
+                    "chain_root_id":session.chain_root_id,
+                    "placement_thread_id":placement_thread_id,
+                    "approval_id":req.approval_id,
+                    "worker_boot_epoch":approval.worker_boot_epoch,
+                    "request_digest":req.request_digest,
+                    "reservation_token":reservation_token,
+                    "decision_digest":decision_digest,
+                    "worker_answer":"absent",
+                    "expiry_observation":{
+                        "batch_digest":observed.batch_digest,
+                        "first_sequence":observed.first_sequence,
+                        "through_sequence":observed.through_sequence,
+                        "event_sequence":observed.event_sequence,
+                    },
+                }),
+            )?;
             return Err(HandlerError::BadRequest(
                 "approval expired before the owner decision reached the worker".into(),
             ));
+        }
+    }
+    if exact_expiry || exact_absent {
+        if exact_expiry {
+            let projected = ryeos_app::dedicated_session_service::wait_for_exact_approval_state(
+                &state,
+                &placement_thread_id,
+                &req.approval_id,
+                approval.worker_boot_epoch,
+                &req.request_digest,
+                &reservation_token,
+                &decision_digest,
+                "expired",
+                lillux::time::Duration::from_secs(30),
+            )
+            .await
+            .map_err(internal)?;
+            if projected {
+                return Err(HandlerError::BadRequest(
+                    "approval expired before the owner decision reached the worker".into(),
+                ));
+            }
         }
         let cleanup_state = match state
             .persistent_sessions
@@ -6908,7 +7089,12 @@ async fn resolve_approval(
             }),
         )?;
         return Err(HandlerError::BadRequest(
-            "worker reported approval expiry without durable expiry testimony; the worker was retired and delivery remains unknown".into(),
+            if exact_expiry {
+                "worker reported approval expiry without durable expiry testimony; the worker was retired and delivery remains unknown"
+            } else {
+                "worker reported the approval absent without its own acknowledged expiry of this exact request; the worker was retired and delivery remains unknown"
+            }
+            .into(),
         ));
     }
     let settled_operation_id = ryeos_state::objects::canonical_value_digest(&json!({
@@ -7564,6 +7750,7 @@ async fn start_candidate_operation(
             scopes: effective_caps.clone(),
         });
     let base_plan_context = ryeos_engine::contracts::PlanContext {
+        logical_project_root: base_provenance.logical_project_root(),
         requested_by: requested_by.clone(),
         project_context: ryeos_engine::contracts::ProjectContext::LocalPath {
             path: base.effective_path.clone(),
@@ -10229,6 +10416,131 @@ async fn discard(
     }))
 }
 
+/// Typed refusal for a candidate whose admitted base HEAD was superseded.
+/// It names the expected and observed HEAD and what the owner can do next.
+fn base_superseded_refusal(
+    session: &ryeos_app::state_store::DedicatedSessionRecord,
+    authority: &CandidatePublicationAuthority,
+    observed_head: Option<&str>,
+) -> HandlerError {
+    HandlerError::Structured {
+        code: "base_superseded".to_string(),
+        status: 409,
+        body: json!({
+            "code": "base_superseded",
+            "message": format!(
+                "the project HEAD moved from the candidate's admitted base {} to {}; this \
+                 candidate can never publish against its base and the session is terminal \
+                 `base_superseded`",
+                authority.base_snapshot_hash,
+                observed_head.unwrap_or("no HEAD"),
+            ),
+            "chain_root_id": session.chain_root_id,
+            "placement_thread_id": session.placement_thread_id,
+            "candidate_snapshot_hash": authority.candidate_snapshot_hash,
+            "expected_previous_hash": authority.base_snapshot_hash,
+            "observed_head": observed_head,
+            "publication_result": format!("base_superseded:{}", authority.candidate_snapshot_hash),
+            "next_steps": [
+                format!(
+                    "inspect the retained candidate snapshot {} (kept as evidence)",
+                    authority.candidate_snapshot_hash
+                ),
+                "start a new session from the current project HEAD and redo the work there",
+            ],
+        }),
+    }
+}
+
+/// Record a publication whose admitted base HEAD was superseded and settle
+/// the session terminal `base_superseded:<candidate>`, keeping the candidate
+/// as evidence. The rooted fact precedes the settlement, so startup recovery
+/// settles an interrupted supersede from it.
+fn supersede_candidate_publication(
+    state: &AppState,
+    session: &ryeos_app::state_store::DedicatedSessionRecord,
+    authority: &CandidatePublicationAuthority,
+    publication_root_id: &str,
+    publication_operation_id: &str,
+    observed_head: Option<&str>,
+) -> Result<HandlerError, HandlerError> {
+    ryeos_app::authoritative_root_fact::append_once(
+        state,
+        publication_root_id,
+        CANDIDATE_PUBLICATION_SUPERSEDED_EVENT,
+        publication_operation_id,
+        candidate_publication_superseded_payload(
+            session,
+            authority,
+            publication_root_id,
+            publication_operation_id,
+            observed_head,
+        ),
+    )
+    .map_err(internal)?;
+    state
+        .state_store
+        .settle_dedicated_candidate_publication(
+            &session.placement_thread_id,
+            &authority.source_candidate_snapshot_hash,
+            publication_root_id,
+            publication_operation_id,
+            &format!("base_superseded:{}", authority.candidate_snapshot_hash),
+        )
+        .map_err(internal)?;
+    ryeos_app::dedicated_session_service::notify_projection_change(&session.placement_thread_id);
+    Ok(base_superseded_refusal(session, authority, observed_head))
+}
+
+/// Record a publication refused before any HEAD write for a reason that does
+/// not supersede the base (a handoff fence, an untrusted signer, an invalid
+/// or unreadable ref) and return the session to `publish_ready`, so the
+/// owner can retry once the cause is gone.
+fn publication_not_applied(
+    state: &AppState,
+    session: &ryeos_app::state_store::DedicatedSessionRecord,
+    authority: &CandidatePublicationAuthority,
+    publication_root_id: &str,
+    publication_operation_id: &str,
+    refusal: &ProjectHeadAdvanceRefusal,
+) -> Result<HandlerError, HandlerError> {
+    ryeos_app::authoritative_root_fact::append_once(
+        state,
+        publication_root_id,
+        "hosted_candidate.publication_not_applied",
+        publication_operation_id,
+        candidate_publication_result_payload(
+            session,
+            authority,
+            publication_root_id,
+            publication_operation_id,
+            "not_applied",
+            false,
+        ),
+    )
+    .map_err(internal)?;
+    state
+        .state_store
+        .fail_dedicated_candidate_disposition(&session.placement_thread_id, "publishing")
+        .map_err(internal)?;
+    ryeos_app::dedicated_session_service::notify_projection_change(&session.placement_thread_id);
+    Ok(HandlerError::Structured {
+        code: "publication_not_applied".to_string(),
+        status: 409,
+        body: json!({
+            "code": "publication_not_applied",
+            "reason": refusal.reason(),
+            "message": format!(
+                "candidate publication was refused before any HEAD write: {refusal}; the \
+                 candidate is still publish_ready, retry once the cause is resolved"
+            ),
+            "chain_root_id": session.chain_root_id,
+            "candidate_snapshot_hash": authority.candidate_snapshot_hash,
+            "expected_previous_hash": authority.base_snapshot_hash,
+        }),
+    })
+}
+
 async fn publish(
     req: PublishRequest,
     ctx: HandlerContext,
@@ -10299,6 +10611,19 @@ async fn publish(
             "retained_for_review"
         }
     };
+    if session.publication_result.as_deref()
+        == Some(format!("base_superseded:{candidate}").as_str())
+    {
+        let current = state
+            .state_store
+            .with_state_db(|db| db.read_project_head(principal_key, project_hash))
+            .map_err(internal)?;
+        return Err(base_superseded_refusal(
+            &session,
+            &publication_authority,
+            current.as_deref(),
+        ));
+    }
     if session.publication_result.as_deref() != Some(retained) && !already_published {
         return Err(HandlerError::BadRequest(
             "session has no publishable retained candidate".into(),
@@ -10416,32 +10741,14 @@ async fn publish(
         .with_state_db(|db| db.read_project_head(principal_key, project_hash))
         .map_err(internal)?;
     if current.as_deref() != Some(candidate) && current.as_deref() != Some(base_snapshot_hash) {
-        ryeos_app::authoritative_root_fact::append_once(
+        return Err(supersede_candidate_publication(
             &state,
+            &session,
+            &publication_authority,
             &invocation_root_id,
-            "hosted_candidate.publication_not_applied",
             &publication_operation_id,
-            candidate_publication_result_payload(
-                &session,
-                &publication_authority,
-                &invocation_root_id,
-                &publication_operation_id,
-                "not_applied",
-                false,
-            ),
-        )
-        .map_err(internal)?;
-        state
-            .state_store
-            .fail_dedicated_candidate_disposition(&session.placement_thread_id, "publishing")
-            .map_err(internal)?;
-        ryeos_app::dedicated_session_service::notify_projection_change(
-            &session.placement_thread_id,
-        );
-        return Err(HandlerError::BadRequest(format!(
-            "publication conflict: expected HEAD {}, current HEAD is {:?}",
-            base_snapshot_hash, current
-        )));
+            current.as_deref(),
+        )?);
     }
     let publication = if current.as_deref() == Some(candidate) {
         Ok(())
@@ -10456,6 +10763,32 @@ async fn publish(
         )
     };
     if let Err(error) = publication {
+        // A refusal proven to precede any HEAD write is never an unknown
+        // outcome. A moved HEAD supersedes the admitted base for good; every
+        // other pre-write refusal leaves the candidate publishable.
+        match error.downcast_ref::<ProjectHeadAdvanceRefusal>() {
+            Some(ProjectHeadAdvanceRefusal::Conflict { observed, .. }) => {
+                return Err(supersede_candidate_publication(
+                    &state,
+                    &session,
+                    &publication_authority,
+                    &invocation_root_id,
+                    &publication_operation_id,
+                    observed.as_deref(),
+                )?);
+            }
+            Some(refusal) => {
+                return Err(publication_not_applied(
+                    &state,
+                    &session,
+                    &publication_authority,
+                    &invocation_root_id,
+                    &publication_operation_id,
+                    refusal,
+                )?);
+            }
+            None => {}
+        }
         ryeos_app::authoritative_root_fact::append_once(
             &state,
             &invocation_root_id,

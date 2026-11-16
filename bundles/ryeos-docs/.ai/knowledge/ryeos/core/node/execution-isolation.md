@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-11-12T12:14:08Z:36e51b6a186c1bcdae22ccee3870b5e01e4fc4d2bb4236b90c1594ada345f0ab:0yVEreO7Rjn7m7XJtBxaDMw6okI5v2IdFbvTzwVskgN21IqKLoXHX44Qs3a+L+6pAaTxIzr50YAx6NFMoGgEDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-15T06:50:32Z:08dc3fa59fbdd61c1bef5dda373e62471010419781859cdea27bdf5fd220c51e:qrKs7WTJ6eyEROzAvFHOWIH1ON0Ss9Lfy27h2YyoerUKSMTiKB19/+t9txWC2Udr5BI3/CwbN2Qh/t+uOBQUCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, security, subprocess, node-policy]
-version: "1.22.0"
+version: "1.24.0"
 description: >
   Node contract for the node-owned subprocess isolation: strict policy
   schema, startup pickup, enforcement behavior, diagnostics, and limits.
@@ -24,8 +24,12 @@ compilation. Core ships the self-contained `linux-lillux` implementation as
 available signed data. The explicit development profile selects enforced
 execution, whole-process scope ownership, and the qualified nested-sandbox
 ceiling required by hosted development workers whose pinned client launches
-its own sandbox. The general installation profiles retain their explicit
-disabled choice.
+its own sandbox. The general installation profiles select enforced
+execution for their `local` host class too, using the direct shape (no
+process-scope requirement, `pid_namespace` proc) where the profile needs no
+scopes; the hosted classes retain their explicit disabled choice. Each such
+profile also declares `local_unconfined`, a disabled lane the operator must
+name with `--host-class local_unconfined`.
 
 Durable execution workspaces use the isolation-adapter v10 contract. RyeOS owns
 one canonical private `project/` generation. Disabled/native execution creates
@@ -87,6 +91,17 @@ are never reinterpreted. Each channel has one exact child descriptor and hidden
 environment binding in both disabled and enforced modes; fd 0 is a deliberate
 full-duplex primary channel, not a sentinel. Parent protocol code retains a
 typed Lillux byte-stream endpoint and never recovers a raw Unix socket.
+
+The adapter does not know the project's ignore policy, so it never refuses an
+upper-layer entry for being unrepresentable: an absolute or otherwise
+unportable symlink target, a socket, FIFO or device, or a name that is not
+UTF-8 is reported as a typed `unrepresentable` mutation naming its path (a
+non-UTF-8 name with each invalid byte as U+FFFD, never descended into) and its
+reason. At seal, RyeOS skips such an entry when the snapshot policy ignores its
+path, exactly as copy-based capture skips it, and refuses the seal naming the
+path and reason when the path is included. Relative symlinks, regular files
+and directories in ignored paths are skipped the same way. This is part of the
+v15 adapter contract; an older adapter is refused by the protocol version.
 
 Argument entries and environment values are exact process data: an empty
 string remains present and empty through plan validation, serialization and
@@ -187,8 +202,8 @@ installed runtime node-trusted.
 The policy has two modes:
 
 - `mode: disabled` does not wrap the subprocess in an isolation adapter. Profiles
-  select it per host class (the `standard` profile's `local` and `hosted` lanes
-  do). It does not require the selected bundle. Node-owned stdout/stderr retention
+  select it per host class (the `hosted` lanes and every `local_unconfined`
+  lane do). It does not require the selected bundle. Node-owned stdout/stderr retention
   caps, signature, trust, authorization, and capability checks still apply,
   but there is no OS confinement. Verification-to-exec is still pinned: an
   admitted command runs only from a retained descriptor carrying its exact
@@ -218,16 +233,25 @@ The policy has two modes:
 
 ## Explicit disabled policy member
 
+The `standard` profile's member, narrowed by `ryeos init --host-class local`
+to the one class the node runs under:
+
 ```yaml
 schema: 1
 policy:
-  version: 6
-  mode: disabled
-  backend: null
-  process_scopes:
-    mode: unconfigured
+  version: 11
+  host_classes:
+    local:
+      requires_capabilities: [accounting, storage:durable_root, time]
+      process_scopes:
+        mode: unconfigured
+      trusted_process_group_sessions: false
+      mode: disabled
+      backend: null
+      proc_filesystem: empty
+      host_direct: unavailable
+  enclosure_inits: [catatonit, dumb-init, tini]
   filesystem:
-    proc_filesystem: empty
     live_project:
       mode: fixed_parents
       limits:
@@ -237,7 +261,6 @@ policy:
       - "{node_public_identity}"
       - "{daemon_socket}"
       - "{bundle_roots}"
-      - "{node_trusted_keys}"
       - "{verified_code}"
     writable:
       - "{project}"
@@ -265,6 +288,28 @@ restart the node.
 `--pin-project` remains the explicit complete-project snapshot/COW workflow. It
 does not control ordinary admitted source or external-content delivery, and is
 not required merely to run a definition that already retains those exact bytes.
+A pinned execution whose terminal publication advances HEAD freezes its result
+generation, binds it to the workspace journal, and only then compare-and-swaps
+HEAD from the admitted base. Three outcomes follow: HEAD advances (published);
+the CAS is refused before any write, most often because HEAD moved off the
+base, and the thread fails with outcome `head_advance_not_applied` in every
+lane (direct item, managed runtime callback, and a managed runtime that exited
+before its callback), its error naming the reason, expected and observed HEAD,
+the runtime's reported status where there is one, and the retained
+`retained_snapshot_hash` / `retained_output_capture_hash`. The retained
+generation joins the failed terminal, so it stays reachable after the
+workspace closes, and a parent following the thread receives a failure
+envelope; or fold-back itself breaks, which stays `foldback_failed`. Recovery
+never publishes. A run interrupted after its freeze has the generation bound by
+recovery; if it cannot resume it fails `head_advance_not_applied` with reason
+`interrupted` (expected and, if readable, observed HEAD and the retained
+hashes) and the generation joins that failed terminal, while a resumable run
+relaunches and its next finish takes the normal path. If HEAD already names
+the recovered generation, the advance applied before the interruption: the
+thread fails `head_advanced_before_interruption`, recording the generation,
+the new HEAD and the base it advanced from, with the generation joined to the
+terminal, since the run never confirmed its own completion. A not-applied result is never retried or
+merged onto the new HEAD; re-run against the current HEAD.
 Sparse admitted-input roots are process inputs and scratch, not project
 publication. Their writes are discarded at process cleanup and never fold back
 to the live project. Durable outputs use structured results or explicit
@@ -294,8 +339,14 @@ refusal is not an executed workload's nonzero exit result.
 
 ## Strict schema
 
-- The outer member `schema` is `1`; `policy.version` must be `5`. Other
+- The outer member `schema` is `1`; `policy.version` must be `11`. Other
   versions and unknown fields are rejected without aliases or translation.
+- Every host class declares `host_direct: unavailable | operator_granted`,
+  with no default. It says whether that class offers the host-direct posture
+  at all (see below). Only the `development` profile's `local` and
+  `local_direct` classes and the `standard` profile's `local` and
+  `local_unconfined` classes say `operator_granted`; every hosted class says
+  `unavailable`.
 - `backend` is null when no backend is selected and must be present in enforce
   mode.
 - `backend.bundle` names one registered signed bundle.
@@ -308,7 +359,7 @@ refusal is not an executed workload's nonzero exit result.
   intersection of the signed declaration and live inspection.
 - `filesystem.readable` accepts absolute paths plus `{project}`, `{cwd}`,
   `{node_public_identity}`, `{daemon_socket}`, `{bundle_roots}`,
-  `{node_trusted_keys}`, and `{verified_code}`.
+  and `{verified_code}`.
 - `filesystem.writable` accepts absolute paths plus `{project}`, `{cwd}`, and
   `{checkpoint_dir}`.
 - A retained immutable-input or live-project authority intersects an explicit
@@ -343,6 +394,28 @@ refusal is not an executed workload's nonzero exit result.
 Missing required sections, malformed YAML, invalid paths or wildcard forms,
 and unsupported values are errors even when disabled. Disabled mode skips
 backend availability and OS-confinement controls, not node-owned output caps.
+
+## Host-direct posture
+
+A tool may declare `host_authority: required`: it asks to run on the host,
+unconfined, as the daemon user. That is the operator's own authority: the
+process can read the operator key, the node key, the vault and every bundle
+root. Declaring it grants nothing. A launch runs host-direct only when the
+node's host class says `host_direct: operator_granted`, the operator granted
+that exact item in the `host_access` node-policy section (pinned to its signer
+and the exact source-closure and runtime bytes), and the caller is the
+configured local operator. See `ryeos/core/node/host-access`.
+
+A granted launch takes the disabled-mode path described above on any node,
+enforced or not, through a per-launch runtime view; every other launch on the
+node keeps the lane's isolation. The node-owned controls stay: exact-digest
+delivery of the interpreter and source closure, the attachment hold, the
+output caps, the timeout and subprocess limits, and a cgroup process scope when
+the grant says `scope_required`. The child inherits only the grant's
+`host_env` names from the daemon's boot environment. Launch provenance records
+`execution_posture: {host_direct: <grant>}`; the live project authority
+records `unconfined_host`. `ryeos node doctor` shows `host_direct` in the
+`isolation` row and lists grants in the `host_access` row.
 
 ## Per-execution network ceiling
 
@@ -437,8 +510,6 @@ The narrow readable placeholders mean:
   socket (for example its parent directory) is refused at launch by name, so
   no entry can hand a sandbox the control socket.
 - `{bundle_roots}` expands to bundle roots verified for this execution.
-- `{node_trusted_keys}` conditionally exposes the node owner's trusted-key
-  directory. The placeholder name matches the existing launch-envelope root.
 - `{verified_code}` is mandatory for executable-item launches. RyeOS rechecks
   the verified whole-file SHA-256, writes those exact bytes to node-owned
   content-addressed storage, mirrors the code's project or bundle authority at
@@ -473,11 +544,23 @@ and be contained by `{project}` or an absolute writable root chosen in this
 policy. This prevents a request from turning a path parameter into new host
 write authority.
 
+A launch that opened a bundle state home gets one more exact mount: the
+namespace directory `<app_root>/.ai/state/bundle-state/<bundle_id>/<namespace>`
+appears at the fixed destination `/run/ryeos/bundle-state`, writable or
+read-only by the declared access, pinned by descriptor. Isolation refuses any
+other path: the state-home root, a bundle's whole home, a deeper descendant, a
+path outside, or one that reaches there through a link. The mount is separate
+from the runtime state root, so a launch may carry both. Sibling namespaces and
+other bundles' homes are not mounted, and a broader policy mount that would
+contain them is dropped for the launch. Under disabled isolation no mount
+exists. See `ryeos/standard/bundle-state-home`.
+
 Writable roots may not overlap `/`, protected system roots, the app root, the
 selected backend artifacts, or the daemon socket. The resolved host home itself and
 its ancestors are also rejected. The only app-root exceptions are a
 daemon-provenance execution workspace directly beneath
-`.ai/state/cache/executions` and the exact daemon-owned checkpoint directory.
+`.ai/state/cache/executions`, the exact daemon-owned checkpoint directory, and
+the one bundle state namespace a launch opened.
 Absolute paths in this file are node-owner authority and should be kept narrow.
 
 ## Process boundary
@@ -624,6 +707,14 @@ down, so provisioning does not unexpectedly start a node. That native boot
 disposition remains inert after a host reboot; an operator explicitly uses
 `ryeos start` when the node should run again.
 
+The association is removed by the matching administrator transition,
+`ryeos node host retire --confirm [--app-root <existing-node-root>]`, while the
+node is stopped. Lillux brings the native service down, deactivates it, waits
+for the service manager to release it, and removes the service definition and
+its logs. It retires only an association whose recorded launch is the RyeOS
+node launch for that exact app root. An association left behind by a deleted
+app root is retired with `ryeos node host retire --orphaned --confirm`.
+
 The native adapter is a Lillux concern. Its first qualified implementation is
 the local Artix/runit adapter; systemd, launchd and Windows require their own
 Lillux adapter and host qualification before RyeOS claims support. Manager
@@ -720,7 +811,20 @@ daemon exit, the exclusive state lock proves that any still-live, exactly
 matched attachment belongs to the previous daemon; startup kills that group
 before recovery launches a replacement. A same-boot attachment whose leader
 birth identity can no longer be proven is quarantined rather than cleared or
-signalled.
+signalled. The quarantine is recorded on the thread's runtime row
+(`process_quarantine`: reason `same_boot_group_present` or
+`boot_comparison_unavailable`, first seen, last checked). `thread get` shows it
+under `runtime`, `ryeos node doctor` lists it as a `process_quarantine`
+finding, and it clears with the identity once a later recovery pass proves the
+group gone.
+
+A graceful stop sends SIGTERM to the exact target only, never to its process
+group or scope. The retained launcher stays alive to publish the real exit, and
+the target owns cooperative cancellation of its own children: it forwards
+SIGTERM or stops them at its own boundary. The node's guarantee is the SIGKILL
+of the whole pinned group (or the kernel kill of the scope) at the grace
+deadline, which reaches every descendant the target did not stop. A hard stop
+skips SIGTERM and kills the group at once.
 
 The native pre-exec hold removes the former local spawn-to-attachment crash
 window. Parent death before durable attachment kills the still-held direct
@@ -811,13 +915,16 @@ execution workspaces; their lifelines are retained for the whole subprocess.
 
 ## Diagnostics and limits
 
-`ryeos node doctor` uses the production policy loader. Disabled mode reports a
-healthy inactive opt-out without resolving the selected backend. Enforce mode verifies
+`ryeos node doctor` uses the production policy loader. Disabled mode reports
+a warning without resolving the selected backend: runs execute as the daemon
+user, can read the operator key on the volume and write any `.ai/` path, and
+the live-run floors hold only under an enforced lane. The fix is to re-init on
+an enforced host class or cut a policy generation with an enforce lane. Enforce mode verifies
 backend availability and capture digest, and reports filesystem, network,
 environment, open-file, captured-output, and verified-artifact-limit posture.
 
-Images that initialize from a profile whose selected lane is disabled (for
-example `standard`) run without extra capabilities. The `contained-workflow`
+Images that initialize from a profile whose selected lane is disabled (a
+`hosted` class, or `local_unconfined`) run without extra capabilities. The `contained-workflow`
 image requires enforce. Enforce mode requires a separately installed selected signed
 backend bundle and every host facility needed by its declared capabilities.
 Setuid, setgid, and file-capability adapter or external artifact executables are
@@ -844,11 +951,15 @@ authorization, and capability checks remain active.
 
 ## Local use, hosted nodes, and Docker
 
-For a trusted, single-user local node, choosing a profile lane with disabled mode is a
-reasonable choice. It avoids namespace requirements while retaining RyeOS's
-normal signed-item and capability model. Enforcement becomes important when a
-node executes bundles for another person, accepts remotely supplied projects,
-or shares one worker among workloads with different trust.
+A local node enforces by default: the `local` host class runs jobs in the
+namespace sandbox, which needs unprivileged user, mount and pid namespaces and
+the new mount API from the kernel. When the host's sandbox probe cannot prove
+that lane, init refuses and names `--host-class local_unconfined`, the explicit
+disabled opt-out for a trusted single-user host. It avoids namespace
+requirements while retaining RyeOS's normal signed-item and capability model,
+but jobs then run as the daemon user and `ryeos node doctor` warns. Enforcement
+matters most when a node executes bundles for another person, accepts remotely
+supplied projects, or shares one worker among workloads with different trust.
 
 Docker and the RyeOS isolation protect different boundaries. A container isolates
 the whole RyeOS node from its host, but the daemon and every tool inside that

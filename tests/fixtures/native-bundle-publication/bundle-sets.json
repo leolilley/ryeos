@@ -45,27 +45,12 @@
       "opencode",
       "render-sandbox"
     ],
-    "f5r-controller": [
+    "hosted-controller": [
       "core",
       "graph",
       "knowledge",
       "codex",
       "render-sandbox"
-    ],
-    "full": [
-      "core",
-      "central-auth",
-      "scheduling",
-      "knowledge",
-      "directive",
-      "graph",
-      "ryeos-docs",
-      "environment-qualification",
-      "web",
-      "browser",
-      "ryeos-ui",
-      "codex",
-      "opencode"
     ],
     "hosted-workflow": [
       "core",
@@ -98,7 +83,12 @@
       "knowledge",
       "directive",
       "graph",
-      "ryeos-docs"
+      "ryeos-docs",
+      "ryeos-ui",
+      "codex",
+      "opencode",
+      "web",
+      "browser"
     ],
     "standard-central-auth": [
       "core",
@@ -119,8 +109,7 @@
     "core-scheduling": "core-scheduling",
     "core-workflow": "core-workflow",
     "development": "development",
-    "f5r-controller": "f5r-controller",
-    "full": "full",
+    "hosted-controller": "hosted-controller",
     "hosted-node": "core",
     "hosted-workflow": "hosted-workflow",
     "local-inference": "local-inference",

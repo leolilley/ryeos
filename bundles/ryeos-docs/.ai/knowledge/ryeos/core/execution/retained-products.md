@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-11-12T23:57:18Z:8d8d580864a795c8856909f971d77ce11a413a23870e0994435ca4bb9b014d9d:S53NQpla6GU0F5w0zk9ZVF89Mme2F6h2G6vQ/r1J8jb8qZq0ZD6fLrqtclVljdYHTr+87dqOCqsh5TTlacWOCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T18:26:28Z:de5f6dd4263a69d236a19664d8fcacf52f604a7a5ba766a69cc48c4067eb2f82:KyLouVjQtfxVt0r3gQQt5+U1BNliD2w4bBzEPpbPJDKbsQzbNcb+jr68OHAgDEUf+woY1eDvYpoIVrJLPdYUCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/execution
 tags: [execution, products, external-content, authority]
-version: "1.0.0"
+version: "1.1.0"
 description: Exact ownership and node-local provisioning boundaries for retained build products.
 ---
 
@@ -106,7 +106,7 @@ route, and prints `testimony_hash`, `acceptance_hash`, `coordinate_id` and
 `reused_existing`. Keep `acceptance_hash`; selections name it.
 
 The receiver accepts only when the testimony's signer is the authenticated
-caller and holds a current `remote_operator` grant, the named acceptance
+caller and holds a current `remote_principal` grant, the named acceptance
 policy resolves and allows the lane, the origin's qualification policy is the
 same signed bytes the receiver resolves for that ref, and the qualified
 product was received from that origin by that operator.
@@ -138,6 +138,17 @@ the testimony. An acceptance is also immutable at its coordinate: a different
 testimony for the same coordinate is refused, and re-qualifying on the origin
 is the remedy.
 
+Acceptances are recorded as acceptance evidence v4. An acceptance recorded
+before v4 is refused wherever it is used, with the code
+`remote_qualification_acceptance_superseded` (or
+`remote_content_acceptance_superseded` when a content testimony is used). To
+cure it, run the export above again from the origin; the receiver records a
+new acceptance at the same coordinate. If the origin refuses the export
+because its qualification is stale or expired, re-qualify there first. Then
+re-sign every selection or placement binding that named the old acceptance
+hash with the new one. `ryeos node doctor` lists superseded acceptances under
+`remote_content_testimonies`.
+
 Age and expiry are checked at every use, not only at acceptance. Selection
 and every launch re-run them against the current time, so a
 testimony older than `max_testimony_age_seconds` stops new launches even
@@ -167,8 +178,9 @@ always present. The two acceptance hashes are different records.
 The receiver admits the selection only for the attesting operator, who also
 owns the received product. From the origin that is `ryeos remote run
 <receiver> service:external-execution/admit-product-program
---outbound-principal configured_operator ...`, and the origin operator's
-grant on the receiver needs
+--outbound-principal delegated ...` (the default), and the origin operator, who
+signs a delegation for the receiver with `ryeos remote delegate`, needs a grant
+on the receiver for
 `ryeos.execute.service.external-execution/admit-product-program`.
 
 `admit-product-program` derives the admitted program for a captured-product
@@ -177,6 +189,130 @@ and `selection_identity_digest`. It writes nothing.
 `ryeos node external-execution compose --program` reads the bare `program`
 object, not that envelope. A product-sourced program carries no runtime
 content qualification: pass `--runtime-content-qualification none`.
+
+### Using a content testimony
+
+A runtime that is activated content rather than a captured product crosses on
+the content lane. The receiver does not take the origin's activation on
+trust: it activates the same signed release itself, and every use compares its
+own activation with the content the origin qualified. Only the content's
+identity is compared: the activation program digest (the signed activation,
+its pinned archives and the consumer's declarations, including mounts), the
+consumer, the declaration, the exact manifest and its realization. The
+origin's receipt, binding and node are its own records and are never
+compared.
+
+1. Install the same signed Bundle release on the receiver as on the origin,
+   including the qualification policy and the verifier.
+2. Install a content acceptance policy whose `allowed_lanes` includes
+   `content`.
+3. Export from the origin with `--content '{"activation_ref": ...,
+   "coordinate_id": ..., "manifest_hash": ...}'`. The receiver may accept
+   before it has activated.
+4. Activate on the receiver: `ryeos external-content activate <activation-ref>
+   <online|offline> [offline-archive-root]`. Keep the verifier's pinned content
+   resident and bound on the receiver, as for a local qualification.
+5. Emit the program and binding selection as the attesting operator:
+   `ryeos external-execution admit-candidate-program <activation-ref>
+   <coordinate-id> <attestation-hash> <runtime-manifest-hash> --required-claims
+   <json> --remote-testimony '{"acceptance_hash": ..., "acceptance_policy_ref":
+   ..., "owner_principal": ...}'`. Compose the placement binding with the
+   returned `runtime_content_qualification`, which carries `remote_testimony`.
+6. Read `ryeos node doctor`: the `remote_content_testimonies` row reports each
+   accepted content testimony as `ok`, `no_local_activation` or
+   `local_activation_differs`.
+
+Launch and the emitter refuse with a typed code that names what differs and
+its fix: `remote_content_no_local_activation`,
+`remote_content_identity_differs` (naming each differing field, such as
+`activation_program_digest`, `manifest_hash` or `realization`),
+`remote_content_policy_differs`, `remote_content_producer_differs`,
+`remote_content_verifier_differs` and `remote_content_acceptance_superseded`.
+A different release on the receiver needs either the origin's release or a
+re-qualification at the origin against the receiver's release.
+
+## Producing and publishing a product
+
+A product declaration is signed data: a producer (a graph or tool) declares
+named products with their bounds, and capture enforces them. One composite
+runs the whole operator flow over the separate verified commands:
+
+```bash
+ryeos --project <project> external-content product publish <producer-ref> <product-name> \
+  [--activation <config-ref>] [--push-to <remote>] [--json]
+```
+
+In order it activates the named external-content recipe online and waits for
+it, executes the producer with `--async --pin-project` (or `--current-head`,
+`--project-snapshot <hash>`), follows the thread to a terminal state, captures
+the product (`external-content capture-product`), admits the witness under the
+node's local admission policy (`ryeos admission submit <witness>`), and, with
+`--push-to`, pushes it (`external-content push-product`) under the
+declaration's byte bound. It keeps no state file. Capture is keyed by the
+chain, thread and product, admission by subject and policy, and a push resumes
+its staging on the remote, so a run that stopped after production resumes with
+`--from-thread <thread-id>`, which every failure after production names. A
+producer thread that ended other than `completed` has no product.
+
+The steps remain separate commands. `ryeos admission submit <subject-hash>
+[--policy <id>] [--claim accepted]` admits any local CAS root; its defaults are
+the local policy and the accepted claim. There is no export-to-directory verb:
+`push-product` is the product transport.
+
+## Generation-scoped bindings and renewal
+
+An installed-bundle binding names the consumer and its publisher, so it keeps
+authorizing the consumer until it is released or its authorizer's grant
+changes. A pinned-project binding also names the exact project snapshot and the
+consumer's effective definition digest. A new project snapshot, or a re-signed
+consumer, is therefore a new consumer authority: every earlier binding stops
+authorizing it. This is deliberate. The node never carries a binding forward on
+its own, and an earlier binding is never a fallback candidate.
+
+Launch and qualification refuse such a consumer with code
+`content_binding_missing` (HTTP 409). The refusal names the consumer, the
+snapshot and effective digest it was resolved at, and each declaration with
+its status (`missing_binding` or `missing_manifest`). Ordinary launch admission
+reports the same condition as `external_content_binding_unavailable`.
+
+Two local-operator verbs inspect and renew bindings:
+
+```
+ryeos external-content bindings <consumer-ref> <installed_bundle|pinned_project> [project-snapshot-hash] [--product-selections <json> --product-owner-principal <fp:hash>]
+ryeos external-content rebind <prior-binding-hash> <project-snapshot-hash> [--product-selections <json> --product-owner-principal <fp:hash>] [--maximum-bytes <n>]
+```
+
+`bindings` is read only. It resolves the consumer at the named generation
+through the same preparation bind uses, lists each of the consumer's binding
+heads as `current`, `stale` or `released`, and gives the reasons a stale one no
+longer applies (`project_snapshot_changed`, `consumer_definition_changed`,
+`source_closure_changed`, `publisher_changed`, `consumer_kind_changed`,
+`manifest_not_declared`, `authorizer_not_current`). For each retained
+declaration it reports `ready`, `missing_binding` or `missing_manifest`, and
+for a missing binding it names the newest stale pinned-project binding of the
+same manifest as `prior_binding_hash`. Run it before a launch on a new
+generation; offline doctor cannot decide this, because staleness depends on the
+snapshot the launch picks.
+
+`rebind` is the explicit, per-generation operator act. It accepts only an
+active pinned-project binding that is the current head of its subject and was
+authorized by the calling operator. Before anything is staged it prepares the
+same consumer at the new snapshot and refuses, with code
+`rebind_consumer_changed`, a consumer that has another publisher, no longer
+depends on the project, or no longer declares the prior manifest. An
+installed-bundle binding is refused with `rebind_not_generation_scoped`, and a
+released or superseded one with `rebind_prior_binding_not_current`. It then
+re-stages the prior binding's exact retained manifest (as
+`import-binding` does) and binds it to the consumer at the new generation
+through the ordinary bind, signed by the node and authorized by the operator.
+The prior binding is left as it was. If the consumer already holds an active
+binding at that generation the call returns it with `idempotent: true` and
+writes nothing.
+
+A consumer bound with product selections is renewed with the same complete
+selection list and product owner it was bound with. `rebind` renews existing
+bindings only; it does not import or compose products, so a product slot whose
+witness changed still goes through `compose-product`.
 
 ## Evidence is not task success
 

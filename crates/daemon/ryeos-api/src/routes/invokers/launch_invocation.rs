@@ -134,6 +134,7 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
             ryeos_app::execution_policy::resolve_standard_local_live_authority(
                 &project_ctx.effective_path,
                 principal_scopes.clone(),
+                &principal_id,
                 &ctx.state.isolation,
             )
             .map_err(|error| RouteDispatchError::BadRequest(format!("{error:#}")))?;
@@ -163,7 +164,9 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
             None,
         )
         .map_err(|error| {
-            RouteDispatchError::BadRequest(format!("launch admission failed: {error}"))
+            crate::routes::launch::typed_launch_policy_refusal(&error).unwrap_or_else(|| {
+                RouteDispatchError::BadRequest(format!("launch admission failed: {error}"))
+            })
         })?;
         if !preflight.class.persists_pre_minted_root() {
             return Err(RouteDispatchError::BadRequest(

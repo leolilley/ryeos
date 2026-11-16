@@ -9,6 +9,39 @@ use ryeos_state::objects::{ProjectFile, ProjectSnapshotPolicy, ProjectTree};
 
 pub use ryeos_engine::execution_workspace::{BACKEND_STATE_DIR, PROJECT_DIR, WorkspaceLayout};
 
+/// A workspace entry the isolation adapter could not represent, at a path the
+/// seal must include: an absolute or otherwise unportable symlink, a socket,
+/// FIFO or device, or a name that is not UTF-8. The same entry under an
+/// ignored path is skipped, as copy-based capture skips it; an included one
+/// cannot be sealed faithfully, so the seal refuses rather than drop it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnrepresentableWorkspaceEntry {
+    pub path: String,
+    pub reason: ryeos_isolation_protocol::WorkspaceUnrepresentableReason,
+}
+
+impl std::fmt::Display for UnrepresentableWorkspaceEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use ryeos_isolation_protocol::WorkspaceUnrepresentableReason as Reason;
+        let what = match self.reason {
+            Reason::UnportableSymlinkTarget => {
+                "a symlink whose target is absolute or not portable relative content"
+            }
+            Reason::UnsupportedEntryType => "a socket, FIFO or device",
+            Reason::NonUtf8Name => "an entry whose name is not UTF-8",
+        };
+        write!(
+            f,
+            "unrepresentable workspace entry ({}) at included path {}: it is {what}. Ignore the \
+             path in the project snapshot policy, or keep it outside the project",
+            self.reason.as_str(),
+            self.path
+        )
+    }
+}
+
+impl std::error::Error for UnrepresentableWorkspaceEntry {}
+
 /// Apply a normalized adapter mutation set to an immutable project tree.
 /// Only changed regular bytes are streamed into CAS; unchanged object hashes
 /// are retained verbatim.
@@ -47,6 +80,18 @@ pub fn apply_workspace_delta(
                     ryeos_state::project_sync::classify_project_ai_path(relative, Some(&matcher)),
                     ryeos_state::project_sync::ProjectAiPathClass::Deployable(_)
                 ));
+        if let ryeos_isolation_protocol::WorkspaceMutationKind::Unrepresentable { reason } =
+            mutation.kind
+        {
+            if included {
+                return Err(UnrepresentableWorkspaceEntry {
+                    path: relative.to_owned(),
+                    reason,
+                }
+                .into());
+            }
+            continue;
+        }
         if mutation.kind == ryeos_isolation_protocol::WorkspaceMutationKind::UpsertSymlink {
             if included {
                 anyhow::bail!(
@@ -114,6 +159,9 @@ pub fn apply_workspace_delta(
         match mutation.kind {
             ryeos_isolation_protocol::WorkspaceMutationKind::UpsertSymlink => {
                 anyhow::bail!("unfiltered source symlink mutation: {relative}");
+            }
+            ryeos_isolation_protocol::WorkspaceMutationKind::Unrepresentable { .. } => {
+                anyhow::bail!("unfiltered unrepresentable workspace entry: {relative}");
             }
             ryeos_isolation_protocol::WorkspaceMutationKind::DeletePath => {
                 remove_path_and_descendants(&mut next, relative);
@@ -275,6 +323,135 @@ mod tests {
         remove_path_and_descendants(&mut deleted, "missing");
         remove_descendants(&mut deleted, "z");
         assert_eq!(deleted.files.len(), 5);
+    }
+
+    /// Fold `mutations` into an empty base under a policy that ignores
+    /// `cache/`, with `files` present as the frozen mutation content.
+    fn fold_with_ignored_cache(
+        mutations: &[WorkspaceMutation],
+        files: &[(&str, &[u8])],
+    ) -> Result<Option<ProjectTree>> {
+        let temporary = tempfile::tempdir().unwrap();
+        let state = ryeos_app::test_support::TestState::open(
+            temporary.path(),
+            std::sync::Arc::new(ryeos_state::TrustStore::new()),
+        )
+        .unwrap();
+        let authority = state.pinned_authority().unwrap();
+        let guard = authority.acquire_shared_guard().unwrap();
+        let mut roots = authority
+            .require_recovery()
+            .unwrap()
+            .begin_staged_cas_roots_admitted(&guard, "ignored-entry-test")
+            .unwrap();
+        let bytes = tempfile::tempdir().unwrap();
+        for (path, content) in files {
+            std::fs::write(bytes.path().join(path), content).unwrap();
+        }
+        let content = lillux::PinnedDirectory::open(bytes.path())
+            .unwrap()
+            .unwrap();
+        let policy = ProjectSnapshotPolicy::new(
+            ryeos_state::project_sync::ProjectSyncScope::FullProject,
+            vec![],
+            vec!["cache/".into()],
+            Default::default(),
+        )
+        .unwrap();
+        let base = ProjectTree {
+            files: Default::default(),
+        };
+        apply_workspace_delta(
+            &authority,
+            &guard,
+            &mut roots,
+            &content,
+            &base,
+            &policy,
+            mutations,
+            &[],
+        )
+    }
+
+    fn unrepresentable(
+        path: &str,
+        reason: ryeos_isolation_protocol::WorkspaceUnrepresentableReason,
+    ) -> WorkspaceMutation {
+        WorkspaceMutation {
+            path: path.to_owned(),
+            kind: WorkspaceMutationKind::Unrepresentable { reason },
+            normalized_mode: None,
+            size: None,
+            content_hash: None,
+            target: None,
+        }
+    }
+
+    #[test]
+    fn ignored_symlink_mutation_is_skipped_not_refused() {
+        let link = WorkspaceMutation {
+            path: "cache/link".into(),
+            kind: WorkspaceMutationKind::UpsertSymlink,
+            normalized_mode: None,
+            size: None,
+            content_hash: None,
+            target: Some("../elsewhere".into()),
+        };
+        let tree = fold_with_ignored_cache(
+            &[link, regular_mutation("out.txt", b"kept")],
+            &[("out.txt", b"kept")],
+        )
+        .unwrap()
+        .expect("the included file changes the tree");
+        assert!(tree.files.contains_key("out.txt"));
+        assert!(!tree.files.contains_key("cache/link"));
+    }
+
+    #[test]
+    fn unrepresentable_entry_in_ignored_path_is_skipped() {
+        use ryeos_isolation_protocol::WorkspaceUnrepresentableReason as Reason;
+        let tree = fold_with_ignored_cache(
+            &[
+                unrepresentable("cache/\u{fffd}name", Reason::NonUtf8Name),
+                unrepresentable("cache/pipe", Reason::UnsupportedEntryType),
+                unrepresentable("cache/py", Reason::UnportableSymlinkTarget),
+                regular_mutation("out.txt", b"kept"),
+            ],
+            &[("out.txt", b"kept")],
+        )
+        .unwrap()
+        .expect("the included file changes the tree");
+        assert_eq!(
+            tree.files.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["out.txt"]
+        );
+    }
+
+    #[test]
+    fn unrepresentable_entry_in_included_path_refuses_with_reason() {
+        use ryeos_isolation_protocol::WorkspaceUnrepresentableReason as Reason;
+        for reason in [
+            Reason::UnportableSymlinkTarget,
+            Reason::UnsupportedEntryType,
+            Reason::NonUtf8Name,
+        ] {
+            let error = fold_with_ignored_cache(
+                &[
+                    unrepresentable("bin/python", reason),
+                    regular_mutation("out.txt", b"kept"),
+                ],
+                &[("out.txt", b"kept")],
+            )
+            .unwrap_err();
+            let refusal = error
+                .downcast_ref::<UnrepresentableWorkspaceEntry>()
+                .unwrap_or_else(|| panic!("untyped refusal: {error:#}"));
+            assert_eq!(refusal.path, "bin/python");
+            assert_eq!(refusal.reason, reason);
+            let message = error.to_string();
+            assert!(message.contains(reason.as_str()), "{message}");
+            assert!(message.contains("bin/python"), "{message}");
+        }
     }
 
     #[test]

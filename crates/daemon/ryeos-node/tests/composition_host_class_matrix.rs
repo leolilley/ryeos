@@ -405,25 +405,25 @@ fn the_core_compositions_follow_the_host_class_matrix() {
 #[test]
 fn every_shipped_profile_declares_the_host_classes_its_composition_runs_on() {
     let both = ["hosted", "local"];
-    let local_only = ["local"];
+    let standard = ["hosted", "local", "local_unconfined"];
+    let local_only = ["local", "local_unconfined"];
     let hosted_only = ["hosted"];
     let controller = ["hosted", "hosted_enforced", "local"];
     let development = ["local", "local_direct"];
-    let expected: [(&str, &[&str]); 16] = [
+    let expected: [(&str, &[&str]); 15] = [
         ("core", &both),
         ("core-scheduling", &both),
         ("core-workflow", &both),
         ("core-knowledge", &both),
-        ("standard", &both),
-        ("f5r-controller", &controller),
+        ("standard", &standard),
+        ("hosted-controller", &controller),
         ("standard-central-auth", &local_only),
         ("central-host", &local_only),
-        ("bundle-source", &local_only),
+        ("bundle-source", &standard),
         ("local-inference", &local_only),
-        ("contained-workflow", &local_only),
-        ("release-authority", &local_only),
+        ("contained-workflow", &["local"]),
+        ("release-authority", &["local"]),
         ("development", &development),
-        ("full", &local_only),
         ("hosted-workflow", &hosted_only),
         ("hosted-node", &hosted_only),
     ];
@@ -447,14 +447,92 @@ fn every_shipped_profile_declares_the_host_classes_its_composition_runs_on() {
     }
 }
 
+fn class_lane(profile: &serde_yaml::Value, class: &str) -> (String, bool) {
+    let entry = host_classes(profile)
+        .get(class)
+        .unwrap_or_else(|| panic!("profile does not declare host class {class}"));
+    (
+        entry["mode"].as_str().expect("a lane mode").to_owned(),
+        entry["backend"].is_mapping(),
+    )
+}
+
+#[test]
+fn standard_local_lane_is_enforce() {
+    let profile = load_profile("standard");
+    let (mode, has_backend) = class_lane(&profile, "local");
+    assert_eq!(mode, "enforce");
+    assert!(has_backend, "an enforced lane selects its backend");
+    let entry = &host_classes(&profile)["local"];
+    assert_eq!(entry["backend"]["bundle"].as_str(), Some("core"));
+    assert_eq!(
+        entry["backend"]["implementation"].as_str(),
+        Some("linux-lillux")
+    );
+    assert_eq!(entry["process_scopes"]["mode"].as_str(), Some("required"));
+    let floor: Vec<&str> = entry["requires_capabilities"]
+        .as_sequence()
+        .expect("a floor list")
+        .iter()
+        .map(|capability| capability.as_str().expect("a named capability"))
+        .collect();
+    assert_eq!(
+        floor,
+        [
+            "accounting",
+            "limits:scope",
+            "quiescence:scope",
+            "recovery:scope",
+            "storage:durable_root",
+            "termination:scope",
+            "time",
+        ],
+        "the standard local floor requires delegated per-job process scopes"
+    );
+}
+
+#[test]
+fn standard_local_unconfined_lane_is_disabled_and_named() {
+    let profile = load_profile("standard");
+    let (mode, has_backend) = class_lane(&profile, "local_unconfined");
+    assert_eq!(mode, "disabled");
+    assert!(!has_backend);
+    // Every profile whose local lane is enforced because of this rule offers
+    // the explicit opt-out; none selects it by default.
+    for name in [
+        "standard",
+        "standard-central-auth",
+        "central-host",
+        "bundle-source",
+        "local-inference",
+    ] {
+        let profile = load_profile(name);
+        assert_eq!(class_lane(&profile, "local").0, "enforce", "{name}");
+        assert_eq!(
+            class_lane(&profile, "local_unconfined").0,
+            "disabled",
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn standard_hosted_lane_unchanged() {
+    let (mode, has_backend) = class_lane(&load_profile("standard"), "hosted");
+    assert_eq!(mode, "disabled");
+    assert!(!has_backend);
+}
+
 #[test]
 fn standard_follows_the_host_class_matrix() {
     let cases: Vec<(&str, Host, Expect)> = vec![
+        // The local class requires the per-job process scopes a runit
+        // supervisor or the OCI hook delegates.
         ("local", runit(), Expect::Admit),
-        ("local", local_docker(), Expect::Admit),
+        ("local", local_docker(), Expect::Refuse(SCOPE_TRIO)),
         ("local", local_docker_oci_hook(), Expect::Admit),
         ("local", local_docker_no_volume(), Expect::Refuse(NO_DISK)),
-        ("local", hosted_volume(), Expect::Refuse(NO_ACCOUNTING)),
+        ("local", hosted_volume(), Expect::Refuse(SCOPE_TRIO)),
         ("hosted", local_docker(), Expect::Admit),
         ("hosted", hosted_volume(), Expect::Admit),
         ("hosted", hosted_no_volume(), Expect::Refuse(NO_DISK)),
@@ -484,6 +562,23 @@ fn the_central_and_bundle_source_compositions_follow_the_host_class_matrix() {
         for (class, host, expect) in plain_local_cases() {
             check(profile, class, &host, &expect);
         }
+    }
+}
+
+/// The bundle-source composition also runs in a hosting provider's
+/// container: its `hosted` floor admits a volume-backed container that
+/// proves neither accounting nor process scopes, and still needs a disk.
+#[test]
+fn bundle_source_runs_in_a_hosted_container() {
+    let cases: Vec<(&str, Host, Expect)> = vec![
+        ("hosted", local_docker(), Expect::Admit),
+        ("hosted", hosted_volume(), Expect::Admit),
+        ("hosted", hosted_no_volume(), Expect::Refuse(NO_DISK)),
+        ("hosted", local_docker_no_volume(), Expect::Refuse(NO_DISK)),
+        ("hosted", hosted_ephemeral(), Expect::Refuse(NO_DISK)),
+    ];
+    for (class, host, expect) in &cases {
+        check("bundle-source", class, host, expect);
     }
 }
 
@@ -527,7 +622,7 @@ fn the_local_inference_and_scoped_compositions_follow_the_host_class_matrix() {
     };
     for (profile, cases) in [
         ("local-inference", scoped(Expect::Admit)),
-        ("full", scoped(Expect::Admit)),
+        ("standard", scoped(Expect::Admit)),
         // The OCI hook delegates scopes but not user namespaces.
         ("contained-workflow", scoped(Expect::Refuse(NO_NAMESPACES))),
         ("development", scoped(Expect::Refuse(NO_NAMESPACES))),
@@ -562,7 +657,7 @@ fn the_release_authority_composition_needs_an_enclosure_limit_no_host_here_prove
 }
 
 #[test]
-fn the_f5r_controller_node_follows_the_host_class_matrix() {
+fn the_hosted_controller_node_follows_the_host_class_matrix() {
     let cases: Vec<(&str, Host, Expect)> = vec![
         ("hosted", local_docker(), Expect::Admit),
         ("hosted", hosted_volume(), Expect::Admit),
@@ -586,7 +681,7 @@ fn the_f5r_controller_node_follows_the_host_class_matrix() {
         ),
     ];
     for (class, host, expect) in &cases {
-        check("f5r-controller", class, host, expect);
+        check("hosted-controller", class, host, expect);
     }
 }
 
@@ -613,7 +708,7 @@ fn the_development_direct_class_admits_an_operator_host_without_a_scope_associat
 
 #[test]
 fn the_admission_names_the_proof_that_met_each_enclosure_entry() {
-    let profile = load_profile("f5r-controller");
+    let profile = load_profile("hosted-controller");
     let admission = match_floor(&floor(&profile, "hosted"), &hosted_volume().capabilities());
     assert!(admission.admitted, "{admission:#?}");
     let termination = &admission.met_by["termination:enclosure_trusted_init"];
@@ -650,8 +745,8 @@ fn every_shipped_profile_declares_valid_floors_that_a_runit_host_meets_in_its_lo
         }
         // The profiles that need an enclosure limit or a container enclosure
         // ask for more than a bare runit host proves.
-        let beyond_runit = ["release-authority", "f5r-controller"];
-        if name == "f5r-controller" {
+        let beyond_runit = ["release-authority", "hosted-controller"];
+        if name == "hosted-controller" {
             let admission = match_floor(&floor(&profile, "local"), &view);
             assert!(
                 !admission.admitted,

@@ -525,6 +525,7 @@ fn success_to_view(s: ComposeSuccess) -> KindComposedView {
 
 fn engine_to_resolution_error(e: EngineError) -> ResolutionError {
     let class = match &e {
+        error if error.is_process_creation_busy() => ResolutionFailureClass::ProcessCreationBusy,
         EngineError::HandlerBinaryMissing { .. } | EngineError::HandlerSpawnFailed { .. } => {
             ResolutionFailureClass::DependencyUnavailable
         }
@@ -549,6 +550,34 @@ mod tests {
     use serde_json::json;
     use std::fs;
     use std::path::PathBuf;
+
+    #[test]
+    fn handler_spawn_busy_maps_to_process_creation_busy() {
+        let busy = || EngineError::ProcessCreationBusy {
+            subject: "handler:ryeos/core/extends-chain".to_string(),
+            detail: "timed out after 5000 ms".to_string(),
+        };
+        for error in [busy(), EngineError::Shared(std::sync::Arc::new(busy()))] {
+            assert!(matches!(
+                engine_to_resolution_error(error),
+                ResolutionError::StepFailed {
+                    class: ResolutionFailureClass::ProcessCreationBusy,
+                    ..
+                }
+            ));
+        }
+        // A missing binary is still a hard dependency failure.
+        assert!(matches!(
+            engine_to_resolution_error(EngineError::HandlerSpawnFailed {
+                handler: "handler:x".to_string(),
+                detail: "no such file".to_string(),
+            }),
+            ResolutionError::StepFailed {
+                class: ResolutionFailureClass::DependencyUnavailable,
+                ..
+            }
+        ));
+    }
 
     fn tempdir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(

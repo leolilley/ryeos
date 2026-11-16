@@ -165,6 +165,7 @@ pub fn install_operator_grant(state: &ryeos_app::state::AppState) {
         "synthetic runtime qualification test operator",
         state.identity.fingerprint(),
         "2026-09-22T00:00:00Z",
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         state.identity.signing_key(),
         ryeos_node_runtime::identity::WildcardPolicy::AllowBootstrap,
     )
@@ -231,16 +232,30 @@ fn live_bundle_engine(
     authoring_bundle: PathBuf,
     bundle_name: &str,
     identity: &ryeos_node_runtime::identity::NodeIdentity,
+    publisher: Option<&ryeos_engine::trust::TrustedSigner>,
     isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
 ) -> ryeos_engine::engine::Engine {
-    let mut trust = ryeos_engine::test_support::live_trust_store();
-    trust.extend_from(&ryeos_engine::trust::TrustStore::from_signers(vec![
+    let platform_key = ryeos_engine::test_support::platform_author_verifying_key();
+    let publisher_key = ryeos_engine::test_support::dev_publisher_verifying_key();
+    let mut signers = vec![
+        ryeos_engine::trust::TrustedSigner {
+            fingerprint: lillux::signature::compute_fingerprint(&platform_key),
+            verifying_key: platform_key,
+            label: Some("test-support: platform author".into()),
+        },
+        ryeos_engine::trust::TrustedSigner {
+            fingerprint: lillux::signature::compute_fingerprint(&publisher_key),
+            verifying_key: publisher_key,
+            label: Some("test-support: dev publisher".into()),
+        },
         ryeos_engine::trust::TrustedSigner {
             fingerprint: identity.fingerprint().to_owned(),
             verifying_key: *identity.verifying_key(),
             label: Some("synthetic runtime qualification authoring bundle".into()),
         },
-    ]));
+    ];
+    signers.extend(publisher.cloned());
+    let trust = ryeos_engine::trust::TrustStore::from_signers(signers);
     let core = ryeos_engine::test_support::core_bundle_root();
     let workflow = ryeos_engine::test_support::workflow_bundle_roots();
     let mut kind_roots = vec![core.join(".ai/node/engine/kinds")];
@@ -263,6 +278,7 @@ fn live_bundle_engine(
         .zip(roots.iter().cloned())
         .map(
             |(name, canonical_root)| ryeos_engine::item_resolution::RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
                 name: name.to_owned(),
                 canonical_root,
             },
@@ -323,6 +339,7 @@ fn install_bundle_engine(
     bundle_name: &str,
     isolation_policy: ryeos_engine::isolation::IsolationPolicy,
     activation: Option<&ManagedActivationGrant>,
+    publisher: Option<&ryeos_engine::trust::TrustedSigner>,
 ) {
     use ryeos_node_runtime::node_policy::sections::external_content::{
         ExternalContentImportLimits, ExternalContentImportPolicyRecord, ExternalContentImportRoot,
@@ -383,6 +400,7 @@ fn install_bundle_engine(
         authoring_bundle,
         bundle_name,
         &state.identity,
+        publisher,
         Arc::clone(&isolation),
     ));
     state.isolation = isolation;
@@ -445,12 +463,16 @@ fn install_bundle_engine(
 /// bundle is live: operator granted, bundle engine and node policy installed,
 /// daemon isolation and execution identity booted. The authoring bundle's
 /// signed items must be written before this runs. The returned listener owns
-/// the daemon socket path and must outlive every qualification step.
+/// the daemon socket path and must outlive every qualification step. The
+/// bundle is signed by the node itself unless a fixed `publisher` is named,
+/// as several nodes installing one signed release name it; the node must then
+/// have been built trusting that publisher.
 pub fn start_bundle_node(
     state: &mut ryeos_app::state::AppState,
     authoring_bundle: &Path,
     bundle_name: &str,
     activation: Option<&ManagedActivationGrant>,
+    publisher: Option<&ryeos_engine::trust::TrustedSigner>,
 ) -> tokio::net::UnixListener {
     install_operator_grant(state);
     state.started_at_iso = lillux::time::iso8601_now();
@@ -464,7 +486,6 @@ pub fn start_bundle_node(
                 .join("identity/public-identity.json"),
         )
         .unwrap();
-    std::fs::create_dir_all(state.config.runtime_root().trusted_keys_dir()).unwrap();
     std::fs::create_dir_all(state.config.runtime_uds_path().parent().unwrap()).unwrap();
     let listener = tokio::net::UnixListener::bind(state.config.runtime_uds_path()).unwrap();
     let isolation_policy = composed_isolation_policy();
@@ -474,6 +495,7 @@ pub fn start_bundle_node(
         bundle_name,
         isolation_policy.clone(),
         activation,
+        publisher,
     );
     let trust = ryeos_engine::test_support::live_trust_store();
     let app_root = state.config.app_root.clone();
@@ -532,6 +554,7 @@ pub fn bind_typed_manifests_to_tool(
     let mut resolution = state
         .engine
         .effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
+            logical_project_root: None,
             item_ref: canonical,
             expected_kind: Some("tool".into()),
             project_root: None,

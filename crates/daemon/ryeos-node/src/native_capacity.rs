@@ -34,7 +34,6 @@ mod reservation;
 pub const MAX_FINALIZATION_ATTEMPTS: u8 = 4;
 
 pub use account::NativeCapacityAccountBinding;
-pub(crate) use account::load_existing_capacity_binding;
 pub(crate) use account::prepare_initial_capacity_binding;
 pub use account::reanchor::{
     CapacityPolicyAmendmentCheck, CapacityPolicyAmendmentEvidence, CapacityPolicyAmendmentReport,
@@ -47,10 +46,11 @@ pub use account::reissue::{
     reissue_capacity,
 };
 pub use account::{CapacityAccountSummary, inspect_capacity_account};
+pub(crate) use account::{OperatorLineage, load_existing_capacity_binding};
 pub use factory::{
     LiveNativeFactory, LiveNativeFactoryFailure, LiveNativeProducerPreparationFailure,
     LiveNativeProducerPublicationFailure, LiveProducerControlCensus, PlannedMarginWake,
-    ServiceRefusalLatch, ServiceRefusalWake, service_refusal,
+    ServiceHeadroom, ServiceRefusalLatch, ServiceRefusalWake, service_refusal,
 };
 #[cfg(target_os = "linux")]
 pub use reservation::OperatorLockCustody;
@@ -127,9 +127,10 @@ pub struct LiveNativeCapacityInputs {
     policy: NodeNativeCapacityPolicy,
     snapshot: NodePolicySnapshot,
     node_fingerprint: String,
-    // The operator key that signed the issuance; an operator re-issuance
-    // document found at open must verify under exactly this key.
-    operator_fingerprint: String,
+    // The operator that signed the issuance and its registered successors; an
+    // operator re-issuance document found at open must verify under one of
+    // them.
+    lineage: OperatorLineage,
     capacity_account: NativeCapacityAccountBinding,
     // Inputs and the prepaid late owner share this ONE captured clock. A late
     // owner must carry no input/account/lease backedge; terminal close requires
@@ -510,7 +511,7 @@ impl LiveNativeCapacityInputs {
             lillux::sha256_hex(&completion.bytes) == report.completion_digest,
             "initialization verifier did not select the retained fence"
         );
-        let trust = TrustStore::load(None, &roots.config())?;
+        let trust = TrustStore::load_node_registry(app_root)?;
         let snapshot = ryeos_node_runtime::node_policy::load_snapshot(
             app_root,
             &trust,
@@ -529,9 +530,11 @@ impl LiveNativeCapacityInputs {
             OsStr::new("native_capacity.yaml"),
             ryeos_node_runtime::node_document::MAX_ITEM_BYTES,
         )?;
-        let verified = ryeos_node_runtime::node_document::verify_pinned_signed_yaml(
+        let verified = ryeos_node_runtime::node_document::verify_node_signed_document_file(
             &policy_file.file,
-            &trust,
+            trust
+                .node_verifying_key()
+                .context("trust store carries no node key")?,
         )?;
         ensure!(
             verified.signer_fingerprint == report.node_fingerprint,
@@ -578,7 +581,7 @@ impl LiveNativeCapacityInputs {
             policy,
             snapshot,
             node_fingerprint: report.node_fingerprint,
-            operator_fingerprint: report.operator_fingerprint,
+            lineage: OperatorLineage::load(app_root)?,
             capacity_account: report.capacity_account,
             clock,
             occupancy,
@@ -644,7 +647,7 @@ impl LiveNativeCapacityInputs {
             policy: _,
             snapshot: _,
             node_fingerprint: _,
-            operator_fingerprint: _,
+            lineage: _,
             capacity_account: _,
             occupancy: _,
             sql_deadline: _,

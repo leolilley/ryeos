@@ -1,0 +1,47 @@
+# ryeos:signed:2026-11-15T00:04:42Z:60406e6d1678fd421a986235d786cccaccb4e988a5c70a4d466cfa073eedc499:YDq3luCkZn7Hc06QhocfYwUIIvlELkpkTBl8MXL1UmGusn3kx1y2su/UDGESsvtqtjOKuE4yFyfc4U1CJLadCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "0.1.0"
+category: "central-auth"
+name: "revoke-session"
+executor_id: "@subprocess"
+execution_protocol: "protocol:ryeos/core/tool_callback"
+required_caps: ["ryeos.execute.tool.central-auth.revoke-session"]
+description: "Revoke one session token."
+
+requires:
+  capabilities:
+    manifest:
+      runtime_authority:
+        state_home:
+          namespace:
+            from_param: realm_id
+          access: read_write
+
+env_config:
+  interpreter:
+    type: local_binary
+    binary: python
+    candidates: [python3]
+    search_paths: []
+    var: RYE_PYTHON
+    path_candidates: [python3]
+  env:
+    PYTHONDONTWRITEBYTECODE: "1"
+    PYTHONUNBUFFERED: "1"
+
+config:
+  command: "${interpreter}"
+  args:
+    - "${tool_dir}/lib/central_auth.py"
+    - "revoke-session"
+  input_data: "${params_json}"
+  timeout_secs: 15
+
+config_schema:
+  type: object
+  properties:
+    realm_id:
+      type: string
+      description: "Realm/app namespace, e.g. example-app."
+    session_token:
+      type: string
+  required: [realm_id, session_token]

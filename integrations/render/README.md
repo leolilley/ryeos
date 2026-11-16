@@ -1,7 +1,7 @@
 # Render controller deployment
 
 `controller.render.yaml.example` is the Render packaging for one RyeOS
-controller. It pins the f5r-controller image built from a release's officially
+controller. It pins the hosted-controller image built from a release's officially
 signed bundle assets by the controller-from-release workflow; the example
 carries a `<DIGEST>` placeholder in two places, to be replaced with the digest
 printed in that workflow run's summary.
@@ -31,6 +31,24 @@ and node fingerprint
 `685322487706f6744d6f9d8aaac2aeb002519d8513aa9d7cd2741fc96f351822`.
 The daemon logged startup ready and the public readiness endpoint returned
 HTTP 200. No Codex turn or Render guest was launched by this deployment.
+
+## Wiring the controller
+
+The controller's grants, its pin of the origin node and its site bundle are
+applied as signed offline operations the `hosted-controller` profile
+delegates (`node.authorize-client`, `node.remote.pin`, `node.bundle.replace`),
+not by running `authorize-client` or `bundle install` in a Render shell. The
+origin operator signs them against the controller's facts and delivers them
+through its own origin node, which forwards them to the controller under the
+operator's delegation (`ryeos node offline-operation submit --remote <name>
+--stop`); the input files of a pin or a bundle replacement travel with the
+request, and the next start applies it. Only the first two grants (the origin
+node and the origin operator) come from the controller's local operator
+through the entrypoint's platform channel (`RYEOS_OFFLINE_OPERATION_REQUEST`,
+base64 in the environment). See "Wiring a hosted node without a shell" in the
+remote-operations knowledge. A controller runs a new profile
+only after an image carrying it is deployed and its policy generation is
+replaced.
 
 ## Current qualification boundary
 

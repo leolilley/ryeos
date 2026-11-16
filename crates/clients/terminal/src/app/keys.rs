@@ -124,13 +124,12 @@ fn find_fold_section(
             ..
         } => {
             // Surface focused_tile remains populated while an ordinary dialog
-            // or dock owns focus. Resolve only the actual shared focus target.
+            // owns focus. Resolve only the actual shared focus target.
             let focused = match focus {
                 RyeOsFocusTarget::MountedView {
                     instance_key: focused,
                 } => focused == instance_key,
                 RyeOsFocusTarget::ViewSetTile { tile_id: focused } => focused == tile_id,
-                RyeOsFocusTarget::Dock { .. } => false,
             };
             if !focused {
                 return None;
@@ -152,7 +151,6 @@ fn find_fold_section(
 mod tests {
     use super::*;
     use ryeos_client_base::ids::{PresentationId, SurfaceInstanceId, TileId, ViewSetId};
-    use ryeos_client_base::ui::model::RyeOsDockEdge;
 
     fn feed_core() -> (RyeOsCore, Vec<RyeOsViewInstanceKey>) {
         use ryeos_client_base::ui::binding::{
@@ -172,10 +170,10 @@ mod tests {
             "project_path":null,"subject":{"kind":"projectless"},"posture":"observation_only",
             "binding_request_bounds":bounds,
             "presentation":{"definition":{"kind":"shared_presentation","config":{
-                "category":"ui","shared_presentation":{"schema":1,"title":"Keys fixture","launcher":"launcher",
+                "category":"ui","shared_presentation":{"schema":2,"title":"Keys fixture","launcher":"launcher",
                     "dialogs":[{"id":"launcher","title":"Launcher","view":"view:test/launcher"},
                         {"id":"help","title":"Help","view":"view:test/help"}],
-                    "docks":{},"capabilities":{"sources":[],"affordances":[]}}}},
+                    "capabilities":{"sources":[],"affordances":[]}}}},
                 "views":{"view:test/launcher":{"widget":"text","body":"Launcher"},
                     "view:test/help":{"widget":"text","body":"Help"}}}
         })).unwrap();
@@ -437,23 +435,13 @@ mod tests {
     }
 
     #[test]
-    fn launcher_and_dock_focus_do_not_fold_the_background_surface() {
+    fn launcher_focus_does_not_fold_the_background_surface() {
         let set = feed_set("surface-a", Some(2));
         let presentation = PresentationId::try_new("terminal-test").unwrap();
-        for focus in [
-            RyeOsFocusTarget::MountedView {
-                instance_key: RyeOsViewInstanceKey::shared_dialog(&presentation, "launcher")
-                    .unwrap(),
-            },
-            RyeOsFocusTarget::Dock {
-                edge: RyeOsDockEdge::Bottom,
-            },
-            RyeOsFocusTarget::MountedView {
-                instance_key: RyeOsViewInstanceKey::shared_dock(&presentation, "bottom").unwrap(),
-            },
-        ] {
-            assert_eq!(fold_section_for_focus(Some(&set), &focus), None);
-        }
+        let focus = RyeOsFocusTarget::MountedView {
+            instance_key: RyeOsViewInstanceKey::shared_dialog(&presentation, "launcher").unwrap(),
+        };
+        assert_eq!(fold_section_for_focus(Some(&set), &focus), None);
     }
 
     #[test]

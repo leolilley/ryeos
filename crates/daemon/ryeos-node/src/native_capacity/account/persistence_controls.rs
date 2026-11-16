@@ -580,8 +580,7 @@ fn operator_reissue_anchor_opens_only_with_its_present_verified_document() {
     let verify = |current: &AccountRedo, key: &SigningKey, fingerprint: &str| {
         verify_reissue_anchor_document(
             onboarding(),
-            &key.verifying_key(),
-            fingerprint,
+            &OperatorLineage::single(fingerprint, &key.verifying_key()),
             &node_fingerprint,
             &f.issuance(),
             current,

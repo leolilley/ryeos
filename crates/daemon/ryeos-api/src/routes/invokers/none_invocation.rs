@@ -169,6 +169,7 @@ mod tests {
             node_policy: Arc::new(
                 ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
                     ryeos_node_runtime::node_policy::default_launch_trust_record(),
+                    ryeos_node_runtime::node_policy::shipped_event_storage_record(),
                     Arc::new(
                         ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(
                         ),
@@ -177,6 +178,9 @@ mod tests {
             ),
             vault: Arc::new(ryeos_app::vault::EmptyVault),
             provider_env: std::sync::Arc::new(ryeos_app::vault::ProviderEnvironment::none()),
+            vault_ceilings: std::sync::Arc::new(ryeos_app::vault::VaultCeilings::operator_only(
+                "fp:test-operator",
+            )),
             command_registry: test_command_registry,
             authorizer: test_auth,
             ignore_matcher: Arc::new(

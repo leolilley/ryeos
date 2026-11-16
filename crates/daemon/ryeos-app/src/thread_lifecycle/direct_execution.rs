@@ -1989,6 +1989,7 @@ impl PreparedItemPlan {
             isolation_network_authority_ceiling: network_authority_ceiling,
             isolation_live_access_authority: None,
             isolation_state_root: state_root.map(Path::to_path_buf),
+            isolation_bundle_state_home: None,
             isolation_checkpoint_dir: None,
             isolation_checkpoint_authority: None,
             isolation_daemon_socket_path: None,
@@ -1997,7 +1998,6 @@ impl PreparedItemPlan {
             // external realizations. Mutable bundle roots and node trust state
             // are neither inputs nor ambient read authority for that worker.
             isolation_bundle_roots: Vec::new(),
-            isolation_node_trusted_keys_dir: None,
             isolation_verified_code: Vec::new(),
             isolation_verified_command: self.admitted_command,
             isolation_external_read_only_mounts: external_mounts,
@@ -2924,6 +2924,7 @@ pub fn with_prepared_external_qualification_local_worker_plan<T>(
         );
         let site = state.threads.site_id().to_owned();
         let context = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: state.identity.fingerprint().to_owned(),
                 scopes: vec![execute_cap],
@@ -3345,14 +3346,14 @@ pub struct SpawnItemParams<'a> {
     pub isolation_workspace_view: Option<lillux::InheritedDescriptorAuthority>,
     pub isolation_live_access_authority:
         Option<ryeos_engine::isolation::IsolationLiveAccessAuthority>,
+    /// The one node-owned bundle state namespace the launch's sealed
+    /// capabilities name, mounted for the spawned process, or `None`.
+    pub bundle_state_home: Option<ryeos_engine::isolation::IsolationBundleStateHome>,
     pub isolation_external_read_only_mounts:
         Vec<ryeos_engine::isolation::IsolationReadOnlyMountAuthority>,
     /// Protected launch channels derived from the admitted root purpose,
     /// never from tool parameters or a live project path.
     pub isolation_target_channels: Vec<ryeos_engine::isolation::IsolationTargetChannelAuthority>,
-    /// Exact node trust-store root supplied by daemon configuration. Never
-    /// reconstructed from an application or bundle filesystem layout.
-    pub isolation_node_trusted_keys_dir: std::path::PathBuf,
     /// Optional daemon-owned workspace for projectless admitted mechanics.
     /// Ordinary item launches leave this absent and retain their project
     /// context as the isolation root.
@@ -3468,9 +3469,9 @@ pub fn spawn_item(
             isolation_immutable_project,
             isolation_workspace_view,
             isolation_live_access_authority,
+            bundle_state_home,
             isolation_external_read_only_mounts,
             isolation_target_channels,
-            isolation_node_trusted_keys_dir,
             isolation_workspace,
             inherited_fds,
             external_realizations_env,
@@ -3564,6 +3565,14 @@ pub fn spawn_item(
                                     key.to_string_lossy().into_owned(),
                                     value.to_string_lossy().into_owned(),
                                 )
+                            })
+                            // A host-direct launch inherits only the names
+                            // its operator grant lists, read from the
+                            // daemon's own boot environment.
+                            .filter(|(key, _)| {
+                                isolation.host_direct_grant().is_none_or(|grant| {
+                                    grant.host_env.iter().any(|name| name == key)
+                                })
                             }),
                     )?
                     .with_daemon_roots(roots.clone())?
@@ -3660,13 +3669,13 @@ pub fn spawn_item(
                 ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
             isolation_live_access_authority,
             isolation_state_root: state_root.map(std::path::Path::to_path_buf),
+            isolation_bundle_state_home: bundle_state_home,
             isolation_checkpoint_dir: allocated_checkpoint_dir.clone(),
             isolation_checkpoint_authority: allocated_checkpoint_authority,
             isolation_daemon_socket_path: isolation_daemon_socket_path
                 .map(std::path::Path::to_path_buf),
             isolation_captured_callback_socket: prepared_plan.captured_callback_class,
             isolation_bundle_roots,
-            isolation_node_trusted_keys_dir: Some(isolation_node_trusted_keys_dir),
             isolation_verified_code,
             isolation_verified_command: prepared_plan.admitted_command,
             isolation_external_read_only_mounts,

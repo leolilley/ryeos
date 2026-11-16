@@ -59,7 +59,7 @@ async fn live_presentation_in_project(
     crate::browser_session::BindingAttachmentCoordinate,
 ) {
     let mut body = String::from(
-        "category: test\nversion: '1'\nshared_presentation:\n  schema: 1\n  title: Test presentation\n  launcher: launch\n  dialogs:\n    - id: launch\n      title: Launch\n      view: 'view:ryeos/ui/launcher'\n  capabilities:\n    sources: []\n    affordances: []\n",
+        "category: test\nversion: '1'\nshared_presentation:\n  schema: 2\n  title: Test presentation\n  launcher: launch\n  dialogs:\n    - id: launch\n      title: Launch\n      view: 'view:ryeos/ui/launcher'\n  capabilities:\n    sources: []\n    affordances: []\n",
     );
     if let Some(surface) = initial_surface {
         // JSON scalars are valid YAML scalars; no unescaped authored ref is
@@ -84,6 +84,7 @@ async fn live_presentation_in_project(
             root_ref: "config:test/presentation".into(),
             project_path: Some(spelling.display().to_string()),
             user_principal_id: Some(principal.clone()),
+            scopes: None,
         },
         ryeos_app::handler_context::HandlerContext::new(principal, vec!["*".into()], true),
         Arc::new(state.clone()),
@@ -145,6 +146,7 @@ pub async fn live_shipped_presentation_in_project(
             root_ref: "config:ryeos/ui/presentation".into(),
             project_path: Some(project_root.display().to_string()),
             user_principal_id: Some(principal.clone()),
+            scopes: None,
         },
         ryeos_app::handler_context::HandlerContext::new(principal, vec!["*".into()], true),
         Arc::new(state.clone()),
@@ -172,6 +174,7 @@ pub async fn live_shipped_presentation(
             root_ref: "config:ryeos/ui/presentation".into(),
             project_path: None,
             user_principal_id: Some(principal.clone()),
+            scopes: None,
         },
         ryeos_app::handler_context::HandlerContext::new(principal, vec!["*".into()], true),
         Arc::new(state.clone()),
@@ -374,6 +377,11 @@ pub fn launch_context(
             )
             .expect("fixture presentation"),
         granted_caps: vec!["ui.read".into()],
+        timing: crate::browser_session::SessionTiming::new(
+            std::time::Duration::from_secs(8 * 3600),
+            std::time::Duration::from_secs(3600),
+            std::time::Duration::from_secs(60),
+        ),
         user_principal_id,
         project_authority: project_root.map(|project_root| {
             Arc::new(
@@ -662,12 +670,18 @@ fn build_app_state(
         node_policy: Arc::new(
             ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
                 ryeos_node_runtime::node_policy::default_launch_trust_record(),
+                ryeos_node_runtime::node_policy::default_authorization_record(),
+                ryeos_node_runtime::node_policy::shipped_event_storage_record(),
                 Arc::new(
                     ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),
                 ),
                 Arc::new(
                     ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy {
-                        schema: 4,
+                        schema: 5,
+                        session_ttl_secs: 28800,
+                        session_idle_secs: 3600,
+                        launch_token_ttl_secs: 60,
+                        session_scopes: vec!["*".to_owned()],
                         max_session_bootstrap_bytes: 4194304,
                         max_live_binding_attachments_per_session: 16,
                         max_presentations_per_session: 16,
@@ -700,6 +714,9 @@ fn build_app_state(
         ),
         vault: Arc::new(ryeos_app::vault::EmptyVault),
         provider_env: std::sync::Arc::new(ryeos_app::vault::ProviderEnvironment::none()),
+        vault_ceilings: std::sync::Arc::new(ryeos_app::vault::VaultCeilings::operator_only(
+            "fp:test-operator",
+        )),
         command_registry: test_command_registry,
         authorizer: test_auth,
         ignore_matcher: Arc::new(
@@ -749,6 +766,7 @@ fn test_ui_routes() -> Vec<ryeos_app::route_raw::RawRouteSpec> {
             body: RawRequestBody::Json,
         },
         source_file: "/test/route.yaml".into(),
+        authority: None,
     };
     vec![
         route(

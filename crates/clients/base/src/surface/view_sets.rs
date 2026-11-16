@@ -68,7 +68,7 @@ pub struct SavedViewSetTemplate {
 }
 
 /// Stable address of a mount inside a reusable composition. Tile indices use
-/// the composition's deterministic depth-first view order. Shared docks/dialogs
+/// the composition's deterministic depth-first view order. Shared dialogs
 /// never enter a saved view set.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -870,8 +870,7 @@ mod tests {
     }
 
     #[test]
-    fn core_mounts_named_view_sets_without_duplicating_shared_docks() {
-        use crate::ui::model::RyeOsDockEdge;
+    fn core_mounts_named_view_sets() {
         use crate::ui::reducer::test_support::{core, session_with_surface};
         let work = seed();
         let session = session_with_surface(json!({
@@ -886,31 +885,12 @@ mod tests {
         let mut core = core(session);
         let sets = core.active_surface_view_sets().unwrap();
         assert_eq!(sets.len(), 2);
-        for set in sets {
-            let serialized = serde_json::to_value(set).unwrap();
-            assert!(serialized.get("docks").is_none());
-            assert!(serialized.get("dock_local").is_none());
-        }
         assert_eq!(sets[1].title, "Review");
         assert!(sets[1].center_is_empty());
-        let shared_left = core.shared_dock_instance_key(RyeOsDockEdge::Left).unwrap();
-        let shared_bottom = core
-            .shared_dock_instance_key(RyeOsDockEdge::Bottom)
-            .unwrap();
         let review = sets[1].id;
         core.active_surface_mut()
             .unwrap()
             .select_view_set(review)
             .unwrap();
-        assert_eq!(
-            core.shared_dock_instance_key(RyeOsDockEdge::Left).unwrap(),
-            shared_left
-        );
-        assert_eq!(
-            core.shared_dock_instance_key(RyeOsDockEdge::Bottom)
-                .unwrap(),
-            shared_bottom
-        );
-        assert_eq!(core.presentation.as_ref().unwrap().docks().len(), 3);
     }
 }

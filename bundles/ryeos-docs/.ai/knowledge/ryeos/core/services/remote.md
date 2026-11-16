@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-11-13T00:41:47Z:d9a630f5dd17f955be7d1fc2223fbf57985bbcf80b5fcd1a8e4997120f804108:p0Xoo6oDhN7HHawEbHrQpMDfGQugrVAmvrhvPkTLzvSV3CPGqVIpoq5Y2DbWK/lqeQLE3dgQ4VwqMU1qck0dCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T05:54:19Z:4a873303cc5ee8e1374371f5608d819c2b92885d1408da2539e5ff18df428f1d:VfB6z0Z1rCumVlhN9JTN6jM2ewovJKuhD4um6uz9QEoFLVlALahFhErBisKCShobQfywWjlXic4ghOnyQlsWAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/services
 tags: [service, remote, pushed-head, transfer, capabilities]
-version: "1.1.1"
+version: "1.1.2"
 description: Remote service reference.
 ---
 
@@ -29,27 +29,37 @@ The authoritative matrix is in
 | `remote/admit` | `remote.admit` | `ryeos.execute.service.remote/admit` |
 | `remote/push` | `remote.push` | `ryeos.execute.service.remote/push` |
 | `remote/reconcile-project-head` | `remote.reconcile-project-head` | `ryeos.execute.service.remote/reconcile-project-head` |
-| `remote/pull` | `remote.pull` | `ryeos.execute.service.objects/get` |
+| `remote/pull` | `remote.pull` | `ryeos.execute.service.remote/pull` |
 | `remote/execute` | `remote.execute` | `ryeos.execute.service.remote/admin` |
 | `remote/authorize` | `remote.authorize` | `ryeos.execute.service.remote/admin` |
+| `remote/revoke` | `remote.revoke` | `ryeos.execute.service.remote/admin` |
 | `remote/threads` | `remote.threads` | `ryeos.execute.service.remote/admin` |
 | `remote/thread-status` | `remote.thread-status` | `ryeos.execute.service.remote/admin` |
 | `remote/bundle-install` | `remote.bundle-install` | `ryeos.execute.service.bundle/install` |
 | `remote/vault-set` | `remote.vault-set` | `ryeos.execute.service.remote/admin` |
 | `remote/vault-list` | `remote.vault-list` | `ryeos.execute.service.remote/admin` |
 | `remote/vault-delete` | `remote.vault-delete` | `ryeos.execute.service.remote/admin` |
+| `remote/delegate` | `remote.delegate` | `ryeos.execute.service.remote/delegate` |
+| `remote/delegation-list` | `remote.delegation-list` | `ryeos.execute.service.remote/delegation-list` |
+| `remote/delegation-revoke` | `remote.delegation-revoke` | `ryeos.execute.service.remote/delegation-revoke` |
+| `remote/offline-operations-facts` | `remote.offline-operations-facts` | `ryeos.execute.service.remote/offline-operations-facts` |
+| `remote/offline-operations-submit` | `remote.offline-operations-submit` | `ryeos.execute.service.remote/offline-operations-submit` |
+| `remote/offline-operations-status` | `remote.offline-operations-status` | `ryeos.execute.service.remote/offline-operations-status` |
 
 ## Operational invariants
 
-- Outbound remote requests normally use the local **node key**. The explicit
-  configured-operator push/run mode uses the exact configured operator only
-  after local operator authentication, and the target must bind it to the
-  forwarding site with an exact-scope `remote_operator` grant. The source node
-  co-signs each exact request, and its independently admitted `remote_node`
-  grant must carry `ryeos.attest.request.forwarded-operator`.
-- `remote configure` stores remote identity, vault fingerprint, URL, and
-  ingest-ignore config in the local system space under
-  `.ai/config/remotes/remotes.yaml`.
+- Outbound remote requests are signed by the local **node key**. A request made
+  for a principal also carries the principal's own signed delegation
+  (`x-ryeos-delegation`); the daemon never loads a principal's private key,
+  the operator's included. The target binds the principal to the forwarding
+  site with an exact-scope `remote_principal` grant and caps the request to the
+  delegation. The source node co-signs each exact request, and its
+  independently admitted `remote_node` grant must carry
+  `ryeos.attest.request.forwarded-operator`.
+- `remote configure` (configured local operator only) stores remote identity,
+  vault fingerprint, URL, ingest-ignore config and the pin source as a
+  node-signed record in the local system space under
+  `.ai/node/remotes/<name>.yaml`. Projects never contribute remotes.
 - `remote configure` requires a pin for the remote node key: a remote
   descriptor or an `expect_fingerprint` (64 lowercase hex). Without either it
   refuses with `remote_key_unpinned` and names the fingerprint seen; there is

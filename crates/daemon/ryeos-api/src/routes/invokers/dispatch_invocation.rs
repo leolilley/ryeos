@@ -133,6 +133,9 @@ impl PinnedDispatchSubject {
 pub(crate) struct FixedPrincipalConfinement {
     pub subject: PinnedDispatchSubject,
     pub workspace: std::path::PathBuf,
+    /// The project environment the route admitted: the operator vault only
+    /// when the signed route declares it and its signed manifest allows it.
+    pub environment: ryeos_app::execution_policy::LocalLiveEnvironment,
 }
 
 /// A dispatch whose input, authority, project and (for a fixed principal)
@@ -311,8 +314,18 @@ impl CompiledDispatchInvoker {
                 })?;
         }
 
-        ryeos_app::execution_policy::authorize_standard_local_live_execution(&principal_scopes)
-            .map_err(|error| RouteDispatchError::Forbidden(format!("{error:#}")))?;
+        // A caller principal runs the standard profile, operator vault
+        // included; a fixed route principal runs exactly what its route
+        // admitted.
+        let environment = confinement.map_or(
+            ryeos_app::execution_policy::LocalLiveEnvironment::OverlayWithOperatorVault,
+            |confinement| confinement.environment,
+        );
+        ryeos_app::execution_policy::authorize_local_live_execution(&principal_scopes, environment)
+            .map_err(|error| {
+                crate::routes::response_modes::execute_mode::operator_vault_route_error(&error)
+                    .unwrap_or_else(|| RouteDispatchError::Forbidden(format!("{error:#}")))
+            })?;
         let site_id = ctx.state.threads.site_id().to_string();
         let origin_site_id = authenticated_origin_site_id.unwrap_or_else(|| site_id.clone());
         let project_ctx = ryeos_executor::execution::project_source::resolve_project_context(
@@ -328,6 +341,7 @@ impl CompiledDispatchInvoker {
         })?;
 
         let plan_ctx = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: principal_id.clone(),
                 scopes: principal_scopes.clone(),
@@ -344,13 +358,14 @@ impl CompiledDispatchInvoker {
             validate_only: false,
         };
 
-        let resolved_authority =
-            ryeos_app::execution_policy::resolve_standard_local_live_authority(
-                &project_ctx.effective_path,
-                principal_scopes.clone(),
-                &ctx.state.isolation,
-            )
-            .map_err(|error| RouteDispatchError::BadRequest(format!("{error:#}")))?;
+        let resolved_authority = ryeos_app::execution_policy::resolve_local_live_authority(
+            &project_ctx.effective_path,
+            principal_scopes.clone(),
+            &principal_id,
+            &ctx.state.isolation,
+            environment,
+        )
+        .map_err(|error| RouteDispatchError::BadRequest(format!("{error:#}")))?;
         if let Some(confinement) = confinement {
             // Callbacks (snapshot create, item authoring, child spawn) take
             // their project root and write ceiling from this sealed record,
@@ -629,7 +644,7 @@ async fn admit_pinned_subject(
     let preflight_exec_ctx = exec_ctx.clone();
     let preflight_state = state.clone();
     let preflight = tokio::task::spawn_blocking(move || {
-        ryeos_executor::dispatch::preflight_root_dispatch(
+        let preflight = ryeos_executor::dispatch::preflight_root_dispatch(
             &preflight_item_ref,
             &preflight_kind,
             &preflight_parameters,
@@ -641,7 +656,12 @@ async fn admit_pinned_subject(
             &preflight_exec_ctx,
             &preflight_state,
             None,
-        )
+        )?;
+        ryeos_executor::dispatch::require_preflight_caller_coverage(
+            &preflight,
+            &preflight_exec_ctx,
+        )?;
+        Ok(preflight)
     })
     .await
     .map_err(|error| {
@@ -649,10 +669,12 @@ async fn admit_pinned_subject(
             "dispatch invoker for '{item_ref}': admission worker failed: {error}"
         ))
     })?
-    .map_err(|error| {
-        RouteDispatchError::Internal(format!(
-            "dispatch invoker for '{item_ref}': admission failed: {error}"
-        ))
+    .map_err(|error: ryeos_executor::dispatch_error::DispatchError| {
+        crate::routes::launch::typed_launch_policy_refusal(&error).unwrap_or_else(|| {
+            RouteDispatchError::Internal(format!(
+                "dispatch invoker for '{item_ref}': admission failed: {error}"
+            ))
+        })
     })?;
 
     let admission = preflight.root_admission.ok_or_else(|| {

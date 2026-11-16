@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-17T05:23:22Z:902ab4a49a3155a6b2575101f269762a9bfb871e5bac62432cafa519bf934907:2Qo1bvcz66AQWFMW/KYctisfX82VBvOwywl+0qyDQJamKKq6miRE/sJPHafnvnbo9tyljUmkn6Qa9sZlkU4kBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-15T02:27:40Z:fa20c5dff18a4304f2a571727efe8909e4ba2329247be73b6330670a93bef5b3:GOj0yQnR4EtCQx7LtJQCNrNGN0ymN9Ct5TZwYsQv9SvIt32NrRryYpfLIkfJYI64zKs1/jHFzGyK8XflQVH7Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, spaces, resolution, bundles]
@@ -43,13 +43,14 @@ overridable via `RYEOS_APP_ROOT`. Created by `ryeos init`.
 
 ```
 <system_space_dir>/.ai/
-├── config/keys/
-│   ├── signing/private_key.pem      ← operator's Ed25519 identity
-│   └── trusted/
-│       ├── <publisher-fp>.toml      ← trusted publisher keys
-│       ├── <operator-fp>.toml       ← operator self-trust
-│       └── <node-fp>.toml           ← daemon trust
 ├── node/
+│   ├── operator/
+│   │   ├── signing/private_key.pem  ← operator's Ed25519 identity
+│   │   └── genesis.json             ← operator-signed genesis record
+│   ├── remotes/<name>.yaml          ← node-signed remote pin records
+│   ├── trust/
+│   │   ├── signers/<fp>.yaml        ← node-signed signer records
+│   │   └── events/                  ← node-signed hash-chained key events
 │   ├── identity/private_key.pem     ← daemon's Ed25519 signing key
 │   ├── vault/{private_key,public_key}.pem  ← X25519 sealed secrets
 │   ├── config.yaml                  ← daemon config
@@ -99,10 +100,10 @@ Bundles are installed by `ryeos init` (not the daemon). The CLI:
 
 ```bash
 # Packaged install (default source):
-ryeos init --node-profile full --host-class local
+ryeos init --node-profile standard --host-class local
 
 # Development:
-ryeos init --source bundles --node-profile full --host-class local \
+ryeos init --source bundles --node-profile standard --host-class local \
   --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
 
 # Distribution image entrypoint:
@@ -134,7 +135,58 @@ For a canonical ref like `tool:ryeos/core/sign`:
 ```
 
 If a project-level item exists, it **shadows** the system version.
-This allows local overrides without modifying bundles.
+This allows local overrides without modifying bundles, with one exception:
+names inside a bundle-owned namespace (below) are never shadowed.
+
+Shadowing is always reported. `ryeos fetch` and `items.effective` mark an
+item with `shadows_bundle_item: true` when the project copy won and a bundle
+also ships an item under that ref, so an override is visible rather than
+silent.
+
+### Owned namespaces
+
+A bundle declares the namespaces it owns in its signed manifest, in
+`.ai/manifest.source.yaml` (the generated `.ai/manifest.yaml` carries it
+forward and is re-signed by the publish pipeline):
+
+```yaml
+# <bundle>/.ai/manifest.source.yaml
+name: core
+owns_namespaces:
+  - ryeos/core
+```
+
+An entry is a literal run of `/`-separated segments (letters, digits, `-`,
+`_`, `.`). Wildcards, empty or `..` segments, and entries inside one another
+are refused when the manifest is generated or loaded. `ryeos/core` owns
+`tool:ryeos/core/runtimes/python/function`, `handler:ryeos/core/...` and
+every other kind's ref whose bare id equals `ryeos/core` or starts with
+`ryeos/core/`.
+
+A project file whose ref is inside an owned namespace is not a candidate. It
+is refused with a 409 `reserved_namespace_shadow` that names the owning
+bundle, the project file and the cure, and the project copy never runs. The
+same holds for executor-chain hops: a tool whose `executor_id` names a
+runtime in an owned namespace gets that runtime from the bundle only. To
+customize, put your copy in your own namespace (for example
+`.ai/tools/<project>/runtimes/python/function.yaml`) and point `executor_id`
+at it.
+
+An installed bundle's own name is reserved the same way. The first segment of
+an item ref names the bundle that owns the item's runtime authority, so a
+project item whose first segment equals an installed bundle's name (for
+example `.ai/tools/core/x.yaml` while the `core` bundle is installed) is
+refused with the same 409 `reserved_namespace_shadow`. A project may still be
+a bundle in its own right, for developing a bundle before publishing it, as
+long as its manifest `name` and item namespace are unique among installed
+bundles. A project item that would mint runtime authority from a project
+manifest named after an installed bundle (or the root of one of its owned
+namespaces) is refused with `project_bundle_id_collision`; the cure is to
+rename the project bundle's manifest `name` and its item namespace.
+
+Two installed bundles cannot claim overlapping namespaces: bundle install and
+`ryeos bundle verify` refuse the candidate, and a node refuses to start on an
+installed set that does.
 
 ## Bundle Discovery
 

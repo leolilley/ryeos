@@ -103,6 +103,7 @@ pub async fn handle(
     use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal, ProjectContext};
     let site_id = state.threads.site_id().to_string();
     let plan_ctx = PlanContext {
+        logical_project_root: None,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: ctx.fingerprint.clone(),
             scopes: ctx.scopes.clone(),
@@ -165,19 +166,32 @@ pub async fn handle(
     names.dedup();
     // Describe what a standard local-live launch of this project would
     // deliver: its admitted project-overlay authority, not ambient sources.
+    // A caller without the operator-vault capability is told only about the
+    // project overlay; the operator vault is never read on its behalf.
     let project_authority = {
         use ryeos_app::execution_policy::ExecutionPolicyResolution as _;
-        ryeos_app::execution_policy::ExecutionPolicy::local_live(
+        let mut policy = ryeos_app::execution_policy::ExecutionPolicy::local_live(
             ryeos_app::execution_policy::ExecutionResponse::Wait,
+        );
+        if ryeos_app::execution_policy::authorize_operator_vault_exposure(
+            state.authorizer.as_ref(),
+            &ctx.scopes,
+            &policy.environment,
         )
-        .resolve_live_project_authority(
-            &project_path,
-            ryeos_app::execution_policy::live_filesystem_confinement_for_isolation(
-                state.isolation.inspection(),
-            ),
-            ctx.scopes.clone(),
-        )
-        .map_err(|e| HandlerError::Internal(format!("derive environment authority: {e:#}")))?
+        .is_err()
+        {
+            policy = policy.exclude_operator_vault();
+        }
+        policy
+            .resolve_live_project_authority(
+                &project_path,
+                ryeos_app::execution_policy::live_filesystem_confinement_for_isolation(
+                    state.isolation.inspection(),
+                ),
+                ctx.scopes.clone(),
+                Some(&ctx.fingerprint),
+            )
+            .map_err(|e| HandlerError::Internal(format!("derive environment authority: {e:#}")))?
     };
     let report = ryeos_app::vault::report_secret_presence(
         &state.secret_sources(),
@@ -187,7 +201,12 @@ pub async fn handle(
         &names,
         &project_authority,
     )
-    .map_err(|e| HandlerError::Internal(e.to_string()))?;
+    .map_err(|e| match e {
+        ryeos_app::vault::VaultReadError::NameRefused(refusal) => {
+            crate::handler_error::vault_name_handler_error(&refusal)
+        }
+        other => HandlerError::Internal(other.to_string()),
+    })?;
 
     let secrets: Vec<Value> = report
         .iter()
@@ -231,12 +250,12 @@ pub async fn handle(
                         ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
                     live_access: None,
                     state_root: None,
+                    bundle_state_home: None,
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
                     captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: &isolation_verified_code,
                     verified_command: None,
                     external_read_only_mounts: &[],

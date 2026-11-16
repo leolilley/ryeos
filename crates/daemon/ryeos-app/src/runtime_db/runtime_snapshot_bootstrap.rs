@@ -321,6 +321,21 @@ pub(super) fn validate_current(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Operation IDs of every open bootstrap: one whose termination is not
+/// terminal, or whose staged snapshot is still being created from it. A
+/// quarantined source stays open because it can still bind a late occurrence
+/// that recovery must terminate through the retained closure.
+const OPEN_BOOTSTRAP_SQL: &str = "SELECT b.operation_id FROM runtime_snapshot_bootstrap b
+     WHERE NOT EXISTS (
+         SELECT 1 FROM runtime_snapshot_bootstrap_termination t
+         WHERE t.bootstrap_operation_id=b.operation_id AND t.phase='terminal'
+     )
+     OR EXISTS (
+         SELECT 1 FROM runtime_snapshot_operation s
+         WHERE s.source_bootstrap_operation_id=b.operation_id
+           AND s.phase IN ('reserved','attempt_pending')
+     )";
+
 fn require_lifecycle_root(root: &str) -> Result<()> {
     ensure!(
         root.len() == 64
@@ -354,14 +369,17 @@ fn validate_retained_binding(
 }
 
 impl RuntimeDb {
-    /// Operational CAS roots for every retained bootstrap. A completed
-    /// durable upload drops its staging roots, so SQLite must keep the exact
-    /// lifecycle closure reachable through provider contact and cleanup.
+    /// Operational CAS roots for every open bootstrap. A completed durable
+    /// upload drops its staging roots, so SQLite must keep the exact
+    /// lifecycle closure reachable through provider contact and cleanup. Once
+    /// the bootstrap settles (`OPEN_BOOTSTRAP_SQL`) its closure leaves the
+    /// root set and the next CAS sweep reclaims what nothing else roots.
     pub(crate) fn snapshot_bootstrap_lifecycle_roots(&self) -> Result<Vec<String>> {
         self.conn.with_sql(|conn| {
-            let mut statement = conn.prepare(
-                "SELECT operation_id,root_hash FROM runtime_snapshot_bootstrap_artifacts ORDER BY operation_id",
-            )?;
+            let mut statement = conn.prepare(&format!(
+                "SELECT a.operation_id,a.root_hash FROM runtime_snapshot_bootstrap_artifacts a
+                 WHERE a.operation_id IN ({OPEN_BOOTSTRAP_SQL}) ORDER BY a.operation_id"
+            ))?;
             let rows = statement
                 .query_map([], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -380,6 +398,45 @@ impl RuntimeDb {
                 roots.push(root);
             }
             Ok(roots)
+        })
+    }
+
+    /// The retained producer generation of every open bootstrap.
+    pub(crate) fn open_snapshot_bootstrap_references(
+        &self,
+    ) -> Result<Vec<super::runtime_snapshot_qualification::OpenSnapshotGenerationReference>> {
+        self.conn.with_sql(|conn| {
+            let mut statement = conn.prepare(&format!(
+                "SELECT operation_id FROM runtime_snapshot_bootstrap
+                 WHERE operation_id IN ({OPEN_BOOTSTRAP_SQL}) ORDER BY operation_id"
+            ))?;
+            let ids = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut references = Vec::with_capacity(ids.len());
+            for id in ids {
+                let record = read(conn, &id)?.context("open bootstrap disappeared")?;
+                let raw: String = conn
+                    .query_row(
+                        "SELECT binding_json FROM runtime_snapshot_bootstrap_authority WHERE operation_id=?1",
+                        [&id],
+                        |row| row.get(0),
+                    )
+                    .context("open bootstrap lost its retained producer generation")?;
+                let binding = validate_retained_binding(conn, &id, &raw)?;
+                references.push(
+                    super::runtime_snapshot_qualification::OpenSnapshotGenerationReference {
+                        section:
+                            crate::node_config::sections::runtime_snapshot_production::SECTION_NAME,
+                        binding_id: binding.id().to_owned(),
+                        binding_digest: binding.digest().to_owned(),
+                        kind: super::runtime_snapshot_qualification::SnapshotWorkKind::BootstrapSource,
+                        operation_id: id,
+                        occurrence_bound: record.occurrence.is_some(),
+                    },
+                );
+            }
+            Ok(references)
         })
     }
 

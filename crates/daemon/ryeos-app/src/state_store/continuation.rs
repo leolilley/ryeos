@@ -1015,13 +1015,26 @@ impl StateStore {
             "result_workspace_output_capture_hash": source_snapshot_after.result_workspace_output_capture_hash,
         });
         if let Some(remote) = &remote_authority {
-            source_payload
+            let source_payload = source_payload
                 .as_object_mut()
-                .expect("continuation payload is an object")
-                .insert(
-                    "remote_adoption".to_string(),
-                    serde_json::to_value(remote).context("encode remote continuation authority")?,
-                );
+                .expect("continuation payload is an object");
+            source_payload.insert(
+                "remote_adoption".to_string(),
+                serde_json::to_value(remote).context("encode remote continuation authority")?,
+            );
+            // The stop policy is node-local and is not transferred: the
+            // target resolves its own from its signed execution config when
+            // the successor attaches. Recording the source's policy here
+            // keeps a change across the site boundary visible.
+            source_payload.insert(
+                "source_stop_policy".to_string(),
+                serde_json::to_value(
+                    source_launch_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.cancellation_mode),
+                )
+                .context("encode source stop policy")?,
+            );
         }
         let source_event = NewEventRecord {
             event_type: "thread_continued".to_string(),

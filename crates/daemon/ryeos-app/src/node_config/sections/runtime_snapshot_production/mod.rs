@@ -172,6 +172,7 @@ impl RetainedRuntimeSnapshotProductionBinding {
             &header,
             &envelope,
             &trust,
+            &ryeos_engine::trust::SignerContext::node("node_config"),
         )?;
         ensure!(
             class == ryeos_engine::contracts::TrustClass::Trusted,
@@ -193,6 +194,10 @@ impl RetainedRuntimeSnapshotProductionBinding {
             "retained snapshot producer digest changed"
         );
         Ok(())
+    }
+
+    pub(crate) fn id(&self) -> &str {
+        &self.id
     }
 
     pub(crate) fn digest(&self) -> &str {

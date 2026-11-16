@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-08T04:59:36Z:b1014f1a85de922c349700ff2383cd5b42cf83a3f76f52414d1e03c54f15bc71:vNdT0y58z4r2xCsI46e7s7/KAz6PWvtpIS7Tk/ziSas4nWd9a5bTPPMh+/Klm0GHQ2Z8yQoGZbzvm9C8FsDWAA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-11-15T02:27:40Z:e1078cdf02ee7a17190b90bdb72cd79433f7a88d667c8d167ce6475f3e1ff0d1:PMYFiXvmsjQvfmB7ls/jBAFuQ6xpesXE7d4wsvK6SS5JuQf14RN4jHFr+qI6u7teGhiZeshj4s5R5iwfv73sAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Future: Command Registration Advanced Path
 
 ## Status
@@ -104,7 +104,7 @@ If source-root distribution metadata grows beyond init seed files, prefer a sign
 <source-root>/.ai/bundle-set/manifest.yaml
 ```
 
-That manifest could later declare bundle-set name, version, selected profile, expected bundles, bundle hashes, init seed path, channels, and partial install profiles. Do not add this until source roots need reproducible bundle-set hashing, multiple profiles beyond today's `full` / `hosted-node`, or remote registry/mirror verification.
+That manifest could later declare bundle-set name, version, selected profile, expected bundles, bundle hashes, init seed path, channels, and partial install profiles. Do not add this until source roots need reproducible bundle-set hashing, multiple profiles beyond today's `standard` / `hosted-node`, or remote registry/mirror verification.
 
 ### 3. Operator-managed grant commands
 

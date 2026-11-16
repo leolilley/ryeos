@@ -127,6 +127,9 @@ pub struct AppState {
     /// for exactly the names the node policy declares. Read only through
     /// authorized secret delivery, alongside the vault.
     pub provider_env: Arc<crate::vault::ProviderEnvironment>,
+    /// Per-name receive and write ceilings of the shared sealed vault, from
+    /// the node's signed policy, bound to the configured local operator.
+    pub vault_ceilings: Arc<crate::vault::VaultCeilings>,
     /// Command registry for token routing. Built once at startup
     /// from node-config command YAMLs.
     pub command_registry: Arc<CommandRegistry>,
@@ -227,6 +230,7 @@ impl AppState {
         crate::vault::SecretSources {
             vault: self.vault.as_ref(),
             provider_env: self.provider_env.as_ref(),
+            ceilings: self.vault_ceilings.as_ref(),
         }
     }
 
@@ -364,6 +368,26 @@ pub mod test_support {
     use crate::state_store::BundleAdmissionTrust;
     use crate::state_store::test_native::TestStateStore;
 
+    /// The live platform and dev publisher signers plus `extra`, as one
+    /// in-memory trust store.
+    pub fn live_trust_store_with(
+        extra: Vec<ryeos_engine::trust::TrustedSigner>,
+    ) -> ryeos_engine::trust::TrustStore {
+        let mut signers = Vec::new();
+        for verifying_key in [
+            ryeos_engine::test_support::platform_author_verifying_key(),
+            ryeos_engine::test_support::dev_publisher_verifying_key(),
+        ] {
+            signers.push(ryeos_engine::trust::TrustedSigner {
+                fingerprint: lillux::signature::compute_fingerprint(&verifying_key),
+                verifying_key,
+                label: Some("test-support live signer".into()),
+            });
+        }
+        signers.extend(extra);
+        ryeos_engine::trust::TrustStore::from_signers(signers)
+    }
+
     pub fn build(root: &std::path::Path) -> Result<(TestStateStore, AppState)> {
         build_with_bundle_admission(root, |_| BundleAdmissionTrust::unbound())
     }
@@ -372,15 +396,24 @@ pub mod test_support {
     /// binds: the live platform signers plus this node's own identity, which
     /// is what the composed test Engine admits Bundles with.
     pub fn build_bound(root: &std::path::Path) -> Result<(TestStateStore, AppState)> {
+        build_bound_trusting(root, None)
+    }
+
+    /// [`build_bound`] that also admits Bundles signed by one fixed
+    /// `publisher`, as separate nodes do when they install the same signed
+    /// release from one publisher.
+    pub fn build_bound_trusting(
+        root: &std::path::Path,
+        publisher: Option<ryeos_engine::trust::TrustedSigner>,
+    ) -> Result<(TestStateStore, AppState)> {
         build_with_bundle_admission(root, |identity| {
-            let mut node_trust = ryeos_engine::test_support::live_trust_store();
-            node_trust.extend_from(&ryeos_engine::trust::TrustStore::from_signers(vec![
-                ryeos_engine::trust::TrustedSigner {
-                    fingerprint: identity.fingerprint().to_owned(),
-                    verifying_key: *identity.verifying_key(),
-                    label: Some("test node identity".into()),
-                },
-            ]));
+            let mut signers = vec![ryeos_engine::trust::TrustedSigner {
+                fingerprint: identity.fingerprint().to_owned(),
+                verifying_key: *identity.verifying_key(),
+                label: Some("test node identity".into()),
+            }];
+            signers.extend(publisher);
+            let node_trust = live_trust_store_with(signers);
             BundleAdmissionTrust::bound(node_trust)
         })
     }
@@ -456,6 +489,14 @@ pub mod test_support {
         };
         let identity = ryeos_node_runtime::identity::NodeIdentity::create(&key_path)?;
         ryeos_node_runtime::identity::NodeIdentity::create(&config.operator_signing_key_path)?;
+        // `runtime.author_item` signs with the node's authoring key, which
+        // `ryeos init` creates; a composed test node holds one too.
+        // A root composed twice keeps the key it already has.
+        let authoring_key =
+            ryeos_engine::roots::RuntimeRoot::new(root.to_path_buf()).authoring_signing_key_path();
+        if !authoring_key.exists() {
+            ryeos_node_runtime::identity::NodeIdentity::create(&authoring_key)?;
+        }
         Ok((config, identity))
     }
 
@@ -541,10 +582,15 @@ pub mod test_support {
             node_policy: Arc::new(
                 ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
                     ryeos_node_runtime::node_policy::default_launch_trust_record(),
+                    ryeos_node_runtime::node_policy::default_authorization_record(),
+                    ryeos_node_runtime::node_policy::shipped_event_storage_record(),
                 ]),
             ),
             vault: Arc::new(crate::vault::EmptyVault),
             provider_env: Arc::new(crate::vault::ProviderEnvironment::none()),
+            vault_ceilings: Arc::new(crate::vault::VaultCeilings::operator_only(
+                "fp:test-operator",
+            )),
             command_registry: Arc::new(ryeos_runtime::CommandRegistry::from_records(
                 &[],
                 &Default::default(),

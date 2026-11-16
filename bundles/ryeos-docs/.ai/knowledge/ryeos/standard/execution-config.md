@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-17T05:23:22Z:c4de93521c3865d1063945f8b45c77b5032ab121b96e728d41cab2fd23ffaf39:zClD62luIho1McHy0RWPB7yUL9+JoMy+GbpJMTwG1ReMbZw594Ka3bZc2bjfAtwcwHKAjqKWvimgg9l5NYSEBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T05:59:40Z:90094458c6c415f28dc39a6bd09f679203b038578a01edb3393c1a4e98d01f2d:lmIkMabgAf4xEJYMg3gecFDuLNzOiOAaa2/n/r9h+slCLNHvbzFb/q1I8XRdt4Fx/ym6/WKE6w953HeT3T8dCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 tags: [reference, execution, retry, timeout, config]
@@ -30,7 +30,8 @@ how LLM API calls are made — timeouts, retries, backoff, and more.
 | `accounting.failure_policy` | auto | Fail closed for unavailable usage with a finite token/spend budget; otherwise warn |
 | `accounting.budget_mode` | settled | Settle after each attempt; may overshoot a finite budget by one attempt |
 | `tool_preload`       | false    | Whether to preload tool definitions   |
-| `retry_on_timeout`   | true     | Whether timeouts trigger retries      |
+| `retry_on_timeout`   | false    | Must remain false without admitted provider deduplication/outcome lookup |
+| `retry_mid_stream`   | false    | Must remain false without admitted provider deduplication/outcome lookup |
 
 ## Retry Behavior
 
@@ -41,7 +42,12 @@ When an API call fails with a retryable status code (429, 500, 502, 503):
 
 Auth errors (401, 403) and not-found (404) are never retried.
 
-Timeouts are retried by default (`retry_on_timeout: true`).
+Connection-establishment failures and explicitly configured retryable HTTP
+statuses may be retried. A timeout, non-connect send failure, or mid-stream cut
+may have reached the provider and is not retried. Reusing the same prompt bytes
+does not make a provider call idempotent. Configuration that enables
+`retry_on_timeout` or `retry_mid_stream` is refused until the selected provider
+route supplies an admitted deduplication or outcome-query contract.
 
 The provider-native token ceiling and RyeOS-local byte backstop are independent.
 RyeOS sends the token ceiling only at the signed provider schema's declared
@@ -104,6 +110,16 @@ Separately, the core bundle's `config:execution/execution` controls
 | `max_concurrency`        | 10       |
 | `cancellation_mode`      | graceful |
 | `cancellation_grace_secs`| 5        |
+
+The two cancellation keys are the stop policy for every managed launch:
+directive and graph runtimes, tools, and workers. The engine resolves them
+per item (defaults, then exact item overrides, then direct
+`cancellation_*` params) and the daemon records the result in the launch's
+metadata; `thread cancel`, daemon drain and recovery stop the process under
+that recorded policy. A `native_async` declaration supplies its own policy
+instead. The node caps the grace at 5 seconds whatever the config says.
+The policy is node-local: a same-node continuation keeps the recorded policy,
+while a cross-node worker handoff re-resolves it from the target node's config.
 
 Both configs coexist — one for LLM API calls, one for subprocess
 management.

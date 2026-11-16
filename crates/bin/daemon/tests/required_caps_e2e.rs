@@ -9,19 +9,13 @@ use std::collections::HashMap;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal};
 use ryeos_engine::kind_registry::KindRegistry;
-use ryeos_engine::trust::TrustStore;
-
-fn manifest_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
 
 fn workspace_root() -> std::path::PathBuf {
     ryeos_engine::test_support::workspace_root()
 }
 
 fn build_test_engine() -> ryeos_engine::engine::Engine {
-    let trusted_dir = manifest_dir().join("tests/fixtures/trusted_signers");
-    let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load trust store");
+    let trust_store = ryeosd::test_support::fixture_trust_store();
 
     let workspace = workspace_root();
     let core_kinds = workspace.join("bundles/core/.ai/node/engine/kinds");
@@ -60,6 +54,7 @@ fn build_test_engine() -> ryeos_engine::engine::Engine {
 
 fn local_plan_ctx() -> PlanContext {
     PlanContext {
+        logical_project_root: None,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: "fp:test-gate".into(),
             scopes: vec![],
@@ -173,4 +168,33 @@ fn extract_required_caps_parses_json_array() {
     );
     let caps = ryeos_api::registry::extract_required_caps(&extra);
     assert_eq!(caps, vec!["node.admin", "execute"]);
+}
+
+/// `remote.pull` is gated by its own capability, not by the object-read
+/// capability: reading objects from this node and making this node pull
+/// from a remote are different authorities.
+#[test]
+fn remote_pull_requires_remote_pull_cap() {
+    let engine = build_test_engine();
+    let ctx = local_plan_ctx();
+
+    let canonical = CanonicalRef::parse("service:remote/pull").unwrap();
+    let resolved = engine.resolve(&ctx, &canonical).expect("resolve");
+    let verified = engine.verify(&ctx, resolved).expect("verify");
+    let required = ryeos_api::registry::extract_required_caps(&verified.resolved.metadata.extra);
+    assert_eq!(required, vec!["ryeos.execute.service.remote/pull"]);
+
+    // A caller holding only objects/get is missing the required cap.
+    let objects_only = ["ryeos.execute.service.objects/get".to_string()];
+    assert!(
+        required.iter().any(|cap| !objects_only.contains(cap)),
+        "objects/get alone must not satisfy remote.pull"
+    );
+
+    // A caller holding remote/pull satisfies the cap gate.
+    let pull_scopes = ["ryeos.execute.service.remote/pull".to_string()];
+    assert!(
+        required.iter().all(|cap| pull_scopes.contains(cap)),
+        "remote/pull must satisfy remote.pull"
+    );
 }

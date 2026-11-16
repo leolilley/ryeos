@@ -33,12 +33,12 @@ mod provenance;
 use authority::IsolationReadOnlyMountScope;
 
 pub use authority::{
-    IsolationAdmittedCommand, IsolationCommandAuthority, IsolationCommandAuthorityRef,
-    IsolationDescriptorBoundCommand, IsolationDescriptorFileIdentity,
-    IsolationFilesystemAuthorityCeiling, IsolationLaunchContext, IsolationLiveAccessAuthority,
-    IsolationNetworkAuthorityCeiling, IsolationProducerPreparedDirectoryAuthority,
-    IsolationProducerPreparedImmutableFileAuthority, IsolationProjectAuthority,
-    IsolationReadOnlyMountAuthority, IsolationRealizationMemberCommand,
+    BUNDLE_STATE_ISOLATION_DESTINATION, IsolationAdmittedCommand, IsolationBundleStateHome,
+    IsolationCommandAuthority, IsolationCommandAuthorityRef, IsolationDescriptorBoundCommand,
+    IsolationDescriptorFileIdentity, IsolationFilesystemAuthorityCeiling, IsolationLaunchContext,
+    IsolationLiveAccessAuthority, IsolationNetworkAuthorityCeiling,
+    IsolationProducerPreparedDirectoryAuthority, IsolationProducerPreparedImmutableFileAuthority,
+    IsolationProjectAuthority, IsolationReadOnlyMountAuthority, IsolationRealizationMemberCommand,
     IsolationTargetChannelAuthority, IsolationVerifiedCode,
     IsolationWritableRuntimeViewMountAuthority, OriginalProductManifestRole,
 };
@@ -55,7 +55,7 @@ pub use inspection::{
 pub use policy::TEST_ISOLATION_POLICY_RELATIVE_PATH;
 pub use policy::{
     AUTHORING_HOST_CLASS, ISOLATION_NAMESPACES, ISOLATION_POLICY_VERSION,
-    IsolationEnvironmentPolicy, IsolationFilesystemPolicy, IsolationHostClass,
+    IsolationEnvironmentPolicy, IsolationFilesystemPolicy, IsolationHostClass, IsolationHostDirect,
     IsolationLimitsPolicy, IsolationLiveProjectPolicy, IsolationMode, IsolationNetworkMode,
     IsolationNetworkPolicy, IsolationNetworkRuntimeFile, IsolationPolicy, IsolationPolicyDocument,
     IsolationProcessScopePolicy, IsolationSharedFilesystemPolicy, MAX_HOST_CLASSES,
@@ -64,7 +64,8 @@ pub use policy::{
 use provenance::redacted_plan_digest;
 pub use provenance::{
     AppliedIsolationLaunch, AppliedIsolationLaunchAwaitingAttachment,
-    IsolationAdapterProtocolIdentity, IsolationCommandDelivery, IsolationLaunchProvenance,
+    IsolationAdapterProtocolIdentity, IsolationCommandDelivery, IsolationExecutionPosture,
+    IsolationHostDirectContainment, IsolationHostDirectGrant, IsolationLaunchProvenance,
     IsolationRequestAwaitingAttachment,
 };
 
@@ -401,6 +402,11 @@ pub struct IsolationRuntime {
     generation_node_trust: Option<TrustStore>,
     generation_bundle_roots: Option<Vec<PathBuf>>,
     generation_registered_bundle_roots: Option<Vec<crate::item_resolution::RegisteredBundleRoot>>,
+    /// Present only on a per-launch view made by
+    /// [`IsolationRuntime::host_direct_launch`]: the operator grant under
+    /// which this one launch runs on the host. The node's shared runtime
+    /// never carries it.
+    host_direct: Option<Arc<IsolationHostDirectGrant>>,
 }
 
 /// Kind-neutral evidence for one daemon-owned workspace lifecycle transition.
@@ -877,6 +883,7 @@ enum WritableMountAuthority {
     Policy,
     DaemonCheckpoint,
     DaemonStateRoot,
+    BundleStateHome,
 }
 
 #[derive(Debug, Clone)]
@@ -929,6 +936,10 @@ struct CodeNamespace<'a> {
     project_destination: &'a Path,
     canonical_project: &'a Path,
     bundle_roots: &'a [PathBuf],
+    /// False when the live project is served through a fixed-parent view:
+    /// mirroring the whole project root as readable code authority would
+    /// reintroduce the paths the view withholds.
+    project_mirror: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -956,7 +967,6 @@ struct ReadableMountResolution<'a> {
     daemon_socket: Option<&'a PinnedDaemonSocket>,
     requested_daemon_socket: Option<&'a Path>,
     bundle_roots: &'a [PathBuf],
-    node_trusted_keys_dir: Option<&'a Path>,
     verified_code_mounts: &'a [ReadableMount],
 }
 
@@ -968,6 +978,7 @@ struct WritableMountValidation<'a> {
     runtime_workspace_authorized: bool,
     canonical_checkpoint_dir: Option<&'a Path>,
     canonical_state_root: Option<&'a Path>,
+    canonical_bundle_state_home: Option<&'a Path>,
 }
 
 struct PreparedProjectWorkspace {
@@ -2190,6 +2201,52 @@ impl IsolationRuntime {
         self.state == IsolationRuntimeState::Enforced
     }
 
+    /// The per-launch view under which one operator-granted host-authority
+    /// launch runs on the host.
+    ///
+    /// The view keeps this generation's identity, limits, verified-artifact
+    /// store and process-scope provider, and compiles every launch with the
+    /// disabled-isolation semantics: no adapter, exact-digest command and
+    /// source delivery through retained descriptors, the node's output caps,
+    /// and cgroup containment when the grant requires a scope. Ordinary
+    /// launches keep the node's shared runtime; only the launch holding this
+    /// view is affected. The lane must offer host-direct execution: an
+    /// `unavailable` lane refuses whatever the grant says.
+    pub fn host_direct_launch(&self, grant: IsolationHostDirectGrant) -> Result<Self, EngineError> {
+        if self.inspection.host_direct != IsolationHostDirect::OperatorGranted {
+            return Err(refused(format!(
+                "host_access_lane_unavailable: host class `{}` says host_direct: {}",
+                self.inspection.host_class,
+                self.inspection.host_direct.as_str()
+            )));
+        }
+        if self.host_direct.is_some() {
+            return Err(refused(
+                "a host-direct launch view cannot be derived from another".to_owned(),
+            ));
+        }
+        if grant.containment == IsolationHostDirectContainment::Scope
+            && self.process_scope_provider.is_none()
+        {
+            return Err(refused(format!(
+                "host_access_containment_unavailable: grant `{}` requires a process scope, but host class `{}` has no qualified scope provider (process_scopes: {:?})",
+                grant.grant_id, self.inspection.host_class, self.inspection.process_scopes
+            )));
+        }
+        let mut runtime = self.clone();
+        runtime.state = IsolationRuntimeState::Disabled;
+        runtime.backend_capture = None;
+        runtime.verified_backend_capture = None;
+        runtime.host_direct = Some(Arc::new(grant));
+        Ok(runtime)
+    }
+
+    /// The operator grant of a per-launch host-direct view; `None` on the
+    /// node's shared runtime and every confined launch.
+    pub fn host_direct_grant(&self) -> Option<&IsolationHostDirectGrant> {
+        self.host_direct.as_deref()
+    }
+
     /// The guarantees this node reports for variant selection, graded by the
     /// same function the signed capability report uses.
     pub fn reported_guarantees(&self) -> lillux::process_control::HostCapabilities {
@@ -2960,7 +3017,6 @@ impl IsolationRuntime {
                 || context.checkpoint_authority.is_some()
                 || (context.daemon_socket_path.is_some() && !context.captured_callback_socket)
                 || !context.bundle_roots.is_empty()
-                || context.node_trusted_keys_dir.is_some()
             {
                 return Err(refused(
                     "captured execution context carries ambient filesystem authority".to_string(),
@@ -3312,9 +3368,6 @@ impl IsolationRuntime {
         }
         for root in context.bundle_roots {
             validate_namespace_destination("bundle root", root)?;
-        }
-        if let Some(path) = context.node_trusted_keys_dir {
-            validate_namespace_destination("node trusted-keys directory", path)?;
         }
         if let Some(path) = self.app_root_destination.as_deref() {
             validate_namespace_destination("app root", path)?;
@@ -3671,6 +3724,17 @@ impl IsolationRuntime {
         } else {
             None
         };
+        let bundle_state_home = context
+            .bundle_state_home
+            .map(|home| {
+                resolve_bundle_state_home(
+                    home,
+                    self.app_root.as_deref().ok_or_else(|| {
+                        refused("bundle state home requires a pinned app root".to_string())
+                    })?,
+                )
+            })
+            .transpose()?;
         if context.checkpoint_dir.is_some() != context.checkpoint_authority.is_some() {
             return Err(refused(
                 "checkpoint path and pinned authority must be supplied together".to_string(),
@@ -3792,6 +3856,20 @@ impl IsolationRuntime {
                 source_handle: source_handle.clone(),
             });
         }
+        if let Some(home) = bundle_state_home.as_ref().filter(|home| home.writable) {
+            // The namespace is an exact descriptor authority. A broader policy
+            // mount that would expose sibling namespaces or other bundles'
+            // homes merely because it contains this path is dropped.
+            writable_mounts.retain(|mount| {
+                !paths_overlap(&mount.source, &home.source) || mount.source == canonical_project
+            });
+            writable_mounts.push(WritableMount {
+                source: home.source.clone(),
+                destination: PathBuf::from(BUNDLE_STATE_ISOLATION_DESTINATION),
+                authority: WritableMountAuthority::BundleStateHome,
+                source_handle: home.handle.clone(),
+            });
+        }
         writable_mounts.sort_by(|left, right| {
             left.destination
                 .cmp(&right.destination)
@@ -3808,6 +3886,10 @@ impl IsolationRuntime {
             runtime_workspace_authorized,
             canonical_checkpoint_dir: canonical_checkpoint_dir.as_deref(),
             canonical_state_root: canonical_state_root.as_deref(),
+            canonical_bundle_state_home: bundle_state_home
+                .as_ref()
+                .filter(|home| home.writable)
+                .map(|home| home.source.as_path()),
         };
         for mount in &writable_mounts {
             validate_writable_mount(&mount.source, mount.authority, &writable_validation)?;
@@ -3816,6 +3898,7 @@ impl IsolationRuntime {
             project_destination: &project_destination,
             canonical_project: &canonical_project,
             bundle_roots: context.bundle_roots,
+            project_mirror: fixed_parent_views.is_empty(),
         };
         let mut verified_code = context.verified_code.iter().collect::<Vec<_>>();
         if let Some(command) =
@@ -4064,7 +4147,6 @@ impl IsolationRuntime {
             daemon_socket: self.daemon_socket.as_ref(),
             requested_daemon_socket,
             bundle_roots: context.bundle_roots,
-            node_trusted_keys_dir: context.node_trusted_keys_dir,
             verified_code_mounts: &verified_code_mounts,
         };
         if context.project_authority == IsolationProjectAuthority::ReadOnly
@@ -4144,6 +4226,36 @@ impl IsolationRuntime {
                 !(mount.source.starts_with(&canonical_project)
                     && mount.destination.starts_with(&project_destination))
             });
+        }
+        if let Some(home) = bundle_state_home.as_ref().filter(|home| !home.writable) {
+            readable_mounts.retain(|mount| !paths_overlap(&mount.source, &home.source));
+            readable_mounts.push(ReadableMount {
+                source: home.source.clone(),
+                destination: PathBuf::from(BUNDLE_STATE_ISOLATION_DESTINATION),
+                source_handle: home.handle.clone(),
+                layer: 20,
+            });
+        }
+        if bundle_state_home.is_some() {
+            let destination = Path::new(BUNDLE_STATE_ISOLATION_DESTINATION);
+            let collides = |other: &Path| paths_overlap(destination, other);
+            if collides(&project_destination)
+                || collides(&cwd_destination)
+                || context.state_root.is_some_and(collides)
+                || context.checkpoint_dir.is_some_and(collides)
+                || self.app_root.as_deref().is_some_and(collides)
+                || readable_mounts
+                    .iter()
+                    .any(|mount| mount.destination != destination && collides(&mount.destination))
+                || writable_mounts
+                    .iter()
+                    .any(|mount| mount.destination != destination && collides(&mount.destination))
+            {
+                return Err(refused(format!(
+                    "bundle state mount destination {BUNDLE_STATE_ISOLATION_DESTINATION} overlaps \
+                     another launch authority"
+                )));
+            }
         }
         // Admitted realization mounts are added only after workspace
         // supersession: they are launch-admitted authority, not configured
@@ -5320,6 +5432,11 @@ impl IsolationRuntime {
             network_runtime_files: network_inputs::digests(&self.network_runtime_files),
             plan_digest,
             command_delivery: None,
+            execution_posture: self
+                .host_direct
+                .as_deref()
+                .cloned()
+                .map(IsolationExecutionPosture::HostDirect),
         }
     }
 
@@ -5492,6 +5609,7 @@ impl IsolationRuntime {
                 requires_capabilities: policy.requires_capabilities,
                 enclosure_inits: policy.enclosure_inits,
                 host_lifetime_bound: policy.host_lifetime_bound,
+                host_direct: policy.host_direct,
                 process_scope_capabilities,
                 process_scope_readiness,
                 backend: IsolationBackendInspection {
@@ -5530,6 +5648,7 @@ impl IsolationRuntime {
             generation_node_trust: None,
             generation_bundle_roots: None,
             generation_registered_bundle_roots: None,
+            host_direct: None,
         })
     }
 
@@ -6105,6 +6224,7 @@ impl IsolationRuntime {
             namespace.project_destination,
             namespace.canonical_project,
             namespace.bundle_roots,
+            namespace.project_mirror,
         )?;
         let artifact = ReadableMount {
             source_handle: artifact.handle,
@@ -6141,6 +6261,26 @@ impl IsolationRuntime {
             scope_admission: ProcessScopeAdmission::DefinitionValidation,
         })
         .expect("compiled disabled isolation fixture policy is valid")
+    }
+
+    /// A policy-free runtime compiled from an explicit, unenforced test
+    /// policy, for composed tests that need a lane field such as
+    /// `host_direct` without an app root or backend.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test_policy(policy: IsolationPolicy) -> Result<Self, EngineError> {
+        Self::resolve(IsolationRuntimeResolution {
+            policy,
+            source: None,
+            digest: None,
+            app_root: None,
+            app_root_authority: None,
+            app_root_destination: None,
+            daemon_socket: None,
+            backend: None,
+            process_scope_provider: None,
+            process_scope_authority_digest: None,
+            scope_admission: ProcessScopeAdmission::DefinitionValidation,
+        })
     }
 
     /// Construct the explicit disabled execution boundary with exact app-root
@@ -6449,7 +6589,6 @@ fn validate_policy_semantics(policy: &IsolationPolicy) -> Result<(), EngineError
                 | "{node_public_identity}"
                 | "{daemon_socket}"
                 | "{bundle_roots}"
-                | "{node_trusted_keys}"
                 | "{verified_code}"
         );
         if !is_placeholder {
@@ -6845,11 +6984,15 @@ fn code_namespace_layout(
     project_destination: &Path,
     canonical_project: &Path,
     bundle_roots: &[PathBuf],
+    project_mirror: bool,
 ) -> Result<(Option<ReadableMount>, PathBuf), EngineError> {
-    let mut candidates = vec![(
-        canonical_project.to_path_buf(),
-        project_destination.to_path_buf(),
-    )];
+    let mut candidates = Vec::new();
+    if project_mirror {
+        candidates.push((
+            canonical_project.to_path_buf(),
+            project_destination.to_path_buf(),
+        ));
+    }
     for bundle_root in bundle_roots {
         candidates.push((
             canonicalize_context_mount("bundle root", bundle_root)?,
@@ -7031,6 +7174,54 @@ fn canonicalize_launch_path(kind: &str, path: &Path) -> Result<PathBuf, EngineEr
 /// descriptor for the isolation adapter. Validation and mount execution therefore refer
 /// to the same kernel object; a pathname swap after this point cannot redirect
 /// the bind to a protected node path.
+/// An admitted bundle state namespace, canonicalized and pinned.
+struct ResolvedBundleStateHome {
+    source: PathBuf,
+    handle: lillux::InheritedDescriptorAuthority,
+    writable: bool,
+}
+
+/// Prove `home` is one exact namespace directory of one bundle's home beneath
+/// `<app_root>/.ai/state/bundle-state/` and pin it. Anything else, including
+/// the root itself, a bundle's whole home, a deeper descendant, or a path
+/// that resolves outside through a link, is refused.
+fn resolve_bundle_state_home(
+    home: &IsolationBundleStateHome,
+    app_root: &Path,
+) -> Result<ResolvedBundleStateHome, EngineError> {
+    use std::path::Component;
+
+    let source = canonicalize_context_mount("bundle state home", &home.namespace_dir)?;
+    let root = app_root
+        .join(crate::AI_DIR)
+        .join("state")
+        .join("bundle-state");
+    let relative = source.strip_prefix(&root).map_err(|_| {
+        refused(format!(
+            "bundle state home {} is not beneath {}",
+            source.display(),
+            root.display()
+        ))
+    })?;
+    let exact_namespace = relative.components().count() == 2
+        && relative
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)));
+    if !exact_namespace {
+        return Err(refused(format!(
+            "bundle state home {} is not one exact namespace directory of one bundle beneath {}",
+            source.display(),
+            root.display()
+        )));
+    }
+    let handle = pin_mount_source("bundle state home", &source)?;
+    Ok(ResolvedBundleStateHome {
+        source,
+        handle,
+        writable: home.writable,
+    })
+}
+
 fn pin_mount_source(
     kind: &str,
     path: &Path,
@@ -7277,20 +7468,6 @@ fn resolve_readable_mounts_unchecked(
             .collect();
     }
 
-    if configured == "{node_trusted_keys}" {
-        let Some(destination) = resolution.node_trusted_keys_dir else {
-            return Ok(Vec::new());
-        };
-        let source = canonicalize_context_mount("node trusted-keys directory", destination)?;
-        let source_handle = pin_mount_source("node trusted-keys directory", &source)?;
-        return Ok(vec![ReadableMount {
-            source,
-            destination: destination.to_path_buf(),
-            source_handle,
-            layer: 20,
-        }]);
-    }
-
     if configured == "{verified_code}" {
         return Ok(resolution.verified_code_mounts.to_vec());
     }
@@ -7417,10 +7594,13 @@ fn validate_writable_mount(
             && validation.canonical_checkpoint_dir == Some(path);
         let is_exact_daemon_state_root = mount_authority == WritableMountAuthority::DaemonStateRoot
             && validation.canonical_state_root == Some(path);
+        let is_exact_bundle_state_home = mount_authority == WritableMountAuthority::BundleStateHome
+            && validation.canonical_bundle_state_home == Some(path);
         if paths_overlap(path, app_root)
             && !is_exact_runtime_workspace
             && !is_exact_daemon_checkpoint
             && !is_exact_daemon_state_root
+            && !is_exact_bundle_state_home
         {
             return Err(refused(format!(
                 "isolation writable path {} overlaps protected app root {}",
@@ -8093,6 +8273,7 @@ mod tests {
             project_destination: project.path(),
             canonical_project: project.path(),
             bundle_roots: &[],
+            project_mirror: true,
         };
         runtime
             .prepare_verified_code(&verified, namespace, true)
@@ -8513,12 +8694,12 @@ mod tests {
                     network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
                     live_access: None,
                     state_root: None,
+                    bundle_state_home: None,
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
                     captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: std::slice::from_ref(command.identity()),
                     verified_command: Some(&command),
                     external_read_only_mounts: &[],
@@ -8605,12 +8786,12 @@ mod tests {
                     network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
                     live_access: None,
                     state_root: None,
+                    bundle_state_home: None,
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
                     captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: std::slice::from_ref(&captured),
                     verified_command: Some(&captured),
                     external_read_only_mounts: &[],
@@ -8694,12 +8875,12 @@ mod tests {
                 network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
                 live_access: None,
                 state_root: None,
+                bundle_state_home: None,
                 checkpoint_dir: None,
                 checkpoint_authority: None,
                 daemon_socket_path: None,
                 captured_callback_socket: false,
                 bundle_roots: &[],
-                node_trusted_keys_dir: None,
                 verified_code: std::slice::from_ref(command.identity()),
                 verified_command: Some(&command),
                 external_read_only_mounts: &[],
@@ -8805,12 +8986,12 @@ mod tests {
                     network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
                     live_access: None,
                     state_root: None,
+                    bundle_state_home: None,
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
                     captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: std::slice::from_ref(&captured),
                     verified_command: Some(&captured),
                     external_read_only_mounts: &[],
@@ -8879,12 +9060,12 @@ mod tests {
                     network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
                     live_access: None,
                     state_root: None,
+                    bundle_state_home: None,
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
                     captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: &verified_code,
                     verified_command: Some(&command),
                     external_read_only_mounts: &[],
@@ -9010,12 +9191,12 @@ mod tests {
                     network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
                     live_access: Some(&live_access),
                     state_root: None,
+                    bundle_state_home: None,
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
                     captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: std::slice::from_ref(&verified),
                     verified_command: None,
                     external_read_only_mounts: std::slice::from_ref(&admitted_mount),
@@ -9288,7 +9469,6 @@ mod tests {
             "{node_public_identity}".to_string(),
             "{daemon_socket}".to_string(),
             "{bundle_roots}".to_string(),
-            "{node_trusted_keys}".to_string(),
             "{verified_code}".to_string(),
         ];
         policy.filesystem.writable = vec!["{project}".to_string(), "{checkpoint_dir}".to_string()];
@@ -9424,12 +9604,12 @@ mod tests {
                     network_authority_ceiling: IsolationNetworkAuthorityCeiling::Isolated,
                     live_access: None,
                     state_root: None,
+                    bundle_state_home: None,
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
                     captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: &[],
                     verified_command: Some(&command),
                     external_read_only_mounts: &[],
@@ -9566,12 +9746,12 @@ mod tests {
                 network_authority_ceiling: network_ceiling,
                 live_access: None,
                 state_root: exact_state,
+                bundle_state_home: None,
                 checkpoint_dir: None,
                 checkpoint_authority: None,
                 daemon_socket_path: None,
                 captured_callback_socket: false,
                 bundle_roots: &[],
-                node_trusted_keys_dir: None,
                 verified_code: &[],
                 verified_command: Some(&command),
                 external_read_only_mounts: &external_mounts,
@@ -9634,6 +9814,8 @@ mod tests {
                             request(),
                             IsolationLaunchContext {
                                 state_root: Some(invalid_root),
+
+                                bundle_state_home: None,
                                 ..context
                             },
                         )
@@ -9651,6 +9833,8 @@ mod tests {
                         request(),
                         IsolationLaunchContext {
                             state_root: Some(&sibling_state),
+
+                            bundle_state_home: None,
                             ..context
                         },
                     )
@@ -9658,20 +9842,6 @@ mod tests {
                     .expect("overlay outside its exact private root must refuse");
                 assert!(
                     error.to_string().contains("read-only state overlay"),
-                    "{error}"
-                );
-                let error = runtime
-                    .apply_with_provenance(
-                        request(),
-                        IsolationLaunchContext {
-                            node_trusted_keys_dir: Some(app_root.path()),
-                            ..context
-                        },
-                    )
-                    .err()
-                    .expect("an exact private root must not admit ambient trust state");
-                assert!(
-                    error.to_string().contains("ambient filesystem authority"),
                     "{error}"
                 );
             }
@@ -9775,6 +9945,313 @@ mod tests {
         }
     }
 
+    /// An enforced runtime over a fake backend with the capabilities a captured
+    /// launch needs, a verified command, and a scratch project to launch in.
+    #[cfg(target_os = "linux")]
+    struct BundleStateFixture {
+        app_root: tempfile::TempDir,
+        runtime: IsolationRuntime,
+        command: IsolationVerifiedCode,
+        project: lillux::PinnedDirectory,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl BundleStateFixture {
+        fn new() -> Self {
+            let app_root = tempfile::tempdir().unwrap();
+            let mut policy = IsolationPolicy::disabled_for_authoring();
+            policy.mode = IsolationMode::Enforce;
+            policy.backend = Some(resolved_backend().selection.clone());
+            policy.filesystem.readable = vec![
+                "{node_public_identity}".to_string(),
+                "{daemon_socket}".to_string(),
+                "{bundle_roots}".to_string(),
+                "{verified_code}".to_string(),
+            ];
+            policy.filesystem.writable =
+                vec!["{project}".to_string(), "{checkpoint_dir}".to_string()];
+            policy.network.mode = IsolationNetworkMode::Host;
+            write_policy(app_root.path(), &policy);
+            let mut backend = resolved_backend();
+            backend.effective_capabilities = BTreeSet::from([
+                IsolationCapability::FilesystemPrivateRoot,
+                IsolationCapability::FilesystemFdReadOnly,
+                IsolationCapability::FilesystemFdWritable,
+                IsolationCapability::FilesystemOrderedOverlays,
+                IsolationCapability::FilesystemFixedParentViews,
+                IsolationCapability::FilesystemPrivateTmp,
+                IsolationCapability::DevicesMinimal,
+                IsolationCapability::EnvironmentExact,
+                IsolationCapability::NetworkIsolated,
+                IsolationCapability::NetworkHost,
+                IsolationCapability::ProcessHostPidNamespace,
+                IsolationCapability::ProcessIsolatedPidNamespace,
+                IsolationCapability::ProcessTargetPidReporting,
+                IsolationCapability::LifecycleSharedProcessGroup,
+            ]);
+            backend.declaration.capabilities = backend.effective_capabilities.clone();
+            let runtime =
+                IsolationRuntime::load_with_backend(app_root.path(), Some(Arc::new(backend)))
+                    .unwrap();
+            let command = runtime
+                .capture_verified_command(Path::new("/bin/true"), None, None)
+                .unwrap();
+            let project = runtime
+                .runtime_workspaces
+                .as_ref()
+                .unwrap()
+                .open_or_create_child(std::ffi::OsStr::new("bundle-state-plan"), 0o700)
+                .unwrap();
+            Self {
+                app_root,
+                runtime,
+                command,
+                project,
+            }
+        }
+
+        /// `<app_root>/.ai/state/bundle-state/<bundle>/<namespace>`, created.
+        fn namespace(&self, bundle: &str, namespace: &str) -> PathBuf {
+            let path = self
+                .app_root
+                .path()
+                .join(crate::AI_DIR)
+                .join("state")
+                .join("bundle-state")
+                .join(bundle)
+                .join(namespace);
+            std::fs::create_dir_all(&path).unwrap();
+            path
+        }
+
+        fn request(&self) -> lillux::SubprocessRequest {
+            lillux::SubprocessRequest {
+                cmd: "/bin/true".to_string(),
+                argv0: None,
+                args: Vec::new(),
+                cwd: Some(self.project.path().to_string_lossy().into_owned()),
+                envs: Vec::new(),
+                stdin_data: None,
+                timeout: 1.0,
+                limits: None,
+                inherited_fds: Vec::new(),
+                inherited_fd_mappings: Vec::new(),
+                supervised_status: None,
+            }
+        }
+
+        fn context<'a>(
+            &'a self,
+            state_root: Option<&'a Path>,
+            bundle_state_home: Option<&'a IsolationBundleStateHome>,
+        ) -> IsolationLaunchContext<'a> {
+            IsolationLaunchContext {
+                immutable_project: None,
+                workspace_view: None,
+                project_path: self.project.path(),
+                project_authority: IsolationProjectAuthority::EphemeralScratch,
+                filesystem_authority_ceiling:
+                    IsolationFilesystemAuthorityCeiling::CapturedExecution,
+                network_authority_ceiling: IsolationNetworkAuthorityCeiling::Isolated,
+                live_access: None,
+                state_root,
+                bundle_state_home,
+                checkpoint_dir: None,
+                checkpoint_authority: None,
+                daemon_socket_path: None,
+                captured_callback_socket: false,
+                bundle_roots: &[],
+                verified_code: &[],
+                verified_command: Some(&self.command),
+                external_read_only_mounts: &[],
+                writable_runtime_view_mounts: &[],
+                producer_prepared_mounts: &[],
+                target_channels: &[],
+                item_ref: "worker:tests/bundle-state",
+                thread_id: "T-bundle-state",
+                verbatim_env_names: &[],
+            }
+        }
+
+        /// The mounts of the plan isolation compiled for `context`.
+        fn mounts(&self, context: IsolationLaunchContext<'_>) -> Vec<serde_json::Value> {
+            let applied = self
+                .runtime
+                .apply_with_provenance(self.request(), context)
+                .unwrap();
+            let (request_bytes, _) = applied
+                .request
+                .inherited_fds
+                .last()
+                .unwrap()
+                .read_regular_file_stable_bounded(
+                    ryeos_isolation_protocol::MAX_REQUEST_BYTES as u64,
+                )
+                .unwrap();
+            let request: serde_json::Value = serde_json::from_slice(&request_bytes).unwrap();
+            request["plan"]["mounts"].as_array().unwrap().clone()
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bundle_state_home_mounts_exact_namespace_only() {
+        let fixture = BundleStateFixture::new();
+        let ns1 = fixture.namespace("central-auth", "realm-a");
+        let ns2 = fixture.namespace("central-auth", "realm-b");
+        let other_bundle = fixture.namespace("other-bundle", "realm-a");
+        let home = IsolationBundleStateHome {
+            namespace_dir: ns1.clone(),
+            writable: true,
+        };
+        let mounts = fixture.mounts(fixture.context(None, Some(&home)));
+        let destinations: Vec<&str> = mounts
+            .iter()
+            .filter_map(|mount| mount["destination"].as_str())
+            .collect();
+        let state_mount = mounts
+            .iter()
+            .find(|mount| mount["destination"] == BUNDLE_STATE_ISOLATION_DESTINATION)
+            .expect("the namespace is mounted at its fixed destination");
+        assert_eq!(state_mount["access"], "writable");
+        // Neither the sibling namespace, the other bundle's home, the bundle
+        // directory, nor the root of all homes is mounted or even named as a
+        // destination.
+        let bundle_state_root = fixture
+            .app_root
+            .path()
+            .join(crate::AI_DIR)
+            .join("state")
+            .join("bundle-state");
+        for hidden in [
+            ns2.as_path(),
+            other_bundle.as_path(),
+            ns1.parent().unwrap(),
+            bundle_state_root.as_path(),
+            ns1.as_path(),
+        ] {
+            assert!(
+                !destinations
+                    .iter()
+                    .any(|destination| Path::new(destination).starts_with(hidden)),
+                "{} must not be visible; destinations: {destinations:?}",
+                hidden.display()
+            );
+        }
+
+        // The app root itself is never a destination (the launch's scratch
+        // project legitimately lives beneath it).
+        assert!(!destinations.contains(&fixture.app_root.path().to_str().unwrap()));
+
+        // Read-only access mounts the same directory read-only.
+        let read_only = IsolationBundleStateHome {
+            namespace_dir: ns2,
+            writable: false,
+        };
+        let mounts = fixture.mounts(fixture.context(None, Some(&read_only)));
+        let state_mount = mounts
+            .iter()
+            .find(|mount| mount["destination"] == BUNDLE_STATE_ISOLATION_DESTINATION)
+            .expect("the read-only namespace is mounted");
+        assert_eq!(state_mount["access"], "read_only");
+
+        // A launch that opened no state home mounts none.
+        let mounts = fixture.mounts(fixture.context(None, None));
+        assert!(
+            !mounts
+                .iter()
+                .any(|mount| mount["destination"] == BUNDLE_STATE_ISOLATION_DESTINATION)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bundle_state_home_outside_bundle_state_root_refused() {
+        let fixture = BundleStateFixture::new();
+        let namespace = fixture.namespace("central-auth", "realm-a");
+        let node_state = fixture.app_root.path().join(crate::AI_DIR).join("state");
+        let sibling = node_state.join("unrelated-state");
+        std::fs::create_dir(&sibling).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let deeper = namespace.join("deeper");
+        std::fs::create_dir(&deeper).unwrap();
+        let bundle_dir = namespace.parent().unwrap().to_path_buf();
+        let root = bundle_dir.parent().unwrap().to_path_buf();
+        // A link inside a namespace-looking spelling cannot lead out.
+        let escape = bundle_dir.join("escape");
+        lillux::PinnedDirectory::open(&bundle_dir)
+            .unwrap()
+            .unwrap()
+            .create_symlink(
+                std::ffi::OsStr::new("escape"),
+                outside.path().to_str().unwrap().as_bytes(),
+            )
+            .unwrap();
+        for refused_path in [
+            sibling.as_path(),
+            node_state.as_path(),
+            root.as_path(),
+            bundle_dir.as_path(),
+            deeper.as_path(),
+            outside.path(),
+            escape.as_path(),
+            fixture.app_root.path(),
+        ] {
+            let home = IsolationBundleStateHome {
+                namespace_dir: refused_path.to_path_buf(),
+                writable: true,
+            };
+            let error = fixture
+                .runtime
+                .apply_with_provenance(fixture.request(), fixture.context(None, Some(&home)))
+                .err()
+                .unwrap_or_else(|| panic!("{} must refuse", refused_path.display()));
+            assert!(
+                error.to_string().contains("bundle state home"),
+                "{}: {error}",
+                refused_path.display()
+            );
+        }
+        // The one exact namespace is admitted.
+        let home = IsolationBundleStateHome {
+            namespace_dir: namespace,
+            writable: true,
+        };
+        fixture.mounts(fixture.context(None, Some(&home)));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bundle_state_home_coexists_with_pinned_scratch_state_root() {
+        let fixture = BundleStateFixture::new();
+        let namespace = fixture.namespace("central-auth", "realm-a");
+        let scratch = fixture
+            .app_root
+            .path()
+            .join(crate::AI_DIR)
+            .join("state")
+            .join("a-scratch-state");
+        std::fs::create_dir(&scratch).unwrap();
+        let home = IsolationBundleStateHome {
+            namespace_dir: namespace,
+            writable: true,
+        };
+        let mounts = fixture.mounts(fixture.context(Some(&scratch), Some(&home)));
+        let writable_destinations: Vec<&str> = mounts
+            .iter()
+            .filter(|mount| mount["access"] == "writable")
+            .filter_map(|mount| mount["destination"].as_str())
+            .collect();
+        assert!(
+            writable_destinations.contains(&scratch.to_str().unwrap()),
+            "the pinned scratch state root stays mounted: {writable_destinations:?}"
+        );
+        assert!(
+            writable_destinations.contains(&BUNDLE_STATE_ISOLATION_DESTINATION),
+            "the bundle state namespace is mounted beside it: {writable_destinations:?}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn disabled_runtime_rejects_command_mutation_after_admission() {
@@ -9820,12 +10297,12 @@ mod tests {
                     network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
                     live_access: Some(&live_access),
                     state_root: None,
+                    bundle_state_home: None,
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
                     captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: std::slice::from_ref(&captured),
                     verified_command: Some(&captured),
                     external_read_only_mounts: &[],
@@ -9872,6 +10349,91 @@ mod tests {
             Path::new("/project/.ai/tools/task.py"),
             Path::new("/project/.ai/tools/task.py"),
         ));
+    }
+
+    fn host_direct_grant(containment: IsolationHostDirectContainment) -> IsolationHostDirectGrant {
+        IsolationHostDirectGrant {
+            policy_generation: "a".repeat(64),
+            grant_id: "guarded-cargo".into(),
+            item: "tool:ryeos/development/guarded-cargo".into(),
+            signer: "b".repeat(64),
+            source_closure: None,
+            runtime_ref: "tool:ryeos/core/runtimes/python/script".into(),
+            runtime_content_hash: "c".repeat(64),
+            origin: "direct".into(),
+            containment,
+            host_env: vec!["PATH".into()],
+        }
+    }
+
+    fn runtime_with_host_direct(host_direct: IsolationHostDirect) -> IsolationRuntime {
+        let mut policy = IsolationPolicy::disabled_for_authoring();
+        policy.host_direct = host_direct;
+        IsolationRuntime::resolve(IsolationRuntimeResolution {
+            policy,
+            source: None,
+            digest: None,
+            app_root: None,
+            app_root_authority: None,
+            app_root_destination: None,
+            daemon_socket: None,
+            backend: None,
+            process_scope_provider: None,
+            process_scope_authority_digest: None,
+            scope_admission: ProcessScopeAdmission::DefinitionValidation,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn host_direct_view_needs_an_operator_granted_lane() {
+        let unavailable = runtime_with_host_direct(IsolationHostDirect::Unavailable);
+        let error = unavailable
+            .host_direct_launch(host_direct_grant(IsolationHostDirectContainment::Group))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("host_access_lane_unavailable"), "{error}");
+        assert!(error.contains("unavailable"), "{error}");
+    }
+
+    #[test]
+    fn host_direct_view_applies_no_adapter_and_records_the_grant() {
+        let lane = runtime_with_host_direct(IsolationHostDirect::OperatorGranted);
+        assert!(lane.host_direct_grant().is_none());
+        assert!(lane.launch_provenance(None).execution_posture.is_none());
+        let view = lane
+            .host_direct_launch(host_direct_grant(IsolationHostDirectContainment::Group))
+            .unwrap();
+        assert!(!view.is_enforced());
+        assert_eq!(view.host_direct_grant().unwrap().grant_id, "guarded-cargo");
+        match view.launch_provenance(None).execution_posture {
+            Some(IsolationExecutionPosture::HostDirect(grant)) => {
+                assert_eq!(grant.item, "tool:ryeos/development/guarded-cargo");
+                assert_eq!(grant.containment, IsolationHostDirectContainment::Group);
+            }
+            other => panic!("host-direct provenance missing: {other:?}"),
+        }
+        // The node's shared runtime is untouched.
+        assert!(lane.host_direct_grant().is_none());
+        assert!(
+            view.host_direct_launch(host_direct_grant(IsolationHostDirectContainment::Group))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn host_direct_scope_containment_needs_a_scope_provider() {
+        let lane = runtime_with_host_direct(IsolationHostDirect::OperatorGranted);
+        let error = lane
+            .host_direct_launch(host_direct_grant(IsolationHostDirectContainment::Scope))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            error.contains("host_access_containment_unavailable"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -9943,12 +10505,12 @@ mod tests {
                 network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
                 live_access: None,
                 state_root: None,
+                bundle_state_home: None,
                 checkpoint_dir: None,
                 checkpoint_authority: None,
                 daemon_socket_path: None,
                 captured_callback_socket: false,
                 bundle_roots: &[],
-                node_trusted_keys_dir: None,
                 verified_code: &[],
                 verified_command: None,
                 external_read_only_mounts: std::slice::from_ref(&external),
@@ -10009,12 +10571,12 @@ mod tests {
                     network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
                     live_access: None,
                     state_root: None,
+                    bundle_state_home: None,
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
                     captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: &[],
                     verified_command: None,
                     external_read_only_mounts: &[],
@@ -10103,12 +10665,12 @@ mod tests {
             network_authority_ceiling: IsolationNetworkAuthorityCeiling::Isolated,
             live_access: None,
             state_root: None,
+            bundle_state_home: None,
             checkpoint_dir: Some(&checkpoint_dir),
             checkpoint_authority: Some(&checkpoint_authority),
             daemon_socket_path: None,
             captured_callback_socket: false,
             bundle_roots: &[],
-            node_trusted_keys_dir: None,
             verified_code: &[],
             verified_command: Some(&command),
             external_read_only_mounts: &[],
@@ -10233,12 +10795,12 @@ mod tests {
             network_authority_ceiling: IsolationNetworkAuthorityCeiling::Isolated,
             live_access: None,
             state_root: None,
+            bundle_state_home: None,
             checkpoint_dir: None,
             checkpoint_authority: None,
             daemon_socket_path: None,
             captured_callback_socket: false,
             bundle_roots: &[],
-            node_trusted_keys_dir: None,
             verified_code: &[],
             verified_command: Some(&command),
             external_read_only_mounts: &[],
@@ -10494,12 +11056,12 @@ mod tests {
                     network_authority_ceiling: IsolationNetworkAuthorityCeiling::Isolated,
                     live_access: None,
                     state_root: None,
+                    bundle_state_home: None,
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
                     captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: &[],
                     verified_command: Some(&command),
                     external_read_only_mounts: &[],
@@ -10576,12 +11138,12 @@ mod tests {
                     network_authority_ceiling: IsolationNetworkAuthorityCeiling::Isolated,
                     live_access: None,
                     state_root: None,
+                    bundle_state_home: None,
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
                     captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: &[],
                     verified_command: Some(&command),
                     external_read_only_mounts: &[],
@@ -10634,12 +11196,12 @@ mod tests {
                 network_authority_ceiling: IsolationNetworkAuthorityCeiling::Isolated,
                 live_access: None,
                 state_root: None,
+                bundle_state_home: None,
                 checkpoint_dir: None,
                 checkpoint_authority: None,
                 daemon_socket_path: None,
                 captured_callback_socket: false,
-                bundle_roots: &[],
-                node_trusted_keys_dir: Some(app_root.path()),
+                bundle_roots: &[app_root.path().to_path_buf()],
                 verified_code: &[],
                 verified_command: None,
                 external_read_only_mounts: &[],
@@ -10736,12 +11298,12 @@ mod tests {
                 network_authority_ceiling: IsolationNetworkAuthorityCeiling::Isolated,
                 live_access: None,
                 state_root: None,
+                bundle_state_home: None,
                 checkpoint_dir: None,
                 checkpoint_authority: None,
                 daemon_socket_path: with_socket.then_some(socket_ref),
                 captured_callback_socket: admitted,
                 bundle_roots,
-                node_trusted_keys_dir: None,
                 verified_code: &[],
                 verified_command: Some(&command),
                 external_read_only_mounts: &[],
@@ -10912,12 +11474,12 @@ mod tests {
             network_authority_ceiling: IsolationNetworkAuthorityCeiling::Isolated,
             live_access: None,
             state_root: None,
+            bundle_state_home: None,
             checkpoint_dir: None,
             checkpoint_authority: None,
             daemon_socket_path: Some(socket),
             captured_callback_socket: captured,
             bundle_roots: &[],
-            node_trusted_keys_dir: None,
             verified_code: &[],
             verified_command: Some(&command),
             external_read_only_mounts: &[],
@@ -11089,12 +11651,12 @@ mod tests {
                         network_authority_ceiling: IsolationNetworkAuthorityCeiling::Isolated,
                         live_access: None,
                         state_root: None,
+                        bundle_state_home: None,
                         checkpoint_dir: None,
                         checkpoint_authority: None,
                         daemon_socket_path: Some(runtime_static),
                         captured_callback_socket: false,
                         bundle_roots: &[],
-                        node_trusted_keys_dir: None,
                         verified_code: &[],
                         verified_command: Some(&command),
                         external_read_only_mounts: &[],
@@ -11202,12 +11764,12 @@ mod tests {
                     network_authority_ceiling: IsolationNetworkAuthorityCeiling::Isolated,
                     live_access: None,
                     state_root: None,
+                    bundle_state_home: None,
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: Some(&socket_path),
                     captured_callback_socket: true,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: &[],
                     verified_command: Some(&command),
                     external_read_only_mounts: &mounts,
@@ -11344,12 +11906,12 @@ mod tests {
                     network_authority_ceiling: IsolationNetworkAuthorityCeiling::Isolated,
                     live_access: None,
                     state_root: None,
+                    bundle_state_home: None,
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: Some(&socket_path),
                     captured_callback_socket: true,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: &[],
                     verified_command: Some(&command),
                     external_read_only_mounts: &mounts,
@@ -11546,12 +12108,12 @@ mod tests {
                 network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
                 live_access: None,
                 state_root: None,
+                bundle_state_home: None,
                 checkpoint_dir: None,
                 checkpoint_authority: None,
                 daemon_socket_path: None,
                 captured_callback_socket: false,
                 bundle_roots: &[],
-                node_trusted_keys_dir: None,
                 verified_code: &[],
                 verified_command: None,
                 external_read_only_mounts: &[],
@@ -11655,12 +12217,12 @@ mod tests {
                     network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
                     live_access: None,
                     state_root: None,
+                    bundle_state_home: None,
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
                     captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: &[],
                     verified_command: None,
                     external_read_only_mounts: &[],
@@ -11785,11 +12347,11 @@ mod tests {
                         network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
                         live_access: Some(&live_access),
                         state_root: None,
+                        bundle_state_home: None,
                         checkpoint_dir: None,
                         checkpoint_authority: None,
                         daemon_socket_path: None,
                         bundle_roots: &[],
-                        node_trusted_keys_dir: None,
                         verified_code: &[],
                         verified_command: None,
                         external_read_only_mounts: &[],
@@ -11860,12 +12422,12 @@ mod tests {
             network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
             live_access: Some(&live_access),
             state_root: None,
+            bundle_state_home: None,
             checkpoint_dir: None,
             checkpoint_authority: None,
             daemon_socket_path: None,
             captured_callback_socket: false,
             bundle_roots: &[],
-            node_trusted_keys_dir: None,
             verified_code: &[],
             verified_command: None,
             external_read_only_mounts: &[],
@@ -11922,12 +12484,12 @@ mod tests {
             network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
             live_access: Some(&live_access),
             state_root: None,
+            bundle_state_home: None,
             checkpoint_dir: None,
             checkpoint_authority: None,
             daemon_socket_path: None,
             captured_callback_socket: false,
             bundle_roots: &[],
-            node_trusted_keys_dir: None,
             verified_code: &[],
             verified_command: None,
             external_read_only_mounts: &[],
@@ -11975,12 +12537,12 @@ mod tests {
             network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
             live_access,
             state_root: None,
+            bundle_state_home: None,
             checkpoint_dir: None,
             checkpoint_authority: None,
             daemon_socket_path: None,
             captured_callback_socket: false,
             bundle_roots: &[],
-            node_trusted_keys_dir: None,
             verified_code: &[],
             verified_command: None,
             external_read_only_mounts: &[],
@@ -12058,12 +12620,12 @@ mod tests {
                     network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
                     live_access: None,
                     state_root: None,
+                    bundle_state_home: None,
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
                     captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: &[],
                     verified_command: None,
                     external_read_only_mounts: &[],
@@ -12160,7 +12722,6 @@ mod tests {
             daemon_socket: None,
             requested_daemon_socket: None,
             bundle_roots: &[],
-            node_trusted_keys_dir: None,
             verified_code_mounts: &[],
         };
         let readable = resolve_readable_mounts("{project}", &readable_resolution)
@@ -12786,7 +13347,10 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            error.contains("unsupported node isolation policy version 9"),
+            error.contains(&format!(
+                "unsupported node isolation policy version {}",
+                ISOLATION_POLICY_VERSION - 1
+            )),
             "{error}"
         );
     }

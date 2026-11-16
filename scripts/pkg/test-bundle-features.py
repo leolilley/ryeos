@@ -68,14 +68,13 @@ HANDLERS_STANDARD = "directive-handlers,graph-handlers"
 HANDLERS_GRAPH = "graph-handlers"
 HANDLERS_CORE = "core-handlers,extends-composer"
 GOLDEN = {
-    "full": (HANDLERS_STANDARD, "model-provider-setup,scheduling"),
     "development": (HANDLERS_STANDARD, "model-provider-setup,scheduling"),
     "central-host": (HANDLERS_STANDARD, "model-provider-setup,scheduling"),
     "standard": (HANDLERS_STANDARD, "model-provider-setup,scheduling"),
     "standard-central-auth": (HANDLERS_STANDARD, "model-provider-setup,scheduling"),
     "local-inference": (HANDLERS_STANDARD, "model-provider-setup,scheduling"),
     "hosted-workflow": (HANDLERS_STANDARD, "model-provider-setup,scheduling"),
-    "f5r-controller": (HANDLERS_GRAPH, ""),
+    "hosted-controller": (HANDLERS_GRAPH, ""),
     "release-authority": (HANDLERS_GRAPH, ""),
     "release-artifacts": (HANDLERS_STANDARD, "model-provider-setup,scheduling"),
     "core-scheduling": (HANDLERS_CORE, "scheduling"),

@@ -496,8 +496,14 @@ pub(crate) fn read_installed_policy_facts(
     };
     let header = ryeos_engine::item_resolution::parse_signature_header(signed, &envelope)
         .context("qualification policy has no valid signature line")?;
-    let (class, _) = ryeos_engine::trust::verify_item_signature(signed, &header, &envelope, trust)
-        .context("verify qualification policy signature")?;
+    let (class, _) = ryeos_engine::trust::verify_item_signature(
+        signed,
+        &header,
+        &envelope,
+        trust,
+        &ryeos_engine::trust::SignerContext::bundle("config"),
+    )
+    .context("verify qualification policy signature")?;
     ensure!(
         class == ryeos_engine::contracts::TrustClass::Trusted,
         "qualification policy signature is not trusted"
@@ -570,10 +576,14 @@ mod tests {
 
     fn stopped_node() -> StoppedNode {
         let root = tempfile::tempdir().unwrap();
-        ryeos_node_runtime::identity::NodeIdentity::create(
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(
             &root.path().join(".ai/node/identity/private_key.pem"),
         )
         .unwrap();
+        ryeos_engine::test_support::write_node_public_identity(
+            root.path(),
+            identity.verifying_key(),
+        );
         let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
             &ryeos_node_runtime::state_lock::default_lock_path(root.path()),
         )

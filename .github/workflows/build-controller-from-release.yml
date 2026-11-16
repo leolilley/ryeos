@@ -87,7 +87,7 @@ jobs:
             --version "$VERSION" \
             --archive "$ARCHIVE_DIR/ryeos-bundles-$VERSION-x86_64.tar.gz" \
             --checksum "$ARCHIVE_DIR/ryeos-bundles-$VERSION-x86_64.tar.gz.sha256" \
-            --set f5r-controller \
+            --set hosted-controller \
             --output "$OUT"
           echo "dir=$OUT" >> "$GITHUB_OUTPUT"
 
@@ -126,7 +126,7 @@ jobs:
         with:
           source: .
           files: ./docker-bake.controller-release.hcl
-          targets: f5r-controller-released
+          targets: hosted-controller-released
           push: ${{ !inputs.dry_run }}
           vars: |
             RELEASED_BUNDLES_DIR=${{ steps.bundles.outputs.dir }}
@@ -155,16 +155,16 @@ jobs:
             echo "Dry run: image built and verified, nothing pushed." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          DIGEST="$(jq -r '.["f5r-controller-released"]["containerimage.digest"] // empty' <<<"$BAKE_METADATA")"
+          DIGEST="$(jq -r '.["hosted-controller-released"]["containerimage.digest"] // empty' <<<"$BAKE_METADATA")"
           [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || {
             echo "no pushed digest for the controller image" >&2
             exit 1
           }
-          IMAGE="${PREFIX}-f5r-controller"
+          IMAGE="${PREFIX}-hosted-controller"
           docker buildx imagetools inspect "${IMAGE}@${DIGEST}" >/dev/null
           echo "${IMAGE}:release-v${VERSION} -> ${IMAGE}@${DIGEST}"
           {
             echo "| image | digest reference |"
             echo "|---|---|"
-            echo "| f5r-controller | \`${IMAGE}@${DIGEST}\` |"
+            echo "| hosted-controller | \`${IMAGE}@${DIGEST}\` |"
           } >> "$GITHUB_STEP_SUMMARY"

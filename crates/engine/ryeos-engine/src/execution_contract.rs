@@ -11,6 +11,12 @@ use serde::{Deserialize, Serialize};
 pub const EXECUTION_POLICY_SCHEMA_VERSION: u32 = 2;
 pub const LIVE_PROJECT_READ_CAPABILITY: &str = "ryeos.read.project.live";
 pub const LIVE_PROJECT_WRITE_CAPABILITY: &str = "ryeos.write.project.live";
+/// Fixed capability required to admit any execution environment that reads
+/// the node operator's vault: a project overlay with
+/// `include_operator_vault: true`, or the `operator` vault namespace.
+pub const OPERATOR_VAULT_CAPABILITY: &str = "ryeos.use.vault.operator";
+/// The only vault namespace installed on a node.
+pub const OPERATOR_VAULT_NAMESPACE: &str = "operator";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -70,6 +76,22 @@ pub enum ExecutionEnvironmentPolicy {
     ProviderEnvironment {
         name_policy: ExecutionEnvironmentNamePolicy,
     },
+}
+
+impl ExecutionEnvironmentPolicy {
+    /// Whether admitting this environment would let the execution read the
+    /// node operator's vault. Such a policy requires
+    /// [`OPERATOR_VAULT_CAPABILITY`] from the principal it acts for.
+    pub fn exposes_operator_vault(&self) -> bool {
+        match self {
+            Self::ProjectOverlay {
+                include_operator_vault,
+                ..
+            } => *include_operator_vault,
+            Self::Vault { namespace, .. } => namespace == OPERATOR_VAULT_NAMESPACE,
+            Self::None | Self::Delegated { .. } | Self::ProviderEnvironment { .. } => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -414,7 +436,7 @@ fn validate_environment_policy(
             name_policy,
         } => {
             validate_identity("vault namespace", namespace)?;
-            if namespace != "operator" {
+            if namespace != OPERATOR_VAULT_NAMESPACE {
                 anyhow::bail!(
                     "vault namespace {namespace:?} is not installed on this node; only `operator` is available"
                 );
@@ -481,6 +503,47 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<ExecutionPolicy>(value).unwrap(),
             policy
+        );
+    }
+
+    #[test]
+    fn operator_vault_exposure_is_exactly_the_overlay_flag_or_operator_namespace() {
+        let declared = || ExecutionEnvironmentNamePolicy::DeclaredRequired;
+        assert!(
+            ExecutionPolicy::local_live(ExecutionResponse::Wait)
+                .environment
+                .exposes_operator_vault()
+        );
+        assert!(
+            !ExecutionPolicy::local_live(ExecutionResponse::Wait)
+                .exclude_operator_vault()
+                .environment
+                .exposes_operator_vault()
+        );
+        assert!(
+            ExecutionEnvironmentPolicy::Vault {
+                namespace: OPERATOR_VAULT_NAMESPACE.to_owned(),
+                name_policy: declared(),
+            }
+            .exposes_operator_vault()
+        );
+        for environment in [
+            ExecutionEnvironmentPolicy::None,
+            ExecutionEnvironmentPolicy::ProviderEnvironment {
+                name_policy: declared(),
+            },
+            ExecutionEnvironmentPolicy::Delegated {
+                provider: "provider".to_owned(),
+                grant_id: "grant".to_owned(),
+                name_policy: declared(),
+            },
+        ] {
+            assert!(!environment.exposes_operator_vault(), "{environment:?}");
+        }
+        assert!(
+            !ExecutionPolicy::projectless(ExecutionResponse::Wait)
+                .environment
+                .exposes_operator_vault()
         );
     }
 

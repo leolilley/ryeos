@@ -59,8 +59,8 @@ pub use events::{
     CognitionInAssembler, CognitionInAssembly, CognitionInChunk, HOOK_FAILURE_SCHEMA,
     HOOK_OBSERVATION_SCHEMA, HookEvidenceDescriptor, HookFailedPayload, HookFailureClass,
     HookObservationRecordedPayload, MAX_RUNTIME_EVENT_BATCH_BYTES, MAX_RUNTIME_EVENT_BATCH_ITEMS,
-    MAX_RUNTIME_EVENT_PAYLOAD_BYTES, RuntimeEventType, StorageClass, encode_bounded_text_payloads,
-    encode_cognition_in_payloads,
+    MAX_RUNTIME_EVENT_PAYLOAD_BYTES, RuntimeEventType, StorageClass, cognition_out_is_progressive,
+    encode_bounded_text_payloads, encode_cognition_in_payloads,
 };
 pub use expression::{
     CompilationLimits, CompiledExpression, CompiledTemplate, ErrorPhase, EvaluationContext,

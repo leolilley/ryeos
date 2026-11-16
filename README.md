@@ -169,21 +169,21 @@ AUR packages (`ryeos`, `ryeos-mcp`) are coming soon. Once published:
 
 ```bash
 yay -S ryeos ryeos-mcp
-ryeos init --node-profile full --host-class local
+ryeos init --node-profile standard --host-class local
 ryeos start
 ryeos node status
 ```
 
-On a capable terminal, `ryeos init --node-profile full --host-class local`
+On a capable terminal, `ryeos init --node-profile standard --host-class local`
 opens the first-contact ceremony. It
 discovers packaged bundles under `/usr/share/ryeos`, installs them into the
 system space, creates operator and node keys, initializes trust and vault
 material, and optionally connects a verified model provider. Use
 `ryeos setup` to reopen provider/model setup later. Automation must use
-`ryeos init --non-interactive --node-profile full --host-class local` or
-`ryeos init --json --node-profile full --host-class local`. Every fresh init
+`ryeos init --non-interactive --node-profile standard --host-class local` or
+`ryeos init --json --node-profile standard --host-class local`. Every fresh init
 requires an exact publisher-signed init profile and an explicit host class the
-profile declares (`full` declares only `local`); absence is never replaced
+profile declares (`standard` declares `local`, `local_unconfined` and `hosted`); absence is never replaced
 with runtime defaults, and the class is never inferred from what the host
 proves.
 Isolation backends are ordinary, separately installed bundles. `ryeos start`
@@ -194,7 +194,7 @@ enabling or tightening the node-owned policy.
 The user lifecycle surface is intentionally small:
 
 ```bash
-ryeos init --node-profile full --host-class local  # interactive first-contact initialization
+ryeos init --node-profile standard --host-class local  # interactive first-contact initialization
 ryeos setup         # reopen optional provider/model setup
 ryeos start         # bring the local node online
 ryeos stop          # stop it
@@ -229,7 +229,7 @@ Composition images, one per bundle set:
 | `ryeos-core-workflow` | core, graph | `core-workflow` |
 | `ryeos-core-knowledge` | core, knowledge | `core-knowledge` |
 | `ryeos-standard` | standard | `standard` |
-| `ryeos-f5r-controller` | f5r-controller | `f5r-controller` |
+| `ryeos-hosted-controller` | hosted-controller | `hosted-controller` |
 | `ryeos-local-inference` | local-inference | `local-inference` |
 | `ryeos-hosted-workflow` | hosted-workflow | `hosted-workflow` |
 | `ryeos-central-host` | central-host | `central-host` |
@@ -272,7 +272,7 @@ A locally built image signed by a development or custom publisher requires an
 explicit trust acknowledgement at startup:
 
 ```bash
-docker run -e RYEOS_TRUST_BAKED_PUBLISHERS=1 ryeosd-full:dev
+docker run -e RYEOS_TRUST_BAKED_PUBLISHERS=1 ryeosd-standard:dev
 ```
 
 That switch pins the image's `PUBLISHER_TRUST.toml` files before preflight. Do
@@ -356,7 +356,7 @@ can start the node for optional provider setup; `ryeos start` remains
 idempotent if setup was skipped or initialization was non-interactive:
 
 ```bash
-ryeos init --node-profile full --host-class local
+ryeos init --node-profile standard --host-class local
 ryeos start
 ryeos node status
 ```

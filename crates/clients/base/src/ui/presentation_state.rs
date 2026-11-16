@@ -60,7 +60,7 @@ mod tests {
             "root_ref":"config:test/shared", "root_generation":"generation", "project_path":null, "subject":{"kind":"projectless"},
             "posture":"observation_only", "binding_request_bounds":{"max_request_bytes":4096,"max_input_bytes":1024,"max_seat_append_bytes":65536},
             "presentation":{"definition":{"kind":"shared_presentation","config":{
-                "category":"ui", "shared_presentation":{"schema":1,"title":"RyeOS","launcher":"launch",
+                "category":"ui", "shared_presentation":{"schema":2,"title":"RyeOS","launcher":"launch",
                     "dialogs":[{"id":"launch","title":"Launch","view":"view:test/shared"},{"id":"help","title":"Help","view":"view:test/shared"}],
                     "capabilities":{"sources":[],"affordances":[]}}
             }},"views":{"view:test/shared":{"widget":"rows"}}}
@@ -1230,22 +1230,6 @@ impl PresentationViewMount {
 }
 
 #[derive(Debug, Clone)]
-pub struct SharedDockMount {
-    view: PresentationViewMount,
-    pub visible: bool,
-    pub size: u16,
-}
-
-impl SharedDockMount {
-    pub fn view(&self) -> &PresentationViewMount {
-        &self.view
-    }
-    pub fn local_mut(&mut self) -> &mut ViewLocalState {
-        &mut self.view.local
-    }
-}
-
-#[derive(Debug, Clone)]
 pub struct DialogMount {
     view: PresentationViewMount,
     title: String,
@@ -1298,10 +1282,6 @@ pub struct SurfaceComposition {
 /// Borrowed projection of the single canonical mounted payload. Not a second
 /// writable composition and not an authority admission result.
 pub enum MountRef<'a> {
-    SharedDock {
-        edge: &'a str,
-        mount: &'a SharedDockMount,
-    },
     SharedDialog {
         id: &'a str,
         mount: &'a DialogMount,
@@ -1323,7 +1303,6 @@ pub enum MountRef<'a> {
 impl<'a> MountRef<'a> {
     pub fn instance_key(&self) -> &'a RyeOsViewInstanceKey {
         match self {
-            Self::SharedDock { mount, .. } => mount.view.instance_key(),
             Self::SharedDialog { mount, .. } | Self::SurfaceDialog { mount, .. } => {
                 mount.view.instance_key()
             }
@@ -1332,7 +1311,6 @@ impl<'a> MountRef<'a> {
     }
     pub fn view_ref(&self) -> &'a str {
         match self {
-            Self::SharedDock { mount, .. } => mount.view.view_ref(),
             Self::SharedDialog { mount, .. } | Self::SurfaceDialog { mount, .. } => {
                 mount.view.view_ref()
             }
@@ -1341,7 +1319,6 @@ impl<'a> MountRef<'a> {
     }
     pub fn binding(&self) -> &'a UiBindingAttachmentCoordinate {
         match self {
-            Self::SharedDock { mount, .. } => mount.view.binding(),
             Self::SharedDialog { mount, .. } | Self::SurfaceDialog { mount, .. } => {
                 mount.view.binding()
             }
@@ -1350,7 +1327,6 @@ impl<'a> MountRef<'a> {
     }
     pub fn local(&self) -> &'a ViewLocalState {
         match self {
-            Self::SharedDock { mount, .. } => &mount.view.local,
             Self::SharedDialog { mount, .. } | Self::SurfaceDialog { mount, .. } => {
                 &mount.view.local
             }
@@ -1359,7 +1335,6 @@ impl<'a> MountRef<'a> {
     }
     pub fn visible(&self) -> bool {
         match self {
-            Self::SharedDock { mount, .. } => mount.visible,
             Self::SharedDialog { mount, .. } | Self::SurfaceDialog { mount, .. } => mount.open,
             Self::SurfaceTile { visible, .. } => *visible,
         }
@@ -1452,7 +1427,6 @@ impl SurfaceComposition {
 pub struct PresentationComposition {
     presentation_id: PresentationId,
     root_binding: UiBindingAttachmentCoordinate,
-    docks: BTreeMap<String, SharedDockMount>,
     dialogs: BTreeMap<String, DialogMount>,
     launcher: String,
     surfaces: BTreeMap<SurfaceInstanceId, SurfaceComposition>,
@@ -1884,40 +1858,11 @@ impl PresentationComposition {
         if !dialogs.contains_key(&spec.launcher) {
             return Err("shared launcher is not a mounted dialog".into());
         }
-        let mut docks = BTreeMap::new();
-        for (edge, slot) in [
-            ("top", &spec.docks.top),
-            ("left", &spec.docks.left),
-            ("right", &spec.docks.right),
-            ("bottom", &spec.docks.bottom),
-        ] {
-            if let Some(slot) = slot {
-                let crate::surface::SlotContentSpec::View(view_ref) = &slot.content;
-                if slot.size == 0 || !descriptor.presentation.views.contains_key(view_ref) {
-                    return Err("shared dock shape or admitted View closure is invalid".into());
-                }
-                docks.insert(
-                    edge.into(),
-                    SharedDockMount {
-                        view: PresentationViewMount {
-                            instance_key: RyeOsViewInstanceKey::shared_dock(&presentation_id, edge)
-                                .map_err(str::to_owned)?,
-                            view_ref: view_ref.clone(),
-                            binding: root_binding.clone(),
-                            local: ViewLocalState::default(),
-                        },
-                        visible: slot.open,
-                        size: slot.size,
-                    },
-                );
-            }
-        }
         // Surface projections are admitted separately, never fabricated from
         // membership hints or the shared Config's initial opening selections.
         Ok(Self {
             presentation_id,
             root_binding,
-            docks,
             dialogs,
             launcher: spec.launcher.clone(),
             surfaces: BTreeMap::new(),
@@ -1931,56 +1876,11 @@ impl PresentationComposition {
     pub fn root_binding(&self) -> &UiBindingAttachmentCoordinate {
         &self.root_binding
     }
-    pub fn docks(&self) -> &BTreeMap<String, SharedDockMount> {
-        &self.docks
-    }
     pub fn dialogs(&self) -> &BTreeMap<String, DialogMount> {
         &self.dialogs
     }
     pub fn launcher(&self) -> &str {
         &self.launcher
-    }
-    pub fn dock_mut(&mut self, edge: &str) -> Option<&mut SharedDockMount> {
-        self.docks.get_mut(edge)
-    }
-    /// Pure structural removal for an exactly authenticated transfer commit.
-    /// The caller must check the exported mount before invoking this method.
-    pub fn remove_shared_dock(&mut self, edge: &str) -> Option<SharedDockMount> {
-        self.docks.remove(edge)
-    }
-    /// Install a precisely allocated shared dock in a staged composition.
-    /// Admission and export/descriptor checks belong to the transfer reducer.
-    pub fn install_shared_dock(
-        &mut self,
-        edge: &str,
-        view_ref: String,
-        binding: UiBindingAttachmentCoordinate,
-        local: ViewLocalState,
-        visible: bool,
-        size: u16,
-    ) -> Result<(), String> {
-        if !matches!(edge, "top" | "bottom" | "left" | "right")
-            || size == 0
-            || self.docks.contains_key(edge)
-        {
-            return Err("transfer shared dock placement is occupied or invalid".into());
-        }
-        let instance_key = RyeOsViewInstanceKey::shared_dock(&self.presentation_id, edge)
-            .map_err(str::to_owned)?;
-        self.docks.insert(
-            edge.to_owned(),
-            SharedDockMount {
-                view: PresentationViewMount {
-                    instance_key,
-                    view_ref,
-                    binding,
-                    local,
-                },
-                visible,
-                size,
-            },
-        );
-        Ok(())
     }
     pub fn dialog_mut(&mut self, id: &str) -> Option<&mut DialogMount> {
         self.dialogs.get_mut(id)
@@ -2142,11 +2042,6 @@ impl PresentationComposition {
         })
     }
     pub fn mount(&self, instance: &RyeOsViewInstanceKey) -> Option<MountRef<'_>> {
-        for (edge, mount) in &self.docks {
-            if mount.view.instance_key() == instance {
-                return Some(MountRef::SharedDock { edge, mount });
-            }
-        }
         for (id, mount) in &self.dialogs {
             if mount.view.instance_key() == instance {
                 if let Some(surface_id) = mount.surface_owner.as_ref() {
@@ -2193,11 +2088,6 @@ impl PresentationComposition {
         &mut self,
         instance: &RyeOsViewInstanceKey,
     ) -> Option<&mut ViewLocalState> {
-        for mount in self.docks.values_mut() {
-            if mount.view.instance_key() == instance {
-                return Some(&mut mount.view.local);
-            }
-        }
         for mount in self.dialogs.values_mut() {
             if mount.view.instance_key() == instance {
                 return Some(&mut mount.view.local);
@@ -2599,14 +2489,9 @@ impl PresentationComposition {
                 && new.binding == old.binding
         };
         let valid_origins = self
-            .docks
+            .dialogs
             .values()
             .map(|mount| mount.view.instance_key.clone())
-            .chain(
-                self.dialogs
-                    .values()
-                    .map(|mount| mount.view.instance_key.clone()),
-            )
             .chain(
                 self.surfaces
                     .values()
@@ -2621,17 +2506,6 @@ impl PresentationComposition {
                     })
             })
             .collect::<std::collections::BTreeSet<_>>();
-        for (edge, dock) in &mut self.docks {
-            if let Some(old) = previous
-                .docks
-                .get(edge)
-                .filter(|old| same(&dock.view, &old.view))
-            {
-                dock.view.local = old.view.local.clone();
-                dock.visible = old.visible;
-                dock.size = old.size;
-            }
-        }
         for (id, dialog) in &mut self.dialogs {
             if let Some(old) = previous.dialogs.get(id).filter(|old| {
                 same(&dialog.view, &old.view) && dialog.surface_owner == old.surface_owner

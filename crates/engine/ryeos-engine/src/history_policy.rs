@@ -627,6 +627,7 @@ mod tests {
     fn verified_item(trust_class: TrustClass) -> VerifiedItem {
         VerifiedItem {
             resolved: ResolvedItem {
+                logical_project_root: None,
                 canonical_ref: CanonicalRef::parse("service:test/example").unwrap(),
                 kind: "service".to_string(),
                 source_path: PathBuf::from("/bundle/.ai/services/test/example.yaml"),
@@ -681,6 +682,7 @@ mod tests {
                 network_authority_ceiling: None,
                 pushed_head_declaration: None,
                 filesystem_authority_ceiling: None,
+                host_authority: None,
                 target: None,
                 endpoint: None,
                 resource_authority_ceiling: None,

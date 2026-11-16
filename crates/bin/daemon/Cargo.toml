@@ -18,6 +18,12 @@ path = "src/main.rs"
 name = "ryeos-bundle-publisher"
 path = "src/bin/ryeos-bundle-publisher.rs"
 
+# Test-only tool executable behind `ryeosd::test_support::callback_probe`.
+[[bin]]
+name = "ryeos-callback-probe"
+path = "src/bin/ryeos-callback-probe.rs"
+required-features = ["test-support"]
+
 [features]
 default = []
 scheduling = ["dep:ryeos-scheduler", "dep:ryeos-scheduler-service", "ryeos-api/scheduling", "ryeos-node/scheduling", "ryeos-ui/scheduling"]
@@ -105,6 +111,8 @@ ryeos-engine = { workspace = true, features = ["test-support"] }
 ryeos-scheduler = { workspace = true, features = ["test-support"] }
 ryeos-core-tools = { workspace = true, features = ["test-support"] }
 ryeos-runtime = { workspace = true }
+ryeos-client-base = { workspace = true }
+uuid = { workspace = true }
 ryeos-tracing = { workspace = true, features = ["test-harness"] }
 http-body-util = { workspace = true }
 hyper = { workspace = true, features = ["client", "server", "http1"] }

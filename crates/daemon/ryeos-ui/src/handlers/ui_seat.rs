@@ -64,7 +64,7 @@ mod initial_surface_contract_tests {
     fn config(seeds: Value) -> ryeos_client_base::presentation::UiCompositionDefinition {
         serde_json::from_value(json!({"kind":"shared_presentation","config": {
             "category":"ui", "shared_presentation": {
-                "schema":1,"title":"Presentation","launcher":"launch","docks":{},
+                "schema":2,"title":"Presentation","launcher":"launch",
                 "dialogs":[{"id":"launch","title":"Launch","view":"view:test/launcher"}],
                 "initial_surfaces":seeds,"capabilities":{"sources":[],"affordances":[]}
             }
@@ -1532,6 +1532,7 @@ pub async fn handle_open(
                                     .project_root
                                     .clone(),
                                 user_principal_id: None,
+                                scopes: None,
                             };
                             let (compiled_binding, presentation) =
                                 super::ui_launch_mint::compile_session_binding(

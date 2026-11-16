@@ -1214,6 +1214,27 @@ impl StateStore {
         Ok(details)
     }
 
+    /// Ids of the live (`created` or `running`) threads whose covering
+    /// authority is the authorized-key grant `grant_digest`, whoever requested
+    /// them. Threads are not indexed by grant digest: each live thread's
+    /// launch metadata is read, which is cheap while live threads are few.
+    pub fn live_thread_ids_under_grant(&self, grant_digest: &str) -> Result<Vec<String>> {
+        Ok(self
+            .list_threads_by_status(&["created", "running"])?
+            .into_iter()
+            .filter(|thread| {
+                thread
+                    .runtime
+                    .launch_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.covering_authority.as_ref())
+                    .and_then(|authority| authority.grant_digest.as_deref())
+                    == Some(grant_digest)
+            })
+            .map(|thread| thread.thread_id)
+            .collect())
+    }
+
     pub fn active_thread_count(&self) -> Result<i64> {
         let g = self.lock()?;
         queries::active_thread_count(g.state_db.projection())

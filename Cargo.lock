@@ -4026,7 +4026,7 @@ dependencies = [
 [[package]]
 name = "rune"
 version = "0.0.1"
-source = "git+https://github.com/leolilley/rune?rev=453221e3b65d04f1428ed0491451eefbde35de65#453221e3b65d04f1428ed0491451eefbde35de65"
+source = "git+https://github.com/leolilley/rune?rev=69e0539869e329b7c277f5d8a99f1ca7396a39bc#69e0539869e329b7c277f5d8a99f1ca7396a39bc"
 dependencies = [
  "accesskit",
  "arboard",
@@ -4090,12 +4090,12 @@ dependencies = [
 [[package]]
 name = "rune-motion"
 version = "0.1.0"
-source = "git+https://github.com/leolilley/rune?rev=453221e3b65d04f1428ed0491451eefbde35de65#453221e3b65d04f1428ed0491451eefbde35de65"
+source = "git+https://github.com/leolilley/rune?rev=69e0539869e329b7c277f5d8a99f1ca7396a39bc#69e0539869e329b7c277f5d8a99f1ca7396a39bc"
 
 [[package]]
 name = "rune-staging"
 version = "0.0.1"
-source = "git+https://github.com/leolilley/rune?rev=453221e3b65d04f1428ed0491451eefbde35de65#453221e3b65d04f1428ed0491451eefbde35de65"
+source = "git+https://github.com/leolilley/rune?rev=69e0539869e329b7c277f5d8a99f1ca7396a39bc#69e0539869e329b7c277f5d8a99f1ca7396a39bc"
 dependencies = [
  "wgpu",
 ]
@@ -4103,7 +4103,7 @@ dependencies = [
 [[package]]
 name = "rune-taffy"
 version = "0.0.1"
-source = "git+https://github.com/leolilley/rune?rev=453221e3b65d04f1428ed0491451eefbde35de65#453221e3b65d04f1428ed0491451eefbde35de65"
+source = "git+https://github.com/leolilley/rune?rev=69e0539869e329b7c277f5d8a99f1ca7396a39bc#69e0539869e329b7c277f5d8a99f1ca7396a39bc"
 dependencies = [
  "taffy",
 ]
@@ -4328,6 +4328,7 @@ dependencies = [
  "ryeos-node-runtime",
  "ryeos-project-capture",
  "ryeos-provider-contract",
+ "ryeos-remote-lease-core",
  "ryeos-runtime",
  "ryeos-scheduler-contract",
  "ryeos-state",
@@ -4338,6 +4339,7 @@ dependencies = [
  "serde_yaml",
  "sha2",
  "subtle",
+ "tar",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -4373,6 +4375,7 @@ dependencies = [
  "ryeos-handler-protocol",
  "ryeos-isolation-protocol",
  "ryeos-runtime",
+ "ryeos-state",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -5477,6 +5480,7 @@ dependencies = [
  "ryeos-accounting",
  "ryeos-api",
  "ryeos-app",
+ "ryeos-client-base",
  "ryeos-codex-runtime-verifier",
  "ryeos-core-tools",
  "ryeos-effect-contract",
@@ -5509,6 +5513,7 @@ dependencies = [
  "toml",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]

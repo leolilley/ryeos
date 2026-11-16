@@ -665,6 +665,7 @@ fn raw_route(auth: &str, methods: &[&str], path: &str) -> RawRouteSpec {
         execute: None,
         request: ryeos_app::route_raw::RawRequest::default(),
         source_file: std::path::PathBuf::new(),
+        authority: None,
     }
 }
 

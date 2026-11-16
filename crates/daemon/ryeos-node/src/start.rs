@@ -443,6 +443,26 @@ impl LifecycleStartLock {
         }))
     }
 
+    /// Acquire the lifecycle lock only where its directory already exists,
+    /// creating nothing in the app root. `Ok(None)` means the node never had a
+    /// lifecycle directory; contention is a refusal, never a wait.
+    pub(crate) fn try_acquire_existing(app_root: &Path) -> Result<Option<Self>> {
+        let path = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).daemon_lifecycle();
+        let Some(root) = lillux::PinnedDirectory::open(&path)? else {
+            return Ok(None);
+        };
+        let Some(guard) = root.try_lock_exclusive()? else {
+            bail!(
+                "another node lifecycle operation is active for {}",
+                app_root.display()
+            );
+        };
+        Ok(Some(Self {
+            state_directory: root,
+            _guard: guard,
+        }))
+    }
+
     pub(crate) fn ensure_protects_app_root(&self, app_root: &Path) -> Result<()> {
         self.state_directory.ensure_path_binding()?;
         let expected =

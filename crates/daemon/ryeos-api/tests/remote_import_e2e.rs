@@ -172,7 +172,7 @@ async fn start_remote_server_with_incomplete_roots(
                     json_handler::<ryeos_api::handlers::objects_closure_describe::Request, _>(
                         state,
                         body,
-                        objects_closure_get::handle,
+                        objects_closure_get::handle_authorized,
                     )
                     .await
                 },
@@ -258,20 +258,26 @@ async fn incomplete_closure_response(
 fn remote_config(name: &str, remote: &RemoteNode) -> RemoteConfig {
     RemoteConfig {
         name: name.to_string(),
-        url: remote.url.clone(),
+        url: Some(remote.url.clone()),
+        reachability: Default::default(),
         principal_id: remote.principal_id.clone(),
         signing_key: remote.signing_key.clone(),
         site_id: remote.site_id.clone(),
         vault_fingerprint: "sha256:test-vault".to_string(),
-        ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
+        ingest_ignore: Some(ryeos_app::ignore::IgnoreConfig { patterns: vec![] }),
         project_bindings: HashMap::new(),
     }
 }
 
 fn install_remote(local: &AppState, cfg: RemoteConfig) {
-    let mut remotes = HashMap::new();
-    remotes.insert(cfg.name.clone(), cfg);
-    config::save_remotes(&local.config.app_root, &remotes).unwrap();
+    config::write_remote_pin(
+        &local.config.app_root,
+        local.identity.signing_key(),
+        &cfg,
+        config::PinSource::ExpectedFingerprint,
+        None,
+    )
+    .unwrap();
 }
 
 async fn admit_subject(state: Arc<AppState>, subject_hash: String) -> String {

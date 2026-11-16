@@ -13,8 +13,11 @@ use crate::ScheduleAutoPauseReason;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScheduledAuthorityRefusalKind {
-    /// The principal's authorized-key grant no longer exists.
+    /// The principal's authorized-key grant no longer exists, or carries a
+    /// revocation tombstone.
     GrantRevoked,
+    /// The principal's authorized-key grant has lapsed.
+    GrantExpired,
     /// The grant exists but is not the generation pinned at registration.
     GrantGenerationChanged,
     /// The pinned grant's principal class or origin site no longer matches.
@@ -29,6 +32,12 @@ pub enum ScheduledAuthorityRefusalKind {
     /// The forwarding node's grant no longer covers forwarded-operator
     /// attestation.
     ForwardingAttestationNotCovered,
+    /// The principal-signed delegation the schedule was registered under
+    /// carries a revocation tombstone on this node.
+    DelegationRevoked,
+    /// The principal-signed delegation the schedule was registered under has
+    /// passed its end time.
+    DelegationExpired,
     /// A node-owned schedule no longer names this node's identity or site.
     NodeAuthorityChanged,
 }
@@ -37,12 +46,15 @@ impl ScheduledAuthorityRefusalKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::GrantRevoked => "grant_revoked",
+            Self::GrantExpired => "grant_expired",
             Self::GrantGenerationChanged => "grant_generation_changed",
             Self::ClassOrOriginChanged => "class_or_origin_changed",
             Self::CapabilityNoLongerCovered => "capability_no_longer_covered",
             Self::ForwardingGrantRevoked => "forwarding_grant_revoked",
             Self::ForwardingGrantChanged => "forwarding_grant_changed",
             Self::ForwardingAttestationNotCovered => "forwarding_attestation_not_covered",
+            Self::DelegationRevoked => "delegation_revoked",
+            Self::DelegationExpired => "delegation_expired",
             Self::NodeAuthorityChanged => "node_authority_changed",
         }
     }
@@ -50,8 +62,11 @@ impl ScheduledAuthorityRefusalKind {
     /// The pause reason, which is also the refused fire's outcome code.
     pub fn pause_reason(self) -> ScheduleAutoPauseReason {
         match self {
-            Self::GrantRevoked | Self::ForwardingGrantRevoked => {
+            Self::GrantRevoked | Self::ForwardingGrantRevoked | Self::DelegationRevoked => {
                 ScheduleAutoPauseReason::AuthorityRevoked
+            }
+            Self::GrantExpired | Self::DelegationExpired => {
+                ScheduleAutoPauseReason::AuthorityExpired
             }
             Self::GrantGenerationChanged
             | Self::ClassOrOriginChanged
@@ -64,7 +79,7 @@ impl ScheduledAuthorityRefusalKind {
     }
 
     /// The outcome recorded on the refused fire: `authority_revoked`,
-    /// `authority_changed` or `authority_narrowed`.
+    /// `authority_expired`, `authority_changed` or `authority_narrowed`.
     pub fn fire_outcome(self) -> &'static str {
         self.pause_reason().as_str()
     }
@@ -133,6 +148,7 @@ mod tests {
         use ScheduledAuthorityRefusalKind::*;
         for (kind, outcome) in [
             (GrantRevoked, "authority_revoked"),
+            (GrantExpired, "authority_expired"),
             (ForwardingGrantRevoked, "authority_revoked"),
             (GrantGenerationChanged, "authority_changed"),
             (ClassOrOriginChanged, "authority_changed"),

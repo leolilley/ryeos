@@ -68,7 +68,7 @@ async fn node_path_inspection_refuses_unauthenticated_remote_and_wrong_local_cal
             local.principal_id(),
             vec![CAP.into()],
             true,
-            Some(AuthorizedKeyPrincipalClass::RemoteOperator),
+            Some(AuthorizedKeyPrincipalClass::RemotePrincipal),
             Some("site:remote".into()),
         ),
         HandlerContext::new_with_authority(

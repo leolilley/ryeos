@@ -136,6 +136,7 @@ impl BundleEventService {
             &effective_bundle_id,
             &params.event_kind,
         )?;
+        let actor = resolve_acting_principal(state_store, cap)?;
         let attachments = capture_attachment_sources(&cap.project_path, &params.attachments)?;
         let result = state_store.append_bundle_event_with_attachments(
             BundleEventAppendRequest {
@@ -150,7 +151,7 @@ impl BundleEventService {
                 idempotency_key: params.idempotency_key,
                 correlation_id: params.correlation_id,
                 causation_id: params.causation_id,
-                attribution: attribution_for_callback(cap),
+                attribution: attribution_for_callback(cap, actor),
                 attachments: vec![],
             },
             attachments,
@@ -444,9 +445,43 @@ fn authorize_bundle_event(
         })
 }
 
-fn attribution_for_callback(cap: &CallbackCapability) -> ryeos_state::BundleEventAttribution {
+/// The daemon could not name the principal behind a bundle-event append.
+/// Nothing is appended: an event without a trustworthy actor would let bundle
+/// code mistake "someone ran this tool" for "this principal did it".
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "bundle_event_actor_unresolved: thread '{thread_id}' has no recorded acting principal, \
+     so the bundle event was not appended; relaunch the tool through an authenticated \
+     caller (every launched thread records its requester); if it persists the thread \
+     row is damaged and the node's execution history needs repair"
+)]
+pub struct BundleEventActorUnresolved {
+    pub thread_id: String,
+}
+
+/// Resolve the acting principal for the capability's thread from the daemon's
+/// own thread row (written at launch from the authenticated caller). Nothing
+/// in the request body can influence it.
+fn resolve_acting_principal(
+    state_store: &StateStore,
+    cap: &CallbackCapability,
+) -> anyhow::Result<String> {
+    let unresolved = || BundleEventActorUnresolved {
+        thread_id: cap.thread_id.clone(),
+    };
+    state_store
+        .get_thread(&cap.thread_id)?
+        .and_then(|thread| thread.requested_by)
+        .filter(|principal| !principal.is_empty())
+        .ok_or_else(|| unresolved().into())
+}
+
+fn attribution_for_callback(
+    cap: &CallbackCapability,
+    acting_principal: String,
+) -> ryeos_state::BundleEventAttribution {
     ryeos_state::BundleEventAttribution {
-        actor: None,
+        actor: Some(acting_principal),
         tool: cap.item_ref.clone(),
         executor: None,
         site: None,
@@ -502,6 +537,40 @@ mod tests {
             scoped_producer_grant: None,
             remote_consumer_grant: None,
         }
+    }
+
+    #[test]
+    fn callback_append_stamps_thread_acting_principal() {
+        let cap = cap(Vec::new(), Some("example-bundle"));
+        let attribution = attribution_for_callback(&cap, "fp:abc".to_string());
+        assert_eq!(attribution.actor.as_deref(), Some("fp:abc"));
+        assert_eq!(
+            attribution.tool.as_deref(),
+            Some("tool:example-bundle/send")
+        );
+
+        // The request carries no actor: an unknown field is refused, so a
+        // callback body cannot supply or override it.
+        let err = serde_json::from_value::<BundleEventAppendParams>(serde_json::json!({
+            "thread_id": "T-test",
+            "event_kind": "example_event",
+            "chain_id": "c",
+            "event_type": "t",
+            "payload": {},
+            "actor": "fp:forged",
+        }))
+        .unwrap_err();
+        assert!(err.to_string().contains("actor"), "got: {err}");
+    }
+
+    #[test]
+    fn unresolved_actor_refusal_is_typed_and_names_the_cure() {
+        let message = BundleEventActorUnresolved {
+            thread_id: "T-x".into(),
+        }
+        .to_string();
+        assert!(message.starts_with("bundle_event_actor_unresolved:"));
+        assert!(message.contains("relaunch the tool"));
     }
 
     #[test]

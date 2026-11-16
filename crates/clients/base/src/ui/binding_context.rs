@@ -256,7 +256,7 @@ mod tests {
             "presentation": {
                 "definition": {"kind": "shared_presentation", "config": {
                     "category": "ui", "shared_presentation": {
-                        "schema": 1, "title": "RyeOS", "launcher": "launch",
+                        "schema": 2, "title": "RyeOS", "launcher": "launch",
                         "dialogs": [{"id": "launch", "title": "Launch", "view": "view:ryeos/launcher"}],
                         "capabilities": {"sources": [], "affordances": []}
                     }

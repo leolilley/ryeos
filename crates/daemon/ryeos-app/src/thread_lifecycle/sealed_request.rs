@@ -341,6 +341,7 @@ impl SealedResolvedItem {
         pinned_capsule_root.ensure_path_binding()?;
         let materialized_source = capsule_root.join(source_name);
         Ok(ResolvedItem {
+            logical_project_root: None,
             canonical_ref,
             kind: self.kind.clone(),
             source_path: materialized_source,
@@ -1143,6 +1144,7 @@ impl SealedRootExecutionRequest {
             }
         };
         let plan_context = PlanContext {
+            logical_project_root: self.project_authority.logical_project_root(),
             requested_by,
             project_context,
             subject_resolution_authority: self.project_binding_subject_authority.clone(),
@@ -1689,7 +1691,8 @@ impl SealedRootExecutionRequest {
         CanonicalRef::parse(&self.runtime_ref).map_err(|error| {
             anyhow!("invalid sealed runtime ref `{}`: {error}", self.runtime_ref)
         })?;
-        let resolved_item = self.verified_subject.restore(capsule_root)?;
+        let mut resolved_item = self.verified_subject.restore(capsule_root)?;
+        resolved_item.logical_project_root = self.project_authority.logical_project_root();
         let verified_subject = VerifiedItem {
             resolved: resolved_item.clone(),
             signer: self
@@ -1700,6 +1703,7 @@ impl SealedRootExecutionRequest {
             pinned_version: self.verified_pinned_version.clone(),
         };
         let plan_context = PlanContext {
+            logical_project_root: self.project_authority.logical_project_root(),
             requested_by,
             project_context: self.project_context.clone(),
             subject_resolution_authority: self.project_binding_subject_authority.clone(),
@@ -1909,6 +1913,7 @@ impl SealedRootExecutionRequest {
         rebound_plan_context.project_context = rebound_project_context;
         rebound_plan_context.subject_resolution_authority =
             provenance.subject_resolution_authority();
+        rebound_plan_context.logical_project_root = provenance.logical_project_root();
         let rebound_binding =
             AdmittedProjectBinding::from_provenance(engine, &rebound_plan_context, provenance)?;
         let rebound_materialized_project_root = match provenance {
@@ -1922,6 +1927,7 @@ impl SealedRootExecutionRequest {
             } => Some(provenance.subject_effective_path().to_path_buf()),
         };
         request.resolved_item.materialized_project_root = rebound_materialized_project_root.clone();
+        request.resolved_item.logical_project_root = provenance.logical_project_root();
         {
             let admission = request
                 .root_admission
@@ -1933,6 +1939,8 @@ impl SealedRootExecutionRequest {
                 .verified_subject
                 .resolved
                 .materialized_project_root = rebound_materialized_project_root;
+            admission.verified_subject.resolved.logical_project_root =
+                provenance.logical_project_root();
             // Complete request snapshots include parser/kind registry
             // semantics and belong only to fresh admission. Recovered paths
             // use the sealed execution closure plus a trust-only current
@@ -3033,7 +3041,7 @@ mod authority_tests {
     }
 
     #[test]
-    fn sealed_remote_operator_handler_authority_round_trips_exactly() {
+    fn sealed_remote_principal_handler_authority_round_trips_exactly() {
         let mut fixture = SealedRootExecutionRequest::storage_test_fixture();
         fixture.current_site_id = "site:target".to_string();
         fixture.origin_site_id = "site:source".to_string();
@@ -3041,7 +3049,7 @@ mod authority_tests {
             "session:test".to_string(),
             Vec::new(),
             true,
-            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator),
+            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemotePrincipal),
             Some("site:source".to_string()),
         ));
         fixture.validate_handler_context().unwrap();
@@ -3311,7 +3319,7 @@ mod authority_tests {
             owner.clone(),
             vec!["*".to_string()],
             true,
-            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator),
+            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemotePrincipal),
             Some("site:source".to_string()),
         ));
         fixture.validate_handler_context().unwrap();
@@ -3384,7 +3392,7 @@ mod authority_tests {
                 owner_principal: owner,
                 origin_site_id: "site:source".to_string(),
                 principal_class:
-                    ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
+                    ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemotePrincipal,
                 grant_digest: "f".repeat(64),
                 scopes: vec!["*".to_string()],
             },
@@ -3483,7 +3491,7 @@ mod authority_tests {
             capsule_target
                 .handler_context()
                 .and_then(|context| context.authorized_key_class),
-            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator)
+            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemotePrincipal)
         );
         assert_eq!(capsule_target.parameters, capsule_resume.parameters);
     }

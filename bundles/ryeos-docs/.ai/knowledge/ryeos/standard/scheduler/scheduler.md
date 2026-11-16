@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T01:22:04Z:e58b05f93ad1d1fa025d0678a01b9197f5fb82f827724bceddb7f482c0bd8d4d:qZyFp3iVCriit4mVZ73wqf88Izx6pHOm38n3dRFc9t3Pj+ff6riYTxg004/R3CI59y7KDCXDYar8JMEfaNB3DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T05:54:19Z:5c960b1c4f28e72a8d45ea2eb2dc5ccc4514745ca8ec8e0e8b332f0b761adbb0:0vgkCVwak01dO3hKUEMR4lOiTmZ1QhXP8/wFWMKI2ZMrcb3FghUparX+0AYP6vZ/W9nOmCUjh9HzsJBPLD3/Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [reference, scheduler, cron, scheduling]
 version: "1.0.0"
@@ -183,7 +183,8 @@ with a typed outcome instead of the generic `dispatch_failed`:
 
 | Outcome | Cause |
 |---|---|
-| `authority_revoked` | the principal's grant, or a forwarding node's grant, no longer exists |
+| `authority_revoked` | the principal's grant, or a forwarding node's grant, no longer exists or carries a revocation tombstone |
+| `authority_expired` | the principal's grant has lapsed; renew it with `ryeos renew-key` (renewal re-seals the schedules it still covers) |
 | `authority_changed` | a different grant generation, principal class or origin site; a node-owned schedule that no longer names this node |
 | `authority_narrowed` | the grant no longer covers a declared capability |
 
@@ -191,7 +192,7 @@ The first such refusal pauses the schedule through the same signed write
 `scheduler.pause` uses, with `paused_reason` set to the outcome, so later
 boundaries do not fail one by one. `scheduler.explain` reports an `authority`
 block computed by the same revalidation: `valid`, the typed `refusal`
-(`grant_revoked`, `grant_generation_changed`, `class_or_origin_changed`,
+(`grant_revoked`, `grant_expired`, `grant_generation_changed`, `class_or_origin_changed`,
 `capability_no_longer_covered`, `forwarding_grant_revoked`,
 `forwarding_grant_changed`, `forwarding_attestation_not_covered` or
 `node_authority_changed`), its `outcome`, and a `detail`. `scheduler.resume`

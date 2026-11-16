@@ -20,16 +20,75 @@ use ryeos_scheduler_contract::{
 use crate::handler_context::HandlerContext;
 use crate::state::AppState;
 use ryeos_node_runtime::identity::{
-    AuthorizedKeyPrincipalClass, FORWARDED_OPERATOR_ATTESTATION_SCOPE, NodeIdentity,
-    VerifiedAuthorizedKeyGrant, load_verified_authorized_key,
+    AuthorizedKeyError, AuthorizedKeyPrincipalClass, FORWARDED_OPERATOR_ATTESTATION_SCOPE,
+    NodeIdentity, VerifiedAuthorizedKeyGrant, load_verified_authorized_key,
 };
 
 fn refused(kind: ScheduledAuthorityRefusalKind, detail: impl Into<String>) -> anyhow::Error {
     anyhow::Error::new(ScheduledAuthorityRefusal::new(kind, detail))
 }
 
+/// Read a pinned grant, turning a lapsed or tombstoned grant into the typed
+/// refusal the fire records. Other failures stay untyped.
+fn load_pinned_grant(
+    fingerprint: &str,
+    authorized_keys_dir: &Path,
+    node_identity: &NodeIdentity,
+    what: &str,
+    revoked: ScheduledAuthorityRefusalKind,
+) -> anyhow::Result<Option<VerifiedAuthorizedKeyGrant>> {
+    load_verified_authorized_key(fingerprint, authorized_keys_dir, node_identity).map_err(|error| {
+        match error.downcast_ref::<AuthorizedKeyError>() {
+            Some(AuthorizedKeyError::Expired { expired_at, .. }) => refused(
+                ScheduledAuthorityRefusalKind::GrantExpired,
+                format!("the {what} expired at {expired_at}; renew it with `ryeos renew-key`"),
+            ),
+            Some(AuthorizedKeyError::Revoked {
+                revoked_at, reason, ..
+            }) => refused(
+                revoked,
+                format!("the {what} was revoked at {revoked_at} ({reason})"),
+            ),
+            _ => error,
+        }
+    })
+}
+
+/// The node facts a schedule's authority is judged against. A value owns
+/// them, so a holder that must not retain the whole [`AppState`] (project
+/// deployment sessions are owned by an `AppState` extension) can still run
+/// the fire-time revalidation.
+#[derive(Clone)]
+pub struct ScheduleAuthorityParts {
+    pub identity: std::sync::Arc<NodeIdentity>,
+    pub authorizer: std::sync::Arc<Authorizer>,
+    pub authorized_keys_dir: std::path::PathBuf,
+    pub app_root: std::path::PathBuf,
+    pub site_id: String,
+}
+
+impl ScheduleAuthorityParts {
+    pub fn from_state(state: &AppState) -> Self {
+        Self {
+            identity: std::sync::Arc::clone(&state.identity),
+            authorizer: std::sync::Arc::clone(&state.authorizer),
+            authorized_keys_dir: state.config.authorized_keys_dir.clone(),
+            app_root: state.config.app_root.clone(),
+            site_id: state.threads.site_id().to_owned(),
+        }
+    }
+}
+
 pub fn revalidate_scheduled_execution(
     state: &AppState,
+    execution: &ScheduleExecution,
+) -> anyhow::Result<HandlerContext> {
+    revalidate_scheduled_execution_with(&ScheduleAuthorityParts::from_state(state), execution)
+}
+
+/// [`revalidate_scheduled_execution`] over [`ScheduleAuthorityParts`].
+pub fn revalidate_scheduled_execution_with(
+    parts: &ScheduleAuthorityParts,
     execution: &ScheduleExecution,
 ) -> anyhow::Result<HandlerContext> {
     execution.policy.validate()?;
@@ -38,8 +97,8 @@ pub fn revalidate_scheduled_execution(
             principal_id,
             effective_origin_site_id,
         } => {
-            if principal_id != &state.identity.principal_id()
-                || effective_origin_site_id != state.threads.site_id()
+            if principal_id != &parts.identity.principal_id()
+                || effective_origin_site_id != &parts.site_id
             {
                 return Err(refused(
                     ScheduledAuthorityRefusalKind::NodeAuthorityChanged,
@@ -63,10 +122,17 @@ pub fn revalidate_scheduled_execution(
         } => {
             check_authenticated_grants(
                 execution,
-                &state.config.authorized_keys_dir,
-                &state.identity,
-                state.threads.site_id(),
-                &state.authorizer,
+                &parts.authorized_keys_dir,
+                &parts.identity,
+                &parts.site_id,
+                &parts.authorizer,
+            )?;
+            check_pinned_delegation(
+                execution,
+                &ryeos_engine::roots::RuntimeRoot::new(parts.app_root.clone())
+                    .delegation_revocations_dir(),
+                &parts.identity,
+                lillux::time::unix_secs_now(),
             )?;
             Ok(HandlerContext::new_with_grant_authority(
                 principal_id.clone(),
@@ -112,13 +178,19 @@ pub fn pinned_schedule_grants(
     let fingerprint = principal_id
         .strip_prefix("fp:")
         .context("scheduled principal is not canonical")?;
-    let grant = load_verified_authorized_key(fingerprint, authorized_keys_dir, node_identity)?
-        .ok_or_else(|| {
-            refused(
-                ScheduledAuthorityRefusalKind::GrantRevoked,
-                format!("the authorized-key grant for {principal_id} no longer exists"),
-            )
-        })?;
+    let grant = load_pinned_grant(
+        fingerprint,
+        authorized_keys_dir,
+        node_identity,
+        &format!("authorized-key grant for {principal_id}"),
+        ScheduledAuthorityRefusalKind::GrantRevoked,
+    )?
+    .ok_or_else(|| {
+        refused(
+            ScheduledAuthorityRefusalKind::GrantRevoked,
+            format!("the authorized-key grant for {principal_id} no longer exists"),
+        )
+    })?;
     if grant.source_file_hash != grant_authority.principal_grant_hash {
         return Err(refused(
             ScheduledAuthorityRefusalKind::GrantGenerationChanged,
@@ -140,10 +212,15 @@ pub fn pinned_schedule_grants(
     let Some(forwarding) = &grant_authority.forwarding else {
         return Ok(Some((grant, None)));
     };
-    let source = load_verified_authorized_key(
+    let source = load_pinned_grant(
         &forwarding.source_node_fingerprint,
         authorized_keys_dir,
         node_identity,
+        &format!(
+            "forwarding node grant fp:{}",
+            forwarding.source_node_fingerprint
+        ),
+        ScheduledAuthorityRefusalKind::ForwardingGrantRevoked,
     )?
     .ok_or_else(|| {
         refused(
@@ -167,6 +244,54 @@ pub fn pinned_schedule_grants(
         ));
     }
     Ok(Some((grant, Some(source))))
+}
+
+/// Prove the principal-signed delegation a forwarded schedule was registered
+/// under still admits it: unexpired at `now` and not tombstoned on this node.
+/// This node retains only the delegation's digest and end time (the signed
+/// delegation itself travels with each request), so those are what is
+/// re-checked. A schedule that was not registered under a delegation passes.
+pub fn check_pinned_delegation(
+    execution: &ScheduleExecution,
+    revocations_dir: &Path,
+    node_identity: &NodeIdentity,
+    now: u64,
+) -> anyhow::Result<()> {
+    let ScheduleExecutionAuthority::Authenticated {
+        grant_authority, ..
+    } = &execution.authority
+    else {
+        return Ok(());
+    };
+    let Some(forwarding) = &grant_authority.forwarding else {
+        return Ok(());
+    };
+    let (Some(digest), Some(not_after)) = (
+        forwarding.delegation_digest.as_deref(),
+        forwarding.delegation_not_after,
+    ) else {
+        return Ok(());
+    };
+    if ryeos_node_runtime::remote_delegation::is_revoked(revocations_dir, digest, node_identity)? {
+        return Err(refused(
+            ScheduledAuthorityRefusalKind::DelegationRevoked,
+            format!(
+                "the delegation {digest} this schedule was registered under was revoked; \
+                 sign a new delegation with `ryeos remote delegate` and re-register the schedule"
+            ),
+        ));
+    }
+    if now > not_after {
+        return Err(refused(
+            ScheduledAuthorityRefusalKind::DelegationExpired,
+            format!(
+                "the delegation {digest} this schedule was registered under expired at unix \
+                 time {not_after}; sign a new delegation with `ryeos remote delegate` and \
+                 re-register the schedule"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Prove an authenticated schedule's pinned grants still admit it on this
@@ -198,7 +323,7 @@ pub fn check_authenticated_grants(
                 ));
             }
         }
-        AuthorizedKeyPrincipalClass::RemoteNode | AuthorizedKeyPrincipalClass::RemoteOperator => {
+        AuthorizedKeyPrincipalClass::RemoteNode | AuthorizedKeyPrincipalClass::RemotePrincipal => {
             if grant.configured_origin_site_id.as_deref() != Some(effective_origin_site_id.as_str())
             {
                 return Err(refused(
@@ -281,6 +406,7 @@ mod tests {
                 "scheduled principal",
                 &format!("fp:{}", "99".repeat(32)),
                 created_at,
+                &ryeos_node_runtime::identity::GrantTerms::for_tests(),
                 self.node.signing_key(),
             )
             .unwrap();
@@ -405,5 +531,140 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn expired_grant_is_typed_grant_expired_with_its_own_outcome() {
+        let fixture = Fixture::new();
+        fixture.grant(&[CAPABILITY], "2026-11-13T00:00:00Z");
+        let execution = fixture.pinned_execution();
+        // Re-sign the same key's grant as already lapsed.
+        fixture.revoke();
+        ryeos_node_runtime::identity::create_authorized_key_toml(
+            &fixture.auth_dir,
+            &fixture.principal_fp,
+            &fixture.principal_key_b64,
+            &[CAPABILITY.to_owned()],
+            "scheduled principal",
+            &format!("fp:{}", "99".repeat(32)),
+            "2026-11-13T00:00:00Z",
+            &ryeos_node_runtime::identity::GrantTerms {
+                expires_at: ryeos_node_runtime::identity::GrantExpiry::At(1_000),
+                authorized_by: ryeos_node_runtime::identity::AuthorizedBy::principal_request(
+                    &format!("fp:{}", "99".repeat(32)),
+                    None,
+                ),
+            },
+            fixture.node.signing_key(),
+        )
+        .unwrap();
+        let kind = refusal_kind(fixture.check_on(&execution, SITE));
+        assert_eq!(kind, ScheduledAuthorityRefusalKind::GrantExpired);
+        assert_eq!(kind.fire_outcome(), "authority_expired");
+    }
+
+    #[test]
+    fn tombstoned_grant_file_is_typed_grant_revoked() {
+        let fixture = Fixture::new();
+        fixture.grant(&[CAPABILITY], "2026-11-13T00:00:00Z");
+        let execution = fixture.pinned_execution();
+        let saved = std::fs::read(
+            fixture
+                .auth_dir
+                .join(format!("{}.toml", fixture.principal_fp)),
+        )
+        .unwrap();
+        ryeos_node_runtime::identity::revoke_authorized_key(
+            &fixture.auth_dir,
+            &fixture.principal_fp,
+            "stolen",
+            &format!("fp:{}", "99".repeat(32)),
+            &fixture.node,
+        )
+        .unwrap();
+        // The pinned generation is put back: the tombstone still refuses it.
+        std::fs::write(
+            fixture
+                .auth_dir
+                .join(format!("{}.toml", fixture.principal_fp)),
+            saved,
+        )
+        .unwrap();
+        let kind = refusal_kind(fixture.check_on(&execution, SITE));
+        assert_eq!(kind, ScheduledAuthorityRefusalKind::GrantRevoked);
+    }
+
+    fn delegated_execution(fixture: &Fixture, digest: &str, not_after: u64) -> ScheduleExecution {
+        let mut execution = fixture.pinned_execution();
+        if let ScheduleExecutionAuthority::Authenticated {
+            principal_class,
+            grant_authority,
+            ..
+        } = &mut execution.authority
+        {
+            *principal_class = AuthorizedKeyPrincipalClass::RemotePrincipal;
+            grant_authority.forwarding = Some(
+                ryeos_engine::principal_contract::ForwardingAuthorityEvidence {
+                    source_node_fingerprint: "66".repeat(32),
+                    source_node_grant_hash: "77".repeat(32),
+                    delegation_digest: Some(digest.to_owned()),
+                    delegation_not_after: Some(not_after),
+                },
+            );
+        }
+        execution
+    }
+
+    #[test]
+    fn delegation_pin_is_admitted_until_expired_or_tombstoned() {
+        let fixture = Fixture::new();
+        fixture.grant(&[CAPABILITY], "2026-11-13T00:00:00Z");
+        let digest = "ab".repeat(32);
+        let revocations = fixture._root.path().join("revocations");
+        let execution = delegated_execution(&fixture, &digest, 2_000);
+
+        check_pinned_delegation(&execution, &revocations, &fixture.node, 1_000).unwrap();
+        let kind = refusal_kind(check_pinned_delegation(
+            &execution,
+            &revocations,
+            &fixture.node,
+            2_001,
+        ));
+        assert_eq!(kind, ScheduledAuthorityRefusalKind::DelegationExpired);
+        assert_eq!(kind.fire_outcome(), "authority_expired");
+
+        ryeos_node_runtime::remote_delegation::write_tombstone(
+            &revocations,
+            &digest,
+            &format!("fp:{}", fixture.principal_fp),
+            &format!("fp:{}", fixture.principal_fp),
+            None,
+            None,
+            &fixture.node,
+            1_500,
+        )
+        .unwrap();
+        let kind = refusal_kind(check_pinned_delegation(
+            &execution,
+            &revocations,
+            &fixture.node,
+            1_600,
+        ));
+        assert_eq!(kind, ScheduledAuthorityRefusalKind::DelegationRevoked);
+        assert_eq!(kind.fire_outcome(), "authority_revoked");
+    }
+
+    #[test]
+    fn a_schedule_without_a_delegation_pin_passes_the_delegation_check() {
+        let fixture = Fixture::new();
+        fixture.grant(&[CAPABILITY], "2026-11-13T00:00:00Z");
+        let execution = fixture.pinned_execution();
+        check_pinned_delegation(
+            &execution,
+            &fixture._root.path().join("revocations"),
+            &fixture.node,
+            u64::MAX,
+        )
+        .unwrap();
     }
 }

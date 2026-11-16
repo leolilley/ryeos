@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-14T14:38:11Z:b2fa185efe6a7ea4525e9acc33b0c2c72def3d62a6adaa64b3656b1616fa5075:LuX9BY/kxHHuuapb9JPsJPJPIUVvvcKUTKfKxqEHQ2T6J1ndwaHil2efXlXgLBioApr0RjMaCIklkdXIoZLeCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-15T02:27:40Z:1ebc415a4b5ece3471f3901fa82bace966201f819f07cbe64ad83c80a6a61537:w8lEqikhK1+O2TY/BrxClF61FEyr1juOfZ6OF1tMiNlcrdfxDLW8GzoZIsIsdBa21IJWisuD6WC2ZdT2V5HLAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, lifecycle, init, start, stop, status, ryeos-node]
@@ -16,11 +16,12 @@ is the ordinary four-verb surface below, plus one explicit administrator
 transition for nodes that require host supervision:
 
 ```bash
-ryeos init --node-profile full --host-class local
+ryeos init --node-profile standard --host-class local
 ryeos start
 ryeos stop
 ryeos node status
 ryeos node host setup --confirm
+ryeos node host retire --confirm
 ```
 
 There is no `restart`, no enable/disable command, and no separate probe
@@ -30,7 +31,7 @@ that variable only steers normal daemon-backed dispatch. Native service-manager
 and process-scope mechanics belong wholly to Lillux. RyeOS retains only the
 generic protected association and lifecycle/upgrade testimony.
 
-`full` above is the native-package distribution selector. Every fresh node
+`standard` above is the native-package distribution selector. Every fresh node
 requires one explicit publisher-signed init profile whose exact bundle inventory
 matches its distribution; image and package entrypoints select their mapped
 profile rather than asking Rust to infer policy from bundle presence. An already
@@ -155,6 +156,14 @@ installer neither copies into that prefix nor claims it upgraded the service.
 The retained journal binds the expected image digest and original Up/Down
 intent, and is removed only after the installed image proves the restored
 state. Interrupted upgrades remain inhibited and retryable.
+
+`ryeos node host retire --confirm [--app-root <dir>]` is the reverse
+administrator transition. It requires the node to be stopped, writes nothing in
+the app root, and removes the native service, its activation and its logs; the
+node then runs as an ordinary direct node. Deleting an app root does not remove
+its service. `ryeos node host retire --orphaned --confirm` retires every RyeOS
+node service whose recorded app root no longer exists, and `ryeos node doctor`
+warns about them in its `host_services` row.
 
 ## Lifecycle RPC timeout
 

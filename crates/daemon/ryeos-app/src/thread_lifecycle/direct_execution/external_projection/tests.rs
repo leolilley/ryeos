@@ -158,6 +158,8 @@ fn direct_project_inputs_refuse_environment_authority() {
     };
     *environment = EnvironmentAuthority::Vault {
         namespace: "operator".into(),
+        recipient_principal: "operator".to_string(),
+        recipient_scopes: Vec::new(),
         name_authority: ryeos_state::objects::EnvironmentNameAuthority::DeclaredRequired,
     };
     authority.validate().unwrap();

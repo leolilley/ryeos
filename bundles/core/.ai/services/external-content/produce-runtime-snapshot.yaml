@@ -1,9 +1,8 @@
-# ryeos:signed:2026-09-29T09:15:35Z:0da8aa12d5b690ab6d19dcbc9d80f0ba476de69a41a71180158867bc6b15b6e8:V7OXfRIrcAfpB54AgCVuwSiiMc+9ZYo7S0fq2FRefaw9kN9WjT4y2G+Umj9g7cnRPsAx2SNwh27DEexrzhcJDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T09:59:46Z:9adc463d66e837aec7006477c0c934cf6b5725024eb1bce700282efa8d9dd9b2:Y9F4A5NVq2My70Qr9uiVoWVkzG0xxrp+uWSKw4xHGIgD16DVyTXhJBGGYC5yQhMmFD/O7JQrD/7NrQEnsJYoDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: external-content.produce-runtime-snapshot
 required_caps: ["ryeos.execute.service.external-content/produce-runtime-snapshot"]
 schema:
   binding_id: string
   source: object
-  source_occurrence_id: string
-description: Produce one unqualified provider snapshot locator from an exact retained captured guest-owner product under the current signed producer binding; materialized sources remain closed until bootstrap ownership is admitted
+description: "Produce one unqualified provider snapshot locator from an exact retained source under the current signed producer binding. A captured_product source names the node's ready bootstrap source (bootstrap_operation_id) or, until the external snapshot driver is retired, an operator-created sandbox (source_occurrence_id); a bundle_materialization source names its bootstrap_operation_id"

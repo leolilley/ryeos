@@ -52,6 +52,12 @@ struct Cli {
     /// Bind RyeOs principal storage to this launcher's signing-key principal.
     #[arg(long = "hosted-principal")]
     hosted_principal: bool,
+
+    /// Capability pattern to narrow the session to (repeatable). The session
+    /// holds the intersection of your scopes, the node's browser-session
+    /// ceiling and these patterns; it can never hold more than the ceiling.
+    #[arg(long = "scope")]
+    scopes: Vec<String>,
 }
 
 /// The one canonical root the launch selects: a shared presentation Config or a
@@ -72,6 +78,9 @@ struct MintResponse {
     launch_url: String,
     session_id: String,
     token: String,
+    /// The authority the session holds: the minter's scopes within the node's
+    /// browser-session ceiling and any requested narrowing.
+    granted_caps: Vec<String>,
     /// Exact public coordinate of the surface binding admitted for this
     /// launch. The browser obtains the same attachment through session open;
     /// retaining it in this strict response type keeps the launcher and daemon
@@ -127,11 +136,14 @@ async fn main() -> Result<()> {
     let user_principal_id = cli
         .hosted_principal
         .then(|| format!("fp:{}", signer.fingerprint));
-    let mint_body = ryeos_client_base::presentation::launch_mint_body(
+    let mut mint_body = ryeos_client_base::presentation::launch_mint_body(
         &root_ref,
         project_path.as_deref(),
         user_principal_id.as_deref(),
     );
+    if !cli.scopes.is_empty() {
+        mint_body["scopes"] = cli.scopes.clone().into();
+    }
 
     let body = serde_json::to_vec(&mint_body).context("serialize mint request")?;
 
@@ -181,6 +193,11 @@ async fn main() -> Result<()> {
     if mint_resp.session_id.is_empty() || mint_resp.token.is_empty() {
         anyhow::bail!("mint response carries no session credentials");
     }
+
+    ryeos_client_base::diagnostic::info(&format!(
+        "session authority · {}",
+        mint_resp.granted_caps.join(", ")
+    ));
 
     if cli.print_url || cli.no_open {
         println!("{}", mint_resp.launch_url);
@@ -412,6 +429,7 @@ mod tests {
             "token": "abc-123",
             "launch_url": "http://localhost:8080/custom/launch/abc-123",
             "session_id": "sess-456",
+            "granted_caps": ["ryeos.execute.service.ui/*"],
             "attachment": {
                 "binding_attachment_id": "attachment-789",
                 "binding_generation": 1,
@@ -435,6 +453,7 @@ mod tests {
             "http://localhost:8080/custom/launch/abc-123"
         );
         assert_eq!(resp.session_id, "sess-456");
+        assert_eq!(resp.granted_caps, ["ryeos.execute.service.ui/*"]);
         assert_eq!(resp.attachment.binding_attachment_id, "attachment-789");
         assert!(resp.attachment.validate().is_ok());
     }

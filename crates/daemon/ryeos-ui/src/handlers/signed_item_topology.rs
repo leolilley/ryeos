@@ -344,6 +344,9 @@ pub(crate) fn build_topology(
                         .spec_for(&resolution.matched_ext)
                         .map(|spec| &spec.signature),
                     &state.engine.trust_store,
+                    resolution.winner_space,
+                    kind,
+                    project_resolution_root.as_deref().map(std::path::Path::new),
                 ),
             });
 
@@ -850,6 +853,9 @@ pub(crate) fn classify_trust(
     access: Option<&crate::seat_auth::RetainedProjectAccess>,
     envelope: Option<&SignatureEnvelope>,
     trust_store: &ryeos_engine::trust::TrustStore,
+    space: ItemSpace,
+    kind: &str,
+    project_root: Option<&std::path::Path>,
 ) -> Option<TrustSummary> {
     let raw = crate::seat_auth::read_whole_item_source(path, access)?;
     let Some(envelope) = envelope else {
@@ -867,7 +873,8 @@ pub(crate) fn classify_trust(
     };
 
     let signer = Some(header.signer_fingerprint.clone());
-    let class = match verify_item_signature(&raw, &header, envelope, trust_store) {
+    let ctx = ryeos_engine::trust::SignerContext::new(space, kind, project_root);
+    let class = match verify_item_signature(&raw, &header, envelope, trust_store, &ctx) {
         Ok((TrustClass::Trusted, _)) => "trusted",
         Ok((TrustClass::Untrusted, _)) => "untrusted",
         Ok((TrustClass::Unsigned, _)) => "unsigned",
@@ -1117,8 +1124,16 @@ Then `rye_execute(item_type="directive", item_id="rye/code/quality/review", para
             "2026-05-27T00:00:00Z",
         );
         std::fs::write(&item_path, signed).unwrap();
-        let trusted = classify_trust(&item_path, None, Some(&envelope), &trust_store)
-            .expect("signed item should classify");
+        let trusted = classify_trust(
+            &item_path,
+            None,
+            Some(&envelope),
+            &trust_store,
+            ItemSpace::Bundle,
+            "config",
+            None,
+        )
+        .expect("signed item should classify");
         assert_eq!(trusted.class, "trusted");
         assert_eq!(trusted.signer.as_deref(), Some(fingerprint.as_str()));
 
@@ -1126,8 +1141,16 @@ Then `rye_execute(item_type="directive", item_id="rye/code/quality/review", para
             .unwrap()
             .replace(body, "name: tampered\n");
         std::fs::write(&item_path, tampered).unwrap();
-        let tampered = classify_trust(&item_path, None, Some(&envelope), &trust_store)
-            .expect("tampered signed item should classify");
+        let tampered = classify_trust(
+            &item_path,
+            None,
+            Some(&envelope),
+            &trust_store,
+            ItemSpace::Bundle,
+            "config",
+            None,
+        )
+        .expect("tampered signed item should classify");
         assert_ne!(tampered.class, "trusted");
     }
 }

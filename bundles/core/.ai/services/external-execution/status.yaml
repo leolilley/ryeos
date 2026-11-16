@@ -1,0 +1,8 @@
+# ryeos:signed:2026-11-13T09:44:35Z:926cfcfc59073346c684c905f61361df1ddf57d466b985910d2878e67386fd76:+XVurxzVVod5ChcQ+SY+MuOwxB7u9ndeWSap9uW4zWkzDE3Y11Oz7zbfKHfQXvPPx4oUQkrFiyqTQq5AjRpHCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: external-execution.status
+state_access: read_only_existing
+record_thread: false
+required_caps: ["ryeos.execute.service.external-execution/status"]
+schema: {}
+description: "List what still holds external capacity or a credential profile on this node: unsettled allocations, open Q local starts and held credential-profile locks, each with its owner, attention (in_use, settling, operator) and the step that releases it. Read only; local configured operator."

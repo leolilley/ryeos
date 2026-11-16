@@ -157,6 +157,22 @@ pub async fn handle(
             "enabled": spec.enabled,
         }));
     }
+    // Re-sealing must not produce a schedule the first fire would refuse
+    // (a delegation that lapsed, a policy the capabilities no longer cover).
+    let resealed = ryeos_scheduler_contract::ScheduleExecution {
+        authority: current.clone(),
+        ..spec.execution.clone()
+    };
+    crate::schedule_admission::refuse_authority_that_cannot_hold_at_fire(
+        &ryeos_app::scheduled_execution_authority::ScheduleAuthorityParts::from_state(
+            state.as_ref(),
+        ),
+        &resealed,
+    )
+    .map_err(|error| match error.downcast::<HandlerError>() {
+        Ok(refusal) => refusal,
+        Err(error) => HandlerError::Internal(format!("{error:#}")),
+    })?;
     let principal_grant_hash = current_grant.principal_grant_hash.clone();
     let rec = super::scheduler_register::rewrite_schedule_authority(&scheduler, &spec, current)
         .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;

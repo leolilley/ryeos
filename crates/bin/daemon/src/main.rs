@@ -3616,6 +3616,36 @@ fn main() -> Result<()> {
         );
         return Ok(());
     }
+    if let Some(config::DaemonCommand::HostRetire { app_root, orphaned }) = &cli.command {
+        lillux::require_administrator()?;
+        if *orphaned {
+            let retired = ryeos_node::supervision::retire_orphaned_host_services()?;
+            if retired.is_empty() {
+                println!("no orphaned host services");
+            }
+            for service in &retired {
+                println!(
+                    "retired host service {} (app root gone: {})",
+                    service.name,
+                    service
+                        .app_root
+                        .as_deref()
+                        .map(|root| root.display().to_string())
+                        .unwrap_or_default()
+                );
+            }
+        } else {
+            let app_root = app_root
+                .as_deref()
+                .context("host-retire requires --app-root or --orphaned")?;
+            if ryeos_node::supervision::retire_host_service(app_root)? {
+                println!("retired the host service of {}", app_root.display());
+            } else {
+                println!("no host service is associated with {}", app_root.display());
+            }
+        }
+        return Ok(());
+    }
     if let Some(config::DaemonCommand::HostInstall {
         package_root,
         action,
@@ -3753,8 +3783,11 @@ fn main() -> Result<()> {
     // Tokio's 2 MiB default while doing that work (the real-process test
     // harness has historically compensated with RUST_MIN_STACK). Make the
     // daemon's actual runtime contract explicit so direct debug and local
-    // qualification installs have the same safe floor as the harness.
-    const DAEMON_WORKER_STACK_BYTES: usize = 4 * 1024 * 1024;
+    // qualification installs have the same safe floor as the harness. The
+    // native launch path (callback authority, host access and root admission
+    // projection) is one deep unoptimized future; 16 MiB is address space
+    // reserved per worker and committed only as it is touched.
+    const DAEMON_WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
     let mut composition = DaemonSelectedComposition::bootstrap();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .thread_stack_size(DAEMON_WORKER_STACK_BYTES)
@@ -3916,9 +3949,14 @@ async fn run(
         anyhow::bail!("native and external host-runtime authorities are both present");
     }
     if let Some(service) = &host_service {
-        // Refuse a misconfigured root/wrong-account daemon before init checks,
-        // state-lock creation, tracing or lifecycle metadata writes.
-        service.binding.runtime.account.require_current_process()?;
+        // Refuse a root or wrong-account process before init checks,
+        // state-lock creation, tracing or lifecycle metadata writes, and take
+        // the no-new-privileges transition so no child can escalate. The
+        // standalone subcommands below run from an operator session on a
+        // stopped node, which keeps its supplementary groups. The supervised
+        // route proves the supervisor's full credential drop together with
+        // placement (`require_current_process_placed`).
+        service.binding.runtime.account.enter_current_process()?;
     }
     if let Some(runtime) = &external_host_runtime {
         runtime.binding().account.require_current_process()?;
@@ -3931,7 +3969,12 @@ async fn run(
     // it before the ordinary start below takes it again. Only the node
     // controller applies them; the standalone subcommands do not.
     if cli.command.is_none() {
-        let host = offline_host::DaemonOfflineHost::from_cli(&cli);
+        let host = offline_host::DaemonOfflineHost::from_cli(
+            &cli,
+            provider_environment
+                .as_ref()
+                .and_then(|environment| environment.as_ref().ok()),
+        );
         // Nothing offline operations do may keep the node from starting: an
         // error here is logged and the ordinary startup checks run next, so a
         // bad inbox can never make a crash loop.
@@ -3965,7 +4008,8 @@ async fn run(
     // their own state lock and must not conflict with the daemon's.
     if let Some(ref cmd) = cli.command {
         match cmd {
-            config::DaemonCommand::HostProvision { .. } => {
+            config::DaemonCommand::HostProvision { .. }
+            | config::DaemonCommand::HostRetire { .. } => {
                 unreachable!("handled before node startup")
             }
             config::DaemonCommand::InitPolicyPreflight { .. }
@@ -4093,10 +4137,13 @@ async fn run(
         .ensure_protects_app_root(&config.app_root)?;
 
     // Bundle-set recovery must observe the old/new completion fence before
-    // ordinary completion verification. The present v1 journal can safely
-    // discard pre-activation work and finalize an already signed exact-new
-    // completion; activated old-state restoration remains fail-closed until
-    // the journal owns exact backup coordinates.
+    // ordinary completion verification. The journal records both signed
+    // completions and the exact backup and staging coordinates in the
+    // transaction root, so recovery restores the exact old generation from
+    // any crash before the new completion is published (whatever was already
+    // activated) and completes the exact new one once it is. It refuses, for
+    // operator repair, only a completion that is neither, an absent one after
+    // publication started, or a new selection that may already have executed.
     let bundle_set_recovery = {
         let registry_lock =
             ryeos_node_runtime::registry::BundleRegistryMutationLock::acquire(&config.app_root)?;
@@ -4130,7 +4177,7 @@ async fn run(
     ));
 
     // Repair only daemon-local artifacts. Missing operator artifacts
-    // (user signing key, trust docs) fail with guidance to run
+    // (user signing key, signer record) fail with guidance to run
     // `ryeos init` — daemon never substitutes for operator init.
     bootstrap::repair_daemon_local(&config)?;
 
@@ -4343,6 +4390,7 @@ async fn run(
                     let node_principal = identity.principal_id();
 
                     let plan_ctx = ryeos_engine::contracts::PlanContext {
+                        logical_project_root: None,
                         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
                             ryeos_engine::contracts::Principal {
                                 fingerprint: node_principal,
@@ -4364,6 +4412,7 @@ async fn run(
                     let effective_requests = installed_refs
                         .iter()
                         .map(|canonical| ryeos_engine::engine::EffectiveItemRequest {
+                            logical_project_root: None,
                             item_ref: canonical.clone(),
                             expected_kind: Some(canonical.kind.clone()),
                             project_root: None,
@@ -4544,6 +4593,10 @@ async fn run(
                 .require::<ryeos_node_runtime::node_policy::sections::launch_trust::NodeLaunchTrustPolicy>()?
                 .check_against_kinds(&engine.kinds)
                 .context("node launch_trust policy does not fit the installed kinds")?;
+            node_policy_snapshot
+                .require::<ryeos_node_runtime::node_policy::sections::host_access::NodeHostAccessPolicy>()?
+                .check_against_kinds(&engine.kinds)
+                .context("node host_access policy grants an item whose kind cannot declare host authority")?;
             tracing::info!(
                 max_private_materialization_copy_bytes = private_copy_limit,
                 "node private materialization limit armed"
@@ -4886,6 +4939,10 @@ async fn run(
                     .retain(),
             );
 
+            let vault_ceilings = Arc::new(ryeos_app::vault::VaultCeilings::from_node_policy(
+                &node_policy_snapshot,
+                &config.operator_signing_key_path,
+            )?);
             let app_state = AppState {
                 config: Arc::new(config.clone()),
                 daemon_build: build.clone(),
@@ -4999,6 +5056,7 @@ async fn run(
                 node_policy: node_policy_snapshot,
                 vault,
                 provider_env: Arc::clone(provider_environment.environment()),
+                vault_ceilings,
                 command_registry,
                 authorizer,
                 ignore_matcher,
@@ -6379,6 +6437,9 @@ async fn run_periodic_recovery(state: AppState) -> Result<()> {
         tokio::select! {
             _ = &mut shutdown => return Ok(()),
             _ = tick.tick() => {}
+            // A stop left for recovery to settle wakes the pass at once
+            // instead of waiting out the period.
+            _ = ryeos_app::recovery_nudge::nudged() => {}
         }
 
         let pass_result = run_periodic_recovery_pass(&state, &cleanup_backoff).await;
@@ -6598,6 +6659,7 @@ async fn run_periodic_recovery_pass(
     let active = reconcile::reconcile_live_threads(state)
         .await
         .context("periodic active-thread reconcile")?;
+    ryeos_api::handlers::dedicated_sessions::mirror_stale_publication_report(state);
     let mut targets = active.active_thread_ids;
     dispatch_resume_intents(state, active.resume_intents)
         .await
@@ -7166,6 +7228,23 @@ fn defer_attached(deferred: &mut DeferredRows, item: &DrainAttached) {
     }
 }
 
+/// What remains of the live native factory before its planned rollover,
+/// read at each admission and each status read: the factory measures it to
+/// the signed rollover drain and work margins (`service_headroom`). Once the
+/// factory refuses service, every read refuses, and so does every fresh
+/// placement.
+fn native_service_headroom_reader(
+    factory: Arc<ryeos_node::native_capacity::LiveNativeFactory>,
+) -> ryeos_app::native_headroom::NativeServiceHeadroomReader {
+    ryeos_app::native_headroom::NativeServiceHeadroomReader::new(move || {
+        let headroom = factory.service_headroom()?;
+        Ok(ryeos_app::native_headroom::NativeServiceHeadroom {
+            work_steps: headroom.work_until_rollover,
+            service_seconds: headroom.service_until_rollover.as_secs(),
+        })
+    })
+}
+
 /// The reader launch admission judges declared node guarantees with. Each
 /// read re-reads the recorded report and verifies its digest and this
 /// node's signature over it, then refuses it unless it still describes the
@@ -7192,29 +7271,6 @@ fn defer_attached(deferred: &mut DeferredRows, item: &DrainAttached) {
 /// nothing this daemon does while it runs makes them stand. Only a failure
 /// to read the report file, the node identity or the host generation is an
 /// unreadable report, which a later attempt may read.
-/// What remains of the live native factory's prepaid work and service
-/// window, read at each admission. The work left is the envelope less the
-/// cleanup reserve less what service SQL has spent; the time left runs to
-/// the deadline by which this incarnation's service SQL must end. Once the
-/// factory refuses service, every read refuses, and so does every fresh
-/// placement.
-fn native_service_headroom_reader(
-    factory: Arc<ryeos_node::native_capacity::LiveNativeFactory>,
-) -> ryeos_app::native_headroom::NativeServiceHeadroomReader {
-    ryeos_app::native_headroom::NativeServiceHeadroomReader::new(move || {
-        let budget = factory.ready_factory()?.budget_snapshot()?;
-        let work_steps = budget
-            .allocator_steps_limit
-            .saturating_sub(budget.cleanup_reserved)
-            .saturating_sub(budget.allocator_steps);
-        let service_seconds = factory.original_sql_deadline()?.remaining().as_secs();
-        Ok(ryeos_app::native_headroom::NativeServiceHeadroom {
-            work_steps,
-            service_seconds,
-        })
-    })
-}
-
 fn node_capability_report_reader(
     app_root: std::path::PathBuf,
     policy_generation: String,
@@ -8294,6 +8350,7 @@ async fn run_service_standalone(
     let standalone_principal = standalone_operator.principal_id();
     let standalone_handler_context = standalone_operator_handler_context(&standalone_operator);
     let standalone_plan_ctx = ryeos_engine::contracts::PlanContext {
+        logical_project_root: None,
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
             ryeos_engine::contracts::Principal {
                 fingerprint: standalone_principal.clone(),
@@ -8637,6 +8694,10 @@ async fn run_service_standalone(
         node_policy: node_policy_snapshot.clone(),
         vault: standalone_vault,
         provider_env: Arc::clone(provider_environment.environment()),
+        vault_ceilings: Arc::new(ryeos_app::vault::VaultCeilings::from_node_policy(
+            &node_policy_snapshot,
+            &config.operator_signing_key_path,
+        )?),
         command_registry: standalone_command_registry,
         authorizer: standalone_auth,
         ignore_matcher: standalone_ignore_matcher,
@@ -9368,10 +9429,12 @@ mod shutdown_mapping_tests {
     }
 
     #[test]
-    fn no_mode_falls_back_to_three_second_default() {
+    fn no_mode_uses_named_node_fallback() {
         assert_eq!(
             resolve_shutdown_action(None),
-            ShutdownAction::Graceful(Duration::from_secs(3))
+            ShutdownAction::Graceful(Duration::from_secs(
+                ryeos_app::process::UNRECORDED_STOP_POLICY_GRACE_SECS,
+            ))
         );
     }
 

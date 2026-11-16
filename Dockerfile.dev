@@ -1,14 +1,14 @@
 # syntax=docker/dockerfile:1.7
 #
-# ryeosd-full:dev — fast local dev image.
+# ryeosd-standard:dev — fast local dev image of the standard set.
 # Copies host-built release binaries + already-published bundles
 # instead of compiling inside the image. Run scripts/populate-bundles.sh
 # on the host first.
 #
 # Build:
-#   docker build -f Dockerfile.dev -t ryeosd-full:dev .
+#   docker build -f Dockerfile.dev -t ryeosd-standard:dev .
 # Run (explicitly trust the dev/custom publisher baked into this image):
-#   docker run -e RYEOS_TRUST_BAKED_PUBLISHERS=1 ryeosd-full:dev
+#   docker run -e RYEOS_TRUST_BAKED_PUBLISHERS=1 ryeosd-standard:dev
 
 # debian:trixie ships glibc 2.41+, matching modern host toolchains. The
 # previous base (debian:bookworm-slim, glibc 2.36) refused to load
@@ -50,12 +50,10 @@ COPY target/release/ryeos-core-tools   /usr/local/bin/ryeos-core-tools
 COPY bundles/.ai         /opt/ryeos/.ai
 COPY bundles/core        /opt/ryeos/core
 COPY bundles/scheduling /opt/ryeos/scheduling
-COPY bundles/central-auth /opt/ryeos/central-auth
 COPY bundles/knowledge /opt/ryeos/knowledge
 COPY bundles/directive /opt/ryeos/directive
 COPY bundles/graph /opt/ryeos/graph
 COPY bundles/ryeos-docs /opt/ryeos/ryeos-docs
-COPY bundles/environment-qualification /opt/ryeos/environment-qualification
 COPY bundles/web         /opt/ryeos/web
 COPY bundles/browser     /opt/ryeos/browser
 COPY bundles/ryeos-ui     /opt/ryeos/ryeos-ui
@@ -69,7 +67,7 @@ ENV HOME=/data/app
 ENV RYEOS_APP_ROOT=/data/app
 LABEL io.ryeos.node-uid="10000"
 LABEL io.ryeos.node-gid="10000"
-ENV RYEOS_INIT_NODE_PROFILE=full
+ENV RYEOS_INIT_NODE_PROFILE=standard
 EXPOSE 8000
 
 # Image-level provenance only. The binary's own revision is baked in by the

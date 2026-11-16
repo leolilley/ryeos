@@ -8,7 +8,7 @@ use serde::de::{DeserializeOwned, DeserializeSeed, Error as _, MapAccess, SeqAcc
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-pub const ISOLATION_ADAPTER_PROTOCOL: &str = "ryeos.isolation-adapter/v14";
+pub const ISOLATION_ADAPTER_PROTOCOL: &str = "ryeos.isolation-adapter/v15";
 /// Second PID-first status document. The adapter may publish this only after
 /// Lillux's child-owned pre-exec observation; the parent requires EOF after
 /// exactly one document before accepting it.
@@ -160,7 +160,7 @@ impl<'de> Visitor<'de> for StrictJsonValueVisitor {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum IsolationAdapterProtocolVersion {
-    #[serde(rename = "ryeos.isolation-adapter/v14")]
+    #[serde(rename = "ryeos.isolation-adapter/v15")]
     Current,
 }
 
@@ -1398,13 +1398,44 @@ impl WorkspaceViewTransferReceipt {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkspaceMutationKind {
     UpsertRegular,
     UpsertSymlink,
     DeletePath,
     EnsureDirectory,
     OpaqueDirectory,
+    /// An upper-layer entry the protocol cannot carry as content. It names
+    /// only its path and why; RyeOS skips it when its ignore policy excludes
+    /// the path and refuses the seal when the path is included. The adapter
+    /// never decides that, because the ignore policy is not its to apply.
+    Unrepresentable {
+        reason: WorkspaceUnrepresentableReason,
+    },
+}
+
+/// Why an observed workspace entry has no protocol representation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceUnrepresentableReason {
+    /// A symlink whose target is absolute, empty, not UTF-8 or contains NUL:
+    /// it is not portable relative content.
+    UnportableSymlinkTarget,
+    /// A socket, FIFO or device other than an overlay whiteout.
+    UnsupportedEntryType,
+    /// A name that is not UTF-8. The path carries the name with each invalid
+    /// byte replaced by U+FFFD, and the entry is never descended into.
+    NonUtf8Name,
+}
+
+impl WorkspaceUnrepresentableReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UnportableSymlinkTarget => "unportable_symlink_target",
+            Self::UnsupportedEntryType => "unsupported_entry_type",
+            Self::NonUtf8Name => "non_utf8_name",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1614,6 +1645,7 @@ impl AdapterWorkspaceResponse {
                 WorkspaceMutationKind::UpsertRegular
                     | WorkspaceMutationKind::UpsertSymlink
                     | WorkspaceMutationKind::DeletePath
+                    | WorkspaceMutationKind::Unrepresentable { .. }
             ) {
                 non_directory_paths.insert(mutation.path.clone());
             }
@@ -2394,8 +2426,8 @@ mod tests {
 
     #[test]
     fn strict_json_rejects_duplicate_keys_at_every_depth() {
-        let top_level = r#"{"protocol":"ryeos.isolation-adapter/v14","protocol":"ryeos.isolation-adapter/v14","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
-        let nested = r#"{"protocol":"ryeos.isolation-adapter/v14","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3,"launcher":4}}"#;
+        let top_level = r#"{"protocol":"ryeos.isolation-adapter/v15","protocol":"ryeos.isolation-adapter/v15","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
+        let nested = r#"{"protocol":"ryeos.isolation-adapter/v15","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3,"launcher":4}}"#;
         for document in [top_level, nested] {
             let error = from_json_str_strict::<AdapterInspectionRequest>(document).unwrap_err();
             assert!(error.to_string().contains("duplicate JSON object key"));
@@ -2404,7 +2436,7 @@ mod tests {
 
     #[test]
     fn strict_json_rejects_unknown_fields_trailing_data_and_excessive_depth() {
-        let unknown = r#"{"protocol":"ryeos.isolation-adapter/v14","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3},"extra":true}"#;
+        let unknown = r#"{"protocol":"ryeos.isolation-adapter/v15","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3},"extra":true}"#;
         assert!(
             from_json_str_strict::<AdapterInspectionRequest>(unknown)
                 .unwrap_err()
@@ -2412,7 +2444,7 @@ mod tests {
                 .contains("unknown field")
         );
 
-        let valid = r#"{"protocol":"ryeos.isolation-adapter/v14","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
+        let valid = r#"{"protocol":"ryeos.isolation-adapter/v15","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
         assert!(
             from_json_str_strict::<AdapterInspectionRequest>(&format!("{valid} true"))
                 .unwrap_err()
@@ -3166,7 +3198,7 @@ mod tests {
         let request = workspace_request(WorkspaceLifecycleOperation::Create);
         request.validate().unwrap();
         let encoded = serde_json::to_value(&request).unwrap();
-        assert_eq!(encoded["protocol"], "ryeos.isolation-adapter/v14");
+        assert_eq!(encoded["protocol"], "ryeos.isolation-adapter/v15");
         let purposes = encoded["authorities"]
             .as_array()
             .unwrap()
@@ -3304,6 +3336,89 @@ mod tests {
         assert!(regular.validate().is_err());
         regular.target = None;
         regular.validate().unwrap();
+    }
+
+    #[test]
+    fn unrepresentable_mutation_carries_no_content_fields() {
+        for reason in [
+            WorkspaceUnrepresentableReason::UnportableSymlinkTarget,
+            WorkspaceUnrepresentableReason::UnsupportedEntryType,
+            WorkspaceUnrepresentableReason::NonUtf8Name,
+        ] {
+            let original = WorkspaceMutation {
+                path: "cache/entry".into(),
+                kind: WorkspaceMutationKind::Unrepresentable { reason },
+                normalized_mode: None,
+                size: None,
+                content_hash: None,
+                target: None,
+            };
+            original.validate().unwrap();
+            let wire = serde_json::to_value(&original).unwrap();
+            assert_eq!(
+                wire["kind"],
+                serde_json::json!({"unrepresentable": {"reason": reason.as_str()}})
+            );
+            assert!(wire["target"].is_null());
+            assert_eq!(
+                serde_json::from_value::<WorkspaceMutation>(wire.clone()).unwrap(),
+                original
+            );
+            for (field, value) in [
+                ("normalized_mode", serde_json::json!(420)),
+                ("size", serde_json::json!(1)),
+                ("content_hash", serde_json::json!("a".repeat(64))),
+                ("target", serde_json::json!("/usr/bin/python3")),
+            ] {
+                let mut changed = wire.clone();
+                changed[field] = value;
+                assert!(
+                    serde_json::from_value::<WorkspaceMutation>(changed)
+                        .unwrap()
+                        .validate()
+                        .is_err(),
+                    "{field} on an unrepresentable entry"
+                );
+            }
+            let mut unknown_reason = wire.clone();
+            unknown_reason["kind"]["unrepresentable"]["reason"] = serde_json::json!("hard_link");
+            assert!(serde_json::from_value::<WorkspaceMutation>(unknown_reason).is_err());
+            let mut extra = wire.clone();
+            extra["kind"]["unrepresentable"]["target"] = serde_json::json!("x");
+            assert!(serde_json::from_value::<WorkspaceMutation>(extra).is_err());
+            let mut bare = wire;
+            bare["kind"] = serde_json::json!("unrepresentable");
+            assert!(serde_json::from_value::<WorkspaceMutation>(bare).is_err());
+        }
+    }
+
+    #[test]
+    fn workspace_mutations_cannot_descend_through_an_unrepresentable_entry() {
+        let request = workspace_request(WorkspaceLifecycleOperation::FreezeAndDiff);
+        let mut response = workspace_response(&request);
+        response.mutations = vec![
+            WorkspaceMutation {
+                path: "cache/\u{fffd}dir".into(),
+                kind: WorkspaceMutationKind::Unrepresentable {
+                    reason: WorkspaceUnrepresentableReason::NonUtf8Name,
+                },
+                normalized_mode: None,
+                size: None,
+                content_hash: None,
+                target: None,
+            },
+            WorkspaceMutation {
+                path: "cache/\u{fffd}dir/child".into(),
+                kind: WorkspaceMutationKind::EnsureDirectory,
+                normalized_mode: None,
+                size: None,
+                content_hash: None,
+                target: None,
+            },
+        ];
+        assert!(response.validate_for(&request).is_err());
+        response.mutations.pop();
+        response.validate_for(&request).unwrap();
     }
 
     #[test]
@@ -3489,7 +3604,11 @@ mod tests {
             from_json_slice_strict::<AdapterLaunchRequest>(&serde_json::to_vec(&missing).unwrap())
                 .is_err()
         );
-        for old in ["ryeos.isolation-adapter/v12", "ryeos.isolation-adapter/v13"] {
+        for old in [
+            "ryeos.isolation-adapter/v12",
+            "ryeos.isolation-adapter/v13",
+            "ryeos.isolation-adapter/v14",
+        ] {
             let mut altered = value.clone();
             altered["protocol"] = serde_json::json!(old);
             assert!(
@@ -3569,7 +3688,7 @@ mod tests {
         let request = original_occupancy_request();
         request.validate().unwrap();
         let value = serde_json::to_value(&request).unwrap();
-        assert_eq!(value["protocol"], "ryeos.isolation-adapter/v14");
+        assert_eq!(value["protocol"], "ryeos.isolation-adapter/v15");
         let mut missing = value.clone();
         missing
             .as_object_mut()

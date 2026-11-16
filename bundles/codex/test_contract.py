@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-11T02:56:41Z:39d960c5eda64b4d270347661ac137761bcf412a0b7a910be7dfed929b71746e:ilzyr+k3GtowdReKFXvfwzosUbUYBaYUWHNmcmgRvKjjuIpKhX9YhhsmbpWnn2qu9jtDT4mf53Cqbqe8SWo7DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T06:51:31Z:99773a3dafe8026a380cc9a18779ca476078463a73fd0cc66e2318b1afad1b16:3lFThJhFgtenWuFJNWE32TvjsFcrRSTxzyYDAD7j70a0pD9N9hCmDkmCEV4r0xylg92A2iPPyi2WHyxgW8LcDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Bundle-owned conformance tests for the pinned Codex integration data."""
 
 from __future__ import annotations
@@ -730,7 +730,7 @@ class CodexContractTests(unittest.TestCase):
         self.assertIn("workload_client: null", environment)
 
     def test_minimal_profile_has_no_workload_ingress_or_socket_allowance(self) -> None:
-        self.assertEqual(self.profile["schema_version"], 11)
+        self.assertEqual(self.profile["schema_version"], 12)
         self.assertIsNone(self.profile["external_candidate"])
         self.assertEqual(self.profile["auxiliary_configs"], [])
         self.assertEqual(self.profile["runtime_configs"], [])
@@ -1098,7 +1098,7 @@ class CodexContractTests(unittest.TestCase):
         for request in self.profile["server_requests"]:
             self.assertNotIn("response_style", request)
             self.assertEqual(
-                set(request["responses"]), {"accept", "cancel", "decline", "expire"}
+                set(request["responses"]), {"accept", "decline", "expire"}
             )
             self.assertEqual(
                 set(request["correlation"]),
@@ -1238,7 +1238,7 @@ class CodexContractTests(unittest.TestCase):
 
     def test_external_original_config_initialization_uses_pinned_rpc_shapes(self) -> None:
         profile = json.loads((SOURCE / "external-authoring.profile.json").read_text())
-        self.assertEqual(profile["schema_version"], 11)
+        self.assertEqual(profile["schema_version"], 12)
         self.assertEqual(profile["configuration_absence"], {
             "absolute_paths": ["/etc/codex/config.toml", "/etc/codex/managed_config.toml",
                                "/etc/codex/requirements.toml"],
@@ -1247,7 +1247,7 @@ class CodexContractTests(unittest.TestCase):
         })
         for name in ("structured-session.profile.json", "authoring.profile.json"):
             ordinary = json.loads((SOURCE / name).read_text())
-            self.assertEqual(ordinary["schema_version"], 11)
+            self.assertEqual(ordinary["schema_version"], 12)
             self.assertEqual(ordinary["configuration_absence"], {
                 "absolute_paths": [], "startup_ancestor_paths": [], "route_ancestor_paths": [],
             })

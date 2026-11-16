@@ -141,6 +141,7 @@ async fn launch_mint_rejects_invalid_user_principal_as_bad_request() {
         root_ref: "surface:ryeos/ui/base".into(),
         project_path: None,
         user_principal_id: Some("session:not-a-principal".into()),
+        scopes: None,
     };
 
     let err = ryeos_ui::handlers::ui_launch_mint::handle(
@@ -163,6 +164,7 @@ async fn launch_mint_rejects_mismatched_user_principal() {
         root_ref: "surface:ryeos/ui/base".into(),
         project_path: None,
         user_principal_id: Some(format!("fp:{}", "aa".repeat(32))),
+        scopes: None,
     };
 
     let err = ryeos_ui::handlers::ui_launch_mint::handle(

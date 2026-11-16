@@ -119,7 +119,7 @@ pub struct ProjectInfo {
 #[serde(deny_unknown_fields)]
 pub struct RemoteSummary {
     pub name: String,
-    pub url: String,
+    pub url: Option<String>,
     pub principal_id: String,
 }
 
@@ -282,7 +282,7 @@ fn build_dimension_projection(
     });
 
     // ── Remotes (configured only, no probes) ──
-    let remotes = load_remotes(state, project_access);
+    let remotes = load_remotes(state);
 
     // ── Threads ──
     let active_threads = state.state_store.active_thread_count().unwrap_or(0);
@@ -328,16 +328,9 @@ fn build_dimension_projection(
 
 // ── Data-loading helpers ────────────────────────────────────────────
 
-/// Load configured remotes without probing. Returns empty on error. The
-/// project layer is read only through the retained project directory.
-fn load_remotes(
-    state: &AppState,
-    project_access: Option<&crate::seat_auth::RetainedProjectAccess>,
-) -> Vec<RemoteSummary> {
-    match ryeos_api::remote::config::load_remotes_layered_under_project_authority(
-        &state.config.app_root,
-        project_access.map(crate::seat_auth::RetainedProjectAccess::directory),
-    ) {
+/// Load configured remotes without probing. Returns empty on error.
+fn load_remotes(state: &AppState) -> Vec<RemoteSummary> {
+    match ryeos_api::remote::config::load_remotes(&state.config.app_root) {
         Ok(remotes_map) => {
             let mut entries: Vec<RemoteSummary> = remotes_map
                 .values()

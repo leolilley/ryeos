@@ -69,7 +69,7 @@ pub async fn handle(
             let report = ryeos_bundle::preflight::preflight_verify_bundle_report_in_context(
                 &source,
                 &dependencies,
-                &state.config.runtime_root().config(),
+                &state.config.app_root,
                 Arc::clone(&state.isolation),
             )
             .context("bundle verify failed")?;
@@ -201,18 +201,22 @@ mod tests {
         let request: Request = serde_json::from_value(json!({"source":"/candidate"})).unwrap();
         let registered = [
             RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
                 name: "core".into(),
                 canonical_root: "/core".into(),
             },
             RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
                 name: "candidate".into(),
                 canonical_root: "/installed-old".into(),
             },
             RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
                 name: "same-path".into(),
                 canonical_root: "/candidate".into(),
             },
             RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
                 name: "graph".into(),
                 canonical_root: "/graph".into(),
             },
@@ -242,6 +246,7 @@ mod tests {
         }))
         .unwrap();
         let registered = [RegisteredBundleRoot {
+            owned_namespaces: Vec::new(),
             name: "unused".into(),
             canonical_root: "/not-selected".into(),
         }];

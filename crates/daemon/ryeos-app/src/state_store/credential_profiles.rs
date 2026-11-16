@@ -291,6 +291,20 @@ impl StateStore {
         Ok(generation)
     }
 
+    pub fn abandon_credential_enrollment(
+        &self,
+        profile_id: &str,
+        owner_principal: &str,
+        login_epoch: u64,
+    ) -> Result<u64> {
+        let g = self.lock()?;
+        let revision =
+            g.runtime_db
+                .abandon_credential_enrollment(profile_id, owner_principal, login_epoch)?;
+        persist_credential_profile_authority_locked(&g, profile_id)?;
+        Ok(revision)
+    }
+
     pub fn cancel_credential_enrollment(
         &self,
         profile_id: &str,

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T00:09:46Z:b1929b73655e1cdd9ffc4e1fc0f0076a0cb6b19c588425fe7458a65bfa1d6fcc:8Doa/Xhbax5tzx1vfWi9ATHWmFbLaRM424KGbHFVs/D9MY5zOf8MZgA6H15Y8ZqFCC1oHCxmfa+o1TTlkNjXDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-15T02:27:40Z:53543af6b36c8f6e7a856a806ef26ccf8bf5fe8212039b6d9f466a43e852f053:4cKNKap3qWFYc5dwmzA99xqC7zB+cGAn0fHC05LtJsVg/n4DYY72T76OQPpLL5z+vnNf4Kw7NIACHjAfaPEkAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: source-local-bundle-development
@@ -201,7 +201,7 @@ branch integration: the prior Rust test covered eight profiles and omitted
 both role-specific profiles.
 
 The release-authority ceiling matches the explicit bounded values already used
-by `full` and `development`. It is an operator-authored initial node-wide
+by `standard` and `development`. It is an operator-authored initial node-wide
 ceiling, below structural producer maxima but not derived from per-recipe
 measurements. Keep that distinction visible through qualification; do not
 describe the current limits as measured recipe budgets.
@@ -336,7 +336,7 @@ only `bundles/bundle-source`, using the already-published byte-identical
 `bundles/core/.ai/bin/x86_64-unknown-linux-gnu/ryeos-core-tools` and
 `bundles/core` as registry. `--owner` is a display/trust label, not key
 selection: the publisher reads the signing key from
-`$RYEOS_APP_ROOT/.ai/config/keys/signing/private_key.pem`. Therefore a build
+`$RYEOS_APP_ROOT/.ai/node/operator/signing/private_key.pem`. Therefore a build
 must use an explicitly isolated signing-only app root containing the
 authorized Development key and verify its derived fingerprint against source
 trust before invocation. This temporary key context is not a node home or a
@@ -1631,10 +1631,10 @@ Core carries one self-contained `linux-lillux` isolation adapter under the
 clean-cut isolation-adapter v10 protocol. The backend is available signed data,
 not ambient host setup: bundle membership does not activate it and every
 ordinary init profile remains explicitly disabled. The separately selectable
-`development` init profile maps to the existing `full` bundle set and enables
+`development` init profile maps to the `development` bundle set and enables
 the backend plus a finite workload-client node ceiling. It is a policy choice,
 not a duplicate bundle distribution. A fresh local development node selects it
-with `--bundle-set full --node-profile development`; replacing an existing
+with `--bundle-set development --node-profile development`; replacing an existing
 policy generation additionally requires the explicit
 `--reset-node-policy-generation` decision. Hosted-worker profiles retain their
 independently selected network policy.

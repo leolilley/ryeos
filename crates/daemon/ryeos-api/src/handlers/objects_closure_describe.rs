@@ -1,17 +1,25 @@
 //! `objects/closure/describe` — describe the schema-defined CAS closure for root objects.
+//!
+//! The request names a typed read root and the closure roots it wants
+//! described; each closure root must itself be reachable from that read root.
 
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
+use crate::objects_read_scope::{ReadRoot, require_objects_in_scope, resolve_scope, root_required};
 use crate::registry::ServiceDescriptor;
+use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
+    /// The read root every closure root must be reachable from.
+    #[serde(default)]
+    pub root: Option<ReadRoot>,
     pub roots: Vec<String>,
     #[serde(default)]
     pub max_objects: Option<usize>,
@@ -55,6 +63,20 @@ pub(crate) struct AdmittedRequest {
     pub allow_untransported_large_objects: bool,
 }
 
+/// Resolve the request's read root for the caller and require every closure
+/// root to be reachable from it.
+pub(crate) fn require_roots_in_scope(
+    req: &Request,
+    ctx: &HandlerContext,
+    state: &AppState,
+    service: &str,
+) -> Result<()> {
+    let root = req.root.as_ref().ok_or_else(|| root_required(service))?;
+    let scope = resolve_scope(root, ctx, state)?;
+    require_objects_in_scope(&scope, root, &req.roots)?;
+    Ok(())
+}
+
 pub(crate) fn admit_request(req: Request, state: &AppState) -> Result<AdmittedRequest> {
     let policy = state
         .node_policy
@@ -94,7 +116,15 @@ pub(crate) fn admit_request(req: Request, state: &AppState) -> Result<AdmittedRe
     })
 }
 
-pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
+pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
+    require_roots_in_scope(&req, &ctx, &state, "objects/closure/describe")?;
+    handle_authorized(req, state).await
+}
+
+/// Describe the closure of roots a caller has already been authorized to read.
+/// Scope is enforced by [`handle`]; this entry exists so closure mechanics can
+/// be exercised without a caller.
+pub async fn handle_authorized(req: Request, state: Arc<AppState>) -> Result<Value> {
     let req = admit_request(req, &state)?;
     let report = collect_limited_closure(&req, state)?;
     let response = closure_summary_json(&report, false);
@@ -304,10 +334,10 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     endpoint: "objects.closure.describe",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.objects/closure/describe"],
-    handler: |params, _ctx, state| {
+    handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
-            handle(req, state).await
+            handle(req, ctx, state).await
         })
     },
 };

@@ -236,7 +236,11 @@ pub(crate) fn capsule_source_placement(
         }
         _ => false,
     });
-    Ok(source_member_placement(consumes_members, enforced))
+    // A host-direct plan ran under its per-launch disabled-shape view.
+    Ok(source_member_placement(
+        consumes_members,
+        enforced && !plan.execution_posture.is_host_direct(),
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

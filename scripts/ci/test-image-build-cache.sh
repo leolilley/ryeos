@@ -124,7 +124,7 @@ grep -q -- 'cargo build --release --locked -p ryeos-core-tools' <<<"$real_builds
 # Every node and CLI pair: ryeos_build_daemon_pair builds each package in its own
 # invocation with its own unqualified features, so each needs a cook with exactly that.
 pair_cooks="$(cook_with '--no-default-features')"
-for set in core core-scheduling core-workflow core-knowledge standard f5r-controller central-host local-inference hosted-workflow; do
+for set in core core-scheduling core-workflow core-knowledge standard hosted-controller central-host local-inference hosted-workflow; do
     for package in ryeosd ryeos-cli; do
         features="$(ryeos_bundle_set_cargo_features "$set" "$package" | tr ',' '\n' | sed -n "s|^$package/||p" | paste -sd, -)"
         cook="$(sed 's/"\$package"/'"$package"'/' <<<"$pair_cooks")"

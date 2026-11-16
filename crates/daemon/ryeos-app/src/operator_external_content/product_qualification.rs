@@ -2643,6 +2643,7 @@ pub(super) fn resolve_consumer_definition_in_generation(
     }
     let resolution =
         generation.effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
+            logical_project_root: None,
             item_ref: canonical,
             expected_kind: Some(kind.into()),
             project_root: None,
@@ -4681,6 +4682,7 @@ fn resolve_current_bundle_verifier_identity_in_generation(
         // fixtures only. Production evidence paths always carry a sealed
         // capsule and cannot invent project authority here.
         let plan_context = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: context.fingerprint.clone(),
                 scopes: context.scopes.clone(),
@@ -4887,7 +4889,17 @@ fn resolve_current_bundle_verifier_identity_in_generation(
                 binding_subject_authority,
             )?;
             if !preview.validation.ready_for_admission {
-                bail!("selected qualification verifier has no current exact content binding");
+                let consumer = crate::external_content_admission::consumer_authority(
+                    &resolution,
+                    binding_subject_authority,
+                )?;
+                return Err(
+                    crate::external_content_admission::ContentBindingMissing::from_preview(
+                        &consumer,
+                        &preview.validation,
+                    )
+                    .into(),
+                );
             }
             let realized = preview
                 .realizations

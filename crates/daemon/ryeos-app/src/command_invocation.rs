@@ -37,6 +37,7 @@ pub fn normalize_selected_parameters(
     }
     let effective = engine
         .effective_item(ryeos_engine::engine::EffectiveItemRequest {
+            logical_project_root: None,
             item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(item_ref)
                 .map_err(|e| e.to_string())?,
             expected_kind: None,
@@ -126,6 +127,17 @@ pub fn compile_command_invocation(
         command.dispatch,
         CommandDispatch::DirectExecuteItemRef { .. }
     );
+    // Project selectors may appear anywhere in the tail. Separate them before
+    // any positional matching so a selector (or its value) can never be taken
+    // for the item ref or a positional slot.
+    let mut selectors = serde_json::Map::new();
+    if direct_execute || (!command.forms.is_empty() && command.project.is_some()) {
+        let (rest, found) = separate_project_control_flags(&tail).map_err(Invalid)?;
+        tail = rest;
+        selectors = found;
+    } else if !command.forms.is_empty() {
+        tail = strip_no_project_flags(&tail);
+    }
     let (item_ref, validate_only) = match &command.dispatch {
         CommandDispatch::ExecuteRef { execute, .. } => (execute.clone(), false),
         CommandDispatch::DirectExecuteItemRef {
@@ -135,8 +147,18 @@ pub fn compile_command_invocation(
         } => {
             // A positional target leaves all structured item fields untouched.
             // If the target is supplied structurally, consume that field only.
-            let target = if tail.first().is_some_and(|s| !s.starts_with('-')) {
-                tail.remove(0)
+            let positional = if tail.first().is_some_and(|s| !s.starts_with('-')) {
+                Some(0)
+            } else {
+                // Item ref after other flags: first non-flag token that is
+                // a canonical ref (flag values are not canonical refs).
+                tail.iter().position(|s| {
+                    !s.starts_with('-')
+                        && ryeos_engine::canonical_ref::CanonicalRef::parse(s).is_ok()
+                })
+            };
+            let target = if let Some(index) = positional {
+                tail.remove(index)
             } else {
                 overlay
                     .as_object_mut()
@@ -190,8 +212,8 @@ pub fn compile_command_invocation(
         )));
     }
     let (mut parameters, project_path) = if direct_execute {
-        let (payload, selectors) = separate_project_control_flags(&tail).map_err(Invalid)?;
-        let mut selectors = Value::Object(selectors);
+        let payload = tail.clone();
+        let mut selectors = Value::Object(std::mem::take(&mut selectors));
         let project_path = apply_project_policy_with_context(
             command,
             &mut selectors,
@@ -215,6 +237,19 @@ pub fn compile_command_invocation(
     } else {
         let mut parameters =
             bind_command_input(binding_command, &tail, &overlay, &load_input).map_err(Invalid)?;
+        if !selectors.is_empty() {
+            let object = parameters
+                .as_object_mut()
+                .ok_or_else(|| Invalid("command parameters must be a JSON object".into()))?;
+            for (field, value) in std::mem::take(&mut selectors) {
+                if object.contains_key(&field) {
+                    return Err(Invalid(format!(
+                        "parameter '{field}' conflicts with the command's runtime-bound project selector"
+                    )));
+                }
+                object.insert(field, value);
+            }
+        }
         let path = apply_project_policy_with_context(
             command,
             &mut parameters,
@@ -566,6 +601,16 @@ pub fn strip_declared_control_flags(
     }
     *tail = parameters;
     Ok(controls)
+}
+
+/// Drop the projectless selector from a tail whose command has no project
+/// policy: it is meaningless there, and left in place its bare-flag binding
+/// would swallow the next positional as its value.
+fn strip_no_project_flags(tail: &[String]) -> Vec<String> {
+    tail.iter()
+        .filter(|t| *t != "--no-project" && !t.starts_with("--no-project="))
+        .cloned()
+        .collect()
 }
 
 pub fn strip_project_control_flags(tail: &[String]) -> Vec<String> {

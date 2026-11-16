@@ -424,7 +424,10 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         // Policy capability checks precede canonicalization or any other
         // caller-selected project filesystem access.
         preauthorize_execution_policy(&req.execution_policy, &principal_scopes, &ctx.state)
-            .map_err(|error| RouteDispatchError::BadRequest(format!("{error:#}")))?;
+            .map_err(|error| {
+                crate::routes::response_modes::execute_mode::operator_vault_route_error(&error)
+                    .unwrap_or_else(|| RouteDispatchError::BadRequest(format!("{error:#}")))
+            })?;
 
         let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
         if let Some(timings) = ctx.launch_timings.as_ref() {
@@ -550,7 +553,11 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             if let Some(timings) = ctx.launch_timings.as_ref() {
                 timings.emit("gateway_preflight_failed");
             }
-            RouteDispatchError::BadRequest(format!("stream root launch admission failed: {error}"))
+            crate::routes::launch::typed_launch_policy_refusal(&error).unwrap_or_else(|| {
+                RouteDispatchError::BadRequest(format!(
+                    "stream root launch admission failed: {error}"
+                ))
+            })
         })?;
         if !preflight.class.persists_pre_minted_root() {
             return Err(RouteDispatchError::BadRequest(

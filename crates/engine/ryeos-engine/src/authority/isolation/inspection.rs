@@ -526,6 +526,8 @@ pub struct IsolationInspection {
     pub enclosure_inits: Vec<String>,
     /// Signed hard lifetime of the node's host class, when declared.
     pub host_lifetime_bound: Option<lillux::process_control::HostLifetimeBound>,
+    /// Whether this host class offers the host-direct execution posture.
+    pub host_direct: super::policy::IsolationHostDirect,
     /// Populated only after the retained provider's actual placement/barrier/
     /// termination probe succeeded, never from a list of implemented features.
     pub process_scope_capabilities: BTreeSet<lillux::ProcessScopeCapability>,

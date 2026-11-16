@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-10T02:15:35Z:e1452dc0eb79f8bb59c84b02236774f69d76e2884b89a8628e0c59b842dc53e2:hxARYKWB4WfA07fYHDeyglbUGpS7GrIfd+5FXlgTyRCe9wieSPrdm7T+hG/zPOKOcybukEq004snR7NKHPATDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T04:43:16Z:6bae0dbfd79ee64042f4e5ae86fe43ba504def0e941b6a4064348c6ff79dff07:uYCw/eKIBj47PhW4byORYRNt1QIi7IeP2tw1xHywb1DNi90wXddLiWlcuzAqyH/zpMzyff9fznTmii3UFCxJAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, architecture, overview]
@@ -148,8 +148,11 @@ Use `ryeos sign <ref>` to sign items. Use `ryeos verify <ref>` to check them.
 
 ### Capabilities
 Execution is **capability-gated**. Items declare which capabilities they need
-under `requires.capabilities.declared` (a flat list of self-asserted caps). The
-daemon checks these against the calling context before allowing execution.
+under `requires.capabilities.declared` (a flat list of the caps they need).
+Declaring a cap does not grant it: the caller must hold every declared cap, or
+the launch is refused with `caller_capability_not_covered`. The thread runs
+with exactly the declared caps plus the runtime authority its bundle's signed
+manifest grants.
 Capabilities use dot-namespaced strings like `ryeos.execute.tool.ryeos.file-system.*`.
 
 ### Threads

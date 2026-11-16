@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-18T22:04:50Z:90c203c7f402ceaedc06d07721a36b0ed45216cc4f062d362e7f2e5a9da2e9fa:gUIyJwCPzOYe4DuN5j/ALbCrgsWi4C+9uVXlJ2rxAQ8xdaHI9U/hOwGYhrqd0b1tLAh5PSpB5mSDRWoSEKT9AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T06:02:00Z:73419ca4b33dcb6263ed40a6203d277db202efb418815244e3f54db65d20bb3c:+jBV/RQFx/wP8jG/deLkEdkLU0qPokCeiJWuMJk+FdYRELPLNxRKBiHf9wnBrHY39EeV6AA5+Z1mG1vqrn4OBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/protocols
 tags: [callbacks, auth, uds, runtime, tokens, capabilities]
-version: "1.1.0"
+version: "1.2.0"
 description: >
   Daemon-runtime callback authentication contract: callback capability
   tokens, thread-auth tokens, env injection, TTLs, caps enforcement, and
@@ -48,6 +48,17 @@ composition as typed protocol bindings. `runtime`, `method_runtime`, and
 - `RYEOSD_PROJECT_STATE_SCOPE` — opaque logical-project namespace identity;
   stable across pinned COW successors and not itself an authority
 - `RYEOSD_THREAD_AUTH_TOKEN`
+- `RYEOSD_ACTING_PRINCIPAL` — the principal the daemon authorized for this
+  launch (`fp:<64 hex>`, `session:<id>` for session-local UI dispatch, or the
+  schedule's principal). `tool_callback` and `tool_streaming` declare it. It
+  tells a tool who called it; it is information, not proof. To record who did
+  something, read the `attribution.actor` the daemon stamps on a bundle event.
+
+- `RYEOSD_BUNDLE_STATE_HOME` — the one node-owned bundle state namespace this
+  launch opened: `/run/ryeos/bundle-state` under enforced isolation, the real
+  directory otherwise. `tool_callback` and `tool_streaming` declare it; it is
+  absent when the item declared no `runtime_authority.state_home`. It names a
+  directory, it is not authority (see `ryeos/standard/bundle-state-home`).
 
 The callback token and thread identity bind the durable project/state
 authority server-side. A subprocess does not receive or submit the canonical

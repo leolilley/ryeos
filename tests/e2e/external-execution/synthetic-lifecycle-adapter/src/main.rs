@@ -349,8 +349,10 @@ fn run() -> Result<()> {
         "produce-snapshot-upload" => snapshot_lane::produce_snapshot_upload(&adapter),
         "produce-snapshot-create" => snapshot_lane::produce_snapshot_create(&adapter),
         "observe-snapshot-readiness" => snapshot_lane::observe_snapshot_readiness(&adapter),
+        "list-provider-resources" => snapshot_lane::list_provider_resources(&adapter),
         "qualify-snapshot-create" => snapshot_lane::qualify_snapshot_create(&adapter),
         "qualify-snapshot-verify" => snapshot_lane::qualify_snapshot_verify(&adapter),
+        "qualify-snapshot-observe" => snapshot_lane::observe_snapshot_qualification(&adapter),
         "qualify-snapshot-terminate" => {
             snapshot_lane::terminate_snapshot_qualification(&adapter, true)
         }

@@ -147,12 +147,12 @@ pub(crate) fn run_handler_subprocess_bounded(
                 crate::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
             live_access: None,
             state_root: None,
+            bundle_state_home: None,
             checkpoint_dir: None,
             checkpoint_authority: None,
             daemon_socket_path: None,
             captured_callback_socket: false,
             bundle_roots: &launch.bundle_roots,
-            node_trusted_keys_dir: None,
             verified_code: &verified_code,
             verified_command: Some(&verified_code[0]),
             external_read_only_mounts: &[],
@@ -171,6 +171,12 @@ pub(crate) fn run_handler_subprocess_bounded(
             return Err(EngineError::HandlerSpawnFailed {
                 handler: canonical_ref.clone(),
                 detail: format!("isolation adapter refused launch: {refusal}"),
+            });
+        }
+        if let Some(busy) = output.process_creation_busy {
+            return Err(EngineError::ProcessCreationBusy {
+                subject: canonical_ref.clone(),
+                detail: busy.to_string(),
             });
         }
         if output.timed_out {

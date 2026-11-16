@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-13T00:09:46Z:c0b30a3a9b1f7c9e62ae1ce5691d3dd005da7b61a4f448891a3a17bfa0d6356d:ZlJNZSLUmZC9Kczp1HZpRY+33PFRYD50KNuCq+H0bl7JSvr3pR7gCNnqskU4epOZha+RCVJn4tgy+xfnZKzvAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-15T00:55:34Z:776bda74ff42d667927bad95b0143147dab80cf4a3df814081b50c21542f1dda:qG/nPMGEgXqeORmY140egdTTvEOXk3vhmu/ELCI/mFuNX6s7uMrpFL836L+QPYOUm5W3hDyaT1ZpnC0GPyx6Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Externally invoked host helper in the development bundle; lib/ is excluded
 # from Tool resolution, so this is signed source, not an admitted Tool. It
 # grants no RyeOS authority. Run it from a checkout of this repository.
@@ -42,7 +42,7 @@ Examples:
   .ai/tools/ryeos/development/interactive-host/lib/dev-ui-assets.sh --print-env
 
 After startup, open http://127.0.0.1:7411/ui, edit files under
-crates/clients/rune/pkg (scripts/build-rune-web.sh rebuilds it), and refresh the browser.
+crates/clients/rune/pkg (browser-assets-production/lib/build-rune-web.sh rebuilds it), and refresh the browser.
 EOF
 }
 
@@ -227,7 +227,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def do_HEAD(self):
-        if self.path == "/" or self.path == "/ui" or self.path.startswith("/ui?"):
+        if urllib.parse.urlsplit(self.path).path in {"/", "/ui", "/ui/"}:
             return self.serve_asset("index.html", head_only=True)
         if self.path.startswith("/ui/assets/"):
             path = urllib.parse.urlsplit(self.path).path.removeprefix("/ui/assets/")
@@ -235,7 +235,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return self.proxy(head_only=True)
 
     def do_GET(self):
-        if self.path == "/" or self.path == "/ui" or self.path.startswith("/ui?"):
+        if urllib.parse.urlsplit(self.path).path in {"/", "/ui", "/ui/"}:
             return self.serve_asset("index.html")
         if self.path.startswith("/ui/assets/"):
             path = urllib.parse.urlsplit(self.path).path.removeprefix("/ui/assets/")
@@ -257,11 +257,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             candidate.relative_to(asset_dir)
         except ValueError:
             return self.send_error(403)
+        # The renderer and fonts are stored gzip-encoded, as the daemon serves them.
+        encoding = None
+        if not candidate.is_file() and candidate.with_name(candidate.name + ".gz").is_file():
+            candidate, encoding = candidate.with_name(candidate.name + ".gz"), "gzip"
         if not candidate.is_file():
             return self.send_error(404)
         data = candidate.read_bytes()
-        content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
-        if candidate.suffix == ".js":
+        name = candidate.name.removesuffix(".gz") if encoding else candidate.name
+        content_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        if name.endswith(".wasm"):
+            content_type = "application/wasm"
+        elif name.endswith(".ttf"):
+            content_type = "font/ttf"
+        elif candidate.suffix == ".js":
             content_type = "application/javascript; charset=utf-8"
         elif candidate.suffix == ".css":
             content_type = "text/css; charset=utf-8"
@@ -269,6 +278,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             content_type = "text/html; charset=utf-8"
         self.send_response(200)
         self.send_header("Content-Type", content_type)
+        if encoding:
+            self.send_header("Content-Encoding", encoding)
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()

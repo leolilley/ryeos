@@ -76,6 +76,9 @@ pub trait SchedulerContext: Send + Sync + 'static {
     /// The trust store for schedule signature verification.
     fn schedule_trust_store(&self) -> &TrustStore;
 
+    /// The node key fingerprint: the only signer a schedule source may have.
+    fn schedule_signer_fingerprint(&self) -> &str;
+
     /// Check a thread's status. Returns `None` if thread doesn't exist.
     fn get_thread_status(&self, thread_id: &str) -> Result<Option<String>>;
 
@@ -167,6 +170,10 @@ impl<T: SchedulerContext> SchedulerContext for Arc<T> {
 
     fn schedule_trust_store(&self) -> &TrustStore {
         (**self).schedule_trust_store()
+    }
+
+    fn schedule_signer_fingerprint(&self) -> &str {
+        (**self).schedule_signer_fingerprint()
     }
 
     fn get_thread_status(&self, thread_id: &str) -> Result<Option<String>> {

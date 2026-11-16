@@ -216,6 +216,8 @@ mod tests {
                 &ryeos_state::objects::ExecutionProjectAuthority::projectless(
                     ryeos_state::objects::EnvironmentAuthority::Vault {
                         namespace: "operator".to_string(),
+                        recipient_principal: "operator".to_string(),
+                        recipient_scopes: Vec::new(),
                         name_authority:
                             ryeos_state::objects::EnvironmentNameAuthority::DeclaredRequired,
                     },

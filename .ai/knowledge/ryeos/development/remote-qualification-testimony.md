@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-11-12T23:57:18Z:6460fec0f8b4318247a4ccb2d6cbd11708fa0ae2926ab54d607cd90167e0f5c5:qrFyu8NcpBS46680LEatx/m9I2Ph7XH35EQ3Is2oPet54Yk8/MSqosHubg5+OAEUvm1NXJKT6MJhij8SeyETDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T03:56:20Z:b9a0c5bdd03f8e15ce1031f189d09157d52909e6c32fe31c0e15b23f217edf4d:ocxbQMjia9aaYVhw3iJANm2ujJ5VY6+eZGfzWmncIO9FGuKzWqzZmn1vdhb5sIWuiIA9/TRfN9VD95i512nfDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "remote-qualification-testimony"
 title: "Remote Qualification Testimony: Design Rationale"
-description: "Why a qualification proven on an origin node reaches a controller as a product-lane testimony consumed at product selection, what the receiver re-derives, and the known limits"
+description: "Why a qualification proven on an origin node reaches a controller as a testimony (product lane at product selection, content lane against the receiver's own activation), what the receiver re-derives, and why the content lane is portable"
 entry_type: decision
-version: "1.0.0"
+version: "1.1.0"
 ```
 
 # Remote Qualification Testimony: Design Rationale
@@ -19,9 +19,13 @@ origin's testimony under its own signed policy. The operator workflow is in
 the crossing is shaped this way and what code changes must preserve.
 
 Code: `crates/state/ryeos-state/src/external_content/products/qualification_testimony.rs`
-(record kinds, acceptance policy, `admit`) and
+(record kinds, acceptance policy, `admit`),
+`crates/state/ryeos-state/src/external_content/qualification_subject.rs`
+(the portable content identity),
 `crates/daemon/ryeos-app/src/operator_external_content/qualification_testimony.rs`
-(export, accept, selection and binding checks).
+(export, accept, selection and binding checks, typed content refusals) and
+`crates/daemon/ryeos-app/src/operator_external_content/content_qualification.rs`
+(the receiver's preparation and `validate_remote_purpose`).
 
 ## Doctrine
 
@@ -31,8 +35,10 @@ Code: `crates/state/ryeos-state/src/external_content/products/qualification_test
   counted as a local qualification, and a selection or binding must name a
   remote testimony explicitly.
 - The receiver re-derives everything it can and records what it took on the
-  attester's word. `PRODUCT_LANE_REDERIVATIONS` and `PRODUCT_LANE_ASSERTIONS`
+  attester's word. The lane's `*_LANE_REDERIVATIONS` and `*_LANE_ASSERTIONS`
   are written into every acceptance, so it never reads as more than it is.
+  Both lanes take exactly one fact on the attester's word,
+  `verifier_realization`.
 - The receiver never runs the verifier and never reads the origin's
   execution as its own. It does not call `execution_evidence::verify_current`.
 - What the receiver trusts (attester, origin site, claims, verifier digests,
@@ -62,6 +68,11 @@ Two crossings were possible:
 
 The state model already has a product-sourced program lane with its own
 authority check, and the product testimony lane asserts almost nothing.
+
+The five-claim worker still crosses on the product lane. The content lane is
+now portable too (see "Portable content identity" below), so a runtime whose
+program is activation-sourced crosses as a content testimony, consumed
+against the receiver's own activation of the same signed release.
 
 ## Export re-verifies by lane
 
@@ -141,9 +152,10 @@ contacted session uses the retained acceptance and retained keys only.
 
 ## Immutability and age
 
-- An acceptance is immutable at its coordinate. A second, different
-  testimony or policy for the same coordinate is refused; re-qualification at
-  the origin is the remedy, not a re-signed testimony.
+- An acceptance is immutable at its coordinate within its evidence schema's
+  head namespace. A second, different testimony or policy for the same
+  coordinate is refused; re-qualification at the origin is the remedy, not a
+  re-signed testimony.
 - Editing an acceptance policy voids every acceptance made under it, even an
   edit that would still admit the testimony.
 - `admit` checks the testimony's and the embedded qualification's age at
@@ -151,15 +163,109 @@ contacted session uses the retained acceptance and retained keys only.
   `max_testimony_age_seconds` (at most 31 days) refuses new selections and
   launches after a successful acceptance.
 
-## Known limit: remote content testimony is node-bound
+## Portable content identity
 
-The content lane can export and accept a testimony, but a receiver cannot use
-one for a different node's activation. `verify_current_remote_runtime_content_testimony`
-re-prepares the receiver's own activation and calls `validate_purpose`, which
-requires the prepared `ContentQualificationSubject` to equal the origin's
-(`content_qualification.rs`). That subject carries
-`activation_receipt_hash`, `binding_hash` and `target_node_fingerprint`,
-which are node-specific. Making the content lane usable across nodes needs a
-node-independent content identity for the remote path, as `portable()` does
-for the product lane. No shipped bundle declares a `qualification_allowance`
-today, so nothing produces a content-lane qualification to carry.
+A content testimony speaks to activated content. Its sealed subject,
+`ContentQualificationSubject`, names both the content and the records the
+origin made of it. The receiver compares only the first part.
+
+| Portable (`portable()`) | Why it is the same on every node |
+|---|---|
+| `activation_program_digest` | Hashes only signed data: the activation Config (sources with their HTTPS URLs and pinned archive and member `sha256`s, components and bounds), the consumer, and every `external_content` declaration of the consumer (pinned digest, mount, mount root, `qualification_allowance`). Node policy and the offline root stay out |
+| `consumer_ref`, `declaration_id` | Signed names |
+| `manifest_hash`, `manifest_kind` | The exact content tree, pinned by the signed declaration |
+| `realization` | The signed mount and kind, and the metrics of the pinned manifest |
+
+| Local join (`local_join()`) | Why it differs on every node |
+|---|---|
+| `activation_receipt_hash` | The receipt this node signed, naming this node |
+| `binding_hash` | The binding for this node's own target and grant |
+| `target_node_fingerprint` | This node |
+
+Both projections are exhaustive destructures, so a field added to the
+subject does not compile until someone decides which side it is on. Nothing
+persisted changed for this: the subject schema, the content evidence and the
+testimony body are as before, and the origin signs nothing new.
+
+### What the receiver re-derives at every use
+
+`verify_current_remote_runtime_content_testimony` (launch, and the
+candidate-program emitter) does, after the acceptance and grant checks:
+
+1. Derives this node's own admitted realization from its own signed
+   activation component and resident manifest (`prepare_receiver_source`),
+   never the origin's realization.
+2. Runs the complete local join: its own node-signed activation head, the
+   current active binding and authorizer, the manifest with its payload in
+   CAS, the current signed allowance, policy and declaration authority, and
+   its own verifier and producer-recipe resolution.
+3. `validate_remote_purpose` requires this subject to equal the origin's in
+   portable form and to name this node, then the same policy and allowance
+   claims, the same producer recipes by signed content (without the
+   node-local `bundle_generation_identity`, as `portable()` drops it for the
+   product lane), and the same verifier definition digests.
+
+Because `activation_program_digest` covers the activation's canonical ref,
+the binding's `activation_ref` is rebound to the activation the origin ran at
+every use. That is why the content lane no longer records `activation_ref` as
+an assertion. The receiver supplies a freshly authenticated equivalent for
+every field that left the comparison, so no implicit trust was added.
+
+Local launch and admission keep `validate_purpose`, which compares the whole
+subject.
+
+### Typed refusals
+
+Each way a receiver can differ is a `RemoteContentTestimonyRefusal` with a
+stable code and a fix; the candidate-program API returns it as 409.
+
+| Code | Seen | Fix |
+|---|---|---|
+| `remote_content_no_local_activation` | no completed activation of the program this node resolves | `ryeos external-content activate <activation_ref> ...` |
+| `remote_content_identity_differs` | every differing portable field, both program digests and manifests | install and activate the release the origin qualified, or re-qualify at the origin against this node's release |
+| `remote_content_policy_differs` | the policy ref, both effective digests and required claims | install the same signed policy and allowance, or re-qualify |
+| `remote_content_producer_differs` | the scenario and both recipe content digests | install the same producer recipe, or re-qualify |
+| `remote_content_verifier_differs` | both admitted and realized verifier digests | install the verifier the acceptance policy pins, with its pinned content resident and bound, or re-qualify |
+| `remote_content_acceptance_superseded` | the acceptance's superseded schema | export the testimony again (below) |
+
+The content comparison comes before the policy and verifier ones, so a
+different release is named as such rather than by its consequences.
+
+### Acceptance stays independent of activation
+
+Acceptance does not resolve this node's activation: a node may accept before
+it activates. `ryeos node doctor` reports each accepted content testimony as
+`ok`, `no_local_activation` or `local_activation_differs`, read offline from
+this node's signed heads, so the operator sees the gap before a launch
+refuses.
+
+### Retained by a session
+
+A persistent-session capsule (schema 25) that runs on a remote content
+testimony retains `receiver_join`: this node's receipt, binding and
+fingerprint as its launch authenticated them. Its closure reaches that
+receipt and binding, as a local qualification reaches its own through its
+attestation's purpose. Recovery requires the join to name this node and the
+receipt to be this node's record of the same program, consumer and
+declaration binding.
+
+## Acceptance evidence v4
+
+Removing `activation_ref` from the content lane's assertions changed what an
+acceptance states, so the acceptance evidence schema moved from v3 to v4 for
+both lanes. A record's meaning must match its version. There is no
+predecessor reader: a v1 to v3 acceptance is classified from its outer schema
+and refused wherever it is read with `remote_qualification_acceptance_superseded`
+(`remote_content_acceptance_superseded` on the content use path). That
+includes a session capsule or product selection that retains one; a capsule
+24 is in any case refused by the persistent-session schema check.
+
+v4 heads live in `remote-qualification-acceptances-v4`. The v3 namespace
+`remote-qualification-testimonies` is retired: nothing resolves an
+acceptance through it, and the doctor lists its heads as superseded. Because
+the namespaces differ, the cure is to export the same qualification again
+from the origin (`ryeos external-content export-qualification-testimony`);
+the receiver records a v4 acceptance at the same coordinate without
+contradicting the old head. If the origin refuses the export because the
+qualification is stale or expired, re-qualify there first. Then re-sign any
+placement binding or product selection that named the old acceptance hash.

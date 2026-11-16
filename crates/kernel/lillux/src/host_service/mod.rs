@@ -77,6 +77,35 @@ pub fn provision_host_service(name: &str, launch: &HostServiceLaunch) -> Result<
     runit::provision(name, launch)
 }
 
+/// One native service association found by enumeration. Enumeration reads
+/// only the recorded launch; it never validates that the launch can still run,
+/// so an association whose client is gone is still named.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostServiceAssociation {
+    pub name: String,
+    /// The recorded launch, or why it could not be read. An association
+    /// without a readable launch record is never retired by name.
+    pub launch: std::result::Result<HostServiceLaunch, String>,
+    /// Whether the service manager is currently set to supervise it.
+    pub activated: bool,
+}
+
+/// Enumerate native service associations whose name starts with `prefix`.
+/// `None` means this host has no readable native service directory: the
+/// service manager is absent, or its directory is not readable by the caller.
+pub fn list_host_services(prefix: &str) -> Result<Option<Vec<HostServiceAssociation>>> {
+    runit::list(prefix)
+}
+
+/// Retire one native service association: bring it down, deactivate it, wait
+/// (bounded) for the service manager to release it, then remove its service
+/// definition and its logs. `expected` must equal the launch the association
+/// records, so a caller retires exactly what it inspected. `Ok(false)` means
+/// no association existed; leftovers of an interrupted retirement are removed.
+pub fn retire_host_service(name: &str, expected: &HostServiceLaunch) -> Result<bool> {
+    runit::retire(name, expected)
+}
+
 pub use installation::{
     exec_install_transaction, run_as_administrator, validate_install_transaction,
 };

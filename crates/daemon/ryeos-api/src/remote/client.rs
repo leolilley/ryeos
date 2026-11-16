@@ -12,8 +12,10 @@ use lillux::crypto::Verifier;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::objects_read_scope::ReadRoot;
 use ryeos_app::state::AppState;
 use ryeos_node_runtime::identity::NodeIdentity;
+use ryeos_node_runtime::remote_delegation::DelegationError;
 use ryeos_state::ignore::IgnoreConfig;
 
 const HASH_REQUEST_BODY_BUDGET_BYTES: usize = 900 * 1024;
@@ -356,6 +358,60 @@ const CONTROL_PLANE_TIMEOUT: lillux::time::Duration = lillux::time::Duration::fr
 const BUNDLE_TRANSFER_REQUEST_TIMEOUT: lillux::time::Duration =
     lillux::time::Duration::from_secs(5 * 60);
 
+/// The fingerprint of the caller a delegated outbound call acts for. Only a
+/// verified local caller may delegate: a caller that itself arrived through a
+/// remote node has no delegation to this node to present onward.
+pub fn delegator_fingerprint(
+    context: &crate::handler_context::HandlerContext,
+) -> Result<String, DelegationError> {
+    if context.authenticated_origin_site_id.is_some() || context.delegated_via.is_some() {
+        return Err(DelegationError::NotTransitive);
+    }
+    context
+        .require_verified()
+        .map_err(|error| DelegationError::Malformed(error.to_string()))?;
+    let fingerprint = context
+        .fingerprint
+        .strip_prefix("fp:")
+        .filter(|value| lillux::valid_hash(value))
+        .ok_or_else(|| {
+            DelegationError::Malformed("the caller is not a fingerprinted principal".to_owned())
+        })?;
+    Ok(fingerprint.to_owned())
+}
+
+/// The delegation stored for `(delegator, remote)`, required to be exactly the
+/// one a durable operation retained.
+pub fn require_retained_delegation(
+    state: &AppState,
+    remote_name: &str,
+    delegator_fingerprint: &str,
+    delegation_digest: &str,
+) -> Result<ryeos_node_runtime::remote_delegation::SignedDelegation> {
+    let delegation = ryeos_node_runtime::remote_delegation::load_delegation(
+        &ryeos_engine::roots::RuntimeRoot::new(state.config.app_root.clone()).delegations_dir(),
+        delegator_fingerprint,
+        remote_name,
+        &state.identity,
+    )?
+    .ok_or_else(|| {
+        anyhow::Error::new(DelegationError::Missing {
+            delegator: format!("fp:{delegator_fingerprint}"),
+            remote: remote_name.to_owned(),
+        })
+    })?;
+    let current = delegation.digest()?;
+    if current != delegation_digest {
+        return Err(anyhow::Error::new(DelegationError::Replaced {
+            delegator: format!("fp:{delegator_fingerprint}"),
+            remote: remote_name.to_owned(),
+            current,
+            retained: delegation_digest.to_owned(),
+        }));
+    }
+    Ok(delegation)
+}
+
 /// Typed client for a remote ryEOS node.
 pub struct RemoteClient {
     /// Base URL (e.g. `https://ryeos.example.com`).
@@ -368,14 +424,17 @@ pub struct RemoteClient {
     identity: Arc<NodeIdentity>,
     /// Local site identity used by the self-signed node admission claim.
     origin_site_id: Option<String>,
-    /// Configured-operator forwarding requires the target grant to preserve
-    /// this source site. Ordinary node-key clients remain compatible with
-    /// existing direct grants and do not add this narrowing assertion.
+    /// Delegated forwarding requires the target to preserve this source site.
+    /// Ordinary node-key clients remain compatible with existing direct grants
+    /// and do not add this narrowing assertion.
     required_forwarding_origin_site_id: Option<String>,
-    /// Source RyeOS node identity that co-signs configured-operator requests.
-    /// The target admits this key independently as `remote_node`; its proof is
-    /// what turns the configured site constraint into transport provenance.
+    /// Source RyeOS node identity that co-signs delegated requests. The target
+    /// admits this key independently as `remote_node`; its proof is what turns
+    /// the source site into transport provenance.
     forwarding_identity: Option<Arc<NodeIdentity>>,
+    /// The principal-signed delegation this client presents with every
+    /// request, when it acts for a principal rather than for the node.
+    delegation: Option<ryeos_node_runtime::remote_delegation::SignedDelegation>,
 }
 
 impl RemoteClient {
@@ -397,6 +456,7 @@ impl RemoteClient {
             origin_site_id: None,
             required_forwarding_origin_site_id: None,
             forwarding_identity: None,
+            delegation: None,
         }
     }
 
@@ -407,93 +467,126 @@ impl RemoteClient {
 
     /// Build a client from a named remote config + app state.
     ///
-    /// Looks up `remote_name` in the layered remotes config
-    /// (project overrides user). Pass `Some(project_path)` when
-    /// the caller is acting in the context of a local project so
-    /// project-level remote definitions are honored.
-    pub fn from_named_remote(
-        state: &AppState,
-        remote_name: &str,
-        project_path: Option<&std::path::Path>,
-    ) -> Result<Self> {
-        let remotes = super::config::load_remotes_layered(&state.config.app_root, project_path)?;
+    /// Looks up `remote_name` among the node-signed remote pins. A project
+    /// never contributes remotes.
+    pub fn from_named_remote(state: &AppState, remote_name: &str) -> Result<Self> {
+        let remotes = super::config::load_remotes(&state.config.app_root)?;
         let remote = super::config::get_remote(&remotes, remote_name)?;
-        Ok(Self::from_remote_cfg(state, &remote))
+        Ok(Self::from_remote_cfg(state, &remote)?)
     }
 
     /// Build a client from an already-resolved `RemoteConfig`.
-    /// Callers that need project layering should resolve via
-    /// [`super::config::load_remotes_layered`] first.
-    pub fn from_remote_cfg(state: &AppState, remote: &super::config::RemoteConfig) -> Self {
-        let mut client = Self::new(&remote.url, &remote.principal_id, state.identity.clone());
+    /// Resolve it from [`super::config::load_remotes`] first.
+    ///
+    /// Refuses an inbound-only remote with `remote_inbound_only`: this node
+    /// never dials it.
+    pub fn from_remote_cfg(
+        state: &AppState,
+        remote: &super::config::RemoteConfig,
+    ) -> Result<Self, super::config::RemotePinError> {
+        let mut client = Self::new(
+            remote.outbound_url()?,
+            &remote.principal_id,
+            state.identity.clone(),
+        );
         client.origin_site_id = Some(state.threads.site_id().to_string());
-        client
+        Ok(client)
     }
 
-    /// Build an outbound client that preserves the already-authenticated
-    /// configured-operator principal across a remote transport hop.
+    /// Build an outbound client that acts for the authenticated caller under
+    /// the delegation the caller signed for this remote.
     ///
-    /// Normal node-to-node operations use [`Self::from_remote_cfg`] and are
-    /// owned by the source node principal. Durable operator-owned workflows
-    /// must instead keep the same principal for project HEAD, credential, and
-    /// later control operations. Requiring the authenticated handler context
-    /// here prevents a merely delegated remote-service capability from turning
-    /// the daemon's operator key into a signing oracle.
-    pub fn from_remote_cfg_as_configured_operator(
+    /// The node key signs and co-signs the request; the caller's own signed
+    /// delegation rides in `x-ryeos-delegation`, and the remote admits the
+    /// caller from its own grants and caps the request to the delegation. The
+    /// daemon never holds the caller's key. A caller that arrived through a
+    /// delegation cannot delegate onward, and the node itself has no
+    /// delegation to present, so it uses [`Self::from_remote_cfg`].
+    pub fn from_remote_cfg_as_delegated(
         state: &AppState,
         remote: &super::config::RemoteConfig,
         context: &crate::handler_context::HandlerContext,
     ) -> Result<Self> {
-        ryeos_app::operator_authority::require_local_configured_operator(state, context)
-            .context("configured operator required for operator-owned remote execution")?;
-        let identity = Arc::new(
-            NodeIdentity::load(&state.config.operator_signing_key_path)
-                .context("load configured operator identity for remote execution")?,
-        );
-        let mut client = Self::new(&remote.url, &remote.principal_id, identity);
+        let fingerprint = delegator_fingerprint(context)?;
+        let delegation = ryeos_node_runtime::remote_delegation::load_delegation(
+            &ryeos_engine::roots::RuntimeRoot::new(state.config.app_root.clone()).delegations_dir(),
+            &fingerprint,
+            &remote.name,
+            &state.identity,
+        )?
+        .ok_or_else(|| {
+            anyhow::Error::new(DelegationError::Missing {
+                delegator: format!("fp:{fingerprint}"),
+                remote: remote.name.clone(),
+            })
+        })?;
+        Self::with_delegation(state, remote, delegation)
+    }
+
+    /// Re-open the delegated transport for one already-authorized durable
+    /// operation.
+    ///
+    /// The operation retained the delegator and the exact delegation digest.
+    /// This constructor requires the stored delegation to still be that
+    /// delegation and still in force, so recovery cannot continue under a
+    /// replaced, lapsed or removed delegation, and cannot act for a principal
+    /// that never delegated.
+    pub fn from_remote_cfg_as_retained_delegated(
+        state: &AppState,
+        remote: &super::config::RemoteConfig,
+        delegator_fingerprint: &str,
+        delegation_digest: &str,
+    ) -> Result<Self> {
+        let delegation = require_retained_delegation(
+            state,
+            &remote.name,
+            delegator_fingerprint,
+            delegation_digest,
+        )?;
+        Self::with_delegation(state, remote, delegation)
+    }
+
+    fn with_delegation(
+        state: &AppState,
+        remote: &super::config::RemoteConfig,
+        delegation: ryeos_node_runtime::remote_delegation::SignedDelegation,
+    ) -> Result<Self> {
         let site_id = state.threads.site_id().to_string();
-        client.origin_site_id = Some(site_id.clone());
+        let node = state.identity.principal_id();
+        delegation
+            .validate_at(
+                lillux::time::unix_secs_now(),
+                ryeos_node_runtime::remote_delegation::DelegationParties {
+                    delegate_site: &site_id,
+                    delegate_node: &node,
+                    audience_site: &remote.site_id,
+                    audience_node: &remote.principal_id,
+                },
+            )
+            .map_err(|error| match error {
+                DelegationError::Expired {
+                    delegator,
+                    not_after,
+                    ..
+                } => DelegationError::Expired {
+                    delegator,
+                    remote: remote.name.clone(),
+                    not_after,
+                },
+                other => other,
+            })?;
+        let mut client = Self::from_remote_cfg(state, remote)?;
         client.required_forwarding_origin_site_id = Some(site_id);
         client.forwarding_identity = Some(state.identity.clone());
+        client.delegation = Some(delegation);
         Ok(client)
     }
 
-    /// Re-open the configured-operator transport for one already-authorized
-    /// durable operation.
-    ///
-    /// The caller must retain both the exact configured-operator fingerprint
-    /// and the node-signed grant digest in its immutable job operation. This
-    /// constructor revalidates those facts before loading the key, so daemon
-    /// recovery cannot survive grant replacement/revocation or use the
-    /// operator identity for a newly invented request.
-    pub fn from_remote_cfg_as_retained_configured_operator(
-        state: &AppState,
-        remote: &super::config::RemoteConfig,
-        operator_fingerprint: &str,
-        operator_authority_digest: &str,
-    ) -> Result<Self> {
-        let current = ryeos_app::operator_authority::admitted_operator_authority_digest(
-            state,
-            operator_fingerprint,
-        )?;
-        if current != operator_authority_digest {
-            anyhow::bail!(
-                "retained configured-operator operation no longer has its exact node-signed grant"
-            );
-        }
-        let identity = Arc::new(
-            NodeIdentity::load(&state.config.operator_signing_key_path)
-                .context("load configured operator identity for durable remote operation")?,
-        );
-        if identity.fingerprint() != operator_fingerprint {
-            anyhow::bail!("retained remote operation belongs to another configured operator");
-        }
-        let mut client = Self::new(&remote.url, &remote.principal_id, identity);
-        let site_id = state.threads.site_id().to_string();
-        client.origin_site_id = Some(site_id.clone());
-        client.required_forwarding_origin_site_id = Some(site_id);
-        client.forwarding_identity = Some(state.identity.clone());
-        Ok(client)
+    /// The digest of the delegation this client presents, when it presents one.
+    pub fn delegation_digest(&self) -> Option<String> {
+        self.delegation
+            .as_ref()
+            .and_then(|delegation| delegation.digest().ok())
     }
 
     /// GET /public-key (no auth required).
@@ -569,6 +662,7 @@ impl RemoteClient {
     /// one namespace never satisfies a request for the other namespace.
     pub async fn objects_has(
         &self,
+        root: &ReadRoot,
         object_hashes: &[String],
         blob_hashes: &[String],
     ) -> Result<ObjectsHasResponse> {
@@ -576,14 +670,16 @@ impl RemoteClient {
             && typed_hashes_request_body_size(object_hashes, blob_hashes)
                 <= HASH_REQUEST_BODY_BUDGET_BYTES
         {
-            return self.objects_has_once(object_hashes, blob_hashes).await;
+            return self
+                .objects_has_once(root, object_hashes, blob_hashes)
+                .await;
         }
 
         let mut response = ObjectsHasResponse::default();
         for chunk in
             chunk_typed_hashes_for_body_budget(object_hashes, HASH_REQUEST_BODY_BUDGET_BYTES)
         {
-            let part = self.objects_has_once(&chunk, &[]).await?;
+            let part = self.objects_has_once(root, &chunk, &[]).await?;
             response
                 .found_object_hashes
                 .extend(part.found_object_hashes);
@@ -593,7 +689,7 @@ impl RemoteClient {
         }
         for chunk in chunk_typed_hashes_for_body_budget(blob_hashes, HASH_REQUEST_BODY_BUDGET_BYTES)
         {
-            let part = self.objects_has_once(&[], &chunk).await?;
+            let part = self.objects_has_once(root, &[], &chunk).await?;
             response.found_blob_hashes.extend(part.found_blob_hashes);
             response
                 .missing_blob_hashes
@@ -605,10 +701,12 @@ impl RemoteClient {
 
     async fn objects_has_once(
         &self,
+        root: &ReadRoot,
         object_hashes: &[String],
         blob_hashes: &[String],
     ) -> Result<ObjectsHasResponse> {
         let body = serde_json::json!({
+            "root": root,
             "object_hashes": object_hashes,
             "blob_hashes": blob_hashes,
         });
@@ -797,10 +895,12 @@ impl RemoteClient {
     /// Server returns `{ "entries": [{ "hash": "...", "kind": "blob"|"object"|"missing", ... }] }`.
     pub async fn objects_get(
         &self,
+        root: &ReadRoot,
         object_hashes: &[String],
         blob_hashes: &[String],
     ) -> Result<ObjectsGetResponse> {
         self.objects_get_with_response_limit(
+            root,
             object_hashes,
             blob_hashes,
             DEFAULT_JSON_RESPONSE_MAX_BYTES,
@@ -810,11 +910,13 @@ impl RemoteClient {
 
     pub async fn objects_get_blob_chunk(
         &self,
+        root: &ReadRoot,
         hash: &str,
         offset: u64,
         length: usize,
     ) -> Result<BlobChunkResponse> {
         let body = serde_json::json!({
+            "root": root,
             "object_hashes": [],
             "blob_hashes": [],
             "blob_chunk": {"hash": hash, "offset": offset, "length": length},
@@ -841,6 +943,7 @@ impl RemoteClient {
     /// JSON body or heap allocation. Returns the verified byte count.
     pub async fn stream_blob<W: std::io::Write>(
         &self,
+        root: &ReadRoot,
         hash: &str,
         destination: &mut W,
     ) -> Result<u64> {
@@ -855,6 +958,7 @@ impl RemoteClient {
         loop {
             let chunk = self
                 .objects_get_blob_chunk(
+                    root,
                     hash,
                     offset,
                     crate::handlers::objects_get::MAX_BLOB_CHUNK_BYTES,
@@ -897,11 +1001,13 @@ impl RemoteClient {
     /// requested range before it is returned.
     pub async fn objects_get_large_object_chunk(
         &self,
+        root: &ReadRoot,
         hash: &str,
         offset: u64,
         length: usize,
     ) -> Result<BlobChunkResponse> {
         let body = serde_json::json!({
+            "root": root,
             "object_hashes": [],
             "blob_hashes": [],
             "large_object_chunk": {"hash": hash, "offset": offset, "length": length},
@@ -928,7 +1034,12 @@ impl RemoteClient {
     /// the whole-file digest is checked once the final chunk arrives, so a
     /// sink must treat its output as provisional until this returns `Ok`.
     /// Returns the byte count.
-    pub async fn stream_large_object<F>(&self, hash: &str, mut sink: F) -> Result<u64>
+    pub async fn stream_large_object<F>(
+        &self,
+        root: &ReadRoot,
+        hash: &str,
+        mut sink: F,
+    ) -> Result<u64>
     where
         F: FnMut(&[u8]) -> Result<()>,
     {
@@ -943,6 +1054,7 @@ impl RemoteClient {
         loop {
             let chunk = self
                 .objects_get_large_object_chunk(
+                    root,
                     hash,
                     offset,
                     crate::handlers::objects_get::MAX_BLOB_CHUNK_BYTES,
@@ -1081,11 +1193,13 @@ impl RemoteClient {
     /// that includes base64/JSON overhead without allowing unbounded buffering.
     pub async fn objects_get_with_response_limit(
         &self,
+        root: &ReadRoot,
         object_hashes: &[String],
         blob_hashes: &[String],
         max_response_bytes: usize,
     ) -> Result<ObjectsGetResponse> {
         self.objects_get_with_response_limit_inner(
+            root,
             object_hashes,
             blob_hashes,
             max_response_bytes,
@@ -1099,12 +1213,14 @@ impl RemoteClient {
     /// the deliberately unbounded generic CAS request behavior.
     pub async fn objects_get_with_response_limit_and_total_timeout(
         &self,
+        root: &ReadRoot,
         object_hashes: &[String],
         blob_hashes: &[String],
         max_response_bytes: usize,
         total_timeout: lillux::time::Duration,
     ) -> Result<ObjectsGetResponse> {
         self.objects_get_with_response_limit_inner(
+            root,
             object_hashes,
             blob_hashes,
             max_response_bytes,
@@ -1120,11 +1236,13 @@ impl RemoteClient {
     /// smaller content limit for an already-admitted object type.
     pub async fn objects_get_with_total_timeout(
         &self,
+        root: &ReadRoot,
         object_hashes: &[String],
         blob_hashes: &[String],
         total_timeout: lillux::time::Duration,
     ) -> Result<ObjectsGetResponse> {
         self.objects_get_with_response_limit_and_total_timeout(
+            root,
             object_hashes,
             blob_hashes,
             DEFAULT_JSON_RESPONSE_MAX_BYTES,
@@ -1138,10 +1256,12 @@ impl RemoteClient {
     /// wall-clock timeout; generic CAS callers retain their existing behavior.
     pub async fn objects_get_bundle_batch_with_response_limit(
         &self,
+        root: &ReadRoot,
         blob_hashes: &[String],
         max_response_bytes: usize,
     ) -> Result<ObjectsGetResponse> {
         self.objects_get_with_response_limit_inner(
+            root,
             &[],
             blob_hashes,
             max_response_bytes,
@@ -1152,6 +1272,7 @@ impl RemoteClient {
 
     async fn objects_get_with_response_limit_inner(
         &self,
+        root: &ReadRoot,
         object_hashes: &[String],
         blob_hashes: &[String],
         max_response_bytes: usize,
@@ -1165,7 +1286,7 @@ impl RemoteClient {
                 chunk_typed_hashes_for_body_budget(object_hashes, HASH_REQUEST_BODY_BUDGET_BYTES)
             {
                 entries.extend(
-                    self.objects_get_once(&chunk, &[], max_response_bytes, total_timeout)
+                    self.objects_get_once(root, &chunk, &[], max_response_bytes, total_timeout)
                         .await?
                         .entries,
                 );
@@ -1174,7 +1295,7 @@ impl RemoteClient {
                 chunk_typed_hashes_for_body_budget(blob_hashes, HASH_REQUEST_BODY_BUDGET_BYTES)
             {
                 entries.extend(
-                    self.objects_get_once(&[], &chunk, max_response_bytes, total_timeout)
+                    self.objects_get_once(root, &[], &chunk, max_response_bytes, total_timeout)
                         .await?
                         .entries,
                 );
@@ -1182,6 +1303,7 @@ impl RemoteClient {
             return Ok(ObjectsGetResponse { entries });
         }
         self.objects_get_once(
+            root,
             object_hashes,
             blob_hashes,
             max_response_bytes,
@@ -1192,12 +1314,14 @@ impl RemoteClient {
 
     async fn objects_get_once(
         &self,
+        root: &ReadRoot,
         object_hashes: &[String],
         blob_hashes: &[String],
         max_response_bytes: usize,
         total_timeout: Option<lillux::time::Duration>,
     ) -> Result<ObjectsGetResponse> {
         let body = serde_json::json!({
+            "root": root,
             "object_hashes": object_hashes,
             "blob_hashes": blob_hashes,
         });
@@ -1215,12 +1339,7 @@ impl RemoteClient {
                 .header("x-ryeos-nonce", &headers.nonce)
                 .header("x-ryeos-signature", &headers.signature)
                 .body(body_bytes);
-            if let Some(forwarding) = headers.forwarding.as_ref() {
-                request = request
-                    .header("x-ryeos-forwarding-key-id", &forwarding.key_id)
-                    .header("x-ryeos-forwarding-site-id", &forwarding.site_id)
-                    .header("x-ryeos-forwarding-signature", &forwarding.signature);
-            }
+            request = headers.apply_forwarding(request);
             let response = request
                 .send()
                 .await
@@ -1243,12 +1362,13 @@ impl RemoteClient {
     /// POST /objects/closure/describe (authenticated).
     pub async fn objects_closure_describe(
         &self,
+        root: &ReadRoot,
         roots: &[String],
         options: NodeAdmittedObjectsClosureRequestOptions,
     ) -> Result<ObjectsClosureDescribeResponse> {
         options.validate_roots(roots)?;
         let response_limit = closure_response_limit(&options)?;
-        let body = closure_request_body(roots, &options);
+        let body = closure_request_body(root, roots, &options);
         let resp = self
             .signed_post_with_response_limit("/objects/closure/describe", &body, response_limit)
             .await?;
@@ -1261,12 +1381,13 @@ impl RemoteClient {
     /// POST /objects/closure/get (authenticated).
     pub async fn objects_closure_get(
         &self,
+        root: &ReadRoot,
         roots: &[String],
         options: NodeAdmittedObjectsClosureRequestOptions,
     ) -> Result<ObjectsClosureGetResponse> {
         options.validate_roots(roots)?;
         let response_limit = closure_response_limit(&options)?;
-        let body = closure_request_body(roots, &options);
+        let body = closure_request_body(root, roots, &options);
         let raw = self
             .signed_post_raw_with_response_limit("/objects/closure/get", &body, response_limit)
             .await?;
@@ -1279,13 +1400,14 @@ impl RemoteClient {
     /// This is opt-in so generic large transfers retain their existing API.
     pub async fn objects_closure_get_with_total_timeout(
         &self,
+        root: &ReadRoot,
         roots: &[String],
         options: NodeAdmittedObjectsClosureRequestOptions,
         total_timeout: lillux::time::Duration,
     ) -> Result<ObjectsClosureGetResponse> {
         options.validate_roots(roots)?;
         let response_limit = closure_response_limit(&options)?;
-        let body = closure_request_body(roots, &options);
+        let body = closure_request_body(root, roots, &options);
         let raw = self
             .signed_post_raw_with_response_limit_and_timeout(
                 "/objects/closure/get",
@@ -1749,6 +1871,25 @@ impl RemoteClient {
         })
     }
 
+    /// Revoke a grant on the remote node. The remote decides whether the
+    /// caller may (its granter or its operator) and what live work stops;
+    /// its receipt is returned as sent.
+    pub async fn revoke_key(
+        &self,
+        fingerprint: &str,
+        reason: &str,
+        leave_running: bool,
+        keep_delegates: bool,
+    ) -> Result<Value> {
+        let body = serde_json::json!({
+            "fingerprint": fingerprint,
+            "reason": reason,
+            "leave_running": leave_running,
+            "keep_delegates": keep_delegates,
+        });
+        self.signed_post("/revoke-key", &body).await
+    }
+
     /// POST /admission/claim (unauthenticated route; claim is self-signed).
     pub async fn admission_claim(
         &self,
@@ -1768,11 +1909,12 @@ impl RemoteClient {
         let nonce_bytes = rand::Rng::r#gen::<[u8; 16]>(&mut rand::thread_rng());
         let nonce = base64::engine::general_purpose::STANDARD.encode(nonce_bytes);
         let token_hash = admission_token_hash(token);
-        let claim = admission_claim_string(
+        let claim = crate::handlers::admission_claim::claim_string(
             &self.audience,
             &token_hash,
+            ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteNode,
             public_key,
-            origin_site_id,
+            Some(origin_site_id),
             &scopes,
             signed_at,
             &nonce,
@@ -1781,7 +1923,8 @@ impl RemoteClient {
         let signature =
             lillux::crypto::Signer::sign(self.identity.signing_key(), content_hash.as_bytes());
         let mut body = serde_json::json!({
-            "protocol_version": 2,
+            "protocol_version": 3,
+            "principal_class": "remote_node",
             "token": token,
             "public_key": public_key,
             "origin_site_id": origin_site_id,
@@ -1794,6 +1937,50 @@ impl RemoteClient {
             body["label"] = Value::String(label.to_string());
         }
         self.unsigned_post("/admission/claim", &body).await
+    }
+
+    /// POST /admission/claim with a claim body another party already signed
+    /// and co-signed. The caller owns every signature in the body.
+    pub async fn post_admission_claim(&self, body: &Value) -> Result<Value> {
+        self.unsigned_post("/admission/claim", body).await
+    }
+
+    /// POST /revoke-delegation (authenticated): ask the remote to tombstone one
+    /// delegation digest.
+    pub async fn revoke_delegation(
+        &self,
+        delegator: &str,
+        delegation_digest: &str,
+    ) -> Result<Value> {
+        let body = serde_json::json!({
+            "delegator": delegator,
+            "delegation_digest": delegation_digest,
+        });
+        self.signed_post("/revoke-delegation", &body).await
+    }
+
+    /// POST /offline-operations (authenticated): deliver a signed
+    /// offline-operation request and its inputs to the remote's inbox. `body`
+    /// is the remote route's request: `{request, inputs, stop?}`.
+    pub async fn offline_operations_submit(&self, body: &Value) -> Result<Value> {
+        self.signed_post_with_response_limit(
+            "/offline-operations",
+            body,
+            DEFAULT_SERVICE_RESPONSE_MAX_BYTES,
+        )
+        .await
+    }
+
+    /// GET /offline-operations/facts (authenticated): the facts a request for
+    /// the remote is signed against.
+    pub async fn offline_operations_facts(&self) -> Result<Value> {
+        self.signed_get("/offline-operations/facts").await
+    }
+
+    /// GET /offline-operations (authenticated): what the remote has queued,
+    /// applied and refused.
+    pub async fn offline_operations_status(&self) -> Result<Value> {
+        self.signed_get("/offline-operations").await
     }
 
     /// POST /vault/set (authenticated).
@@ -1851,12 +2038,7 @@ impl RemoteClient {
             .header("x-ryeos-timestamp", &headers.timestamp)
             .header("x-ryeos-nonce", &headers.nonce)
             .header("x-ryeos-signature", &headers.signature);
-        if let Some(forwarding) = headers.forwarding.as_ref() {
-            request = request
-                .header("x-ryeos-forwarding-key-id", &forwarding.key_id)
-                .header("x-ryeos-forwarding-site-id", &forwarding.site_id)
-                .header("x-ryeos-forwarding-signature", &forwarding.signature);
-        }
+        request = headers.apply_forwarding(request);
         let resp = request
             .send()
             .await
@@ -1912,12 +2094,7 @@ impl RemoteClient {
             .header("x-ryeos-nonce", &headers.nonce)
             .header("x-ryeos-signature", &headers.signature)
             .body(body_bytes);
-        if let Some(forwarding) = headers.forwarding.as_ref() {
-            request = request
-                .header("x-ryeos-forwarding-key-id", &forwarding.key_id)
-                .header("x-ryeos-forwarding-site-id", &forwarding.site_id)
-                .header("x-ryeos-forwarding-signature", &forwarding.signature);
-        }
+        request = headers.apply_forwarding(request);
         let resp = request
             .send()
             .await
@@ -1945,12 +2122,7 @@ impl RemoteClient {
             .header("x-ryeos-nonce", &headers.nonce)
             .header("x-ryeos-signature", &headers.signature)
             .body(body_bytes);
-        if let Some(forwarding) = headers.forwarding.as_ref() {
-            request = request
-                .header("x-ryeos-forwarding-key-id", &forwarding.key_id)
-                .header("x-ryeos-forwarding-site-id", &forwarding.site_id)
-                .header("x-ryeos-forwarding-signature", &forwarding.signature);
-        }
+        request = headers.apply_forwarding(request);
         let response = request
             .send()
             .await
@@ -2088,10 +2260,16 @@ impl RemoteClient {
                 })
             }
             (None, None) => None,
-            _ => anyhow::bail!(
-                "configured-operator forwarding requires both a source-node identity and site"
-            ),
+            _ => anyhow::bail!("forwarding requires both a source-node identity and site"),
         };
+        let delegation = self
+            .delegation
+            .as_ref()
+            .map(ryeos_node_runtime::remote_delegation::SignedDelegation::to_header_value)
+            .transpose()?;
+        if delegation.is_some() && forwarding.is_none() {
+            anyhow::bail!("a delegated request requires the source-node forwarding proof");
+        }
 
         Ok(SignedHeaders {
             key_id,
@@ -2099,6 +2277,7 @@ impl RemoteClient {
             nonce,
             signature: sig_b64,
             forwarding,
+            delegation,
             request_digest: content_hash,
         })
     }
@@ -2225,7 +2404,7 @@ fn admission_token_hash(token: &str) -> String {
     lillux::cas::sha256_hex(token.as_bytes())
 }
 
-fn normalize_admission_scopes(scopes: &[String]) -> Result<Vec<String>> {
+pub(crate) fn normalize_admission_scopes(scopes: &[String]) -> Result<Vec<String>> {
     let mut normalized: Vec<String> = scopes
         .iter()
         .map(|s| s.trim().to_string())
@@ -2250,27 +2429,6 @@ fn normalize_admission_scopes(scopes: &[String]) -> Result<Vec<String>> {
     Ok(normalized)
 }
 
-fn admission_claim_string(
-    audience: &str,
-    token_hash: &str,
-    public_key: &str,
-    origin_site_id: &str,
-    scopes: &[String],
-    signed_at: u64,
-    nonce: &str,
-) -> String {
-    format!(
-        "ryeos-admission-claim-v2\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
-        audience,
-        token_hash,
-        public_key,
-        origin_site_id,
-        scopes.join(","),
-        signed_at,
-        nonce,
-    )
-}
-
 /// A remote `/execute` response with the digest of the request that asked
 /// for it.
 pub struct RemoteExecuteResponse {
@@ -2286,6 +2444,8 @@ struct SignedHeaders {
     nonce: String,
     signature: String,
     forwarding: Option<ForwardingHeaders>,
+    /// Base64 signed delegation, present when the request acts for a principal.
+    delegation: Option<String>,
     /// `ryeos-request-v1` content hash of this exact request; a remote
     /// result attestation binds it.
     request_digest: String,
@@ -2295,6 +2455,25 @@ struct ForwardingHeaders {
     key_id: String,
     site_id: String,
     signature: String,
+}
+
+impl SignedHeaders {
+    /// Attach the forwarding co-signature and the delegation, when present.
+    fn apply_forwarding(&self, mut request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if let Some(forwarding) = self.forwarding.as_ref() {
+            request = request
+                .header("x-ryeos-forwarding-key-id", &forwarding.key_id)
+                .header("x-ryeos-forwarding-site-id", &forwarding.site_id)
+                .header("x-ryeos-forwarding-signature", &forwarding.signature);
+        }
+        if let Some(delegation) = self.delegation.as_ref() {
+            request = request.header(
+                ryeos_node_runtime::remote_delegation::DELEGATION_HEADER,
+                delegation,
+            );
+        }
+        request
+    }
 }
 
 /// Sort query parameters alphabetically and normalise the path.
@@ -3640,11 +3819,13 @@ fn closure_response_limit(options: &NodeAdmittedObjectsClosureRequestOptions) ->
 }
 
 fn closure_request_body(
+    root: &ReadRoot,
     roots: &[String],
     options: &NodeAdmittedObjectsClosureRequestOptions,
 ) -> Value {
     let limits = options.limits();
     let mut body = serde_json::json!({
+        "root": root,
         "roots": roots,
         "max_objects": limits.max_objects,
         "max_blobs": limits.max_blobs,
@@ -4865,13 +5046,14 @@ mod tests {
         );
 
         let object_error = client
-            .objects_get_with_total_timeout(&["b".repeat(64)], &[], timeout)
+            .objects_get_with_total_timeout(&test_read_root(), &["b".repeat(64)], &[], timeout)
             .await
             .unwrap_err();
         assert!(object_error.to_string().contains("exceeded total timeout"));
 
         let closure_error = client
             .objects_closure_get_with_total_timeout(
+                &test_read_root(),
                 &["a".repeat(64)],
                 NodeAdmittedObjectsClosureRequestOptions::admit(
                     ObjectsClosureRequestOptions::default(),
@@ -4884,6 +5066,12 @@ mod tests {
             .unwrap_err();
         assert!(closure_error.to_string().contains("exceeded total timeout"));
         server.abort();
+    }
+
+    fn test_read_root() -> ReadRoot {
+        ReadRoot::ProjectHead {
+            project_path: "/project".to_owned(),
+        }
     }
 
     #[test]
@@ -4936,7 +5124,7 @@ mod tests {
     }
 
     #[test]
-    fn configured_operator_request_is_cosigned_by_source_node() {
+    fn forwarded_request_is_cosigned_by_source_node() {
         let directory = tempfile::tempdir().unwrap();
         let operator =
             Arc::new(NodeIdentity::create(&directory.path().join("operator.pem")).unwrap());
@@ -4952,7 +5140,7 @@ mod tests {
         let proof = headers
             .forwarding
             .as_ref()
-            .expect("operator request must carry forwarding proof");
+            .expect("forwarded request must carry forwarding proof");
         assert_eq!(proof.key_id, forwarding.principal_id());
         assert_eq!(proof.site_id, "site:source");
         let content_hash = crate::auth::forwarding_request_content_hash(
@@ -6008,5 +6196,164 @@ mod tests {
                 .validate_against_request(&[hash], &options)
                 .is_err()
         );
+    }
+
+    fn delegation_fixture() -> (
+        tempfile::TempDir,
+        ryeos_app::test_support::TestStateStore,
+        AppState,
+        super::super::config::RemoteConfig,
+        lillux::crypto::SigningKey,
+        crate::handler_context::HandlerContext,
+    ) {
+        let (tmp, store_owner, state) = crate::test_support::build_test_state();
+        let user_key = lillux::crypto::SigningKey::from_bytes(&[61u8; 32]);
+        let fingerprint = lillux::signature::compute_fingerprint(&user_key.verifying_key());
+        let remote = super::super::config::RemoteConfig {
+            name: "hosted".into(),
+            url: Some("https://hosted.invalid".into()),
+            reachability: super::super::config::Reachability::Outbound,
+            principal_id: format!("fp:{}", "ab".repeat(32)),
+            signing_key: "ed25519:unused".into(),
+            site_id: "site:hosted".into(),
+            vault_fingerprint: "vault".into(),
+            ingest_ignore: None,
+            project_bindings: std::collections::HashMap::new(),
+        };
+        let context = crate::handler_context::HandlerContext::new(
+            format!("fp:{fingerprint}"),
+            vec!["*".to_owned()],
+            true,
+        );
+        (tmp, store_owner, state, remote, user_key, context)
+    }
+
+    fn store_delegation(
+        state: &AppState,
+        remote: &super::super::config::RemoteConfig,
+        user_key: &lillux::crypto::SigningKey,
+        not_after: u64,
+    ) -> ryeos_node_runtime::remote_delegation::SignedDelegation {
+        use ryeos_node_runtime::remote_delegation::{DelegationBody, DelegationParties};
+        let fingerprint = lillux::signature::compute_fingerprint(&user_key.verifying_key());
+        let body = DelegationBody::new(
+            &format!("fp:{fingerprint}"),
+            DelegationParties {
+                delegate_site: state.threads.site_id(),
+                delegate_node: &state.identity.principal_id(),
+                audience_site: &remote.site_id,
+                audience_node: &remote.principal_id,
+            },
+            &["ryeos.execute.service.remote/run".to_owned()],
+            not_after,
+        );
+        let signed =
+            ryeos_node_runtime::remote_delegation::SignedDelegation::sign(body, user_key).unwrap();
+        ryeos_node_runtime::remote_delegation::store_delegation(
+            &ryeos_engine::roots::RuntimeRoot::new(state.config.app_root.clone()).delegations_dir(),
+            &remote.name,
+            &signed,
+            &state.identity,
+            lillux::time::unix_secs_now(),
+        )
+        .unwrap();
+        signed
+    }
+
+    fn refusal(error: anyhow::Error) -> DelegationError {
+        error
+            .downcast::<DelegationError>()
+            .expect("typed delegation refusal")
+    }
+
+    #[test]
+    fn outbound_without_delegation_is_refused_with_fix() {
+        let (_tmp, _store, state, remote, _key, context) = delegation_fixture();
+        let error = refusal(
+            RemoteClient::from_remote_cfg_as_delegated(&state, &remote, &context)
+                .err()
+                .expect("no stored delegation"),
+        );
+        assert_eq!(error.code(), "remote_delegation_missing");
+        assert!(
+            error
+                .to_string()
+                .contains("ryeos remote delegate --remote hosted"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn outbound_with_expired_delegation_is_refused() {
+        let (_tmp, _store, state, remote, key, context) = delegation_fixture();
+        store_delegation(&state, &remote, &key, 1_000);
+        let error = refusal(
+            RemoteClient::from_remote_cfg_as_delegated(&state, &remote, &context)
+                .err()
+                .expect("expired delegation"),
+        );
+        assert_eq!(error.code(), "remote_delegation_expired");
+        assert!(
+            error
+                .to_string()
+                .contains("ryeos remote delegate --remote hosted"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn delegated_client_presents_the_delegation_and_the_cosignature() {
+        let (_tmp, _store, state, remote, key, context) = delegation_fixture();
+        let stored = store_delegation(&state, &remote, &key, lillux::time::unix_secs_now() + 600);
+        let client = RemoteClient::from_remote_cfg_as_delegated(&state, &remote, &context).unwrap();
+        assert_eq!(client.delegation_digest(), Some(stored.digest().unwrap()));
+        let headers = client.sign_request("POST", "/execute", b"{}").unwrap();
+        assert_eq!(headers.key_id, state.identity.principal_id());
+        let proof = headers.forwarding.as_ref().expect("co-signature");
+        assert_eq!(proof.key_id, headers.key_id);
+        let parsed = ryeos_node_runtime::remote_delegation::SignedDelegation::from_header_value(
+            headers.delegation.as_deref().expect("delegation header"),
+        )
+        .unwrap();
+        assert_eq!(parsed, stored);
+    }
+
+    #[test]
+    fn a_delegated_caller_cannot_delegate_onward() {
+        let (_tmp, _store, state, remote, key, mut context) = delegation_fixture();
+        store_delegation(&state, &remote, &key, lillux::time::unix_secs_now() + 600);
+        context.authenticated_origin_site_id = Some("site:somewhere".to_owned());
+        let error = refusal(
+            RemoteClient::from_remote_cfg_as_delegated(&state, &remote, &context)
+                .err()
+                .expect("a forwarded caller has no delegation to this node"),
+        );
+        assert_eq!(error.code(), "remote_delegation_not_transitive");
+    }
+
+    #[test]
+    fn a_retained_operation_refuses_a_replaced_delegation() {
+        let (_tmp, _store, state, remote, key, context) = delegation_fixture();
+        let first = store_delegation(&state, &remote, &key, lillux::time::unix_secs_now() + 600);
+        let fingerprint = context.fingerprint.strip_prefix("fp:").unwrap().to_owned();
+        RemoteClient::from_remote_cfg_as_retained_delegated(
+            &state,
+            &remote,
+            &fingerprint,
+            &first.digest().unwrap(),
+        )
+        .unwrap();
+        store_delegation(&state, &remote, &key, lillux::time::unix_secs_now() + 900);
+        let error = refusal(
+            RemoteClient::from_remote_cfg_as_retained_delegated(
+                &state,
+                &remote,
+                &fingerprint,
+                &first.digest().unwrap(),
+            )
+            .err()
+            .expect("replaced delegation"),
+        );
+        assert_eq!(error.code(), "remote_delegation_replaced");
     }
 }

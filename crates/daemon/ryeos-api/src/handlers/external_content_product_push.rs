@@ -6,7 +6,6 @@ use anyhow::{Result, bail};
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
-use ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -19,12 +18,15 @@ pub struct Request {
     pub remote: String,
     pub witness_hash: String,
     pub origin_admission_hash: String,
-    pub maximum_bytes: u64,
+    /// The operator's byte bound; absent, the product declaration's signed
+    /// `maximum_total_bytes`.
+    #[serde(default)]
+    pub maximum_bytes: Option<u64>,
 }
 
 impl Request {
     fn validate(&self) -> Result<()> {
-        if self.remote.is_empty() || self.remote.len() > 256 || self.maximum_bytes == 0 {
+        if self.remote.is_empty() || self.remote.len() > 256 || self.maximum_bytes == Some(0) {
             bail!("product push requires an exact remote and positive byte bound");
         }
         for hash in [&self.witness_hash, &self.origin_admission_hash] {
@@ -39,12 +41,6 @@ impl Request {
 pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     ryeos_app::operator_authority::require_local_configured_operator(&state, &ctx)?;
     req.validate()?;
-    let policy = state
-        .node_policy
-        .require::<ExternalContentImportPolicyRecord>()?;
-    if req.maximum_bytes > policy.limits.max_total_bytes {
-        bail!("product push byte bound exceeds current import policy");
-    }
     let outcome = push_product(
         &state,
         &ctx,
@@ -93,7 +89,7 @@ mod tests {
                 "remote": "string",
                 "witness_hash": "string",
                 "origin_admission_hash": "string",
-                "maximum_bytes": "integer",
+                "maximum_bytes": "integer?",
             })
         );
         // Every authored field is a field of the typed request: the request
@@ -132,16 +128,18 @@ mod tests {
             .unwrap()
             .validate()
             .unwrap();
-        for field in [
-            "remote",
-            "witness_hash",
-            "origin_admission_hash",
-            "maximum_bytes",
-        ] {
+        for field in ["remote", "witness_hash", "origin_admission_hash"] {
             let mut missing = valid.clone();
             missing.as_object_mut().unwrap().remove(field);
             assert!(serde_json::from_value::<Request>(missing).is_err());
         }
+        // The bound is optional: absent, the declaration's maximum applies.
+        let mut unbounded = valid.clone();
+        unbounded.as_object_mut().unwrap().remove("maximum_bytes");
+        serde_json::from_value::<Request>(unbounded)
+            .unwrap()
+            .validate()
+            .unwrap();
         for (field, value) in [
             ("remote", serde_json::json!("")),
             ("witness_hash", serde_json::json!("A".repeat(64))),

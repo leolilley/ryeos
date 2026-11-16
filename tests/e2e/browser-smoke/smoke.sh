@@ -47,7 +47,7 @@ smoke_exit() {
 trap 'smoke_exit "$?"' EXIT
 
 ryeos_term_info "initializing isolated node"
-init_args=(init --non-interactive --source "$BUNDLE_SOURCE" --node-profile full --host-class local)
+init_args=(init --non-interactive --source "$BUNDLE_SOURCE" --node-profile standard --host-class local)
 if [[ -n "$TRUST_FILE" ]]; then
   [[ -f "$TRUST_FILE" ]] || {
     ryeos_term_fail "RYEOS_SMOKE_TRUST_FILE does not exist: $TRUST_FILE"

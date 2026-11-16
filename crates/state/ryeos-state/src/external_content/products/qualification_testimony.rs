@@ -12,9 +12,22 @@
 //! One record kind carries both qualification lanes. The lane is explicit in
 //! the testimony body and in the receiver's acceptance, and a receiver policy
 //! lists the lanes it accepts. The product lane testifies to a guest-owner
-//! runtime product; the content lane testifies to an activated content
-//! manifest. The content lane carries no product, so what the receiver can
-//! re-derive offline is recorded in the acceptance as data.
+//! runtime product; the content lane testifies to activated content. The
+//! content lane carries no product, so what the receiver can re-derive offline
+//! is recorded in the acceptance as data.
+//!
+//! Content is compared between nodes by its portable identity
+//! (`ContentQualificationSubject::portable`): the receiver activates the same
+//! signed release itself and every use requires its own subject to equal the
+//! origin's apart from the node-local receipt, binding and fingerprint. The
+//! activation name is therefore rebound at every use, not taken on the
+//! attester's word.
+//!
+//! Acceptance evidence v4 records that contract. An acceptance recorded under
+//! an earlier evidence schema stated a different contract and is refused with
+//! [`RemoteQualificationAcceptanceSuperseded`], never reinterpreted. v4
+//! acceptances publish their heads in their own namespace, so the same
+//! testimony can be accepted again without contradicting a predecessor head.
 
 use anyhow::{Context as _, bail};
 use serde::{Deserialize, Serialize};
@@ -37,11 +50,21 @@ pub const REMOTE_QUALIFICATION_TESTIMONY_BODY_SCHEMA: &str =
     "ryeos.remote_qualification_testimony_body.v2";
 pub const REMOTE_QUALIFICATION_ACCEPTANCE_CLAIM: &str = "qualification_testimony_accepted";
 pub const REMOTE_QUALIFICATION_ACCEPTANCE_POLICY: &str = "ryeos.remote_qualification_acceptance.v1";
+const REMOTE_QUALIFICATION_ACCEPTANCE_EVIDENCE_SCHEMA_PREFIX: &str =
+    "ryeos.remote_qualification_acceptance_evidence.v";
+pub const REMOTE_QUALIFICATION_ACCEPTANCE_EVIDENCE_VERSION: u32 = 4;
 pub const REMOTE_QUALIFICATION_ACCEPTANCE_EVIDENCE_SCHEMA: &str =
-    "ryeos.remote_qualification_acceptance_evidence.v3";
+    "ryeos.remote_qualification_acceptance_evidence.v4";
 pub const REMOTE_QUALIFICATION_ACCEPTANCE_POLICY_SCHEMA: &str =
     "ryeos.remote_qualification_acceptance_policy.v2";
-pub const REMOTE_QUALIFICATION_TESTIMONY_HEAD_NAMESPACE: &str = "remote-qualification-testimonies";
+/// Head namespace of current (v4) acceptances, keyed by coordinate.
+pub const REMOTE_QUALIFICATION_TESTIMONY_HEAD_NAMESPACE: &str =
+    "remote-qualification-acceptances-v4";
+/// Namespaces that held heads of superseded acceptance evidence. Nothing
+/// resolves an acceptance through them; they are read only to name what an
+/// operator must accept again.
+pub const RETIRED_REMOTE_QUALIFICATION_TESTIMONY_HEAD_NAMESPACES: &[&str] =
+    &["remote-qualification-testimonies"];
 pub const MAX_REMOTE_QUALIFICATION_TESTIMONY_BODY_BYTES: usize = 128 * 1024;
 pub const MAX_REMOTE_QUALIFICATION_ACCEPTANCE_EVIDENCE_BYTES: usize = 256 * 1024;
 pub const MAX_REMOTE_QUALIFICATION_ACCEPTANCE_POLICY_BYTES: usize = 16 * 1024;
@@ -76,10 +99,13 @@ pub const CONTENT_LANE_REDERIVATIONS: &[&str] = &[
 /// verifier's realization on the attester's word: that realization is not in
 /// the receiver's content store, so the receiver cannot re-derive it.
 pub const PRODUCT_LANE_ASSERTIONS: &[&str] = &["verifier_realization"];
-/// The content lane's activation name cannot be derived from the evidence; the
-/// receiver joins it to its own binding and re-prepares against its own
-/// activation at every use.
-pub const CONTENT_LANE_ASSERTIONS: &[&str] = &["activation_ref"];
+/// The content lane takes the same single fact on the attester's word. Its
+/// activation name is not an assertion: every use rebinds it through the
+/// activation program digest, by requiring the receiver's own activation to
+/// equal the origin's subject in portable form. The receiver compares the
+/// verifier's definition digests with its own resolution, never the origin's
+/// realized verifier bytes.
+pub const CONTENT_LANE_ASSERTIONS: &[&str] = &["verifier_realization"];
 
 /// Which qualification a testimony speaks to. Selects the evidence type the
 /// embedded attestation must decode as; it carries no policy of its own.
@@ -494,6 +520,63 @@ pub fn verify_remote_qualification_testimony(
     })
 }
 
+/// Typed refusal for an acceptance recorded under an earlier evidence schema.
+/// Its record states a different contract (what the receiver re-derived and
+/// what it took on the attester's word), so it is refused wherever it is read
+/// rather than reinterpreted. The cure is a new acceptance, not a reader.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteQualificationAcceptanceSuperseded {
+    pub recorded_schema: String,
+}
+
+impl RemoteQualificationAcceptanceSuperseded {
+    pub const CODE: &'static str = "remote_qualification_acceptance_superseded";
+
+    pub fn code(&self) -> &'static str {
+        Self::CODE
+    }
+
+    pub fn fix(&self) -> &'static str {
+        "export the testimony again from the origin (`ryeos external-content export-qualification-testimony <remote> <qualification-hash> <acceptance-policy-ref>`, with `--content <json>` for the content lane) so this node records a current acceptance; if the origin refuses the export because its qualification is stale or expired, re-qualify at the origin first. Then re-sign every placement binding or product selection that names the old acceptance hash with the new one"
+    }
+}
+
+impl std::fmt::Display for RemoteQualificationAcceptanceSuperseded {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{}: remote qualification acceptance evidence {} predates {}; it is refused, not reinterpreted. Fix: {}",
+            self.code(),
+            self.recorded_schema,
+            REMOTE_QUALIFICATION_ACCEPTANCE_EVIDENCE_SCHEMA,
+            self.fix()
+        )
+    }
+}
+
+impl std::error::Error for RemoteQualificationAcceptanceSuperseded {}
+
+/// Classify an acceptance evidence schema before anything else is decoded:
+/// the current schema passes, an earlier numbered schema is the typed
+/// superseded refusal, and anything else is unsupported.
+pub fn require_current_acceptance_evidence_schema(schema: &str) -> anyhow::Result<()> {
+    if schema == REMOTE_QUALIFICATION_ACCEPTANCE_EVIDENCE_SCHEMA {
+        return Ok(());
+    }
+    let predecessor = schema
+        .strip_prefix(REMOTE_QUALIFICATION_ACCEPTANCE_EVIDENCE_SCHEMA_PREFIX)
+        .filter(|version| !version.starts_with('0'))
+        .and_then(|version| version.parse::<u32>().ok())
+        .is_some_and(|version| version < REMOTE_QUALIFICATION_ACCEPTANCE_EVIDENCE_VERSION);
+    if predecessor {
+        return Err(RemoteQualificationAcceptanceSuperseded {
+            recorded_schema: schema.to_owned(),
+        }
+        .into());
+    }
+    bail!("unsupported remote qualification acceptance evidence schema");
+}
+
 /// Receiver-side retained acceptance. Keys are retained so recovery verifies
 /// the same signatures after remote grants or configuration change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -524,6 +607,14 @@ impl RemoteQualificationAcceptanceEvidence {
             MAX_REMOTE_QUALIFICATION_ACCEPTANCE_EVIDENCE_BYTES,
             "remote qualification acceptance evidence",
         )?;
+        // The outer schema is classified before the typed shape is decoded,
+        // so a superseded record surfaces as its typed refusal.
+        require_current_acceptance_evidence_schema(
+            value
+                .get("schema")
+                .and_then(Value::as_str)
+                .context("remote qualification acceptance evidence has no schema")?,
+        )?;
         let evidence: Self = serde_json::from_value(value.clone())
             .context("decode remote qualification acceptance evidence")?;
         evidence.validate()?;
@@ -531,9 +622,7 @@ impl RemoteQualificationAcceptanceEvidence {
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
-        if self.schema != REMOTE_QUALIFICATION_ACCEPTANCE_EVIDENCE_SCHEMA {
-            bail!("unsupported remote qualification acceptance evidence schema");
-        }
+        require_current_acceptance_evidence_schema(&self.schema)?;
         self.testimony.validate()?;
         let body = RemoteQualificationTestimonyBody::from_value(&self.testimony.evidence)?;
         if body.lane != self.lane {
@@ -1539,12 +1628,132 @@ pub(crate) mod tests {
             acceptance_hash: "a".repeat(64),
         });
         assert!(with_product.validate().is_err());
-        assert_eq!(evidence.asserted, vec!["activation_ref".to_owned()]);
+        assert_eq!(evidence.asserted, vec!["verifier_realization".to_owned()]);
+        assert!(
+            !evidence
+                .asserted
+                .iter()
+                .any(|name| name == "activation_ref")
+        );
         let mut unasserted = evidence.clone();
         unasserted.asserted.clear();
         assert!(unasserted.validate().is_err());
         let mut product_rederivations = evidence;
         product_rederivations.rederived = QualificationLane::Product.rederived();
         assert!(product_rederivations.validate().is_err());
+    }
+
+    #[test]
+    fn a_superseded_acceptance_is_refused_with_its_cure_in_both_lanes() {
+        let f = content_fixture();
+        let content = RemoteQualificationAcceptanceEvidence {
+            schema: REMOTE_QUALIFICATION_ACCEPTANCE_EVIDENCE_SCHEMA.into(),
+            lane: QualificationLane::Content,
+            testimony: f.testimony.clone(),
+            product_source: None,
+            acceptance_policy_ref: ACCEPTANCE_REF.into(),
+            acceptance_policy_digest: f.policy.digest().unwrap(),
+            attester_verifying_key: f.attester.verifying_key().to_bytes(),
+            origin_node_verifying_key: f.node.verifying_key().to_bytes(),
+            accepted_claims: f.body.asserted_claims.clone(),
+            rederived: QualificationLane::Content.rederived(),
+            asserted: QualificationLane::Content.asserted(),
+        };
+        content.validate().unwrap();
+        let product = product_acceptance_evidence(&"a".repeat(64));
+        product.validate().unwrap();
+        for current in [content, product] {
+            for predecessor in [
+                "ryeos.remote_qualification_acceptance_evidence.v1",
+                "ryeos.remote_qualification_acceptance_evidence.v2",
+                "ryeos.remote_qualification_acceptance_evidence.v3",
+            ] {
+                let mut old = current.clone();
+                old.schema = predecessor.into();
+                // The v3 content record carried the old assertion list; it is
+                // refused for its schema before its lists are read.
+                if current.lane == QualificationLane::Content {
+                    old.asserted = vec!["activation_ref".into()];
+                }
+                for error in [
+                    old.validate().unwrap_err(),
+                    RemoteQualificationAcceptanceEvidence::from_value(
+                        &serde_json::to_value(&old).unwrap(),
+                    )
+                    .unwrap_err(),
+                ] {
+                    let refusal = error
+                        .downcast_ref::<RemoteQualificationAcceptanceSuperseded>()
+                        .expect("a superseded acceptance is refused with its typed cure");
+                    assert_eq!(refusal.code(), "remote_qualification_acceptance_superseded");
+                    assert_eq!(refusal.recorded_schema, predecessor);
+                    assert!(refusal.fix().contains("export-qualification-testimony"));
+                    assert!(refusal.fix().contains("re-qualify"));
+                    assert!(error.to_string().contains(refusal.fix()));
+                }
+            }
+            for unknown in [
+                "ryeos.remote_qualification_acceptance_evidence.v5",
+                "ryeos.remote_qualification_acceptance_evidence.v03",
+                "ryeos.remote_qualification_acceptance_evidence",
+                "other",
+            ] {
+                let mut other = current.clone();
+                other.schema = unknown.into();
+                let error = other.validate().unwrap_err();
+                assert!(
+                    error
+                        .downcast_ref::<RemoteQualificationAcceptanceSuperseded>()
+                        .is_none(),
+                    "{unknown}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_acceptance_contract_names_its_version_and_both_lanes() {
+        assert_eq!(
+            REMOTE_QUALIFICATION_ACCEPTANCE_EVIDENCE_SCHEMA,
+            format!(
+                "{REMOTE_QUALIFICATION_ACCEPTANCE_EVIDENCE_SCHEMA_PREFIX}{REMOTE_QUALIFICATION_ACCEPTANCE_EVIDENCE_VERSION}"
+            )
+        );
+        assert_eq!(
+            REMOTE_QUALIFICATION_TESTIMONY_BODY_SCHEMA,
+            "ryeos.remote_qualification_testimony_body.v2"
+        );
+        assert_eq!(
+            REMOTE_QUALIFICATION_ACCEPTANCE_POLICY_SCHEMA,
+            "ryeos.remote_qualification_acceptance_policy.v2"
+        );
+        assert_eq!(PRODUCT_LANE_ASSERTIONS, ["verifier_realization"]);
+        assert_eq!(CONTENT_LANE_ASSERTIONS, ["verifier_realization"]);
+        assert_eq!(
+            PRODUCT_LANE_REDERIVATIONS,
+            [
+                "attestation_hash",
+                "claims",
+                "coordinate",
+                "origin_policy",
+                "received_product_join",
+                "subject_manifest",
+            ]
+        );
+        assert_eq!(
+            CONTENT_LANE_REDERIVATIONS,
+            [
+                "attestation_hash",
+                "claims",
+                "coordinate",
+                "origin_policy",
+                "subject_manifest",
+            ]
+        );
+        // Current heads never share a namespace with a superseded one.
+        assert!(
+            !RETIRED_REMOTE_QUALIFICATION_TESTIMONY_HEAD_NAMESPACES
+                .contains(&REMOTE_QUALIFICATION_TESTIMONY_HEAD_NAMESPACE)
+        );
     }
 }

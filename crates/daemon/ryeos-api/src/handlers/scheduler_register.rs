@@ -197,7 +197,14 @@ pub async fn handle(
     capabilities.sort();
     capabilities.dedup();
     if capabilities.is_empty() || capabilities != requested_capabilities {
-        bail!("scheduler capabilities must be a non-empty sorted unique capability subset");
+        return Err(structured_refusal(
+            400,
+            SCHEDULER_CAPABILITIES_NOT_CANONICAL,
+            "scheduler capabilities must be a non-empty list that is sorted and has no \
+             duplicates; send the capabilities the schedule needs, sorted and unique"
+                .to_owned(),
+            serde_json::json!({ "capabilities": requested_capabilities }),
+        ));
     }
     let authorizer = ryeos_runtime::authorizer::Authorizer::new();
     for capability in &capabilities {
@@ -210,6 +217,8 @@ pub async fn handle(
                 "scheduler capability {capability:?} is not covered by the authenticated caller grant"
             ))?;
     }
+
+    refuse_uncovered_item_declarations(state.as_ref(), &req, &ctx.fingerprint, &capabilities)?;
 
     // On update the authenticated owner explicitly replaces the policy,
     // capability ceiling, and stable grant generation. Nothing is inherited
@@ -247,6 +256,12 @@ pub async fn handle(
         paused_reason: None,
     };
     source_record.validate(Some(&req.schedule_id))?;
+    refuse_authority_that_cannot_hold_at_fire(
+        &ryeos_app::scheduled_execution_authority::ScheduleAuthorityParts::from_state(
+            state.as_ref(),
+        ),
+        &source_record.execution,
+    )?;
     let body = serde_json::to_value(&source_record)?;
 
     // Write signed YAML through the same pinned source transaction used for
@@ -276,6 +291,102 @@ pub async fn handle(
         "spec_path": spec_path.display().to_string(),
         "created": !was_existing,
     }))
+}
+
+/// Code of the 400 for a capability list the scheduler cannot accept as is.
+pub const SCHEDULER_CAPABILITIES_NOT_CANONICAL: &str = "scheduler_capabilities_not_canonical";
+use crate::schedule_admission::{refuse_authority_that_cannot_hold_at_fire, structured_refusal};
+
+/// Refuse at registration a schedule whose capabilities do not cover what its
+/// item declares. A fire runs with exactly the schedule's registered
+/// capabilities as its caller, so a schedule that cannot cover the item would
+/// register and then be refused on every fire; this reports it once, now, with
+/// the same typed `caller_capability_not_covered` code.
+///
+/// The item is read from the node's engine under the schedule's project
+/// policy: projectless, or live-direct with the registered `project_root`. A
+/// pinned-project schedule resolves its item from a snapshot that exists only
+/// at fire time, and an item that does not resolve yet (a project item synced
+/// later) has no declaration to judge; both stay judged at fire time.
+fn refuse_uncovered_item_declarations(
+    state: &AppState,
+    req: &Request,
+    principal: &str,
+    capabilities: &[String],
+) -> Result<()> {
+    use ryeos_engine::contracts::{
+        EffectivePrincipal, ExecutionHints, PlanContext, Principal, ProjectContext,
+        SubjectResolutionAuthority,
+    };
+    use ryeos_engine::execution_contract::ProjectExecutionPolicy;
+
+    let (project_context, authority, project_root) = match &req.execution_policy.project {
+        ProjectExecutionPolicy::Projectless => (
+            ProjectContext::None,
+            SubjectResolutionAuthority::Projectless,
+            None,
+        ),
+        ProjectExecutionPolicy::LiveDirect { .. } => {
+            let Some(root) = req.project_root.as_deref() else {
+                return Ok(());
+            };
+            let root = PathBuf::from(root);
+            (
+                ProjectContext::LocalPath { path: root.clone() },
+                SubjectResolutionAuthority::LiveFs,
+                Some(root),
+            )
+        }
+        ProjectExecutionPolicy::Pinned { .. } => return Ok(()),
+    };
+    let site_id = state.threads.site_id().to_owned();
+    let plan_context = PlanContext {
+        // Live and projectless: the live project is its own logical root.
+        logical_project_root: None,
+        requested_by: EffectivePrincipal::Local(Principal {
+            fingerprint: principal.to_owned(),
+            scopes: capabilities.to_vec(),
+        }),
+        project_context,
+        subject_resolution_authority: authority,
+        current_site_id: site_id.clone(),
+        origin_site_id: site_id,
+        execution_hints: ExecutionHints::default(),
+        scheduled_fire: None,
+        validate_only: true,
+    };
+    let item_ref = ryeos_engine::canonical_ref::CanonicalRef::parse(&req.item_ref)
+        .with_context(|| format!("invalid item_ref: {}", req.item_ref))?;
+    let declared = match ryeos_executor::execution::launch::composed_declared_caps(
+        &state.engine,
+        &plan_context,
+        &item_ref,
+        project_root,
+    ) {
+        Ok(declared) => declared,
+        Err(error) => {
+            tracing::debug!(
+                schedule_id = %req.schedule_id,
+                item_ref = %req.item_ref,
+                error = %error,
+                "schedule item does not resolve at registration; its declarations are judged at fire time"
+            );
+            return Ok(());
+        }
+    };
+    ryeos_executor::execution::launch::require_declared_caps_covered(
+        declared,
+        capabilities,
+        principal,
+        &req.item_ref,
+    )
+    .map_err(|error| {
+        anyhow::Error::new(ryeos_app::handler_error::HandlerError::Structured {
+            code: error.code().to_string(),
+            status: error.http_status().as_u16(),
+            body: ryeos_executor::structured_error::dispatch_error_value(&error),
+        })
+    })
 }
 
 pub(crate) fn authenticated_schedule_authority(
@@ -317,7 +428,11 @@ pub(super) fn load_existing_schedule_source(
                 .with_context(|| format!("inspect schedule source {}", source.display()));
         }
     }
-    let verified = projection::load_verified_schedule_source(&source, scheduler.trust_store())?;
+    let verified = projection::load_verified_schedule_source(
+        &source,
+        scheduler.trust_store(),
+        scheduler.identity().fingerprint(),
+    )?;
     if let Some(expected) = expected_spec_hash
         && verified.spec_hash != expected
     {
@@ -366,6 +481,7 @@ impl<'a> ScheduleSourceMutation<'a> {
                 &path,
                 &content,
                 scheduler.trust_store(),
+                scheduler.identity().fingerprint(),
             )?)
         } else {
             None
@@ -412,8 +528,12 @@ impl<'a> ScheduleSourceMutation<'a> {
             crate::API_TEMP_PURPOSE,
         )?;
         let content = String::from_utf8(bytes).context("signed schedule source is not UTF-8")?;
-        let verified =
-            projection::verify_schedule_source_content(&self.path, &content, self.trust_store)?;
+        let verified = projection::verify_schedule_source_content(
+            &self.path,
+            &content,
+            self.trust_store,
+            identity.fingerprint(),
+        )?;
         Ok((self.path.clone(), verified))
     }
 }

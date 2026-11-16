@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-17T05:23:21Z:f4c9af9b3ebf5bf9cfc9529be54d2db415991bce71ba2496f30110a388b20135:RBRU9QEUe4ql/J0qmfBzgyYPL58uuiuSQa6lUtQvi4iuQje2WowF6Y3WPPPDAO+3Uk3e0yq+fPpYJvSpSwWsBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:36:23Z:ea59c34f59561a829c9871187da48fe761ea6d20ac6074bf80a8022b1fa0d092:dSd1PV94cn+Bn/xg9dklObpN0GCuEeWu9fYdBNtLbur7SzLhxFwJHhfKPgoxEbWgalbAmJr4/AAA/+K/TIffCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, runtimes, execution, subprocess]
@@ -49,6 +49,15 @@ All runtimes inherit defaults from `config:execution/execution`:
 | `cancellation_grace_secs`| 5             |
 
 Override at project level in `.ai/config/execution/execution.yaml`.
+
+`cancellation_mode` and `cancellation_grace_secs` are the stop policy for
+every launch, runtimes included. They are resolved per item and recorded in
+the launch metadata when the process attaches; a stop uses the recorded
+policy, with the grace capped at the node's 5-second bound. A graceful stop
+sends SIGTERM to the runtime process only. The runtime owns stopping its own
+children (forward SIGTERM, or stop them at its own boundary); at the grace
+deadline the node SIGKILLs the whole process group, which reaches any child
+still running.
 
 Per-item overrides are kind-keyed so the policy format extends without an
 engine code change:

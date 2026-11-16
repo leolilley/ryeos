@@ -1,0 +1,11 @@
+# ryeos:signed:2026-11-14T05:54:19Z:268aa8797a334e0b24e98e64fdea06ecefdc82ac4907fde9a98e881c5983dd31:QIfRrNNyrA1sDk41r288g/Xi23i6W6rtSneFO/jaHBDy7L+uUMMmj++P8aJOpaq5fsJgiwJzR6ACqVJwv5uCBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: remote.revoke
+required_caps: ["ryeos.execute.service.remote/admin"]
+schema:
+  remote: string?
+  fingerprint: string
+  reason: string
+  leave_running: boolean?
+  keep_delegates: boolean?
+description: "Revoke an authorized-key grant on a remote node"

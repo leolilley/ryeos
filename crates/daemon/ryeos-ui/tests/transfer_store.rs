@@ -208,9 +208,9 @@ fn new_seat(store: &StateStore, id: &str, presentation_id: &str, incarnation: ch
                     "definition": {"kind": "shared_presentation", "config": {
                         "category": "ui",
                         "shared_presentation": {
-                            "schema": 1, "title": "Fixture", "launcher": "launcher",
+                            "schema": 2, "title": "Fixture", "launcher": "launcher",
                             "dialogs": [{"id": "launcher", "title": "Launcher", "view": "view:test/launcher"}],
-                            "docks": {}, "capabilities": {"sources": [], "affordances": []}
+                            "capabilities": {"sources": [], "affordances": []}
                         }
                     }},
                     "views": {"view:test/launcher": {"widget": "rows"}}
@@ -1074,7 +1074,7 @@ fn shared_launch_context() -> ryeos_ui::browser_session::LaunchContext {
     let config = serde_json::from_value(json!({
         "category": "ryeos/test",
         "shared_presentation": {
-            "schema": 1, "title": "Test presentation", "launcher": "launch",
+            "schema": 2, "title": "Test presentation", "launcher": "launch",
             "dialogs": [{"id": "launch", "title": "Launch", "view": "view:ryeos/test/launcher"}],
             "capabilities": {"sources": [], "affordances": []}
         }

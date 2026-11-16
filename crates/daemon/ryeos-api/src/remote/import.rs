@@ -271,7 +271,13 @@ pub async fn import_admitted_root(
     let attestation_entry = attestation_sync_entry(attestation)?;
     let fetch_options = closure_options.reserving_supplemental_entry(&attestation_entry)?;
     let closure = client
-        .objects_closure_get(std::slice::from_ref(&req.subject_hash), fetch_options)
+        .objects_closure_get(
+            &crate::objects_read_scope::ReadRoot::AdmittedSubject {
+                subject_hash: req.subject_hash.clone(),
+            },
+            std::slice::from_ref(&req.subject_hash),
+            fetch_options,
+        )
         .await?;
     let mut payload = closure_response_to_export_payload(
         &format!("remote-admission:{}", req.subject_hash),

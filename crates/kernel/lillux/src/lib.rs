@@ -54,8 +54,8 @@ pub use exec::{
     DEFAULT_MAX_CAPTURE_BYTES, DeadlineDuplexStream, DuplexReadiness, ForkSensitiveDescriptorLease,
     InheritedDescriptorAuthority, InheritedDescriptorMapping, InheritedDuplexChannel,
     InheritedDuplexChannelChildAuthority, OutputLimitExceeded, PendingCooperativeChildTermination,
-    ProcessAwaitingAttachment, ProcessObservationError, ProcessStdoutReader, RunningProcess,
-    SpawnResult, SubprocessLimits, SubprocessRequest, SubprocessResult,
+    ProcessAwaitingAttachment, ProcessCreationBusy, ProcessObservationError, ProcessStdoutReader,
+    RunningProcess, SpawnResult, SubprocessLimits, SubprocessRequest, SubprocessResult,
     SupervisedLauncherAttachmentStatusPipe, SupervisedLauncherStatusPipe, SupervisedProcessStatus,
     configure_command_argv0, configure_inherited_descriptor_authorities, configure_inherited_fds,
     configure_owner_private_creation_mask, configure_subprocess_limits, disable_process_core_dumps,
@@ -90,9 +90,9 @@ pub use cas::{
 };
 pub use guest_account::{GuestRuntimeAccount, effective_uid};
 pub use host_service::{
-    HostServiceController, HostServiceInstallation, HostServiceLaunch, discover_host_service,
-    exec_install_transaction, provision_host_service, run_as_administrator,
-    validate_install_transaction,
+    HostServiceAssociation, HostServiceController, HostServiceInstallation, HostServiceLaunch,
+    discover_host_service, exec_install_transaction, list_host_services, provision_host_service,
+    retire_host_service, run_as_administrator, validate_install_transaction,
 };
 pub use json::deserialize_json_str_stack_safe;
 pub use local_ipc::{
@@ -172,7 +172,8 @@ pub use secure_fs::{
 
 pub use sandbox::{
     LinuxOverlayMutation, LinuxOverlayMutationKind, LinuxOverlayTemplate,
-    LinuxOverlayWorkspaceObservation, LinuxOverlayWorkspaceOperation, LinuxSandboxAggregateLimits,
+    LinuxOverlayUnrepresentableReason, LinuxOverlayWorkspaceObservation,
+    LinuxOverlayWorkspaceOperation, LinuxSandboxAggregateLimits,
     LinuxSandboxAppliedLaunchCommitments, LinuxSandboxAppliedLaunchReceipt,
     LinuxSandboxAppliedLaunchTarget, LinuxSandboxCharacterDevice, LinuxSandboxExit,
     LinuxSandboxFixedParentView, LinuxSandboxInspection, LinuxSandboxLifecycle, LinuxSandboxMount,

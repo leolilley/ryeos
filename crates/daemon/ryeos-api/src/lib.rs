@@ -17,6 +17,7 @@ pub mod handler_context;
 pub mod handler_error;
 pub mod handlers;
 pub mod maintenance;
+pub mod objects_read_scope;
 pub mod project_deploy;
 pub(crate) mod project_namespace;
 pub mod publisher_server;
@@ -24,6 +25,7 @@ pub mod registry;
 pub mod remote;
 pub mod route_error;
 pub mod routes;
+pub mod schedule_admission;
 pub mod scheduler_selection;
 pub mod surface_views;
 #[cfg(feature = "test-support")]

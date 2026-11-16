@@ -329,6 +329,10 @@ fn build_top_level_help(
             "Provision one administrator-owned local hosted-worker service",
         ),
         crate::tty::Row::key_value(
+            "node host retire",
+            "Retire a stopped node's host service, or every orphaned one",
+        ),
+        crate::tty::Row::key_value(
             "node doctor",
             "Offline checklist answering \"why won't it start\"",
         ),
@@ -339,6 +343,10 @@ fn build_top_level_help(
         crate::tty::Row::key_value(
             "node reset authorization",
             "Reset authorized keys for a schema cutover",
+        ),
+        crate::tty::Row::key_value(
+            "node authorization revoke",
+            "Revoke a grant on a stopped node, leaving a tombstone",
         ),
         crate::tty::Row::key_value(
             "node reset policy-generation",
@@ -932,6 +940,11 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
             "Provision one administrator-owned local hosted-worker service",
             "ryeos node host setup --confirm [--app-root <DIR>] [--bind <ADDR>] [--uds-path <PATH>]",
         ),
+        "node host retire" => (
+            "ryeos node host retire",
+            "Retire a stopped node's host service, or every orphaned one",
+            "ryeos node host retire --confirm [--app-root <DIR> | --orphaned]",
+        ),
         "node doctor" => (
             "ryeos node doctor",
             "Diagnose the local node environment",
@@ -952,6 +965,11 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
             "Retire all grants and restore only the local operator",
             "ryeos node reset authorization --confirm [--json] [--app-root <DIR>]",
         ),
+        "node authorization revoke" => (
+            "ryeos node authorization revoke",
+            "Revoke a grant on a stopped node, leaving a tombstone",
+            "ryeos node authorization revoke --fingerprint <FINGERPRINT> --reason <TEXT> [--keep-delegates] [--json] [--app-root <DIR>]",
+        ),
         "node reset replay-indexes" => (
             "ryeos node reset replay-indexes",
             "Retire predecessor replay indexes",
@@ -962,10 +980,30 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
             "Retire predecessor external-content bindings",
             "ryeos node reset external-content-bindings [--dry-run | --confirm] [--json] [--app-root <DIR>]",
         ),
+        "node large-objects purge-quarantine" => (
+            "ryeos node large-objects purge-quarantine",
+            "Discard the damaged large objects scrub quarantined",
+            "ryeos node large-objects purge-quarantine [--dry-run | --confirm] [--json] [--app-root <DIR>]",
+        ),
         "node reset policy-generation" => (
             "ryeos node reset policy-generation",
             "Replace an obsolete node-policy generation",
             "ryeos node reset policy-generation --node-profile <NAME> --host-class <NAME> --confirm [--source <DIR>] [--trust-file <FILE>]... [--json] [--app-root <DIR>]",
+        ),
+        "node host-access grant" => (
+            "ryeos node host-access grant",
+            "Grant one exact host-authority tool host-direct execution: it runs on the host with the operator's authority",
+            "ryeos node host-access grant <item_ref> --project <DIR> [--id <ID>] [--origin direct|graph_child|schedule]... [--env <NAME>]... [--containment scope_required|group_allowed] [--json] [--app-root <DIR>]",
+        ),
+        "node host-access revoke" => (
+            "ryeos node host-access revoke",
+            "Remove one host_access grant",
+            "ryeos node host-access revoke <id> [--json] [--app-root <DIR>]",
+        ),
+        "node host-access list" => (
+            "ryeos node host-access list",
+            "List host_access grants; with --project, report each as current or stale",
+            "ryeos node host-access list [--project <DIR>] [--json] [--app-root <DIR>]",
         ),
         "start" => (
             "ryeos start",
@@ -986,6 +1024,16 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
             "ryeos sign",
             "Sign RyeOS items by canonical ref, glob, or .ai path",
             "ryeos sign <item_ref_or_glob_or_path> [...more] [OPTIONS]",
+        ),
+        "external-content product publish" => (
+            "ryeos external-content product publish",
+            "Produce a named product and ship it: activate, execute the producer, wait, capture, admit the witness, and push it when asked",
+            "ryeos external-content product publish <producer-ref> <product-name> [--activation <config-ref>] [--from-thread <thread-id>] [--push-to <remote>] [--json]",
+        ),
+        "codex login device" => (
+            "ryeos codex login device",
+            "Log a Codex credential profile in with a device code: open the login session, show the code, wait for the account, end the session, and confirm",
+            "ryeos codex login device <profile-id> [--create] [--trusted] [--yes] [--json]",
         ),
         "identity" => (
             "ryeos identity",
@@ -1030,18 +1078,74 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
             ),
             (
                 "--host-class <NAME>",
-                "Kind of host the node runs on (for example local or hosted), one the profile declares; required with --node-profile",
+                "Kind of host the node runs on (for example local or hosted), one the profile declares; required with --node-profile. `local` enforces the sandbox and init refuses if the host cannot prove it; `local_unconfined` is the explicit opt-out that runs jobs as the daemon user",
             ),
             ("--app-root <DIR>", "Application root"),
         ],
         #[cfg(feature = "model-provider-setup")]
         "setup" => &[("--app-root <DIR>", "Application root")],
+        "external-content product publish" => &[
+            (
+                "--activation <config-ref>",
+                "Activate this external-content recipe online first and wait for it",
+            ),
+            (
+                "--from-thread <thread-id>",
+                "Resume from a completed producer thread instead of executing again",
+            ),
+            (
+                "--push-to <remote>",
+                "Push the admitted product to this remote under the declared byte bound",
+            ),
+            (
+                "--project-snapshot <hash>",
+                "Execute the producer from this published project snapshot",
+            ),
+            (
+                "--current-head",
+                "Execute the producer from the current principal project HEAD",
+            ),
+            (
+                "--timeout-secs <n>",
+                "Give up waiting after this many seconds",
+            ),
+            ("--json", "Emit the final result as JSON"),
+        ],
+        "codex login device" => &[
+            (
+                "--create",
+                "Create the profile first; an existing owned profile is kept",
+            ),
+            (
+                "--trusted",
+                "Open the login on an explicitly trusted process-group node",
+            ),
+            (
+                "--yes",
+                "Confirm the observed account without asking (needed without a terminal)",
+            ),
+            ("--json", "Emit the final result as JSON"),
+        ],
         "node host setup" => &[
             (
                 "--confirm",
                 "Confirm provisioning the administrator-owned host association",
             ),
             ("--app-root <DIR>", "Existing initialized application root"),
+        ],
+        "node host retire" => &[
+            (
+                "--confirm",
+                "Confirm removing the administrator-owned host association",
+            ),
+            (
+                "--app-root <DIR>",
+                "Application root whose stopped node's service to retire",
+            ),
+            (
+                "--orphaned",
+                "Retire every node service whose app root no longer exists",
+            ),
         ],
         "execute" => &[
             (

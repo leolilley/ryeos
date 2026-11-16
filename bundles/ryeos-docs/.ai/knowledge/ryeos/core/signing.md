@@ -1,9 +1,9 @@
-<!-- ryeos:signed:2026-11-12T10:13:58Z:97d123b07e0d0e24c3d1c8b03dfc940e815b0161f43ebb0115199e1c25b4741f:yVkd5MpzqC5q578ajqmau7PPIhvvDJ8uNcrI/rnQF5IuzLXyopQZfSvdEP9S3a4s2YmeXbKIqkeH/FIXU8F8BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T11:55:49Z:a7ccbc80bd4e56c0008d855786c84cba0f2196cbb815dd693bf5aa2234a95c51:bPKX7TsHr0pkS+IJUYtpvyLIxRhyzWokuDZigvBhilHMG2j6zyoaFnvUT7a2n/X118kCJQUuHC4Y7ootTsYPAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
 tags: [fundamentals, signing, trust, integrity, compilation]
-version: "3.1.0"
+version: "3.2.0"
 description: >
   How signing and trust work in Rye OS — Ed25519 signatures,
   content hashing, path anchoring, the trust store, the signed
@@ -15,15 +15,18 @@ description: >
 Rye OS uses Ed25519 cryptographic signatures to ensure item integrity.
 Every executable item must be signed before the daemon will run it.
 
-## Three Keys, Three Roles
+## Four Keys, Four Roles
 
 | Key | Purpose | Location |
 |-----|---------|----------|
-| **Operator key** | Operator identity — CLI auth, signing project items | `<system>/.ai/config/keys/signing/private_key.pem` |
+| **Operator key** | Operator identity — CLI auth, signing project items | `<system>/.ai/node/operator/signing/private_key.pem` |
 | **Node key** | Daemon identity — bundle registrations, node config | `<system>/.ai/node/identity/private_key.pem` |
-| **Publisher key** | Bundle author identity — signs items in published bundles | Pinned in `<system>/.ai/config/keys/trusted/` |
+| **Authoring key** | Items the runtime authors; machine drafts, no kind admitted until the operator widens its scope | `<system>/.ai/node/authoring/signing/private_key.pem` |
+| **Publisher key** | Bundle author identity — signs items in published bundles | Signer record in `<system>/.ai/node/trust/signers/` |
 
-The operator key and node key are generated at `ryeos init` time. The
+The operator, authoring and node keys are generated at `ryeos init` time.
+Operator and authoring keys rotate with `ryeos node operator rotate` and
+`ryeos node authoring rotate`; the node key does not rotate. The
 publisher key is **hardcoded in the binary** and pinned during init
 without trusting any on-disk file. For development, `--trust-file`
 pins a dev publisher key instead.
@@ -159,40 +162,118 @@ Apply it to a stopped node with `ryeos node policy-apply launch_trust
 any key, in every project on the node. Withdrawing it also stops work
 admitted under it from resuming.
 
-**What this does not cover yet.** A key placed in a project's
-`.ai/config/keys/trusted/` counts as pinned for that project, so writing
-that directory is still enough to make an item `trusted_project`. Live
-runs may write `.ai/tools/` and `.ai/services/`: an item planted there is
-inert unless it is signed by a pinned key.
+**Projects cannot pin keys.** Trust is held only by the node, in
+node-signed signer records. Nothing a project contains, and nothing a live
+run writes, can make a signer trusted. Live runs may write `.ai/tools/` and
+`.ai/services/`: an item planted there is inert unless it is signed by a
+key the node has pinned, for that project.
+
+**Bundle-owned namespaces cannot be shadowed.** A bundle's signed manifest
+can declare `owns_namespaces` (core owns `ryeos/core`). A project file inside
+an owned namespace, such as a copy of a core runtime at
+`.ai/tools/ryeos/core/runtimes/python/function.yaml`, is refused with a 409
+`reserved_namespace_shadow` instead of winning resolution, even when a pinned
+key signed it. An installed bundle's name is reserved the same way, so a
+project item under another installed bundle's name is refused too. See
+[Spaces](spaces.md).
 
 **One name, one item.** Two files with the same name and different
 formats in one folder (for example `x.py` and `x.yaml`) are refused as
-ambiguous rather than one silently winning.
+ambiguous rather than one silently winning. A launch refuses with 409
+`ambiguous_item_formats`, naming the item, the space and both candidate
+files; the cure is to keep exactly one of them.
 
 ## Trust Store
 
-The trust store lives in `<system>/.ai/config/keys/trusted/` and contains
-Ed25519 public keys indexed by SHA-256 fingerprint:
+Trust lives only on the node, as a registry of signer records in
+`<system>/.ai/node/trust/signers/<fp>.yaml`. Each record is signed by the
+node key; nothing writes trust by hand. The node key itself is the
+implicit root: it is trusted for the node space only and needs no
+record. It does not sign project items.
 
-```toml
-fingerprint = "741a8bc6..."
-owner = "official-publisher"
+A record carries the signer's fingerprint and public key, a label, and:
 
-[public_key]
-pem = "ed25519:MCowBQYDK2VwAyEA..."
-```
+| Field | Values |
+|---|---|
+| `role` | `publisher`, `operator`, `project_author`, `authoring` |
+| `scope` | `spaces` (bundle, project, node), `kinds` (item kinds, or all), `projects` (project roots, for `project_author`) |
+| `status` | `active`, `retired`, `revoked` |
 
-Each trust doc is self-signed (signed by the key it declares). During
-`ryeos init`, three entries are created:
-1. **Operator self-trust** — your own key
-2. **Node self-trust** — the daemon's key
-3. **Publisher trust** — the hardcoded official publisher key (or dev key)
+Defaults: a publisher is scoped to the bundle space for every kind; the
+operator key is scoped to the project and node spaces for every kind; the
+authoring key is scoped to the project space with **no kinds** (`kinds: []`
+admits nothing), so items it signs are untrusted until the operator widens the
+scope with `ryeos trust scope <fp> --kind <kind>`.
 
-Additional publisher keys can be pinned with `ryeos trust pin`.
+`scope.projects` names projects by their logical project path: the absolute
+project path as the node knows it. A run against a live project matches by that
+path. A run against a pinned generation, a copy-on-write workspace or a pushed
+head is materialized at a per-generation checkout, so it matches by the
+project's original path instead, but only when the node's stable project
+identity for it is local (`local:<path>`); the checkout path never matches. A
+run whose logical project is unknown (for example a head whose project
+identity names another site) is judged as no project, so a signer scoped to
+specific projects is untrusted there.
 
-**Bundles do NOT ship trust docs.** The operator must pin publisher
+The scope is checked on every verification. A signer outside its scope is
+not trusted for that item: in project space the item is
+`untrusted_project`; in bundle or node space the verification is refused
+with `signer_out_of_scope`. A revoked signer verifies nothing
+(`trust_signer_revoked`). Node documents (policy generations, bindings,
+node configuration) verify only under the node key, never against the
+registry.
+
+Each record is checked when the registry loads. A record that fails is
+refused with a typed code: `trust_record_unsigned`,
+`trust_record_wrong_signer`, `trust_record_tampered`,
+`trust_record_name_mismatch` (the file name is not the fingerprint),
+`trust_record_schema_unsupported`.
+
+During `ryeos init` the publisher key (hardcoded official key, or each
+`--trust-file`) is pinned as role `publisher`, scope bundle.
+
+**Pinned is not the same as allowed to sign node state.** Item
+verification accepts any pinned key within its scope, but node state does
+not: node policy, schedules, bundle registrations and app-root node config
+verify only under the node key, and the init completion record only under
+the local operator key. Anything else is refused as
+`node_document_wrong_signer`. See [Identity Model](identity-model.md#who-signs-node-state).
+
+**Bundles do NOT ship trust records.** The operator must pin publisher
 keys explicitly via `ryeos init` (official) or `ryeos trust pin`
 (third-party). This prevents a bundle from injecting its own trust.
+
+### Changing trust
+
+`ryeos trust pin --from <PUBLISHER_TRUST.toml> --role publisher` pins an
+additional publisher; the other verbs change scope or status. See the
+verb table in the CLI reference. The mutating verbs are offline
+operations: stop the node first. Read-only `ryeos trust list` and
+`ryeos trust show <fp>` work on a running or stopped node.
+
+### Retired and revoked
+
+A **retired** signer still verifies the items it already signed. A
+**revoked** signer verifies nothing, and revocation is terminal: a
+revoked key cannot be pinned again.
+
+### Key events
+
+Every trust change appends a node-signed, hash-chained key event under
+`<system>/.ai/node/trust/events/`. Event fields:
+
+| Field | Meaning |
+|---|---|
+| `schema` | `ryeos/trust-event/v1` |
+| `seq` | position in the chain |
+| `previous` | digest of the previous event |
+| `kind` | `pinned`, `scope_changed`, `retired`, `revoked`, `succeeded`, `init` |
+| `signer` | fingerprint of the key the event concerns |
+| `record_digest` | digest of the resulting signer record |
+| `request_digest` | digest of the signed operation that caused it |
+| `operator` | the operator that requested the change |
+
+Read them with `ryeos trust show <fp>`.
 
 ## Bundle Install Verification
 

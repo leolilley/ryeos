@@ -1,0 +1,8 @@
+# ryeos:signed:2026-11-13T04:25:00Z:e305e163e3b96e0b1894d8154cb3904cf2a244cf331c41ae230b0b71b044b372:3zidt9jFMT2K5i15ZnLiF9S7Tz1a2Z4yKeMI6UdMbMY9PMiRHvb9zMkph33IObbMY7bzo/Ev1P08IdrYfNgHDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: session-end
+version: "1.0.0"
+description: Ends the authenticated browser session and clears its cookie.
+endpoint: ui.session.end
+record_thread: false
+availability: daemon_only

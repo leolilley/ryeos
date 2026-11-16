@@ -113,7 +113,7 @@ mod tests {
                 checked += 1;
             }
         }
-        assert_eq!(checked, 16, "every shipped offline reset quota is checked");
+        assert_eq!(checked, 15, "every shipped offline reset quota is checked");
     }
 
     #[test]
@@ -126,12 +126,18 @@ mod tests {
         }
         assert_eq!(delegating.len(), 1, "{delegating:?}");
         assert!(
-            delegating[0].0.ends_with("f5r-controller.yaml"),
+            delegating[0].0.ends_with("hosted-controller.yaml"),
             "{delegating:?}"
         );
         assert_eq!(
             delegating[0].1,
-            ["node.external-execution.compose".to_owned()]
+            [
+                "node.external-execution.compose",
+                "node.external-execution.recompose",
+                "node.authorize-client",
+                "node.remote.pin",
+                "node.bundle.replace",
+            ]
         );
     }
 

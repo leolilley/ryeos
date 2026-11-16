@@ -3,9 +3,11 @@
 # ryeos-standard — standard remote workflow node image.
 #
 # Bakes the exact standard set: core + scheduling + knowledge + directive + graph +
-# ryeos-docs. This provides
-# project sync/CAS/remote APIs, native caller authorization, and scheduling,
-# graph/directive/knowledge schemas, services, and runtimes. The application central-auth, ryeos-ui, and web are explicit additions.
+# ryeos-docs + ryeos-ui + codex + opencode + web + browser. This provides
+# project sync/CAS/remote APIs, native caller authorization, scheduling,
+# graph/directive/knowledge schemas, services and runtimes, the UI, the hosted
+# Codex and opencode workers, and the web and browser tools. The application
+# central-auth is an explicit addition.
 
 FROM rust:1.95-slim@sha256:e14e87345b4d5964ddcc3491d27ee046a0f23820f340c3c1e24da6880141f7c0 AS builder
 
@@ -102,6 +104,11 @@ COPY --from=builder /build/bundles/knowledge /opt/ryeos/knowledge
 COPY --from=builder /build/bundles/directive /opt/ryeos/directive
 COPY --from=builder /build/bundles/graph /opt/ryeos/graph
 COPY --from=builder /build/bundles/ryeos-docs /opt/ryeos/ryeos-docs
+COPY --from=builder /build/bundles/ryeos-ui  /opt/ryeos/ryeos-ui
+COPY --from=builder /build/bundles/codex     /opt/ryeos/codex
+COPY --from=builder /build/bundles/opencode  /opt/ryeos/opencode
+COPY --from=builder /build/bundles/web       /opt/ryeos/web
+COPY --from=builder /build/bundles/browser   /opt/ryeos/browser
 
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh

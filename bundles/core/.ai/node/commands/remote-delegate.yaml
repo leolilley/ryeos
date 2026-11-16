@@ -1,0 +1,16 @@
+# ryeos:signed:2026-11-13T14:29:21Z:00869d93dd3cd0e7ac5f3b9a9e0a69e584c2480872efa465dd6895ef0113fcda:kRt7wf05/0tyd5ZRnRwoJrcO1/t0iXpt0PBcavTtbDrm11v3b326KKsOkOcgUSLRxUtaiA7joxxr7qIK0zUmDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- remote
+- delegate
+description: Sign a bounded delegation that lets this node act for you on a remote
+help:
+  usage: "ryeos remote delegate --remote <name> --scopes <scope,scope,...> [--lifetime-secs <seconds>]"
+  examples:
+    - "ryeos remote delegate --remote hosted --scopes ryeos.execute.service.remote/run,ryeos.execute.service.remote/push --lifetime-secs 3600"
+parameter_binding:
+  mode: tail_object
+  flag_key_normalization: hyphen_to_underscore
+dispatch:
+  kind: local_handler
+  handler: remote_delegate
+  bootstrap: false

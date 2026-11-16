@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-11T04:16:48Z:9906f09304da705b27edacdd59ca5709390f02d02f7c386cfb30aad416832b25:a+AFirv5Prf8qKfQhELOhRYJgJ6y2JsfGLQxGoyhobvp4YyId70bdnmdbaUwmjy7FcK7LuU6ZHkM/shIYMXeDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T07:17:08Z:11bdd136ad5575455ab2fc6461401001cd145bb371938895d6858d0a53c64d59:fUxIM/VJu5v8uQ6HXp0qkF1oaCe5y0D9y56VKeyzXX5s0zz3xq0OGr6yQc3uuqwjOCPl2/8H51uL3bx/nY9wBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus the knowledge bundle.
 schema: 1
 exact_bundles:
@@ -219,7 +219,7 @@ policies:
   isolation:
     schema: 1
     policy:
-      version: 10
+      version: 11
       # Host classes this profile supports. The deployment names one at
       # init (`ryeos init --host-class`), and the node runs under that
       # class's floor and isolation lane from then on. A class names the
@@ -245,6 +245,7 @@ policies:
           mode: disabled
           backend: null
           proc_filesystem: empty
+          host_direct: unavailable
         local:
           # A host whose supervisor delegates qualified per-job process scopes
           # (runit, or the OCI hook): jobs run sandboxed in their own scope.
@@ -264,6 +265,7 @@ policies:
             bundle: core
             implementation: linux-lillux
           proc_filesystem: pid_namespace
+          host_direct: unavailable
       # Inits trusted to exit when their only child exits. When the node's
       # parent is pid 1 and pid 1 is one of these, the node's exit is trusted
       # to end its container, so a new container on the same boot proves
@@ -279,7 +281,6 @@ policies:
           - "{node_public_identity}"
           - "{daemon_socket}"
           - "{bundle_roots}"
-          - "{node_trusted_keys}"
           - "{verified_code}"
         writable:
           - "{project}"
@@ -309,11 +310,39 @@ policies:
         verified_artifact_file_bytes: 268435456
         verified_artifact_total_bytes: 1073741824
         verified_artifact_files: 4096
+  # Operator grants of host-direct execution, per exact item. Empty by
+  # default, so nothing runs on the host. Changed only by the operator-signed
+  # `node.policy-apply` (`ryeos node host-access grant|revoke`).
+  host_access:
+    schema: 1
+    grants: []
+  # Longest lifetime of an authorized-key grant per principal class, in
+  # seconds (365, 90 and 30 days). A grant request that names no lifetime
+  # receives its class maximum; the configured operator's own grant is the
+  # only one issued without an expiry. warn_before_secs (14 days) is how
+  # early `ryeos node doctor` reports a grant as expiring.
+  authorization:
+    schema: 1
+    max_lifetime_secs:
+      local_client: 31536000
+      remote_node: 7776000
+      remote_principal: 2592000
+    warn_before_secs: 1209600
   # Trust classes the operator admits for launch roots beyond each kind's
   # default, per kind (only what the kind schema lets an operator admit).
   launch_trust:
     schema: 1
     admit: {}
+  # Storage class of each progressive runtime event. Every other event is
+  # always indexed; only these may be ephemeral or journal_only.
+  event_storage:
+    schema: 1
+    classes:
+      cognition_reasoning: ephemeral
+      graph_foreach_iteration: journal_only
+      observation: journal_only
+      stream_snapshot: ephemeral
+      token_delta: ephemeral
   ingest_ignore:
     schema: 2
     patterns:
@@ -325,7 +354,7 @@ policies:
       - ".svn/"
       - ".tmp/"
       - ".venv/"
-      - "/.ai/config/remotes/"
+      - "/.ai/node/remotes/"
       - "/.ai/state/"
       - "__pycache__/"
       - "node_modules/"
@@ -374,8 +403,38 @@ policies:
   provider_environment:
     schema: 2
     names: []
+  sealed_vault_names:
+    schema: 1
+    names: []
   ui_browser_sessions:
-    schema: 4
+    schema: 5
+    session_ttl_secs: 28800
+    session_idle_secs: 3600
+    launch_token_ttl_secs: 60
+    session_scopes:
+      - ryeos.execute.service.ui/ryeos-ui/*
+      - ryeos.execute.service.ui/session/surfaces/open
+      - ryeos.execute.service.node/status
+      - ryeos.execute.service.projects/list
+      - ryeos.execute.service.events/chain_replay
+      - ryeos.execute.service.projects/add
+      - ryeos.execute.service.projects/open
+      - ryeos.execute.service.threads/input
+      - ryeos.execute.service.commands/dispatch
+      - ryeos.execute.service.commands/submit
+      - ryeos.execute.service.worker-executions/approvals
+      - ryeos.execute.service.worker-executions/resolve-approval
+      - ryeos.execute.directive.*
+      - ryeos.execute.graph.*
+      - ryeos.execute.tool.ryeos/core/fetch
+      - ryeos.execute.tool.ryeos/core/verify
+      - ryeos.execute.tool.ryeos/core/node/doctor
+      - ryeos.execute.tool.ryeos/knowledge/compose
+      - ryeos.execute.knowledge.*
+      - ryeos.execute.tool.core/snapshot-status
+      - ryeos.execute.tool.core/snapshot-show
+      - ryeos.execute.tool.core/snapshot-log
+      - ryeos.read.project.live
     max_session_bootstrap_bytes: 4194304
     max_live_binding_attachments_per_session: 16
     max_presentations_per_session: 16

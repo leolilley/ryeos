@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-11-13T01:27:48Z:1347fcddda69e314898c65a8914313edcc8fa285744114c4debd54a96c17f59b:aFyBU3DXD/jFA2KiTfq4byrtn7WqjlJ4QNbwAS1NYDk7U8/hgfFyUAC24MaukwGE7exmqXmJfs/B5E7EHVjrDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T13:05:39Z:1cc64fe170b61faa00d1d9b48e5d90f543c5f316cf88f8953a9f53add97f1639:3To15GfUCl1ScSvq2v1zBRE2TOOec6DQI6lVfA+JTlu7ZA7a+YPlrNyQ9MdVdC2VVjmGA8aTQ+rBNFWZoJdcDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/development
 tags: [development, tooling, production, qualification]
-version: "1.7.0"
+version: "1.8.0"
 description: Canonical owners, external entry boundaries and completion gates for repository operations.
 ---
 
@@ -118,8 +118,12 @@ their tests. The rule:
   in the tracked tree.
 - Reusable development tooling goes in the repository-root `.ai` development
   bundle under `.ai/tools/ryeos/development/`: an admitted operation as a
-  Tool with its `ryeos-tool` header, a host-run helper as signed source in a
-  `lib/` directory (which Tool resolution excludes).
+  Tool with its `ryeos-tool` header. A helper that needs the host itself is
+  signed source in a `lib/` directory (which Tool resolution excludes) with a
+  thin Tool entry beside it that declares `host_authority: required` and runs
+  only under an operator `host_access` grant. Interactive and pre-node entries
+  (`sign-dev.sh`, `dev-tui.sh`, `dev-ui-assets.sh`) stay external `lib/`
+  scripts.
 - Tests live beside their subject: `bundles/<bundle>/tests/`,
   `tests/development/`, or the matching `tests/e2e/` family.
 
@@ -159,10 +163,9 @@ Moved out on 2026-11-13: the bundle-release source tests to
 `bundles/bundle-release/tests/`; `sign-dev.sh` and `revert-sig-churn.sh` to
 `.ai/tools/ryeos/development/maintainer/lib/`; `dev-tui.sh` and
 `dev-ui-assets.sh` to `.ai/tools/ryeos/development/interactive-host/lib/`;
-`rebuild-build-support-inputs.py` to
-`.ai/tools/ryeos/development/build-support-inputs/lib/`;
-`prove-contained-oci-provider.py` to
-`.ai/tools/ryeos/development/contained-oci-provider/lib/`, with their tests
+`rebuild-build-support-inputs.py` and `prove-contained-oci-provider.py` to
+`.ai/tools/ryeos/development/dev-host/lib/` (first under their own tool
+directories, then beside the other host helpers), with their tests
 in `tests/e2e/authoring-environment/` and `tests/development/`. Removed:
 `check-ui-wasm-fresh.sh` (call `browser-assets-production/publish.sh --check`),
 `release/verify-contained-oci-hook.sh`,
@@ -202,7 +205,7 @@ directory.
 | `ci/install-static-linters.sh`, `ci/lint-workflows-and-shell.sh` | Pre-install CI acquisition/orchestration entry; exact actionlint/ShellCheck are reusable validation Tool inputs, not ambient worker dependencies. | Preserve checksum-pinned acquisition; signed validation operation must bind exact binaries and complete child PATH before replacing CI behavior. |
 | `ci/test-daemon-image-init-policy.sh`, `ci/test-publisher-trust-policy.sh` | Focused tests of genuinely external Docker/init/install/publisher integration; remain with that owner. | Run relevant contract tests when those scripts change; no automatic live node mutation. |
 | `gate.sh` | Explicit broad CI/maintainer test orchestration, not default worker operation. Runtime test behaviors remain Cargo/project-owned Tools. | Keep full test/rebuild opt-in and crash-feature isolation; do not hide unrelated tests in release packaging. |
-| `browser-assets-production/publish.sh`, `interactive-host/lib/dev-ui-assets.sh`, `interactive-host/lib/dev-tui.sh` (development bundle) | Rune renderer assembly (`scripts/build-rune-web.sh --out`), its freshness check (`publish.sh --check`) and atomic publication have one canonical signed source under `.ai/tools/ryeos/development/browser-assets-production/`; host file-watcher and interactive TUI/browser launch remain thin host entrypoints. | The operation builds one closed six-file generation into `crates/clients/rune/pkg/`, rejects stale bytes and atomically replaces it; the exact wasm-bindgen CLI the lock names must come from the admitted development environment. Watching/process lifecycle remains separate. No host PATH inside worker children. |
+| `browser-assets-production/publish.sh`, `browser-assets-production/lib/build-rune-web.sh`, `browser-assets-production/lib/build-rune-fonts.py`, `interactive-host/lib/dev-ui-assets.sh`, `interactive-host/lib/dev-tui.sh` (development bundle) | Rune renderer assembly (`build-rune-web.sh --out`), its freshness check (`publish.sh --check`) and atomic publication have one canonical signed source under `.ai/tools/ryeos/development/browser-assets-production/`; host file-watcher and interactive TUI/browser launch remain thin host entrypoints. | The operation builds one closed six-file generation into `crates/clients/rune/pkg/`, rejects stale bytes and atomically replaces it; the exact wasm-bindgen CLI the lock names must come from the admitted development environment. Watching/process lifecycle remains separate. No host PATH inside worker children. |
 | `.ai/tools/ryeos/development/maintainer/lib/sign-dev.sh` (was `dev/sign-dev.sh`) | Existing RyeOS/Lillux signing is canonical; the public development fixture selects a key, not another signature algorithm. Only the necessary explicit pre-install key-selection entry may remain. | Expose/reuse safe per-item publisher signing without whole-checkout exchange or node identity impersonation; remove duplicate envelope/hash/signature implementation after canonical entry qualification. Current script remains an open consolidation item. |
 | `.ai/tools/ryeos/development/maintainer/lib/revert-sig-churn.sh` (was `dev/revert-sig-churn.sh`) | Maintainer-only Git working-tree operation; Git remains the authority for local review/commits. Reusable filtering should live beside its signed maintainer Tool if retained. | Exact path selection, dry-run, reject mixed edits, never staged-change loss; no blanket worker Git/signing grant. |
 | `dev/free-build-space.py` (removed) | Personal host build-cache housekeeping, not project production or node GC. Removed from the repository; it is kept outside it. Existing Cargo cache and RyeOS GC owners remain separate. | Do not reintroduce it under `scripts/`. A reusable version would need an exact exclusively owned target and explicit destructive intent, and must not add node/host mounts to a Tool. |

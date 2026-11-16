@@ -297,7 +297,6 @@ pub(crate) fn publish_retained_lifecycle_artifacts(
     let mut executables = Vec::with_capacity(capture.executables.len());
     for item in &capture.executables {
         let observation = item.handle.regular_file_observation()?;
-        let mode = observation.permission_mode()?;
         ensure!(
             observation.size() == item.bytes,
             "captured lifecycle executable size changed"
@@ -311,6 +310,15 @@ pub(crate) fn publish_retained_lifecycle_artifacts(
             signer_fingerprint: capture.signer_fingerprint.to_owned(),
             target_triple: target.to_owned(),
         };
+        // The capture descriptor is a sealed executable memfd whose mode the
+        // kernel layer fixes at 0o500, so its observed mode says nothing about
+        // the bundle payload. The signed ItemSource declares the payload mode;
+        // it is source data, not a new grant.
+        let (_, mode) = ryeos_engine::executor_resolution::verify_executor_item_source(
+            &item.proof.item_source_object,
+            &identity.item_source_hash,
+            &item.proof.selected_item_ref,
+        )?;
         verify_retained_bundle_payload_proof(item.proof, &identity, mode, &verifier)?;
         executables.push(RetainedLifecycleExecutable {
             role: item.role,
@@ -673,6 +681,56 @@ impl RecoveredBootstrapLifecycle {
     ) -> Result<crate::external_placement::ExternalLifecycleObservation<ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotReadinessObservation>>{
         self.backend
             .observe_runtime_snapshot_readiness(binding, credential, request, deadline)
+    }
+}
+
+/// Termination-only facade over the lifecycle generation a qualification
+/// occurrence was created under, rebuilt from its retained CAS closure. It
+/// never enters the fresh-work registry and exposes no create or verify.
+pub(crate) struct RecoveredQualificationLifecycle {
+    backend: crate::external_lifecycle_adapter::ExecutableExternalPlacementBackend,
+}
+
+impl RecoveredQualificationLifecycle {
+    pub(crate) fn from_generation(
+        state: &crate::state::AppState,
+        generation: &crate::runtime_db::runtime_snapshot_qualification::RetainedQualificationGeneration,
+        producer: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        qualification: &crate::node_config::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding,
+        credential: &crate::vault::placement::PlacementCredential,
+    ) -> Result<Self> {
+        let authority = state.state_store.pinned_state_authority()?;
+        let guard = authority.acquire_shared_guard()?;
+        let backend = recover_retained_lifecycle_backend(
+            &authority.cas_store()?,
+            &generation.lifecycle_root_hash,
+            crate::private_artifact_home::root(&state.config.runtime_state_dir()),
+        )
+        .context(
+            "the qualification's retained lifecycle generation is gone; it is reclaimed only after the occurrence settles",
+        )?;
+        authority.ensure_guard(&guard)?;
+        backend.preflight_snapshot_qualification_create(producer, qualification, credential)?;
+        Ok(Self { backend })
+    }
+
+    pub(crate) fn terminate(
+        &self,
+        producer: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        qualification: &crate::node_config::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding,
+        credential: &crate::vault::placement::PlacementCredential,
+        request: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationTerminationAdapterRequest,
+        first_contact: bool,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<crate::external_placement::ExternalLifecycleObservation<ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationTerminationAdapterResponse>>{
+        self.backend.terminate_snapshot_qualification_occurrence(
+            producer,
+            qualification,
+            credential,
+            request,
+            first_contact,
+            deadline,
+        )
     }
 }
 
@@ -1074,6 +1132,7 @@ mod tests {
             runtime_authority: Default::default(),
             smoke: vec![],
             shadows: vec![],
+            owns_namespaces: vec![],
             isolation_backends: vec![],
             external_providers: vec![],
             external_lifecycle_adapters: vec![declaration.clone()],

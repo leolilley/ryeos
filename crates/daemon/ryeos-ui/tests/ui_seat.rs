@@ -80,7 +80,7 @@ fn session_context(
     principal: Option<String>,
 ) -> ryeos_ui::browser_session::LaunchContext {
     // A real, signed Config root; never a Surface masquerading as Config.
-    let body = "category: test\nversion: '1'\nshared_presentation:\n  schema: 1\n  title: Test presentation\n  launcher: launch\n  dialogs:\n    - id: launch\n      title: Launch\n      view: 'view:ryeos/home'\n  capabilities:\n    sources: []\n    affordances: []\n";
+    let body = "category: test\nversion: '1'\nshared_presentation:\n  schema: 2\n  title: Test presentation\n  launcher: launch\n  dialogs:\n    - id: launch\n      title: Launch\n      view: 'view:ryeos/home'\n  capabilities:\n    sources: []\n    affordances: []\n";
     let key = lillux::crypto::load_signing_key(
         &ryeos_engine::test_support::workspace_root().join(".dev-keys/PUBLISHER_DEV.pem"),
     )
@@ -111,6 +111,7 @@ fn session_context(
         .with_checked_bundle_generation(|generation| -> anyhow::Result<_> {
             let root = generation.effective_item_under_project_authority(
                 ryeos_engine::engine::EffectiveItemRequest {
+                    logical_project_root: None,
                     item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(
                         "config:test/presentation",
                     )?,
@@ -2038,7 +2039,7 @@ fn set_export(
 }
 
 fn empty_export(mode: &str) -> Value {
-    json!({"schema": 1, "mode": mode,
+    json!({"schema": 2, "mode": mode,
         "content": {"kind": "view_sets", "active_set": null, "sets": []}})
 }
 
@@ -2575,7 +2576,7 @@ async fn an_executable_admission_the_signed_binding_does_not_declare_is_refused_
                     "kind": "view_set", "id": "current", "expected_revision": 0,
                     "surface_ref": "surface:ryeos/ui/base",
                 },
-                "invocation_origin": format!("seat:{presentation}:dock:left"),
+                "invocation_origin": format!("seat:{presentation}:dialog:left"),
                 "request": {
                     "binding_attachment_id": coordinate.binding_attachment_id,
                     "binding_generation": coordinate.binding_generation,

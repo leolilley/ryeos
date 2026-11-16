@@ -62,8 +62,24 @@ impl<'a> BundleBootstrapLoader<'a> {
             .join("bundles");
         // Bundles use one exact flat YAML namespace. Missing is empty; any
         // directory, symlink, special file, or non-YAML entry is an error.
-        for path in scan_yaml_files(&node_dir, false)? {
+        let files = scan_yaml_files(&node_dir, false)?;
+        // Registrations are node state, written only with the node key
+        // (`bundle_transaction`). A registration signed by any other pinned
+        // key, a publisher's included, is refused.
+        let node_fingerprint = if files.is_empty() {
+            String::new()
+        } else {
+            crate::identity::node_identity_fingerprint(self.app_root)?
+        };
+        for path in files {
             let verified = verify_and_parse(&path, &node_dir, "bundles", self.trust_store)?;
+            ryeos_engine::trust::require_document_signer(
+                verified.path(),
+                verified.signer_fingerprint(),
+                &node_fingerprint,
+                "node",
+                "bundle registrations are written only by the node's own `ryeos bundle install`: remove the file and reinstall the bundle",
+            )?;
 
             let mut record =
                 parse_bundle(verified.context(), verified.body()).with_context(|| {

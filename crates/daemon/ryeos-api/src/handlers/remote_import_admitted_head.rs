@@ -66,10 +66,10 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         anyhow::bail!("admission policy must not be empty");
     }
     let remote_cfg = {
-        let remotes = config::load_remotes_layered(&state.config.app_root, req.project.as_deref())?;
+        let remotes = config::load_remotes(&state.config.app_root)?;
         config::get_remote(&remotes, &req.remote)?
     };
-    let client = RemoteClient::from_remote_cfg(&state, &remote_cfg);
+    let client = RemoteClient::from_remote_cfg(&state, &remote_cfg)?;
     let expected_key = remote_cfg.pinned_signing_key().with_context(|| {
         format!(
             "remote '{}' has no valid pinned signing_key; run `ryeos remote configure --remote {}`",

@@ -18,7 +18,7 @@ use ryeos_isolation_protocol::{
     LoopbackListenerTransferReceipt, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES,
     MAX_WORKSPACE_MUTATIONS, MAX_WORKSPACE_RESPONSE_BYTES, MAX_WORKSPACE_VIEW_RECEIPT_BYTES,
     WorkspaceLifecycleOperation, WorkspaceMutation, WorkspaceMutationKind,
-    WorkspaceViewTransferReceipt, from_json_slice_strict,
+    WorkspaceUnrepresentableReason, WorkspaceViewTransferReceipt, from_json_slice_strict,
 };
 
 const BACKEND_ID: &str = "linux-lillux";
@@ -865,6 +865,25 @@ fn workspace_mutation(mutation: lillux::LinuxOverlayMutation) -> WorkspaceMutati
             None,
             None,
         ),
+        lillux::LinuxOverlayMutationKind::Unrepresentable { reason } => (
+            WorkspaceMutationKind::Unrepresentable {
+                reason: match reason {
+                    lillux::LinuxOverlayUnrepresentableReason::UnportableSymlinkTarget => {
+                        WorkspaceUnrepresentableReason::UnportableSymlinkTarget
+                    }
+                    lillux::LinuxOverlayUnrepresentableReason::UnsupportedEntryType => {
+                        WorkspaceUnrepresentableReason::UnsupportedEntryType
+                    }
+                    lillux::LinuxOverlayUnrepresentableReason::NonUtf8Name => {
+                        WorkspaceUnrepresentableReason::NonUtf8Name
+                    }
+                },
+            },
+            None,
+            None,
+            None,
+            None,
+        ),
     };
     WorkspaceMutation {
         path: mutation.path,
@@ -1112,6 +1131,30 @@ mod tests {
             (
                 lillux::LinuxOverlayMutationKind::OpaqueDirectory,
                 WorkspaceMutationKind::OpaqueDirectory,
+            ),
+            (
+                lillux::LinuxOverlayMutationKind::Unrepresentable {
+                    reason: lillux::LinuxOverlayUnrepresentableReason::UnportableSymlinkTarget,
+                },
+                WorkspaceMutationKind::Unrepresentable {
+                    reason: WorkspaceUnrepresentableReason::UnportableSymlinkTarget,
+                },
+            ),
+            (
+                lillux::LinuxOverlayMutationKind::Unrepresentable {
+                    reason: lillux::LinuxOverlayUnrepresentableReason::UnsupportedEntryType,
+                },
+                WorkspaceMutationKind::Unrepresentable {
+                    reason: WorkspaceUnrepresentableReason::UnsupportedEntryType,
+                },
+            ),
+            (
+                lillux::LinuxOverlayMutationKind::Unrepresentable {
+                    reason: lillux::LinuxOverlayUnrepresentableReason::NonUtf8Name,
+                },
+                WorkspaceMutationKind::Unrepresentable {
+                    reason: WorkspaceUnrepresentableReason::NonUtf8Name,
+                },
             ),
         ];
         for (kind, expected) in cases {

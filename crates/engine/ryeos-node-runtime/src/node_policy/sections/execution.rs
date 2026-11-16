@@ -777,7 +777,7 @@ mod tests {
         profiles.sort();
         assert_eq!(
             profiles.len(),
-            16,
+            15,
             "update init-profile policy expectations"
         );
 
@@ -790,16 +790,15 @@ mod tests {
             policy.validate().unwrap();
             assert_eq!(policy.schema, 4, "{}", path.display());
             match profile.as_str() {
-                "full" | "contained-workflow" | "development" | "release-authority" => {
+                "standard" | "contained-workflow" | "development" | "release-authority" => {
                     assert!(policy.producer_resource_ceiling.is_some(), "{profile}");
                 }
                 "central-host"
-                | "standard"
                 | "standard-central-auth"
                 | "local-inference"
                 | "hosted-node"
                 | "hosted-workflow"
-                | "f5r-controller"
+                | "hosted-controller"
                 | "bundle-source"
                 | "core"
                 | "core-knowledge"
@@ -813,7 +812,7 @@ mod tests {
             // qualification ceiling: two concurrent leases of at most four
             // hours, about eight lease-hours a day, and ten minutes of each
             // lease kept free after a turn's deadline.
-            if profile == "f5r-controller" {
+            if profile == "hosted-controller" {
                 assert_eq!(
                     policy.external_lease_budget,
                     Some(controller_lease_budget()),

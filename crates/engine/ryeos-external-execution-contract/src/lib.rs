@@ -13,6 +13,7 @@ pub mod guest_supervisor_descriptors;
 pub mod lease_ready_inputs;
 pub mod length_prefixed;
 pub mod provider_configuration;
+pub mod provider_inventory;
 pub use provider_configuration::{
     PROVIDER_CONFIGURATION_RESPONSE_PROTOCOL, PROVIDER_CONFIGURATION_RESPONSE_SCHEMA,
     ProviderCommandEnvironmentProjection, ProviderCommandEnvironmentTransport,

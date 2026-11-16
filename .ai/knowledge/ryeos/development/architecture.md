@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-18T01:26:29Z:4c7f30625cb686a2125d9971269ae54f9a010dd17b7be1adebc43de065e60bc5:MPFwntyZ0TsgWnYY1s6KPse9fDTBEBgNwNEanx0cQhFw0nrqrKm/CIo5lf2k/5AJaGuBlRln06R1sYwXKjxgCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T20:05:03Z:83b5c37cbe30b0cffe6eb4f0a842733a82b3c52ca4082182933644c8fe0998cd:z1egbFIa5XYbN8g3WTLXG+DVTTYTJEDO6nEGxl10NAFsOuZHIYGko16xf/JBq2uOMbFwzq5T5RLO4IgsyugNAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "architecture"
@@ -122,7 +122,10 @@ enforced as a **scope-independent structural floor** — they apply to
 `full_project` sync as well as `ai_only` and are not ignore policy:
 
 - `NEVER_DEPLOY_SECRETS` — credentials: `.ai/node/identity`, `.ai/node/auth`,
-  `.ai/node/vault`, `.ai/config/keys/signing`.
+  `.ai/node/vault`.
+- Live-execution-only denials (a run may not read or write them, but the
+  snapshot floor does not list them): `.ai/node/trust`,
+  `.ai/node/operator`, `.ai/node/authoring`, `.ai/node/remotes`.
 - `NODE_OWNED` — node runtime state and transaction anchors: `.ai/state`,
   `.ai/cache`, `.ai/.bundles.lock`, `.ai/node/schedules`, `.ai/node/routes`,
   `.ai/node/bundles`.
@@ -132,7 +135,7 @@ deployable → unknown/non-ai`, so an ignored file inside a deployable surface
 (e.g. `.ai/tools/x/__pycache__/y.pyc`) is dropped, not shipped. The ingest
 ignore policy (`.ai/node/policies/ingest_ignore.yaml`) is the complete source of
 conventional ignore patterns; the engine contributes no hidden defaults. It
-supports **path-anchored** patterns (e.g. `/.ai/config/remotes/`, which shipped
+supports **path-anchored** patterns (e.g. `/.ai/node/remotes/`, which shipped
 profiles select because a project's remotes config is environment-specific and
 must not travel). It is a member of the complete node-signed policy generation
 and is changed through the stopped-node policy workflow, not edited in place.

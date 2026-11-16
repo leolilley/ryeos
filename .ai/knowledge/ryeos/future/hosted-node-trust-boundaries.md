@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-27T04:21:36Z:900b03977a013ae3347dde0312a3e8041339a970bf8694b7787a139296bbded6:16cGcmzpsU8zG2F3nrN1JraKgboOxi2uR7XbhPZT1PU5kg3GmaMLY/XBs6pMcMXo33mgVZYwPMb92vqJveN3Aw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-11-13T21:47:42Z:f134298f062300e2c8a33c87eeaec56aadc220e46f64dea558404ca6a97a81c7:ologozpYIZ7JzUwVKnFDHuEK5hFZTL5tbr+SAqY5L2Q17/Z9txStIOUfpl/26zLhOVk0G8qC64siSu+csPmSCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: hosted-node-trust-boundaries

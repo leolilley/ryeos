@@ -52,6 +52,16 @@ pub enum EngineError {
         candidates: Vec<PathBuf>,
     },
 
+    #[error(
+        "project item `{canonical_ref}` at {project_path} is inside namespace `{namespace}` owned by (or named for) installed bundle `{bundle}`; a project cannot shadow an installed bundle's namespace or name"
+    )]
+    ReservedNamespaceShadow {
+        canonical_ref: String,
+        namespace: String,
+        bundle: String,
+        project_path: PathBuf,
+    },
+
     #[error("pinned version not found for `{canonical_ref}`: {reason}")]
     PinnedVersionNotFound {
         canonical_ref: String,
@@ -105,6 +115,11 @@ pub enum EngineError {
         canonical_ref: String,
         fingerprint: String,
     },
+
+    /// A typed signer-registry refusal (unsigned or tampered record, revoked
+    /// signer, signer outside its scope). The code and cure ride in the text.
+    #[error("{0}")]
+    Trust(#[from] crate::trust::TrustError),
 
     #[error("content hash mismatch for `{canonical_ref}`: expected {expected}, got {actual}")]
     ContentHashMismatch {
@@ -454,6 +469,13 @@ pub enum EngineError {
     #[error("handler `{handler}` spawn failed: {detail}")]
     HandlerSpawnFailed { handler: String, detail: String },
 
+    /// The handler process could not be created because fork-sensitive
+    /// descriptor authority stayed retained past the setup deadline. No
+    /// process ran; the same request may succeed once the holders release.
+    /// `detail` names the holder sites for the daemon log only.
+    #[error("process creation is busy for `{subject}`: {detail}")]
+    ProcessCreationBusy { subject: String, detail: String },
+
     #[error("handler `{handler}` exited with code {exit_code}; stderr: {stderr}")]
     HandlerExitNonZero {
         handler: String,
@@ -504,6 +526,19 @@ pub enum EngineError {
         #[source]
         source: Box<crate::protocols::ProtocolError>,
     },
+}
+
+impl EngineError {
+    /// Whether this failure, or the engine failure it shares or wraps, is the
+    /// transient process-creation refusal.
+    pub fn is_process_creation_busy(&self) -> bool {
+        match self {
+            Self::ProcessCreationBusy { .. } => true,
+            Self::Shared(error) => error.is_process_creation_busy(),
+            Self::InventoryItemFailed { source, .. } => source.is_process_creation_busy(),
+            _ => false,
+        }
+    }
 }
 
 impl From<crate::handlers::HandlerError> for EngineError {

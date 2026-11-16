@@ -107,13 +107,7 @@ impl ryeos_runtime::callback::RuntimeCallbackAPI for MockClient {
     ) -> Result<Value, CallbackError> {
         Ok(json!({}))
     }
-    async fn append_event(
-        &self,
-        _: &str,
-        _: &str,
-        _: Value,
-        _: &str,
-    ) -> Result<Value, CallbackError> {
+    async fn append_event(&self, _: &str, _: &str, _: Value) -> Result<Value, CallbackError> {
         Ok(json!({}))
     }
     async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> {
@@ -1522,9 +1516,9 @@ config:
             .is_some_and(|error| error.contains("invalid cost"))
     );
     let events = recorder.recorded_events();
-    let (_, _, payload, _) = events
+    let (_, _, payload) = events
         .iter()
-        .find(|(_, event_type, _, _)| event_type == RuntimeEventType::ToolCallResult.as_str())
+        .find(|(_, event_type, _)| event_type == RuntimeEventType::ToolCallResult.as_str())
         .expect("invalid native cost emits a terminal tool result");
     assert_eq!(
         payload["status"],
@@ -1568,9 +1562,9 @@ config:
                 .is_some_and(|error| error.contains("integrity failed"))
         );
         let events = recorder.recorded_events();
-        let (_, _, payload, _) = events
+        let (_, _, payload) = events
             .iter()
-            .find(|(_, event_type, _, _)| {
+            .find(|(_, event_type, _)| {
                 event_type == RuntimeEventType::GraphForeachIteration.as_str()
             })
             .expect("invalid native cost emits a foreach iteration result");
@@ -1947,7 +1941,7 @@ config:
     let emitted_foreach_started = recorder
         .recorded_events()
         .iter()
-        .any(|(_, event, _, _)| event == RuntimeEventType::GraphForeachStarted.as_str());
+        .any(|(_, event, _)| event == RuntimeEventType::GraphForeachStarted.as_str());
     assert!(!emitted_foreach_started);
 }
 
@@ -2681,7 +2675,7 @@ fn step_outcome_terminal_captures_status() {
 struct RecordingMockClient {
     dispatch_results: Mutex<Vec<Value>>,
     dispatch_requests: Mutex<Vec<DispatchActionRequest>>,
-    events: Mutex<Vec<(String, String, Value, String)>>,
+    events: Mutex<Vec<(String, String, Value)>>,
     event_batch_calls: Mutex<usize>,
     /// (thread_id, status) pairs from finalize_thread calls.
     finalizations: Mutex<Vec<(String, ryeos_runtime::ThreadTerminalStatus)>>,
@@ -2730,7 +2724,7 @@ impl RecordingMockClient {
         client
     }
 
-    fn recorded_events(&self) -> Vec<(String, String, Value, String)> {
+    fn recorded_events(&self) -> Vec<(String, String, Value)> {
         self.events.lock().unwrap().clone()
     }
 
@@ -2861,14 +2855,11 @@ impl ryeos_runtime::callback::RuntimeCallbackAPI for RecordingMockClient {
         thread_id: &str,
         event_type: &str,
         payload: Value,
-        storage_class: &str,
     ) -> Result<Value, CallbackError> {
-        self.events.lock().unwrap().push((
-            thread_id.to_string(),
-            event_type.to_string(),
-            payload,
-            storage_class.to_string(),
-        ));
+        self.events
+            .lock()
+            .unwrap()
+            .push((thread_id.to_string(), event_type.to_string(), payload));
         Ok(json!({}))
     }
     async fn append_events(
@@ -2887,11 +2878,6 @@ impl ryeos_runtime::callback::RuntimeCallbackAPI for RecordingMockClient {
                     .unwrap()
                     .to_string(),
                 event.get("payload").cloned().unwrap(),
-                event
-                    .get("storage_class")
-                    .and_then(Value::as_str)
-                    .unwrap()
-                    .to_string(),
             ));
         }
         Ok(json!({}))
@@ -3209,7 +3195,7 @@ async fn unknown_unary_dispatch_outcome_exits_without_step_commit_or_authored_re
         );
         assert!(recorder.recorded_finalizations().is_empty(), "{label}");
         assert!(
-            recorder.recorded_events().iter().all(|(_, event, _, _)| {
+            recorder.recorded_events().iter().all(|(_, event, _)| {
                 event != "graph_step_started"
                     && event != "tool_call_result"
                     && event != "graph_node_retry"
@@ -3311,7 +3297,7 @@ async fn initial_checkpoint_recovers_retained_first_child_without_second_executi
         recorder
             .recorded_events()
             .iter()
-            .filter(|(_, event, _, _)| event == "graph_started")
+            .filter(|(_, event, _)| event == "graph_started")
             .count(),
         1
     );
@@ -3449,7 +3435,7 @@ config:
         recorder
             .recorded_events()
             .iter()
-            .all(|(_, event, _, _)| event != "graph_step_completed")
+            .all(|(_, event, _)| event != "graph_step_completed")
     );
 }
 
@@ -3500,22 +3486,18 @@ async fn retry_emits_braid_visible_retry_event() {
     let events = rec.recorded_events();
     let retries: Vec<_> = events
         .iter()
-        .filter(|(_, ty, _, _)| ty == "graph_node_retry")
+        .filter(|(_, ty, _)| ty == "graph_node_retry")
         .collect();
     assert_eq!(
         retries.len(),
         1,
         "one failed attempt → exactly one retry event; events={events:#?}"
     );
-    let (_, _, payload, storage_class) = retries[0];
+    let (_, _, payload) = retries[0];
     assert_eq!(payload["attempt"], 1);
     assert_eq!(payload["attempts"], 3);
     assert_eq!(payload["delay_ms"], 1);
     assert_eq!(payload["node"], "flaky");
-    assert_eq!(
-        storage_class, "indexed",
-        "graph_node_retry is an indexed milestone"
-    );
 }
 
 #[tokio::test]
@@ -3594,7 +3576,7 @@ config:
     let events = rec.recorded_events();
     let retries = events
         .iter()
-        .filter(|(_, ty, _, _)| ty == "graph_node_retry")
+        .filter(|(_, ty, _)| ty == "graph_node_retry")
         .count();
     assert_eq!(
         retries, 0,
@@ -3666,7 +3648,7 @@ async fn deterministic_leaf_failure_does_not_consume_retry_budget() {
         recorder
             .recorded_events()
             .iter()
-            .all(|(_, event_type, _, _)| event_type != "graph_node_retry")
+            .all(|(_, event_type, _)| event_type != "graph_node_retry")
     );
 }
 
@@ -4105,7 +4087,7 @@ async fn follow_suspend_emits_events_and_no_receipt() {
     let types: Vec<String> = rec
         .recorded_events()
         .into_iter()
-        .map(|(_, et, _, _)| et)
+        .map(|(_, et, _)| et)
         .collect();
     assert!(types.iter().any(|t| t == "graph_step_started"));
     assert!(types.iter().any(|t| t == "graph_follow_suspended"));
@@ -4259,7 +4241,7 @@ async fn follow_resume_consumes_child_result_and_completes() {
     let types: Vec<String> = rec
         .recorded_events()
         .into_iter()
-        .map(|(_, et, _, _)| et)
+        .map(|(_, et, _)| et)
         .collect();
     // The normal lifecycle deferred from suspend now lands on resume.
     assert!(types.iter().any(|t| t == "graph_step_completed"));
@@ -4453,14 +4435,11 @@ async fn follow_resume_failure_routes_on_error() {
     assert!(rec.recorded_follow_requests().is_empty());
     // The follow node's step recorded an ERROR completion, and the failed
     // child's cost was still accounted.
-    let step_completed_error = rec
-        .recorded_events()
-        .into_iter()
-        .any(|(_, et, payload, _)| {
-            et == RuntimeEventType::GraphStepCompleted.as_str()
-                && payload.get("status").and_then(|s| s.as_str())
-                    == Some(GraphStepStatus::Error.as_str())
-        });
+    let step_completed_error = rec.recorded_events().into_iter().any(|(_, et, payload)| {
+        et == RuntimeEventType::GraphStepCompleted.as_str()
+            && payload.get("status").and_then(|s| s.as_str())
+                == Some(GraphStepStatus::Error.as_str())
+    });
     assert!(
         step_completed_error,
         "expected an error graph_step_completed"
@@ -4549,7 +4528,7 @@ async fn follow_bare_marker_resuspends() {
     assert!(
         rec.recorded_events()
             .into_iter()
-            .any(|(_, et, _, _)| et == "graph_follow_suspended")
+            .any(|(_, et, _)| et == "graph_follow_suspended")
     );
 }
 
@@ -5274,9 +5253,9 @@ config:
         1,
         "the completed action lifecycle must use one atomic callback batch"
     );
-    let types: Vec<&str> = events.iter().map(|(_, et, _, _)| et.as_str()).collect();
+    let types: Vec<&str> = events.iter().map(|(_, et, _)| et.as_str()).collect();
 
-    for (_, event_type, payload, _) in &events {
+    for (_, event_type, payload) in &events {
         match event_type.as_str() {
             "graph_started"
             | "graph_completed"
@@ -5299,7 +5278,7 @@ config:
         }
     }
 
-    for (_, event_type, payload, _) in &events {
+    for (_, event_type, payload) in &events {
         match event_type.as_str() {
             "graph_step_started"
             | "graph_step_completed"
@@ -5762,7 +5741,7 @@ config:
     assert!(result.success);
 
     let events = recorder.recorded_events();
-    let types: Vec<&str> = events.iter().map(|(_, et, _, _)| et.as_str()).collect();
+    let types: Vec<&str> = events.iter().map(|(_, et, _)| et.as_str()).collect();
 
     // Gate lifecycle: graph_step_started → graph_branch_taken → graph_step_completed
     let step_started_idx = types
@@ -5783,7 +5762,7 @@ config:
     // Verify the branch target is correct
     let branch_event = events
         .iter()
-        .find(|(_, et, _, _)| et == "graph_branch_taken")
+        .find(|(_, et, _)| et == "graph_branch_taken")
         .unwrap();
     assert_eq!(branch_event.2["target"], "fast_path");
     assert_eq!(
@@ -5859,7 +5838,7 @@ config:
     assert!(result.success);
 
     let events = recorder.recorded_events();
-    let types: Vec<&str> = events.iter().map(|(_, et, _, _)| et.as_str()).collect();
+    let types: Vec<&str> = events.iter().map(|(_, et, _)| et.as_str()).collect();
 
     // Foreach must emit per-iteration events
     let iteration_count = types
@@ -6084,7 +6063,7 @@ config:
     let result_ok = w_ok.execute(json!({}), Some("gr-t1".to_string())).await;
     assert!(result_ok.success);
     let events_ok = recorder_ok.recorded_events();
-    let types_ok: Vec<&str> = events_ok.iter().map(|(_, et, _, _)| et.as_str()).collect();
+    let types_ok: Vec<&str> = events_ok.iter().map(|(_, et, _)| et.as_str()).collect();
     let completed_ok = types_ok.iter().filter(|&&t| t == "graph_completed").count();
     assert_eq!(
         completed_ok, 1,
@@ -6122,7 +6101,7 @@ config:
     let result_err = w_err.execute(json!({}), Some("gr-t2".to_string())).await;
     assert!(!result_err.success);
     let events_err = recorder_err.recorded_events();
-    let types_err: Vec<&str> = events_err.iter().map(|(_, et, _, _)| et.as_str()).collect();
+    let types_err: Vec<&str> = events_err.iter().map(|(_, et, _)| et.as_str()).collect();
     let completed_err = types_err
         .iter()
         .filter(|&&t| t == "graph_completed")
@@ -6136,7 +6115,7 @@ config:
     let events_err_full = recorder_err.recorded_events();
     let gc = events_err_full
         .iter()
-        .find(|(_, et, _, _)| et == "graph_completed")
+        .find(|(_, et, _)| et == "graph_completed")
         .unwrap();
     assert_eq!(gc.2["status"], "error");
 }

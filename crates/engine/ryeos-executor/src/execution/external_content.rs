@@ -1434,6 +1434,26 @@ where
 /// consulted for source bytes. A borrowed child arrives here with its own
 /// finalized resolution; the parent contributes workspace/lineage provenance,
 /// not an alternate prepared-launch realization set.
+/// A launch whose content needs a large object that scrub quarantined is
+/// refused as an operator-correctable resource state, not an internal
+/// failure. The message is the store's own, which names the cure.
+pub(crate) fn classify_quarantined_large_object(
+    error: &anyhow::Error,
+) -> Option<crate::dispatch_error::DispatchError> {
+    let quarantined = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<ryeos_state::LargeObjectQuarantined>())?;
+    Some(
+        crate::dispatch_error::DispatchError::LaunchResourceNotFound {
+            code: LARGE_OBJECT_QUARANTINED_CODE.to_owned(),
+            message: quarantined.to_string(),
+            binding: None,
+        },
+    )
+}
+
+pub(crate) const LARGE_OBJECT_QUARANTINED_CODE: &str = "large_object_quarantined";
+
 pub(crate) fn bind_external_realizations(
     state: &ryeos_app::state::AppState,
     resolution: &ryeos_engine::resolution::ResolutionOutput,
@@ -2982,6 +3002,129 @@ mod tests {
                 .unwrap()
                 .ino(),
             std::fs::metadata(root.join("lib/payload.so"))
+                .unwrap()
+                .ino()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_quarantined_large_object_refuses_typed_until_clean_bytes_rebuild_the_generation() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let (dir, cas) = temp_cas();
+        let runtime_root = dir.path().join("state");
+        let runtime = lillux::PinnedDirectory::open_or_create(&runtime_root).unwrap();
+        let store = ryeos_state::LargeObjectStore::open_or_create_under(&runtime).unwrap();
+        let large_bytes = b"model-weights-that-scrub-will-find-rotten".to_vec();
+        let ingest = |name: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, &large_bytes).unwrap();
+            let source = std::fs::File::open(&path).unwrap();
+            let source_identity = ryeos_state::PinnedLargeObjectSourceIdentity {
+                file: lillux::pinned_regular_file_identity(&source).unwrap(),
+                size: source.metadata().unwrap().len(),
+            };
+            store
+                .ingest_open_regular(source, source_identity, "payload", None)
+                .unwrap()
+        };
+        let ingested = ingest("first-source.bin");
+        let manifest = ryeos_state::objects::ExternalLargeContentManifestObject {
+            schema: ryeos_state::objects::EXTERNAL_LARGE_CONTENT_SCHEMA.to_owned(),
+            kind: ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND.to_owned(),
+            entry_count: 1,
+            total_bytes: ingested.size,
+            entries: vec![ryeos_state::objects::ExternalLargeContentManifestEntry {
+                path: "payload".to_owned(),
+                kind: ryeos_state::objects::ExternalContentManifestEntryKind::File,
+                mode: Some(0o644),
+                blob_hash: None,
+                file_sha256: Some(ingested.file_sha256.clone()),
+                size: Some(ingested.size),
+                chunk_size: Some(ingested.chunk_size),
+                chunk_hashes: ingested.chunk_hashes.clone(),
+                target: None,
+            }],
+        };
+        manifest.validate().unwrap();
+        let manifest_hash = cas.store_object(&manifest.to_value().unwrap()).unwrap();
+        let cache = ExternalMaterializationCache::from_runtime_state_root(&runtime_root);
+        let first = cache
+            .materialize_large(
+                &cas,
+                &store,
+                &manifest_hash,
+                &manifest,
+                ExternalContentKind::Tree,
+            )
+            .unwrap();
+        let first_inode = std::fs::metadata(first.source_path.join("payload"))
+            .unwrap()
+            .ino();
+        drop(first);
+
+        // Rot one byte of the store object in place. The generation entry is
+        // a hard link to the same inode, so it rots too.
+        let object_path = runtime_root
+            .join("large-objects/objects")
+            .join(&ingested.file_sha256);
+        std::fs::set_permissions(&object_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let mut rotten = std::fs::read(&object_path).unwrap();
+        rotten[4] ^= 0xff;
+        std::fs::write(&object_path, &rotten).unwrap();
+        assert_eq!(
+            store.scrub_all().unwrap().quarantined,
+            vec![ingested.file_sha256.clone()]
+        );
+
+        let error = cache
+            .materialize_large(
+                &cas,
+                &store,
+                &manifest_hash,
+                &manifest,
+                ExternalContentKind::Tree,
+            )
+            .err()
+            .expect("a quarantined object cannot be materialized");
+        match classify_quarantined_large_object(&error) {
+            Some(crate::dispatch_error::DispatchError::LaunchResourceNotFound {
+                code,
+                message,
+                binding,
+            }) => {
+                assert_eq!(code, LARGE_OBJECT_QUARANTINED_CODE);
+                assert!(message.contains(&ingested.file_sha256), "{message}");
+                assert!(message.contains("purge-quarantine"), "{message}");
+                assert!(binding.is_none());
+            }
+            other => panic!("expected a typed quarantine refusal, got {other:?} for {error:#}"),
+        }
+        assert!(classify_quarantined_large_object(&anyhow::anyhow!("other")).is_none());
+
+        let reingested = ingest("second-source.bin");
+        assert_eq!(reingested.file_sha256, ingested.file_sha256);
+        assert!(!reingested.deduplicated);
+        let rebuilt = cache
+            .materialize_large(
+                &cas,
+                &store,
+                &manifest_hash,
+                &manifest,
+                ExternalContentKind::Tree,
+            )
+            .unwrap();
+        let payload = rebuilt.source_path.join("payload");
+        assert_eq!(std::fs::read(&payload).unwrap(), large_bytes);
+        let rebuilt_inode = std::fs::metadata(&payload).unwrap().ino();
+        assert_ne!(rebuilt_inode, first_inode);
+        assert_eq!(
+            rebuilt_inode,
+            store
+                .lease_object(&ingested.file_sha256, ingested.size)
+                .unwrap()
+                .file()
+                .metadata()
                 .unwrap()
                 .ino()
         );

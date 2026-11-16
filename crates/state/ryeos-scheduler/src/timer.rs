@@ -879,6 +879,10 @@ mod tests {
             &self.trust
         }
 
+        fn schedule_signer_fingerprint(&self) -> &str {
+            ""
+        }
+
         fn get_thread_status(&self, thread_id: &str) -> anyhow::Result<Option<String>> {
             Ok(self.statuses.lock().unwrap().get(thread_id).cloned())
         }
@@ -1212,6 +1216,35 @@ mod tests {
                 spec.schedule_id.clone(),
                 spec.spec_hash.clone(),
                 ScheduleAutoPauseReason::AuthorityRevoked
+            )]
+        );
+        assert!(!ctx.db.get_spec(&spec.schedule_id).unwrap().unwrap().enabled);
+    }
+
+    #[tokio::test]
+    async fn expired_grant_records_authority_expired_and_pauses() {
+        let store = crate::test_native::TestSchedulerDb::open();
+        let ctx = Arc::new(MockContext::new(store.shared()));
+        *ctx.refuse_authority.lock().unwrap() =
+            Some(ryeos_scheduler_contract::ScheduledAuthorityRefusalKind::GrantExpired);
+        let spec = make_spec("expired-owner", "skip");
+        ctx.db.upsert_spec(&spec).unwrap();
+        let fire_id = types::fire_id(&spec.schedule_id, 1000);
+
+        dispatch_fire(&ctx, &fire_id, &spec, 1000, "normal", false)
+            .await
+            .unwrap();
+        finish_detached_work(&ctx).await;
+
+        let fire = ctx.db.get_fire(&fire_id).unwrap().expect("fire recorded");
+        assert_eq!(fire.status, "failed");
+        assert_eq!(fire.outcome.as_deref(), Some("authority_expired"));
+        assert_eq!(
+            *ctx.auto_pauses.lock().unwrap(),
+            vec![(
+                spec.schedule_id.clone(),
+                spec.spec_hash.clone(),
+                ScheduleAutoPauseReason::AuthorityExpired
             )]
         );
         assert!(!ctx.db.get_spec(&spec.schedule_id).unwrap().unwrap().enabled);

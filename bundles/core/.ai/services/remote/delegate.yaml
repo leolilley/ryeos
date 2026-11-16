@@ -1,0 +1,8 @@
+# ryeos:signed:2026-11-13T14:29:21Z:7d967bf1b23fe44b6b096805b1e83714a8cbf4a3170616ae1fe0c05a34a95f49:vEwYp1Ln8RyTKbOCo8d5V+Q/Iq/wMZ6SUF2Vift/prjFzch/WbPBstJupk3UzOOjFZO+0+IE98vXYBtiXSjXAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: remote.delegate
+required_caps: ["ryeos.execute.service.remote/delegate"]
+schema:
+  remote: string?
+  delegation: object?
+description: "Store a bounded delegation the caller signed with its own key, so this node may act for the caller on one remote. Without a delegation the response carries the facts the caller needs to build one."

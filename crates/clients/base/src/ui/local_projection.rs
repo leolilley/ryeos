@@ -51,8 +51,7 @@ fn global_or_exact_command(
     has_surface_origin: bool,
 ) -> bool {
     match intent {
-        RyeOsUiIntent::ToggleDock { .. }
-        | RyeOsUiIntent::ToggleTopStatusBar
+        RyeOsUiIntent::ToggleTopStatusBar
         | RyeOsUiIntent::ToggleBottomStatusBar
         | RyeOsUiIntent::OpenDialog { .. }
         | RyeOsUiIntent::OpenNewPresentationDocument

@@ -356,8 +356,35 @@ pub fn store_journal(app_root: &Path, journal: &BundleSetJournal) -> anyhow::Res
     Ok(())
 }
 
+/// Where a caller stages the candidate trees and registrations it passes to
+/// [`apply_stopped_bundle_set`] for transaction `transaction_id`. The
+/// transaction copies them into its own root and consumes them, and
+/// [`consume_journal`] removes whatever is left of this directory.
+pub fn prepared_sources_root(app_root: &Path, transaction_id: &str) -> PathBuf {
+    app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("transactions/bundle-set-prepared")
+        .join(transaction_id)
+}
+
 pub fn consume_journal(app_root: &Path) -> anyhow::Result<()> {
     let journal = load_journal(app_root)?;
+    if let Some(journal) = &journal {
+        // Recovery never reads the caller's prepared sources: materialisation
+        // copies them into the transaction root, and restoring old ignores
+        // them. So they go before the journal, the only record naming them; a
+        // crash in between leaves the journal, and the next consume repeats
+        // this.
+        let prepared = recovery_path(
+            app_root,
+            &format!(
+                "{}/transactions/bundle-set-prepared/{}",
+                ryeos_engine::AI_DIR,
+                journal.transaction_id
+            ),
+        )?;
+        remove_transaction_directory(&prepared, "bundle-set prepared sources root")?;
+    }
     let path = journal_path(app_root);
     lillux::remove_file_durable(&path)?;
     if let Some(journal) = journal {
@@ -369,16 +396,20 @@ pub fn consume_journal(app_root: &Path) -> anyhow::Result<()> {
                 journal.transaction_id
             ),
         )?;
-        match std::fs::symlink_metadata(&transaction_root) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
-                lillux::remove_dir_all_durable(&transaction_root)?;
-            }
-            Ok(_) => bail!("bundle-set transaction root is not a safe directory"),
-            Err(error) => return Err(error.into()),
-        }
+        remove_transaction_directory(&transaction_root, "bundle-set transaction root")?;
     }
     Ok(())
+}
+
+fn remove_transaction_directory(path: &Path, label: &str) -> anyhow::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            lillux::remove_dir_all_durable(path)
+        }
+        Ok(_) => bail!("{label} is not a safe directory"),
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub fn load_journal(app_root: &Path) -> anyhow::Result<Option<BundleSetJournal>> {
@@ -1176,14 +1207,14 @@ pub trait BundleSetRecoveryExecutor {
     fn complete_exact_new(&self, journal: &BundleSetJournal) -> anyhow::Result<()>;
 }
 
-/// Startup executor for the layouts the current journal can prove without
-/// inventing unstored filesystem coordinates.
+/// Startup executor over the coordinates the journal records.
 ///
-/// Before `TreesActivated`, restore-old is exact while the old completion is
-/// still present because no installed tree or registration has changed. An
-/// absent completion cannot be reconstructed from its digest. Once activation
-/// begins, v1's action manifest has digests but no durable backup paths, so
-/// recovery refuses instead of guessing.
+/// Restore-old is exact at every phase [`decide_recovery`] allows it: each
+/// replaced or removed entry was backed up into the transaction root, at the
+/// journal's coordinates, before its live path changed, and the old completion
+/// is rewritten from the bytes the journal holds. Both directions remove this
+/// transaction's publication siblings and verify every digest before
+/// publishing.
 /// Exact-new completion is already fenced by the byte hash of the signed whole-
 /// init completion; ordinary bootstrap verification immediately revalidates its
 /// registrations and policy generation after this journal is consumed.
@@ -2192,7 +2223,7 @@ mod tests {
             );
             old.insert(name, (tree, registration));
         }
-        let prepared = app.join(".ai/transactions/bundle-set-prepared").join(&tx);
+        let prepared = prepared_sources_root(app, &tx);
         let mut sources = Vec::new();
         for name in ["fresh", "knowledge"] {
             let tree_source = prepared.join(format!("{name}.tree"));
@@ -2393,6 +2424,10 @@ mod tests {
         let app = set.root.path();
         assert_eq!(load_journal(app).unwrap(), None);
         assert!(!transaction_entry(app, &set.request.transaction_id, "").exists());
+        assert!(
+            !prepared_sources_root(app, &set.request.transaction_id).exists(),
+            "the emptied prepared sources directory is removed with the transaction"
+        );
     }
 
     #[test]
@@ -2468,6 +2503,48 @@ mod tests {
                 RecoveryDecision::RefuseOperatorRepair => unreachable!(),
             }
         }
+    }
+
+    #[test]
+    fn recovery_before_materialisation_removes_the_unconsumed_prepared_sources() {
+        // A crash right after the journal is first stored: nothing is copied
+        // into the transaction root and every prepared source is still there.
+        let set = stopped_set();
+        let app = set.root.path();
+        let lock = BundleRegistryMutationLock::acquire(app).unwrap();
+        let (journal, _sources) = prepare_journal_layout(app, set.request.clone()).unwrap();
+        store_journal(app, &journal).unwrap();
+        assert!(set.sources.iter().all(|source| source.exists()));
+
+        let recovered =
+            recover_for_bootstrap(app, &lock, &BootstrapBundleSetRecoveryExecutor::new(app))
+                .unwrap();
+        assert_eq!(recovered, Some(RecoveryDecision::RestoreExactOld));
+        assert_old_generation(&set);
+        assert_transaction_consumed(&set);
+    }
+
+    #[test]
+    fn an_interrupted_consume_is_repeated_from_the_surviving_journal() {
+        // A crash after the prepared sources directory is removed but before
+        // the journal is: the next consume finds the journal and finishes.
+        let set = stopped_set();
+        let app = set.root.path();
+        let lock = BundleRegistryMutationLock::acquire(app).unwrap();
+        apply(&set, &lock, Some("commit"));
+        let journal = load_journal(app)
+            .unwrap()
+            .expect("journal survives a crash");
+        assert!(prepared_sources_root(app, &journal.transaction_id).is_dir());
+        std::fs::remove_dir_all(prepared_sources_root(app, &journal.transaction_id)).unwrap();
+
+        let recovered =
+            recover_for_bootstrap(app, &lock, &BootstrapBundleSetRecoveryExecutor::new(app))
+                .unwrap();
+        assert_eq!(recovered, Some(RecoveryDecision::CompleteExactNew));
+        consume_journal(app).unwrap();
+        assert_new_generation(&set);
+        assert_transaction_consumed(&set);
     }
 
     #[test]

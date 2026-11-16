@@ -2668,16 +2668,39 @@ mod tests {
         }));
         // A remote content testimony reaches this node's own acceptance, not
         // the origin's attestation, which is not in this store.
+        // It also reaches this node's own activation receipt and binding.
         let mut remote_content = persistent.clone();
         remote_content["retained_external_runtime_content_qualification"] = json!({
             "attestation_hash": h("ab"),
-            "remote_testimony": {"acceptance_hash": h("ac")}
+            "remote_testimony": {"acceptance_hash": h("ac")},
+            "receiver_join": {
+                "activation_receipt_hash": h("ae"),
+                "binding_hash": h("af"),
+                "target_node_fingerprint": h("a0")
+            }
         });
         let edges = typed_object_edges(&remote_content).unwrap();
         assert!(edges.iter().any(|edge| {
             edge.hash == h("ac") && edge.expected == ExpectedObject::Kind("attestation")
         }));
-        assert!(!edges.iter().any(|edge| edge.hash == h("ab")));
+        assert!(edges.iter().any(|edge| {
+            edge.hash == h("ae")
+                && edge.expected
+                    == ExpectedObject::Kind(crate::objects::EXTERNAL_CONTENT_ACTIVATION_KIND)
+        }));
+        assert!(edges.iter().any(|edge| {
+            edge.hash == h("af")
+                && edge.expected
+                    == ExpectedObject::Kind(crate::objects::EXTERNAL_CONTENT_BINDING_KIND)
+        }));
+        assert!(
+            !edges
+                .iter()
+                .any(|edge| edge.hash == h("ab") || edge.hash == h("a0"))
+        );
+        remote_content["retained_external_runtime_content_qualification"]["receiver_join"] =
+            Value::Null;
+        assert!(typed_object_edges(&remote_content).is_err());
         // The two owning slots cannot borrow one another's field shape.
         content_qualified["retained_external_runtime_content_qualification"] =
             json!({"proof": {"attestation_hash": h("aa")}});

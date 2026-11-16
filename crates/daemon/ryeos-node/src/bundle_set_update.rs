@@ -143,8 +143,7 @@ pub fn load_current_consumer_publication_policy(
 ) -> anyhow::Result<ryeos_app::bundle_publication::consumer::CurrentConsumerPublicationPolicy> {
     let completion = crate::verify_init_completion(app_root)?
         .context("node has no verified initialization completion")?;
-    let config_root = app_root.join(ryeos_engine::AI_DIR).join("config");
-    let trust_store = ryeos_engine::trust::TrustStore::load(None, &config_root)
+    let trust_store = ryeos_engine::trust::TrustStore::load_node_registry(app_root)
         .context("load pinned consumer trust store")?;
     let table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
     let generation = ryeos_node_runtime::node_policy::generation::load_policy_generation(

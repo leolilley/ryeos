@@ -352,6 +352,31 @@ pub fn load_current_activation_receipt(
     load_activation_receipt_for_resolution(state, activation)
 }
 
+/// Whether this node holds a completed activation head for the exact
+/// activation program it currently resolves. Absence is a fact a caller may
+/// name to the operator; presence is not authority, because the receipt it
+/// names is still authenticated by the full current join.
+pub fn has_completed_activation_head(
+    state: &crate::state::AppState,
+    activation: &ResolvedManagedExternalContentActivation,
+) -> anyhow::Result<bool> {
+    let activation_id =
+        ryeos_state::objects::ExternalContentActivationReceipt::derive_activation_id(
+            &activation.activation_program_digest,
+            &activation.document.consumer_ref,
+            &activation.publisher_fingerprint,
+        )?;
+    Ok(state
+        .state_store
+        .with_state_db(|db| {
+            db.read_generic_head_ref(
+                ryeos_state::objects::EXTERNAL_CONTENT_ACTIVATION_HEAD_NAMESPACE,
+                &activation_id,
+            )
+        })?
+        .is_some())
+}
+
 fn load_activation_receipt_for_resolution(
     state: &crate::state::AppState,
     activation: ResolvedManagedExternalContentActivation,

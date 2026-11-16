@@ -7,8 +7,8 @@
     "bundle_name": "browser",
     "bundle_sets": [
      "development",
-     "full",
-     "release-artifacts"
+     "release-artifacts",
+     "standard"
     ],
     "host_features": [],
     "payloads": [
@@ -24,10 +24,10 @@
     "bundle_name": "codex",
     "bundle_sets": [
      "development",
-     "f5r-controller",
-     "full",
+     "hosted-controller",
      "hosted-workflow",
-     "release-artifacts"
+     "release-artifacts",
+     "standard"
     ],
     "host_features": [],
     "payloads": [
@@ -97,8 +97,7 @@
      "core-scheduling",
      "core-workflow",
      "development",
-     "f5r-controller",
-     "full",
+     "hosted-controller",
      "hosted-workflow",
      "local-inference",
      "release-artifacts",
@@ -201,7 +200,6 @@
     "bundle_sets": [
      "central-host",
      "development",
-     "full",
      "hosted-workflow",
      "local-inference",
      "release-artifacts",
@@ -234,8 +232,7 @@
      "central-host",
      "core-workflow",
      "development",
-     "f5r-controller",
-     "full",
+     "hosted-controller",
      "hosted-workflow",
      "local-inference",
      "release-artifacts",
@@ -283,8 +280,7 @@
      "central-host",
      "core-knowledge",
      "development",
-     "f5r-controller",
-     "full",
+     "hosted-controller",
      "hosted-workflow",
      "local-inference",
      "release-artifacts",
@@ -326,7 +322,7 @@
     "bundle_name": "render-sandbox",
     "bundle_sets": [
      "development",
-     "f5r-controller",
+     "hosted-controller",
      "release-artifacts"
     ],
     "host_features": [],
@@ -349,8 +345,8 @@
     "bundle_name": "ryeos-ui",
     "bundle_sets": [
      "development",
-     "full",
-     "release-artifacts"
+     "release-artifacts",
+     "standard"
     ],
     "host_features": [],
     "payloads": [
@@ -373,8 +369,8 @@
     "bundle_sets": [
      "central-host",
      "development",
-     "full",
-     "release-artifacts"
+     "release-artifacts",
+     "standard"
     ],
     "host_features": [],
     "payloads": [
@@ -415,7 +411,6 @@
      "central-host",
      "core-scheduling",
      "development",
-     "full",
      "hosted-workflow",
      "local-inference",
      "release-artifacts",

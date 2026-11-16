@@ -1,0 +1,36 @@
+# ryeos:signed:2026-11-13T02:54:45Z:5bb85441d82c30579eb6cc3a3f69fb2c8046f0b1aa744546f13ce9472169de8a:8+fP09URPYD+wqjoe73T/F6knT4SyKaQDqr3Od4InVZ7+NAsyRuoEKNcKFoHJ7pjJDTGg9xlH/Nyhfl6D9W2Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-content, bindings]
+description: List a consumer's content bindings and whether each still authorizes it at a generation
+arguments:
+  - name: product_selections
+    kind: json
+    positional: 4
+    required: false
+    arity: optional
+    description: Complete typed product-selection list, for a consumer bound with selections
+  - name: product_owner_principal
+    kind: string
+    positional: 5
+    required: false
+    arity: optional
+    description: Exact currently admitted operator principal owning every selected product
+forms:
+  - slots:
+      - field: consumer_ref
+      - field: consumer_kind
+      - field: project_snapshot_hash
+  - slots:
+      - field: consumer_ref
+      - field: consumer_kind
+project:
+  resolution: optional
+  bind_parameter: project_path
+  no_project_flag: true
+help:
+  usage: ryeos external-content bindings <consumer-ref> <consumer-kind> [project-snapshot-hash] [--product-selections <json>] [--product-owner-principal <fp:hash>] --project <project-root>
+  examples:
+    - ryeos --project /absolute/project external-content bindings tool:project/build pinned_project <snapshot>
+    - ryeos --no-project external-content bindings worker:provider/hosted installed_bundle
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/bindings

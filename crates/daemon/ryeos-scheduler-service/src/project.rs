@@ -142,6 +142,7 @@ fn restore_recovery_sources_and_projection(
     directory: &lillux::PinnedDirectory,
     scheduler_db: &ryeos_scheduler::db::SchedulerDb,
     trust_store: &ryeos_engine::trust::TrustStore,
+    node_fingerprint: &str,
     entries: &[ScheduleRecoveryBeforeImage],
 ) -> Result<HashSet<String>> {
     let mut touched = HashSet::new();
@@ -166,6 +167,7 @@ fn restore_recovery_sources_and_projection(
                     &path,
                     content,
                     trust_store,
+                    node_fingerprint,
                 )?;
                 scheduler_db.upsert_spec(&verified.to_spec_record()?)?;
             }
@@ -250,13 +252,18 @@ pub(crate) fn plan(ctx: &ProjectContext) -> Result<ScheduleDeployPlan> {
         &schedules_dir,
         ctx.request.project_key.as_str(),
         &ctx.trust_store,
+        ctx.identity.fingerprint(),
     )?;
 
     for desired_schedule in desired_by_id.values() {
         let schedule_id = &desired_schedule.declaration.schedule_id;
         let existing = ctx.db.get_spec(schedule_id)?;
-        let existing_body =
-            read_existing_schedule_body(&schedules_dir, schedule_id, &ctx.trust_store)?;
+        let existing_body = read_existing_schedule_body(
+            &schedules_dir,
+            schedule_id,
+            &ctx.trust_store,
+            ctx.identity.fingerprint(),
+        )?;
 
         match existing {
             Some(existing) => {
@@ -498,6 +505,7 @@ fn load_project_managed_schedule_yaml(
     schedules_dir: &Path,
     project_key: &str,
     trust_store: &ryeos_engine::trust::TrustStore,
+    node_fingerprint: &str,
 ) -> Result<HashMap<String, Value>> {
     let mut out = HashMap::new();
     for path in ryeos_scheduler::projection::canonical_schedule_source_paths(schedules_dir)? {
@@ -505,8 +513,11 @@ fn load_project_managed_schedule_yaml(
             .file_stem()
             .and_then(|stem| stem.to_str())
             .expect("canonical schedule path has a validated UTF-8 stem");
-        let verified =
-            ryeos_scheduler::projection::load_verified_schedule_source(&path, trust_store)?;
+        let verified = ryeos_scheduler::projection::load_verified_schedule_source(
+            &path,
+            trust_store,
+            node_fingerprint,
+        )?;
         let body = serde_json::to_value(verified.record)?;
         let Some(managed) = parse_project_managed_by(&body) else {
             continue;
@@ -537,6 +548,7 @@ fn read_pinned_verified_source(
     directory: &lillux::PinnedDirectory,
     schedule_id: &str,
     trust_store: &ryeos_engine::trust::TrustStore,
+    node_fingerprint: &str,
 ) -> Result<
     Option<(
         VerifiedIncumbent,
@@ -554,9 +566,13 @@ fn read_pinned_verified_source(
     let bytes = file.read_bounded(MAX_RECOVERY_SCHEDULE_SOURCE_BYTES)?;
     let content = std::str::from_utf8(&bytes)
         .with_context(|| format!("schedule source {} is not UTF-8", path.display()))?;
-    let verified =
-        ryeos_scheduler::projection::verify_schedule_source_content(&path, content, trust_store)
-            .with_context(|| format!("verify existing schedule YAML {}", path.display()))?;
+    let verified = ryeos_scheduler::projection::verify_schedule_source_content(
+        &path,
+        content,
+        trust_store,
+        node_fingerprint,
+    )
+    .with_context(|| format!("verify existing schedule YAML {}", path.display()))?;
     Ok(Some((VerifiedIncumbent { file, bytes }, verified)))
 }
 
@@ -577,7 +593,14 @@ fn revalidate_action(
                     schedule_id
                 );
             }
-            if read_pinned_verified_source(directory, schedule_id, &ctx.trust_store)?.is_some() {
+            if read_pinned_verified_source(
+                directory,
+                schedule_id,
+                &ctx.trust_store,
+                ctx.identity.fingerprint(),
+            )?
+            .is_some()
+            {
                 anyhow::bail!(
                     "schedule_id '{}' gained node YAML during project deploy; refusing to overwrite",
                     schedule_id
@@ -611,6 +634,7 @@ fn revalidate_action(
                 directory,
                 schedule_id,
                 &ctx.trust_store,
+                ctx.identity.fingerprint(),
             )?
             .ok_or_else(|| {
                 anyhow!(
@@ -679,6 +703,7 @@ fn revalidate_action(
                 directory,
                 schedule_id,
                 &ctx.trust_store,
+                ctx.identity.fingerprint(),
             )?
             .ok_or_else(|| {
                 anyhow!(
@@ -1007,6 +1032,7 @@ fn read_existing_schedule_body(
     schedules_dir: &Path,
     schedule_id: &str,
     trust_store: &ryeos_engine::trust::TrustStore,
+    node_fingerprint: &str,
 ) -> Result<Option<Value>> {
     let yaml_path = canonical_project_schedule_path(schedules_dir, schedule_id)?;
     match fs::symlink_metadata(&yaml_path) {
@@ -1017,9 +1043,12 @@ fn read_existing_schedule_body(
                 .with_context(|| format!("inspect schedule source {}", yaml_path.display()));
         }
     }
-    let verified =
-        ryeos_scheduler::projection::load_verified_schedule_source(&yaml_path, trust_store)
-            .with_context(|| format!("verify existing schedule YAML {}", yaml_path.display()))?;
+    let verified = ryeos_scheduler::projection::load_verified_schedule_source(
+        &yaml_path,
+        trust_store,
+        node_fingerprint,
+    )
+    .with_context(|| format!("verify existing schedule YAML {}", yaml_path.display()))?;
     Ok(Some(serde_json::to_value(verified.record)?))
 }
 
@@ -1063,14 +1092,18 @@ fn write_reconciled_schedule(
         .request
         .caller
         .authenticated_execution_authority(registration_request_hash)?;
-    let execution = serde_json::to_value(ryeos_scheduler_contract::ScheduleExecution {
+    let execution = ryeos_scheduler_contract::ScheduleExecution {
         authority,
         capabilities,
         policy: schedule.execution_policy.clone(),
         limits: schedule.limits.clone(),
         max_fires: schedule.max_fires,
         expires_at: schedule.expires_at.clone(),
-    })?;
+    };
+    ctx.request
+        .caller
+        .require_execution_admissible(&execution)?;
+    let execution = serde_json::to_value(execution)?;
     let body = serde_json::json!({
         "spec_version": 2,
         "schedule_id": schedule.schedule_id,
@@ -1118,6 +1151,7 @@ fn write_reconciled_schedule(
         &spec_path,
         &content,
         &ctx.trust_store,
+        ctx.identity.fingerprint(),
     )?;
     let rec = verified.to_spec_record()?;
     ctx.db.upsert_spec(&rec)?;
@@ -1611,6 +1645,7 @@ impl ProjectScheduleSession for ProjectScheduleSessionImpl {
             &recovery.tx.directory,
             &self.db,
             &self.trust_store,
+            self.identity.fingerprint(),
             &entries,
         ) {
             Ok(touched) => touched,
@@ -1700,6 +1735,13 @@ mod deploy_recovery_tests {
                 principal_id: self.identity.principal_id(),
                 effective_origin_site_id: self.identity.site_id(),
             })
+        }
+
+        fn require_execution_admissible(
+            &self,
+            _: &ryeos_scheduler_contract::ScheduleExecution,
+        ) -> Result<()> {
+            Ok(())
         }
     }
 
