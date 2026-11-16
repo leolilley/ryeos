@@ -2627,10 +2627,10 @@ fn serve_candidate_controller_tls(
     state: Arc<ryeos_app::state::AppState>,
     stop: Arc<AtomicBool>,
     evidence: Arc<Mutex<Vec<String>>>,
+    tls_config: Arc<rustls::ServerConfig>,
 ) -> std::thread::JoinHandle<usize> {
     listener.set_nonblocking(true).unwrap();
     std::thread::spawn(move || {
-        let tls_config = production_tls_config();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -3577,7 +3577,7 @@ fn public_bounded_worker_dispatch_uses_production_tls_candidate_route() {
 /// supervisor over https.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
-#[ignore = "the lease allow-list needs a two-label controller host and the only test server certificate names `localhost`; see run.md W7"]
+#[ignore = "the synthetic supervisor start has no guest-owner ready boot inputs for a leased guest; see run.md W7"]
 fn production_tls_candidate_on_a_remote_lease() {
     run_production_tls_candidate_with_test_stack(None, false, PublicationScenario::Lease);
 }
@@ -3654,13 +3654,112 @@ fn lease_lane_environment_names() -> Vec<String> {
 }
 
 /// The binding's execution timeout, which is the lease lifetime: the lease
-/// lane states 400 s (journal window 60+60+400+60+120 = 700 s); every other
+/// lane states 900 s: the real codex profile's 600 s Ready deadline must leave
+/// lease time after Ready (journal window 60+60+900+60+120 = 1200 s); every other
 /// scenario keeps the fixture's 60 s.
 fn lease_lane_binding_timeout_seconds(publication: PublicationScenario) -> u32 {
     if publication == PublicationScenario::Lease {
-        400
+        900
     } else {
         60
+    }
+}
+
+/// The controller of a lease-lane scenario: a real two-label DNS name the
+/// guest resolves through its captured hosts input and verifies TLS against by
+/// name, served with a test certificate for that name. Every other scenario
+/// keeps the `localhost` controller and the machine's resolver inputs.
+struct LeaseLaneController {
+    inputs: Option<tempfile::TempDir>,
+}
+
+const LEASE_LANE_CONTROLLER_HOST: &str = "controller.test";
+
+impl LeaseLaneController {
+    fn new(publication: PublicationScenario) -> Self {
+        let inputs = matches!(
+            publication,
+            PublicationScenario::Lease | PublicationScenario::LeaseTooShort
+        )
+        .then(|| {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                dir.path().join("hosts"),
+                format!("127.0.0.1 localhost\n127.0.0.1 {LEASE_LANE_CONTROLLER_HOST}\n"),
+            )
+            .unwrap();
+            std::fs::write(dir.path().join("resolv.conf"), b"nameserver 127.0.0.1\n").unwrap();
+            dir
+        });
+        Self { inputs }
+    }
+
+    fn fixture(name: &str) -> String {
+        std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../fixtures")
+                .join(name),
+        )
+        .unwrap()
+    }
+
+    fn pem_der(pem: &str) -> Vec<u8> {
+        let body: String = pem.lines().filter(|line| !line.starts_with("-----")).collect();
+        STANDARD.decode(body).unwrap()
+    }
+
+    fn roots(&self) -> Vec<String> {
+        if self.inputs.is_some() {
+            vec![STANDARD.encode(Self::pem_der(&Self::fixture("lease-controller-ca.pem")))]
+        } else {
+            vec![ryeos_external_candidate_supervisor::test_support::TEST_CA_DER_BASE64.to_owned()]
+        }
+    }
+
+    fn origin(&self, port: u16) -> String {
+        let host = if self.inputs.is_some() {
+            LEASE_LANE_CONTROLLER_HOST
+        } else {
+            "localhost"
+        };
+        format!("https://{host}:{port}")
+    }
+
+    fn resolver_source(&self) -> String {
+        match &self.inputs {
+            Some(dir) => dir.path().join("resolv.conf").to_string_lossy().into_owned(),
+            None => "/etc/resolv.conf".into(),
+        }
+    }
+
+    fn hosts_source(&self) -> String {
+        match &self.inputs {
+            Some(dir) => dir.path().join("hosts").to_string_lossy().into_owned(),
+            None => "/etc/hosts".into(),
+        }
+    }
+
+    fn tls_config(&self) -> Arc<rustls::ServerConfig> {
+        if self.inputs.is_none() {
+            return production_tls_config();
+        }
+        let certificate = rustls::pki_types::CertificateDer::from(Self::pem_der(&Self::fixture(
+            "lease-controller-server.pem",
+        )));
+        let private_key = rustls::pki_types::PrivateKeyDer::Pkcs8(
+            rustls::pki_types::PrivatePkcs8KeyDer::from(Self::pem_der(&Self::fixture(
+                "lease-controller-server.key.pem",
+            ))),
+        );
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        Arc::new(
+            rustls::ServerConfig::builder_with_provider(provider)
+                .with_protocol_versions(&[&rustls::version::TLS13])
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(vec![certificate], private_key)
+                .unwrap(),
+        )
     }
 }
 
@@ -4504,11 +4603,11 @@ async fn run_production_tls_candidate(
         .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let controller_port = listener.local_addr().unwrap().port();
-    let roots =
-        vec![ryeos_external_candidate_supervisor::test_support::TEST_CA_DER_BASE64.to_owned()];
+    let lease_lane = LeaseLaneController::new(publication);
+    let roots = lease_lane.roots();
     let controller_contract = ExternalControllerTransportContract {
         schema: 2,
-        https_origin: format!("https://localhost:{controller_port}"),
+        https_origin: lease_lane.origin(controller_port),
         route_contract: EXTERNAL_CHANNEL_ROUTE_CONTRACT.into(),
         tls_root_bundle_digest: external_tls_root_bundle_digest(&roots).unwrap(),
         connect_timeout_ms: 1_000,
@@ -4517,11 +4616,11 @@ async fn run_production_tls_candidate(
         max_clock_skew_ms: None,
         network_inputs: ExternalNetworkInputPolicy {
             resolver: ExternalNetworkInputSelection {
-                source: "/etc/resolv.conf".into(),
+                source: lease_lane.resolver_source(),
                 max_bytes: 64 * 1024,
             },
             hosts: ExternalNetworkInputSelection {
-                source: "/etc/hosts".into(),
+                source: lease_lane.hosts_source(),
                 max_bytes: 64 * 1024,
             },
         },
@@ -4631,6 +4730,7 @@ async fn run_production_tls_candidate(
             state.clone(),
             stop.clone(),
             controller_evidence.clone(),
+            lease_lane.tls_config(),
         );
         if let Some(ready) = scripted_turn_ready {
             ready.send(()).unwrap();
@@ -5074,6 +5174,7 @@ async fn run_production_tls_candidate(
         state.clone(),
         stop.clone(),
         controller_evidence.clone(),
+        lease_lane.tls_config(),
     );
 
     let state_root = ryeos_app::private_artifact_home::home_path(
