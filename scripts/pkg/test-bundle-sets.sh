@@ -158,7 +158,7 @@ done
 # not gain render-sandbox. Only modal-sandbox, which no installable set names,
 # is published by the release build but absent from the archive.
 mapfile -t release_archive < <(ryeos_release_archive_bundle_names)
-[[ "${release_archive[*]}" == "browser bundle-release bundle-source central-auth codex core directive environment-qualification graph knowledge local-inference opencode render-sandbox ryeos-docs ryeos-ui scheduling web" ]]
+[[ "${release_archive[*]}" == "browser bundle-release bundle-source central-auth claude-code codex core directive environment-qualification graph knowledge local-inference opencode render-sandbox ryeos-docs ryeos-ui scheduling web" ]]
 for installable_set in "${bundle_set_ids[@]}"; do
   mapfile -t installable_members < <(ryeos_bundle_set_names "$installable_set")
   for member in "${installable_members[@]}"; do

@@ -26017,7 +26017,7 @@ mod tests {
             placement_thread_id: placement,
             chain_root_id: placement,
             owner_principal: "fp:operator",
-            admitted_capsule_hash: "a".repeat(64).leak(),
+            admitted_capsule_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             workspace_id: workspace,
             candidate_required: false,
             candidate_disposition: DedicatedCandidateDisposition::OwnerDecision,
