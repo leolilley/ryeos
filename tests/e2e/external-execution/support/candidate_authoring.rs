@@ -356,6 +356,7 @@ config_schema:
     let mut profile = serde_json::json!({
         "schema_version": ryeos_state::objects::STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION,
         "external_candidate": joined_external_candidate_requirement(),
+        "requires": fixture_placement_requires(),
         "transport": "stdio_jsonrpc",
         "http_sse": null,
         "configuration_authority": "immutable_argv",
@@ -711,12 +712,23 @@ requires:
     (CandidateAuthoringBundle { root: bundle }, compiled_profile)
 }
 
+/// What an admitted external-candidate profile declares about its placement:
+/// no lease and no guest fact, so the fixture session is placed without one.
+fn fixture_placement_requires() -> serde_json::Value {
+    serde_json::json!({
+        "workload_class": "fixture.workload",
+        "controller": ["time"],
+        "credential_kinds": {"credential_profile": ["credential:private_home"]}
+    })
+}
+
 fn configure_real_codex_handshake_profile(
     repository_source_root: &Path,
     profile: &mut serde_json::Value,
     sources: &mut BTreeMap<String, Vec<u8>>,
 ) {
     profile["external_candidate"] = serde_json::to_value(real_codex_requirement()).unwrap();
+    profile["requires"] = fixture_placement_requires();
     profile["workload_executable"] = "bin/codex".into();
     profile["workload_args"] = serde_json::json!([
         "--strict-config",
@@ -851,6 +863,7 @@ pub fn configure_real_codex_scripted_turn_profile(
     *sources = authored_codex_hosted_sources(repository_source_root);
     *profile = serde_json::from_slice(sources.get("authoring.profile.json").unwrap()).unwrap();
     profile["external_candidate"] = serde_json::to_value(real_codex_requirement()).unwrap();
+    profile["requires"] = fixture_placement_requires();
     profile["workload_realization_id"] = "provider-runtime".into();
     profile["workload_executable"] = "bin/codex".into();
     profile["workload_args"] = serde_json::json!([
