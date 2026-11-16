@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-16T07:29:37Z:42748d0a21de997965b1709d1493a63e47947e3bdbd5c07bd0c71ef030e1224a:kwV7GtrE8TM4yDAYTJvozvbcYNC0ja/xlhKjVFswlWSxuXnWSDVSP7R4p6HWfGcVTRbwFtqNnXpHBKtkp51LDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T21:45:18Z:b5458751a4be7d74eaf7caa21c847149c504df143cde7b44853d074e638563a2:3Si3FrMNAwnnlOtwlk3JSHwDYJTfbNqNWoDhWvxZC/pyvNqNe3fEqXcHMf84Tv9We+Uri8kOuwvHGl+7mDE1Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "release-process"
