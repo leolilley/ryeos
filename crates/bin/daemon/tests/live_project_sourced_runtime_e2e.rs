@@ -116,7 +116,7 @@ async fn the_same_tool_runs_pinned_and_a_subprocess_tool_still_writes_live() {
         project.path(),
         "sub",
         "yaml",
-        SUBPROCESS_TOOL,
+        &subprocess_tool(project.path()),
         &fixture.user,
     );
 
