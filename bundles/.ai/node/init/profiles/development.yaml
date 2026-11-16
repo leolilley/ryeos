@@ -1,8 +1,9 @@
-# ryeos:signed:2026-11-14T07:17:08Z:6a326e354f5b5271743e68da864b871c4a4e86720c3dc4b2379ab7a96d5461b6:AmNCPC1cP98TMwhv4n7qoIlnf2XNYZNB6uwfqs+3lKEB3plqDBk/Z3LdBokkdntjPUmYGH24+IEftMoA2cAzDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T09:38:06Z:bc7e8709afb4c6182548195bac5c26b6b80b8f7218b529fddd46c343164f7812:7WKsNEuuG4I4fZwW+7d/bGhecYXJI5BeBHJxXClircQpi1SJv/X3a+9seGUBwaTJXP9eP2WdE3cKoSAdmKFKCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
   - central-auth
+  - claude-code
   - codex
   - core
   - directive
@@ -140,6 +141,7 @@ policies:
     bundle_source_caps:
       browser: []
       central-auth: []
+      claude-code: []
       codex:
         - ryeos.register.command.root.codex
       opencode: []

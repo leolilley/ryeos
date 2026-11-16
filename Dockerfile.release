@@ -92,7 +92,8 @@ RUN mkdir -p /usr/local/cargo/git && \
       --package ryeos-external-guest-restoration-verifier \
       --package ryeos-render-sandbox-lifecycle-adapter \
       --package modal-guest-launcher \
-      --package ryeos-modal-sandbox-lifecycle-adapter && \
+      --package ryeos-modal-sandbox-lifecycle-adapter \
+      --package ryeos-claude-code-adapter && \
     cargo chef cook --release --locked --recipe-path recipe.json \
       --package lillux --package ryeos-lillux-oci-hook && \
     RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \

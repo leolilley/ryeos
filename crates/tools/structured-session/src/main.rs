@@ -1888,12 +1888,21 @@ fn resolve_pinned_executable_with_delivery(
     if matches.next().is_some() {
         bail!("workload realization id is ambiguous");
     }
-    if realization.mode != ryeos_state::objects::ExternalContentMode::Pinned
+    // A pinned closure (file or tree) is always admissible. The one other
+    // shape is a captured bundle binary: a single regular file whose
+    // manifest carries exactly one entry. A captured tree is never a
+    // workload executable.
+    let captured_single_file = realization.mode
+        == ryeos_state::objects::ExternalContentMode::Captured
+        && realization.kind == ryeos_state::objects::ExternalContentKind::File
+        && realization.entry_count == 1;
+    if (realization.mode != ryeos_state::objects::ExternalContentMode::Pinned
+        && !captured_single_file)
         || !lillux::valid_hash(&realization.manifest_hash)
         || realization.entry_count == 0
         || realization.total_bytes == 0
     {
-        bail!("workload realization is not a non-empty pinned closure");
+        bail!("workload realization is not a non-empty pinned closure or a captured single file");
     }
     let mount = std::path::Path::new(&realization.mount);
     if mount.as_os_str().is_empty()
@@ -6860,6 +6869,54 @@ server.serve_forever()
             .is_err(),
             "a file realization must not discard an executable-member prefix"
         );
+    }
+
+    #[test]
+    fn captured_single_file_is_a_workload_executable_and_nothing_else_captured_is() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("fixture-worker");
+        std::fs::write(&executable, b"fixture").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let sealed = |kind: &str, mode: &str, entries: u64| {
+            serde_json::to_string(&json!([{
+                "id":"fixture",
+                "kind":kind,
+                "mode":mode,
+                "manifest_hash":"a".repeat(64),
+                "entry_count":entries,
+                "total_bytes":7,
+                "mount_root":"project",
+                "mount":"fixture-worker"
+            }]))
+            .unwrap()
+        };
+        let resolve = |sealed: &str| {
+            resolve_pinned_executable(
+                root.path(),
+                sealed,
+                "fixture",
+                std::path::Path::new("fixture-worker"),
+            )
+        };
+        let (descriptor, argv0, authorities) = resolve(&sealed("file", "captured", 1)).unwrap();
+        assert_eq!(std::fs::read(descriptor).unwrap(), b"fixture");
+        assert_eq!(argv0.file_name().unwrap(), "fixture-worker");
+        assert_eq!(authorities.len(), 2);
+        assert!(
+            resolve(&sealed("file", "captured", 2)).is_err(),
+            "a captured file manifest holds exactly one entry"
+        );
+        assert!(
+            resolve(&sealed("file", "captured", 0)).is_err(),
+            "an empty captured manifest is not an executable"
+        );
+        assert!(
+            resolve(&sealed("tree", "captured", 1)).is_err(),
+            "a captured tree is never a workload executable"
+        );
+        assert!(resolve(&sealed("file", "pinned", 1)).is_ok());
     }
 
     #[test]

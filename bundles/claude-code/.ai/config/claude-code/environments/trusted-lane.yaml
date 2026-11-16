@@ -1,0 +1,23 @@
+# ryeos:signed:2026-11-16T09:38:06Z:abc1a65cca9764508e6abef896adbe725b857cfa8a28fc4a1bceb7025668854c:QccFkF0YvNK+g2CGzQHoEZAGQz/vWyiJaWV+aCiwn6dGt/BUj2WkOcTG2joIYxSLVsMYBdeMWuzr1D5w1i08BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: claude-code/environments
+schema: ryeos.worker_environment.v7
+external_product_slots: []
+worker_ref: worker:claude-code/trusted-hosted
+external_content: []
+configuration:
+  executable_search: []
+  # The model key and the gateway address are host-provided values. Only their
+  # names are retained anywhere; the daemon reads the values at session start.
+  process_environment:
+    ANTHROPIC_API_KEY:
+      kind: delivered_secret
+      name: ANTHROPIC_API_KEY
+    ANTHROPIC_BASE_URL:
+      kind: delivered_secret
+      name: ANTHROPIC_BASE_URL
+credential_requirement:
+  workload_family: claude-code
+  required_state: active
+  subject_projection_contract: ryeos.credential.delivered_secret.v1
+portable_state_contract: ryeos.worker_session.restore.v1
+workload_client: null

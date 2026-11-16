@@ -1,0 +1,511 @@
+{
+  "schema_version": 12,
+  "external_candidate": null,
+  "transport": "stdio_jsonrpc",
+  "http_sse": null,
+  "configuration_authority": "immutable_argv",
+  "workload_realization_id": "adapter",
+  "workload_executable": "claude-code-adapter",
+  "workload_args": [],
+  "workload_home_env": "CLAUDE_CONFIG_DIR",
+  "required_process_environment": [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL"
+  ],
+  "workload_client": null,
+  "baseline_config": "settings.baseline.json",
+  "baseline_destination": "settings.json",
+  "auxiliary_configs": [],
+  "runtime_configs": [],
+  "configuration_absence": {
+    "absolute_paths": [
+      "/etc/claude-code/managed-settings.json"
+    ],
+    "startup_ancestor_paths": [
+      ".claude/settings.json",
+      ".claude/settings.local.json",
+      ".mcp.json"
+    ],
+    "route_ancestor_paths": [
+      ".claude/settings.json",
+      ".claude/settings.local.json",
+      ".mcp.json"
+    ]
+  },
+  "portable_state": null,
+  "credential_subject": null,
+  "initialization": [
+    {
+      "method": "initialize",
+      "effect_class": "pure_read",
+      "params": {
+        "client": {
+          "name": "ryeos",
+          "version": "1"
+        }
+      },
+      "response_schema": "schema/InitializeResponse.json",
+      "notification": null
+    },
+    {
+      "method": "initialized",
+      "effect_class": "pure_read",
+      "params": {},
+      "response_schema": null,
+      "notification": "initialized"
+    }
+  ],
+  "recovery": {
+    "resume_route": "session.resume",
+    "inspect_route": "session.read",
+    "route_sets": [
+      "read_only",
+      "session"
+    ]
+  },
+  "route_sets": {
+    "read_only": [
+      "session.read",
+      "session.resume",
+      "session.start_read_only",
+      "turn.interrupt",
+      "turn.start"
+    ],
+    "session": [
+      "session.read",
+      "session.resume",
+      "session.start",
+      "turn.interrupt",
+      "turn.start"
+    ]
+  },
+  "routes": [
+    {
+      "id": "session.start",
+      "method": "session/start",
+      "effect_class": "external_effect",
+      "request_schema": "schema/SessionStartParams.json",
+      "response_schema": "schema/SessionStartResponse.json",
+      "fixed_params": {
+        "access": "read_write"
+      },
+      "workspace_fields": [
+        "cwd"
+      ],
+      "forbidden_non_null_fields": [],
+      "forbidden_fields": [],
+      "observations": [
+        {
+          "when": [],
+          "value": {
+            "op": "object",
+            "fields": {
+              "kind": {
+                "op": "literal",
+                "value": "remote_session"
+              },
+              "id": {
+                "op": "pointer",
+                "pointer": "/response/result/session_id",
+                "max_string_bytes": 256
+              }
+            }
+          }
+        }
+      ],
+      "result_retention": "ephemeral",
+      "ceremony": null,
+      "session_binding": {
+        "action": "bind_new",
+        "request_field": null,
+        "response_pointer": "/result/session_id"
+      },
+      "response_predicates": [
+        {
+          "pointer": "/response/result/access",
+          "equals": "read_write"
+        }
+      ]
+    },
+    {
+      "id": "session.start_read_only",
+      "method": "session/start_read_only",
+      "effect_class": "external_effect",
+      "request_schema": "schema/SessionStartParams.json",
+      "response_schema": "schema/SessionStartResponse.json",
+      "fixed_params": {
+        "access": "read_only"
+      },
+      "workspace_fields": [
+        "cwd"
+      ],
+      "forbidden_non_null_fields": [],
+      "forbidden_fields": [],
+      "observations": [
+        {
+          "when": [],
+          "value": {
+            "op": "object",
+            "fields": {
+              "kind": {
+                "op": "literal",
+                "value": "remote_session"
+              },
+              "id": {
+                "op": "pointer",
+                "pointer": "/response/result/session_id",
+                "max_string_bytes": 256
+              }
+            }
+          }
+        }
+      ],
+      "result_retention": "ephemeral",
+      "ceremony": null,
+      "session_binding": {
+        "action": "bind_new",
+        "request_field": null,
+        "response_pointer": "/result/session_id"
+      },
+      "response_predicates": [
+        {
+          "pointer": "/response/result/access",
+          "equals": "read_only"
+        }
+      ]
+    },
+    {
+      "id": "session.resume",
+      "method": "session/resume",
+      "audience": "runtime",
+      "effect_class": "session_mutation",
+      "request_schema": "schema/SessionResumeParams.json",
+      "response_schema": "schema/SessionResumeResponse.json",
+      "fixed_params": {},
+      "workspace_fields": [
+        "cwd"
+      ],
+      "forbidden_non_null_fields": [],
+      "forbidden_fields": [],
+      "observations": [
+        {
+          "when": [
+            {
+              "pointer": "/response/result/state",
+              "equals": "idle"
+            }
+          ],
+          "value": {
+            "op": "object",
+            "fields": {
+              "kind": {
+                "op": "literal",
+                "value": "remote_session_recovered"
+              },
+              "id": {
+                "op": "pointer",
+                "pointer": "/response/result/session_id",
+                "max_string_bytes": 256
+              }
+            }
+          }
+        }
+      ],
+      "result_retention": "ephemeral",
+      "ceremony": null,
+      "session_binding": {
+        "action": "bind_expected",
+        "request_field": "session_id",
+        "response_pointer": "/result/session_id"
+      },
+      "response_predicates": []
+    },
+    {
+      "id": "session.read",
+      "method": "session/read",
+      "audience": "runtime",
+      "effect_class": "pure_read",
+      "request_schema": "schema/SessionReadParams.json",
+      "response_schema": "schema/SessionReadResponse.json",
+      "fixed_params": {},
+      "workspace_fields": [],
+      "forbidden_non_null_fields": [],
+      "forbidden_fields": [],
+      "observations": [
+        {
+          "when": [
+            {
+              "pointer": "/response/result/state",
+              "equals": "idle"
+            }
+          ],
+          "value": {
+            "op": "object",
+            "fields": {
+              "kind": {
+                "op": "literal",
+                "value": "remote_session_recovery_status"
+              },
+              "id": {
+                "op": "pointer",
+                "pointer": "/response/result/session_id",
+                "max_string_bytes": 256
+              },
+              "outcome": {
+                "op": "literal",
+                "value": "safe_idle"
+              }
+            }
+          }
+        },
+        {
+          "when": [
+            {
+              "pointer": "/response/result/state",
+              "equals": "running"
+            }
+          ],
+          "value": {
+            "op": "object",
+            "fields": {
+              "kind": {
+                "op": "literal",
+                "value": "remote_session_recovery_status"
+              },
+              "id": {
+                "op": "pointer",
+                "pointer": "/response/result/session_id",
+                "max_string_bytes": 256
+              },
+              "outcome": {
+                "op": "literal",
+                "value": "uncertain"
+              }
+            }
+          }
+        },
+        {
+          "when": [
+            {
+              "pointer": "/response/result/state",
+              "equals": "lost"
+            }
+          ],
+          "value": {
+            "op": "object",
+            "fields": {
+              "kind": {
+                "op": "literal",
+                "value": "remote_session_recovery_status"
+              },
+              "id": {
+                "op": "pointer",
+                "pointer": "/response/result/session_id",
+                "max_string_bytes": 256
+              },
+              "outcome": {
+                "op": "literal",
+                "value": "uncertain"
+              }
+            }
+          }
+        }
+      ],
+      "result_retention": "ephemeral",
+      "ceremony": null,
+      "session_binding": {
+        "action": "require",
+        "request_field": "session_id",
+        "response_pointer": null
+      },
+      "response_predicates": []
+    },
+    {
+      "id": "turn.start",
+      "method": "turn/start",
+      "effect_class": "external_effect",
+      "request_schema": "schema/TurnStartParams.json",
+      "response_schema": "schema/TurnStartResponse.json",
+      "fixed_params": {},
+      "workspace_fields": [
+        "cwd"
+      ],
+      "forbidden_non_null_fields": [],
+      "forbidden_fields": [],
+      "observations": [
+        {
+          "when": [],
+          "value": {
+            "op": "object",
+            "fields": {
+              "kind": {
+                "op": "literal",
+                "value": "state"
+              },
+              "expected": {
+                "op": "literal",
+                "value": "idle"
+              },
+              "next": {
+                "op": "literal",
+                "value": "turn_running"
+              },
+              "turn_id": {
+                "op": "pointer",
+                "pointer": "/response/result/turn_id",
+                "max_string_bytes": 256
+              }
+            }
+          }
+        }
+      ],
+      "result_retention": "ephemeral",
+      "ceremony": null,
+      "session_binding": {
+        "action": "require",
+        "request_field": "session_id",
+        "response_pointer": null
+      },
+      "progress_notifications": [
+        "turn/started"
+      ],
+      "response_predicates": []
+    },
+    {
+      "id": "turn.interrupt",
+      "method": "turn/interrupt",
+      "effect_class": "external_effect",
+      "request_schema": "schema/TurnInterruptParams.json",
+      "response_schema": "schema/TurnInterruptResponse.json",
+      "fixed_params": {},
+      "workspace_fields": [],
+      "forbidden_non_null_fields": [],
+      "forbidden_fields": [],
+      "observations": [],
+      "result_retention": "ephemeral",
+      "ceremony": null,
+      "session_binding": {
+        "action": "require",
+        "request_field": "session_id",
+        "response_pointer": null
+      },
+      "response_predicates": []
+    }
+  ],
+  "notifications": [
+    {
+      "method": "turn/completed",
+      "schema": "schema/TurnCompletedNotification.json",
+      "event_type": "turn.completed",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "session_id": {
+            "op": "pointer",
+            "pointer": "/message/params/session_id",
+            "max_string_bytes": 256
+          },
+          "turn_id": {
+            "op": "pointer",
+            "pointer": "/message/params/completed_turn_id",
+            "max_string_bytes": 256
+          },
+          "status": {
+            "op": "pointer",
+            "pointer": "/message/params/status",
+            "max_string_bytes": 256
+          },
+          "result": {
+            "op": "pointer",
+            "pointer": "/message/params/result",
+            "max_string_bytes": 262144
+          }
+        }
+      },
+      "observations": [
+        {
+          "when": [],
+          "value": {
+            "op": "object",
+            "fields": {
+              "kind": {
+                "op": "literal",
+                "value": "state"
+              },
+              "expected": {
+                "op": "literal",
+                "value": "turn_running"
+              },
+              "next": {
+                "op": "literal",
+                "value": "idle"
+              },
+              "completed_turn_id": {
+                "op": "pointer",
+                "pointer": "/message/params/completed_turn_id",
+                "max_string_bytes": 256
+              }
+            }
+          }
+        }
+      ],
+      "ceremony_clear": false,
+      "upstream_session_pointer": "/message/params/session_id"
+    },
+    {
+      "method": "turn/started",
+      "schema": "schema/TurnStartedNotification.json",
+      "event_type": "turn.started",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "session_id": {
+            "op": "pointer",
+            "pointer": "/message/params/session_id",
+            "max_string_bytes": 256
+          },
+          "turn_id": {
+            "op": "pointer",
+            "pointer": "/message/params/turn_id",
+            "max_string_bytes": 256
+          }
+        }
+      },
+      "observations": [
+        {
+          "when": [],
+          "value": {
+            "op": "object",
+            "fields": {
+              "kind": {
+                "op": "literal",
+                "value": "state"
+              },
+              "expected": {
+                "op": "literal",
+                "value": "idle"
+              },
+              "next": {
+                "op": "literal",
+                "value": "turn_running"
+              },
+              "turn_id": {
+                "op": "pointer",
+                "pointer": "/message/params/turn_id",
+                "max_string_bytes": 256
+              }
+            }
+          }
+        }
+      ],
+      "ceremony_clear": false,
+      "upstream_session_pointer": "/message/params/session_id"
+    }
+  ],
+  "ignored_notifications": {
+    "turn/progress": "schema/TurnProgressNotification.json"
+  },
+  "server_requests": []
+}

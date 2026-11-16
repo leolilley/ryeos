@@ -1,0 +1,69 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TurnStartParams",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "session_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "cwd": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "prompt": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200000
+    },
+    "system_prompt": {
+      "type": "string",
+      "maxLength": 100000
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "deadline_seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 86400
+    },
+    "stub": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 600000
+        },
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "completed",
+            "crash",
+            "interrupt"
+          ]
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 262144
+        },
+        "progress_events": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000
+        },
+        "structured_output": {}
+      }
+    }
+  },
+  "required": [
+    "cwd",
+    "prompt",
+    "session_id"
+  ]
+}

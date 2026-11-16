@@ -1454,6 +1454,70 @@ mod tests {
     }
 
     #[test]
+    fn claude_code_environments_pass_the_launch_preparer_validator() {
+        let bundle = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../bundles/claude-code/.ai");
+        let profile: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                bundle.join("workers/claude-code/lib/hosted/structured-session.profile.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let required: Vec<&str> = profile["required_process_environment"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|name| name.as_str().unwrap())
+            .collect();
+        for (file, worker) in [
+            ("default", "worker:claude-code/hosted"),
+            ("trusted-lane", "worker:claude-code/trusted-hosted"),
+        ] {
+            let path = bundle.join(format!("config/claude-code/environments/{file}.yaml"));
+            let document: serde_yaml::Value =
+                serde_yaml::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            let environment = LaunchPreparedItemWire {
+                canonical_ref: format!("config:claude-code/environments/{file}"),
+                source_space: ItemSpaceWire::Bundle,
+                effective_trust_class: TrustClassWire::TrustedBundle,
+                composed: ryeos_handler_protocol::LaunchComposedViewWire {
+                    composed: serde_json::to_value(&document).unwrap(),
+                    derived: BTreeMap::new(),
+                    policy_facts: BTreeMap::new(),
+                },
+                resolution_digest: serde_json::json!({"digest":"retained"}),
+            };
+            let validated = validate_worker_environment(&environment)
+                .unwrap_or_else(|error| panic!("{file}: {}", error.message));
+            assert_eq!(validated.worker_ref, worker, "{file}");
+            assert_eq!(
+                validated.subject_projection_contract, "ryeos.credential.delivered_secret.v1",
+                "{file}"
+            );
+            assert!(!validated.has_external_content, "{file}");
+            assert!(validated.workload_client.is_none(), "{file}");
+            // Every variable the profile requires is delivered as a secret
+            // under its own name, and nothing else is.
+            assert_eq!(
+                validated.process_environment.len(),
+                required.len(),
+                "{file}"
+            );
+            for name in &required {
+                assert!(
+                    matches!(
+                        validated.process_environment.get(*name),
+                        Some(AuthoredWorkerEnvironmentValue::DeliveredSecret { name: secret })
+                            if secret == name
+                    ),
+                    "{file}: {name}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn worker_environment_rejects_the_previous_schema_version() {
         let environment = LaunchPreparedItemWire {
             canonical_ref: "config:fixture/environments/default".to_string(),

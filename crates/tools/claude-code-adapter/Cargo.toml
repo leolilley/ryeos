@@ -1,0 +1,17 @@
+[package]
+name = "ryeos-claude-code-adapter"
+version = "0.1.0"
+edition = "2024"
+description = "Stdio adapter that speaks the structured-session wire for the claude-code bundle (stub driver only)"
+license.workspace = true
+repository = "https://github.com/leolilley/ryeos"
+
+[[bin]]
+name = "claude-code-adapter"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

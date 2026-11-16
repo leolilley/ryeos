@@ -1,6 +1,6 @@
-# ryeos:signed:2026-11-04T00:01:30Z:83aa127d1de89ba0a27aca159bf3f97684ba1107c8a04cbc48b6944f367c8f96:Utv7RRBM3NPUZHGb+M6l+azxrtMOFRp7XW2BLXYZpIyUS2zO7SbmbdJtjEN/OS+o5KO8FF7ZzhfnxAg10nl9Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T09:38:06Z:879e9c35ad1ced4efa4ba45762ead4dd3db347fbbebcdd2f4b757feb88a17e98:YtIL+IxQRWXjJRVz9Gu7C5+moAmrohu3NE1HbilHQNcQJxsWbGLMp9CWlj6y9hfJJNmHnoJygDX2XY2gbRRUCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/worker"
-version: "1.3.0"
+version: "1.4.0"
 location:
   directory: workers
   excluded_directories: [lib]
@@ -60,7 +60,7 @@ execution:
     idle_timeout_ms: 1800000
   external_content:
     realization_derived: effective_external_realizations
-    allowed_roots: ["bundle:own"]
+    allowed_roots: ["bundle:own", "bundle_binary:own"]
     allowed_mount_roots: [project, execution_runtime]
     max_declarations: 8
     large_content:

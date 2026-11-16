@@ -4430,6 +4430,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-claude-code-adapter"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "ryeos-cli"
 version = "0.5.102"
 dependencies = [
@@ -5351,6 +5358,7 @@ dependencies = [
  "ryeos-state",
  "serde",
  "serde_json",
+ "serde_yaml",
  "tempfile",
  "tokio",
  "zeroize",

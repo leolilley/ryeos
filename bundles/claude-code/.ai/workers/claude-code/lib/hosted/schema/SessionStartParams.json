@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SessionStartParams",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "cwd": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "access": {
+      "type": "string",
+      "enum": [
+        "read_only",
+        "read_write"
+      ]
+    },
+    "system_prompt": {
+      "type": "string",
+      "maxLength": 100000
+    }
+  },
+  "required": [
+    "access",
+    "cwd"
+  ]
+}

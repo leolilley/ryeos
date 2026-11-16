@@ -58,6 +58,7 @@ members = [
     "crates/tools/codex-external-configuration",
     "crates/tools/codex-guest-runtime-producer",
     "crates/tools/codex-runtime-verifier",
+    "crates/tools/claude-code-adapter",
     "tests/e2e/external-execution/synthetic-lifecycle-adapter",
     "crates/host-adapters/lillux-oci-hook",
     "crates/host-adapters/remote-lease-core",

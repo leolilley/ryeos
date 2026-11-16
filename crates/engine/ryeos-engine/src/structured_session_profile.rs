@@ -2478,6 +2478,66 @@ mod tests {
         );
     }
 
+    /// Every file under one bundle's `lib/hosted` source directory, keyed by
+    /// its path relative to that directory, exactly as admission captures it.
+    fn bundle_source_set(relative: &str) -> BTreeMap<String, Vec<u8>> {
+        fn collect(root: &Path, dir: &Path, files: &mut BTreeMap<String, Vec<u8>>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if entry.file_type().unwrap().is_dir() {
+                    collect(root, &path, files);
+                } else {
+                    assert!(entry.file_type().unwrap().is_file());
+                    files.insert(
+                        path.strip_prefix(root)
+                            .unwrap()
+                            .to_str()
+                            .unwrap()
+                            .to_owned(),
+                        std::fs::read(path).unwrap(),
+                    );
+                }
+            }
+        }
+        let root = crate::test_support::workspace_root().join(relative);
+        let mut files = BTreeMap::new();
+        collect(&root, &root, &mut files);
+        files
+    }
+
+    #[test]
+    fn claude_code_stdio_profile_compiles_from_the_exact_local_source_set() {
+        let files = bundle_source_set("bundles/claude-code/.ai/workers/claude-code/lib/hosted");
+        let admitted = compile(&files["structured-session.profile.json"], &files)
+            .expect("the authored claude-code profile must compile from its local source set");
+        let contract = &admitted.contract;
+        assert_eq!(
+            contract.get("transport").and_then(Value::as_str),
+            Some("stdio_jsonrpc")
+        );
+        assert_eq!(admitted.baseline_destination, "settings.json");
+        assert!(contract["credential_subject"].is_null());
+        assert!(contract["portable_state"].is_null());
+        // Both route sets carry the recovery pair, and the bounded turn's
+        // lifecycle is observed from the route and from its notifications.
+        assert_eq!(
+            contract["recovery"]["route_sets"],
+            json!(["read_only", "session"])
+        );
+        let completed = contract["notifications"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|rule| rule["method"] == "turn/completed")
+            .unwrap();
+        assert_eq!(completed["durable"], true);
+        assert_eq!(
+            completed["observations"][0]["value"]["fields"]["completed_turn_id"]["pointer"],
+            "/message/params/completed_turn_id"
+        );
+    }
+
     #[test]
     fn invocation_mapping_refuses_missing_paths_and_incompatible_shapes_at_admission() {
         let mut profile: Value =

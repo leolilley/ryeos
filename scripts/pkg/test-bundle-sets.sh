@@ -171,14 +171,17 @@ for member in "${release_archive[@]}"; do
   contains "$member" "${release_artifacts[@]}"
 done
 assert_rejected contains render-sandbox "${standard[@]}"
-# Development is standard plus central-auth, environment-qualification and
-# render-sandbox, in that published order.
-[[ "${development[*]}" == "core central-auth scheduling knowledge directive graph ryeos-docs environment-qualification web browser ryeos-ui codex opencode render-sandbox" ]]
+# Development is standard plus central-auth, environment-qualification,
+# render-sandbox and claude-code, in that published order. The claude-code
+# worker bundle is not part of any deployable image set yet.
+[[ "${development[*]}" == "core central-auth scheduling knowledge directive graph ryeos-docs environment-qualification web browser ryeos-ui codex opencode render-sandbox claude-code" ]]
+assert_rejected contains claude-code "${standard[@]}"
+assert_rejected contains claude-code "${hosted_workflow[@]}"
 mapfile -t hosted_controller < <(ryeos_bundle_set_names hosted-controller)
 [[ "${hosted_controller[*]}" == "core graph knowledge codex render-sandbox" ]]
 mapfile -t hosted_controller_bins < <(ryeos_bundle_set_bin_managed_names hosted-controller)
 [[ "${hosted_controller_bins[*]}" == "core graph knowledge codex render-sandbox" ]]
-for forbidden in central-auth scheduling directive ryeos-docs opencode local-inference bundle-release; do
+for forbidden in central-auth scheduling directive ryeos-docs opencode claude-code local-inference bundle-release; do
   assert_rejected contains "$forbidden" "${hosted_controller[@]}"
 done
 [[ -z "$(ryeos_bundle_set_cargo_features standard ryeos-core-tools)" ]]
@@ -189,7 +192,7 @@ assert_rejected ryeos_bundle_set_cargo_features unknown ryeosd
 for forbidden in codex render-sandbox opencode web browser ryeos-ui; do
   assert_rejected contains "$forbidden" "${local_inference[@]}"
 done
-[[ "${release_artifacts[*]}" == "core central-auth scheduling knowledge directive graph ryeos-docs environment-qualification web browser ryeos-ui codex render-sandbox modal-sandbox opencode local-inference bundle-source bundle-release" ]]
+[[ "${release_artifacts[*]}" == "core central-auth scheduling knowledge directive graph ryeos-docs environment-qualification web browser ryeos-ui codex render-sandbox modal-sandbox opencode claude-code local-inference bundle-source bundle-release" ]]
 [[ "${release_authority[*]}" == "core graph environment-qualification bundle-release" ]]
 for forbidden in central-auth scheduling knowledge directive ryeos-docs web browser ryeos-ui codex opencode render-sandbox; do
   assert_rejected contains "$forbidden" "${release_authority[@]}"
@@ -205,7 +208,8 @@ for set_name in "${bundle_set_ids[@]}" release-artifacts; do
     for required in directive graph knowledge; do contains "$required" "${members[@]}"; done
   fi
   if contains directive "${members[@]}" || contains ryeos-docs "${members[@]}" \
-      || contains opencode "${members[@]}" || contains codex "${members[@]}"; then
+      || contains opencode "${members[@]}" || contains codex "${members[@]}" \
+      || contains claude-code "${members[@]}"; then
     contains knowledge "${members[@]}"
   fi
   if contains codex "${members[@]}" || contains render-sandbox "${members[@]}" \
@@ -495,6 +499,7 @@ static_package_cases=(
   'ryeos-codex-external-configuration|ryeos-codex-external-configuration'
   'ryeos-codex-guest-runtime-producer|ryeos-codex-guest-runtime-producer'
   'ryeos-codex-runtime-verifier|codex-runtime-verifier'
+  'ryeos-claude-code-adapter|claude-code-adapter'
   'ryeos-guest-wire-verifier|ryeos-guest-wire-verifier'
 )
 for package_case in "${static_package_cases[@]}"; do
