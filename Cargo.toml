@@ -241,3 +241,9 @@ zeroize = "1"
 # One maintained, pinned SQLite implementation; optional bound host backend.
 [patch.crates-io]
 libsqlite3-sys = { path = "vendor/libsqlite3-sys-0.28.0" }
+# Rune builds against its own patched copies of these crates (its `vendor/` directory). A
+# dependency's `[patch]` does not reach the workspace that depends on it, so the workspace names
+# them here, at the same revision as the `rune` dependency in `crates/clients/rune/Cargo.toml`.
+wgpu-hal = { git = "https://github.com/leolilley/rune", rev = "cc754dd38d85f0fe577d900013d4ae5e21dd649e" }
+winit = { git = "https://github.com/leolilley/rune", rev = "cc754dd38d85f0fe577d900013d4ae5e21dd649e" }
+parley_engine = { git = "https://github.com/leolilley/rune", rev = "cc754dd38d85f0fe577d900013d4ae5e21dd649e" }
