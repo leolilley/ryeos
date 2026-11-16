@@ -6002,6 +6002,7 @@ mod tests {
             relationship_name: relationship.name.clone(),
             relationship_ref: "config:test/recipe".to_owned(),
             relationship_raw_content_digest: "1".repeat(64),
+            relationship_project_dependent: false,
             relationship,
             witness_hash: "2".repeat(64),
             witness_source: ProductWitnessSource::LocalCapture {},

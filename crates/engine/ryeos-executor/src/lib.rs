@@ -443,6 +443,10 @@ pub mod test_support {
             selection.relationship_name = slot.relationship.clone();
             selection.relationship_raw_content_digest =
                 relationship_resolution.root.raw_content_digest.clone();
+            selection.relationship_project_dependent =
+                ryeos_app::external_content_admission::resolution_has_project_contributor(
+                    &relationship_resolution,
+                );
             selection.relationship = relationship;
             selection.consumer_source = selection_consumer_source.clone();
             selection.pre_selection_effective_definition_digest = pre_selection_digest.clone();

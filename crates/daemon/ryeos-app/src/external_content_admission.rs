@@ -225,14 +225,11 @@ pub fn derive_consumer_authority_for_test(
     consumer_authority(resolution, subject_resolution_authority)
 }
 
-/// Whether the admitted effective bundle definition contains any project-
-/// scoped contributor. The outer execution subject alone is deliberately not
-/// evidence of this: fixed bundle pins remain reusable under a pinned launch.
-/// Conversely, a project contributor or a resolved product projection is
-/// committed by the effective definition and must retain generation scope.
-/// A source closure is owned by the resolution root itself; its mere presence
-/// therefore cannot turn a bundle root into project authority.
-pub(crate) fn bundle_consumer_depends_on_project(
+/// The one predicate for project dependence of a resolution: its root, an
+/// ancestor, or a referenced item is project-space. The consumer's own
+/// resolution and every product relationship's resolution are judged by this
+/// function, so no second place decides it.
+pub fn resolution_has_project_contributor(
     resolution: &ryeos_engine::resolution::ResolutionOutput,
 ) -> bool {
     let project_source = |ancestor: &ryeos_engine::resolution::ResolvedAncestor| {
@@ -242,12 +239,39 @@ pub(crate) fn bundle_consumer_depends_on_project(
                 ryeos_engine::contracts::ItemSourceRoot::Project
             )
     };
-    resolution.ancestors.iter().any(project_source)
+    project_source(&resolution.root)
+        || resolution.ancestors.iter().any(project_source)
         || resolution.referenced_items.iter().any(project_source)
+}
+
+/// Whether the admitted effective bundle definition depends on a project: a
+/// project-scoped contributor, or a resolved product selection whose
+/// relationship resolved from project space (recorded on the selection by the
+/// predicate above). The outer execution subject alone is deliberately not
+/// evidence of this: fixed bundle pins remain reusable under a pinned launch,
+/// and a selection whose relationship is bundle-owned does not make the
+/// consumer project-dependent. A source closure is owned by the resolution
+/// root itself; its mere presence therefore cannot turn a bundle root into
+/// project authority. A selections value that cannot be read counts as
+/// dependent, so the consumer keeps generation scope.
+pub(crate) fn bundle_consumer_depends_on_project(
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+) -> bool {
+    resolution_has_project_contributor(resolution)
         || resolution
             .composed
             .derived
-            .contains_key(ryeos_engine::external_content::EXTERNAL_PRODUCT_SELECTIONS_DERIVED_KEY)
+            .get(ryeos_engine::external_content::EXTERNAL_PRODUCT_SELECTIONS_DERIVED_KEY)
+            .is_some_and(|value| {
+                serde_json::from_value::<
+                    ryeos_state::external_content::products::composition::ResolvedExternalProductSelections,
+                >(value.clone())
+                .map_or(true, |selections| {
+                    selections
+                        .iter()
+                        .any(|(_, selection)| selection.relationship_project_dependent)
+                })
+            })
 }
 
 /// A pinned-project binding may name either an executable rooted in the
@@ -1794,9 +1818,10 @@ mod consumer_authority_tests {
         assert!(consumer_authority(&resolution, &SubjectResolutionAuthority::Projectless).is_err());
         resolution.ancestors.clear();
 
-        // A completed product projection is also generation-scoped even when
-        // every executable source contributor remains bundle-owned. Keep this
-        // fixture a closed, valid projection so the assertion covers the
+        // A completed product projection whose relationship resolved from
+        // project space is generation-scoped even when every executable
+        // source contributor remains bundle-owned. Keep this fixture a
+        // closed, valid projection so the assertion covers the
         // effective-definition identity path rather than mere key presence.
         let selections = serde_json::json!({
             "runtime": {
@@ -1805,6 +1830,7 @@ mod consumer_authority_tests {
                 "relationship_name": "runtime_to_worker",
                 "relationship_ref": "config:fixture/recipe",
                 "relationship_raw_content_digest": "2".repeat(64),
+                "relationship_project_dependent": true,
                 "relationship": {
                     "name": "runtime_to_worker",
                     "producer": {
@@ -1876,6 +1902,30 @@ mod consumer_authority_tests {
             ryeos_state::objects::ExternalContentConsumerAuthority::PinnedProject { .. }
         ));
         assert!(consumer_authority(&resolution, &SubjectResolutionAuthority::Projectless).is_err());
+        // The same selection with a bundle-owned relationship does not make
+        // the consumer project-dependent: installed-bundle authority under a
+        // pinned generation and projectless alike, so a binding made
+        // projectless authorises the pinned launch.
+        let mut bundle_owned = resolution
+            .composed
+            .derived
+            .get(ryeos_engine::external_content::EXTERNAL_PRODUCT_SELECTIONS_DERIVED_KEY)
+            .cloned()
+            .unwrap();
+        bundle_owned["runtime"]["relationship_project_dependent"] = serde_json::json!(false);
+        resolution.composed.derived.insert(
+            ryeos_engine::external_content::EXTERNAL_PRODUCT_SELECTIONS_DERIVED_KEY.to_owned(),
+            bundle_owned,
+        );
+        assert!(!is_pinned_project_consumer_resolution(&resolution));
+        let pinned_launch = consumer_authority(&resolution, &generation).unwrap();
+        let projectless =
+            consumer_authority(&resolution, &SubjectResolutionAuthority::Projectless).unwrap();
+        assert!(matches!(
+            pinned_launch,
+            ryeos_state::objects::ExternalContentConsumerAuthority::InstalledBundle { .. }
+        ));
+        assert_eq!(pinned_launch, projectless);
         resolution
             .composed
             .derived

@@ -592,6 +592,7 @@ fn select_verified_product(
         relationship_name: slot.relationship.clone(),
         relationship_ref: slot.relationship_ref.clone(),
         relationship_raw_content_digest: relationship_resolution.root.raw_content_digest.clone(),
+        relationship_project_dependent: crate::external_content_admission::resolution_has_project_contributor(&relationship_resolution),
         relationship,
         witness_hash: selector.witness_hash.clone(),
         witness_source: selector.witness_source.clone(),

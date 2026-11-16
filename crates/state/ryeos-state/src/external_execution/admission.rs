@@ -2580,6 +2580,28 @@ mod tests {
                 .unwrap()
         );
         program.verify_selections(Some(&selections)).unwrap();
+        // A bundle-owned relationship whose content changes under the same
+        // publisher moves the selection identity the installed placement
+        // binding compares at launch; no re-bind is needed to notice it.
+        let mut moved = selections.clone().into_inner();
+        let selection = moved
+            .get_mut(&requirement.runtime_product_declaration_id)
+            .unwrap();
+        assert!(!selection.relationship_project_dependent);
+        selection.relationship_raw_content_digest = "0".repeat(64);
+        let moved = ResolvedExternalProductSelections::new(moved).unwrap();
+        let moved_program = requirement
+            .resolve_for_use(
+                Some(&moved),
+                &qualification_use,
+                crate::external_execution::admission::fixture_placement(),
+            )
+            .unwrap();
+        assert_ne!(
+            moved_program.selection_identity_digest,
+            program.selection_identity_digest
+        );
+        assert!(program.verify_selections(Some(&moved)).is_err());
         assert!(
             requirement
                 .resolve_for_use(

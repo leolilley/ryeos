@@ -1435,6 +1435,7 @@ fn subject_selection(evidence: &ProductQualificationEvidence) -> ResolvedExterna
         relationship_name: relationship.name.clone(),
         relationship_ref: "config:fixtures/build_recipe".into(),
         relationship_raw_content_digest: "8".repeat(64),
+        relationship_project_dependent: false,
         relationship,
         witness_hash: evidence.product_witness_hash.clone(),
         witness_source: evidence.witness_source.clone(),
