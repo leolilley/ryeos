@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T00:43:18Z:8e5aeaecc0b8fcae83af472675492063fc38dc31229ad0794cb50b00ead3d57c:4xTa8KFF1dQi0TRBrhf6A3qwgditY0m1kvasjtIXINw3OUE+Vk582uy/tGfWhfVXMnuDJPsTFFAiII33SmdnCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T00:19:46Z:91690f6dcabd52a2289750f9303607f19615b8698737225d084bc9ee29542b8f:8iMixiEi+CT9O4s9Y+e1UT4WhQjmkisOAzRyFJaHUFVdzckQ1AGtTjEk44NtHpPWnO1PauwPbcxkhyEEUzyHCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "central-auth"
 version: "0.1.0"
 description: "JSON-schema-style contract for central-auth realm policies."
@@ -42,3 +42,25 @@ properties:
       lockout_secs:
         type: integer
         minimum: 1
+  principal_management:
+    type: object
+    additionalProperties: false
+    description: "Optional. Lets an operator list accounts with manageability and disable or re-enable them (set-principal-disabled). Without it those requests are refused with principal_management_unconfigured."
+    required:
+      - operator_capability
+      - managed_roles
+    properties:
+      operator_capability:
+        type: string
+        description: "Capability (in allowed_capabilities) that marks an operator. Always protected: no operator manages another."
+      managed_roles:
+        type: array
+        minItems: 1
+        items:
+          type: string
+        description: "Roles an operator may manage. A manageable account has only these roles and no direct capabilities."
+      protected_capabilities:
+        type: array
+        items:
+          type: string
+        description: "Capabilities whose holders are never manageable, in addition to operator_capability."

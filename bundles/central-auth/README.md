@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T07:05:20Z:50a5b3711d5ad77f1855331648ff89fe8455fd5a6afb17f9dfdfc4672836e0da:Yc2LUmfDlkNRF/pkrfRpI7MCzcfUkBHRYXcdx43xO/LeoDdATLbhnZkcFONW7WorWigEWObIze0PBWBiog6bAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T00:19:46Z:e5f19d83d74a598a8e7aaf12177ceb8d69e84d2058d29b0b6c20fbf3a423febd:Oc2GnBmCQk7PDruVhOAxMmOKjdC5vTKDkTv0bNCI9iLKOQjvMMVmG0thsOEALGUoBMt+ahyjwfwdohIYJNksDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Central Auth Bundle
 
 `central-auth` provides small, reusable web-app auth primitives for RyeOS
@@ -43,6 +43,8 @@ mounts for the tool (the manifest declares `runtime_authority.state_home` with
     <sha256(invite_code)>.json
   failures/
     <sha256("principal:<id>" | "address:<client_address>")>.json
+  operations/
+    <request_id>.json
   audit.jsonl
   lock
 ```
@@ -109,6 +111,24 @@ Stores the realm policy.
 `login_throttle` is required. A policy without it is refused with
 `policy_missing_login_throttle`, both by `set-policy` and when a realm stored
 before it existed is loaded; rerun `set-policy` with the field to upgrade.
+
+`principal_management` is optional. It lets an operator manage ordinary
+accounts (`list-principals` with an actor, `set-principal-disabled`):
+
+```json
+"principal_management": {
+  "operator_capability": "example-app.admin",
+  "managed_roles": ["viewer", "analyst"],
+  "protected_capabilities": []
+}
+```
+
+An operator is an enabled principal holding `operator_capability`. An account
+is manageable by an operator when it is not the operator itself, all its roles
+are in `managed_roles`, it holds no direct capabilities, and none of its
+effective capabilities is protected (`operator_capability` is always
+protected). Without the section, those requests are refused with
+`principal_management_unconfigured`.
 
 ### create-principal
 
@@ -189,6 +209,11 @@ Invite redemption creates a principal and immediately issues a session:
 }
 ```
 
+A session is valid only while its principal is enabled and still at the
+session generation recorded when the session was issued. Disabling a
+principal raises its generation, so re-enabling it does not revive old
+sessions.
+
 ### revoke-session
 
 ```json
@@ -197,6 +222,44 @@ Invite redemption creates a principal and immediately issues a session:
   "session_token": "opaque-token"
 }
 ```
+
+### list-principals
+
+```json
+{
+  "realm_id": "example-app",
+  "actor_principal_id": "ops"
+}
+```
+
+Returns `{"ok": true, "complete": true, "principals": [...]}` with `id`,
+`display_name`, `roles` and `disabled` per account, never secrets. An
+unreadable or inconsistent account fails the call with `state_corrupt` instead
+of being left out. `actor_principal_id` is optional; with it the actor must be
+an enabled operator (`actor_not_authorized` otherwise) and each entry adds
+`manageable`, plus `protected_reason` (`self` or
+`privileged_or_nonstandard_account`) when it is not.
+
+### set-principal-disabled
+
+```json
+{
+  "realm_id": "example-app",
+  "actor_principal_id": "ops",
+  "principal_id": "alice",
+  "disabled": true,
+  "request_id": "disable-alice-7f3c"
+}
+```
+
+Changes only the account's `disabled` flag. Disabling raises the account's
+session generation first, then marks its sessions revoked and writes an audit
+line. The result reports `session_sweep_complete`, `audit_recorded` and
+`complete`; when a step did not finish, retry with the same `request_id` to
+resume it. A completed `request_id` replays its result and is never applied
+again, and reusing it for a different change is refused with
+`request_id_conflict`. Refusals: `actor_not_authorized`, `principal_not_found`,
+`principal_not_manageable`, `principal_management_unconfigured`.
 
 ### gc
 

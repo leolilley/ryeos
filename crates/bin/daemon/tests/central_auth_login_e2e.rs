@@ -13,7 +13,9 @@
 //!     under the earlier `central-auth/realms` location;
 //!   * a caller without that cap is refused with `bundle_state_namespace_denied`
 //!     naming the cap that cures it, and no realm directory is created;
-//!   * a cap for another realm does not open this one.
+//!   * a cap for another realm does not open this one;
+//!   * an operator disables an account with `set-principal-disabled`, and the
+//!     account's existing session stops verifying.
 
 use ryeosd::test_support as common;
 
@@ -230,4 +232,106 @@ async fn a_login_without_the_realm_cap_is_refused_and_creates_nothing() {
         sessions_before, sessions_after,
         "a refused login issues no session"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_operator_disabling_an_account_ends_its_session() {
+    let backend = caller(0x75);
+    let (h, _fixture) = start(vec![(
+        backend.clone(),
+        scopes(&["ryeos.use.bundle-state.central-auth/tv"]),
+    )])
+    .await;
+    let run = |item: &'static str, parameters: Value| {
+        let (h, backend) = (&h, &backend);
+        async move {
+            let (status, body) = execute_as(h, backend, item, parameters).await;
+            assert_eq!(status, reqwest::StatusCode::OK, "{item}: {body:#}");
+            body
+        }
+    };
+    run(
+        "tool:central-auth/set-policy",
+        json!({
+            "realm_id": REALM,
+            "policy": {
+                "roles": {
+                    "user": { "capabilities": ["tv.read"] },
+                    "operator": { "capabilities": ["tv.read", "tv.operator"] },
+                },
+                "allowed_capabilities": ["tv.read", "tv.operator"],
+                "login_throttle": { "max_failures": 3, "window_secs": 600, "lockout_secs": 300 },
+                "principal_management": {
+                    "operator_capability": "tv.operator",
+                    "managed_roles": ["user"],
+                },
+            },
+        }),
+    )
+    .await;
+    for (id, role, bootstrap) in [("ops", "operator", true), ("alice", "user", false)] {
+        run(
+            "tool:central-auth/create-principal",
+            json!({
+                "realm_id": REALM,
+                "principal_id": id,
+                "display_name": id,
+                "roles": [role],
+                "passphrase": PASSPHRASE,
+                "bootstrap": bootstrap,
+            }),
+        )
+        .await;
+    }
+    let (status, login) = execute_as(
+        &h,
+        &backend,
+        "tool:central-auth/login",
+        login_parameters(REALM),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "login: {login:#}");
+    let token = find(&login, "session_token")
+        .and_then(|token| token.as_str().map(str::to_owned))
+        .expect("login issues a token");
+
+    let disabled = run(
+        "tool:central-auth/set-principal-disabled",
+        json!({
+            "realm_id": REALM,
+            "actor_principal_id": "ops",
+            "principal_id": "alice",
+            "disabled": true,
+            "request_id": "disable-alice-1",
+        }),
+    )
+    .await;
+    assert_eq!(
+        find(&disabled, "complete"),
+        Some(json!(true)),
+        "{disabled:#}"
+    );
+
+    let verified = run(
+        "tool:central-auth/verify-session",
+        json!({ "realm_id": REALM, "session_token": token }),
+    )
+    .await;
+    assert_eq!(find(&verified, "valid"), Some(json!(false)), "{verified:#}");
+}
+
+/// The first value stored under `key` anywhere in `value`, looking inside
+/// strings that hold JSON (a tool's stdout).
+fn find(value: &Value, key: &str) -> Option<Value> {
+    match value {
+        Value::Object(map) => map
+            .get(key)
+            .cloned()
+            .or_else(|| map.values().find_map(|v| find(v, key))),
+        Value::Array(items) => items.iter().find_map(|v| find(v, key)),
+        Value::String(text) => serde_json::from_str::<Value>(text)
+            .ok()
+            .and_then(|inner| find(&inner, key)),
+        _ => None,
+    }
 }
