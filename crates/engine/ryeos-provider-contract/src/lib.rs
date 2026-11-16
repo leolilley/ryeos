@@ -11,6 +11,13 @@ use ryeos_effect_contract::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod parts;
+
+pub use parts::{
+    Artefact, ImagePart, MAX_MESSAGE_PARTS, Message, Part, ReasoningPart, Role, TextPart,
+    ToolCallPart, ToolResultPart, ToolResultStatus,
+};
+
 pub const PROVIDER_CALL_RECORD_SCHEMA_VERSION: u32 = 2;
 pub const PROVIDER_CALL_KEY_SCHEMA: &str = "ryeos.provider_call_effect.key.v2";
 pub const PROVIDER_CALL_RECORD_KIND: &str = "provider_call_effect_record";
