@@ -82,6 +82,97 @@ pub enum RyeOsTimelineEntryVm {
     },
 }
 
+/// Decorations the renderers draw around an entry's text; they are not part
+/// of what a screen reader announces or a copy carries.
+const DECORATIONS: [char; 4] = ['✻', '↘', '▍', '▸'];
+
+impl RyeOsTimelineEntryVm {
+    /// The entry's text as a screen reader or a copy receives it: the visible
+    /// text flattened, without drawing decorations, and never empty (an entry
+    /// with no text is named by its shape).
+    pub fn label(&self) -> String {
+        let join = |parts: &[Option<&str>]| {
+            parts
+                .iter()
+                .flatten()
+                .map(|part| part.replace(DECORATIONS, ""))
+                .map(|part| part.trim().to_string())
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let (text, fallback) = match self {
+            Self::Block { text, .. } => (join(&[Some(text.as_str())]), "text"),
+            Self::Line { primary, meta, .. } => {
+                (join(&[Some(primary.as_str()), meta.as_deref()]), "line")
+            }
+            Self::Pair {
+                summary,
+                meta,
+                pending,
+                ..
+            } => (
+                join(&[
+                    Some(summary.as_str()),
+                    meta.as_deref(),
+                    pending.then_some("running"),
+                ]),
+                "step",
+            ),
+            Self::Separator { label } => (join(&[Some(label.as_str())]), "message"),
+        };
+        if text.is_empty() {
+            fallback.to_string()
+        } else {
+            text
+        }
+    }
+}
+
+/// What a timeline entry can be asked to do beyond its own activation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RyeOsTimelineEntryAction {
+    /// Copy the entry's plain-text label.
+    CopyText,
+    /// Fetch the raw events behind the entry and copy them.
+    CopyRaw,
+    /// Fetch the raw events behind the entry and show them in the inspector.
+    InspectRaw,
+}
+
+/// The role of one service item: its entry type, or `cluster` / `recap`.
+pub(crate) fn item_role(item: &Value) -> String {
+    match item.get("item").and_then(Value::as_str) {
+        Some("cluster") => "cluster".to_string(),
+        Some("recap") => "recap".to_string(),
+        _ => item
+            .get("type")
+            .and_then(Value::as_str)
+            .filter(|kind| !kind.is_empty())
+            .unwrap_or("entry")
+            .to_string(),
+    }
+}
+
+/// The inclusive `chain_seq` range of the events behind one service item: an
+/// entry's own range, a cluster's span over its members. A recap has none.
+pub(crate) fn item_seq_range(item: &Value) -> Option<(i64, i64)> {
+    let own = |entry: &Value| {
+        let seq = entry.get("seq")?.as_array()?;
+        Some((seq.first()?.as_i64()?, seq.get(1)?.as_i64()?))
+    };
+    if item.get("item").and_then(Value::as_str) == Some("cluster") {
+        return item
+            .get("members")?
+            .as_array()?
+            .iter()
+            .filter_map(own)
+            .reduce(|(first, last), (a, b)| (first.min(a), last.max(b)));
+    }
+    own(item)
+}
+
 /// The full, unfolded timeline built from one service response, with the
 /// per-entry metadata the windowed projection needs. Built once when a source
 /// response lands, never per render frame.
@@ -904,6 +995,236 @@ fn event_payload(frame_payload: &Value) -> &Value {
     frame_payload.get("payload").unwrap_or(frame_payload)
 }
 
+/// What the keymap needs to know about the focused view's timeline point.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct TimelineKeyState {
+    pub entry: bool,
+    pub foldable: bool,
+    pub source_failed: bool,
+}
+
+/// The timeline entry under the point in the focused view.
+struct TimelineFocus {
+    instance: crate::ids::RyeOsViewInstanceKey,
+    view_ref: String,
+    label: String,
+    /// The service item behind the entry, when it has one.
+    item: Option<Value>,
+    /// The foldable section under the point and whether it is folded now.
+    fold: Option<(usize, bool)>,
+}
+
+/// A raw-events fetch the operator asked for, awaiting its response.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PendingTimelineRaw {
+    pub source_key: String,
+    pub action: RyeOsTimelineEntryAction,
+}
+
+const RAW_ROLE: &str = "timeline_raw";
+
+impl RyeOsCore {
+    /// The point of the focused timeline, read from the same view model the
+    /// renderers draw, so a key acts on exactly what is highlighted.
+    fn focused_timeline(&self) -> Option<TimelineFocus> {
+        let instance = self.focused_view_instance_key()?;
+        let view_ref = self.mounted_view_ref(&instance)?.to_string();
+        let super::view_model::RyeOsViewVm::Timeline {
+            entries,
+            entry_ids,
+            selected,
+            fold_section,
+            ..
+        } = super::view_model::view_vm_for_instance(self, &instance)?
+        else {
+            return None;
+        };
+        let selected = selected?;
+        let label = entries.get(selected)?.label();
+        let binding = self.binding_for_instance(&instance, &view_ref)?;
+        let channel = binding.primary_source()?.0;
+        let source_key =
+            super::source_key::RyeOsSourceInstanceKey::named(instance.clone(), channel).encode();
+        let item = entry_ids
+            .get(selected)
+            .and_then(|id| id.strip_prefix("timeline-entry:"))
+            .and_then(|key| {
+                let find = |layout: &TimelineLayout| {
+                    layout
+                        .sources
+                        .iter()
+                        .flatten()
+                        .find(|source| source.key == key)
+                        .map(|source| source.raw.clone())
+                };
+                match self.data.timeline_sources.get(&source_key) {
+                    Some(cache) => find(&cache.layout),
+                    None => find(&timeline_layout_for(
+                        binding,
+                        self.data.sources.get(&source_key)?,
+                        &instance,
+                        &view_ref,
+                    )),
+                }
+            });
+        let fold = fold_section.map(|section| {
+            let folded = matches!(
+                self.mounted_local_state(&instance),
+                Some(crate::view_set::ViewLocalState::GenericList { collapsed, .. })
+                    if collapsed.contains(&section)
+            );
+            (section, folded)
+        });
+        Some(TimelineFocus {
+            instance,
+            view_ref,
+            label,
+            item,
+            fold,
+        })
+    }
+
+    pub(crate) fn focused_timeline_key_state(&self) -> TimelineKeyState {
+        let Some(instance) = self.focused_view_instance_key() else {
+            return TimelineKeyState::default();
+        };
+        let Some(vm) = super::view_model::view_vm_for_instance(self, &instance) else {
+            return TimelineKeyState::default();
+        };
+        use super::view_model::RyeOsViewVm;
+        let status = match &vm {
+            RyeOsViewVm::Rows { source_status, .. }
+            | RyeOsViewVm::Timeline { source_status, .. }
+            | RyeOsViewVm::Table { source_status, .. }
+            | RyeOsViewVm::Document { source_status, .. } => source_status.as_ref(),
+            _ => None,
+        };
+        let source_failed = status.is_some_and(|status| status.state == "failed");
+        match vm {
+            RyeOsViewVm::Timeline {
+                selected,
+                fold_section,
+                ..
+            } => TimelineKeyState {
+                entry: selected.is_some(),
+                foldable: fold_section.is_some(),
+                source_failed,
+            },
+            _ => TimelineKeyState {
+                source_failed,
+                ..TimelineKeyState::default()
+            },
+        }
+    }
+
+    /// Fold or unfold the cluster under the point in the focused timeline.
+    pub(crate) fn toggle_timeline_fold(&mut self) -> Vec<RyeOsEffect> {
+        let Some(TimelineFocus {
+            instance,
+            fold: Some((section, folded)),
+            ..
+        }) = self.focused_timeline()
+        else {
+            return Vec::new();
+        };
+        if self.set_view_fold(&instance, section, !folded) {
+            self.bump_generation();
+        }
+        Vec::new()
+    }
+
+    /// Act on the entry under the point: copy its text, or fetch the raw
+    /// events behind it to copy or inspect.
+    pub(crate) fn timeline_entry_action(
+        &mut self,
+        action: RyeOsTimelineEntryAction,
+    ) -> Vec<RyeOsEffect> {
+        let Some(focus) = self.focused_timeline() else {
+            return Vec::new();
+        };
+        if action == RyeOsTimelineEntryAction::CopyText {
+            return vec![
+                self.emit(super::effect::RyeOsEffectKind::CopyToClipboard { text: focus.label }),
+            ];
+        }
+        let Some((from, to)) = focus.item.as_ref().and_then(item_seq_range) else {
+            self.notice("This entry has no raw events.", RyeOsTone::Warn);
+            return Vec::new();
+        };
+        let Some(chain_root) = self.route_for_instance(&focus.instance).chain_root else {
+            self.notice("No chain is bound to this view.", RyeOsTone::Warn);
+            return Vec::new();
+        };
+        let params = serde_json::json!({
+            "chain_root_id": chain_root,
+            "from_chain_seq": from.to_string(),
+            "to_chain_seq": to.to_string(),
+        });
+        let Some(fetch) =
+            self.fetch_view_source_role(focus.instance.clone(), &focus.view_ref, RAW_ROLE, params)
+        else {
+            self.notice("Raw events are not available here.", RyeOsTone::Warn);
+            return Vec::new();
+        };
+        if let super::effect::RyeOsEffectKind::FetchSource { tile_id, .. } = &fetch.kind {
+            self.data.pending_timeline_raw = Some(PendingTimelineRaw {
+                source_key: tile_id.clone(),
+                action,
+            });
+        }
+        vec![fetch]
+    }
+
+    /// A source response landed under `source_key`: when it is the raw-events
+    /// fetch the operator asked for, hand it to the action that wanted it.
+    pub(crate) fn settle_timeline_raw(
+        &mut self,
+        source_key: &str,
+        data: &Value,
+    ) -> Vec<RyeOsEffect> {
+        if self
+            .data
+            .pending_timeline_raw
+            .as_ref()
+            .is_none_or(|pending| pending.source_key != source_key)
+        {
+            return Vec::new();
+        }
+        let Some(pending) = self.data.pending_timeline_raw.take() else {
+            return Vec::new();
+        };
+        let events = data.get("events").cloned().unwrap_or(Value::Null);
+        let seq = |name: &str| data.get(name).and_then(Value::as_i64).unwrap_or(0);
+        if data.get("truncated").and_then(Value::as_bool) == Some(true) {
+            self.notice(
+                "The range holds more events than one fetch returns; showing the first part.",
+                RyeOsTone::Warn,
+            );
+        }
+        match pending.action {
+            RyeOsTimelineEntryAction::CopyRaw => {
+                let text = serde_json::to_string_pretty(&events).unwrap_or_default();
+                vec![self.emit(super::effect::RyeOsEffectKind::CopyToClipboard { text })]
+            }
+            RyeOsTimelineEntryAction::InspectRaw => self.apply_ui_affordance(
+                super::seat::KEY_SELECTION.to_string(),
+                Some(serde_json::json!({ "summary": {
+                    "title": format!(
+                        "Raw events {}–{}",
+                        seq("from_chain_seq"),
+                        seq("to_chain_seq")
+                    ),
+                    "detail": events,
+                } })),
+                None,
+                None,
+                false,
+            ),
+            RyeOsTimelineEntryAction::CopyText => Vec::new(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1479,5 +1800,89 @@ mod tests {
                 .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchSource { .. })),
             "a durable tail frame must refetch the timeline source; got {effects:?}"
         );
+    }
+
+    #[test]
+    fn every_entry_kind_has_a_non_empty_label_and_a_role() {
+        // Even with no slots at all, an entry is named by its shape, and its
+        // role is the entry type.
+        let kinds = [
+            "message",
+            "prose",
+            "thought",
+            "activity",
+            "link",
+            "marker",
+            "outcome",
+            "ask",
+            "future-kind",
+        ];
+        let items: Vec<Value> = kinds
+            .iter()
+            .map(|kind| entry(kind, kind, json!({})))
+            .collect();
+        let built = layout(items.clone(), 0);
+        for (item, vm) in items.iter().zip(&built.entries) {
+            assert!(!vm.label().is_empty(), "{item} has an empty label");
+            assert_eq!(item_role(item), item["type"].as_str().unwrap());
+        }
+        let cluster = json!({
+            "item": "cluster", "id": "c", "headline": "", "members": []
+        });
+        let recap = json!({
+            "item": "recap", "id": "r", "exchange": "x", "work": 0, "duration_s": null
+        });
+        let built = layout(
+            vec![
+                cluster.clone(),
+                recap.clone(),
+                entry("a", "activity", json!({})),
+            ],
+            3,
+        );
+        assert_eq!(built.entries.len(), 4, "older line, cluster, recap, entry");
+        for vm in &built.entries {
+            assert!(!vm.label().is_empty());
+        }
+        assert_eq!(item_role(&cluster), "cluster");
+        assert_eq!(item_role(&recap), "recap");
+    }
+
+    #[test]
+    fn labels_flatten_the_visible_text_without_drawing_decorations() {
+        let pair = RyeOsTimelineEntryVm::Pair {
+            summary: "tool fetch".into(),
+            meta: Some("3.2 KiB".into()),
+            tone: RyeOsTone::Neutral,
+            pending: true,
+        };
+        assert_eq!(pair.label(), "tool fetch, 3.2 KiB, running");
+        let link = layout(
+            vec![entry(
+                "l",
+                "link",
+                json!({"headline": "study", "target": "T-child"}),
+            )],
+            0,
+        );
+        assert_eq!(link.entries[0].label(), "study, T-child");
+        let thought = layout(vec![entry("t", "thought", json!({"body": "hmm"}))], 0);
+        assert_eq!(thought.entries[0].label(), "hmm");
+    }
+
+    #[test]
+    fn seq_range_is_an_entrys_own_or_a_clusters_span_and_a_recap_has_none() {
+        let one = with(entry("a", "activity", json!({})), "seq", json!([4, 6]));
+        assert_eq!(item_seq_range(&one), Some((4, 6)));
+        let cluster = json!({
+            "item": "cluster", "id": "c", "headline": "2 operations",
+            "members": [
+                with(entry("a", "activity", json!({})), "seq", json!([7, 8])),
+                with(entry("b", "activity", json!({})), "seq", json!([9, 12])),
+            ]
+        });
+        assert_eq!(item_seq_range(&cluster), Some((7, 12)));
+        let recap = json!({"item": "recap", "id": "r", "exchange": "x", "work": 1});
+        assert_eq!(item_seq_range(&recap), None);
     }
 }
