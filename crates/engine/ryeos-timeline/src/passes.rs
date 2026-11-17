@@ -246,6 +246,7 @@ fn close(stretch: &mut Vec<Item>, out: &mut Vec<Item>) {
         exchange,
         work,
         duration_s: end.checked_sub(start),
+        seq: all.iter().map(|e| e.seq.1).max().unwrap_or(0),
         members,
     }));
 }

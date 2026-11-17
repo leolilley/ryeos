@@ -171,8 +171,18 @@ impl<K: Clone + Eq + Hash, V: Clone> BoundedLru<K, V> {
 /// `(chain_root_id, definition_digest)`.
 pub(crate) type TimelineCacheKey = (String, String);
 
-/// Folded chain timelines with the highest `chain_seq` each covers.
-pub(crate) type TimelineCache = BoundedLru<TimelineCacheKey, (i64, Arc<ryeos_timeline::Timeline>)>;
+/// One chain's resumable fold. A request locks it, pushes the events newer
+/// than `highest`, and reads the timeline.
+pub(crate) struct ChainFold {
+    pub(crate) folder: ryeos_timeline::Folder,
+    /// Highest `chain_seq` pushed into `folder`; zero before any event.
+    pub(crate) highest: i64,
+    /// The folder's timeline as of `highest`.
+    pub(crate) timeline: Arc<ryeos_timeline::Timeline>,
+}
+
+/// Chain folds, one per chain and definition.
+pub(crate) type TimelineCache = BoundedLru<TimelineCacheKey, Arc<Mutex<ChainFold>>>;
 
 struct FieldProjectionCache {
     lru: BoundedLru<String, EffectiveProgramProjection>,

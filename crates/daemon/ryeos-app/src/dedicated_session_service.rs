@@ -125,6 +125,16 @@ fn validate_session_observation_cardinality(result: &Value, limit: usize) -> Res
     Ok(())
 }
 
+/// A worker route result whose upstream response carries a JSON-RPC `error`
+/// member is a definitive refusal by a contacted workload. The command was
+/// delivered and answered, so it is settled, but it did not succeed.
+fn command_response_succeeded(result: &Value) -> bool {
+    result
+        .get("response")
+        .and_then(Value::as_object)
+        .is_none_or(|response| !response.contains_key("error"))
+}
+
 fn canonical_command_observation_batch(result: &Value, observation_limit: usize) -> Result<Value> {
     // Command replies carry session observations, but asynchronous events use
     // the pushed-batch channel and need not appear in a reply. Normalize that
@@ -1985,7 +1995,7 @@ pub fn reconcile_command_outboxes(state: &AppState) -> Result<()> {
                 continue;
             }
             if matches!(record.state.as_str(), "dispatched" | "outcome_unknown") {
-                if let Some((canonical_batch, response_digest)) =
+                if let Some((canonical_batch, response_digest, succeeded)) =
                     find_authoritative_command_observation_batch(
                         state,
                         &session,
@@ -2006,6 +2016,7 @@ pub fn reconcile_command_outboxes(state: &AppState) -> Result<()> {
                             &record.placement_thread_id,
                             record.command_sequence,
                             record.worker_boot_epoch,
+                            succeeded,
                             &json!({
                                 "redacted":true,
                                 "response_digest":response_digest,
@@ -2142,7 +2153,7 @@ pub fn reconcile_command_outboxes(state: &AppState) -> Result<()> {
         match record.state.as_str() {
             "committed" => {}
             "dispatched" | "outcome_unknown" => {
-                if let Some((canonical_batch, response_digest)) =
+                if let Some((canonical_batch, response_digest, succeeded)) =
                     find_authoritative_command_observation_batch(
                         state,
                         &session,
@@ -2177,7 +2188,7 @@ pub fn reconcile_command_outboxes(state: &AppState) -> Result<()> {
                                 "origin":"daemon_observed_io",
                                 "worker_boot_epoch":record.worker_boot_epoch,
                                 "response_digest":response_digest,
-                                "succeeded":true,
+                                "succeeded":succeeded,
                                 "recovered":true,
                             }),
                         )?;
@@ -2187,6 +2198,7 @@ pub fn reconcile_command_outboxes(state: &AppState) -> Result<()> {
                                 &record.placement_thread_id,
                                 record.command_sequence,
                                 record.worker_boot_epoch,
+                                succeeded,
                                 &json!({
                                     "redacted":true,
                                     "response_digest":response_digest,
@@ -2234,7 +2246,7 @@ pub fn reconcile_command_outboxes(state: &AppState) -> Result<()> {
                             "origin":"daemon_observed_io",
                             "worker_boot_epoch":record.worker_boot_epoch,
                             "response_digest":response_digest,
-                            "succeeded":true,
+                            "succeeded":succeeded,
                             "recovered":true,
                         }),
                     )?;
@@ -2242,6 +2254,7 @@ pub fn reconcile_command_outboxes(state: &AppState) -> Result<()> {
                         &record.placement_thread_id,
                         record.command_sequence,
                         record.worker_boot_epoch,
+                        succeeded,
                         &json!({
                             "redacted":true,
                             "response_digest":response_digest,
@@ -2385,6 +2398,12 @@ pub fn reconcile_command_outboxes(state: &AppState) -> Result<()> {
             }
             "failed" => {
                 let result = record.result.as_ref().unwrap_or(&Value::Null);
+                let response_digest = result
+                    .get("response_digest")
+                    .and_then(Value::as_str)
+                    .filter(|digest| lillux::valid_hash(digest))
+                    .map(ToOwned::to_owned)
+                    .unwrap_or(ryeos_state::objects::canonical_value_digest(result)?);
                 append_recovered_command_fact_once(
                     state,
                     &session,
@@ -2396,7 +2415,7 @@ pub fn reconcile_command_outboxes(state: &AppState) -> Result<()> {
                         "schema":1,
                         "origin":"daemon_observed_io",
                         "worker_boot_epoch":record.worker_boot_epoch,
-                        "response_digest":ryeos_state::objects::canonical_value_digest(result)?,
+                        "response_digest":response_digest,
                         "succeeded":false,
                         "recovered":true,
                     }),
@@ -3417,6 +3436,7 @@ pub async fn execute_command(
                 )?;
                 return Err(error);
             }
+            let succeeded = command_response_succeeded(&result);
             let persisted_result =
                 if result.get("result_retention").and_then(Value::as_str) == Some("ephemeral") {
                     json!({
@@ -3437,14 +3457,14 @@ pub async fn execute_command(
                     "origin":"daemon_observed_io",
                     "worker_boot_epoch":worker_boot_epoch,
                     "response_digest":ryeos_state::objects::canonical_value_digest(&result)?,
-                    "succeeded":true,
+                    "succeeded":succeeded,
                 }),
             )?;
             state.state_store.settle_dedicated_command(
                 placement_thread_id,
                 record.command_sequence,
                 worker_boot_epoch,
-                true,
+                succeeded,
                 &persisted_result,
             )?;
             notify_projection_change(placement_thread_id);
@@ -3463,7 +3483,7 @@ pub async fn execute_command(
             )?;
             Ok(json!({
                 "command_sequence": record.command_sequence,
-                "state": "completed",
+                "state": if succeeded { "completed" } else { "failed" },
                 "result": result,
             }))
         }
@@ -4155,12 +4175,12 @@ fn authoritative_settled_command_replay(
         }
         return Ok(true);
     }
-    if record.state != "completed" {
-        return Ok(false);
-    }
     if !redacted || !recovered_from_root_chain {
         return Ok(false);
     }
+    // A command recovered from the root chain settles exactly the outcome its
+    // observation batch recorded: completed for success, failed for a
+    // workload error response.
     Ok(find_authoritative_command_observation_batch(
         state,
         session,
@@ -4168,7 +4188,9 @@ fn authoritative_settled_command_replay(
         record.command_sequence,
         &record.request_digest,
     )?
-    .is_some_and(|(_, response_digest)| response_digest == projected_response_digest))
+    .is_some_and(|(_, response_digest, succeeded)| {
+        succeeded == (record.state == "completed") && response_digest == projected_response_digest
+    }))
 }
 
 fn committed_command_fact_exists(
@@ -4429,6 +4451,7 @@ fn append_command_observation_batch_phase(
             "origin":"daemon_observed_io",
             "worker_boot_epoch":worker_boot_epoch,
             "response_digest":response_digest,
+            "succeeded":command_response_succeeded(result),
             "canonical_batch":canonical_batch,
         }),
         &followups,
@@ -4441,7 +4464,7 @@ fn find_authoritative_command_observation_batch(
     worker_boot_epoch: u64,
     command_sequence: u64,
     request_digest: &str,
-) -> Result<Option<(Value, String)>> {
+) -> Result<Option<(Value, String, bool)>> {
     let operation_id = ryeos_state::objects::canonical_value_digest(&json!({
         "schema":"ryeos.hosted_command_fact.v1",
         "chain_root_id":session.chain_root_id,
@@ -4482,6 +4505,10 @@ fn find_authoritative_command_observation_batch(
         .and_then(Value::as_str)
         .filter(|digest| lillux::valid_hash(digest))
         .ok_or_else(|| anyhow!("authoritative command batch has no response digest"))?;
+    let succeeded = payload
+        .get("succeeded")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| anyhow!("authoritative command batch has no outcome"))?;
     let batch = payload
         .get("canonical_batch")
         .cloned()
@@ -4506,7 +4533,7 @@ fn find_authoritative_command_observation_batch(
         }),
         Some((command_sequence, request_digest)),
     )?;
-    Ok(Some((batch, response_digest.to_owned())))
+    Ok(Some((batch, response_digest.to_owned(), succeeded)))
 }
 
 fn hosted_turn_completion_payload(
@@ -4615,7 +4642,7 @@ pub fn command_observation(
     if record.state != "completed" {
         return Ok(result);
     }
-    let Some((batch, response_digest)) = find_authoritative_command_observation_batch(
+    let Some((batch, response_digest, _)) = find_authoritative_command_observation_batch(
         state,
         &session,
         record.worker_boot_epoch,
@@ -5650,7 +5677,7 @@ fn completion_worker_result(state: &AppState, session: &DedicatedSessionRecord) 
                     sequence,
                     digest,
                 )?
-                .map(|(batch, _)| batch),
+                .map(|(batch, _, _)| batch),
                 _ => None,
             }
         }
@@ -7189,6 +7216,20 @@ mod tests {
                 "max_uncontacted_attempts":3,
             },
         })
+    }
+
+    #[test]
+    fn workload_error_response_is_a_failed_command() {
+        assert!(command_response_succeeded(&json!({
+            "response":{"result":{"ok":true}},"session_observations":[],
+        })));
+        assert!(command_response_succeeded(
+            &json!({"session_observations":[]})
+        ));
+        assert!(!command_response_succeeded(&json!({
+            "response":{"error":{"code":-32000,"message":"refused"}},
+            "session_observations":[],
+        })));
     }
 
     #[test]

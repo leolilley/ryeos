@@ -16,7 +16,7 @@ mod fold;
 mod passes;
 mod path;
 
-pub use fold::fold;
+pub use fold::{Folder, fold};
 
 /// How events fold into entries. Parsed from signed data.
 #[derive(Debug, Clone, Deserialize)]
@@ -312,6 +312,9 @@ pub struct Recap {
     pub duration_s: Option<i64>,
     /// The folded work: entries and clusters, in order.
     pub members: Vec<Item>,
+    /// Highest `chain_seq` among the members: the recap changes only when
+    /// one of them does.
+    pub seq: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -320,6 +323,26 @@ pub enum Item {
     Entry(Entry),
     Cluster(Cluster),
     Recap(Recap),
+}
+
+impl Item {
+    pub fn id(&self) -> &str {
+        match self {
+            Item::Entry(entry) => &entry.id,
+            Item::Cluster(cluster) => &cluster.id,
+            Item::Recap(recap) => &recap.id,
+        }
+    }
+
+    /// The highest `chain_seq` that contributed to the item. An item whose
+    /// content changed has a larger value than it had before the change.
+    pub fn last_seq(&self) -> i64 {
+        match self {
+            Item::Entry(entry) => entry.seq.1,
+            Item::Cluster(cluster) => cluster.members.iter().map(|m| m.seq.1).max().unwrap_or(0),
+            Item::Recap(recap) => recap.seq,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

@@ -20,10 +20,10 @@ use serde_json::{Value, json};
 
 use crate::driver::{Driver, RpcError, TurnLaunch};
 use crate::invocation::{Config, SessionFlag, SessionSettings, TurnSettings, build_argv};
-use crate::os::{self, GroupSignal};
 use crate::sessions::{Record, SessionMap, Verdict};
 use crate::stream::{End, Redactor, StreamParser};
 use crate::wire::Emitter;
+use lillux::child_group::{self, GroupSignal};
 
 /// Host-provided credential values the adapter holds. They never appear in
 /// anything the adapter reports.
@@ -398,7 +398,7 @@ fn drive(context: &TurnContext) -> (&'static str, Value) {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = match os::spawn_in_own_group(&mut command) {
+    let mut child = match child_group::spawn_in_own_group(&mut command) {
         Ok(child) => child,
         Err(error) => return not_started(&parser, format!("spawn failed: {error}")),
     };
@@ -485,9 +485,9 @@ fn drive(context: &TurnContext) -> (&'static str, Value) {
 /// close its own children, then kill whatever is left of the group.
 fn stop_group(child: &mut Child) {
     let leader = child.id();
-    os::signal_group(leader, GroupSignal::Terminate);
+    child_group::signal_group(leader, GroupSignal::Terminate);
     wait_for(child, TERMINATE_GRACE);
-    os::signal_group(leader, GroupSignal::Kill);
+    child_group::signal_group(leader, GroupSignal::Kill);
     let _ = child.wait();
 }
 
