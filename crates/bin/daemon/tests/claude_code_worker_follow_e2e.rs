@@ -573,7 +573,7 @@ fn plant_short_turn(state_path: &Path, fixture: &FastFixture) -> Result<()> {
 }
 
 async fn start_node() -> Result<(DaemonHarness, FastFixture)> {
-    DaemonHarness::start_fast_development_with(
+    DaemonHarness::start_fast_development_hosted_with(
         |state_path: &Path, _user: &Path, fixture: &FastFixture| {
             plant_claude_code(state_path, fixture)
         },
@@ -584,7 +584,7 @@ async fn start_node() -> Result<(DaemonHarness, FastFixture)> {
 
 /// [`start_node`] plus the short-turn fixture bundle.
 async fn start_node_with_short_turn() -> Result<(DaemonHarness, FastFixture)> {
-    DaemonHarness::start_fast_development_with(
+    DaemonHarness::start_fast_development_hosted_with(
         |state_path: &Path, _user: &Path, fixture: &FastFixture| {
             plant_claude_code(state_path, fixture)?;
             plant_short_turn(state_path, fixture)
