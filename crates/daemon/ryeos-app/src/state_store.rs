@@ -705,7 +705,7 @@ impl StateStore {
                     .context("invalid pending transition prepared_at")?;
                 let now = parse_canonical_timestamp(&lillux::time::iso8601_now())
                     .context("invalid current time while reading transition diagnostics")?;
-                Ok(now.signed_duration_since(prepared_at).num_seconds().max(0) as u64)
+                Ok(now.saturating_sub(prepared_at).max(0) as u64)
             })
             .transpose()?;
         Ok(PendingHeadTransitionStatus {

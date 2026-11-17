@@ -1013,8 +1013,10 @@ impl Origination {
     fn new(pair: &Pair) -> Result<Self> {
         let identity = daemon_identity(&pair.origin.harness.state_path)?;
         let node_signer = NodeIdentitySigner::from_identity(&identity);
-        let expires_at = (chrono::Utc::now() + chrono::Duration::days(7))
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let expires_at = ryeos_effect_contract::rfc3339::format_unix_seconds(
+            lillux::time::unix_secs_now() as i64 + 7 * 24 * 60 * 60,
+        )
+        .unwrap();
         let evidence = qualification_evidence(&pair.origin.product, pair.policy_source.clone())?;
         let qualification = evidence.sign_attestation(
             &node_signer,
@@ -1322,8 +1324,10 @@ impl Origination {
     fn new_content(pair: &Pair, issued_at: String) -> Result<Self> {
         let identity = daemon_identity(&pair.origin.harness.state_path)?;
         let node_signer = NodeIdentitySigner::from_identity(&identity);
-        let expires_at = (chrono::Utc::now() + chrono::Duration::days(7))
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let expires_at = ryeos_effect_contract::rfc3339::format_unix_seconds(
+            lillux::time::unix_secs_now() as i64 + 7 * 24 * 60 * 60,
+        )
+        .unwrap();
         let evidence =
             content_qualification_evidence(&pair.origin.product, pair.policy_source.clone())?;
         let qualification = evidence.sign_attestation(&node_signer, issued_at, None)?;
@@ -1354,8 +1358,10 @@ impl Origination {
 }
 
 fn utc_after(seconds: i64) -> String {
-    (chrono::Utc::now() + chrono::Duration::seconds(seconds))
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    ryeos_effect_contract::rfc3339::format_unix_seconds(
+        lillux::time::unix_secs_now() as i64 + seconds,
+    )
+    .unwrap()
 }
 
 /// The content lane of the same record kind. No product crosses: the

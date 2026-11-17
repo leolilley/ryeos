@@ -30,6 +30,7 @@ tempfile = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+ryeos-effect-contract = { workspace = true }
 ryeos-state = { workspace = true, features = ["test-support"] }
 ryeos-engine = { workspace = true, features = ["test-support"] }
 
