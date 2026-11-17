@@ -43,7 +43,8 @@
       "ryeos-ui",
       "codex",
       "opencode",
-      "render-sandbox"
+      "render-sandbox",
+      "claude-code"
     ],
     "hosted-controller": [
       "core",

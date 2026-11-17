@@ -107,6 +107,20 @@ enum Cmd {
         name: Option<String>,
     },
 
+    /// Sign an init profile in place with a publisher key.
+    ///
+    /// The profile is validated as an init profile first. The key is the
+    /// operator signing key of the app root unless `--key` names a PEM file;
+    /// key material is never printed.
+    ProfileSign {
+        /// Init profile file (`.ai/node/init/profiles/<name>.yaml`).
+        profile: Option<PathBuf>,
+
+        /// Signing key PEM file. Defaults to the app root's operator key.
+        #[arg(long)]
+        key: Option<PathBuf>,
+    },
+
     /// Report the runtime-authority delta between two bundle manifests.
     ///
     /// Parses both manifests and prints ONLY the granted-authority change (event
@@ -466,6 +480,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             bundle_source,
             name,
         } => run_manifest_sign(bundle_source, name, cli.stdin_json),
+        Cmd::ProfileSign { profile, key } => run_profile_sign(profile, key, cli.stdin_json),
         Cmd::ManifestAudit { old, new } => run_manifest_audit(old, new),
         Cmd::Logs { app_root, lines } => run_logs(app_root, lines, cli.stdin_json),
         Cmd::Doctor {
@@ -939,6 +954,46 @@ struct BundleManifestSignParams {
     source: PathBuf,
     #[serde(default)]
     name: Option<String>,
+}
+
+fn run_profile_sign(
+    profile: Option<PathBuf>,
+    key: Option<PathBuf>,
+    stdin_json: bool,
+) -> anyhow::Result<()> {
+    let (profile, key) = if stdin_json {
+        if profile.is_some() || key.is_some() {
+            anyhow::bail!("--stdin-json is mutually exclusive with positional PROFILE and --key");
+        }
+        let params: ProfileSignParams = serde_json::from_value(read_stdin_json()?)?;
+        (params.profile, params.key)
+    } else {
+        let profile =
+            profile.ok_or_else(|| anyhow::anyhow!("PROFILE required (or pass --stdin-json)"))?;
+        (profile, key)
+    };
+
+    let key_path = match key {
+        Some(path) => path,
+        None => ryeos_engine::roots::runtime_root()
+            .map_err(|e| anyhow::anyhow!("cannot resolve app root: {e}"))?
+            .operator_signing_key_path(),
+    };
+    if !key_path.exists() {
+        anyhow::bail!("signing key not found at {}", key_path.display());
+    }
+    let signing_key = ryeos_core_tools::actions::build_bundle::load_signing_key(&key_path)
+        .with_context(|| format!("load signing key from {}", key_path.display()))?;
+    let report = ryeos_core_tools::actions::profile_sign::profile_sign(&profile, &signing_key)?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct ProfileSignParams {
+    profile: PathBuf,
+    #[serde(default)]
+    key: Option<PathBuf>,
 }
 
 fn run_manifest_audit(old: PathBuf, new: PathBuf) -> anyhow::Result<()> {

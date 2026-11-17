@@ -356,7 +356,17 @@ pub(super) struct LeafSoftErrorOutcome {
     /// A child dispatch may return a terminal failure after its thread already
     /// exists. Publish that lineage observation behind the normal commit fence.
     pub(super) observation: Option<DispatchObservation>,
+    /// The structured outcome a followed worker child reported with its
+    /// failure. Under a redirect or continue policy it lands in graph state
+    /// under [`FAILED_NODE_OUTCOME_KEY`] so the recovery path can branch on it.
+    pub(super) outcome: Option<Value>,
 }
+
+/// Graph state key that receives the structured outcome of a failed node
+/// whose child reported one, when the node's failure policy keeps the graph
+/// running (`on_error` redirect or `continue`). The next such failure
+/// overwrites it.
+pub(crate) const FAILED_NODE_OUTCOME_KEY: &str = "_outcome";
 
 pub(super) struct DispatchHardErrorOutcome {
     pub(super) item_id: Option<String>,

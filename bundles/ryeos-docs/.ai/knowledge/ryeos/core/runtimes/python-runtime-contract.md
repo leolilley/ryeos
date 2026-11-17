@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-16T03:56:03Z:9a656a961539f9a321bf1499d39b959f3097b51cf4e22a8de008fb9b87b0fe9a:RGDhDF3OrVDReEgRcCS1aiEzBtueJ8VbOQwT++i4iMVuSAAwJ72kVwLGUNSPpEIVC9sAvrt2qJjtJ4qgZ31uAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T23:12:59Z:cbb1fe0962a0dec7cd11ec5fcb47e13a84527e0d00c120a4b4fc22404b16c742:jN816+eXQHS+ZvygyhMsJtyKkiG8ktsGOMj9G27EgoiCNGbxGLfs1LQq5XQ2XnlGkAx8Y4ZLaAgtR/s+8cDAAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/runtimes
 tags: [runtime, python, contract, tools]
@@ -63,10 +63,12 @@ retained filesystem bindings this is the live project root. The python script
 and function runtimes declare `source_scope`, so a tool on them always retains
 source: it never sees the live project. Its workspace is a daemon-private,
 possibly sparse and ephemeral view containing only those admitted bytes (a
-pinned launch gets its generation instead). A schedule fire that grants such a
-tool live project authority is refused with
-`live_project_unavailable_to_sourced_runtime`; any other live launch of it runs
-from the private view and its project writes are discarded. For live project
+pinned launch gets its generation instead). A request that explicitly demands
+the live project (`--live-project`, `project.intent: live`, or a schedule's
+`live_direct` policy) is refused for such a tool with
+`live_project_unavailable_to_sourced_runtime`; a request that only defaulted to
+the live project runs from the private view and its project writes are
+discarded. For live project
 access use an `@subprocess` tool without `source_scope`; to run the python tool
 on a project launch it pinned (`--pin-project` or a pinned project policy).
 Relative

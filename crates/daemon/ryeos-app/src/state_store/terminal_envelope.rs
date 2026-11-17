@@ -336,7 +336,20 @@ pub(super) fn compact_follow_terminal_envelope(
                 waiter.follow_key
             )
         })?;
-    let result = if envelope.status.is_success() {
+    let is_worker_execution = ryeos_engine::canonical_ref::CanonicalRef::parse(&child.item_ref)
+        .is_ok_and(|canonical| {
+            canonical.kind == ryeos_runtime::envelope::WORKER_EXECUTION_ITEM_KIND
+        });
+    let result = if is_worker_execution {
+        // A worker child's followed value is its outcome record for every
+        // terminal status, never the raw session projection.
+        ryeos_runtime::envelope::worker_follow_value(
+            child_terminal_thread_id,
+            envelope.status,
+            &envelope.result,
+            envelope.cost.as_ref(),
+        )
+    } else if envelope.status.is_success() {
         project_follow_action_result(&child.item_ref, envelope.result, envelope.outputs)?
     } else {
         envelope.result
@@ -537,5 +550,129 @@ pub(super) fn admit_follow_terminal_envelope(
                 })?;
             Ok((degraded, true))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn worker_waiter() -> runtime_db::FollowWaiter {
+        let mut waiter = super::super::tests::follow_waiter_for_admission();
+        waiter.children[0].item_ref = "worker_execution:test/bounded".to_string();
+        waiter
+    }
+
+    fn candidate(status: &str, result: Value, cost: Value) -> Value {
+        json!({
+            "success": status == "completed",
+            "child_thread_id": "T-child",
+            "status": status,
+            "result": result,
+            "outputs": {},
+            "warnings": [],
+            "cost": cost,
+        })
+    }
+
+    fn compact(waiter: &runtime_db::FollowWaiter, candidate: &Value) -> Value {
+        compact_follow_terminal_envelope(waiter, "T-child", "T-child", candidate).unwrap()
+    }
+
+    #[test]
+    fn a_completed_worker_child_follows_as_its_outcome_record() {
+        let worker_result = json!({"turn_id": "t1", "result": {"text": "ok", "truncated": false}});
+        let envelope = compact(
+            &worker_waiter(),
+            &candidate(
+                "completed",
+                json!({"session": {
+                    "state": "terminal", "outcome_kind": "completed",
+                    "worker_result": worker_result,
+                }}),
+                json!({"input_tokens": 1, "output_tokens": 2, "total_usd": "0.000003"}),
+            ),
+        );
+        let decoded = ryeos_runtime::envelope::decode_follow_terminal_envelope(&envelope).unwrap();
+        assert!(decoded.success);
+        assert_eq!(
+            decoded.result,
+            json!({
+                "child_thread_id": "T-child",
+                "status": "completed",
+                "outcome_kind": "completed",
+                "result": worker_result,
+                "cost": {"input_tokens": 1, "output_tokens": 2, "total_usd": "0.000003"},
+            })
+        );
+        assert!(decoded.cost.is_some());
+    }
+
+    #[test]
+    fn a_failed_worker_child_follows_as_its_outcome_record_not_the_raw_session() {
+        let envelope = compact(
+            &worker_waiter(),
+            &candidate(
+                "cancelled",
+                json!({"session": {
+                    "state": "terminal", "outcome_kind": "deadline",
+                    "worker_result": null, "bounded_execution": {"large": true},
+                }}),
+                Value::Null,
+            ),
+        );
+        let decoded = ryeos_runtime::envelope::decode_follow_terminal_envelope(&envelope).unwrap();
+        assert!(!decoded.success);
+        assert_eq!(
+            decoded.result,
+            json!({
+                "child_thread_id": "T-child",
+                "status": "cancelled",
+                "outcome_kind": "deadline",
+                "result": null,
+                "cost": null,
+            })
+        );
+    }
+
+    #[test]
+    fn a_worker_failure_child_follows_as_a_failure_with_its_partial_result() {
+        let worker_result =
+            json!({"turn_id": "t1", "status": "crashed", "result": {"text": "partial"}});
+        let envelope = compact(
+            &worker_waiter(),
+            &candidate(
+                "failed",
+                json!({"session": {
+                    "state": "terminal", "outcome_kind": "worker_failure",
+                    "worker_result": worker_result,
+                }}),
+                Value::Null,
+            ),
+        );
+        let decoded = ryeos_runtime::envelope::decode_follow_terminal_envelope(&envelope).unwrap();
+        assert!(!decoded.success);
+        assert_eq!(
+            decoded.result,
+            json!({
+                "child_thread_id": "T-child",
+                "status": "failed",
+                "outcome_kind": "worker_failure",
+                "result": worker_result,
+                "cost": null,
+            })
+        );
+    }
+
+    #[test]
+    fn a_non_worker_child_keeps_its_kind_defined_projection() {
+        let mut waiter = worker_waiter();
+        waiter.children[0].item_ref = "tool:test/one".to_string();
+        let envelope = compact(
+            &waiter,
+            &candidate("completed", json!({"answer": 42}), Value::Null),
+        );
+        let decoded = ryeos_runtime::envelope::decode_follow_terminal_envelope(&envelope).unwrap();
+        assert_eq!(decoded.result, json!({"answer": 42}));
     }
 }
