@@ -63,6 +63,7 @@ impl PartsBuilder {
 
     /// A completed tool call. A call the provider issued without an id keeps
     /// an empty id until [`Self::finish`] gives it one.
+    #[cfg(test)]
     pub fn push_call(&mut self, call: ToolCall) {
         self.push_call_with_artefact(call, None);
     }
