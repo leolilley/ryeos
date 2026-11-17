@@ -11,6 +11,7 @@ pub mod accounting_db;
 pub mod admission_events;
 pub mod admitted_program_trust;
 pub mod authoritative_root_fact;
+pub mod bounded_lru;
 pub mod build_info;
 pub mod bundle_event_service;
 pub mod bundle_publication;

@@ -149,6 +149,7 @@ pub mod threads_list;
 pub mod threads_receipts;
 pub mod threads_set_facet;
 pub mod threads_tail;
+pub mod threads_timeline;
 pub mod tool_env_check;
 pub mod trace_branch;
 pub mod trace_inspect;
@@ -199,6 +200,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     threads_get::DESCRIPTOR,
     threads_receipts::DESCRIPTOR,
     threads_tail::DESCRIPTOR,
+    threads_timeline::DESCRIPTOR,
     threads_cancel::DESCRIPTOR,
     threads_children::DESCRIPTOR,
     threads_set_facet::DESCRIPTOR,
