@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use crate::directive::ProviderMessage;
+use crate::directive::{ProviderMessage, ProviderMessageExt};
 use ryeos_directive_definition::{
     AssistantToolCallsPlacement, MessageSchemas, SystemMessageMode, TextPlacement,
     ToolResultWrapMode,
@@ -28,7 +28,7 @@ fn convert_openai(messages: &[ProviderMessage]) -> (Vec<Value>, Option<String>) 
             }
             if msg.has_tool_calls() {
                 obj["tool_calls"] = json!(
-                    msg.tool_calls()
+                    msg.calls()
                         .iter()
                         .map(|tc| {
                             json!({
@@ -97,7 +97,7 @@ fn convert_with_schemas(
     // return tool_call IDs so it identifies tool results by name).
     let mut tc_id_to_name: HashMap<String, String> = HashMap::new();
     for msg in messages {
-        for tc in msg.tool_calls() {
+        for tc in msg.calls() {
             if let Some(id) = tc.id {
                 tc_id_to_name.insert(id, tc.name);
             }
@@ -226,7 +226,7 @@ fn convert_with_schemas(
         if msg.has_tool_calls() {
             // Render each tool_call with the profile's template (if any).
             let rendered: Vec<Value> = msg
-                .tool_calls()
+                .calls()
                 .iter()
                 .map(|tc| {
                     if let Some(tmpl) = tc_block_template {
@@ -346,7 +346,7 @@ fn wrap_content(content: Value, _content_key: &str, template: Option<&Value>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::directive::ProviderMessage;
+    use crate::directive::{ProviderMessage, ProviderMessageExt};
     use ryeos_directive_definition::{MessageSchemas, SystemMessageConfig, ToolResultConfig};
     use ryeos_tracing::test as trace_test;
 
@@ -625,8 +625,8 @@ mod tests {
     #[test]
     fn convert_messages_anthropic_tool_result_uses_content_blocks_wrap() {
         let msgs = vec![
-            ProviderMessage::tool_result(Some("tc_1".to_string()), "result-1"),
-            ProviderMessage::tool_result(Some("tc_2".to_string()), "result-2"),
+            ProviderMessage::tool_result("tc_1", "result-1"),
+            ProviderMessage::tool_result("tc_2", "result-2"),
         ];
         let schemas = MessageSchemas {
             role_map: None,
@@ -660,10 +660,7 @@ mod tests {
 
     #[test]
     fn convert_messages_openai_tool_result_uses_direct_wrap() {
-        let msgs = vec![ProviderMessage::tool_result(
-            Some("tc_xyz".to_string()),
-            "calc result",
-        )];
+        let msgs = vec![ProviderMessage::tool_result("tc_xyz", "calc result")];
         let schemas = MessageSchemas {
             role_map: None,
             content_key: Some("content".to_string()),
@@ -693,12 +690,12 @@ mod tests {
         // Anthropic: text_placement=string (default), but assistant
         // tool_calls must land as content blocks.
         let msgs = vec![ProviderMessage::assistant(
-            Some(Value::String("Let me check that.".to_string())),
-            Some(vec![crate::directive::ToolCall {
+            Some("Let me check that.".to_string()),
+            vec![crate::directive::ToolCall {
                 id: Some("toolu_01abc".to_string()),
                 name: "search".to_string(),
                 arguments: json!({"q": "rust"}),
-            }]),
+            }],
             None,
         )];
         let schemas = MessageSchemas {
@@ -745,11 +742,11 @@ mod tests {
         // OpenAI: defaults — text=string, tool_calls=top_level_field.
         let msgs = vec![ProviderMessage::assistant(
             None,
-            Some(vec![crate::directive::ToolCall {
+            vec![crate::directive::ToolCall {
                 id: Some("call_xyz".to_string()),
                 name: "search".to_string(),
                 arguments: json!({"q": "rust"}),
-            }]),
+            }],
             None,
         )];
         let schemas = MessageSchemas {
@@ -786,14 +783,14 @@ mod tests {
             ProviderMessage::user("search rust"),
             ProviderMessage::assistant(
                 None,
-                Some(vec![ToolCall {
+                vec![ToolCall {
                     id: Some("gemini_tc_0".to_string()),
                     name: "search".to_string(),
                     arguments: json!({"q": "rust"}),
-                }]),
+                }],
                 None,
             ),
-            ProviderMessage::tool_result(Some("gemini_tc_0".to_string()), "results: ..."),
+            ProviderMessage::tool_result("gemini_tc_0", "results: ..."),
         ];
         let schemas = MessageSchemas {
             role_map: Some({
@@ -881,12 +878,12 @@ mod tests {
         // in {type: "text", text: "..."} blocks so the content array
         // contains only well-formed Anthropic blocks — no raw strings.
         let msgs = vec![ProviderMessage::assistant(
-            Some(Value::String("Let me check.".to_string())),
-            Some(vec![crate::directive::ToolCall {
+            Some("Let me check.".to_string()),
+            vec![crate::directive::ToolCall {
                 id: Some("toolu_01".to_string()),
                 name: "search".to_string(),
                 arguments: json!({"q":"rust"}),
-            }]),
+            }],
             None,
         )];
         let schemas = MessageSchemas {

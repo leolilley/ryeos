@@ -1,4 +1,4 @@
-use crate::directive::ProviderMessage;
+use crate::directive::{ProviderMessage, ProviderMessageExt};
 
 pub struct ContinuationCheck {
     context_window: u64,
@@ -44,7 +44,7 @@ impl ContinuationCheck {
                 if let Some(reasoning) = m.reasoning_text() {
                     chars += reasoning.len();
                 }
-                for tc in m.tool_calls() {
+                for tc in m.calls() {
                     chars += tc.arguments.to_string().len();
                     chars += tc.name.len();
                 }
@@ -68,7 +68,7 @@ mod tests {
         match role {
             "system" => ProviderMessage::system(content),
             "assistant" => ProviderMessage::assistant_text(content),
-            "tool" => ProviderMessage::tool_result(None, content),
+            "tool" => ProviderMessage::tool_result("c0", content),
             _ => ProviderMessage::user(content),
         }
     }
@@ -106,11 +106,8 @@ mod tests {
     #[test]
     fn reasoning_content_counts_toward_context() {
         let check = ContinuationCheck::new(200_000, 0.9);
-        let with_reasoning = ProviderMessage::assistant(
-            Some(serde_json::Value::String(String::new())),
-            None,
-            Some("r".repeat(4000)),
-        );
+        let with_reasoning =
+            ProviderMessage::assistant(Some(String::new()), Vec::new(), Some("r".repeat(4000)));
         let with = check.estimate_live_context_tokens(std::slice::from_ref(&with_reasoning));
         let without = check.estimate_live_context_tokens(&[make_message("assistant", "")]);
         assert!(with > without);

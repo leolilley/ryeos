@@ -8,6 +8,8 @@
 //! send time. The credential VALUE stays outside every digest — only its
 //! declared header name participates.
 
+#[cfg(feature = "latency-profiling")]
+use crate::directive::ProviderMessageExt as _;
 use anyhow::{Result, anyhow, bail};
 #[cfg(feature = "latency-profiling")]
 use std::time::Instant;
@@ -355,7 +357,7 @@ fn serialized_len(value: &impl serde::Serialize) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::directive::{ExecutionConfig, ProviderMessage};
+    use crate::directive::{ExecutionConfig, ProviderMessage, ProviderMessageExt};
     use ryeos_directive_definition::{ProviderConfig, ReasoningConfig, ReasoningMode};
     use ryeos_runtime::callback_client::CallbackClient;
     use ryeos_runtime::envelope::EnvelopeCallback;

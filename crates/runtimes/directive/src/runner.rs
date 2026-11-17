@@ -5,7 +5,8 @@ use serde_json::{Value, json};
 use crate::budget::BudgetTracker;
 use crate::continuation::ContinuationCheck;
 use crate::directive::{
-    DIRECTIVE_RETURN_TOOL, ExecutionConfig, FinishReason, ProviderMessage, StreamEvent, ToolSchema,
+    DIRECTIVE_RETURN_TOOL, ExecutionConfig, FinishReason, ProviderMessage, ProviderMessageExt,
+    StreamEvent, ToolSchema,
 };
 use crate::dispatcher::{DispatchKind, Dispatcher};
 use crate::harness::{Harness, HookAction};
@@ -197,9 +198,9 @@ fn recovered_return_nudge_seen(
     else {
         return false;
     };
-    messages[last_assistant + 1..]
-        .iter()
-        .any(|message| message.role() == "user" && message.text() == Some(expected.as_str()))
+    messages[last_assistant + 1..].iter().any(|message| {
+        message.role() == "user" && message.text().as_deref() == Some(expected.as_str())
+    })
 }
 
 fn state_after_serial_tool_result(
@@ -2168,10 +2169,11 @@ impl Runner {
                                 };
                                 continue;
                             }
-                            let cognition_tool_calls = match resp
-                                .message
-                                .has_tool_calls()
-                                .then(|| serde_json::to_value(resp.message.tool_calls()))
+                            let cognition = resp.message.cognition_fields();
+                            let cognition_tool_calls = match cognition
+                                .tool_calls
+                                .as_ref()
+                                .map(serde_json::to_value)
                                 .transpose()
                             {
                                 Ok(value) => value,
@@ -2213,9 +2215,9 @@ impl Runner {
                                 .emit_turn_complete(
                                     turn,
                                     token_counts,
-                                    resp.message.content_value(),
+                                    cognition.content,
                                     cognition_tool_calls,
-                                    resp.message.reasoning_text().map(str::to_owned),
+                                    cognition.reasoning_content,
                                     provider_accounting,
                                 )
                                 .await
@@ -2343,7 +2345,7 @@ impl Runner {
                                 .callback
                                 .emit_turn_interrupted(
                                     turn,
-                                    partial_cognition.content.clone(),
+                                    partial_cognition.content.clone().map(Value::String),
                                     partial_cognition.reasoning_content.clone(),
                                 )
                                 .await
@@ -2709,7 +2711,7 @@ impl Runner {
                         Some(msg) => {
                             if msg.has_tool_calls() {
                                 let occurrences = msg
-                                    .tool_calls()
+                                    .calls()
                                     .iter()
                                     .enumerate()
                                     .map(|(call_index, call)| ToolOccurrence {
@@ -3270,10 +3272,8 @@ impl Runner {
                         };
                         continue;
                     }
-                    self.messages.push(ProviderMessage::tool_result(
-                        Some(call_id),
-                        tool_result_content,
-                    ));
+                    self.messages
+                        .push(ProviderMessage::tool_result(call_id, tool_result_content));
                     State::CheckingContinuation
                 }
 
@@ -3834,10 +3834,8 @@ impl Runner {
             .await
             .map_err(|e| format!("resume-critical callback emit_tool_result failed: {e}"))?;
         block_at_directive_recovery_test_cut(&self.callback, "tool_observation_recorded").await;
-        self.messages.push(ProviderMessage::tool_result(
-            Some(call_id),
-            rendered.content,
-        ));
+        self.messages
+            .push(ProviderMessage::tool_result(call_id, rendered.content));
         Ok(())
     }
 
@@ -3976,7 +3974,7 @@ impl Runner {
                     record_hash,
                     answer,
                 } => {
-                    let message = ProviderMessage::from_recorded(&answer.message)?;
+                    let message = answer.message;
                     return Ok(LedgerAdmission::Replayed {
                         record_hash,
                         response: crate::provider_adapter::http::AdapterResponse {

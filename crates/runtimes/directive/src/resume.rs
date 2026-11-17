@@ -5,7 +5,7 @@ use ryeos_runtime::ReplayedEventRecord;
 use ryeos_runtime::callback_client::{CallbackClient, RuntimeReplayBudget};
 use ryeos_state::ThreadUsage;
 
-use crate::directive::{DIRECTIVE_RETURN_TOOL, ProviderMessage};
+use crate::directive::{DIRECTIVE_RETURN_TOOL, ProviderMessage, ProviderMessageExt};
 use crate::result_guard::ResultGuard;
 use crate::runner::ToolOccurrence;
 
@@ -1230,22 +1230,29 @@ fn reconstruct_messages(events: &[ReplayedEventRecord]) -> Result<Vec<ProviderMe
             "cognition_out" => {
                 let tool_calls = replayed_tool_calls(&event.payload)?;
 
-                messages.push(ProviderMessage::assistant(
-                    event.payload.get("content").cloned(),
+                let turn = event
+                    .payload
+                    .get("turn")
+                    .and_then(Value::as_u64)
+                    .and_then(|turn| u32::try_from(turn).ok())
+                    .unwrap_or(0);
+                messages.push(crate::directive::assistant_from_cognition_fields(
+                    event.payload.get("content"),
                     tool_calls,
                     event
                         .payload
                         .get("reasoning_content")
                         .and_then(|v| v.as_str())
                         .map(String::from),
-                ));
+                    turn,
+                )?);
             }
             "tool_call_result" => {
                 let call_id = event
                     .payload
                     .get("call_id")
                     .and_then(|v| v.as_str())
-                    .map(String::from);
+                    .ok_or_else(|| anyhow::anyhow!("resume: tool_call_result has no call_id"))?;
                 // The retained string is exactly what the live runner put in
                 // the provider message. Never parse JSON-looking content:
                 // doing so changes both OpenAI-style wire content and custom
@@ -1355,7 +1362,7 @@ fn trim_to_token_budget(
 
 fn estimate_tokens(msg: &ProviderMessage) -> u64 {
     let mut count = estimate_tokens_from_value(&msg.content_value());
-    for tc in msg.tool_calls() {
+    for tc in msg.calls() {
         count += estimate_tokens_from_value(&Some(tc.arguments.clone()));
     }
     count
@@ -2219,7 +2226,7 @@ mod tests {
         }];
 
         let messages = reconstruct_messages(&events).unwrap();
-        assert_eq!(messages[0].text(), Some(exact));
+        assert_eq!(messages[0].text().as_deref(), Some(exact));
         let (wire, system) = crate::provider_adapter::messages::convert_messages(&messages, &None);
         assert!(system.is_none());
         assert_eq!(wire[0]["content"].as_str(), Some(exact));
@@ -2319,7 +2326,7 @@ mod tests {
         let messages = reconstruct_messages(&events).unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role(), "user");
-        assert_eq!(messages[0].text(), Some(content.as_str()));
+        assert_eq!(messages[0].text().as_deref(), Some(content.as_str()));
     }
 
     #[test]
@@ -2351,7 +2358,7 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role(), "user");
         assert_eq!(messages[1].role(), "assistant");
-        assert_eq!(messages[1].text(), Some("Hi there!"));
+        assert_eq!(messages[1].text().as_deref(), Some("Hi there!"));
 
         let trimmed = trim_to_recent_turns(messages, 1);
         assert_eq!(trimmed.len(), 2);
@@ -2391,7 +2398,7 @@ mod tests {
         assert_eq!(messages[0].role(), "user");
         assert_eq!(messages[1].role(), "assistant");
         assert_eq!(
-            messages[1].text(),
+            messages[1].text().as_deref(),
             Some("working on it, step on"),
             "interrupted partial content is preserved"
         );
@@ -2400,7 +2407,7 @@ mod tests {
             "an interrupted seal carries no tool_calls — no unpaired tool call"
         );
         assert_eq!(messages[2].role(), "user");
-        assert_eq!(messages[2].text(), Some("stop — do X instead"));
+        assert_eq!(messages[2].text().as_deref(), Some("stop — do X instead"));
         assert_eq!(messages[3].role(), "assistant");
     }
 
@@ -2832,13 +2839,13 @@ mod tests {
             ProviderMessage::assistant_text("a1"),
             ProviderMessage::user("u2"),
             ProviderMessage::assistant_text("a2"),
-            ProviderMessage::tool_result(None, "tool2"),
+            ProviderMessage::tool_result("c0", "tool2"),
             ProviderMessage::user("u3"),
             ProviderMessage::assistant_text("a3"),
         ];
 
         let trimmed = trim_to_recent_turns(messages, 2);
-        let contents: Vec<_> = trimmed.iter().filter_map(|m| m.text()).collect();
+        let contents: Vec<_> = trimmed.iter().filter_map(|m| m.text()).collect::<Vec<String>>();
         assert_eq!(contents, vec!["u2", "a2", "tool2", "u3", "a3"]);
     }
 
@@ -2847,13 +2854,13 @@ mod tests {
         let messages = vec![
             ProviderMessage::user("u1"),
             ProviderMessage::assistant_text("a1 tool call"),
-            ProviderMessage::tool_result(None, "orphan if kept"),
+            ProviderMessage::tool_result("c0", "orphan if kept"),
             ProviderMessage::user("u2"),
             ProviderMessage::assistant_text("a2"),
         ];
 
         let trimmed = trim_to_recent_turns(messages, 1);
-        let contents: Vec<_> = trimmed.iter().filter_map(|m| m.text()).collect();
+        let contents: Vec<_> = trimmed.iter().filter_map(|m| m.text()).collect::<Vec<String>>();
         assert_eq!(contents, vec!["u2", "a2"]);
     }
 }

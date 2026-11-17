@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use ryeos_directive_definition::{ContinuationConfig, OutputSpec, ReturnNudge};
+use ryeos_provider_contract::{Part, ReasoningPart, Role, ToolResultStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -304,190 +305,200 @@ pub struct ToolCall {
     pub arguments: Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProviderMessage {
-    pub role: String,
+/// The in-memory conversation message: the neutral turn, a role and an
+/// ordered list of parts.
+pub type ProviderMessage = ryeos_provider_contract::Message;
+
+/// The id the runtime gives a tool call whose provider issued none. It is a
+/// function of the turn and the call's position, so a replay and a recovery
+/// derive the same id the live run used.
+pub fn synthesised_call_id(turn: u32, call_index: usize) -> String {
+    format!("call_t{turn}_{call_index}")
+}
+
+/// Constructors and readers the directive runtime uses on a message.
+pub trait ProviderMessageExt: Sized {
+    fn system(text: impl Into<String>) -> Self;
+    fn user(text: impl Into<String>) -> Self;
+    fn assistant_text(text: impl Into<String>) -> Self;
+    /// An assistant message: reasoning, text, then the tool calls, in that
+    /// order. Every call must carry an id by the time it is recorded.
+    fn assistant(
+        text: Option<String>,
+        tool_calls: Vec<ToolCall>,
+        reasoning: Option<String>,
+    ) -> Self;
+    /// A tool message holding the result text of the call named `call_id`.
+    fn tool_result(call_id: impl Into<String>, text: impl Into<String>) -> Self;
+    /// The wire role name: `system`, `user`, `assistant` or `tool`.
+    fn role(&self) -> &str;
+    /// Joined text of the message; for a tool message, of its result. `None`
+    /// when there is no text part (an empty text part counts).
+    fn text(&self) -> Option<String>;
+    /// The text as a JSON string value.
+    fn content_value(&self) -> Option<Value>;
+    /// The tool calls the message proposes, in order.
+    fn calls(&self) -> Vec<ToolCall>;
+    fn has_tool_calls(&self) -> bool;
+    /// The call id a tool message answers.
+    fn tool_call_id(&self) -> Option<&str>;
+    /// Joined text of the reasoning parts.
+    fn reasoning_text(&self) -> Option<String>;
+    /// The old event payload fields of this message, for the emit boundary.
+    fn cognition_fields(&self) -> CognitionFields;
+}
+
+/// The recorded `cognition_out` content, tool calls and reasoning of one
+/// message.
+#[derive(Debug, Clone, Default)]
+pub struct CognitionFields {
     pub content: Option<Value>,
-    #[serde(default)]
     pub tool_calls: Option<Vec<ToolCall>>,
-    #[serde(default)]
-    pub tool_call_id: Option<String>,
-    /// Provider-specific hidden reasoning that must be replayed with an
-    /// assistant tool-call message for OpenAI-compatible reasoning models
-    /// such as DeepSeek thinking-mode endpoints.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
 }
 
-impl ProviderMessage {
-    /// A system message holding `text`.
-    pub fn system(text: impl Into<String>) -> Self {
-        Self::with_text("system", text)
+/// The fold boundary: an assistant message from the recorded `cognition_out`
+/// fields. A call with no id gets the one the live run synthesised from the
+/// turn and its position.
+pub fn assistant_from_cognition_fields(
+    content: Option<&Value>,
+    tool_calls: Option<Vec<ToolCall>>,
+    reasoning_content: Option<String>,
+    turn: u32,
+) -> anyhow::Result<ProviderMessage> {
+    let text = match content {
+        None | Some(Value::Null) => None,
+        Some(Value::String(text)) => Some(text.clone()),
+        Some(_) => anyhow::bail!("recorded cognition content is not text"),
+    };
+    let calls = tool_calls
+        .unwrap_or_default()
+        .into_iter()
+        .enumerate()
+        .map(|(index, mut call)| {
+            call.id
+                .get_or_insert_with(|| synthesised_call_id(turn, index));
+            call
+        })
+        .collect();
+    Ok(ProviderMessage::assistant(text, calls, reasoning_content))
+}
+
+impl ProviderMessageExt for ProviderMessage {
+    fn system(text: impl Into<String>) -> Self {
+        Self::text(Role::System, text)
     }
 
-    /// A user message holding `text`.
-    pub fn user(text: impl Into<String>) -> Self {
-        Self::with_text("user", text)
+    fn user(text: impl Into<String>) -> Self {
+        Self::text(Role::User, text)
     }
 
-    /// An assistant message holding only `text`.
-    pub fn assistant_text(text: impl Into<String>) -> Self {
-        Self::with_text("assistant", text)
+    fn assistant_text(text: impl Into<String>) -> Self {
+        Self::text(Role::Assistant, text)
     }
 
-    /// An assistant message built from a provider answer or a recorded
-    /// cognition: optional content, optional tool calls, optional reasoning.
-    pub fn assistant(
-        content: Option<Value>,
-        tool_calls: Option<Vec<ToolCall>>,
-        reasoning_content: Option<String>,
+    fn assistant(
+        text: Option<String>,
+        tool_calls: Vec<ToolCall>,
+        reasoning: Option<String>,
     ) -> Self {
-        Self {
-            role: "assistant".to_string(),
-            content,
-            tool_calls,
-            tool_call_id: None,
-            reasoning_content,
-        }
-    }
-
-    /// A tool message carrying the result text of the call named by
-    /// `call_id`. A call the provider issued without an id passes `None`.
-    pub fn tool_result(call_id: Option<String>, text: impl Into<String>) -> Self {
-        Self {
-            role: "tool".to_string(),
-            content: Some(Value::String(text.into())),
-            tool_calls: None,
-            tool_call_id: call_id,
-            reasoning_content: None,
-        }
-    }
-
-    fn with_text(role: &str, text: impl Into<String>) -> Self {
-        Self {
-            role: role.to_string(),
-            content: Some(Value::String(text.into())),
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-        }
-    }
-
-    /// The wire role name: `system`, `user`, `assistant` or `tool`.
-    pub fn role(&self) -> &str {
-        &self.role
-    }
-
-    /// The message text, when the message carries text (an empty string
-    /// counts).
-    pub fn text(&self) -> Option<&str> {
-        self.content.as_ref().and_then(Value::as_str)
-    }
-
-    /// The message content as a JSON value, `None` when it carries none.
-    pub fn content_value(&self) -> Option<Value> {
-        self.content.clone()
-    }
-
-    /// The tool calls the message proposes, in order.
-    pub fn tool_calls(&self) -> Vec<ToolCall> {
-        self.tool_calls.clone().unwrap_or_default()
-    }
-
-    /// Whether the message proposes at least one tool call.
-    pub fn has_tool_calls(&self) -> bool {
-        self.tool_calls
-            .as_ref()
-            .is_some_and(|calls| !calls.is_empty())
-    }
-
-    /// The call id a tool message answers.
-    pub fn tool_call_id(&self) -> Option<&str> {
-        self.tool_call_id.as_deref()
-    }
-
-    /// The reasoning text replayed with an assistant message.
-    pub fn reasoning_text(&self) -> Option<&str> {
-        self.reasoning_content.as_deref()
-    }
-
-    /// The message as a recorded provider answer: parts in the order
-    /// reasoning, text, tool calls. Only an assistant message without a
-    /// tool-call id can be recorded, and every tool call needs an id.
-    pub fn to_recorded(&self) -> anyhow::Result<ryeos_provider_contract::RecordedMessage> {
-        use ryeos_provider_contract::{Part, ReasoningPart, Role};
-        if self.role != "assistant" || self.tool_call_id.is_some() {
-            anyhow::bail!("provider message is not record-safe: not an assistant answer");
-        }
         let mut parts = Vec::new();
-        if let Some(reasoning) = &self.reasoning_content {
+        if let Some(reasoning) = reasoning {
             parts.push(Part::Reasoning(ReasoningPart {
-                text: Some(reasoning.clone()),
+                text: Some(reasoning),
                 artefact: None,
             }));
         }
-        match &self.content {
-            None | Some(Value::Null) => {}
-            Some(Value::String(text)) => parts.push(Part::text(text.clone())),
-            Some(_) => anyhow::bail!("provider message is not record-safe: content is not text"),
+        if let Some(text) = text {
+            parts.push(Part::text(text));
         }
-        for call in self.tool_calls.iter().flatten() {
-            let id = call.id.as_deref().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "provider message is not record-safe: tool call {:?} has no id",
-                    call.name
-                )
-            })?;
+        for call in tool_calls {
             parts.push(Part::tool_call(
-                id,
-                call.name.clone(),
-                call.arguments.clone(),
+                call.id.unwrap_or_default(),
+                call.name,
+                call.arguments,
             ));
         }
-        Ok(ryeos_provider_contract::RecordedMessage::new(
-            Role::Assistant,
-            parts,
-        ))
+        Self::new(Role::Assistant, parts)
     }
 
-    /// The message a recorded provider answer stands for. Text parts join
-    /// into the content, reasoning text parts into the reasoning, and tool
-    /// call parts become the tool calls; parts a provider answer cannot
-    /// hold are refused.
-    pub fn from_recorded(
-        recorded: &ryeos_provider_contract::RecordedMessage,
-    ) -> anyhow::Result<Self> {
-        use ryeos_provider_contract::Part;
-        let mut content: Option<String> = None;
-        let mut reasoning: Option<String> = None;
-        let mut tool_calls = Vec::new();
-        for part in &recorded.parts {
+    fn tool_result(call_id: impl Into<String>, text: impl Into<String>) -> Self {
+        Self::new(
+            Role::Tool,
+            vec![Part::tool_result(
+                call_id,
+                vec![Part::text(text)],
+                ToolResultStatus::Ok,
+            )],
+        )
+    }
+
+    fn role(&self) -> &str {
+        self.role.as_str()
+    }
+
+    fn text(&self) -> Option<String> {
+        let mut out: Option<String> = None;
+        for part in &self.parts {
             match part {
-                Part::Text(text) => content.get_or_insert_with(String::new).push_str(&text.text),
-                Part::Reasoning(part) => {
-                    if let Some(text) = &part.text {
-                        reasoning.get_or_insert_with(String::new).push_str(text);
+                Part::Text(text) => out.get_or_insert_with(String::new).push_str(&text.text),
+                Part::ToolResult(result) => {
+                    for inner in &result.parts {
+                        if let Part::Text(text) = inner {
+                            out.get_or_insert_with(String::new).push_str(&text.text);
+                        }
                     }
                 }
-                Part::ToolCall(call) => tool_calls.push(ToolCall {
-                    id: Some(call.call_id.clone()),
-                    name: call.name.clone(),
-                    arguments: call.arguments.clone(),
-                }),
-                other => anyhow::bail!(
-                    "recorded provider answer holds a {} part",
-                    other.type_name()
-                ),
+                _ => {}
             }
         }
-        Ok(Self {
-            role: recorded.role.as_str().to_string(),
-            content: content.map(Value::String),
-            tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
-            tool_call_id: None,
-            reasoning_content: reasoning,
+        out
+    }
+
+    fn content_value(&self) -> Option<Value> {
+        self.text().map(Value::String)
+    }
+
+    fn calls(&self) -> Vec<ToolCall> {
+        self.tool_calls()
+            .map(|call| ToolCall {
+                id: Some(call.call_id.clone()),
+                name: call.name.clone(),
+                arguments: call.arguments.clone(),
+            })
+            .collect()
+    }
+
+    fn has_tool_calls(&self) -> bool {
+        self.tool_calls().next().is_some()
+    }
+
+    fn tool_call_id(&self) -> Option<&str> {
+        self.parts.iter().find_map(|part| match part {
+            Part::ToolResult(result) => Some(result.call_id.as_str()),
+            _ => None,
         })
+    }
+
+    fn reasoning_text(&self) -> Option<String> {
+        let mut out: Option<String> = None;
+        for part in &self.parts {
+            if let Part::Reasoning(reasoning) = part
+                && let Some(text) = &reasoning.text
+            {
+                out.get_or_insert_with(String::new).push_str(text);
+            }
+        }
+        out
+    }
+
+    fn cognition_fields(&self) -> CognitionFields {
+        let calls = self.calls();
+        CognitionFields {
+            content: self.content_value(),
+            tool_calls: (!calls.is_empty()).then_some(calls),
+            reasoning_content: self.reasoning_text(),
+        }
     }
 }
 
@@ -499,7 +510,7 @@ pub fn normalize_provider_call_answer(
     finish_reason: Option<&str>,
 ) -> anyhow::Result<ryeos_provider_contract::ProviderCallAnswer> {
     let answer = ryeos_provider_contract::ProviderCallAnswer {
-        message: message.to_recorded()?,
+        message: message.clone(),
         finish_reason: finish_reason.map(str::to_string),
     };
     answer.validate()?;
@@ -628,64 +639,79 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_message_round_trips_through_its_recorded_parts() {
+    fn an_assistant_message_keeps_reasoning_text_then_calls_in_order() {
         let message = ProviderMessage::assistant(
-            Some(serde_json::json!("checking")),
-            Some(vec![ToolCall {
+            Some("checking".to_string()),
+            vec![ToolCall {
                 id: Some("call_1".to_string()),
                 name: "inspect".to_string(),
                 arguments: serde_json::json!({"a": 1}),
-            }]),
+            }],
             Some("thinking".to_string()),
         );
-        let recorded = message.to_recorded().unwrap();
-        let kinds: Vec<_> = recorded.parts.iter().map(|part| part.type_name()).collect();
+        let kinds: Vec<_> = message.parts.iter().map(|part| part.type_name()).collect();
         assert_eq!(kinds, ["reasoning", "text", "tool_call"]);
-        let back = ProviderMessage::from_recorded(&recorded).unwrap();
-        assert_eq!(back.text(), Some("checking"));
-        assert_eq!(back.reasoning_text(), Some("thinking"));
-        assert_eq!(back.tool_calls().len(), 1);
-        assert_eq!(back.tool_calls()[0].id.as_deref(), Some("call_1"));
-
-        let empty = ProviderMessage::assistant(None, None, None);
-        let recorded = empty.to_recorded().unwrap();
-        assert!(recorded.parts.is_empty());
-        let back = ProviderMessage::from_recorded(&recorded).unwrap();
-        assert!(back.text().is_none() && !back.has_tool_calls());
+        assert_eq!(message.text().as_deref(), Some("checking"));
+        assert_eq!(message.reasoning_text().as_deref(), Some("thinking"));
+        assert_eq!(message.calls()[0].id.as_deref(), Some("call_1"));
+        let fields = message.cognition_fields();
+        assert_eq!(fields.content, Some(serde_json::json!("checking")));
+        assert_eq!(fields.tool_calls.unwrap().len(), 1);
+        message.validate().unwrap();
     }
 
     #[test]
-    fn a_message_without_a_tool_call_id_is_not_recorded() {
-        let message = ProviderMessage::assistant(
-            None,
-            Some(vec![ToolCall {
+    fn a_tool_message_reads_its_call_id_and_result_text() {
+        let message = ProviderMessage::tool_result("call_1", "4");
+        assert_eq!(message.role(), "tool");
+        assert_eq!(message.tool_call_id(), Some("call_1"));
+        assert_eq!(message.text().as_deref(), Some("4"));
+        message.validate().unwrap();
+    }
+
+    #[test]
+    fn the_fold_boundary_synthesises_a_missing_call_id_from_turn_and_position() {
+        let calls = vec![
+            ToolCall {
                 id: None,
-                name: "inspect".to_string(),
+                name: "a".to_string(),
                 arguments: serde_json::json!({}),
-            }]),
-            None,
+            },
+            ToolCall {
+                id: Some("kept".to_string()),
+                name: "b".to_string(),
+                arguments: serde_json::json!({}),
+            },
+            ToolCall {
+                id: None,
+                name: "c".to_string(),
+                arguments: serde_json::json!({}),
+            },
+        ];
+        let message = assistant_from_cognition_fields(None, Some(calls), None, 4).unwrap();
+        let ids: Vec<_> = message
+            .calls()
+            .into_iter()
+            .map(|call| call.id.unwrap())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                synthesised_call_id(4, 0),
+                "kept".to_string(),
+                synthesised_call_id(4, 2)
+            ]
         );
-        assert!(message.to_recorded().is_err());
-    }
-
-    #[test]
-    fn a_recorded_answer_holds_no_image_or_tool_result_part() {
-        let image = ryeos_provider_contract::RecordedMessage::new(
-            ryeos_provider_contract::Role::Assistant,
-            vec![ryeos_provider_contract::Part::tool_result(
-                "c",
-                vec![],
-                ryeos_provider_contract::ToolResultStatus::Ok,
-            )],
+        assert!(
+            assistant_from_cognition_fields(Some(&serde_json::json!(5)), None, None, 1).is_err()
         );
-        assert!(ProviderMessage::from_recorded(&image).is_err());
     }
 
     #[test]
     fn provider_effect_answer_excludes_observation_texture() {
         let message = ProviderMessage::assistant(
-            Some(serde_json::json!("answer")),
-            None,
+            Some("answer".to_string()),
+            Vec::new(),
             Some("reasoning".to_string()),
         );
         let first = normalize_provider_call_answer(&message, Some("stop")).unwrap();
@@ -700,7 +726,7 @@ mod tests {
 
     #[test]
     fn provider_effect_answer_refuses_non_assistant_or_unsafe_finish_reason() {
-        let tool_message = ProviderMessage::tool_result(None, "answer");
+        let tool_message = ProviderMessage::tool_result("c1", "answer");
         assert!(normalize_provider_call_answer(&tool_message, Some("stop")).is_err());
         let message = ProviderMessage::assistant_text("answer");
         assert!(normalize_provider_call_answer(&message, Some(" stop ")).is_err());

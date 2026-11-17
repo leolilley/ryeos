@@ -1,5 +1,6 @@
 use std::io::Read;
 
+use crate::directive::ProviderMessageExt as _;
 use anyhow::{Context, Result};
 use serde_json::json;
 

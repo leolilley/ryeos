@@ -1,6 +1,6 @@
 use serde_json::{Map, Value, json};
 
-use crate::directive::{DIRECTIVE_RETURN_TOOL, ProviderMessage, ToolSchema};
+use crate::directive::{DIRECTIVE_RETURN_TOOL, ProviderMessage, ProviderMessageExt, ToolSchema};
 use ryeos_directive_definition::OutputSpec;
 
 pub(super) fn initial_messages(
@@ -88,7 +88,7 @@ mod tests {
         let messages = initial_messages(vec![user_message()], Some("You are helpful"));
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role(), "system");
-        assert_eq!(messages[0].text(), Some("You are helpful"));
+        assert_eq!(messages[0].text().as_deref(), Some("You are helpful"));
         assert_eq!(messages[1].role(), "user");
     }
 

@@ -11,8 +11,8 @@ use sha2::{Digest, Sha256};
 #[cfg(test)]
 use crate::directive::FinishReason;
 use crate::directive::{
-    ExecutionConfig, MalformedArgs, ProviderMessage, StreamEvent, ToolCall, ToolSchema,
-    UsageUpdate, normalize_finish_reason,
+    ExecutionConfig, MalformedArgs, ProviderMessage, ProviderMessageExt, StreamEvent, ToolCall,
+    ToolSchema, UsageUpdate, normalize_finish_reason,
 };
 use crate::provider_adapter::http::{
     AdapterResponse, ObservedOutput, ProviderLimitContractStatus, ProviderUsageSource, TokenUsage,
@@ -463,14 +463,14 @@ pub struct CutAttemptState {
 /// role required by a later request.
 #[derive(Debug, Clone, Default)]
 pub struct InterruptedCognition {
-    pub content: Option<Value>,
+    pub content: Option<String>,
     pub reasoning_content: Option<String>,
 }
 
 impl InterruptedCognition {
     pub fn into_provider_message(self) -> ProviderMessage {
         // Explicit provider-wire rendering of a RyeOS cognition output.
-        ProviderMessage::assistant(self.content, None, self.reasoning_content)
+        ProviderMessage::assistant(self.content, Vec::new(), self.reasoning_content)
     }
 }
 
@@ -1455,23 +1455,23 @@ fn completed_from_retained_local_observation(
     requested_output_tokens: Option<u64>,
 ) -> Result<StreamOutcome> {
     terminal.validate()?;
-    let message = ProviderMessage::from_recorded(&terminal.answer.message)?;
+    let message = terminal.answer.message.clone();
     let mut meter = StreamOutputMeter::default();
     if let Some(text) = message.text() {
         meter.accept(
-            &StreamEvent::Delta(text.to_owned()),
+            &StreamEvent::Delta(text),
             input.execution.max_stream_output_bytes_per_turn,
             0,
         )?;
     }
     if let Some(reasoning) = message.reasoning_text() {
         meter.accept(
-            &StreamEvent::ReasoningDelta(reasoning.to_owned()),
+            &StreamEvent::ReasoningDelta(reasoning),
             input.execution.max_stream_output_bytes_per_turn,
             0,
         )?;
     }
-    for (index, call) in message.tool_calls().iter().enumerate() {
+    for (index, call) in message.calls().iter().enumerate() {
         meter.accept(
             &StreamEvent::ToolUse {
                 id: call.id.clone(),
@@ -1626,7 +1626,7 @@ pub async fn send_prepared_local_streaming(
             return if interrupted {
                 Ok(StreamOutcome::Interrupted {
                     partial_cognition: InterruptedCognition {
-                        content: (!accumulated_text.is_empty()).then(|| json!(accumulated_text)),
+                        content: (!accumulated_text.is_empty()).then(|| accumulated_text.clone()),
                         reasoning_content: (!accumulated_reasoning.is_empty())
                             .then_some(accumulated_reasoning),
                     },
@@ -1833,13 +1833,13 @@ pub async fn send_prepared_local_streaming(
         &final_value.expect("final value checked above"),
     )
     .context("decode admitted local-worker final result")?;
-    let message = ProviderMessage::from_recorded(&final_result.answer.message)?;
+    let message = final_result.answer.message.clone();
     if message.role() != "assistant"
         || message.tool_call_id().is_some()
-        || message.text() != (!accumulated_text.is_empty()).then_some(accumulated_text.as_str())
+        || message.text() != (!accumulated_text.is_empty()).then(|| accumulated_text.clone())
         || message.reasoning_text()
-            != (!accumulated_reasoning.is_empty()).then_some(accumulated_reasoning.as_str())
-        || serde_json::to_value(message.tool_calls())? != serde_json::to_value(&accumulated_tools)?
+            != (!accumulated_reasoning.is_empty()).then(|| accumulated_reasoning.clone())
+        || serde_json::to_value(message.calls())? != serde_json::to_value(&accumulated_tools)?
     {
         bail!("local worker final answer contradicts its streamed semantic events");
     }
@@ -2804,7 +2804,7 @@ async fn send_prepared_streaming_inner(
     let content = if accumulated_text.is_empty() {
         None
     } else {
-        Some(json!(accumulated_text))
+        Some(accumulated_text.clone())
     };
     let reasoning_content = if accumulated_reasoning.is_empty() {
         None
@@ -2827,15 +2827,15 @@ async fn send_prepared_streaming_inner(
         });
     }
 
-    let message = ProviderMessage::assistant(
-        content,
-        if accumulated_tools.is_empty() {
-            None
-        } else {
-            Some(accumulated_tools)
-        },
-        reasoning_content,
-    );
+    // A call the provider issued without an id gets one derived from the
+    // turn and the call's position, so a replay and a recovery see the id
+    // the live run used.
+    for (index, call) in accumulated_tools.iter_mut().enumerate() {
+        if call.id.is_none() {
+            call.id = Some(crate::directive::synthesised_call_id(input.turn, index));
+        }
+    }
+    let message = ProviderMessage::assistant(content, accumulated_tools, reasoning_content);
 
     Ok(StreamOutcome::Completed {
         response: AdapterResponse {
@@ -5310,15 +5310,15 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             ProviderMessage::system("You are helpful."),
             ProviderMessage::user("What is 2+2?"),
             ProviderMessage::assistant(
-                Some(json!("Let me calculate.")),
-                Some(vec![ToolCall {
+                Some("Let me calculate.".to_string()),
+                vec![ToolCall {
                     id: Some("call_1".to_string()),
                     name: "calculator".to_string(),
                     arguments: json!({"expr": "2+2"}),
-                }]),
+                }],
                 None,
             ),
-            ProviderMessage::tool_result(Some("call_1".to_string()), "4"),
+            ProviderMessage::tool_result("call_1", "4"),
             ProviderMessage::user("Thanks."),
         ]
     }
@@ -5449,7 +5449,13 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
         let model = "glm-5.2";
         let snapshot = resolve("zai", model);
         let mut transcript = canonical_transcript_with_tool_call();
-        transcript[2].reasoning_content = Some("I should use the calculator.".to_string());
+        transcript[2].parts.insert(
+            0,
+            ryeos_provider_contract::Part::Reasoning(ryeos_provider_contract::ReasoningPart {
+                text: Some("I should use the calculator.".to_string()),
+                artefact: None,
+            }),
+        );
         let body = build_golden_body(
             &snapshot,
             &transcript,
@@ -5678,9 +5684,12 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             panic!("retained local observation must complete the call");
         };
         assert!(events.is_empty(), "historical deltas must not republish");
-        assert_eq!(response.message.text(), Some("done"));
-        assert_eq!(response.message.reasoning_text(), Some("checked"));
-        assert_eq!(response.message.tool_calls().len(), 1);
+        assert_eq!(response.message.text().as_deref(), Some("done"));
+        assert_eq!(
+            response.message.reasoning_text().as_deref(),
+            Some("checked")
+        );
+        assert_eq!(response.message.calls().len(), 1);
         assert_eq!(response.usage.as_ref().unwrap().input_tokens, Some(11));
         assert_eq!(response.usage.as_ref().unwrap().output_tokens, Some(3));
         assert_eq!(response.response_id.as_deref(), Some("local-response-1"));
@@ -6070,7 +6079,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
         let StreamOutcome::Completed { response, .. } = outcome else {
             panic!("provider stream did not complete");
         };
-        assert_eq!(response.message.text(), Some("first second"));
+        assert_eq!(response.message.text().as_deref(), Some("first second"));
         assert_eq!(recorder.batch_sizes(), vec![1, 1]);
         let offsets = recorder.batch_offsets();
         assert_eq!(offsets.len(), 2);
