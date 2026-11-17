@@ -1,0 +1,10 @@
+# ryeos:signed:2026-11-16T23:03:18Z:2cb44f0ab2a6d30b8802d262b83fcbbe58df46c350c61f0c31adcb152c4dff1a:FPKBM9NMgJlusxPKk5N741c4AygcfCrLBPXLNcLkxxf+eSvz9Jvu3sVX5/uGiJKA2ypIRA50E8Q4zSyJcAhqCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: bundle.profile-sign
+availability: local
+local_execute: tool:ryeos/core/bundle/profile-sign
+required_caps: []
+schema:
+  profile: string
+  key: string?
+description: "Sign an init profile in place with a publisher key."

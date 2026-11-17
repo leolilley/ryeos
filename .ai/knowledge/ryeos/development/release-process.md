@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-16T07:29:37Z:42748d0a21de997965b1709d1493a63e47947e3bdbd5c07bd0c71ef030e1224a:kwV7GtrE8TM4yDAYTJvozvbcYNC0ja/xlhKjVFswlWSxuXnWSDVSP7R4p6HWfGcVTRbwFtqNnXpHBKtkp51LDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-17T01:54:47Z:b3d4dd7638e90e436263b8d944d4b7e39775b0d1bc31eb3de09267cdfa89299b:DbqMWlvi00Vh4YtJ7EkD7Ob1SB7VEbuH9rBJtFVrY6I84Ls3GqPH7/tIvPkITG+qhlCzG3360HizCYr9AQr8Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "release-process"
@@ -108,6 +108,8 @@ those stages and their exact retained evidence during operational integration.
   failures without blocking an explicitly authorized release. Publication
   still fails closed on source identity, artifact digests, signatures,
   attestations, immutable-tag conflicts, and required dependency availability.
+- The node-binaries archive is built by the `node-binaries-artifact` Bake target
+  from the `standard-pair` stage in that same solve; do not build it separately.
 - One release uses one BuildKit Bake solve. Its internal, non-installable
   `release-artifacts` publication set compiles and signs the union required by
   the native archive and all release images exactly once. The archive,
@@ -544,6 +546,43 @@ If an AUR publication is requested, render the metadata with
 digests and fills in the checksums), publish only the generated package
 directories, and validate with a clean `makepkg` build/install/init. See
 `deploy/aur/README.md` for the full command.
+
+### Installing the node from release files (no Docker, no Rust)
+
+Each release also carries the node pair as a plain archive beside the bundles
+archive:
+
+- `ryeos-node-<version>-x86_64-unknown-linux-gnu.tar.gz`, holding
+  `ryeos-node-<version>-x86_64-unknown-linux-gnu/bin/ryeosd`, `.../bin/ryeos`
+  and `.../LICENSE`; and
+- `ryeos-node-<version>-x86_64-unknown-linux-gnu.tar.gz.sha256`.
+
+They are the very `ryeosd` and `ryeos` the standard image installs, taken from
+the same compiled stage. `ryeos-core-tools` is not in the node archive: it is
+a bundle payload and arrives in the bundles archive under
+`core/.ai/bin/x86_64-unknown-linux-gnu/`. All compile stages use the
+`rust:1.95-slim-bookworm` toolchain, so the dynamically linked pair needs glibc
+2.36 or newer and runs on `debian:bookworm` and later. The release build proves this before
+publishing: its `node-binaries-verify` stage unpacks the archive into a stock
+`debian:bookworm-slim` (no build libraries) and runs both binaries there.
+
+```sh
+V=0.6.0   # the release version, no leading v
+B=https://github.com/leolilley/ryeos/releases/download/v$V
+curl -fLO $B/ryeos-node-$V-x86_64-unknown-linux-gnu.tar.gz
+curl -fLO $B/ryeos-node-$V-x86_64-unknown-linux-gnu.tar.gz.sha256
+curl -fLO $B/ryeos-bundles-$V-x86_64.tar.gz
+curl -fLO $B/ryeos-bundles-$V-x86_64.tar.gz.sha256
+sha256sum -c ryeos-node-$V-x86_64-unknown-linux-gnu.tar.gz.sha256 \
+          ryeos-bundles-$V-x86_64.tar.gz.sha256
+tar -xzf ryeos-node-$V-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf ryeos-bundles-$V-x86_64.tar.gz
+export PATH=$PWD/ryeos-node-$V-x86_64-unknown-linux-gnu/bin:$PATH
+ryeos init --source $PWD/ryeos-bundles-$V-x86_64 ...   # remaining flags as for any node
+```
+
+The release signs the bundles with the official publisher key, which the
+binaries already trust, so no trust-file override is needed.
 
 ## 10. Local packaged-layout install validation
 

@@ -73,6 +73,8 @@ pub struct CommandInvocationControls {
     /// Exact published project snapshot to execute read-only.
     pub project_snapshot: Option<String>,
     pub retain_child_results: bool,
+    /// Demand the live project explicitly (`--live-project`).
+    pub live_project: bool,
     pub exclude_operator_vault: bool,
     pub stream: Option<bool>,
     pub debug_raw: bool,
@@ -281,12 +283,23 @@ pub fn compile_command_invocation(
         (controls.pin_project_at_admission, "--pin-project"),
         (controls.pin_current_head_at_admission, "--current-head"),
         (controls.retain_child_results, "--retain-child-results"),
+        (controls.live_project, "--live-project"),
     ] {
         if requested && project_path.is_none() {
             return Err(Invalid(format!(
                 "{flag} requires a project root; it cannot be combined with --no-project"
             )));
         }
+    }
+    if controls.live_project
+        && (controls.pin_project_at_admission
+            || controls.pin_current_head_at_admission
+            || controls.project_snapshot.is_some())
+    {
+        return Err(Invalid(
+            "--live-project cannot be combined with --pin-project, --current-head or --project-snapshot"
+                .into(),
+        ));
     }
     if controls.pin_project_at_admission && controls.pin_current_head_at_admission {
         return Err(Invalid(
@@ -367,6 +380,9 @@ pub fn command_execution_policy(
     } else {
         ExecutionPolicy::projectless(response)
     };
+    if controls.live_project {
+        policy = policy.demand_live_project().map_err(|e| format!("{e:#}"))?;
+    }
     if controls.retain_child_results {
         policy = policy
             .retain_child_results()
@@ -609,6 +625,7 @@ pub fn strip_declared_control_flags(
                 controls.pin_current_head_at_admission = true
             }
             ControlFlagBinding::RetainChildResults => controls.retain_child_results = true,
+            ControlFlagBinding::LiveProject => controls.live_project = true,
             ControlFlagBinding::ExcludeOperatorVault => controls.exclude_operator_vault = true,
             ControlFlagBinding::DebugRaw => controls.debug_raw = true,
             ControlFlagBinding::StreamOn => {

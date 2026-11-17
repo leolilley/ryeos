@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T11:33:58Z:2a11afcb29dad352cf5e2c91a23da443b37ebaa15e139adcae051eb95f38165a:aVTpPETBhAiLd1fArRE4tgfKrjirsA2jL8Lmk5LNoLJolvHiC+5QSObnrJJtD2lpEYHO9QdFd0nFqeCLLfs6Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T23:12:59Z:80f6a9452756255fdef347ad1d693cba6c6c663f7e5fb6f7eb8017a2a299f0f7:cTTZPVmK3EMZbuUyg0A6o61Cqs3XwZ/XoDCOJHvPeChqdu0O+SjciKiRI5JGeKo7vSi2hbkGExfC/4O0L9P2Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "admitted-execution-recovery"
@@ -178,8 +178,10 @@ consumer must be requalified under the final installed generation; the A/B
 static-input qualifications remain evidence of their earlier verifier runs,
 not current four-slot `native-build` or `core-seed-build` permission.
 
-Dispatch-effect replay moves to operational epoch 16 for the schema-37
-contract. Capsule 37 seals the admitted recipient principal and its own
+Dispatch-effect replay moves to operational epoch 17 for the schema-38
+contract. Capsule 38 records the request's live-project intent (`default` or
+`live`) in every live project authority; an explicit live demand is refused
+where the resolved root is not live. Capsule 37 seals the admitted recipient principal and its own
 scopes into every vault-reading environment authority (project overlay and
 vault namespace); delivery judges that recipient, not the project's access
 ceiling. Capsule 34 first bound retained remote-verifier sources and complete

@@ -1,0 +1,14 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TurnInterruptResponse",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "interrupted": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "interrupted"
+  ]
+}

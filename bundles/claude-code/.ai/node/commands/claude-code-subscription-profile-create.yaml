@@ -1,0 +1,19 @@
+# ryeos:signed:2026-11-16T23:03:24Z:874088d86c9f304f29579dd81f6800c90b6f65faec089e1e5e24ac3ca7c67989:CldxAoMsj5Bud4wTBiTa6hcIrDHEMDkxajftxM1N9vmEShJxKV+1sxu3kYRsPBB0vtLGLenT5DvOZq1rJYSWDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [claude-code, profile, create-subscription]
+description: "Create one node-private Claude Code credential profile that activates from the delivered Claude subscription token"
+forms:
+  - slots:
+      - field: profile_id
+defaults:
+  activation:
+    kind: delivered_secret
+    names:
+      - CLAUDE_CODE_OAUTH_TOKEN
+help:
+  usage: "ryeos claude-code profile create-subscription <profile-id>"
+  examples:
+    - "ryeos claude-code profile create-subscription personal"
+dispatch:
+  kind: execute_ref
+  execute: service:credential-profiles/create
+  availability: daemon
