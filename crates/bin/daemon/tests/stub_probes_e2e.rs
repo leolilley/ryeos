@@ -939,7 +939,75 @@ fn field_of(line: &str, key: &str) -> Option<String> {
 /// Group `StateStore contention summary` lines by contention kind and latest
 /// caller site. Each summary covers up to a 5 s interval and names only the
 /// latest caller, so attribution is a sample, not an exact split.
-fn contention_report(name: &str, log: &str) {
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' && chars.peek() == Some(&'[') {
+            for n in chars.by_ref() {
+                if n.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// One mid-run call as the daemon's own stderr saw it: every line between
+/// the 40th and 41st "resolved project execution context" marker (one per
+/// call), with its offset in ms from the first line of the window, and the
+/// largest silent gaps between consecutive lines (where the call's time sits).
+fn call_timeline(name: &str, log: &str) {
+    fn stamp_ms(line: &str) -> Option<f64> {
+        // 2026-11-17T10:23:14.369823Z -> seconds of day, in ms
+        let t = line.trim_start().split('Z').next()?.split('T').nth(1)?;
+        let mut p = t.split(':');
+        let h: f64 = p.next()?.parse().ok()?;
+        let m: f64 = p.next()?.parse().ok()?;
+        let s: f64 = p.next()?.parse().ok()?;
+        Some((h * 3600.0 + m * 60.0 + s) * 1000.0)
+    }
+    let lines: Vec<&str> = log.lines().collect();
+    let marks: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.contains("resolved project execution context"))
+        .map(|(i, _)| i)
+        .collect();
+    say(name, &format!("call_markers={}", marks.len()));
+    if marks.len() < 42 {
+        return;
+    }
+    let window = &lines[marks[40]..marks[41]];
+    let t0 = window.iter().find_map(|l| stamp_ms(l)).unwrap_or(0.0);
+    let mut prev = t0;
+    let mut gaps: Vec<(f64, usize)> = Vec::new();
+    let mut rendered: Vec<String> = Vec::new();
+    for (i, l) in window.iter().enumerate() {
+        if let Some(t) = stamp_ms(l) {
+            gaps.push((t - prev, i));
+            prev = t;
+            let body = l.splitn(2, "Z ").nth(1).unwrap_or(l);
+            rendered.push(format!("+{:.0}ms {}", t - t0, trunc(body, 170)));
+        }
+    }
+    say(name, &format!("call_window_ms={:.0} lines={}", prev - t0, window.len()));
+    say(name, &format!("call_timeline={rendered:#?}"));
+    gaps.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let top: Vec<String> = gaps
+        .iter()
+        .take(8)
+        .map(|(g, i)| format!("{g:.0}ms before line {i}: {}", trunc(window[*i].splitn(2, "Z ").nth(1).unwrap_or(""), 140)))
+        .collect();
+    say(name, &format!("call_largest_gaps={top:#?}"));
+}
+
+fn contention_report(name: &str, raw_log: &str) {
+    let log = strip_ansi(raw_log);
+    let log = log.as_str();
     let mut groups: BTreeMap<(String, String), (u64, u64, u64, u64)> = BTreeMap::new();
     let mut lines = 0u64;
     for l in log.lines().filter(|l| l.contains("StateStore contention summary")) {
@@ -966,11 +1034,12 @@ fn contention_report(name: &str, log: &str) {
             ),
         );
     }
+    call_timeline(name, log);
     let raw: Vec<String> = log
         .lines()
         .filter(|l| l.contains("StateStore contention summary"))
         .take(60)
-        .map(|l| trunc(l, 420))
+        .map(|l| trunc(l.split("StateStore contention summary").last().unwrap_or(l), 420))
         .collect();
     say(name, &format!("contention_raw_first60={raw:#?}"));
     let prof: Vec<String> = log
