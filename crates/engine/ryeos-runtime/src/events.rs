@@ -416,6 +416,35 @@ pub fn encode_cognition_in_payloads(input: &CognitionInput) -> Result<Vec<Value>
     Ok(payloads)
 }
 
+/// Encodes several inputs as the payloads of one atomic batch under a single
+/// budget. `reserved_items` and `reserved_bytes` are what the batch's other
+/// events (a frame) already use. The batch may hold at most
+/// [`MAX_RUNTIME_EVENT_BATCH_ITEMS`] events and
+/// [`MAX_RUNTIME_EVENT_BATCH_BYTES`] bytes of payload in all; one that needs
+/// more fails here, before anything is appended.
+pub fn encode_cognition_in_batch(
+    reserved_items: usize,
+    reserved_bytes: usize,
+    inputs: &[CognitionInput],
+) -> Result<Vec<Value>> {
+    let mut payloads = Vec::new();
+    for input in inputs {
+        payloads.extend(encode_cognition_in_payloads(input)?);
+    }
+    let bytes = payloads.iter().try_fold(reserved_bytes, |total, payload| {
+        Ok::<_, anyhow::Error>(total + serde_json::to_vec(payload)?.len())
+    })?;
+    let items = reserved_items + payloads.len();
+    if items > MAX_RUNTIME_EVENT_BATCH_ITEMS || bytes > MAX_RUNTIME_EVENT_BATCH_BYTES {
+        bail!(
+            "launch records need {items} events and {bytes} payload bytes; one atomic batch \
+             holds at most {MAX_RUNTIME_EVENT_BATCH_ITEMS} events and \
+             {MAX_RUNTIME_EVENT_BATCH_BYTES} bytes"
+        );
+    }
+    Ok(payloads)
+}
+
 /// Project bounded UTF-8 content into one atomic event batch. The caller owns
 /// the payload schema; this helper owns only exact JSON byte budgeting and
 /// scalar boundaries. It does not publish, truncate, or introduce a queue.
@@ -1023,6 +1052,28 @@ mod tests {
                 .map(|error| error.to_string().contains("content hash mismatch"))
                 .unwrap_or(false)
         );
+    }
+
+    #[test]
+    fn a_batch_of_inputs_shares_one_budget() {
+        let small = CognitionInput::text("context", "background");
+        let payloads =
+            encode_cognition_in_batch(1, 1_000, &[small.clone(), launch_input("go"), small])
+                .unwrap();
+        assert_eq!(payloads.len(), 3);
+
+        // Each input fits alone; together with the reserved frame they do not.
+        let big = launch_input(&"z".repeat(MAX_RUNTIME_EVENT_BATCH_BYTES - 512 * 1024));
+        let error = encode_cognition_in_batch(1, 3 * 1024 * 1024, &[big])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("one atomic batch holds at most"), "{error}");
+
+        let many: Vec<_> = (0..MAX_RUNTIME_EVENT_BATCH_ITEMS)
+            .map(|index| CognitionInput::text("context", format!("c{index}")))
+            .collect();
+        assert!(encode_cognition_in_batch(0, 0, &many).is_ok());
+        assert!(encode_cognition_in_batch(1, 0, &many).is_err());
     }
 
     #[test]

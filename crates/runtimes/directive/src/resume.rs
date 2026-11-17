@@ -9,7 +9,9 @@ use crate::directive::{DIRECTIVE_RETURN_TOOL, ProviderMessage, ProviderMessageEx
 use crate::result_guard::ResultGuard;
 use crate::runner::ToolOccurrence;
 use ryeos_provider_contract::ToolResultStatus;
-use ryeos_runtime::{CognitionOutPayload, FINISH_INTERRUPTED, ToolResultPayload};
+use ryeos_runtime::{
+    CognitionFramePayload, CognitionOutPayload, FINISH_INTERRUPTED, ToolResultPayload,
+};
 
 #[derive(Debug)]
 pub struct ResumeState {
@@ -41,6 +43,18 @@ pub struct ResumeState {
     /// Exact retry decisions already represented in the current thread braid.
     /// Used only to make testimony append lost-reply recovery idempotent.
     pub provider_retry_testimony_digests: std::collections::BTreeSet<String>,
+    /// The latest frame recorded on the path: what the model was given besides
+    /// the conversation. `None` when the path recorded none.
+    pub frame: Option<CognitionFramePayload>,
+}
+
+impl ResumeState {
+    /// A thread that was marked running and then lost its process before it
+    /// wrote any launch record: nothing recorded, nothing to rebuild. Its
+    /// resume is a fresh launch.
+    pub fn has_no_launch_records(&self) -> bool {
+        self.frame.is_none() && self.messages.is_empty() && self.last_turn_coordinate == 0
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,7 +112,8 @@ const MAX_CONTINUATION_PATH: usize = 10_000;
 /// The event types a recovery reads. Everything else a thread records, such
 /// as launch audit and accounting transitions, is neither fetched nor counted
 /// against the replay budget.
-const RECOVERY_EVENT_TYPES: [&str; 6] = [
+const RECOVERY_EVENT_TYPES: [&str; 7] = [
+    "cognition_frame",
     "cognition_in",
     "cognition_out",
     "tool_call_start",
@@ -184,6 +199,7 @@ pub async fn load_resume_state(
     // recorded. A predecessor thread's part of the path is what a successor
     // started from, so it is carried the way the successor's start carried it:
     // pinned inputs, then the most recent turns.
+    let frame = latest_frame(&events)?;
     let predecessor = fold_messages(&events[..own_start])?;
     let own = fold_messages(&events[own_start..])?;
     let mut messages = carry_into_successor(predecessor, carry_turns)?;
@@ -200,6 +216,7 @@ pub async fn load_resume_state(
         thread_usage,
         result_guard,
         provider_retry_testimony_digests,
+        frame,
     })
 }
 
@@ -1085,6 +1102,32 @@ fn recover_thread_usage(
 /// tool-dispatch starts, graph milestones) carries no message and is skipped —
 /// folding a chain is lossy by design, not an error. `role` is the provider-wire
 /// mapping applied here, not a substrate concept.
+/// The latest `cognition_frame` on the path. Frames are numbered from 1 and
+/// each is the previous number plus one; anything else is refused.
+fn latest_frame(events: &[ReplayedEventRecord]) -> Result<Option<CognitionFramePayload>> {
+    let mut latest: Option<CognitionFramePayload> = None;
+    for event in events
+        .iter()
+        .filter(|event| event.event_type == "cognition_frame")
+    {
+        let frame: CognitionFramePayload = serde_json::from_value(event.payload.clone())
+            .context("resume: cognition_frame is not a recorded frame")?;
+        frame
+            .validate()
+            .context("resume: invalid cognition_frame")?;
+        let expected = latest.as_ref().map_or(1, |previous| previous.frame_seq + 1);
+        if frame.frame_seq != expected {
+            anyhow::bail!(
+                "resume: cognition_frame {} does not follow frame {}",
+                frame.frame_seq,
+                expected - 1
+            );
+        }
+        latest = Some(frame);
+    }
+    Ok(latest)
+}
+
 /// One message of a fold, with whether the input that produced it is pinned.
 #[derive(Debug, Clone)]
 struct FoldedMessage {
@@ -1115,10 +1158,14 @@ fn fold_messages(events: &[ReplayedEventRecord]) -> Result<Vec<FoldedMessage>> {
                 if let ryeos_runtime::CognitionInAssembly::Complete(input) =
                     cognition_in.push(&event.payload)?
                 {
-                    messages.push(FoldedMessage {
-                        message: input.message(),
-                        pinned: input.pinned,
-                    });
+                    messages.extend(
+                        crate::launch_records::input_messages(&input)
+                            .into_iter()
+                            .map(|message| FoldedMessage {
+                                message,
+                                pinned: input.pinned,
+                            }),
+                    );
                 }
             }
             // Streaming fragments are UI/event-log data, not replayable
@@ -2991,6 +3038,85 @@ mod tests {
         // A typed error survives the anyhow boundary.
         let error: anyhow::Error = ResumeFoldError::PinnedInputsExceedBudget { budget: 1 }.into();
         assert!(error.downcast_ref::<ResumeFoldError>().is_some());
+    }
+
+    fn frame_event(frame_seq: u32, system: &str) -> ReplayedEventRecord {
+        let mut frame = crate::launch_records::build_frame(
+            1,
+            &crate::launch_records::FrameSource {
+                system_prompt: Some(system),
+                inventory: &[],
+                model: "m",
+                reasoning: None,
+                sampling: None,
+                max_output_tokens: 0,
+                provider_config_hash: &"ab".repeat(32),
+            },
+        )
+        .unwrap();
+        frame.payload.frame_seq = frame_seq;
+        ReplayedEventRecord {
+            event_type: "cognition_frame".to_string(),
+            payload: ryeos_runtime::cognition::to_payload(&frame.payload).unwrap(),
+        }
+    }
+
+    fn input_events(inputs: &[ryeos_runtime::CognitionInput]) -> Vec<ReplayedEventRecord> {
+        inputs
+            .iter()
+            .flat_map(|input| ryeos_runtime::encode_cognition_in_payloads(input).unwrap())
+            .map(|payload| ReplayedEventRecord {
+                event_type: "cognition_in".to_string(),
+                payload,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn recorded_launch_records_fold_to_the_messages_the_live_run_had() {
+        let inputs = crate::launch_records::launch_inputs(Some("before"), "go", Some("after"));
+        let mut events = vec![frame_event(1, "system text")];
+        events.extend(input_events(&inputs));
+
+        let folded = fold_messages(&events).unwrap();
+        let messages: Vec<ProviderMessage> = folded.iter().map(|f| f.message.clone()).collect();
+        assert_eq!(messages, crate::launch_records::messages_of(&inputs));
+        // Only the stimulus is pinned; the acknowledgements follow their input.
+        let pinned: Vec<bool> = folded.iter().map(|f| f.pinned).collect();
+        assert_eq!(pinned, [false, false, true, false, false]);
+
+        let frame = latest_frame(&events).unwrap().unwrap();
+        assert_eq!(frame.system_text().as_deref(), Some("system text"));
+    }
+
+    #[test]
+    fn frames_are_numbered_without_gaps_and_the_latest_wins() {
+        let events = vec![frame_event(1, "one"), frame_event(2, "two")];
+        let latest = latest_frame(&events).unwrap().unwrap();
+        assert_eq!(latest.frame_seq, 2);
+        assert_eq!(latest.system_text().as_deref(), Some("two"));
+
+        let gap = vec![frame_event(1, "one"), frame_event(3, "three")];
+        assert!(latest_frame(&gap).is_err());
+        let starts_late = vec![frame_event(2, "two")];
+        assert!(latest_frame(&starts_late).is_err());
+        assert!(latest_frame(&[]).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_thread_that_recorded_nothing_resumes_as_a_fresh_launch() {
+        let empty = make_callback(vec![]);
+        let state = load_resume_state(&empty, "T-empty", 8, ResumeMode::NativeSameThread)
+            .await
+            .unwrap();
+        assert!(state.has_no_launch_records());
+
+        let with_frame = make_callback(vec![frame_event(1, "system text")]);
+        let state = load_resume_state(&with_frame, "T-framed", 8, ResumeMode::NativeSameThread)
+            .await
+            .unwrap();
+        assert!(!state.has_no_launch_records());
+        assert_eq!(state.frame.unwrap().frame_seq, 1);
     }
 
     #[tokio::test]

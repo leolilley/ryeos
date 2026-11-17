@@ -257,6 +257,123 @@ impl ToolResultPayload {
     }
 }
 
+/// How the provider request is configured for the whole conversation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FrameRequestOptions {
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampling: Option<Value>,
+    /// The configured output limit per turn; absent when none is configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
+}
+
+/// What the model is given that is not a conversation message and that is
+/// stable across turns: the system parts, the tool inventory, the request
+/// options and the identity of the provider configuration in force.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CognitionFramePayload {
+    /// The frame's position among the frames of a chain, starting at 1.
+    pub frame_seq: u32,
+    pub system: Vec<Part>,
+    /// The object hash of the attachment holding the tool inventory.
+    pub tool_inventory: String,
+    pub request_options: FrameRequestOptions,
+    /// The hash of the provider configuration the request is built from.
+    pub provider_config: String,
+    /// The attachments the frame names; always the tool inventory.
+    pub attachment_refs: Vec<String>,
+}
+
+impl CognitionFramePayload {
+    pub fn validate(&self) -> Result<()> {
+        if self.frame_seq == 0 {
+            bail!("cognition_frame has frame_seq 0");
+        }
+        if self.request_options.model.is_empty() {
+            bail!("cognition_frame request_options has no model");
+        }
+        ryeos_effect_contract::require_hex64(
+            "cognition_frame tool_inventory",
+            &self.tool_inventory,
+        )?;
+        ryeos_effect_contract::require_hex64(
+            "cognition_frame provider_config",
+            &self.provider_config,
+        )?;
+        if self.attachment_refs != [self.tool_inventory.clone()] {
+            bail!("cognition_frame attachment_refs must name exactly its tool inventory");
+        }
+        if self
+            .system
+            .iter()
+            .any(|part| !matches!(part, Part::Text(_)))
+        {
+            bail!("cognition_frame system parts must be text");
+        }
+        Ok(())
+    }
+
+    /// Joined text of the system parts; `None` when the frame has no system
+    /// text.
+    pub fn system_text(&self) -> Option<String> {
+        let text: String = self
+            .system
+            .iter()
+            .filter_map(|part| match part {
+                Part::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        (!text.is_empty()).then_some(text)
+    }
+
+    /// Whether two frames give the model the same thing. The position in the
+    /// chain is not part of it.
+    pub fn same_as(&self, other: &Self) -> bool {
+        self.system == other.system
+            && self.tool_inventory == other.tool_inventory
+            && self.request_options == other.request_options
+            && self.provider_config == other.provider_config
+    }
+}
+
+/// A frame ready to append: its payload and the attachment holding the tool
+/// inventory the payload names.
+#[derive(Debug, Clone)]
+pub struct FrameRecord {
+    pub payload: CognitionFramePayload,
+    pub inventory: crate::callback::EventAttachment,
+}
+
+impl FrameRecord {
+    /// Builds a frame whose inventory is `inventory_json`, the exact bytes of
+    /// the canonical JSON tool list.
+    pub fn new(
+        frame_seq: u32,
+        system: Option<&str>,
+        request_options: FrameRequestOptions,
+        provider_config: &str,
+        inventory_json: Vec<u8>,
+    ) -> Result<Self> {
+        let inventory = crate::callback::EventAttachment::new("application/json", inventory_json)?;
+        let payload = CognitionFramePayload {
+            frame_seq,
+            system: system.map(Part::text).into_iter().collect(),
+            tool_inventory: inventory.object_hash().to_string(),
+            request_options,
+            provider_config: provider_config.to_string(),
+            attachment_refs: vec![inventory.object_hash().to_string()],
+        };
+        payload.validate()?;
+        Ok(Self { payload, inventory })
+    }
+}
+
 /// Serialise a typed payload to the JSON an event carries.
 pub fn to_payload<T: Serialize>(payload: &T) -> Result<Value> {
     Ok(serde_json::to_value(payload)?)
@@ -297,6 +414,60 @@ mod tests {
             usage: None,
             provider_accounting: None,
         };
+        assert!(payload.validate().is_err());
+    }
+
+    fn frame(system: Option<&str>, model: &str) -> FrameRecord {
+        FrameRecord::new(
+            1,
+            system,
+            FrameRequestOptions {
+                model: model.to_string(),
+                reasoning: None,
+                sampling: None,
+                max_output_tokens: Some(1024),
+            },
+            &"ab".repeat(32),
+            br#"[{"name":"tool"}]"#.to_vec(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_frame_names_its_inventory_attachment() {
+        let record = frame(Some("be brief"), "m");
+        assert_eq!(
+            record.payload.tool_inventory,
+            record.inventory.object_hash()
+        );
+        assert_eq!(
+            record.payload.attachment_refs,
+            [record.inventory.object_hash().to_string()]
+        );
+        assert_eq!(record.payload.system_text().as_deref(), Some("be brief"));
+        let value = to_payload(&record.payload).unwrap();
+        let parsed: CognitionFramePayload = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed, record.payload);
+        parsed.validate().unwrap();
+    }
+
+    #[test]
+    fn frames_compare_without_their_position() {
+        let first = frame(Some("be brief"), "m");
+        let mut later = first.payload.clone();
+        later.frame_seq = 2;
+        assert!(first.payload.same_as(&later));
+        assert!(!first.payload.same_as(&frame(Some("be long"), "m").payload));
+        assert!(!first.payload.same_as(&frame(Some("be brief"), "n").payload));
+        let mut other_inventory = first.payload.clone();
+        other_inventory.tool_inventory = "cd".repeat(32);
+        assert!(!first.payload.same_as(&other_inventory));
+    }
+
+    #[test]
+    fn a_frame_that_does_not_name_its_inventory_is_refused() {
+        let mut payload = frame(None, "m").payload;
+        payload.attachment_refs = Vec::new();
         assert!(payload.validate().is_err());
     }
 

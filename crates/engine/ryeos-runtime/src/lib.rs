@@ -44,8 +44,8 @@ pub use callback::{
 };
 pub use checkpoint::CheckpointWriter;
 pub use cognition::{
-    CognitionInput, CognitionOutPayload, CognitionUsage, FINISH_INTERRUPTED, ToolResultGuard,
-    ToolResultPayload, TurnMarker,
+    CognitionFramePayload, CognitionInput, CognitionOutPayload, CognitionUsage, FINISH_INTERRUPTED,
+    FrameRecord, FrameRequestOptions, ToolResultGuard, ToolResultPayload, TurnMarker,
 };
 pub use command::{
     CommandAliasDef, CommandArgumentArity, CommandArgumentDef, CommandArgumentForm,
@@ -65,7 +65,7 @@ pub use events::{
     HOOK_OBSERVATION_SCHEMA, HookEvidenceDescriptor, HookFailedPayload, HookFailureClass,
     HookObservationRecordedPayload, MAX_RUNTIME_EVENT_BATCH_BYTES, MAX_RUNTIME_EVENT_BATCH_ITEMS,
     MAX_RUNTIME_EVENT_PAYLOAD_BYTES, RuntimeEventType, StorageClass, cognition_out_is_progressive,
-    encode_bounded_text_payloads, encode_cognition_in_payloads,
+    encode_bounded_text_payloads, encode_cognition_in_batch, encode_cognition_in_payloads,
 };
 pub use expression::{
     CompilationLimits, CompiledExpression, CompiledTemplate, ErrorPhase, EvaluationContext,

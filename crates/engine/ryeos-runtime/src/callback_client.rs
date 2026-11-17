@@ -1122,12 +1122,54 @@ impl CallbackClient {
         Ok(())
     }
 
-    pub async fn emit_turn_start(&self, turn: u32) -> Result<()> {
+    /// Resume-critical: the launch records of a conversation as one atomic
+    /// batch: the frame when there is one, then the inputs in the order the
+    /// model is given them, under one budget. The frame's tool inventory is
+    /// stored beside the batch. A retry of the whole batch after a lost
+    /// acknowledgement repeats `idempotency_key` and is answered without
+    /// appending twice.
+    pub async fn emit_launch_records(
+        &self,
+        frame: Option<&crate::cognition::FrameRecord>,
+        inputs: &[crate::cognition::CognitionInput],
+        idempotency_key: &str,
+    ) -> Result<()> {
+        let mut events = Vec::new();
+        let mut options = EventAppendOptions {
+            attachments: Vec::new(),
+            idempotency_key: Some(idempotency_key.to_string()),
+        };
+        let mut reserved_bytes = 0usize;
+        if let Some(frame) = frame {
+            frame.payload.validate()?;
+            let payload = crate::cognition::to_payload(&frame.payload)?;
+            reserved_bytes = serde_json::to_vec(&payload)?.len();
+            events.push((RuntimeEventType::CognitionFrame, payload));
+            options.attachments.push(frame.inventory.clone());
+        }
+        let payloads =
+            crate::events::encode_cognition_in_batch(events.len(), reserved_bytes, inputs)?;
+        events.extend(
+            payloads
+                .into_iter()
+                .map(|payload| (RuntimeEventType::CognitionIn, payload)),
+        );
+        self.append_runtime_events_with(events, options).await
+    }
+
+    /// Resume-critical: the opening marker of a provider turn. `tools_offered`
+    /// names the tools offered on this turn when they differ from the tool
+    /// inventory of the frame in force.
+    pub async fn emit_turn_start(
+        &self,
+        turn: u32,
+        tools_offered: Option<Vec<String>>,
+    ) -> Result<()> {
         self.append_runtime_event(
             RuntimeEventType::CognitionIn,
             crate::cognition::to_payload(&crate::cognition::TurnMarker {
                 turn,
-                tools_offered: None,
+                tools_offered,
             })?,
         )
         .await
@@ -1362,12 +1404,15 @@ mod tests {
 
     struct EventRecorder {
         events: Mutex<Vec<(String, Value)>>,
+        /// The options of every batch append, in order.
+        options: Mutex<Vec<crate::callback::EventAppendOptions>>,
     }
 
     impl EventRecorder {
         fn new() -> Self {
             Self {
                 events: Mutex::new(Vec::new()),
+                options: Mutex::new(Vec::new()),
             }
         }
 
@@ -1429,8 +1474,9 @@ mod tests {
             &self,
             _thread_id: &str,
             events: Vec<Value>,
-            _options: crate::callback::EventAppendOptions,
+            options: crate::callback::EventAppendOptions,
         ) -> Result<Value, CallbackError> {
+            self.options.lock().unwrap().push(options);
             let mut recorded = self.events.lock().unwrap();
             for event in events {
                 let event_type =
@@ -1562,6 +1608,65 @@ mod tests {
         }
         assembler.finish().unwrap();
         assert_eq!(recovered.as_ref(), Some(&input));
+    }
+
+    #[tokio::test]
+    async fn launch_records_are_one_batch_of_frame_then_inputs_in_model_order() {
+        let (callback, recorder) = make_recorder_client();
+        let frame = crate::cognition::FrameRecord::new(
+            1,
+            Some("system text"),
+            crate::cognition::FrameRequestOptions {
+                model: "m".to_string(),
+                reasoning: None,
+                sampling: None,
+                max_output_tokens: None,
+            },
+            &"ab".repeat(32),
+            b"[]".to_vec(),
+        )
+        .unwrap();
+        let before = crate::cognition::CognitionInput::text("context", "before")
+            .with_ack("Understood. I will use this context.");
+        let stimulus = crate::cognition::CognitionInput::text("launch", "go").pinned();
+        callback
+            .emit_launch_records(Some(&frame), &[before, stimulus], "launch:T-test")
+            .await
+            .unwrap();
+        let events = recorder.events.lock().unwrap();
+        let kinds: Vec<_> = events.iter().map(|(kind, _)| kind.as_str()).collect();
+        assert_eq!(kinds, ["cognition_frame", "cognition_in", "cognition_in"]);
+        assert_eq!(
+            events[0].1["attachment_refs"][0],
+            events[0].1["tool_inventory"]
+        );
+        assert_eq!(events[1].1["origin"], "context");
+        assert_eq!(events[1].1["ack"], "Understood. I will use this context.");
+        assert_eq!(events[2].1["pinned"], true);
+        let options = recorder.options.lock().unwrap();
+        assert_eq!(options.len(), 1, "one append for the whole batch");
+        assert_eq!(options[0].idempotency_key.as_deref(), Some("launch:T-test"));
+        assert_eq!(options[0].attachments.len(), 1);
+        assert_eq!(
+            options[0].attachments[0].object_hash(),
+            events[0].1["tool_inventory"].as_str().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_turn_marker_names_offered_tools_only_when_given() {
+        let (callback, recorder) = make_recorder_client();
+        callback.emit_turn_start(1, None).await.unwrap();
+        callback
+            .emit_turn_start(2, Some(vec!["only_tool".to_string()]))
+            .await
+            .unwrap();
+        let events = recorder.events.lock().unwrap();
+        assert_eq!(events[0].1, json!({"turn": 1}));
+        assert_eq!(
+            events[1].1,
+            json!({"turn": 2, "tools_offered": ["only_tool"]})
+        );
     }
 
     fn tool_result(

@@ -36,6 +36,17 @@ use ryeos_runtime::{TerminalCompletion, ThreadTerminalStatus};
 
 mod request_context;
 
+/// The tools a launch offers the model on its first turn: the tools its
+/// capabilities admit, plus the lifecycle return tool when outputs are
+/// declared. This is the inventory a frame records.
+pub(crate) fn launch_inventory(
+    tools: &[ToolSchema],
+    effective_caps: &[String],
+    outputs: Option<&[OutputSpec]>,
+) -> Vec<ToolSchema> {
+    visible_provider_tools(tools, effective_caps, outputs, true)
+}
+
 use request_context::{initial_messages, visible_provider_tools};
 
 /// Free-form breadcrumb passed to `request_continuation` for logs only.
@@ -337,6 +348,10 @@ pub enum State {
 pub struct Runner {
     messages: Vec<ProviderMessage>,
     tools: Vec<ToolSchema>,
+    /// The names of the tools the launch offers the model: the tool
+    /// inventory the frame records. A turn that offers a different set
+    /// records its offered names on its turn marker.
+    inventory_tool_names: Vec<String>,
     dispatcher: Dispatcher,
     harness: Harness,
     budget: BudgetTracker,
@@ -974,10 +989,16 @@ impl Runner {
 
         let effective_caps = harness.effective_caps().to_vec();
         let dispatcher = Dispatcher::new(tools.clone(), effective_caps);
+        let inventory_tool_names =
+            launch_inventory(&tools, harness.effective_caps(), outputs.as_deref())
+                .into_iter()
+                .map(|tool| tool.name)
+                .collect();
 
         Self {
             messages: initial_messages,
             tools,
+            inventory_tool_names,
             dispatcher,
             harness,
             budget,
@@ -1341,11 +1362,28 @@ impl Runner {
                 State::CallingProvider => {
                     let turn_start = Instant::now();
                     self.harness.record_turn();
+                    // Filter tools by effective_caps so the LLM only sees
+                    // tools it can actually call (saves context, avoids the
+                    // "model names a tool the dispatcher would reject" path).
+                    let visible_tools_owned = visible_provider_tools(
+                        &self.tools,
+                        self.harness.effective_caps(),
+                        self.directive_outputs.as_deref(),
+                        self.harness.tool_calls_available(),
+                    );
                     if let Some(active_turn) = self.resume_active_provider_turn.take() {
                         turn = active_turn;
                     } else {
                         turn += 1;
-                        if let Err(e) = self.callback.emit_turn_start(turn).await {
+                        // The turn marker names the offered tools only when
+                        // they differ from the frame's inventory.
+                        let offered: Vec<String> = visible_tools_owned
+                            .iter()
+                            .map(|tool| tool.name.clone())
+                            .collect();
+                        let tools_offered =
+                            (offered != self.inventory_tool_names).then_some(offered);
+                        if let Err(e) = self.callback.emit_turn_start(turn, tools_offered).await {
                             state = State::RecoveryRequired {
                                 error: format!(
                                     "resume-critical callback emit_turn_start failed: {e}"
@@ -1365,15 +1403,6 @@ impl Runner {
                     // in-progress generation.
                     self.harness.take_interrupt();
                     let interrupt_flag = self.harness.interrupted_flag();
-                    // Filter tools by effective_caps so the LLM only sees
-                    // tools it can actually call (saves context, avoids the
-                    // "model names a tool the dispatcher would reject" path).
-                    let visible_tools_owned = visible_provider_tools(
-                        &self.tools,
-                        self.harness.effective_caps(),
-                        self.directive_outputs.as_deref(),
-                        self.harness.tool_calls_available(),
-                    );
                     // §1 retry loop. A provider failure with an outcome-safe
                     // classification — a configured status response or a
                     // connection-establishment failure — is re-attempted with
