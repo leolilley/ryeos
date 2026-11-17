@@ -202,6 +202,7 @@ fn push_timeline_lines(
                 meta,
                 tone,
                 pending,
+                ..
             } => {
                 let glyph = if *pending {
                     "▸"
@@ -500,6 +501,7 @@ mod tests {
             tone: RyeOsTone::Neutral,
             intent: None,
             secondary_intent: None,
+            state: None,
         }
     }
 

@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 mod fold;
+mod overlay;
 mod passes;
 mod path;
 
@@ -165,6 +166,11 @@ pub struct Emission {
     /// Adopt a thread: later entries from it nest under the named entry.
     #[serde(default)]
     pub adopt: Option<Adopt>,
+    /// Values this event contributes to the entry's presentation: named roots
+    /// that a subject's presentation paths read (`<root>.<path>`). Each is
+    /// parsed as JSON when it is; one that is not is dropped.
+    #[serde(default)]
+    pub inputs: BTreeMap<String, Slot>,
     /// This entry opens an exchange.
     #[serde(default)]
     pub starts_exchange: bool,
@@ -189,6 +195,32 @@ pub struct Adopt {
     /// Path to the adopted thread's id.
     pub thread: String,
     pub under: ParentRef,
+    /// Let the adopted thread's subject (supplied through
+    /// [`Folder::provide`]) present the entry it is adopted under. Absent
+    /// means the entry is never presented by a subject.
+    #[serde(default)]
+    pub present: Option<Present>,
+}
+
+/// How a subject's `presentation` block may shape an entry.
+///
+/// The block is a mapping from slot name to an ordered list of paths, plus an
+/// optional `counts_as` key. Paths read the entry's `inputs` roots
+/// (`arguments.url`); the first path that yields text fills the slot, and a
+/// slot with no text keeps what the definition's rules projected. A
+/// `counts_as` key applies only when the definition's vocabulary has it.
+/// Presentation never touches an entry's kind, state, tone, id or parent.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Present {
+    /// The slots a subject may fill, each with its cap in characters. Text is
+    /// stripped of control characters and bidirectional overrides and cut at
+    /// the cap with an elision mark.
+    pub slots: BTreeMap<String, usize>,
+    /// When a presented slot replaces projected text, the projected text moves
+    /// to the slot named here (when that slot is free), so it stays drawn.
+    #[serde(default)]
+    pub displace: BTreeMap<String, String>,
 }
 
 /// The closed set of entries a rule can create. `cluster` and `recap` are

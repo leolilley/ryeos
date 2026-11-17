@@ -1,10 +1,18 @@
-# ryeos:signed:2026-09-05T00:45:39Z:d661d342c81cfdc0057bdafd9dca2e04aae96c1a328cf5637a62df4ccc7a19ee:OIngQphYdLlWljU+3gfVd89NAGLfIdjkQUdMOzSxXFLvXLdY1ti8iuMeF3wJAQMS7tJiJusEB8rFEp/GUgCxCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T12:51:39Z:64955e87624b8826436ca86094888ce936b2d6b92cd7c5ab960eba74ecf51f4f:VkJn8ooqoo4jHs8XXAcZRP1S2kqL98+D9XxF3XCBIPLfA7e6UK3evRZQq9EA/jjidN5u1QeUFmgbU92Q07n2Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "rye/web"
 version: "1.0.0"
 tool_type: "subprocess"
 executor_id: "@subprocess"
 execution_protocol: "protocol:ryeos/core/tool_callback"
 description: "Fetch an HTTP(S) page and return markdown, text, or HTML"
+
+# How the timeline draws a call: the URL as the headline, the requested format
+# as the detail, and an excerpt of the page as the body.
+presentation:
+  counts_as: fetch
+  headline: [arguments.url]
+  detail: [arguments.format]
+  body: [result.output]
 
 config:
   command: "bin:ryeos-web-tools"
