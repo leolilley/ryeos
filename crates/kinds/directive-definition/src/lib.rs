@@ -3195,6 +3195,10 @@ mod reasoning_capture_config_tests {
             "transport": {"kind": "remote_http", "base_url": "https://example.invalid"},
             "schemas": {
                 "streaming": {"mode": streaming_mode},
+                "output_limit": {
+                    "path": "max_tokens",
+                    "semantics": "provider_native_output_tokens"
+                },
                 "reasoning": reasoning
             },
             "pricing": {"explicitly_free": true},
@@ -3372,7 +3376,7 @@ mod reasoning_capture_config_tests {
 
     #[test]
     fn fill_goes_with_on_missing_fill_and_nothing_else() {
-        let mut shape = gemini_shape();
+        let mut shape = claude_shape();
         shape["replay"]["placements"][0]["fill"] = json!({"x": 1});
         assert!(serde_json::from_value::<ReasoningSchemaConfig>(shape).is_err());
         let mut shape = gemini_shape();
