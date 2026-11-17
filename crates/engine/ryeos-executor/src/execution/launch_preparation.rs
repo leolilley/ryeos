@@ -4299,3 +4299,73 @@ fn launch_policy_forbidden(
         binding,
     }
 }
+
+#[cfg(test)]
+mod rebound_continuation_classification_tests {
+    use super::*;
+
+    /// Prepared-launch fields an operator rebind continuation must hold equal
+    /// to its source. Together with the replaced fields the state layer
+    /// declares, and `binding_records` (replaced at the rebound names only),
+    /// this is every field of [`PreparedRuntimeLaunch`].
+    const HELD_EQUAL_ON_REBIND: &[&str] = &[
+        "admitted_sessions",
+        "content_dependencies",
+        "environment_contributions",
+        "evidence_attachments",
+        "execution_dependencies",
+        "filesystem_authority_ceiling",
+        "network_authority_ceiling",
+        "project_result_requirement",
+        "resource_authority_ceiling",
+        "target_requirement",
+    ];
+
+    #[test]
+    fn every_prepared_launch_field_is_classified_for_a_rebound_continuation() {
+        // Built field by field, so a field added to the struct does not
+        // compile here until it is given a place in one of the lists.
+        let prepared = PreparedRuntimeLaunch {
+            project_result_requirement: ProjectResultRequirement::None,
+            filesystem_authority_ceiling:
+                ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+            network_authority_ceiling:
+                ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
+            target_requirement: None,
+            resource_authority_ceiling:
+                ryeos_engine::contracts::ExecutionResourceAuthorityCeiling::NodePolicy,
+            runtime_data: Default::default(),
+            required_secrets: Vec::new(),
+            runtime_facts: Default::default(),
+            binding_records: Default::default(),
+            execution_dependencies: Default::default(),
+            content_dependencies: Default::default(),
+            evidence_attachments: Default::default(),
+            environment_contributions: Default::default(),
+            admitted_sessions: Default::default(),
+            config_contributors: Vec::new(),
+            financial_authority: None,
+            external_effect_authority: None,
+        };
+        let value = serde_json::to_value(&prepared).expect("prepared launch value");
+        let fields: BTreeSet<&str> = value
+            .as_object()
+            .expect("prepared launch object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let replaced: BTreeSet<&str> = ryeos_state::objects::REBOUND_PREPARED_LAUNCH_FIELDS
+            .iter()
+            .copied()
+            .collect();
+        let held: BTreeSet<&str> = HELD_EQUAL_ON_REBIND.iter().copied().collect();
+        assert!(replaced.is_disjoint(&held));
+        assert!(!replaced.contains("binding_records") && !held.contains("binding_records"));
+        let classified: BTreeSet<&str> = replaced
+            .union(&held)
+            .copied()
+            .chain(std::iter::once("binding_records"))
+            .collect();
+        assert_eq!(fields, classified);
+    }
+}
