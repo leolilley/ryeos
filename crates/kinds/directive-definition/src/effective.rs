@@ -474,7 +474,8 @@ mod tests {
 
     #[test]
     fn unknown_outcome_ceiling_truth_table() {
-        let remote = provider_with(json!({"kind": "remote_http", "base_url": "https://example.test"}));
+        let remote =
+            provider_with(json!({"kind": "remote_http", "base_url": "https://example.test"}));
         let local = provider_with(json!({
             "kind": "admitted_local_worker",
             "execute": "worker:fixtures/local",
@@ -485,9 +486,13 @@ mod tests {
             on: vec![UnknownOutcomeClass::MidStream],
         };
         let once = parse_effective_header(&json!({})).unwrap();
-        let repeatable = parse_effective_header(&json!({"provider_contact": "repeatable"})).unwrap();
+        let repeatable =
+            parse_effective_header(&json!({"provider_contact": "repeatable"})).unwrap();
 
-        assert_eq!(unknown_outcome_retry_ceiling(&once, &remote, Some(&policy)), 0);
+        assert_eq!(
+            unknown_outcome_retry_ceiling(&once, &remote, Some(&policy)),
+            0
+        );
         assert_eq!(
             unknown_outcome_retry_ceiling(&repeatable, &remote, Some(&policy)),
             2

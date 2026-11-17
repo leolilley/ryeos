@@ -233,8 +233,15 @@ impl ProviderRetryReason {
     /// could have been sent, leaves the outcome known.
     pub const fn leaves_outcome_unknown(&self) -> bool {
         match self {
-            Self::Status { .. } | Self::Send { connect_phase: true } => false,
-            Self::Timeout | Self::Send { connect_phase: false } | Self::MidStream { .. } => true,
+            Self::Status { .. }
+            | Self::Send {
+                connect_phase: true,
+            } => false,
+            Self::Timeout
+            | Self::Send {
+                connect_phase: false,
+            }
+            | Self::MidStream { .. } => true,
         }
     }
 }

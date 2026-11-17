@@ -15725,7 +15725,15 @@ mod tests {
             let request_hash = lillux::sha256_hex(format!("first-{index}").as_bytes());
             let attempt_id = reserved_id(
                 &reserve(
-                    &db, THREAD, GENERATION, 1, 1, &request_hash, &authority, EXEC, None,
+                    &db,
+                    THREAD,
+                    GENERATION,
+                    1,
+                    1,
+                    &request_hash,
+                    &authority,
+                    EXEC,
+                    None,
                 )
                 .unwrap(),
             );

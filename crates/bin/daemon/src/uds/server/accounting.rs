@@ -681,7 +681,9 @@ pub(super) fn handle_provider_attempt_settle(
         check_unknown_outcome_retry(
             retry,
             &request.coordinate.transport,
-            sealed.external_effect_authority.unknown_outcome_retry_ceiling,
+            sealed
+                .external_effect_authority
+                .unknown_outcome_retry_ceiling,
         )?;
     }
     let binding = ledger

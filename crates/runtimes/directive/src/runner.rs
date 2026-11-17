@@ -743,9 +743,11 @@ fn retry_delay_for_reason(
         ProviderRetryReason::Send {
             connect_phase: true,
         } => true,
-        ProviderRetryReason::Timeout => {
-            unknown_outcome_admitted(UnknownOutcomeClass::Timeout, failed_attempt_number, execution)
-        }
+        ProviderRetryReason::Timeout => unknown_outcome_admitted(
+            UnknownOutcomeClass::Timeout,
+            failed_attempt_number,
+            execution,
+        ),
         ProviderRetryReason::Send {
             connect_phase: false,
         } => unknown_outcome_admitted(UnknownOutcomeClass::Send, failed_attempt_number, execution),
@@ -2907,8 +2909,7 @@ impl Runner {
                                             .turn_malformed_calls
                                             .iter()
                                             .find(|malformed| {
-                                                usize::try_from(malformed.call_index)
-                                                    .ok()
+                                                usize::try_from(malformed.call_index).ok()
                                                     == Some(call_index)
                                             })
                                             .cloned(),
@@ -2940,9 +2941,10 @@ impl Runner {
                                     .map(|policy| policy.message.clone());
                                 match message {
                                     Some(message) if self.can_start_another_turn() => {
-                                        let input =
-                                            ryeos_runtime::CognitionInput::text("harness", &message)
-                                                .with_kind("output_limit");
+                                        let input = ryeos_runtime::CognitionInput::text(
+                                            "harness", &message,
+                                        )
+                                        .with_kind("output_limit");
                                         if let Err(e) =
                                             self.callback.emit_cognition_input(&input).await
                                         {
@@ -3933,10 +3935,10 @@ impl Runner {
         malformed: Option<&ryeos_runtime::MalformedCall>,
     ) -> Result<Box<ryeos_runtime::callback::DispatchActionRequest>, String> {
         if let Some(malformed) = malformed {
-            return Err(
-                serde_json::to_string(&json!({ "error": malformed_call_error(malformed) }))
-                    .unwrap_or_else(|_| "{\"error\":\"malformed arguments\"}".to_string()),
-            );
+            return Err(serde_json::to_string(
+                &json!({ "error": malformed_call_error(malformed) }),
+            )
+            .unwrap_or_else(|_| "{\"error\":\"malformed arguments\"}".to_string()));
         }
         match self
             .dispatcher
@@ -5178,19 +5180,15 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        assert!(
-            malformed_calls_of_turn(&[], &message)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(malformed_calls_of_turn(&[], &message).unwrap().is_empty());
     }
 
     #[test]
     fn malformed_attribution_refuses_a_stream_that_disagrees_with_the_message() {
         let sha = "cd".repeat(32);
         let events = vec![tool_use_event("only", Some((3, &sha)))];
-        let error = malformed_calls_of_turn(&events, &assistant_calls(&["only", "extra"]))
-            .unwrap_err();
+        let error =
+            malformed_calls_of_turn(&events, &assistant_calls(&["only", "extra"])).unwrap_err();
         assert!(error.to_string().contains("cannot attribute"));
     }
 
@@ -6221,8 +6219,14 @@ mod tests {
         ];
         let cfg = unknown_policy_cfg(5, 2, all);
         for err in [timeout_err(), post_connect_send_err(), mid_stream_err()] {
-            assert_eq!(retry_backoff(&err, 0, &cfg), Some(Duration::from_millis(1000)));
-            assert_eq!(retry_backoff(&err, 1, &cfg), Some(Duration::from_millis(2000)));
+            assert_eq!(
+                retry_backoff(&err, 0, &cfg),
+                Some(Duration::from_millis(1000))
+            );
+            assert_eq!(
+                retry_backoff(&err, 1, &cfg),
+                Some(Duration::from_millis(2000))
+            );
             // The third failed attempt is past max_retries.
             assert_eq!(retry_backoff(&err, 2, &cfg), None);
         }

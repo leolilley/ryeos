@@ -869,10 +869,9 @@ mod tests {
         assert_eq!(cfg.on_output_limit.as_ref().unwrap().max_consecutive, 2);
         assert!(ExecutionConfig::default().on_output_limit.is_none());
 
-        let blank: ExecutionConfig = serde_yaml::from_str(
-            "on_output_limit:\n  max_consecutive: 1\n  message: \"  \"\n",
-        )
-        .unwrap();
+        let blank: ExecutionConfig =
+            serde_yaml::from_str("on_output_limit:\n  max_consecutive: 1\n  message: \"  \"\n")
+                .unwrap();
         assert!(blank.validate().is_err());
         assert!(
             serde_yaml::from_str::<ExecutionConfig>("on_output_limit:\n  max_consecutive: 1\n")

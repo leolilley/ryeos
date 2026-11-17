@@ -915,7 +915,8 @@ fn recover_provider_retry_testimonies(
                 anyhow::bail!("resume: provider_retry {field} contradicts its exact advancement");
             }
         }
-        if event.payload.get("supersedes") != Some(&crate::runner::retry_supersedes(&advance.decision))
+        if event.payload.get("supersedes")
+            != Some(&crate::runner::retry_supersedes(&advance.decision))
         {
             anyhow::bail!("resume: provider_retry supersedes contradicts its exact advancement");
         }
@@ -2846,7 +2847,11 @@ mod tests {
         assert!(error.to_string().contains("supersedes contradicts"));
 
         let mut missing = retry_event(&status);
-        missing.payload.as_object_mut().unwrap().remove("supersedes");
+        missing
+            .payload
+            .as_object_mut()
+            .unwrap()
+            .remove("supersedes");
         assert!(
             recover_provider_retry_testimonies(
                 &[prelude, missing],

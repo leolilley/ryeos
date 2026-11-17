@@ -1009,7 +1009,9 @@ fn a_provider_retry_marker_names_the_reason_and_any_superseded_output() {
         found
     };
     let cut = headlines(&[retry(1, 4)]);
-    assert!(cut.contains(&"provider retry, attempt 1 · partial output superseded, live events: 4".to_string()));
+    assert!(cut.contains(
+        &"provider retry, attempt 1 · partial output superseded, live events: 4".to_string()
+    ));
     let clean = headlines(&[retry(1, 0)]);
     assert_eq!(clean, vec!["provider retry, attempt 1".to_string()]);
 }
