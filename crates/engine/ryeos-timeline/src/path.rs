@@ -106,18 +106,26 @@ pub(crate) fn slot(slot: &Slot, event: &Value, cx: &Context) -> Option<String> {
 
 fn lookup_value(lookup: &crate::Lookup, event: &Value, cx: &Context) -> Option<String> {
     let thread = event.get("thread_id")?;
-    let wanted = get(event, &lookup.find.1)?;
+    // `array` and `find` select an element together; neither alone is a lookup.
+    let element_match = match (&lookup.array, &lookup.find) {
+        (Some(array), Some((field, source))) => Some((array, field, get(event, source)?)),
+        (None, None) => None,
+        _ => return None,
+    };
     cx.history.iter().rev().find_map(|previous| {
         if previous.get("event_type").and_then(Value::as_str) != Some(lookup.event.as_str())
             || previous.get("thread_id") != Some(thread)
         {
             return None;
         }
-        get(previous, &lookup.array)?
-            .as_array()?
-            .iter()
-            .find(|element| get(element, &lookup.find.0) == Some(wanted))
-            .and_then(|element| get(element, &lookup.get))
-            .map(text)
+        match element_match {
+            None => get(previous, &lookup.get).map(text),
+            Some((array, field, wanted)) => get(previous, array)?
+                .as_array()?
+                .iter()
+                .find(|element| get(element, field) == Some(wanted))
+                .and_then(|element| get(element, &lookup.get))
+                .map(text),
+        }
     })
 }

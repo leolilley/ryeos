@@ -728,6 +728,9 @@ pub struct RyeOsCore {
     /// already had a fetch in flight. Transient client backpressure: at most
     /// one request runs and one trailing request waits per source.
     pub(crate) deferred_source_fetches: BTreeMap<String, DeferredSourceFetch>,
+    /// Timeline sources whose next fetch must ask for the whole window because
+    /// an incremental update named an item the stored window lacks.
+    pub(crate) timeline_full_refetch: BTreeSet<String>,
     pub generation: u64,
     pub next_effect_id: u64,
 }
@@ -1869,6 +1872,62 @@ impl RyeOsCore {
         self.deferred_source_fetches.retain(|key, _| !belongs(key));
     }
 
+    /// A source that declares the `since_chain_seq` parameter and already
+    /// holds a window asks only for what changed after that window's highest
+    /// seq. The subject fingerprint is taken before this, so the parameter
+    /// never reads as a subject change.
+    fn with_window_since(
+        &mut self,
+        source_key: &str,
+        source: &super::content::SourceBinding,
+        mut params: serde_json::Value,
+    ) -> serde_json::Value {
+        const SINCE: &str = "since_chain_seq";
+        if self.timeline_full_refetch.remove(source_key)
+            || !source.dynamic_parameters.iter().any(|name| name == SINCE)
+        {
+            return params;
+        }
+        let highest = self
+            .data
+            .sources
+            .get(source_key)
+            .and_then(|response| response.get("highest_chain_seq"))
+            .and_then(serde_json::Value::as_i64);
+        if let (Some(highest), Some(fields)) = (highest, params.as_object_mut()) {
+            fields.insert(SINCE.to_string(), highest.to_string().into());
+        }
+        params
+    }
+
+    /// Refetch a timeline source's whole window, after an incremental update
+    /// that the stored window could not absorb.
+    pub(crate) fn refetch_window_in_full(&mut self, source_key: &str) -> Vec<RyeOsEffect> {
+        let Some(key) = super::source_key::RyeOsSourceInstanceKey::decode(source_key) else {
+            return Vec::new();
+        };
+        let super::source_key::RyeOsSourceChannel::Named(channel) = &key.channel else {
+            return Vec::new();
+        };
+        let Some(view_ref) = self
+            .mounted_view_ref(&key.view_instance)
+            .map(str::to_string)
+        else {
+            return Vec::new();
+        };
+        self.timeline_full_refetch.insert(source_key.to_string());
+        let effects = self.emit_fetch_source_for_instance_policy(
+            key.view_instance.clone(),
+            &view_ref,
+            false,
+            Some(channel),
+        );
+        if effects.is_empty() {
+            self.timeline_full_refetch.remove(source_key);
+        }
+        effects
+    }
+
     fn build_fetch_source(
         &mut self,
         attachment_id: &str,
@@ -1910,6 +1969,7 @@ impl RyeOsCore {
         if unresolved {
             return None;
         }
+        let params = self.with_window_since(&source_key, source, params);
         if hint_single_flight
             && self.pending_effects.values().any(|kind| {
                 matches!(kind, RyeOsEffectKind::FetchSource { tile_id, .. } if tile_id == &source_key)
@@ -2182,7 +2242,7 @@ impl RyeOsCore {
         let Some(response) = self.data.sources.get(source_key) else {
             return;
         };
-        let layout = super::timeline::timeline_layout_for(binding, response);
+        let layout = super::timeline::timeline_layout_for(binding, response, &instance, view_ref);
         let previous_by_key: HashMap<String, (String, Option<u64>)> = previous
             .as_ref()
             .map(|cache| {
@@ -2978,7 +3038,12 @@ impl RyeOsCore {
                 let layout = match self.data.timeline_sources.get(&source_key) {
                     Some(cache) => &cache.layout,
                     None => {
-                        built = super::timeline::timeline_layout_for(binding, response);
+                        built = super::timeline::timeline_layout_for(
+                            binding,
+                            response,
+                            &tile.instance_key,
+                            self.mounted_view_ref(&tile.instance_key).unwrap_or(""),
+                        );
                         &built
                     }
                 };

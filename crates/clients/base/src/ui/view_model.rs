@@ -16,7 +16,7 @@ mod execution;
 mod session;
 pub use dialogs::{RyeOsCommandChoice, RyeOsDialogVm, RyeOsShortcutEntryVm, RyeOsTileIntentVm};
 pub use execution::RyeOsTimelineEntryVm;
-use execution::{facet_backed_response, focused_timeline_entry};
+use execution::{facet_backed_response, focused_timeline_entry, retry_intent_for_focused_row};
 pub use session::{RyeOsSessionVm, RyeOsSurfaceChoiceVm};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1486,7 +1486,12 @@ fn bound_view_vm_keyed(
             let layout = match cached {
                 Some(cache) => &cache.layout,
                 None => {
-                    built = super::timeline::timeline_layout_for(binding, response);
+                    built = super::timeline::timeline_layout_for(
+                        binding,
+                        response,
+                        instance_key,
+                        view_ref,
+                    );
                     &built
                 }
             };
@@ -2105,7 +2110,7 @@ pub(crate) fn view_pointer_tree_fold(
 /// (no implicit "first affordance") — and the named affordance must be
 /// supplied by the `record` producer (binding-time validation) or activation is
 /// unbound (`None`).
-fn activate_affordance(binding: &super::content::ViewBinding) -> Option<String> {
+pub(crate) fn activate_affordance(binding: &super::content::ViewBinding) -> Option<String> {
     binding
         .selection
         .as_ref()
@@ -3056,12 +3061,32 @@ fn context_command_items(
     focused: Option<&RyeOsViewInstanceKey>,
 ) -> Vec<RyeOsCommandChoice> {
     let mut items = Vec::new();
+    // A failed turn the definition marks retryable offers retry: re-submit its
+    // own input as a continuation, pre-filled for review (not one-click).
+    // Surfaced two ways so it works everywhere: as the Inspect item's
+    // Shift+Enter secondary, and as a distinct plain-Enter item for clients
+    // that cannot send Shift+Enter.
+    let retry = focused.and_then(|instance| retry_intent_for_focused_row(core, instance));
+
     if let Some(intent) = inspect_intent_for_focused_row(core, focused) {
-        let hint =
-            focused_selection_hint(core, focused).unwrap_or_else(|| "focused row".to_string());
+        let hint = if retry.is_some() {
+            "Enter inspect · Shift+Enter retry".to_string()
+        } else {
+            focused_selection_hint(core, focused).unwrap_or_else(|| "focused row".to_string())
+        };
         items.push(RyeOsCommandChoice {
             label: "Inspect selection".to_string(),
             hint,
+            intent,
+            secondary_intent: retry.clone(),
+            enabled: true,
+        });
+    }
+
+    if let Some(intent) = retry {
+        items.push(RyeOsCommandChoice {
+            label: "Retry failed turn".to_string(),
+            hint: "re-submit this failed turn (review, then Enter)".to_string(),
             intent,
             secondary_intent: None,
             enabled: true,
@@ -4941,9 +4966,10 @@ mod tests {
         let mut core = test_support_core(session);
         let tile_key = core.active_view_set().unwrap().focused_tile.0.to_string();
         let key = tile_default_source_key(&core, core.active_view_set().unwrap().focused_tile);
-        core.data
-            .sources
-            .insert(key.clone(), json!({ "items": items, "older": 0 }));
+        core.data.sources.insert(
+            key.clone(),
+            json!({ "chain_root_id": "R-1", "items": items, "older": 0 }),
+        );
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::SetTileCursor {
                 tile_id: tile_key,
@@ -5108,6 +5134,40 @@ mod tests {
             .expect("inspect item on an outcome with a reason");
         assert!(
             matches!(&inspect.intent, RyeOsUiIntent::InspectSummary { title, .. } if title == "failed — boom")
+        );
+    }
+
+    #[test]
+    fn command_overlay_offers_retry_on_an_outcome_that_projects_a_retry_input() {
+        let mut failed = outcome("failed", Some("boom"));
+        failed["slots"]["retry_input"] = json!("do it");
+        let core = feed_core(json!([failed]));
+        let items = available_command_items(&core);
+        let inspect = items
+            .iter()
+            .find(|i| i.label == "Inspect selection")
+            .expect("inspect item");
+        assert!(
+            matches!(&inspect.secondary_intent,
+                Some(RyeOsUiIntent::PrefillRetryTurn { thread_id, chain_root_id, input })
+                    if thread_id == "T-1" && chain_root_id == "R-1" && input == "do it"),
+            "retry is the inspect item's secondary; got {:?}",
+            inspect.secondary_intent
+        );
+        let retry = items
+            .iter()
+            .find(|i| i.label == "Retry failed turn")
+            .expect("distinct retry item");
+        assert!(matches!(
+            &retry.intent,
+            RyeOsUiIntent::PrefillRetryTurn { thread_id, .. } if thread_id == "T-1"
+        ));
+        // Without the projected input there is no retry.
+        let core = feed_core(json!([outcome("failed", Some("boom"))]));
+        assert!(
+            !available_command_items(&core)
+                .iter()
+                .any(|i| i.label == "Retry failed turn")
         );
     }
 

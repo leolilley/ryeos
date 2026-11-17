@@ -2373,6 +2373,7 @@ dependencies = [
  "serde_json",
  "serde_stacker",
  "sha2",
+ "signal-hook",
  "tempfile",
  "tokio",
  "windows-sys 0.59.0",
@@ -4434,9 +4435,8 @@ dependencies = [
 name = "ryeos-claude-code-adapter"
 version = "0.1.0"
 dependencies = [
- "libc",
+ "lillux",
  "serde_json",
- "signal-hook",
  "uuid",
 ]
 

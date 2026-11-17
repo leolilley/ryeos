@@ -16,7 +16,7 @@ mod fold;
 mod passes;
 mod path;
 
-pub use fold::fold;
+pub use fold::{Folder, fold};
 
 /// How events fold into entries. Parsed from signed data.
 #[derive(Debug, Clone, Deserialize)]
@@ -216,15 +216,20 @@ pub enum Slot {
     Lookup { lookup: Lookup },
 }
 
-/// A value taken from an earlier event of the same thread: the latest event of
-/// type `event` whose array at `array` has an element whose `find.0` equals
-/// this event's `find.1`; the slot is that element's `get`.
+/// A value taken from an earlier event of the same thread.
+///
+/// With `array` and `find`: the latest event of type `event` whose array at
+/// `array` has an element whose `find.0` equals this event's `find.1`; the slot
+/// is that element's `get`. Without them: the latest event of type `event`
+/// where `get` resolves; the slot is that value.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Lookup {
     pub event: String,
-    pub array: String,
-    pub find: (String, String),
+    #[serde(default)]
+    pub array: Option<String>,
+    #[serde(default)]
+    pub find: Option<(String, String)>,
     pub get: String,
 }
 
@@ -280,6 +285,9 @@ pub struct Recap {
     pub exchange: String,
     pub work: usize,
     pub duration_s: Option<i64>,
+    /// Highest `chain_seq` among the exchange's entries: the recap changes
+    /// only when one of them does.
+    pub seq: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -288,6 +296,26 @@ pub enum Item {
     Entry(Entry),
     Cluster(Cluster),
     Recap(Recap),
+}
+
+impl Item {
+    pub fn id(&self) -> &str {
+        match self {
+            Item::Entry(entry) => &entry.id,
+            Item::Cluster(cluster) => &cluster.id,
+            Item::Recap(recap) => &recap.id,
+        }
+    }
+
+    /// The highest `chain_seq` that contributed to the item. An item whose
+    /// content changed has a larger value than it had before the change.
+    pub fn last_seq(&self) -> i64 {
+        match self {
+            Item::Entry(entry) => entry.seq.1,
+            Item::Cluster(cluster) => cluster.members.iter().map(|m| m.seq.1).max().unwrap_or(0),
+            Item::Recap(recap) => recap.seq,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
