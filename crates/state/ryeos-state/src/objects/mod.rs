@@ -61,6 +61,7 @@ pub mod source_closure;
 pub mod source_manifest;
 pub mod state_anchor;
 pub mod state_manifest;
+pub mod thread_attachment;
 pub mod thread_event;
 pub mod thread_snapshot;
 pub mod worker_session_restore;
@@ -235,11 +236,17 @@ pub use state_manifest::{
     MAX_STATE_MANIFEST_OBJECTS, STATE_MANIFEST_KIND, STATE_MANIFEST_SCHEMA_VERSION, StateManifest,
     StateManifestBlob,
 };
+pub use thread_attachment::{
+    MAX_THREAD_ATTACHMENT_BYTES, MAX_THREAD_ATTACHMENT_MEDIA_TYPE_BYTES, THREAD_ATTACHMENT_KIND,
+    THREAD_ATTACHMENT_SCHEMA, ThreadAttachment,
+};
 pub use thread_event::{
     ACCOUNTING_ALLOWANCE_TRANSFER_KIND, ACCOUNTING_ALLOWANCE_TRANSFER_SCHEMA,
-    AccountingAllowanceTransfer, EventDurability, MAX_HOSTED_SESSION_OBSERVATION_EVENTS,
-    MAX_STRUCTURED_OBSERVATION_BATCH_BYTES, MAX_THREAD_EVENT_SERIALIZED_BYTES,
+    ATTACHMENT_REFS_FIELD, AccountingAllowanceTransfer, EventDurability,
+    MAX_HOSTED_SESSION_OBSERVATION_EVENTS, MAX_STRUCTURED_OBSERVATION_BATCH_BYTES,
+    MAX_THREAD_EVENT_ATTACHMENT_REFS, MAX_THREAD_EVENT_SERIALIZED_BYTES,
     REMOTE_CONTINUATION_AUTHORITY_SCHEMA, RemoteContinuationAuthority, ThreadEvent,
+    payload_attachment_refs,
 };
 pub use thread_snapshot::{
     CapturedEffectiveTrustClass, CapturedItemSpace, CapturedItemTrustClass,

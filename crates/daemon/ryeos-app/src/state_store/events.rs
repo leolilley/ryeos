@@ -53,7 +53,38 @@ impl StateStore {
         thread_id: &str,
         events: &[NewEventRecord],
     ) -> Result<Option<Vec<PersistedEventRecord>>> {
-        self.append_events_if_thread_running_inner(chain_root_id, thread_id, events, None)
+        self.append_events_if_thread_running_inner(chain_root_id, thread_id, events, &[], None)
+    }
+
+    /// Append runtime events that may name attachments, storing the
+    /// attachments under the same write permit and state lock as the append
+    /// so no garbage sweep can run between storing and naming. Every
+    /// `attachment_refs` entry must name an attachment stored by this call or
+    /// already stored, and only an indexed event may carry one.
+    #[tracing::instrument(
+        name = "state:append_events_with_attachments_if_thread_running",
+        skip(self, events, attachments),
+        fields(
+            thread_id = %thread_id,
+            chain_root_id = %chain_root_id,
+            event_count = events.len(),
+            attachment_count = attachments.len(),
+        )
+    )]
+    pub fn append_events_with_attachments_if_thread_running(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        events: &[NewEventRecord],
+        attachments: &[NewThreadAttachment],
+    ) -> Result<Option<Vec<PersistedEventRecord>>> {
+        self.append_events_if_thread_running_inner(
+            chain_root_id,
+            thread_id,
+            events,
+            attachments,
+            None,
+        )
     }
 
     /// Process-observer admission must fence the exact launch owner under the
@@ -70,6 +101,7 @@ impl StateStore {
             chain_root_id,
             thread_id,
             events,
+            &[],
             Some(launch_owner),
         )
     }
@@ -79,6 +111,7 @@ impl StateStore {
         chain_root_id: &str,
         thread_id: &str,
         events: &[NewEventRecord],
+        attachments: &[NewThreadAttachment],
         launch_owner: Option<&str>,
     ) -> Result<Option<Vec<PersistedEventRecord>>> {
         let has_cas_events = events
@@ -117,14 +150,68 @@ impl StateStore {
             return Ok(None);
         }
 
-        append_events_locked(
-            &g,
-            permit.as_ref().map(StateMutationPermit::cas_guard),
-            chain_root_id,
-            thread_id,
-            events,
-        )
-        .map(Some)
+        let cas_guard = permit.as_ref().map(StateMutationPermit::cas_guard);
+        self.store_and_check_event_attachments(cas_guard, events, attachments)?;
+        append_events_locked(&g, cas_guard, chain_root_id, thread_id, events).map(Some)
+    }
+
+    /// Store `attachments` and prove that every attachment an event names
+    /// exists with its blob. Runs under the caller's write permit.
+    fn store_and_check_event_attachments(
+        &self,
+        cas_guard: Option<&ryeos_state::CasMutationGuard>,
+        events: &[NewEventRecord],
+        attachments: &[NewThreadAttachment],
+    ) -> Result<()> {
+        let mut references = Vec::new();
+        for event in events {
+            let named = ryeos_state::objects::payload_attachment_refs(&event.payload)
+                .with_context(|| format!("event '{}' attachment references", event.event_type))?;
+            if !named.is_empty() && event.storage_class != "indexed" {
+                bail!(
+                    "event '{}' is stored '{}' and cannot name attachments; only an indexed \
+                     event can",
+                    event.event_type,
+                    event.storage_class
+                );
+            }
+            references.extend(named);
+        }
+        if references.is_empty() && attachments.is_empty() {
+            return Ok(());
+        }
+        let cas_guard = cas_guard.ok_or_else(|| {
+            anyhow!("attachments require a write permit, but the append holds none")
+        })?;
+        self.state_authority.ensure_guard(cas_guard)?;
+        let cas = self.state_authority.cas_store()?;
+        let mut stored = BTreeSet::new();
+        for upload in attachments {
+            let object = ryeos_state::objects::ThreadAttachment::for_bytes(
+                &upload.media_type,
+                &upload.bytes,
+            )?;
+            cas.put_blob(&upload.bytes)
+                .context("store thread attachment blob in CAS")?;
+            let hash = cas
+                .store_object(&object.to_value())
+                .context("store thread attachment object in CAS")?;
+            stored.insert(hash);
+        }
+        for reference in references {
+            if stored.contains(reference) {
+                continue;
+            }
+            let object = cas
+                .get_object(reference)?
+                .ok_or_else(|| anyhow!("event names attachment {reference}, which is not stored"))
+                .and_then(|value| ryeos_state::objects::ThreadAttachment::from_value(&value))
+                .with_context(|| format!("event names attachment {reference}"))?;
+            if !cas.has_blob(&object.blob_hash)? {
+                bail!("event names attachment {reference}, whose blob is not stored");
+            }
+        }
+        Ok(())
     }
 
     /// Append the exact daemon-authored launch-attempt audit immediately before
@@ -258,14 +345,36 @@ impl StateStore {
         limit: usize,
         max_serialized_bytes: usize,
     ) -> Result<PersistedEventPage> {
+        self.replay_events_of_types(
+            chain_root_id,
+            thread_id,
+            after_seq,
+            limit,
+            max_serialized_bytes,
+            None,
+        )
+    }
+
+    /// [`Self::replay_events`] limited to the given event types (`None` keeps
+    /// every type); the limit and byte budget count only matching events.
+    pub fn replay_events_of_types(
+        &self,
+        chain_root_id: &str,
+        thread_id: Option<&str>,
+        after_seq: Option<i64>,
+        limit: usize,
+        max_serialized_bytes: usize,
+        event_types: Option<&[String]>,
+    ) -> Result<PersistedEventPage> {
         let g = self.lock()?;
-        let page = queries::replay_events_bounded(
+        let page = queries::replay_events_of_types_bounded(
             g.state_db.projection(),
             chain_root_id,
             thread_id,
             after_seq,
             limit,
             max_serialized_bytes,
+            event_types,
         )?;
         drop(g);
         let events = page

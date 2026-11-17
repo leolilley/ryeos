@@ -790,13 +790,10 @@ mod tests {
     #[test]
     fn settlement_cannot_carry_both_answer_and_retry() {
         let answer = ryeos_provider_contract::ProviderCallAnswer {
-            message: ryeos_provider_contract::RecordedMessage {
-                role: "assistant".to_string(),
-                content: Some(serde_json::json!("done")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
+            message: ryeos_provider_contract::Message::text(
+                ryeos_provider_contract::Role::Assistant,
+                "done",
+            ),
             finish_reason: Some("stop".to_string()),
         };
         let params = ProviderAttemptSettleParams {

@@ -8,6 +8,8 @@
 //! send time. The credential VALUE stays outside every digest — only its
 //! declared header name participates.
 
+#[cfg(feature = "latency-profiling")]
+use crate::directive::ProviderMessageExt as _;
 use anyhow::{Result, anyhow, bail};
 #[cfg(feature = "latency-profiling")]
 use std::time::Instant;
@@ -135,7 +137,7 @@ pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<Prepar
         let mut reasoning_replay_bytes = 0_u64;
         for message in input.messages {
             let bytes = serialized_len(message);
-            match message.role.as_str() {
+            match message.role() {
                 "system" => system_message_bytes = system_message_bytes.saturating_add(bytes),
                 "user" => user_message_bytes = user_message_bytes.saturating_add(bytes),
                 "assistant" => {
@@ -146,8 +148,7 @@ pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<Prepar
             }
             reasoning_replay_bytes = reasoning_replay_bytes.saturating_add(
                 message
-                    .reasoning_content
-                    .as_ref()
+                    .reasoning_text()
                     .map_or(0, |reasoning| reasoning.len() as u64),
             );
         }
@@ -356,7 +357,7 @@ fn serialized_len(value: &impl serde::Serialize) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::directive::{ExecutionConfig, ProviderMessage};
+    use crate::directive::{ExecutionConfig, ProviderMessage, ProviderMessageExt};
     use ryeos_directive_definition::{ProviderConfig, ReasoningConfig, ReasoningMode};
     use ryeos_runtime::callback_client::CallbackClient;
     use ryeos_runtime::envelope::EnvelopeCallback;
@@ -395,13 +396,7 @@ mod tests {
         let provider = provider();
         let client = reqwest::Client::new();
         let execution = ExecutionConfig::default();
-        let messages = [ProviderMessage {
-            role: "user".to_string(),
-            content: Some(json!("hello")),
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-        }];
+        let messages = [ProviderMessage::user("hello")];
         let callback_config = EnvelopeCallback {
             socket_path: std::path::PathBuf::from("/nonexistent/ryeos-callback.sock"),
             token: "unused".to_string(),
@@ -468,13 +463,7 @@ mod tests {
         let client = reqwest::Client::new();
         let provider = provider();
         let execution = ExecutionConfig::default();
-        let messages = [ProviderMessage {
-            role: "user".to_string(),
-            content: Some(json!("hello")),
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-        }];
+        let messages = [ProviderMessage::user("hello")];
         let callback_config = EnvelopeCallback {
             socket_path: std::path::PathBuf::from("/nonexistent/ryeos-callback.sock"),
             token: "unused".to_string(),

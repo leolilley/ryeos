@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-18T01:26:29Z:6034b628c92912180cfcd76c8bc40096171df32e426ad0742f8ebbed1e16c9ae:W51MH9JOdyoAdHfAxR6Dfzp5pyhFRAMRoh2MbUPWbMqVf0/gXl4zaexOD5IYEv5DFLMMEh2pcB9JNMQYUHecDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-17T05:02:42Z:4742529e5deb13aa6df03f88b3f226cf2b7d8af2b73f2486548f6ac579247607:wC8+UYsNspn0mBQIMxeZzLmlFBkQ8poyk/8/K6pZ4iGpaTiVLl3sddhDwDd6DP6/0JyLsXXKb1Vadrl/pf5IBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: steering-graph-interrupt-and-cancel-path
@@ -28,7 +28,7 @@ thread's allowed actions only when its profile has `supports_interrupt: true`.
 `allowed_actions` is refused (`command_service.rs`).
 
 The directive runtime honors an interrupt: SIGUSR1 seals the partial cognition
-as `cognition_out { interrupted: true }`, refunds the turn, and folds any queued
+as `cognition_out { finish: "interrupted" }`, refunds the turn, and folds any queued
 input (the braid even renders an `interrupted` seam). **The graph walker has no
 equivalent.** A running graph is a segment-walk over a frontier; there is no
 in-flight signal it catches and reseals as a partial turn, and

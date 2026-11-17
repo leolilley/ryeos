@@ -75,7 +75,10 @@ fn cognition_in_batch(content: &str) -> Vec<NewEventRecord> {
     vec![NewEventRecord {
         event_type: "cognition_in".to_string(),
         storage_class: "indexed".to_string(),
-        payload: serde_json::json!({ "content": content }),
+        payload: ryeos_runtime::cognition::to_payload(&ryeos_runtime::CognitionInput::text(
+            "operator", content,
+        ))
+        .expect("operator input payload"),
     }]
 }
 
@@ -88,17 +91,13 @@ fn cognition_in_contents(state: &AppState, thread_id: &str) -> Vec<String> {
             thread_id: Some(thread_id.to_string()),
             after_chain_seq: None,
             limit: 200,
+            event_types: None,
         })
         .expect("replay");
     res.events
         .into_iter()
         .filter(|e| e.event_type == "cognition_in")
-        .filter_map(|e| {
-            e.payload
-                .get("content")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-        })
+        .filter_map(|e| e.payload["parts"][0]["text"].as_str().map(String::from))
         .collect()
 }
 

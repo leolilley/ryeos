@@ -97,11 +97,11 @@ pub const THREAD_FACET_SET: &str = "thread_facet_set";
 pub const THREAD_RECONCILED: &str = "thread_reconciled";
 pub const ORPHAN_PROCESS_KILLED: &str = "orphan_process_killed";
 
-pub const SYSTEM_PROMPT: &str = "system_prompt";
-pub const CONTEXT_INJECTED: &str = "context_injected";
 pub const COGNITION_IN: &str = "cognition_in";
 pub const COGNITION_OUT: &str = "cognition_out";
 pub const COGNITION_REASONING: &str = "cognition_reasoning";
+pub const COGNITION_FRAME: &str = "cognition_frame";
+pub const COGNITION_COMPACTION: &str = "cognition_compaction";
 
 pub const TOOL_CALL_START: &str = "tool_call_start";
 pub const TOOL_CALL_RESULT: &str = "tool_call_result";

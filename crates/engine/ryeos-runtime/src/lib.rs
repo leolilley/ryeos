@@ -8,6 +8,7 @@ pub mod callback_client;
 pub mod callback_contract;
 pub mod callback_uds;
 pub mod checkpoint;
+pub mod cognition;
 pub mod command;
 pub mod compiled_template;
 pub mod daemon_rpc;
@@ -36,12 +37,16 @@ pub use authorizer::{
     CapabilityParseError, canonical_cap, cap_matches,
 };
 pub use callback::{
-    ActionPayload, CallbackError, DispatchActionRequest, ProjectObservationPublishParams,
-    RUNTIME_FAILURE_KIND, ReplayResponse, ReplayedEventRecord, RuntimeCallbackAPI, RuntimeFailure,
-    RuntimeFailureDiagnosticLocator, TerminalCompletion, client_from_env, parse_hook_action,
-    validate_runtime_thread_id,
+    ActionPayload, CallbackError, DispatchActionRequest, EventAppendOptions, EventAttachment,
+    ProjectObservationPublishParams, RUNTIME_FAILURE_KIND, ReplayResponse, ReplayedEventRecord,
+    RuntimeCallbackAPI, RuntimeFailure, RuntimeFailureDiagnosticLocator, TerminalCompletion,
+    client_from_env, parse_hook_action, validate_runtime_thread_id,
 };
 pub use checkpoint::CheckpointWriter;
+pub use cognition::{
+    CognitionFramePayload, CognitionInput, CognitionOutPayload, CognitionUsage, FINISH_INTERRUPTED,
+    FrameRecord, FrameRequestOptions, ToolResultGuard, ToolResultPayload, TurnMarker,
+};
 pub use command::{
     CommandAliasDef, CommandArgumentArity, CommandArgumentDef, CommandArgumentForm,
     CommandArgumentKind, CommandArgumentSlot, CommandAvailability, CommandControlFlag, CommandDef,
@@ -60,7 +65,7 @@ pub use events::{
     HOOK_OBSERVATION_SCHEMA, HookEvidenceDescriptor, HookFailedPayload, HookFailureClass,
     HookObservationRecordedPayload, MAX_RUNTIME_EVENT_BATCH_BYTES, MAX_RUNTIME_EVENT_BATCH_ITEMS,
     MAX_RUNTIME_EVENT_PAYLOAD_BYTES, RuntimeEventType, StorageClass, cognition_out_is_progressive,
-    encode_bounded_text_payloads, encode_cognition_in_payloads,
+    encode_bounded_text_payloads, encode_cognition_in_batch, encode_cognition_in_payloads,
 };
 pub use expression::{
     CompilationLimits, CompiledExpression, CompiledTemplate, ErrorPhase, EvaluationContext,

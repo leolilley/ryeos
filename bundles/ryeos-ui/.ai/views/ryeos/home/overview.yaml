@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-16T21:46:28Z:f119e9d8f1fe89823910cf8f8df66deaff24d2d400b7b4de0a728f99c1f7d3a5:ZSDMtYGqjhhnY5uRqr/43jiFaL5YhV53iVHubYigyYhiQBMnaxZRnAxIgk6vpjWUzN+QgOiQhpLreKFt+cnoCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T06:37:39Z:937600ef21475101ee8e1dd60459f1c0bf912bbccafd7e9306bfeafeb710a90b:YrlJ0+JPI25AC9OBRlgFVxaDgu659jKZeqGCOoxhmhJlEpzSc+N8IYZ+qTi0LK1UnPrJitq5GjQ8KhyH+s5pAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: assistant-home
 title: Home
 version: "1.0.0"
@@ -14,7 +14,7 @@ sources:
     ref: service:ui/ryeos-ui/node/activity
     params:
       event_limit: 30
-      exclude_types: ["seat.facet", "thread_usage", "cognition_out"]
+      exclude_types: ["seat.facet", "thread_usage", "cognition_out", "cognition_frame", "cognition_compaction"]
     collection: events
   attention:
     ref: service:ui/ryeos-ui/work/attention

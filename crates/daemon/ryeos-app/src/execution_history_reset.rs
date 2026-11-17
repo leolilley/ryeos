@@ -3700,13 +3700,7 @@ mod tests {
     fn local_terminal() -> AdmittedLocalWorkerFinal {
         AdmittedLocalWorkerFinal {
             answer: ProviderCallAnswer {
-                message: RecordedMessage {
-                    role: "assistant".to_owned(),
-                    content: Some(serde_json::Value::String("done".to_owned())),
-                    tool_calls: None,
-                    tool_call_id: None,
-                    reasoning_content: None,
-                },
+                message: RecordedMessage::text(ryeos_provider_contract::Role::Assistant, "done"),
                 finish_reason: Some("stop".to_owned()),
             },
             usage: AdmittedLocalWorkerUsage {

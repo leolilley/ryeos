@@ -11,8 +11,8 @@ use sha2::{Digest, Sha256};
 #[cfg(test)]
 use crate::directive::FinishReason;
 use crate::directive::{
-    ExecutionConfig, MalformedArgs, ProviderMessage, StreamEvent, ToolCall, ToolSchema,
-    UsageUpdate, normalize_finish_reason,
+    ExecutionConfig, MalformedArgs, ProviderMessage, ProviderMessageExt, StreamEvent, ToolCall,
+    ToolSchema, UsageUpdate, normalize_finish_reason,
 };
 use crate::provider_adapter::http::{
     AdapterResponse, ObservedOutput, ProviderLimitContractStatus, ProviderUsageSource, TokenUsage,
@@ -463,20 +463,14 @@ pub struct CutAttemptState {
 /// role required by a later request.
 #[derive(Debug, Clone, Default)]
 pub struct InterruptedCognition {
-    pub content: Option<Value>,
-    pub reasoning_content: Option<String>,
+    /// The complete text and reasoning parts, in the order the stream gave
+    /// them. Never a tool call.
+    pub parts: Vec<ryeos_provider_contract::Part>,
 }
 
 impl InterruptedCognition {
     pub fn into_provider_message(self) -> ProviderMessage {
-        ProviderMessage {
-            // Explicit provider-wire rendering of a RyeOS cognition output.
-            role: "assistant".to_string(),
-            content: self.content,
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: self.reasoning_content,
-        }
+        ProviderMessage::new(ryeos_provider_contract::Role::Assistant, self.parts)
     }
 }
 
@@ -1461,36 +1455,23 @@ fn completed_from_retained_local_observation(
     requested_output_tokens: Option<u64>,
 ) -> Result<StreamOutcome> {
     terminal.validate()?;
+    let message = terminal.answer.message.clone();
     let mut meter = StreamOutputMeter::default();
-    if let Some(text) = terminal
-        .answer
-        .message
-        .content
-        .as_ref()
-        .and_then(Value::as_str)
-    {
+    if let Some(text) = message.text() {
         meter.accept(
-            &StreamEvent::Delta(text.to_owned()),
+            &StreamEvent::Delta(text),
             input.execution.max_stream_output_bytes_per_turn,
             0,
         )?;
     }
-    if let Some(reasoning) = terminal.answer.message.reasoning_content.as_deref() {
+    if let Some(reasoning) = message.reasoning_text() {
         meter.accept(
-            &StreamEvent::ReasoningDelta(reasoning.to_owned()),
+            &StreamEvent::ReasoningDelta(reasoning),
             input.execution.max_stream_output_bytes_per_turn,
             0,
         )?;
     }
-    for (index, call) in terminal
-        .answer
-        .message
-        .tool_calls
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
-        .enumerate()
-    {
+    for (index, call) in message.calls().iter().enumerate() {
         meter.accept(
             &StreamEvent::ToolUse {
                 id: call.id.clone(),
@@ -1504,8 +1485,6 @@ fn completed_from_retained_local_observation(
             0,
         )?;
     }
-    let message: ProviderMessage =
-        serde_json::from_value(serde_json::to_value(&terminal.answer.message)?)?;
     let usage = TokenUsage {
         input_tokens: Some(terminal.usage.input_tokens),
         output_tokens: Some(terminal.usage.output_tokens),
@@ -1627,9 +1606,7 @@ pub async fn send_prepared_local_streaming(
     let mut after_sequence = 0u64;
     let mut output_meter = StreamOutputMeter::default();
     let mut live_output_events_emitted = 0usize;
-    let mut accumulated_text = String::new();
-    let mut accumulated_reasoning = String::new();
-    let mut accumulated_tools = Vec::new();
+    let mut answer_parts = crate::provider_adapter::parts_builder::PartsBuilder::default();
     let mut all_events = Vec::new();
     let mut final_value: Option<Value> = None;
 
@@ -1647,9 +1624,7 @@ pub async fn send_prepared_local_streaming(
             return if interrupted {
                 Ok(StreamOutcome::Interrupted {
                     partial_cognition: InterruptedCognition {
-                        content: (!accumulated_text.is_empty()).then(|| json!(accumulated_text)),
-                        reasoning_content: (!accumulated_reasoning.is_empty())
-                            .then_some(accumulated_reasoning),
+                        parts: answer_parts.interrupted_parts(),
                     },
                     events: all_events,
                     attempt,
@@ -1734,7 +1709,7 @@ pub async fn send_prepared_local_streaming(
                     )?;
                     match &semantic {
                         StreamEvent::Delta(text) => {
-                            accumulated_text.push_str(text);
+                            answer_parts.push_text(text);
                             input
                                 .callback
                                 .append_runtime_event(
@@ -1757,7 +1732,7 @@ pub async fn send_prepared_local_streaming(
                                 live_output_events_emitted.saturating_add(1);
                         }
                         StreamEvent::ReasoningDelta(text) => {
-                            accumulated_reasoning.push_str(text);
+                            answer_parts.push_reasoning(text);
                         }
                         StreamEvent::ToolUse {
                             id,
@@ -1766,7 +1741,7 @@ pub async fn send_prepared_local_streaming(
                             malformed_args,
                             ..
                         } => {
-                            accumulated_tools.push(ToolCall {
+                            answer_parts.push_call(ToolCall {
                                 id: id.clone(),
                                 name: name.clone(),
                                 arguments: arguments.clone(),
@@ -1854,27 +1829,12 @@ pub async fn send_prepared_local_streaming(
         &final_value.expect("final value checked above"),
     )
     .context("decode admitted local-worker final result")?;
-    let message: ProviderMessage =
-        serde_json::from_value(serde_json::to_value(&final_result.answer.message)?)?;
-    if message.role != "assistant"
-        || message.tool_call_id.is_some()
-        || final_result
-            .answer
-            .message
-            .content
-            .as_ref()
-            .and_then(Value::as_str)
-            != (!accumulated_text.is_empty()).then_some(accumulated_text.as_str())
-        || final_result.answer.message.reasoning_content.as_deref()
-            != (!accumulated_reasoning.is_empty()).then_some(accumulated_reasoning.as_str())
-        || serde_json::to_value(
-            final_result
-                .answer
-                .message
-                .tool_calls
-                .as_deref()
-                .unwrap_or_default(),
-        )? != serde_json::to_value(&accumulated_tools)?
+    let message = final_result.answer.message.clone();
+    if message.role() != "assistant"
+        || message.tool_call_id().is_some()
+        || message.text() != answer_parts.text()
+        || message.reasoning_text() != answer_parts.reasoning_text()
+        || serde_json::to_value(message.calls())? != serde_json::to_value(answer_parts.calls())?
     {
         bail!("local worker final answer contradicts its streamed semantic events");
     }
@@ -2207,9 +2167,7 @@ async fn send_prepared_streaming_inner(
     // with `non-utf8 SSE chunk`.
     let mut utf8_carry: Vec<u8> = Vec::new();
     let mut all_events: Vec<StreamEvent> = Vec::new();
-    let mut accumulated_text = String::new();
-    let mut accumulated_reasoning = String::new();
-    let mut accumulated_tools: Vec<ToolCall> = Vec::new();
+    let mut answer_parts = crate::provider_adapter::parts_builder::PartsBuilder::default();
     let mut output_meter = StreamOutputMeter::default();
     #[cfg(feature = "latency-profiling")]
     let mut provider_stream_started_published = false;
@@ -2500,7 +2458,7 @@ async fn send_prepared_streaming_inner(
                     })?;
                 match &ev {
                     StreamEvent::Delta(text) => {
-                        accumulated_text.push_str(text);
+                        answer_parts.push_text(text);
                         progressive_events.push_text(turn, text);
                         if (!text.trim().is_empty() && !first_non_whitespace_text_published)
                             || progressive_events.is_full()
@@ -2517,7 +2475,7 @@ async fn send_prepared_streaming_inner(
                         malformed_args,
                         ..
                     } => {
-                        accumulated_tools.push(ToolCall {
+                        answer_parts.push_call(ToolCall {
                             id: id.clone(),
                             name: name.clone(),
                             arguments: arguments.clone(),
@@ -2579,7 +2537,7 @@ async fn send_prepared_streaming_inner(
                                 tracing::warn!(%error, "provider reasoning-start milestone publication failed");
                             }
                         }
-                        accumulated_reasoning.push_str(text);
+                        answer_parts.push_reasoning(text);
                     }
                 }
                 all_events.push(ev);
@@ -2718,7 +2676,7 @@ async fn send_prepared_streaming_inner(
                 })?;
             match &ev {
                 StreamEvent::Delta(text) => {
-                    accumulated_text.push_str(text);
+                    answer_parts.push_text(text);
                     progressive_events.push_text(turn, text);
                     if (!text.trim().is_empty() && !first_non_whitespace_text_published)
                         || progressive_events.is_full()
@@ -2735,7 +2693,7 @@ async fn send_prepared_streaming_inner(
                     malformed_args,
                     ..
                 } => {
-                    accumulated_tools.push(ToolCall {
+                    answer_parts.push_call(ToolCall {
                         id: id.clone(),
                         name: name.clone(),
                         arguments: arguments.clone(),
@@ -2795,7 +2753,7 @@ async fn send_prepared_streaming_inner(
                             tracing::warn!(%error, "provider reasoning-start milestone publication failed");
                         }
                     }
-                    accumulated_reasoning.push_str(text);
+                    answer_parts.push_reasoning(text);
                 }
             }
             all_events.push(ev);
@@ -2836,43 +2794,25 @@ async fn send_prepared_streaming_inner(
         }));
     }
 
-    let content = if accumulated_text.is_empty() {
-        None
-    } else {
-        Some(json!(accumulated_text))
-    };
-    let reasoning_content = if accumulated_reasoning.is_empty() {
-        None
-    } else {
-        Some(accumulated_reasoning)
-    };
-
-    // Interrupt cut: seal the partial cognition with content + reasoning only.
-    // NO tool_calls — an interrupted cognition didn't complete
-    // its tool call, so the folded wire history has no unpaired tool_call → the
-    // runner records `cognition_out{interrupted:true}` from this.
+    // Interrupt cut: seal the partial cognition with its complete text and
+    // reasoning parts only. NO tool call: an interrupted cognition didn't
+    // complete its tool call, so the folded wire history has no unpaired
+    // tool call. The runner records a `cognition_out` with finish
+    // "interrupted" from this.
     if exit == LoopExit::Interrupted {
         return Ok(StreamOutcome::Interrupted {
             partial_cognition: InterruptedCognition {
-                content,
-                reasoning_content,
+                parts: answer_parts.interrupted_parts(),
             },
             events: all_events,
             attempt: CutAttemptState { usage: last_usage },
         });
     }
 
-    let message = ProviderMessage {
-        role: "assistant".to_string(),
-        content,
-        tool_calls: if accumulated_tools.is_empty() {
-            None
-        } else {
-            Some(accumulated_tools)
-        },
-        tool_call_id: None,
-        reasoning_content,
-    };
+    // The parts are in the order the stream gave them. A call the provider
+    // issued without an id gets one derived from the turn and the call's
+    // position, so a replay and a recovery see the id the live run used.
+    let message = answer_parts.finish(input.turn);
 
     Ok(StreamOutcome::Completed {
         response: AdapterResponse {
@@ -5344,56 +5284,24 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
     /// Canonical transcript with a tool call.
     fn canonical_transcript_with_tool_call() -> Vec<ProviderMessage> {
         vec![
-            ProviderMessage {
-                role: "system".to_string(),
-                content: Some(json!("You are helpful.")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!("What is 2+2?")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "assistant".to_string(),
-                content: Some(json!("Let me calculate.")),
-                tool_calls: Some(vec![ToolCall {
+            ProviderMessage::system("You are helpful."),
+            ProviderMessage::user("What is 2+2?"),
+            ProviderMessage::assistant(
+                Some("Let me calculate.".to_string()),
+                vec![ToolCall {
                     id: Some("call_1".to_string()),
                     name: "calculator".to_string(),
                     arguments: json!({"expr": "2+2"}),
-                }]),
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "tool".to_string(),
-                content: Some(json!("4")),
-                tool_calls: None,
-                tool_call_id: Some("call_1".to_string()),
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!("Thanks.")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
+                }],
+                None,
+            ),
+            ProviderMessage::tool_result("call_1", "4"),
+            ProviderMessage::user("Thanks."),
         ]
     }
 
     fn canonical_transcript_no_tools() -> Vec<ProviderMessage> {
-        vec![ProviderMessage {
-            role: "user".to_string(),
-            content: Some(json!("hi")),
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-        }]
+        vec![ProviderMessage::user("hi")]
     }
 
     fn canonical_tool_schemas() -> Vec<ToolSchema> {
@@ -5518,7 +5426,13 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
         let model = "glm-5.2";
         let snapshot = resolve("zai", model);
         let mut transcript = canonical_transcript_with_tool_call();
-        transcript[2].reasoning_content = Some("I should use the calculator.".to_string());
+        transcript[2].parts.insert(
+            0,
+            ryeos_provider_contract::Part::Reasoning(ryeos_provider_contract::ReasoningPart {
+                text: Some("I should use the calculator.".to_string()),
+                artefact: None,
+            }),
+        );
         let body = build_golden_body(
             &snapshot,
             &transcript,
@@ -5694,17 +5608,23 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
         };
         let terminal = ryeos_provider_contract::AdmittedLocalWorkerFinal {
             answer: ryeos_provider_contract::ProviderCallAnswer {
-                message: ryeos_provider_contract::RecordedMessage {
-                    role: "assistant".to_owned(),
-                    content: Some(json!("done")),
-                    tool_calls: Some(vec![ryeos_provider_contract::RecordedToolCall {
-                        id: Some("call-1".to_owned()),
-                        name: "inspect".to_owned(),
-                        arguments: json!({"value": 1}),
-                    }]),
-                    tool_call_id: None,
-                    reasoning_content: Some("checked".to_owned()),
-                },
+                message: ryeos_provider_contract::RecordedMessage::new(
+                    ryeos_provider_contract::Role::Assistant,
+                    vec![
+                        ryeos_provider_contract::Part::Reasoning(
+                            ryeos_provider_contract::ReasoningPart {
+                                text: Some("checked".to_owned()),
+                                artefact: None,
+                            },
+                        ),
+                        ryeos_provider_contract::Part::text("done"),
+                        ryeos_provider_contract::Part::tool_call(
+                            "call-1",
+                            "inspect",
+                            json!({"value": 1}),
+                        ),
+                    ],
+                ),
                 finish_reason: Some("tool_calls".to_owned()),
             },
             usage: ryeos_provider_contract::AdmittedLocalWorkerUsage {
@@ -5741,12 +5661,12 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             panic!("retained local observation must complete the call");
         };
         assert!(events.is_empty(), "historical deltas must not republish");
-        assert_eq!(response.message.content, Some(json!("done")));
+        assert_eq!(response.message.text().as_deref(), Some("done"));
         assert_eq!(
-            response.message.reasoning_content.as_deref(),
+            response.message.reasoning_text().as_deref(),
             Some("checked")
         );
-        assert_eq!(response.message.tool_calls.as_deref().unwrap().len(), 1);
+        assert_eq!(response.message.calls().len(), 1);
         assert_eq!(response.usage.as_ref().unwrap().input_tokens, Some(11));
         assert_eq!(response.usage.as_ref().unwrap().output_tokens, Some(3));
         assert_eq!(response.response_id.as_deref(), Some("local-response-1"));
@@ -5809,6 +5729,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             &self,
             _thread_id: &str,
             events: Vec<Value>,
+            _options: ryeos_runtime::callback::EventAppendOptions,
         ) -> Result<Value, ryeos_runtime::callback::CallbackError> {
             self.batch_offsets
                 .lock()
@@ -5983,13 +5904,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             max_stream_output_bytes_per_turn: 3_910,
             ..ExecutionConfig::default()
         };
-        let messages = vec![ProviderMessage {
-            role: "user".to_string(),
-            content: Some(json!("hypothesize")),
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-        }];
+        let messages = vec![ProviderMessage::user("hypothesize")];
 
         let outcome = call_provider_streaming_for_test(StreamingCallInput {
             client: &reqwest::Client::new(),
@@ -6110,13 +6025,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
         let recorder = Arc::new(StreamingEventRecorder::new());
         let callback =
             CallbackClient::from_inner(recorder.clone(), "T-deadline", "/project", "tat-test");
-        let messages = vec![ProviderMessage {
-            role: "user".to_string(),
-            content: Some(json!("respond")),
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-        }];
+        let messages = vec![ProviderMessage::user("respond")];
 
         let outcome = call_provider_streaming_for_test(StreamingCallInput {
             client: &reqwest::Client::new(),
@@ -6147,7 +6056,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
         let StreamOutcome::Completed { response, .. } = outcome else {
             panic!("provider stream did not complete");
         };
-        assert_eq!(response.message.content, Some(json!("first second")));
+        assert_eq!(response.message.text().as_deref(), Some("first second"));
         assert_eq!(recorder.batch_sizes(), vec![1, 1]);
         let offsets = recorder.batch_offsets();
         assert_eq!(offsets.len(), 2);
