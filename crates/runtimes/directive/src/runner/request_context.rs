@@ -9,13 +9,7 @@ pub(super) fn initial_messages(
 ) -> Vec<ProviderMessage> {
     let mut initial_messages = Vec::new();
     if let Some(system_prompt) = system_prompt {
-        initial_messages.push(ProviderMessage {
-            role: "system".to_string(),
-            content: Some(json!(system_prompt)),
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-        });
+        initial_messages.push(ProviderMessage::system(system_prompt));
     }
     initial_messages.extend(messages);
     initial_messages
@@ -86,22 +80,16 @@ mod tests {
     use super::*;
 
     fn user_message() -> ProviderMessage {
-        ProviderMessage {
-            role: "user".to_string(),
-            content: Some(json!("hello")),
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-        }
+        ProviderMessage::user("hello")
     }
 
     #[test]
     fn system_prompt_is_prepended_without_reordering_messages() {
         let messages = initial_messages(vec![user_message()], Some("You are helpful"));
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].role, "system");
-        assert_eq!(messages[0].content, Some(json!("You are helpful")));
-        assert_eq!(messages[1].role, "user");
+        assert_eq!(messages[0].role(), "system");
+        assert_eq!(messages[0].text(), Some("You are helpful"));
+        assert_eq!(messages[1].role(), "user");
     }
 
     #[test]

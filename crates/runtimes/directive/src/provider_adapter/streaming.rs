@@ -469,14 +469,8 @@ pub struct InterruptedCognition {
 
 impl InterruptedCognition {
     pub fn into_provider_message(self) -> ProviderMessage {
-        ProviderMessage {
-            // Explicit provider-wire rendering of a RyeOS cognition output.
-            role: "assistant".to_string(),
-            content: self.content,
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: self.reasoning_content,
-        }
+        // Explicit provider-wire rendering of a RyeOS cognition output.
+        ProviderMessage::assistant(self.content, None, self.reasoning_content)
     }
 }
 
@@ -2862,17 +2856,15 @@ async fn send_prepared_streaming_inner(
         });
     }
 
-    let message = ProviderMessage {
-        role: "assistant".to_string(),
+    let message = ProviderMessage::assistant(
         content,
-        tool_calls: if accumulated_tools.is_empty() {
+        if accumulated_tools.is_empty() {
             None
         } else {
             Some(accumulated_tools)
         },
-        tool_call_id: None,
         reasoning_content,
-    };
+    );
 
     Ok(StreamOutcome::Completed {
         response: AdapterResponse {
@@ -5344,56 +5336,24 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
     /// Canonical transcript with a tool call.
     fn canonical_transcript_with_tool_call() -> Vec<ProviderMessage> {
         vec![
-            ProviderMessage {
-                role: "system".to_string(),
-                content: Some(json!("You are helpful.")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!("What is 2+2?")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "assistant".to_string(),
-                content: Some(json!("Let me calculate.")),
-                tool_calls: Some(vec![ToolCall {
+            ProviderMessage::system("You are helpful."),
+            ProviderMessage::user("What is 2+2?"),
+            ProviderMessage::assistant(
+                Some(json!("Let me calculate.")),
+                Some(vec![ToolCall {
                     id: Some("call_1".to_string()),
                     name: "calculator".to_string(),
                     arguments: json!({"expr": "2+2"}),
                 }]),
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "tool".to_string(),
-                content: Some(json!("4")),
-                tool_calls: None,
-                tool_call_id: Some("call_1".to_string()),
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!("Thanks.")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
+                None,
+            ),
+            ProviderMessage::tool_result(Some("call_1".to_string()), "4"),
+            ProviderMessage::user("Thanks."),
         ]
     }
 
     fn canonical_transcript_no_tools() -> Vec<ProviderMessage> {
-        vec![ProviderMessage {
-            role: "user".to_string(),
-            content: Some(json!("hi")),
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-        }]
+        vec![ProviderMessage::user("hi")]
     }
 
     fn canonical_tool_schemas() -> Vec<ToolSchema> {
@@ -5741,12 +5701,9 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             panic!("retained local observation must complete the call");
         };
         assert!(events.is_empty(), "historical deltas must not republish");
-        assert_eq!(response.message.content, Some(json!("done")));
-        assert_eq!(
-            response.message.reasoning_content.as_deref(),
-            Some("checked")
-        );
-        assert_eq!(response.message.tool_calls.as_deref().unwrap().len(), 1);
+        assert_eq!(response.message.text(), Some("done"));
+        assert_eq!(response.message.reasoning_text(), Some("checked"));
+        assert_eq!(response.message.tool_calls().len(), 1);
         assert_eq!(response.usage.as_ref().unwrap().input_tokens, Some(11));
         assert_eq!(response.usage.as_ref().unwrap().output_tokens, Some(3));
         assert_eq!(response.response_id.as_deref(), Some("local-response-1"));
@@ -5984,13 +5941,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             max_stream_output_bytes_per_turn: 3_910,
             ..ExecutionConfig::default()
         };
-        let messages = vec![ProviderMessage {
-            role: "user".to_string(),
-            content: Some(json!("hypothesize")),
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-        }];
+        let messages = vec![ProviderMessage::user("hypothesize")];
 
         let outcome = call_provider_streaming_for_test(StreamingCallInput {
             client: &reqwest::Client::new(),
@@ -6111,13 +6062,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
         let recorder = Arc::new(StreamingEventRecorder::new());
         let callback =
             CallbackClient::from_inner(recorder.clone(), "T-deadline", "/project", "tat-test");
-        let messages = vec![ProviderMessage {
-            role: "user".to_string(),
-            content: Some(json!("respond")),
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-        }];
+        let messages = vec![ProviderMessage::user("respond")];
 
         let outcome = call_provider_streaming_for_test(StreamingCallInput {
             client: &reqwest::Client::new(),
@@ -6148,7 +6093,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
         let StreamOutcome::Completed { response, .. } = outcome else {
             panic!("provider stream did not complete");
         };
-        assert_eq!(response.message.content, Some(json!("first second")));
+        assert_eq!(response.message.text(), Some("first second"));
         assert_eq!(recorder.batch_sizes(), vec![1, 1]);
         let offsets = recorder.batch_offsets();
         assert_eq!(offsets.len(), 2);

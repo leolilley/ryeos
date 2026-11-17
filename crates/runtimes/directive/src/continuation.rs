@@ -38,13 +38,13 @@ impl ContinuationCheck {
             .iter()
             .map(|m| {
                 let mut chars = 0;
-                if let Some(ref content) = m.content {
+                if let Some(content) = m.content_value() {
                     chars += content.to_string().len();
                 }
-                if let Some(ref reasoning) = m.reasoning_content {
+                if let Some(reasoning) = m.reasoning_text() {
                     chars += reasoning.len();
                 }
-                for tc in m.tool_calls.iter().flatten() {
+                for tc in m.tool_calls() {
                     chars += tc.arguments.to_string().len();
                     chars += tc.name.len();
                 }
@@ -63,15 +63,13 @@ impl ContinuationCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     fn make_message(role: &str, content: &str) -> ProviderMessage {
-        ProviderMessage {
-            role: role.to_string(),
-            content: Some(json!(content)),
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
+        match role {
+            "system" => ProviderMessage::system(content),
+            "assistant" => ProviderMessage::assistant_text(content),
+            "tool" => ProviderMessage::tool_result(None, content),
+            _ => ProviderMessage::user(content),
         }
     }
 
@@ -108,8 +106,11 @@ mod tests {
     #[test]
     fn reasoning_content_counts_toward_context() {
         let check = ContinuationCheck::new(200_000, 0.9);
-        let mut with_reasoning = make_message("assistant", "");
-        with_reasoning.reasoning_content = Some("r".repeat(4000));
+        let with_reasoning = ProviderMessage::assistant(
+            Some(serde_json::Value::String(String::new())),
+            None,
+            Some("r".repeat(4000)),
+        );
         let with = check.estimate_live_context_tokens(std::slice::from_ref(&with_reasoning));
         let without = check.estimate_live_context_tokens(&[make_message("assistant", "")]);
         assert!(with > without);

@@ -320,6 +320,99 @@ pub struct ProviderMessage {
     pub reasoning_content: Option<String>,
 }
 
+impl ProviderMessage {
+    /// A system message holding `text`.
+    pub fn system(text: impl Into<String>) -> Self {
+        Self::with_text("system", text)
+    }
+
+    /// A user message holding `text`.
+    pub fn user(text: impl Into<String>) -> Self {
+        Self::with_text("user", text)
+    }
+
+    /// An assistant message holding only `text`.
+    pub fn assistant_text(text: impl Into<String>) -> Self {
+        Self::with_text("assistant", text)
+    }
+
+    /// An assistant message built from a provider answer or a recorded
+    /// cognition: optional content, optional tool calls, optional reasoning.
+    pub fn assistant(
+        content: Option<Value>,
+        tool_calls: Option<Vec<ToolCall>>,
+        reasoning_content: Option<String>,
+    ) -> Self {
+        Self {
+            role: "assistant".to_string(),
+            content,
+            tool_calls,
+            tool_call_id: None,
+            reasoning_content,
+        }
+    }
+
+    /// A tool message carrying the result text of the call named by
+    /// `call_id`. A call the provider issued without an id passes `None`.
+    pub fn tool_result(call_id: Option<String>, text: impl Into<String>) -> Self {
+        Self {
+            role: "tool".to_string(),
+            content: Some(Value::String(text.into())),
+            tool_calls: None,
+            tool_call_id: call_id,
+            reasoning_content: None,
+        }
+    }
+
+    fn with_text(role: &str, text: impl Into<String>) -> Self {
+        Self {
+            role: role.to_string(),
+            content: Some(Value::String(text.into())),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        }
+    }
+
+    /// The wire role name: `system`, `user`, `assistant` or `tool`.
+    pub fn role(&self) -> &str {
+        &self.role
+    }
+
+    /// The message text, when the message carries text (an empty string
+    /// counts).
+    pub fn text(&self) -> Option<&str> {
+        self.content.as_ref().and_then(Value::as_str)
+    }
+
+    /// The message content as a JSON value, `None` when it carries none.
+    pub fn content_value(&self) -> Option<Value> {
+        self.content.clone()
+    }
+
+    /// The tool calls the message proposes, in order.
+    pub fn tool_calls(&self) -> Vec<ToolCall> {
+        self.tool_calls.clone().unwrap_or_default()
+    }
+
+    /// Whether the message proposes at least one tool call.
+    pub fn has_tool_calls(&self) -> bool {
+        self.tool_calls
+            .as_ref()
+            .is_some_and(|calls| !calls.is_empty())
+    }
+
+    /// The call id a tool message answers.
+    pub fn tool_call_id(&self) -> Option<&str> {
+        self.tool_call_id.as_deref()
+    }
+
+    /// The reasoning text replayed with an assistant message.
+    pub fn reasoning_text(&self) -> Option<&str> {
+        self.reasoning_content.as_deref()
+    }
+}
+
 /// Construct the one durable semantic answer for a completed provider turn.
 /// Usage, request/response IDs, attempt/thread identity, and transport timing
 /// are observation evidence and therefore cannot enter this value.
@@ -460,13 +553,11 @@ mod tests {
 
     #[test]
     fn provider_effect_answer_excludes_observation_texture() {
-        let message = ProviderMessage {
-            role: "assistant".to_string(),
-            content: Some(serde_json::json!("answer")),
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: Some("reasoning".to_string()),
-        };
+        let message = ProviderMessage::assistant(
+            Some(serde_json::json!("answer")),
+            None,
+            Some("reasoning".to_string()),
+        );
         let first = normalize_provider_call_answer(&message, Some("stop")).unwrap();
         let second = normalize_provider_call_answer(&message, Some("stop")).unwrap();
         assert_eq!(first, second);
@@ -479,16 +570,9 @@ mod tests {
 
     #[test]
     fn provider_effect_answer_refuses_non_assistant_or_unsafe_finish_reason() {
-        let mut message = ProviderMessage {
-            role: "assistant".to_string(),
-            content: Some(serde_json::json!("answer")),
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-        };
-        message.role = "tool".to_string();
-        assert!(normalize_provider_call_answer(&message, Some("stop")).is_err());
-        message.role = "assistant".to_string();
+        let tool_message = ProviderMessage::tool_result(None, "answer");
+        assert!(normalize_provider_call_answer(&tool_message, Some("stop")).is_err());
+        let message = ProviderMessage::assistant_text("answer");
         assert!(normalize_provider_call_answer(&message, Some(" stop ")).is_err());
     }
 

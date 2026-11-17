@@ -1215,13 +1215,7 @@ fn reconstruct_messages(events: &[ReplayedEventRecord]) -> Result<Vec<ProviderMe
                 if let ryeos_runtime::CognitionInAssembly::Complete(content) =
                     cognition_in.push(&event.payload)?
                 {
-                    messages.push(ProviderMessage {
-                        role: "user".to_string(),
-                        content: Some(serde_json::json!(content)),
-                        tool_calls: None,
-                        tool_call_id: None,
-                        reasoning_content: None,
-                    });
+                    messages.push(ProviderMessage::user(content));
                 }
             }
             "cognition_out"
@@ -1236,17 +1230,15 @@ fn reconstruct_messages(events: &[ReplayedEventRecord]) -> Result<Vec<ProviderMe
             "cognition_out" => {
                 let tool_calls = replayed_tool_calls(&event.payload)?;
 
-                messages.push(ProviderMessage {
-                    role: "assistant".to_string(),
-                    content: event.payload.get("content").cloned(),
+                messages.push(ProviderMessage::assistant(
+                    event.payload.get("content").cloned(),
                     tool_calls,
-                    tool_call_id: None,
-                    reasoning_content: event
+                    event
                         .payload
                         .get("reasoning_content")
                         .and_then(|v| v.as_str())
                         .map(String::from),
-                });
+                ));
             }
             "tool_call_result" => {
                 let call_id = event
@@ -1258,15 +1250,9 @@ fn reconstruct_messages(events: &[ReplayedEventRecord]) -> Result<Vec<ProviderMe
                 // the provider message. Never parse JSON-looking content:
                 // doing so changes both OpenAI-style wire content and custom
                 // schema template rendering after a crash.
-                let content = Some(serde_json::json!(replayed_result_text(event)?));
+                let content = replayed_result_text(event)?;
 
-                messages.push(ProviderMessage {
-                    role: "tool".to_string(),
-                    content,
-                    tool_calls: None,
-                    tool_call_id: call_id,
-                    reasoning_content: None,
-                });
+                messages.push(ProviderMessage::tool_result(call_id, content));
             }
             // Non-conversational chain events carry no message — skip.
             _ => {}
@@ -1280,7 +1266,7 @@ fn reconstruct_messages(events: &[ReplayedEventRecord]) -> Result<Vec<ProviderMe
 }
 
 fn count_turns(messages: &[ProviderMessage]) -> u32 {
-    messages.iter().filter(|m| m.role == "assistant").count() as u32
+    messages.iter().filter(|m| m.role() == "assistant").count() as u32
 }
 
 /// Keep only the most recent `carry_turns` assistant turns plus the context
@@ -1306,7 +1292,7 @@ fn trim_to_recent_turns(
     let mut seen = 0u32;
     let mut cutoff = 0usize;
     for (idx, msg) in messages.iter().enumerate() {
-        if msg.role == "assistant" {
+        if msg.role() == "assistant" {
             seen += 1;
             if seen == turns_to_drop {
                 cutoff = idx + 1;
@@ -1315,7 +1301,7 @@ fn trim_to_recent_turns(
         }
     }
     let mut trimmed = messages.split_off(cutoff);
-    while trimmed.first().is_some_and(|msg| msg.role == "tool") {
+    while trimmed.first().is_some_and(|msg| msg.role() == "tool") {
         trimmed.remove(0);
     }
     trimmed
@@ -1338,7 +1324,7 @@ fn trim_to_token_budget(
 
         let assistant_count = messages
             .iter()
-            .filter(|message| message.role == "assistant")
+            .filter(|message| message.role() == "assistant")
             .count();
         if assistant_count == 0 || (pin_last_assistant && assistant_count == 1) {
             anyhow::bail!(
@@ -1348,19 +1334,19 @@ fn trim_to_token_budget(
 
         let assistant_index = messages
             .iter()
-            .position(|message| message.role == "assistant")
+            .position(|message| message.role() == "assistant")
             .expect("assistant_count proved one exists");
         let mut group_end = assistant_index + 1;
         while messages
             .get(group_end)
-            .is_some_and(|message| message.role == "tool")
+            .is_some_and(|message| message.role() == "tool")
         {
             group_end += 1;
         }
         messages.drain(..group_end);
         while messages
             .first()
-            .is_some_and(|message| message.role == "tool")
+            .is_some_and(|message| message.role() == "tool")
         {
             messages.remove(0);
         }
@@ -1368,8 +1354,8 @@ fn trim_to_token_budget(
 }
 
 fn estimate_tokens(msg: &ProviderMessage) -> u64 {
-    let mut count = estimate_tokens_from_value(&msg.content);
-    for tc in msg.tool_calls.iter().flatten() {
+    let mut count = estimate_tokens_from_value(&msg.content_value());
+    for tc in msg.tool_calls() {
         count += estimate_tokens_from_value(&Some(tc.arguments.clone()));
     }
     count
@@ -2211,12 +2197,12 @@ mod tests {
 
         let messages = reconstruct_messages(&events).unwrap();
         assert_eq!(messages.len(), 5);
-        assert_eq!(messages[0].role, "user");
-        assert_eq!(messages[1].role, "assistant");
-        assert_eq!(messages[2].role, "user");
-        assert!(messages[3].tool_calls.is_some());
-        assert_eq!(messages[4].role, "tool");
-        assert_eq!(messages[4].tool_call_id.as_deref(), Some("c1"));
+        assert_eq!(messages[0].role(), "user");
+        assert_eq!(messages[1].role(), "assistant");
+        assert_eq!(messages[2].role(), "user");
+        assert!(messages[3].has_tool_calls());
+        assert_eq!(messages[4].role(), "tool");
+        assert_eq!(messages[4].tool_call_id(), Some("c1"));
     }
 
     #[test]
@@ -2233,10 +2219,7 @@ mod tests {
         }];
 
         let messages = reconstruct_messages(&events).unwrap();
-        assert_eq!(
-            messages[0].content.as_ref().and_then(Value::as_str),
-            Some(exact)
-        );
+        assert_eq!(messages[0].text(), Some(exact));
         let (wire, system) = crate::provider_adapter::messages::convert_messages(&messages, &None);
         assert!(system.is_none());
         assert_eq!(wire[0]["content"].as_str(), Some(exact));
@@ -2335,11 +2318,8 @@ mod tests {
 
         let messages = reconstruct_messages(&events).unwrap();
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].role, "user");
-        assert_eq!(
-            messages[0].content.as_ref().and_then(Value::as_str),
-            Some(content.as_str())
-        );
+        assert_eq!(messages[0].role(), "user");
+        assert_eq!(messages[0].text(), Some(content.as_str()));
     }
 
     #[test]
@@ -2369,17 +2349,14 @@ mod tests {
 
         let messages = reconstruct_messages(&events).unwrap();
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].role, "user");
-        assert_eq!(messages[1].role, "assistant");
-        assert_eq!(
-            messages[1].content.as_ref().and_then(|v| v.as_str()),
-            Some("Hi there!")
-        );
+        assert_eq!(messages[0].role(), "user");
+        assert_eq!(messages[1].role(), "assistant");
+        assert_eq!(messages[1].text(), Some("Hi there!"));
 
         let trimmed = trim_to_recent_turns(messages, 1);
         assert_eq!(trimmed.len(), 2);
-        assert_eq!(trimmed[0].role, "user");
-        assert_eq!(trimmed[1].role, "assistant");
+        assert_eq!(trimmed[0].role(), "user");
+        assert_eq!(trimmed[1].role(), "assistant");
     }
 
     #[test]
@@ -2411,23 +2388,20 @@ mod tests {
         ];
         let messages = reconstruct_messages(&events).unwrap();
         assert_eq!(messages.len(), 4);
-        assert_eq!(messages[0].role, "user");
-        assert_eq!(messages[1].role, "assistant");
+        assert_eq!(messages[0].role(), "user");
+        assert_eq!(messages[1].role(), "assistant");
         assert_eq!(
-            messages[1].content.as_ref().and_then(|c| c.as_str()),
+            messages[1].text(),
             Some("working on it, step on"),
             "interrupted partial content is preserved"
         );
         assert!(
-            messages[1].tool_calls.is_none(),
+            !messages[1].has_tool_calls(),
             "an interrupted seal carries no tool_calls — no unpaired tool call"
         );
-        assert_eq!(messages[2].role, "user");
-        assert_eq!(
-            messages[2].content.as_ref().and_then(|c| c.as_str()),
-            Some("stop — do X instead")
-        );
-        assert_eq!(messages[3].role, "assistant");
+        assert_eq!(messages[2].role(), "user");
+        assert_eq!(messages[2].text(), Some("stop — do X instead"));
+        assert_eq!(messages[3].role(), "assistant");
     }
 
     #[test]
@@ -2458,40 +2432,16 @@ mod tests {
         ];
         let messages = reconstruct_messages(&events).unwrap();
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[0].role(), "user");
     }
 
     #[test]
     fn count_turns_correct() {
         let messages = vec![
-            ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!("hello")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "assistant".to_string(),
-                content: Some(json!("hi")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!("again")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "assistant".to_string(),
-                content: Some(json!("there")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
+            ProviderMessage::user("hello"),
+            ProviderMessage::assistant_text("hi"),
+            ProviderMessage::user("again"),
+            ProviderMessage::assistant_text("there"),
         ];
         assert_eq!(count_turns(&messages), 2);
     }
@@ -2529,20 +2479,13 @@ mod tests {
     fn trim_to_token_budget_works() {
         let mut messages = Vec::new();
         for i in 0..100 {
-            messages.push(ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!(format!("message {} with some content here", i))),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            });
-            messages.push(ProviderMessage {
-                role: "assistant".to_string(),
-                content: Some(json!(format!("answer {i} with some content here"))),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            });
+            messages.push(ProviderMessage::user(format!(
+                "message {} with some content here",
+                i
+            )));
+            messages.push(ProviderMessage::assistant_text(format!(
+                "answer {i} with some content here"
+            )));
         }
         let trimmed = trim_to_token_budget(messages, 200, true).unwrap();
         assert!(trimmed.len() < 200);
@@ -2856,12 +2799,7 @@ mod tests {
         let contents: Vec<String> = state
             .messages
             .iter()
-            .filter_map(|m| {
-                m.content
-                    .as_ref()
-                    .and_then(|c| c.as_str())
-                    .map(String::from)
-            })
+            .filter_map(|m| m.text().map(String::from))
             .collect();
         // Both turns, root-first, in order; the chain-sharing child is excluded.
         assert_eq!(
@@ -2890,110 +2828,32 @@ mod tests {
     #[test]
     fn trim_to_recent_turns_keeps_last_n_assistant_turns_with_context() {
         let messages = vec![
-            ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!("u1")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "assistant".to_string(),
-                content: Some(json!("a1")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!("u2")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "assistant".to_string(),
-                content: Some(json!("a2")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "tool".to_string(),
-                content: Some(json!("tool2")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!("u3")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "assistant".to_string(),
-                content: Some(json!("a3")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
+            ProviderMessage::user("u1"),
+            ProviderMessage::assistant_text("a1"),
+            ProviderMessage::user("u2"),
+            ProviderMessage::assistant_text("a2"),
+            ProviderMessage::tool_result(None, "tool2"),
+            ProviderMessage::user("u3"),
+            ProviderMessage::assistant_text("a3"),
         ];
 
         let trimmed = trim_to_recent_turns(messages, 2);
-        let contents: Vec<_> = trimmed
-            .iter()
-            .filter_map(|m| m.content.as_ref().and_then(|v| v.as_str()))
-            .collect();
+        let contents: Vec<_> = trimmed.iter().filter_map(|m| m.text()).collect();
         assert_eq!(contents, vec!["u2", "a2", "tool2", "u3", "a3"]);
     }
 
     #[test]
     fn trim_to_recent_turns_drops_leading_orphan_tool_results() {
         let messages = vec![
-            ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!("u1")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "assistant".to_string(),
-                content: Some(json!("a1 tool call")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "tool".to_string(),
-                content: Some(json!("orphan if kept")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!("u2")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "assistant".to_string(),
-                content: Some(json!("a2")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
+            ProviderMessage::user("u1"),
+            ProviderMessage::assistant_text("a1 tool call"),
+            ProviderMessage::tool_result(None, "orphan if kept"),
+            ProviderMessage::user("u2"),
+            ProviderMessage::assistant_text("a2"),
         ];
 
         let trimmed = trim_to_recent_turns(messages, 1);
-        let contents: Vec<_> = trimmed
-            .iter()
-            .filter_map(|m| m.content.as_ref().and_then(|v| v.as_str()))
-            .collect();
+        let contents: Vec<_> = trimmed.iter().filter_map(|m| m.text()).collect();
         assert_eq!(contents, vec!["u2", "a2"]);
     }
 }

@@ -516,13 +516,9 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
         if !same_thread_resume && !envelope.request.suppress_stimulus {
             let rendered_prompt = operator_follow_up_stimulus(&envelope.request.inputs)?;
             callback.emit_stimulus(&rendered_prompt).await?;
-            resume_state.messages.push(directive::ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!(rendered_prompt)),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            });
+            resume_state
+                .messages
+                .push(directive::ProviderMessage::user(rendered_prompt));
         }
 
         runner::Runner::from_resume(
@@ -574,46 +570,20 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
 
         // Context before: injected before user prompt
         if let Some(ref before) = bootstrap_output.config.context_before {
-            messages.push(directive::ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!(before)),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            });
-            messages.push(directive::ProviderMessage {
-                role: "assistant".to_string(),
-                content: Some(json!("Understood. I will use this context.")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            });
+            messages.push(directive::ProviderMessage::user(before));
+            messages.push(directive::ProviderMessage::assistant_text(
+                "Understood. I will use this context.",
+            ));
         }
 
-        messages.push(directive::ProviderMessage {
-            role: "user".to_string(),
-            content: Some(json!(rendered_prompt)),
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-        });
+        messages.push(directive::ProviderMessage::user(rendered_prompt));
 
         // Context after: injected after user prompt
         if let Some(ref after) = bootstrap_output.config.context_after {
-            messages.push(directive::ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!(after)),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            });
-            messages.push(directive::ProviderMessage {
-                role: "assistant".to_string(),
-                content: Some(json!("Noted. I will apply this guidance.")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            });
+            messages.push(directive::ProviderMessage::user(after));
+            messages.push(directive::ProviderMessage::assistant_text(
+                "Noted. I will apply this guidance.",
+            ));
         }
 
         runner::Runner::new(runner::RunnerConfig {

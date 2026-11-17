@@ -193,14 +193,13 @@ fn recovered_return_nudge_seen(
     let expected = return_nudge.message(&declared);
     let Some(last_assistant) = messages
         .iter()
-        .rposition(|message| message.role == "assistant")
+        .rposition(|message| message.role() == "assistant")
     else {
         return false;
     };
-    messages[last_assistant + 1..].iter().any(|message| {
-        message.role == "user"
-            && message.content.as_ref().and_then(Value::as_str) == Some(expected.as_str())
-    })
+    messages[last_assistant + 1..]
+        .iter()
+        .any(|message| message.role() == "user" && message.text() == Some(expected.as_str()))
 }
 
 fn state_after_serial_tool_result(
@@ -1147,13 +1146,7 @@ impl Runner {
             return Ok(false);
         }
         for s in &inputs {
-            self.messages.push(ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!(s.content)),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            });
+            self.messages.push(ProviderMessage::user(s.content.clone()));
         }
         tracing::info!(
             folded = inputs.len(),
@@ -1590,12 +1583,7 @@ impl Runner {
                             // one ephemeral delta (chunk cadence is transport
                             // texture, not evidence); the durable record of the
                             // turn still comes from emit_turn_complete.
-                            if let Some(text) = response
-                                .message
-                                .content
-                                .as_ref()
-                                .and_then(serde_json::Value::as_str)
-                            {
+                            if let Some(text) = response.message.text() {
                                 let _ = self
                                     .callback
                                     .append_runtime_event(
@@ -2182,9 +2170,8 @@ impl Runner {
                             }
                             let cognition_tool_calls = match resp
                                 .message
-                                .tool_calls
-                                .as_ref()
-                                .map(serde_json::to_value)
+                                .has_tool_calls()
+                                .then(|| serde_json::to_value(resp.message.tool_calls()))
                                 .transpose()
                             {
                                 Ok(value) => value,
@@ -2226,9 +2213,9 @@ impl Runner {
                                 .emit_turn_complete(
                                     turn,
                                     token_counts,
-                                    resp.message.content.clone(),
+                                    resp.message.content_value(),
                                     cognition_tool_calls,
-                                    resp.message.reasoning_content.clone(),
+                                    resp.message.reasoning_text().map(str::to_owned),
                                     provider_accounting,
                                 )
                                 .await
@@ -2241,18 +2228,13 @@ impl Runner {
                                 continue;
                             }
                             self.messages.push(resp.message.clone());
-                            if resp
-                                .message
-                                .tool_calls
-                                .as_ref()
-                                .is_some_and(|calls| !calls.is_empty())
-                            {
+                            if resp.message.has_tool_calls() {
                                 block_at_directive_recovery_test_cut(
                                     &self.callback,
                                     "tool_proposal_recorded",
                                 )
                                 .await;
-                            } else if resp.message.content.is_some() {
+                            } else if resp.message.content_value().is_some() {
                                 block_at_directive_recovery_test_cut(
                                     &self.callback,
                                     "final_cognition_recorded",
@@ -2725,50 +2707,39 @@ impl Runner {
                     let last = self.messages.last().cloned();
                     match last {
                         Some(msg) => {
-                            let has_tool_calls =
-                                msg.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty());
-                            let has_content = msg.content.as_ref().is_some_and(|c| {
-                                !c.is_null() && c.as_str().is_none_or(|s| !s.is_empty())
-                            });
-
-                            if has_tool_calls {
-                                if let Some(ref tool_calls) = msg.tool_calls {
-                                    let occurrences = tool_calls
-                                        .iter()
-                                        .enumerate()
-                                        .map(|(call_index, call)| ToolOccurrence {
-                                            call: call.clone(),
-                                            operation_id:
-                                                crate::resume::directive_tool_operation_id(
-                                                    &self.thread_id,
-                                                    turn,
-                                                    call_index,
-                                                ),
+                            if msg.has_tool_calls() {
+                                let occurrences = msg
+                                    .tool_calls()
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(call_index, call)| ToolOccurrence {
+                                        call: call.clone(),
+                                        operation_id: crate::resume::directive_tool_operation_id(
+                                            &self.thread_id,
                                             turn,
                                             call_index,
-                                            start_recorded: false,
-                                            counted: false,
-                                            spawn_counted: false,
-                                        })
-                                        .collect::<Vec<_>>();
-                                    // Lifecycle-bearing batches keep the
-                                    // strict serial path; plain batches
-                                    // dispatch through the bounded window.
-                                    if batch_is_lifecycle_bearing(&occurrences) {
-                                        State::DispatchingTools {
-                                            pending: occurrences,
-                                            index: 0,
-                                        }
-                                    } else {
-                                        State::DispatchingToolBatch {
-                                            pending: occurrences,
-                                        }
+                                        ),
+                                        turn,
+                                        call_index,
+                                        start_recorded: false,
+                                        counted: false,
+                                        spawn_counted: false,
+                                    })
+                                    .collect::<Vec<_>>();
+                                // Lifecycle-bearing batches keep the
+                                // strict serial path; plain batches
+                                // dispatch through the bounded window.
+                                if batch_is_lifecycle_bearing(&occurrences) {
+                                    State::DispatchingTools {
+                                        pending: occurrences,
+                                        index: 0,
                                     }
                                 } else {
-                                    State::CheckingContinuation
+                                    State::DispatchingToolBatch {
+                                        pending: occurrences,
+                                    }
                                 }
-                            } else if has_content || msg.content.is_some() {
-                                let content = msg.content.unwrap_or(Value::Null);
+                            } else if let Some(content) = msg.content_value() {
                                 // Steer pre-finalize drain (finding C): a no-tool
                                 // content response is about to finalize. If an
                                 // operator input is pending, fold it and take
@@ -3299,13 +3270,10 @@ impl Runner {
                         };
                         continue;
                     }
-                    self.messages.push(ProviderMessage {
-                        role: "tool".to_string(),
-                        content: Some(json!(tool_result_content)),
-                        tool_calls: None,
-                        tool_call_id: Some(call_id),
-                        reasoning_content: None,
-                    });
+                    self.messages.push(ProviderMessage::tool_result(
+                        Some(call_id),
+                        tool_result_content,
+                    ));
                     State::CheckingContinuation
                 }
 
@@ -3468,7 +3436,7 @@ impl Runner {
                             let result = self
                                 .messages
                                 .last()
-                                .and_then(|m| m.content.clone())
+                                .and_then(|m| m.content_value())
                                 .unwrap_or(Value::Null);
                             State::Finalizing { result }
                         }
@@ -3519,13 +3487,7 @@ impl Runner {
                                 };
                                 continue;
                             }
-                            self.messages.push(ProviderMessage {
-                                role: "user".to_string(),
-                                content: Some(json!(nudge)),
-                                tool_calls: None,
-                                tool_call_id: None,
-                                reasoning_content: None,
-                            });
+                            self.messages.push(ProviderMessage::user(nudge));
                             state = State::CheckingLimits;
                             continue;
                         }
@@ -3872,13 +3834,10 @@ impl Runner {
             .await
             .map_err(|e| format!("resume-critical callback emit_tool_result failed: {e}"))?;
         block_at_directive_recovery_test_cut(&self.callback, "tool_observation_recorded").await;
-        self.messages.push(ProviderMessage {
-            role: "tool".to_string(),
-            content: Some(json!(rendered.content)),
-            tool_calls: None,
-            tool_call_id: Some(call_id),
-            reasoning_content: None,
-        });
+        self.messages.push(ProviderMessage::tool_result(
+            Some(call_id),
+            rendered.content,
+        ));
         Ok(())
     }
 
@@ -5257,13 +5216,7 @@ mod tests {
         };
 
         let runner = Runner::new(RunnerConfig {
-            messages: vec![ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!("hello")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            }],
+            messages: vec![ProviderMessage::user("hello")],
             tools: vec![],
             system_prompt: Some("You are helpful".to_string()),
             harness: Harness::new(&make_policy(), 0, None),
@@ -5293,8 +5246,8 @@ mod tests {
         });
 
         assert_eq!(runner.messages.len(), 2);
-        assert_eq!(runner.messages[0].role, "system");
-        assert_eq!(runner.messages[1].role, "user");
+        assert_eq!(runner.messages[0].role(), "system");
+        assert_eq!(runner.messages[1].role(), "user");
     }
 
     #[test]
@@ -5387,13 +5340,7 @@ mod tests {
         let mut budget = BudgetTracker::new(usd("1"));
         budget.report(10, 5, usd("0.25")).unwrap();
         let runner = Runner::new(RunnerConfig {
-            messages: vec![ProviderMessage {
-                role: "assistant".to_string(),
-                content: Some(json!("hello")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            }],
+            messages: vec![ProviderMessage::assistant_text("hello")],
             tools: vec![],
             system_prompt: None,
             harness: Harness::new(&make_policy(), 0, None),

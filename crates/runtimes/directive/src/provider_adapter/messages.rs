@@ -21,14 +21,14 @@ fn convert_openai(messages: &[ProviderMessage]) -> (Vec<Value>, Option<String>) 
     let converted: Vec<Value> = messages
         .iter()
         .map(|msg| {
-            let mut obj = json!({ "role": msg.role });
-            match &msg.content {
-                Some(content) => obj["content"] = content.clone(),
+            let mut obj = json!({ "role": msg.role() });
+            match msg.content_value() {
+                Some(content) => obj["content"] = content,
                 None => obj["content"] = Value::Null,
             }
-            if let Some(ref calls) = msg.tool_calls {
+            if msg.has_tool_calls() {
                 obj["tool_calls"] = json!(
-                    calls
+                    msg.tool_calls()
                         .iter()
                         .map(|tc| {
                             json!({
@@ -43,11 +43,11 @@ fn convert_openai(messages: &[ProviderMessage]) -> (Vec<Value>, Option<String>) 
                         .collect::<Vec<_>>()
                 );
             }
-            if let Some(ref id) = msg.tool_call_id {
+            if let Some(id) = msg.tool_call_id() {
                 obj["tool_call_id"] = json!(id);
             }
-            if msg.role == "assistant"
-                && let Some(ref reasoning) = msg.reasoning_content
+            if msg.role() == "assistant"
+                && let Some(reasoning) = msg.reasoning_text()
             {
                 obj["reasoning_content"] = json!(reasoning);
             }
@@ -97,11 +97,9 @@ fn convert_with_schemas(
     // return tool_call IDs so it identifies tool results by name).
     let mut tc_id_to_name: HashMap<String, String> = HashMap::new();
     for msg in messages {
-        if let Some(ref calls) = msg.tool_calls {
-            for tc in calls {
-                if let Some(ref id) = tc.id {
-                    tc_id_to_name.insert(id.clone(), tc.name.clone());
-                }
+        for tc in msg.tool_calls() {
+            if let Some(id) = tc.id {
+                tc_id_to_name.insert(id, tc.name);
             }
         }
     }
@@ -116,10 +114,10 @@ fn convert_with_schemas(
         // and `body_inject` (Gemini) need extraction so the adapter can
         // route the text to the right place. Only `message_role`
         // (OpenAI) keeps the system message inline.
-        if msg.role == "system" && system_mode != SystemMessageMode::MessageRole {
-            if let Some(ref content) = msg.content {
+        if msg.role() == "system" && system_mode != SystemMessageMode::MessageRole {
+            if let Some(content) = msg.content_value() {
                 let text = match content {
-                    Value::String(s) => s.clone(),
+                    Value::String(s) => s,
                     other => other.to_string(),
                 };
                 extracted_system = Some(text);
@@ -129,7 +127,8 @@ fn convert_with_schemas(
 
         // Flush any pending tool-result blocks before processing a
         // non-tool message (content_blocks wrap_mode requirement).
-        if msg.role != "tool" && msg.tool_call_id.is_none() && !pending_tool_results.is_empty() {
+        if msg.role() != "tool" && msg.tool_call_id().is_none() && !pending_tool_results.is_empty()
+        {
             let mut tr_msg = json!({"role": tr_role});
             tr_msg[content_key] = json!(std::mem::take(&mut pending_tool_results));
             converted.push(tr_msg);
@@ -137,34 +136,31 @@ fn convert_with_schemas(
 
         let mapped_role = match role_map {
             Some(rm) => rm
-                .get(&msg.role)
+                .get(msg.role())
                 .cloned()
-                .unwrap_or_else(|| msg.role.clone()),
-            None => msg.role.clone(),
+                .unwrap_or_else(|| msg.role().to_string()),
+            None => msg.role().to_string(),
         };
 
         let mut obj = json!({ "role": mapped_role });
 
-        if msg.role == "assistant"
-            && let Some(ref reasoning) = msg.reasoning_content
+        if msg.role() == "assistant"
+            && let Some(reasoning) = msg.reasoning_text()
         {
             obj["reasoning_content"] = json!(reasoning);
         }
 
-        if msg.role == "system" && system_mode == SystemMessageMode::MessageRole {
-            match &msg.content {
-                Some(content) => obj[content_key] = content.clone(),
+        if msg.role() == "system" && system_mode == SystemMessageMode::MessageRole {
+            match msg.content_value() {
+                Some(content) => obj[content_key] = content,
                 None => obj[content_key] = Value::Null,
             }
-        } else if let Some(ref tc_id) = msg.tool_call_id {
+        } else if let Some(tc_id) = msg.tool_call_id() {
             // Tool-result message. Three behaviours by wrap_mode:
             //   "content_blocks" — render block_template, buffer; flush on next non-tool msg.
             //   "direct"         — render block_template, attach to {role: <tr_role>, ...rendered}.
             //   "parts"          — render block_template, set role.parts = [rendered].
-            let result_content_value = match &msg.content {
-                Some(content) => content.clone(),
-                None => json!(null),
-            };
+            let result_content_value = msg.content_value().unwrap_or(Value::Null);
             let result_content_str = match &result_content_value {
                 Value::String(s) => s.clone(),
                 other => other.to_string(),
@@ -213,10 +209,7 @@ fn convert_with_schemas(
                 }
             }
         } else {
-            let nested_content = match &msg.content {
-                Some(content) => content.clone(),
-                None => Value::Null,
-            };
+            let nested_content = msg.content_value().unwrap_or(Value::Null);
             match schemas.text_placement {
                 Some(TextPlacement::PartsArray) | Some(TextPlacement::BlocksArray) => {
                     let template = schemas.text_block_template.as_ref();
@@ -230,9 +223,10 @@ fn convert_with_schemas(
             }
         }
 
-        if let Some(ref calls) = msg.tool_calls {
+        if msg.has_tool_calls() {
             // Render each tool_call with the profile's template (if any).
-            let rendered: Vec<Value> = calls
+            let rendered: Vec<Value> = msg
+                .tool_calls()
                 .iter()
                 .map(|tc| {
                     if let Some(tmpl) = tc_block_template {
@@ -358,27 +352,9 @@ mod tests {
 
     fn sample_messages() -> Vec<ProviderMessage> {
         vec![
-            ProviderMessage {
-                role: "system".to_string(),
-                content: Some(json!("You are helpful.")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!("Hello")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "assistant".to_string(),
-                content: Some(json!("Hi there!")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
+            ProviderMessage::system("You are helpful."),
+            ProviderMessage::user("Hello"),
+            ProviderMessage::assistant_text("Hi there!"),
         ]
     }
 
@@ -397,20 +373,8 @@ mod tests {
     #[test]
     fn role_map_gemini_style() {
         let msgs = vec![
-            ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!("Hello")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "assistant".to_string(),
-                content: Some(json!("Hi!")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
+            ProviderMessage::user("Hello"),
+            ProviderMessage::assistant_text("Hi!"),
         ];
         let schemas = MessageSchemas {
             role_map: Some(
@@ -486,13 +450,7 @@ mod tests {
 
     #[test]
     fn text_placement_parts() {
-        let msgs = vec![ProviderMessage {
-            role: "user".to_string(),
-            content: Some(json!("Hello world")),
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-        }];
+        let msgs = vec![ProviderMessage::user("Hello world")];
         // Without text_placement: plain string content.
         let schemas = MessageSchemas {
             role_map: None,
@@ -525,13 +483,7 @@ mod tests {
 
     #[test]
     fn content_key_custom() {
-        let msgs = vec![ProviderMessage {
-            role: "user".to_string(),
-            content: Some(json!("test")),
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-        }];
+        let msgs = vec![ProviderMessage::user("test")];
         let schemas = MessageSchemas {
             role_map: None,
             content_key: Some("text".to_string()),
@@ -578,20 +530,8 @@ mod tests {
     #[test]
     fn system_message_extracted_for_body_field_mode() {
         let msgs = vec![
-            ProviderMessage {
-                role: "system".to_string(),
-                content: Some(Value::String("you are helpful".to_string())),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "user".to_string(),
-                content: Some(Value::String("hi".to_string())),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
+            ProviderMessage::system("you are helpful"),
+            ProviderMessage::user("hi"),
         ];
         let schemas = MessageSchemas {
             role_map: None,
@@ -657,13 +597,7 @@ mod tests {
 
     #[test]
     fn convert_messages_gemini_user_message_uses_text_in_parts() {
-        let msgs = vec![ProviderMessage {
-            role: "user".to_string(),
-            content: Some(Value::String("hello".to_string())),
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-        }];
+        let msgs = vec![ProviderMessage::user("hello")];
         let schemas = MessageSchemas {
             role_map: Some({
                 let mut m = std::collections::HashMap::new();
@@ -691,20 +625,8 @@ mod tests {
     #[test]
     fn convert_messages_anthropic_tool_result_uses_content_blocks_wrap() {
         let msgs = vec![
-            ProviderMessage {
-                role: "tool".to_string(),
-                content: Some(Value::String("result-1".to_string())),
-                tool_calls: None,
-                tool_call_id: Some("tc_1".to_string()),
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "tool".to_string(),
-                content: Some(Value::String("result-2".to_string())),
-                tool_calls: None,
-                tool_call_id: Some("tc_2".to_string()),
-                reasoning_content: None,
-            },
+            ProviderMessage::tool_result(Some("tc_1".to_string()), "result-1"),
+            ProviderMessage::tool_result(Some("tc_2".to_string()), "result-2"),
         ];
         let schemas = MessageSchemas {
             role_map: None,
@@ -738,13 +660,10 @@ mod tests {
 
     #[test]
     fn convert_messages_openai_tool_result_uses_direct_wrap() {
-        let msgs = vec![ProviderMessage {
-            role: "tool".to_string(),
-            content: Some(Value::String("calc result".to_string())),
-            tool_calls: None,
-            tool_call_id: Some("tc_xyz".to_string()),
-            reasoning_content: None,
-        }];
+        let msgs = vec![ProviderMessage::tool_result(
+            Some("tc_xyz".to_string()),
+            "calc result",
+        )];
         let schemas = MessageSchemas {
             role_map: None,
             content_key: Some("content".to_string()),
@@ -773,17 +692,15 @@ mod tests {
     fn convert_messages_anthropic_assistant_tool_calls_go_inline_as_blocks() {
         // Anthropic: text_placement=string (default), but assistant
         // tool_calls must land as content blocks.
-        let msgs = vec![ProviderMessage {
-            role: "assistant".to_string(),
-            content: Some(Value::String("Let me check that.".to_string())),
-            tool_calls: Some(vec![crate::directive::ToolCall {
+        let msgs = vec![ProviderMessage::assistant(
+            Some(Value::String("Let me check that.".to_string())),
+            Some(vec![crate::directive::ToolCall {
                 id: Some("toolu_01abc".to_string()),
                 name: "search".to_string(),
                 arguments: json!({"q": "rust"}),
             }]),
-            tool_call_id: None,
-            reasoning_content: None,
-        }];
+            None,
+        )];
         let schemas = MessageSchemas {
             role_map: None,
             content_key: Some("content".to_string()),
@@ -826,17 +743,15 @@ mod tests {
     #[test]
     fn convert_messages_openai_assistant_tool_calls_go_top_level() {
         // OpenAI: defaults — text=string, tool_calls=top_level_field.
-        let msgs = vec![ProviderMessage {
-            role: "assistant".to_string(),
-            content: None,
-            tool_calls: Some(vec![crate::directive::ToolCall {
+        let msgs = vec![ProviderMessage::assistant(
+            None,
+            Some(vec![crate::directive::ToolCall {
                 id: Some("call_xyz".to_string()),
                 name: "search".to_string(),
                 arguments: json!({"q": "rust"}),
             }]),
-            tool_call_id: None,
-            reasoning_content: None,
-        }];
+            None,
+        )];
         let schemas = MessageSchemas {
             role_map: None,
             content_key: Some("content".to_string()),
@@ -868,31 +783,17 @@ mod tests {
         // tool result. The tool_name MUST be threaded through to the
         // template (functionResponse.name).
         let msgs = vec![
-            ProviderMessage {
-                role: "user".to_string(),
-                content: Some(Value::String("search rust".to_string())),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "assistant".to_string(),
-                content: None,
-                tool_calls: Some(vec![ToolCall {
+            ProviderMessage::user("search rust"),
+            ProviderMessage::assistant(
+                None,
+                Some(vec![ToolCall {
                     id: Some("gemini_tc_0".to_string()),
                     name: "search".to_string(),
                     arguments: json!({"q": "rust"}),
                 }]),
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "tool".to_string(),
-                content: Some(Value::String("results: ...".to_string())),
-                tool_calls: None,
-                tool_call_id: Some("gemini_tc_0".to_string()),
-                reasoning_content: None,
-            },
+                None,
+            ),
+            ProviderMessage::tool_result(Some("gemini_tc_0".to_string()), "results: ..."),
         ];
         let schemas = MessageSchemas {
             role_map: Some({
@@ -943,20 +844,8 @@ mod tests {
     fn convert_messages_anthropic_full_round_trip_system_extraction_into_body_field() {
         // End-to-end: system + user → extracted_system + 1 user message.
         let msgs = vec![
-            ProviderMessage {
-                role: "system".to_string(),
-                content: Some(Value::String("be brief".to_string())),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "user".to_string(),
-                content: Some(Value::String("hello".to_string())),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
+            ProviderMessage::system("be brief"),
+            ProviderMessage::user("hello"),
         ];
         let schemas = MessageSchemas {
             role_map: None,
@@ -991,17 +880,15 @@ mod tests {
         // When text_placement=blocks_array, assistant text MUST be wrapped
         // in {type: "text", text: "..."} blocks so the content array
         // contains only well-formed Anthropic blocks — no raw strings.
-        let msgs = vec![ProviderMessage {
-            role: "assistant".to_string(),
-            content: Some(Value::String("Let me check.".to_string())),
-            tool_calls: Some(vec![crate::directive::ToolCall {
+        let msgs = vec![ProviderMessage::assistant(
+            Some(Value::String("Let me check.".to_string())),
+            Some(vec![crate::directive::ToolCall {
                 id: Some("toolu_01".to_string()),
                 name: "search".to_string(),
                 arguments: json!({"q":"rust"}),
             }]),
-            tool_call_id: None,
-            reasoning_content: None,
-        }];
+            None,
+        )];
         let schemas = MessageSchemas {
             role_map: None,
             content_key: Some("content".to_string()),
