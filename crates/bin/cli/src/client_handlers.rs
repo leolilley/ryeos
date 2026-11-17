@@ -617,6 +617,91 @@ fn delegation_scopes(value: Option<&Value>) -> Result<Vec<String>, CliError> {
     Ok(scopes)
 }
 
+/// One signed `service:threads/timeline` call, returning the service's
+/// response. Shared by `ryeos threads timeline` and the live view of
+/// `ryeos execute`, so both read the node's one projection.
+pub(crate) async fn call_timeline_service(
+    signer: &crate::transport::signing::Signer,
+    base_url: &str,
+    audience: &str,
+    parameters: Value,
+) -> Result<Value, CliError> {
+    let body = json!({
+        "item_ref": "service:threads/timeline",
+        "ref_bindings": {},
+        "product_selections": [],
+        "parameters": parameters,
+        "execution_policy": ryeos_app::execution_policy::ExecutionPolicy::projectless(
+            ryeos_app::execution_policy::ExecutionResponse::Wait,
+        ),
+    });
+    let body_bytes = serde_json::to_vec(&body).expect("JSON value serialization");
+    let headers = signer.sign("POST", "/execute", &body_bytes, audience)?;
+    let url = format!("{}/execute", base_url.trim_end_matches('/'));
+    let response = crate::transport::http::post_json(&url, &headers, &body_bytes).await?;
+    response
+        .get("result")
+        .cloned()
+        .ok_or_else(|| local(format!("the node returned no result: {response}")))
+}
+
+/// `ryeos threads timeline <chain_root_id> [--limit N] [--json]`.
+///
+/// Prints the chain as text, one line per entry, and returns `None`; with
+/// `--json` it returns the node's response unchanged for the result printer.
+pub(crate) async fn threads_timeline(
+    app_root: &Path,
+    console: &crate::tty::Console,
+    parameters: &Value,
+) -> Result<Option<Value>, CliError> {
+    let object = parameters
+        .as_object()
+        .ok_or_else(|| local("threads timeline parameters must be an object"))?;
+    if let Some(unknown) = object
+        .keys()
+        .find(|key| !matches!(key.as_str(), "chain_root_id" | "limit" | "json"))
+    {
+        return Err(local(format!(
+            "threads timeline does not take --{}",
+            unknown.replace('_', "-")
+        )));
+    }
+    let chain_root_id = object
+        .get("chain_root_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| local("threads timeline requires a chain_root_id"))?;
+    let json_output = match object.get("json") {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => false,
+        Some(Value::Bool(true)) => true,
+        Some(Value::String(text)) => text != "false",
+        Some(_) => return Err(local("--json takes no value")),
+    };
+    let mut service_parameters = json!({ "chain_root_id": chain_root_id });
+    if let Some(limit) = object.get("limit").filter(|limit| !limit.is_null()) {
+        service_parameters["limit"] = limit.clone();
+    }
+
+    crate::daemon_preflight::lifecycle_preflight(app_root).await?;
+    let daemon_url = crate::transport::http::resolve_daemon_url(app_root).await?;
+    let signer = crate::transport::signing::Signer::resolve(app_root)?;
+    let discovered = crate::transport::discovery::discover_audience(&daemon_url).await?;
+    let response = call_timeline_service(
+        &signer,
+        &discovered.base_url,
+        &discovered.principal_id,
+        service_parameters,
+    )
+    .await?;
+    if json_output {
+        return Ok(Some(response));
+    }
+    let lines = crate::timeline_text::render_response(&response, console.capabilities().color);
+    for line in &lines {
+        console.text(line).map_err(CliError::Io)?;
+    }
+    Ok(None)
+}
+
 /// One signed `/execute` call for a service, returning its result.
 async fn execute_service(
     app_root: &Path,

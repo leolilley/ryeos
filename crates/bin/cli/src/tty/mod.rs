@@ -37,7 +37,7 @@ pub use progress::{
     OperationProgress,
 };
 pub use result::{write_json, write_machine_diagnostics, write_raw};
-pub use theme::Tone;
+pub use theme::{Tone, style};
 
 pub(crate) fn sanitize_terminal_inline(value: &str) -> String {
     value

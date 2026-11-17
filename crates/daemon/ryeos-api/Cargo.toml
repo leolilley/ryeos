@@ -53,6 +53,7 @@ ryeos-scheduler-contract = { workspace = true }
 ryeos-scheduler = { workspace = true, optional = true }
 ryeos-scheduler-service = { workspace = true, optional = true }
 ryeos-state = { workspace = true }
+ryeos-timeline = { workspace = true }
 ryeos-bundle = { workspace = true }
 ryeos-bundle-publication-contract = { workspace = true }
 ryeos-core-tools = { workspace = true }

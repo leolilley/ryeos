@@ -5,11 +5,11 @@
 //! it via the generic `AppState::extensions` typed state bag.
 
 use std::collections::{HashMap, VecDeque};
-use std::hash::Hash;
 use std::sync::{Arc, Mutex};
 
 use crate::browser_session::BrowserSessionStore;
 use crate::session_bus::SessionBus;
+use ryeos_app::bounded_lru::BoundedLru;
 use ryeos_client_base::ui::composition_replay::UiCompositionReplay;
 use ryeos_executor::execution::effective_program_projection::{
     EffectiveProgramProjection, EffectiveProgramProjectionCache,
@@ -18,8 +18,6 @@ use ryeos_ui_presentation_contract::seat_control::{UiSeatControlPredecessor, UiS
 
 const FIELD_PROJECTION_CACHE_MAX_ENTRIES: usize = 128;
 const COMPOSITION_CHECKPOINT_CACHE_MAX_ENTRIES: usize = 32;
-const TIMELINE_CACHE_MAX_ENTRIES: usize = 64;
-const PRESENTATION_CACHE_MAX_ENTRIES: usize = 256;
 
 /// Identity of one original presentation history, not a grant of authority.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -103,93 +101,6 @@ impl CompositionCheckpointCache {
     }
 }
 
-/// Count-bounded LRU keyed by string. Deliberately count- rather than
-/// byte-bounded: entries retain full source closures, so the cap trades a
-/// bounded number of large entries for eviction simplicity on a
-/// single-operator node.
-#[derive(Default)]
-struct BoundedLruState<K, V> {
-    entries: HashMap<K, V>,
-    order: VecDeque<K>,
-}
-
-#[derive(Default)]
-pub(crate) struct BoundedLru<K, V> {
-    state: Mutex<BoundedLruState<K, V>>,
-    max_entries: usize,
-}
-
-impl<K: Clone + Eq + Hash, V: Clone> BoundedLru<K, V> {
-    pub(crate) fn with_capacity(max_entries: usize) -> Self {
-        Self {
-            state: Mutex::new(BoundedLruState {
-                entries: HashMap::new(),
-                order: VecDeque::new(),
-            }),
-            max_entries,
-        }
-    }
-
-    pub(crate) fn get(&self, key: &K) -> Option<V> {
-        let mut state = self.state.lock().ok()?;
-        let value = state.entries.get(key)?.clone();
-        if let Some(position) = state.order.iter().position(|entry| entry == key) {
-            state.order.remove(position);
-        }
-        state.order.push_back(key.clone());
-        Some(value)
-    }
-
-    pub(crate) fn insert(&self, key: K, value: V) {
-        let Ok(mut state) = self.state.lock() else {
-            return;
-        };
-        if let Some(position) = state.order.iter().position(|entry| entry == &key) {
-            state.order.remove(position);
-        }
-        state.entries.insert(key.clone(), value);
-        state.order.push_back(key);
-        while state.entries.len() > self.max_entries {
-            let Some(evicted) = state.order.pop_front() else {
-                break;
-            };
-            state.entries.remove(&evicted);
-        }
-    }
-
-    #[cfg(test)]
-    fn remove(&self, key: &K) {
-        let Ok(mut state) = self.state.lock() else {
-            return;
-        };
-        state.entries.remove(key);
-        if let Some(position) = state.order.iter().position(|entry| entry == key) {
-            state.order.remove(position);
-        }
-    }
-}
-
-/// `(chain_root_id, definition_digest)`.
-pub(crate) type TimelineCacheKey = (String, String);
-
-/// One chain's resumable fold. A request locks it, pushes the events newer
-/// than `highest`, and reads the timeline.
-pub(crate) struct ChainFold {
-    pub(crate) folder: ryeos_timeline::Folder,
-    /// Highest `chain_seq` pushed into `folder`; zero before any event.
-    pub(crate) highest: i64,
-    /// The folder's timeline as of `highest`.
-    pub(crate) timeline: Arc<ryeos_timeline::Timeline>,
-}
-
-/// Chain folds, one per chain and definition.
-pub(crate) type TimelineCache = BoundedLru<TimelineCacheKey, Arc<Mutex<ChainFold>>>;
-
-/// A tool's `presentation` block by admitted-launch-capsule hash. A capsule is
-/// content-addressed and immutable, so an entry never goes stale; `None`
-/// records a capsule that carries no block.
-pub(crate) type PresentationCache = BoundedLru<String, Option<serde_json::Value>>;
-
 struct FieldProjectionCache {
     lru: BoundedLru<String, EffectiveProgramProjection>,
 }
@@ -220,8 +131,6 @@ pub struct UiState {
     field_token_key: Arc<[u8; 32]>,
     field_projection_cache: Arc<FieldProjectionCache>,
     composition_checkpoints: Arc<CompositionCheckpointCache>,
-    timeline_cache: Arc<TimelineCache>,
-    presentation_cache: Arc<PresentationCache>,
 }
 
 impl Default for UiState {
@@ -239,10 +148,6 @@ impl UiState {
             field_token_key: Arc::new(rand::random()),
             field_projection_cache: Arc::new(FieldProjectionCache::default()),
             composition_checkpoints: Arc::new(CompositionCheckpointCache::default()),
-            timeline_cache: Arc::new(TimelineCache::with_capacity(TIMELINE_CACHE_MAX_ENTRIES)),
-            presentation_cache: Arc::new(PresentationCache::with_capacity(
-                PRESENTATION_CACHE_MAX_ENTRIES,
-            )),
         }
     }
 
@@ -273,14 +178,6 @@ impl UiState {
 
     pub(crate) fn field_projection_cache(&self) -> &dyn EffectiveProgramProjectionCache {
         self.field_projection_cache.as_ref()
-    }
-
-    pub(crate) fn timeline_cache(&self) -> &TimelineCache {
-        self.timeline_cache.as_ref()
-    }
-
-    pub(crate) fn presentation_cache(&self) -> &PresentationCache {
-        self.presentation_cache.as_ref()
     }
 
     pub(crate) fn composition_checkpoint_get(
