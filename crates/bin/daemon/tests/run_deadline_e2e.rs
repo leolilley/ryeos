@@ -186,11 +186,15 @@ async fn a_long_tool_does_not_outlive_the_run() {
 /// not restart the clock, and the last segment settles as a deadline stop.
 #[tokio::test(flavor = "multi_thread")]
 async fn continuations_share_one_deadline() {
-    // Each reply reports a prompt near the 2,000-token window, which crosses
-    // the continuation threshold on every turn.
-    let script = "steps:\n  - repeat: 200\n    delay_ms: 3000\n    usage: { prompt_tokens: 1900, completion_tokens: 5 }\n    tool_calls:\n      - { id: \"call_{n}\", name: noop_noop, arguments: {} }\n";
+    // Each reply carries about 250 tokens of its own text, so the live context
+    // crosses the 2,000-token window's continuation threshold every few turns.
+    // (Tool results are de-duplicated by the result guard and would not grow.)
+    let padding = "padding ".repeat(125);
+    let script = format!(
+        "steps:\n  - repeat: 200\n    delay_ms: 2000\n    text: \"{padding}\"\n    tool_calls:\n      - {{ id: \"call_{{n}}\", name: noop_noop, arguments: {{}} }}\n"
+    );
     let rig = start_rig(
-        script,
+        &script,
         RigOptions {
             context_window: 2000,
             header_extra:
