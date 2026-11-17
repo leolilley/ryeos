@@ -4125,12 +4125,12 @@ fn authoritative_settled_command_replay(
         }
         return Ok(true);
     }
-    if record.state != "completed" {
-        return Ok(false);
-    }
     if !redacted || !recovered_from_root_chain {
         return Ok(false);
     }
+    // A command recovered from the root chain settles exactly the outcome its
+    // observation batch recorded: completed for success, failed for a
+    // workload error response.
     Ok(find_authoritative_command_observation_batch(
         state,
         session,
@@ -4139,7 +4139,7 @@ fn authoritative_settled_command_replay(
         &record.request_digest,
     )?
     .is_some_and(|(_, response_digest, succeeded)| {
-        succeeded && response_digest == projected_response_digest
+        succeeded == (record.state == "completed") && response_digest == projected_response_digest
     }))
 }
 
