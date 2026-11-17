@@ -6808,7 +6808,6 @@ async fn run_claimed_thread_row_inner(
         project_path,
         super::source_closure::SourceMountPlacement::Project,
         false,
-        resolved.plan_context.scheduled_fire.is_some(),
     )
     .map_err(|error| {
         super::external_content::classify_quarantined_large_object(&error)

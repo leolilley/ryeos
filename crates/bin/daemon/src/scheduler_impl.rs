@@ -27,6 +27,19 @@ use ryeos_state::objects::{
     ExecutionProjectAuthority, PinnedProjectRealization, PinnedTerminalPublication,
 };
 
+/// A schedule that authors a `live_direct` project policy is demanding the
+/// live project: a scheduled launch has no operator to notice a private copy,
+/// so the policy is sealed with explicit live intent whatever it spelled.
+fn scheduled_policy(
+    policy: &ryeos_app::execution_policy::ExecutionPolicy,
+) -> ryeos_app::execution_policy::ExecutionPolicy {
+    let mut policy = policy.clone();
+    if let ProjectExecutionPolicy::LiveDirect { intent, .. } = &mut policy.project {
+        *intent = ryeos_app::execution_policy::LiveIntent::Live;
+    }
+    policy
+}
+
 /// Newtype wrapper around `AppState` so daemon-private dispatch can implement
 /// the scheduler-owned context trait without moving either public type.
 #[derive(Clone)]
@@ -99,7 +112,7 @@ impl AppSchedulerContext {
         };
         let expected =
             ryeos_api::routes::response_modes::execute_mode::resolve_execution_project_authority(
-                &spec.execution.policy,
+                &scheduled_policy(&spec.execution.policy),
                 project_root,
                 snapshot_hash,
                 current_head_destination.as_ref(),
@@ -331,7 +344,7 @@ impl SchedulerContext for AppSchedulerContext {
                     .context("scheduled live-root canonicalization task stopped")?
                     .with_context(|| format!("canonicalize scheduled project {display}"))?;
                 let authority = ryeos_api::routes::response_modes::execute_mode::resolve_execution_project_authority(
-                    &spec.execution.policy,
+                    &scheduled_policy(&spec.execution.policy),
                     Some(&canonical),
                     None,
                     None,

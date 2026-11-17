@@ -1537,6 +1537,7 @@ mod tests {
                 "pin-project",
                 "current-head",
                 "project-snapshot",
+                "live-project",
                 "retain-child-results",
                 "no-operator-vault",
                 "method",
