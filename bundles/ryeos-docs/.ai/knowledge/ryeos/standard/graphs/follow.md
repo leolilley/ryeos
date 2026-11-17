@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-17T17:25:45Z:8fa0911419b3bf0757293c2b3721386a99820d66e892f098e31e22b446f8a76d:CiHdMyXDoMThi17tsYCpn20iOmKlqOKDenVGkfbwHiHJPPy/wC7xctqbktUbcawKtkt9IhtFc0p06OlN8a2KBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-17T21:34:14Z:78904bc5353d8b2cb4a46f4795fcd30d450dfbf5eedfd98602a2111802dd9d1d:2RM7nZvoF+pRAPihQyKumYsYF21wf0ORzv0zp9/F+PJL7aV4eNRztlAReAUqBLD7X5OpbYOg9jiQ6Hfy7wR8Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/graphs
 tags: [graph, follow, authoring, lineage, budget]
@@ -212,7 +212,8 @@ A graph launched with `run_timeout` can reserve time for its own fallback by
 authoring `limits: {deadline: {reserve_seconds: N}}` at the top of the graph
 file. A followed child is stopped when that reserve window opens, so the graph
 resumes with at least `N` seconds left. A child stopped by the deadline reports
-`outcome_kind: deadline`, which a node-level `on_error` target reads as
+`outcome_kind: deadline` (the same outcome record a failed worker child
+reports), which a node-level `on_error` target reads as
 `state._outcome.outcome_kind` before running its fallback inside the reserve.
 
 ## What follow does

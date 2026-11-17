@@ -481,8 +481,13 @@ config:
     let _ = id;
     assert!(
         seen.contains("run_timeout_root_only") || seen.contains("accepted only on the root launch"),
-        "the refusal names the root-only rule: {}",
-        trunc(&seen, 3000)
+        "the refusal names the root-only rule: {}\nstderr: {}",
+        trunc(&seen, 1200),
+        stderr_hits(
+            &rig.h,
+            &["run_timeout", "follow", "refus", "waiter", "launch failed"],
+            40
+        )
     );
     assert!(
         rig.stub.requests().await.is_empty(),
