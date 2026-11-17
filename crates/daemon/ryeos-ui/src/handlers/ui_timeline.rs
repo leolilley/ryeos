@@ -386,7 +386,8 @@ mod tests {
             spend_usd: 0.0421,
         };
         let summary = chain_summary("running", &totals);
-        let value = window_response("c", "config:x", "d", &folded(1, 9), summary, 200, None).unwrap();
+        let value =
+            window_response("c", "config:x", "d", &folded(1, 9), summary, 200, None).unwrap();
         assert_eq!(
             value["summary"],
             json!({
@@ -405,9 +406,11 @@ mod tests {
         assert_eq!(next_limit(5, 1900), Some(MAX_LIMIT));
         assert_eq!(next_limit(5, MAX_LIMIT), None, "already at the cap");
         assert_eq!(next_limit(0, 200), None, "nothing older to reveal");
-        let value = window_response("c", "config:x", "d", &folded(500, 9), summary(), 200, None).unwrap();
+        let value =
+            window_response("c", "config:x", "d", &folded(500, 9), summary(), 200, None).unwrap();
         assert_eq!(value["next_limit"], 400);
-        let value = window_response("c", "config:x", "d", &folded(5, 9), summary(), 200, None).unwrap();
+        let value =
+            window_response("c", "config:x", "d", &folded(5, 9), summary(), 200, None).unwrap();
         assert!(value["next_limit"].is_null());
     }
 
@@ -451,7 +454,8 @@ mod tests {
         assert_eq!(older_count(10, 3), 7);
         assert_eq!(older_count(3, 3), 0);
         assert_eq!(older_count(2, 200), 0);
-        let value = window_response("c", "config:x", "d", &folded(5, 9), summary(), 2, None).unwrap();
+        let value =
+            window_response("c", "config:x", "d", &folded(5, 9), summary(), 2, None).unwrap();
         assert_eq!(value["older"], 3);
         assert_eq!(value["highest_chain_seq"], 9);
         assert!(value.get("order").is_none());
@@ -463,7 +467,8 @@ mod tests {
 
     #[test]
     fn since_sends_the_order_and_only_items_that_changed() {
-        let value = window_response("c", "config:x", "d", &folded(5, 9), summary(), 4, Some(2)).unwrap();
+        let value =
+            window_response("c", "config:x", "d", &folded(5, 9), summary(), 4, Some(2)).unwrap();
         assert_eq!(
             value["order"],
             json!(["item-1", "item-2", "item-3", "item-4"])
@@ -579,7 +584,8 @@ mod tests {
                 let full = window_response("c", "r", "d", &now, summary(), 200, None).unwrap();
                 if let Some(previous) = &held {
                     let since = previous["highest_chain_seq"].as_i64().unwrap();
-                    let update = window_response("c", "r", "d", &now, summary(), 200, Some(since)).unwrap();
+                    let update =
+                        window_response("c", "r", "d", &now, summary(), 200, Some(since)).unwrap();
                     let merged = merge(previous, &update)
                         .unwrap_or_else(|| panic!("{name} at {count}: an id was missing"));
                     assert_eq!(Value::Array(merged), full["items"], "{name} at {count}");
