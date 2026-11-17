@@ -2465,24 +2465,37 @@ fn run_execution_history_reset_owned(
     // succeed. Never use ordinary current-open here: it correctly rejects
     // predecessor replay epochs, even though this command explicitly retires
     // them. The restricted preparation cannot service replay or retire rows.
-    let operational_inspection = operational_owner::open_original_operational(
-        inspection_custody,
-        &quota_claim,
-        &native_factory,
-        &runtime_directory,
-        &runtime_directory_lock,
-        OperationalOwnerPhase::Inspection,
-    )
-    .context("admit strict readonly Operational inspection before intent")?;
-    let replay_indexes = operational_inspection.report()?;
-    let stable_profiles = operational_inspection
-        .credential_profiles()
-        .context("validate stable credential-profile authority before history retirement")?;
-    // Keep this actual inspector's terminal. A later writable owner is a
-    // distinct original ticket, not a readonly-to-write phase conversion.
-    operational_inspection
-        .close(Arc::clone(&native_factory))
-        .context("close original Operational inspector before durable intent")?;
+    //
+    // A wholly absent store (the operator set aside one this binary has no
+    // migration for) carries nothing: no replay rows, no credential profiles.
+    // The next start creates a fresh current store.
+    let operational_absent = quota_claim.operational_store_absent();
+    let (replay_indexes, stable_profiles) = if operational_absent {
+        (
+            ryeos_state::operational::ReplayIndexResetReport::absent_store(),
+            Vec::new(),
+        )
+    } else {
+        let operational_inspection = operational_owner::open_original_operational(
+            inspection_custody,
+            &quota_claim,
+            &native_factory,
+            &runtime_directory,
+            &runtime_directory_lock,
+            OperationalOwnerPhase::Inspection,
+        )
+        .context("admit strict readonly Operational inspection before intent")?;
+        let replay_indexes = operational_inspection.report()?;
+        let stable_profiles = operational_inspection
+            .credential_profiles()
+            .context("validate stable credential-profile authority before history retirement")?;
+        // Keep this actual inspector's terminal. A later writable owner is a
+        // distinct original ticket, not a readonly-to-write phase conversion.
+        operational_inspection
+            .close(Arc::clone(&native_factory))
+            .context("close original Operational inspector before durable intent")?;
+        (replay_indexes, stable_profiles)
+    };
 
     // Credential-profile lifecycle authority is stable node state, not
     // execution history. OperationalDb is the only authority carried across
@@ -2728,7 +2741,9 @@ fn run_execution_history_reset_owned(
         .context("discard the unreadable scope lifetime fence under the attested reboot")?;
     // Only after durable intent may any replay rows or enrolling ceremonies
     // be retired. A crash leaves the existing discard marker for safe retry.
-    let operational_db = {
+    let operational_db = if operational_absent {
+        None
+    } else {
         let verify_operational_mutation = || -> Result<()> {
             operation.require_quota_claim(&quota_claim)?;
             operation.require_active_in(
@@ -2785,7 +2800,7 @@ fn run_execution_history_reset_owned(
                     "preserve stable credential authority and invalidate retired enrollment",
                 )?;
         }
-        owner
+        Some(owner)
     };
     runtime_db
         .apply_explicit_history_reset(&reset_authority, &config.db_path)
@@ -2998,9 +3013,11 @@ fn run_execution_history_reset_owned(
             )?;
         }
     }
-    operational_db
-        .close(Arc::clone(&native_factory))
-        .context("close original Operational mutation before terminal census")?;
+    if let Some(operational_db) = operational_db {
+        operational_db
+            .close(Arc::clone(&native_factory))
+            .context("close original Operational mutation before terminal census")?;
+    }
     let closed_runtime = runtime_db
         .close(Arc::clone(&native_factory))
         .context("close original Runtime before final reset acknowledgement")?;
