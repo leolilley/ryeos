@@ -145,6 +145,7 @@ fn recap(mut items: Vec<Item>) -> Vec<Item> {
                 exchange: id,
                 work,
                 duration_s,
+                seq: all.iter().map(|e| e.seq.1).max().unwrap_or(0),
             },
         ));
     }
