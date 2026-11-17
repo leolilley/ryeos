@@ -30,3 +30,4 @@ pub(crate) mod test_helpers;
 pub use descriptor::{ParserCachePolicy, ParserDescriptor};
 pub use dispatcher::ParserDispatcher;
 pub use registry::{DuplicateRef, ParserRegistry};
+pub use result_cache::ParseResultCache;
