@@ -37,5 +37,6 @@ pub(crate) mod setup;
 #[cfg(test)]
 pub(crate) mod test_env;
 pub(crate) mod thread_diagnostics;
+mod timeline_text;
 pub mod transport;
 pub mod tty;

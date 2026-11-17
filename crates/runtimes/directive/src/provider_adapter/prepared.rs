@@ -109,8 +109,24 @@ pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<Prepar
     let model = input.model;
 
     let schemas = provider.schemas.as_ref().and_then(|s| s.messages.as_ref());
-    let (converted_messages, system_prompt) =
-        super::messages::convert_messages(input.messages, &schemas.cloned());
+    let reasoning_schema = provider
+        .schemas
+        .as_ref()
+        .and_then(|schemas| schemas.reasoning.as_ref());
+    // A history that owes a replayable value and holds none (a resumed or
+    // re-grouped chain) is refused before any request is made.
+    if let Some(reasoning) = reasoning_schema
+        && let Some(missing) = super::reasoning_replay::owed_missing(input.messages, reasoning)
+    {
+        bail!("{missing}");
+    }
+    let (converted_messages, system_prompt) = super::messages::convert_messages(
+        input.messages,
+        &schemas.cloned(),
+        &super::messages::ConvertOptions {
+            reasoning: reasoning_schema,
+        },
+    );
 
     let tool_schema = provider.schemas.as_ref().and_then(|s| s.tools.clone());
     let tools_val = super::tools::serialize_tools(input.tools, &tool_schema);
@@ -146,11 +162,10 @@ pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<Prepar
                 "tool" => tool_message_bytes = tool_message_bytes.saturating_add(bytes),
                 _ => {}
             }
-            reasoning_replay_bytes = reasoning_replay_bytes.saturating_add(
-                message
-                    .reasoning_text()
-                    .map_or(0, |reasoning| reasoning.len() as u64),
-            );
+        }
+        if let Some(reasoning) = reasoning_schema {
+            reasoning_replay_bytes =
+                super::reasoning_replay::replayed_bytes(&converted_messages, reasoning);
         }
         (
             converted_messages_bytes,

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-17T15:16:28Z:9137eda851ae6314167cbdbdf0dcdf514905c75cd402c1326e6ac570fab98dd7:owvaM+HOt7F2PPKQdYv+YES/78XH/agWld3+fV7D1lG7xky1Ih4LL6jLT3W9RBCb0vISwT5pXAzwmY9H/0gsCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T19:59:00Z:b74034e96208f5e4f85b5502af7ab0d6859ea1a23cbd2baa532797b36ef6a402:9Br6LtIKDU1VTXQHd+vJsNkY8A+3ULqgXCpz7kayyPsgS2cN58Ec3ksp8YECuGOYNUVcc/41aYCCCCvFkVKIBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Thread timeline definition: how a chain's events fold into timeline items.
 # Declarative data read by the timeline service; the fold engine names no event type itself.
 category: ryeos/ui/timeline
@@ -33,6 +33,34 @@ events:
   provider_attempt_budget_transition_v1: [{drop: true}]
   stream_opened: [{drop: true}]
   thread_usage: [{drop: true}]
+
+  # Daemon bookkeeping and evidence records: hashes, identities and routing the
+  # person watching a thread does not act on. Each is a deliberate drop.
+  edge_recorded: [{drop: true}]  # chain link between threads; child_thread_spawned draws the work
+  worker_continuation_admitted: [{drop: true}]  # admission detail; worker_session.restored draws the resume
+  continuation_requested: [{drop: true}]  # handshake step; thread_continued draws the continuation
+  continuation_accepted: [{drop: true}]  # handshake step; thread_continued draws the continuation
+  command_submitted: [{drop: true}]  # command-queue plumbing
+  command_claimed: [{drop: true}]  # command-queue plumbing
+  command_completed: [{drop: true}]  # command-queue plumbing
+  launch_augmentation_cache_hit: [{drop: true}]  # cache evidence for the launch
+  thread_facet_set: [{drop: true}]  # tag metadata, shown by the thread header rather than the flow
+  thread_reconciled: [{drop: true}]  # reserved daemon bookkeeping; the terminal event draws the outcome
+  orphan_process_killed: [{drop: true}]  # reserved daemon bookkeeping; the terminal event draws the outcome
+  subprocess_output_observed: [{drop: true}]  # raw output frames; tool results draw what was returned
+  observation: [{drop: true}]  # journal-only runtime observation, not part of the story
+  hook_observation_recorded: [{drop: true}]  # hook result evidence, hashes only
+  project_observation_recorded: [{drop: true}]  # project observation evidence
+  provider_call_observation_recorded: [{drop: true}]  # provider call evidence
+  resource_budget_transition_v1: [{drop: true}]  # accounting evidence
+  resource_precontact_budget_transition_v1: [{drop: true}]  # accounting evidence
+  # Live stream fragments: the finished cognition_out and tool events carry the content.
+  token_delta: [{drop: true}]
+  stream_snapshot: [{drop: true}]
+  stream_closed: [{drop: true}]
+  cognition_reasoning: [{drop: true}]  # live reasoning delta; cognition_out carries the finished reasoning
+  graph_foreach_iteration: [{drop: true}]  # journal-only; graph_foreach_started and the step activity draw the loop
+  graph_branch_taken: [{drop: true}]  # routing between steps; each step draws its own activity
 
   # Input the model is given. An operator or launch input opens an exchange with
   # its first text part; later text parts continue it and images draw a line.
@@ -372,6 +400,12 @@ events:
           project:
             headline: {join: [{path: payload.attempt, prefix: "provider retry, attempt "}]}
             reason: payload.retry_advance.decision.reason.kind
+  # A declared hook failed: worth a warning, since its observation is missing.
+  hook_failed:
+    - emit:
+        - type: marker
+          tone: [{default: warn}]
+          project: {headline: {join: [{path: payload.failure_class, prefix: "hook failed: "}]}}
   cost_untracked:
     - emit:
         - type: marker
