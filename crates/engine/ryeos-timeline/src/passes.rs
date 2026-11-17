@@ -151,6 +151,10 @@ struct Exchange {
     last_outcome: Option<usize>,
     /// The exchange is open until it has an answer and something ends it.
     finished: bool,
+    /// Highest `chain_seq` among the entries that decided the fold: the
+    /// answer and what ended the exchange. A recap formed when the exchange
+    /// finishes carries it, so it reads as changed from that moment.
+    settled: i64,
 }
 
 /// The turn fold: a finished exchange's work folds under a recap.
@@ -185,6 +189,22 @@ fn turn_fold(items: Vec<Item>, definition: &Definition) -> Vec<Item> {
             last_exchange.as_deref() != Some(id.as_str())
                 || info.last_outcome.is_some_and(|outcome| outcome > answer)
         });
+        let Some(answer) = info.last_prose.filter(|_| info.finished) else {
+            continue;
+        };
+        let next_exchange = items[answer + 1..]
+            .iter()
+            .find(|item| exchange(item).is_some_and(|other| other != id.as_str()));
+        let outcome = info
+            .last_outcome
+            .filter(|&outcome| outcome > answer)
+            .map(|outcome| &items[outcome]);
+        info.settled = [Some(&items[answer]), next_exchange, outcome]
+            .into_iter()
+            .flatten()
+            .map(Item::last_seq)
+            .max()
+            .unwrap_or(0);
     }
     let folds_at = |at: usize, item: &Item| -> bool {
         let Some(info) = exchange(item).and_then(|id| exchanges.get(id)) else {
@@ -216,7 +236,7 @@ fn turn_fold(items: Vec<Item>, definition: &Definition) -> Vec<Item> {
                 .last()
                 .is_none_or(|last| exchange(last) == exchange(&item));
         if !joins {
-            close(&mut stretch, &mut out);
+            close(&mut stretch, &mut out, &exchanges);
         }
         if folds_at(at, &item) {
             stretch.push(item);
@@ -224,13 +244,13 @@ fn turn_fold(items: Vec<Item>, definition: &Definition) -> Vec<Item> {
             out.push(item);
         }
     }
-    close(&mut stretch, &mut out);
+    close(&mut stretch, &mut out, &exchanges);
     out
 }
 
 /// Fold a finished stretch into a recap, or leave its items open when its
 /// duration cannot be measured.
-fn close(stretch: &mut Vec<Item>, out: &mut Vec<Item>) {
+fn close(stretch: &mut Vec<Item>, out: &mut Vec<Item>, exchanges: &HashMap<String, Exchange>) {
     let members = std::mem::take(stretch);
     let all: Vec<&Entry> = members.iter().flat_map(entries_of).collect();
     let start = all.iter().filter_map(|e| epoch(&e.ts.0)).min();
@@ -241,12 +261,13 @@ fn close(stretch: &mut Vec<Item>, out: &mut Vec<Item>) {
     };
     let work = all.iter().filter(|e| e.kind == EntryKind::Activity).count();
     let exchange = first.exchange.clone().unwrap_or_default();
+    let settled = exchanges.get(&exchange).map_or(0, |info| info.settled);
     out.push(Item::Recap(Recap {
         id: format!("rc:{}", first.id),
         exchange,
         work,
         duration_s: end.checked_sub(start),
-        seq: all.iter().map(|e| e.seq.1).max().unwrap_or(0),
+        seq: all.iter().map(|e| e.seq.1).max().unwrap_or(0).max(settled),
         members,
     }));
 }

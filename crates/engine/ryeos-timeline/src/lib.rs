@@ -317,8 +317,8 @@ pub struct Recap {
     pub duration_s: Option<i64>,
     /// The folded work: entries and clusters, in order.
     pub members: Vec<Item>,
-    /// Highest `chain_seq` among the members: the recap changes only when
-    /// one of them does.
+    /// Highest `chain_seq` among the members and the entries that finished
+    /// the exchange: the recap changes only when one of them does.
     pub seq: i64,
 }
 
