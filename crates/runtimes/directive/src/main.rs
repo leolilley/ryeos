@@ -530,29 +530,18 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
         // text, the tool inventory or the reasoning policy. That is decided
         // before the thread is continued or anything is recorded, so a refused
         // launch leaves the chain exactly as it was.
-        if let Some(recorded) = &resume_state.frame {
-            let refused = provider
-                .schemas
-                .as_ref()
-                .and_then(|schemas| schemas.frame_stability.as_ref())
-                .map_or(&[][..], |stability| stability.refuse_change_of.as_slice());
-            if let Some(component) =
-                launch_records::refused_frame_change(recorded, &launch_frame.payload, refused)
-            {
-                let error = format!(
-                    "frame_change_refused: the provider entry refuses a changed {} within one \
-                     conversation (recorded frame_seq {})",
-                    component.as_str(),
-                    recorded.frame_seq
-                );
-                return runner::refuse_launch(
-                    &callback,
-                    &envelope.thread_id,
-                    &error,
-                    budget.cost(),
-                )
-                .await;
-            }
+        if let Some(recorded) = &resume_state.frame
+            && let Some(refusal) = runner::refuse_frame_change(
+                &callback,
+                &envelope.thread_id,
+                &provider,
+                recorded,
+                &launch_frame.payload,
+                budget.cost(),
+            )
+            .await
+        {
+            return refusal;
         }
         if !same_thread_resume
             && let Err(e) = callback

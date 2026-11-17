@@ -1718,6 +1718,26 @@ impl ProviderConfig {
             }
         }
 
+        if let Some(stability) = self
+            .schemas
+            .as_ref()
+            .and_then(|schemas| schemas.frame_stability.as_ref())
+        {
+            let listed = &stability.refuse_change_of;
+            if listed.is_empty() {
+                bail!(
+                    "provider config{context}: schemas.frame_stability must list at least one component in refuse_change_of"
+                );
+            }
+            let distinct: std::collections::BTreeSet<&str> =
+                listed.iter().map(|component| component.as_str()).collect();
+            if distinct.len() != listed.len() {
+                bail!(
+                    "provider config{context}: schemas.frame_stability.refuse_change_of lists a component twice"
+                );
+            }
+        }
+
         if let Some(pricing) = self.pricing.as_ref()
             && pricing.explicitly_free
             && (pricing
@@ -2682,6 +2702,19 @@ fn validate_reasoning_capture_and_replay(
             bail!("provider config{context}: two reasoning replay placements write the same key");
         }
     }
+    for rule in &config.capture {
+        if !matches!(rule, ReasoningCaptureRule::TextDelta { .. })
+            && !replay
+                .placements
+                .iter()
+                .any(|placement| placement.from == rule.id())
+        {
+            bail!(
+                "provider config{context}: reasoning capture {:?} stores an artefact that no replay placement names",
+                rule.id()
+            );
+        }
+    }
     Ok(())
 }
 
@@ -3389,6 +3422,29 @@ mod reasoning_capture_config_tests {
         shape["replay"]["placements"][0]["into"] =
             json!({"message_field": "a", "tool_call_field": "b"});
         assert!(serde_json::from_value::<ReasoningSchemaConfig>(shape).is_err());
+    }
+
+    #[test]
+    fn an_artefact_capture_no_placement_names_is_refused() {
+        let mut shape = claude_shape();
+        shape["capture"].as_array_mut().unwrap().push(json!(
+            {"id": "extra", "kind": "tool_call_field", "field": "x", "merge": "last"}
+        ));
+        let error = validate(shape).expect_err("unused artefact capture");
+        assert!(error.to_string().contains("no replay placement"), "{error}");
+    }
+
+    #[test]
+    fn frame_stability_refuses_empty_and_duplicate_lists() {
+        let with = |list: Value| {
+            let mut provider = provider_with("delta_merge", text_shape());
+            provider.schemas.as_mut().unwrap().frame_stability =
+                Some(serde_json::from_value(json!({"refuse_change_of": list})).unwrap());
+            provider.validate("")
+        };
+        with(json!(["system", "reasoning"])).expect("distinct components");
+        assert!(with(json!([])).is_err());
+        assert!(with(json!(["tools", "tools"])).is_err());
     }
 
     #[test]

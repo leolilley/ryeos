@@ -5077,6 +5077,34 @@ fn provider_reported_spend_runtime_cost(usd: ryeos_runtime::envelope::UsdNanos) 
     }
 }
 
+/// The frame-stability check of a resume or continuation: when the provider
+/// entry refuses a change of a component in which the launch frame differs
+/// from the recorded one, the launch ends here with `frame_change_refused`
+/// and nothing about the new frame or its inputs is recorded. `None` means the
+/// launch may go on.
+pub(crate) async fn refuse_frame_change(
+    callback: &CallbackClient,
+    thread_id: &str,
+    provider: &ryeos_directive_definition::ProviderConfig,
+    recorded: &ryeos_runtime::cognition::CognitionFramePayload,
+    launch: &ryeos_runtime::cognition::CognitionFramePayload,
+    cost: ryeos_runtime::envelope::RuntimeCost,
+) -> Option<anyhow::Result<RuntimeResult>> {
+    let refused = provider
+        .schemas
+        .as_ref()
+        .and_then(|schemas| schemas.frame_stability.as_ref())
+        .map_or(&[][..], |stability| stability.refuse_change_of.as_slice());
+    let component = crate::launch_records::refused_frame_change(recorded, launch, refused)?;
+    let error = format!(
+        "frame_change_refused: the provider entry refuses a changed {} within one \
+         conversation (recorded frame_seq {})",
+        component.as_str(),
+        recorded.frame_seq
+    );
+    Some(refuse_launch(callback, thread_id, &error, cost).await)
+}
+
 /// Ends a launch that is refused before the runner starts: records the
 /// failure on the thread and returns the terminal result. Used where the
 /// refusal is decided from the recorded chain and the launch alone.
@@ -7568,5 +7596,171 @@ mod tests {
             error.to_string().contains("unprovable"),
             "expected unprovable settlement, got: {error:#}"
         );
+    }
+}
+
+#[cfg(test)]
+mod frame_refusal_tests {
+    use super::*;
+    use crate::launch_records::{FrameSource, build_frame};
+    use ryeos_directive_definition::{ProviderConfig, ReasoningConfig, ReasoningMode};
+    use ryeos_runtime::callback::{CallbackError, DispatchActionRequest, RuntimeCallbackAPI};
+    use std::sync::{Arc, Mutex};
+
+    /// Records what a refused launch writes: events and the terminal
+    /// completion.
+    #[derive(Default)]
+    struct Recorder {
+        events: Mutex<Vec<(String, Value)>>,
+        finalized: Mutex<Vec<TerminalCompletion>>,
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeCallbackAPI for Recorder {
+        async fn dispatch_action(&self, _: DispatchActionRequest) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn attach_process(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn finalize_thread(
+            &self,
+            _: &str,
+            completion: TerminalCompletion,
+        ) -> Result<Value, CallbackError> {
+            self.finalized.lock().unwrap().push(completion);
+            Ok(json!({}))
+        }
+        async fn get_thread(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(Value::Null)
+        }
+        async fn request_continuation(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: TerminalCompletion,
+        ) -> Result<Value, CallbackError> {
+            Ok(Value::Null)
+        }
+        async fn append_event(
+            &self,
+            _: &str,
+            event_type: &str,
+            payload: Value,
+        ) -> Result<Value, CallbackError> {
+            self.events
+                .lock()
+                .unwrap()
+                .push((event_type.to_string(), payload));
+            Ok(json!({}))
+        }
+        async fn append_events(
+            &self,
+            _: &str,
+            _: Vec<Value>,
+            _: ryeos_runtime::callback::EventAppendOptions,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+    }
+
+    fn provider(refuse: Option<Value>) -> ProviderConfig {
+        let mut schemas = json!({
+            "streaming": {"mode": "delta_merge"},
+            "output_limit": {"path": "max_tokens", "semantics": "provider_native_output_tokens"},
+        });
+        if let Some(refuse) = refuse {
+            schemas["frame_stability"] = json!({"refuse_change_of": refuse});
+        }
+        serde_json::from_value(json!({
+            "family": "chat_completions",
+            "transport": {"kind": "remote_http", "base_url": "https://example.invalid"},
+            "schemas": schemas,
+            "pricing": {"explicitly_free": true},
+            "body_template": {"model": "{model}", "messages": "{messages}", "stream": "{stream}"}
+        }))
+        .expect("provider fixture")
+    }
+
+    fn frame(effort: &str) -> ryeos_runtime::cognition::CognitionFramePayload {
+        build_frame(
+            1,
+            &FrameSource {
+                system_prompt: Some("sys"),
+                inventory: &[],
+                model: "m",
+                reasoning: Some(&ReasoningConfig {
+                    mode: ReasoningMode::Enabled,
+                    effort: Some(effort.to_string()),
+                }),
+                sampling: None,
+                max_output_tokens: 0,
+                provider_config_hash: &"ab".repeat(32),
+            },
+        )
+        .unwrap()
+        .payload
+    }
+
+    fn cost() -> ryeos_runtime::envelope::RuntimeCost {
+        BudgetTracker::new(ryeos_accounting::UsdNanos::parse_canonical("1").unwrap()).cost()
+    }
+
+    async fn run(refuse: Option<Value>) -> (Option<anyhow::Result<RuntimeResult>>, Arc<Recorder>) {
+        let recorder = Arc::new(Recorder::default());
+        let callback = CallbackClient::from_inner(recorder.clone(), "T-refuse", "/tmp/p", "tat");
+        let result = refuse_frame_change(
+            &callback,
+            "T-refuse",
+            &provider(refuse),
+            &frame("high"),
+            &frame("low"),
+            cost(),
+        )
+        .await;
+        (result, recorder)
+    }
+
+    #[tokio::test]
+    async fn a_refused_component_ends_the_launch_with_the_stable_code_and_one_failure_record() {
+        let (result, recorder) = run(Some(json!(["reasoning"]))).await;
+        let result = result.expect("refused").expect("terminal result");
+        assert!(!result.success);
+        assert_eq!(result.status, RuntimeResultStatus::Failed);
+        let failure: ryeos_runtime::RuntimeFailure =
+            serde_json::from_value(result.result.expect("failure payload")).unwrap();
+        assert_eq!(failure.code, "frame_change_refused");
+        assert!(failure.summary.contains("reasoning"), "{}", failure.summary);
+        assert!(
+            failure.summary.contains("frame_seq 1"),
+            "{}",
+            failure.summary
+        );
+
+        let events = recorder.events.lock().unwrap();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].0, "thread_failed");
+        assert!(
+            events[0].1["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("frame_change_refused")
+        );
+        let finalized = recorder.finalized.lock().unwrap();
+        assert_eq!(finalized.len(), 1);
+        assert_eq!(finalized[0].status, ThreadTerminalStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn a_change_the_entry_does_not_refuse_records_nothing_and_lets_the_launch_go_on() {
+        for refuse in [None, Some(json!(["system", "tools"]))] {
+            let (result, recorder) = run(refuse).await;
+            assert!(result.is_none());
+            assert!(recorder.events.lock().unwrap().is_empty());
+            assert!(recorder.finalized.lock().unwrap().is_empty());
+        }
     }
 }

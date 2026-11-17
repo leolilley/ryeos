@@ -248,6 +248,12 @@ async fn a_turn_that_owes_a_signature_and_has_none_fails_before_its_tool_runs() 
         thread_detail(&rig.h, &thread_id, 800).await
     );
     assert_eq!(rig.marker_count(), 0, "the proposed tool must not have run");
+    // Only live fragments were published for the refused call; the chain holds
+    // no settled turn that proposes it.
+    assert!(
+        turn_parts(&rig, &thread_id).await.is_empty(),
+        "a refused turn must leave no settled cognition_out"
+    );
     assert_eq!(rig.stub.requests().await.len(), 1);
 }
 

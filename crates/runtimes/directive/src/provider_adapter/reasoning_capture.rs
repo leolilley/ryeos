@@ -149,8 +149,11 @@ fn assemble_block_item(
         .unwrap_or_default();
     // Without a group key there is one open slot, so an item of another type
     // means the open block was abandoned: drop it, never replay half a block.
+    // An item that names no type is a continuation chunk of the open block
+    // (a bare signature, say) and never displaces it.
     if group_key.is_none()
         && !block.is_empty()
+        && item.contains_key(type_key)
         && block.get(type_key).and_then(Value::as_str).unwrap_or("") != item_type
     {
         events.push(incomplete_warning(id, &block));
@@ -238,6 +241,16 @@ pub fn take_tool_call_artefact(
     rules: &[ReasoningCaptureRule],
     state: &mut HashMap<String, String>,
 ) -> Option<ToolCallArtefact> {
+    // A call holds one artefact, so provider validation caps an entry at one
+    // `tool_call_field` rule; only the first such rule is read here.
+    debug_assert!(
+        rules
+            .iter()
+            .filter(|rule| matches!(rule, ReasoningCaptureRule::ToolCallField { .. }))
+            .count()
+            <= 1,
+        "validation allows at most one tool_call_field rule"
+    );
     rules.iter().find_map(|rule| {
         let ReasoningCaptureRule::ToolCallField { id, .. } = rule else {
             return None;
@@ -403,6 +416,28 @@ mod tests {
             StreamEvent::Warning { code, .. } if code == INCOMPLETE_ARTEFACT_CODE
         )));
         assert_eq!(artefacts(&events)[0].1["thinking"], "b");
+    }
+
+    #[test]
+    fn a_type_less_signature_chunk_continues_the_open_block() {
+        let (events, state) = run(
+            &claude_rules(),
+            &[
+                json!({"thinking_blocks": [{"type": "thinking", "thinking": "ab"}]}),
+                json!({"thinking_blocks": [{"signature": "S1"}]}),
+            ],
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, StreamEvent::Warning { .. })),
+            "a continuation chunk must not drop the block"
+        );
+        assert_eq!(
+            artefacts(&events)[0].1,
+            json!({"type": "thinking", "thinking": "ab", "signature": "S1"})
+        );
+        assert!(state.is_empty());
     }
 
     #[test]

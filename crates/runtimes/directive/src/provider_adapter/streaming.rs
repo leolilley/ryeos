@@ -2836,6 +2836,12 @@ async fn send_prepared_streaming_inner(
         }));
     }
 
+    // A stream that ended without a terminal finish reason still closes its
+    // capture state: a block left open is dropped with a warning, never kept.
+    if exit != LoopExit::Cancelled {
+        super::reasoning_capture::finish_capture(&mut tool_state, &mut all_events);
+    }
+
     // Interrupt cut: seal the partial cognition with its complete text and
     // reasoning parts only. NO tool call: an interrupted cognition didn't
     // complete its tool call, so the folded wire history has no unpaired
