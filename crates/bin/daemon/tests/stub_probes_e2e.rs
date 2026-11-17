@@ -1520,7 +1520,8 @@ fn probe_stale_diagnosis() {
     newer_files(&root.join("crates"), published, &mut newer);
     newer_files(&root.join("bundles/browser"), published, &mut newer);
     for name in ["Cargo.toml", "Cargo.lock"] {
-        newer_files(&root.join(name), published, &mut newer);
+        let modified = std::fs::metadata(root.join(name)).and_then(|m| m.modified());
+        say("stale_diagnosis", &format!("{name} mtime={modified:?}"));
     }
     say(
         "stale_diagnosis",
