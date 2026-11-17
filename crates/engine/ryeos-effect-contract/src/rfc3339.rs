@@ -10,17 +10,16 @@ use anyhow::{Result, anyhow};
 const NANOS_PER_SECOND: i128 = 1_000_000_000;
 const NANOS_PER_MILLI: i128 = 1_000_000;
 
-fn parse_fixed(value: &str) -> Result<chrono::DateTime<chrono::FixedOffset>> {
-    chrono::DateTime::parse_from_rfc3339(value)
+fn parse_timestamp(value: &str) -> Result<jiff::Timestamp> {
+    value
+        .parse::<jiff::Timestamp>()
         .map_err(|error| anyhow!("invalid RFC 3339 timestamp: {error}"))
 }
 
 /// Parse an RFC 3339 timestamp (any numeric offset, `Z`, optional fractional
 /// seconds) into Unix nanoseconds.
 pub fn parse_unix_nanos(value: &str) -> Result<i128> {
-    let parsed = parse_fixed(value)?;
-    Ok(i128::from(parsed.timestamp()) * NANOS_PER_SECOND
-        + i128::from(parsed.timestamp_subsec_nanos()))
+    Ok(parse_timestamp(value)?.as_nanosecond())
 }
 
 /// Unix milliseconds, rounded toward negative infinity.
@@ -35,18 +34,41 @@ pub fn parse_unix_seconds(value: &str) -> Result<i64> {
     i64::try_from(seconds).map_err(|_| anyhow!("RFC 3339 timestamp is out of range"))
 }
 
+fn civil_utc(timestamp: jiff::Timestamp) -> jiff::civil::DateTime {
+    jiff::tz::TimeZone::UTC.to_datetime(timestamp)
+}
+
 /// `YYYY-MM-DDTHH:MM:SS.mmmZ` for Unix milliseconds.
 pub fn format_unix_millis(millis: i64) -> Result<String> {
-    Ok(chrono::DateTime::from_timestamp_millis(millis)
-        .ok_or_else(|| anyhow!("Unix milliseconds are out of range: {millis}"))?
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+    let timestamp = jiff::Timestamp::from_millisecond(millis)
+        .map_err(|_| anyhow!("Unix milliseconds are out of range: {millis}"))?;
+    let at = civil_utc(timestamp);
+    Ok(format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        at.year(),
+        at.month(),
+        at.day(),
+        at.hour(),
+        at.minute(),
+        at.second(),
+        at.millisecond()
+    ))
 }
 
 /// `YYYY-MM-DDTHH:MM:SSZ` for Unix seconds.
 pub fn format_unix_seconds(seconds: i64) -> Result<String> {
-    Ok(chrono::DateTime::from_timestamp(seconds, 0)
-        .ok_or_else(|| anyhow!("Unix seconds are out of range: {seconds}"))?
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+    let timestamp = jiff::Timestamp::from_second(seconds)
+        .map_err(|_| anyhow!("Unix seconds are out of range: {seconds}"))?;
+    let at = civil_utc(timestamp);
+    Ok(format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        at.year(),
+        at.month(),
+        at.day(),
+        at.hour(),
+        at.minute(),
+        at.second()
+    ))
 }
 
 /// Re-spell a parsed timestamp as UTC milliseconds with `Z` (sub-millisecond
@@ -199,7 +221,7 @@ mod tests {
     }
 
     // Behaviours that differ between date-time libraries; each one below is
-    // pinned to the value the pre-migration (chrono) code produced.
+    // pinned to the value the pre-migration (chrono) implementation produced.
     #[test]
     fn grammar_corners_are_pinned() {
         let accepts = |value: &str| parse_unix_nanos(value).is_ok();

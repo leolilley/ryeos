@@ -11,7 +11,7 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = { workspace = true }
-chrono = { workspace = true }
+jiff = { workspace = true }
 lillux = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
