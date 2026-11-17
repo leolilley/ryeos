@@ -447,9 +447,8 @@ async fn cancel_and_prove(run: &Run, graph_id: &str, child_ids: &[String], extra
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    let all = run.h.list_threads(200).await.expect("list threads");
     let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
+    let all = loop {
         let all = run.h.list_threads(200).await.expect("list threads");
         let unsettled: Vec<(String, String)> = all
             .iter()
@@ -457,14 +456,14 @@ async fn cancel_and_prove(run: &Run, graph_id: &str, child_ids: &[String], extra
             .map(|thread| (thread.thread_id.clone(), thread.status.clone()))
             .collect();
         if unsettled.is_empty() {
-            break;
+            break all;
         }
         assert!(
             Instant::now() < deadline,
             "threads not settled 20s after the cancel: {unsettled:?}"
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
-    }
+    };
     for child in child_ids {
         let thread = all
             .iter()
