@@ -978,11 +978,18 @@ fn call_timeline(name: &str, log: &str) {
         .map(|(i, _)| i)
         .collect();
     say(name, &format!("call_markers={}", marks.len()));
-    if marks.len() < 42 {
+    if marks.len() < 160 {
         return;
     }
-    let window = &lines[marks[40]..marks[41]];
-    let t0 = window.iter().find_map(|l| stamp_ms(l)).unwrap_or(0.0);
+    // A 2.5 s window starting at the 150th marker, about 3/5 through the run.
+    let start = marks[150];
+    let t_start = stamp_ms(lines[start]).unwrap_or(0.0);
+    let window: Vec<&str> = lines[start..]
+        .iter()
+        .copied()
+        .take_while(|l| stamp_ms(l).is_none_or(|t| t - t_start <= 2500.0))
+        .collect();
+    let t0 = t_start;
     let mut prev = t0;
     let mut gaps: Vec<(f64, usize)> = Vec::new();
     let mut rendered: Vec<String> = Vec::new();
@@ -991,7 +998,7 @@ fn call_timeline(name: &str, log: &str) {
             gaps.push((t - prev, i));
             prev = t;
             let body = l.splitn(2, "Z ").nth(1).unwrap_or(l);
-            rendered.push(format!("+{:.0}ms {}", t - t0, trunc(body, 170)));
+            rendered.push(format!("+{:.0}ms {}", t - t0, trunc(body, 150)));
         }
     }
     say(name, &format!("call_window_ms={:.0} lines={}", prev - t0, window.len()));
