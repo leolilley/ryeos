@@ -505,7 +505,7 @@ mod tests {
     fn common() -> LifecycleOperationCommon {
         LifecycleOperationCommon {
             schema: 1,
-            protocol: "ryeos.external-execution.lifecycle-adapter.v2".into(),
+            protocol: "ryeos.external-execution.lifecycle-adapter.v3".into(),
             operation_id: "op-1".into(),
             binding_hash: "b".repeat(64),
             settings_digest: "c".repeat(64),

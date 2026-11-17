@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-17T06:27:45Z:7daae64ebb3e5c103e041867392ce1b9d4fd2be5eb0072696e6b1ff15b3f110e:Rg8rH6zWHodaV347wWGudpmcrBibJBza7STECO+CrNfbuNxnz5OQPYwS7BHClu1ygga4qm8P0XSmsPOTwEEjBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T06:56:49Z:cea5959fbf770dbb52f93d488170f70f1af56e3409b16c7d10d26bb7d892ec4b:LncwRTGtB25kEzAPYDfA8fmvPgTnBrs17kAVclXOqFOG/xipkUjqhdoRvlfUNqh1RB4S56ppuZn2f/vDrEuQCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: protocol
 name: contained_structured_session
 category: ryeos/core
@@ -39,3 +39,12 @@ session:
   wire_protocol: ryeos.structured-session
   wire_version: 2
   max_frame_bytes: 16777216
+holding:
+  requires_guarantees:
+    - isolation:enforced
+    - filesystem:captured_execution
+    - callback:captured_compatible
+    - { any_of: [termination:scope, termination:pid_namespace] }
+    - { any_of: [recovery:scope, recovery:pid_namespace] }
+  filesystem_authority: captured_execution
+  root_settlement: containment_empty

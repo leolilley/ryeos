@@ -2025,6 +2025,7 @@ composed_value_contract:
             captured_compatible_callback: None,
             session: None,
             execution_evidence: None,
+            holding: None,
         }
     }
 
@@ -2115,6 +2116,7 @@ composed_value_contract:
             captured_compatible_callback: None,
             session: None,
             execution_evidence: None,
+            holding: None,
         };
 
         let synthetic_ref = CanonicalRef::parse("tool:synthetic/test").unwrap();

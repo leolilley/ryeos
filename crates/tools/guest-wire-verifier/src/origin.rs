@@ -109,7 +109,6 @@ pub fn measure_subject_at(
     Ok(SubjectEvidence {
         owner_executable_sha256: identity.owner_executable_sha256,
         manifest_hash: identity.manifest_hash,
-        controller_public_root: identity.controller_public_root,
     })
 }
 
@@ -307,7 +306,7 @@ fn check_observation(
                 "evidence bytes differ from the adapter observation"
             );
             let challenge = ConsumerRuntimeChallenge {
-                schema: 1,
+                schema: ryeos_external_execution_contract::restored_runtime_measurement::CONSUMER_RUNTIME_CHALLENGE_SCHEMA,
                 intent: attempt.intent,
                 selection: record.selection.clone(),
             };
@@ -333,21 +332,6 @@ pub fn registered_member_digests(
     Ok(source.archive_member_digests.clone())
 }
 
-/// The published RFC 8032 test-vector public key a relationship carries until
-/// a real controller key replaces it. A measured subject rooted at it was
-/// produced for no controller at all.
-pub(crate) const PLACEHOLDER_CONTROLLER_ROOT: &str =
-    "ed25519:11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=";
-
-/// Refuse a subject whose controller root is the well-known placeholder.
-pub fn refuse_placeholder_controller_root(subject: &SubjectEvidence) -> Result<()> {
-    ensure!(
-        subject.controller_public_root != PLACEHOLDER_CONTROLLER_ROOT,
-        "the relationship's controller key was never replaced for this controller"
-    );
-    Ok(())
-}
-
 /// Pure acceptance step: build the qualification result or refuse.
 pub fn accept(
     config: &VerifierConfig,
@@ -355,11 +339,9 @@ pub fn accept(
     record: &RemoteProbeInputRecord,
     observed: &ObservedAttempt,
 ) -> Result<ProductQualificationResult> {
-    refuse_placeholder_controller_root(subject)?;
     ensure!(
         record.prerequisite.manifest_hash == subject.manifest_hash
             && record.prerequisite.owner_executable_sha256 == subject.owner_executable_sha256
-            && record.prerequisite.controller_public_root == subject.controller_public_root
             && record.purpose.subject_manifest_hash == subject.manifest_hash,
         "mounted subject differs from the daemon-retained owner measurement"
     );
@@ -418,7 +400,6 @@ pub async fn run(input: &[u8]) -> Result<ProductQualificationResult> {
     let realizations = std::env::var("RYEOS_EXTERNAL_REALIZATIONS")
         .context("daemon-protected realization set absent")?;
     let subject = measure_subject(&realizations)?;
-    refuse_placeholder_controller_root(&subject)?;
     let thread_id = std::env::var("RYEOSD_THREAD_ID")
         .context("protected invoking verifier thread identity absent")?;
     ryeos_runtime::validate_runtime_thread_id(&thread_id).map_err(anyhow::Error::msg)?;
@@ -519,17 +500,6 @@ mod tests {
     }
 
     #[test]
-    fn placeholder_controller_root_is_refused() {
-        let subject = |root: &str| SubjectEvidence {
-            owner_executable_sha256: "2".repeat(64),
-            manifest_hash: "3".repeat(64),
-            controller_public_root: root.to_owned(),
-        };
-        assert!(refuse_placeholder_controller_root(&subject(PLACEHOLDER_CONTROLLER_ROOT)).is_err());
-        assert!(refuse_placeholder_controller_root(&subject("ed25519:root")).is_ok());
-    }
-
-    #[test]
     fn configuration_is_closed_and_pinned() {
         assert!(parse(&config_json()).is_ok());
         for (field, value) in [
@@ -556,7 +526,7 @@ mod tests {
         };
         let hash = "a".repeat(64);
         let mut intent = RestoredVerifierAttemptIntent {
-            schema: 2,
+            schema: ryeos_external_execution_contract::restored_runtime_measurement::RESTORED_VERIFIER_ATTEMPT_SCHEMA,
             operation_id: String::new(),
             qualification_operation_id: hash.clone(),
             restored_occurrence_id: "sbx-probe".into(),
@@ -578,13 +548,12 @@ mod tests {
                     prerequisite_measurement_observation_digest: hash.clone(),
                 },
                 nonce_hex: hash.clone(),
-                guest_runtime_manifest_hash: hash.clone(),
-            },
+                guest_runtime_manifest_hash: hash.clone(), launch_shape: ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(), },
         };
         intent.operation_id = intent.derived_operation_id().unwrap();
         let observed = ObservedAttempt {
             challenge: ConsumerRuntimeChallenge {
-                schema: 1,
+                schema: ryeos_external_execution_contract::restored_runtime_measurement::CONSUMER_RUNTIME_CHALLENGE_SCHEMA,
                 intent,
                 selection: ConsumerRuntimeVerifierSelection {
                     scenario_source_digest: hash.clone(),

@@ -1046,6 +1046,14 @@ pub(super) fn external_compose(ctx: &HandlerContext<'_>) -> Result<Value> {
                 .context("mailbox parent")?,
         },
     };
+    let trust_store = ryeos_engine::trust::TrustStore::load_node_registry(ctx.app_root)
+        .context("load trust store for the node policy")?;
+    let node_policy = ryeos_node_runtime::node_policy::load_snapshot(
+        ctx.app_root,
+        &trust_store,
+        &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
+    )
+    .context("load verified node policy generation")?;
     let report = compose_external_execution_binding(ComposeRequest {
         app_root: ctx.app_root,
         state_lock: ctx.state_lock,
@@ -1064,6 +1072,7 @@ pub(super) fn external_compose(ctx: &HandlerContext<'_>) -> Result<Value> {
         runtime_qualification: optional("runtime_qualification")?,
         runtime_content_qualification: optional("runtime_content_qualification")?,
         limits,
+        node_policy: &node_policy,
     })?;
     Ok(serde_json::to_value(report)?)
 }
@@ -1171,6 +1180,7 @@ pub(super) fn snapshot_qualification_compose(ctx: &HandlerContext<'_>) -> Result
         .get("consumer_verifiers")
         .map(|bytes| read_json::<Value>(bytes, "consumer verifiers"))
         .transpose()?;
+    let launch_shape = read_json::<Value>(ctx.inputs.require("launch_shape")?, "launch shape")?;
     let report = compose_runtime_snapshot_qualification_binding(QualificationComposeRequest {
         app_root: ctx.app_root,
         state_lock: ctx.state_lock,
@@ -1179,6 +1189,7 @@ pub(super) fn snapshot_qualification_compose(ctx: &HandlerContext<'_>) -> Result
         provider_spec: ctx.inputs.require("provider_spec")?.to_vec(),
         verifier_artifact_hash: arguments.verifier.clone(),
         consumer_verifiers,
+        launch_shape,
         limits: QualificationLimits {
             contact_timeout_seconds: arguments
                 .contact_timeout_seconds
@@ -2052,6 +2063,59 @@ mod tests {
             serde_json::from_value::<RecomposeArguments>(json!({"bindings": ["bundles/core"]}))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn a_qualification_compose_without_a_launch_shape_is_refused_naming_the_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().to_path_buf();
+        let node =
+            NodeIdentity::create(&RuntimeRoot::new(state.clone()).node_signing_key_path()).unwrap();
+        let lock = StateLock::acquire(&default_lock_path(&state)).unwrap();
+        let request = RequestBody {
+            schema: REQUEST_SCHEMA.to_owned(),
+            node_fingerprint: node.fingerprint().to_owned(),
+            signer_fingerprint: "b".repeat(64),
+            signer_grant_digest: None,
+            signer_origin_site_id: None,
+            operation: "node.external-execution.snapshot-qualification-compose".to_owned(),
+            arguments: json!({
+                "id": "qualifier",
+                "snapshot_binding": "producer",
+                "verifier": "3".repeat(64),
+            }),
+            inputs: BTreeMap::new(),
+            expected_result: BTreeMap::new(),
+            precondition: BTreeMap::new(),
+            issued_at: "2026-11-13T00:00:00Z".to_owned(),
+            not_after: "2026-11-13T01:00:00Z".to_owned(),
+        };
+        let inputs = VerifiedInputs::new(BTreeMap::from([(
+            "provider_spec".to_owned(),
+            br#"{"schema":1}"#.to_vec(),
+        )]));
+        let error = snapshot_qualification_compose(&HandlerContext {
+            app_root: &state,
+            state_lock: &lock,
+            request: &request,
+            signed: &SignedRequest {
+                body: request.clone(),
+                signature: String::new(),
+            },
+            request_digest: &"c".repeat(64),
+            inputs: &inputs,
+            host: &BareHost,
+            node: &node,
+        })
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("input `launch_shape` is absent"),
+            "{error:#}"
+        );
+        let spec =
+            super::super::table::lookup("node.external-execution.snapshot-qualification-compose")
+                .unwrap();
+        assert!(spec.slot("launch_shape").is_some_and(|slot| slot.required));
     }
 
     #[test]

@@ -628,6 +628,12 @@ mod tests {
                 qualification_attestation_hash: "2".repeat(64),
                 selection_identity_digest: "c".repeat(64),
                 runtime_recipe_digest,
+                placement: ryeos_state::external_execution::admission::ExternalProgramPlacement {
+                    workload_class: "fixture.workload".into(),
+                    lease: Vec::new(),
+                    guest: Vec::new(),
+                    ready_timeout_ms: 60_000,
+                },
             };
         binding.check_program(&program).unwrap();
         for field in [

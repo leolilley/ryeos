@@ -653,10 +653,6 @@ pub(crate) mod tests {
             },
             guest_runtime_manifest_hash: "8".repeat(64),
             owner_executable_sha256: "9".repeat(64),
-            controller_public_root: format!(
-                "ed25519:{}",
-                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [3u8; 32])
-            ),
             upload_sha256: "a".repeat(64),
             upload_bytes: 1024,
             attempt_deadline_ms: now + 60_000,
@@ -691,7 +687,7 @@ pub(crate) mod tests {
         };
         db.bind_runtime_snapshot_readiness(&readiness).unwrap();
         let mut intent = RuntimeSnapshotQualificationIntent {
-            schema: 1,
+            schema: ryeos_external_execution_contract::runtime_snapshot::RUNTIME_SNAPSHOT_QUALIFICATION_SCHEMA,
             operation_id: String::new(),
             owner_principal: source.owner_principal.clone(),
             snapshot_operation_id: source.operation_id.clone(),
@@ -705,8 +701,7 @@ pub(crate) mod tests {
             settings_digest: "1".repeat(64),
             verifier_artifact_hash: "2".repeat(64),
             maximum_lifetime_seconds: 900,
-            attempt_deadline_ms: now + 60_000,
-        };
+            attempt_deadline_ms: now + 60_000, launch_shape: ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(), };
         intent.operation_id = intent.derived_operation_id().unwrap();
         db.reserve_snapshot_qualification(&intent).unwrap();
         assert!(matches!(
@@ -742,7 +737,7 @@ pub(crate) mod tests {
         ));
 
         let mut verifier = RestoredVerifierAttemptIntent {
-            schema: 2,
+            schema: ryeos_external_execution_contract::restored_runtime_measurement::RESTORED_VERIFIER_ATTEMPT_SCHEMA,
             operation_id: String::new(),
             qualification_operation_id: intent.operation_id.clone(),
             restored_occurrence_id: "sbx-restored".into(),
@@ -800,7 +795,6 @@ pub(crate) mod tests {
                 challenge_digest: verifier.owner_challenge().unwrap().digest().unwrap(),
                 manifest_hash: source.guest_runtime_manifest_hash.clone(),
                 owner_executable_sha256: source.owner_executable_sha256.clone(),
-                controller_public_root: source.controller_public_root.clone(),
             },
             contact_deadline_exceeded: false,
         };
@@ -854,10 +848,6 @@ pub(crate) mod tests {
             },
             guest_runtime_manifest_hash: "8".repeat(64),
             owner_executable_sha256: "9".repeat(64),
-            controller_public_root: format!(
-                "ed25519:{}",
-                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [3u8; 32])
-            ),
             upload_sha256: "a".repeat(64),
             upload_bytes: 1024,
             attempt_deadline_ms: now + 60_000,
@@ -892,7 +882,7 @@ pub(crate) mod tests {
         })
         .unwrap();
         let mut intent = RuntimeSnapshotQualificationIntent {
-            schema: 1,
+            schema: ryeos_external_execution_contract::runtime_snapshot::RUNTIME_SNAPSHOT_QUALIFICATION_SCHEMA,
             operation_id: String::new(),
             owner_principal: source.owner_principal.clone(),
             snapshot_operation_id: source.operation_id.clone(),
@@ -906,8 +896,7 @@ pub(crate) mod tests {
             settings_digest: qualification.settings_digest().to_owned(),
             verifier_artifact_hash: qualification.verifier_artifact_hash().to_owned(),
             maximum_lifetime_seconds: qualification.maximum_lifetime_seconds(),
-            attempt_deadline_ms: now + 60_000,
-        };
+            attempt_deadline_ms: now + 60_000, launch_shape: ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(), };
         intent.operation_id = intent.derived_operation_id().unwrap();
         let generation = RetainedQualificationGeneration {
             production: producer.retained_generation().unwrap(),
@@ -1341,8 +1330,7 @@ pub(crate) mod tests {
         consumer.verifier_artifact_hash = selection.verifier_artifact_hash.clone();
         consumer.purpose = ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose::ConsumerRuntime {
             coordinate: coordinate.clone(), nonce_hex: "8".repeat(64),
-            guest_runtime_manifest_hash: source.guest_runtime_manifest_hash.clone(),
-        };
+            guest_runtime_manifest_hash: source.guest_runtime_manifest_hash.clone(), launch_shape: ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(), };
         consumer.operation_id = consumer.derived_operation_id().unwrap();
         // The owner-measurement entry point supplies neither retained consumer
         // input nor root admission. The input-lane check refuses first.

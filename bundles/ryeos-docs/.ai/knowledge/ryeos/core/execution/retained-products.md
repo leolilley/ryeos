@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T11:51:10Z:88adaae22aec7a8813f7a0275e1dd261bcbbcf7e8a77d8587c50204507bbdb2d:7gfAvOehJe/KBOMkmgX3nfxj+Nb4/g3pQiaH9tHOkUREwHEm+sHWGtHl4DkVEdcPB6oEDfIgzXV0W8kJLqn+Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T10:04:31Z:4f0c2223d4d585d068c1a44fcb0100550ccd154a2ebc43019272a178fc41e122:2+AZDnP408vcU0xCWTssV2H5VX46t2KqaEOiwnmW2ZFrL0MpLbbLZhE/M9VMOjDE/Mkqvwx6i9KmaE/2cOdYDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/execution
 tags: [execution, products, external-content, authority]
@@ -65,6 +65,14 @@ large-object sidecar transfer remains separate from ordinary CAS-blob receipt.
 
 For installed-bundle consumers, local literal provisioning is independent of
 product selections because the binding names the consumer and publisher.
+Selecting a product does not make a bundle consumer project-dependent: a
+bundle consumer whose selected relationships are bundle-owned keeps
+installed-bundle authority under a pinned launch and projectless alike, and a
+binding made projectless authorises the pinned launch. A consumer is
+project-dependent only when a project-space ancestor, referenced item, or
+selected relationship (judged by one predicate over its full resolution)
+contributes to it; a project overlaying the relationship Config makes the
+consumer a pinned-project consumer.
 A pinned-project consumer containing both literal inputs and product slots on
 that same item instead has a selection-sensitive binding identity. Its selected
 literal provisioning currently requires the same operator as its products;
@@ -122,17 +130,26 @@ An acceptance policy is a signed `config` item whose
 
 | Field | Meaning |
 |---|---|
-| `schema` | `ryeos.remote_qualification_acceptance_policy.v2` |
+| `schema` | `ryeos.remote_qualification_acceptance_policy.v3` |
 | `qualification_policy_ref` | the exact origin qualification policy ref this policy accepts |
 | `trusted_attesters` | `{principal, origin_site_id}` pairs; both must match the testimony and the attester's grant |
 | `required_claims`, `allowed_claims` | required must be a subset of allowed |
 | `accepted_verifier_definition_digests` | the evidence's `verifier.effective_definition_digest` |
 | `accepted_verifier_artifact_digests` | the canonical JSON digest of the evidence's `verifier.artifact_identity`, not the raw binary hash |
+| `accepted_origin_holdings` | required, non-empty, sorted unique, at most 8 `{execution_protocol, filesystem_authority, process_settlement_authority}` entries; the holdings an origin may have run its qualified processes under |
 | `allowed_lanes` | `product`, `content`, or both |
 | `max_testimony_age_seconds` | 1 to 2678400 (31 days) |
 | `max_clock_skew_seconds` | at most 3600 |
 
-Lists are sorted and unique. Because `qualification_policy_ref` must equal
+Lists are sorted and unique. A product testimony records the holding its
+origin ran under: the verifier's, and for a consumer qualification the Worker's
+too (the protocol it executed through, the filesystem authority that protocol
+granted, and the settlement the node observed). Acceptance requires every
+recorded holding to be listed in `accepted_origin_holdings`, and refuses with
+"origin holding is not accepted by this site policy" otherwise. A policy
+without the field does not decode, so none accepts any holding by omission. The
+holding describes the origin; it is never compared with the receiving node's own
+posture. Because `qualification_policy_ref` must equal
 the evidence's policy ref, each origin qualification policy needs its own
 acceptance policy.
 
@@ -142,8 +159,8 @@ the testimony. An acceptance is also immutable at its coordinate: a different
 testimony for the same coordinate is refused, and re-qualifying on the origin
 is the remedy.
 
-Acceptances are recorded as acceptance evidence v4. An acceptance recorded
-before v4 is refused wherever it is used, with the code
+Acceptances are recorded as acceptance evidence v5. An acceptance recorded
+before v5 is refused wherever it is used, with the code
 `remote_qualification_acceptance_superseded` (or
 `remote_content_acceptance_superseded` when a content testimony is used). To
 cure it, run the export above again from the origin; the receiver records a
@@ -317,6 +334,19 @@ A consumer bound with product selections is renewed with the same complete
 selection list and product owner it was bound with. `rebind` renews existing
 bindings only; it does not import or compose products, so a product slot whose
 witness changed still goes through `compose-product`.
+
+## One qualification policy for every node
+
+A consumer qualification policy (one with a `consumer_execution_context`) names
+no minimum verifier settlement and no required node guarantees. The Worker and
+the verifier each list the protocols they may run under; every protocol carries
+its own holding (required node guarantees, filesystem authority and root
+settlement). At each launch the node selects the one protocol whose guarantees
+its own report meets, so the same signed policy qualifies on a node that
+enforces isolation and on one that only runs trusted sessions. The settlement
+the verifier is held to is its selected protocol's root settlement; a policy
+without a consumer context still names its own `minimum_verifier_process_settlement`.
+The evidence records what was actually used as `origin_holdings`.
 
 ## Evidence is not task success
 

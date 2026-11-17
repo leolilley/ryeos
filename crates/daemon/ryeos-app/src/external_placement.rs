@@ -59,31 +59,6 @@ enum RuntimeAdmissionBasis {
     RestoredOwnerMeasurement,
 }
 
-/// Adapter interpretation input, not a qualification publication or grant.
-/// The caller must independently authenticate the exact source, attestation,
-/// retained journal and policy before constructing this value.
-pub(crate) struct RuntimeProbeInput {
-    pub qualification_attestation_hash: String,
-    pub runtime_source: ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotSource,
-    pub subject_manifest_hash: String,
-    pub probe_evidence: serde_json::Value,
-}
-
-impl RuntimeProbeInput {
-    fn from_product(
-        proof: &ryeos_state::external_content::products::composition::AdmittedProductQualification,
-    ) -> Self {
-        Self {
-            qualification_attestation_hash: proof.attestation_hash.clone(),
-            runtime_source: ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotSource::CapturedProduct {
-                product_witness_hash: proof.evidence.product_witness_hash.clone(),
-            },
-            subject_manifest_hash: proof.evidence.result.subject_manifest_hash.clone(),
-            probe_evidence: proof.evidence.result.probe_evidence.clone(),
-        }
-    }
-}
-
 /// The binding facts a provider inventory lists under: the signed settings
 /// that name the owner scope, and the network inputs the adapter may use.
 pub(crate) struct ProviderInventorySource<'a> {
@@ -354,20 +329,6 @@ pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
         contract: &ExternalPlacementBackendContract,
         credential: &PlacementCredential,
     ) -> Result<()>;
-
-    /// Interpret an already-authenticated, CAS-owned runtime probe
-    /// against this exact signed placement contract. This operation must be
-    /// credential-free and provider-contact-free. It cannot authenticate the
-    /// qualification attestation, grant lifecycle capability, or permit allocation.
-    fn verify_runtime_probe(
-        &self,
-        _contract: &ExternalPlacementBackendContract,
-        _proof: &RuntimeProbeInput,
-        _source: &ryeos_external_execution::guest_runtime_product::GuestOwnerRuntimeManifestIdentity,
-        _binding_hash: &str,
-    ) -> Result<()> {
-        bail!("external lifecycle adapter does not verify runtime qualification probes")
-    }
 
     /// Whether this backend's signed provider spec declares that activation
     /// uploads the guest runtime itself, so the controller must produce that
@@ -1685,34 +1646,6 @@ impl ExternalPlacementBackendRegistry {
         backend.observe_runtime_snapshot_readiness(binding, credential, request, deadline)
     }
 
-    fn verify_runtime_probe(
-        &self,
-        contract: &ExternalPlacementBackendContract,
-        proof: &RuntimeProbeInput,
-        source: &ryeos_external_execution::guest_runtime_product::GuestOwnerRuntimeManifestIdentity,
-        binding_hash: &str,
-    ) -> Result<()> {
-        let backend = self
-            .backends
-            .get(&(
-                contract.backend.clone(),
-                contract.backend_artifact_hash.clone(),
-            ))
-            .ok_or_else(|| {
-                self.binding_artifact_not_installed(
-                    "exact signed external placement backend generation is not installed",
-                    serde_json::json!({
-                        "section": crate::node_config::sections::external_execution::SECTION_NAME,
-                        "digest": binding_hash,
-                    }),
-                    "backend_artifact_hash",
-                    &contract.backend,
-                    &contract.backend_artifact_hash,
-                )
-            })?;
-        backend.verify_runtime_probe(contract, proof, source, binding_hash)
-    }
-
     /// Exact installed artifact coordinates of the one lifecycle generation
     /// registered under this backend id, for composing a signed placement
     /// binding.
@@ -1930,7 +1863,7 @@ impl ExternalPlacementBackendRegistry {
         backend: Arc<dyn ExternalPlacementBackend>,
         contract: &ExternalPlacementBackendContract,
         credential: &PlacementCredential,
-        mut required: BTreeSet<LifecycleCapability>,
+        required: BTreeSet<LifecycleCapability>,
         require_activation: bool,
         runtime_basis: RuntimeAdmissionBasis,
     ) -> Result<Arc<dyn ExternalPlacementBackend>> {
@@ -1943,56 +1876,13 @@ impl ExternalPlacementBackendRegistry {
             contract.cleanup_proof == "provider_terminal_occurrence_v1",
             "external placement has an unsupported cleanup evidence contract"
         );
-        // Allocation without an installed activation operation strands a paid
-        // occurrence. Require startup capability before any provider contact.
-        if require_activation {
-            required.insert(LifecycleCapability::SupervisorActivation);
-        }
-        // A relay transport moves files through the adapter's relay operation;
-        // a binding must not select it over an adapter that does not declare
-        // that operation. Retained cleanup never relays, so it is not gated.
-        if require_activation
-            && matches!(
-                contract.controller_transport,
-                ryeos_state::external_execution::transport::ExternalControllerTransportSelection::ControllerFileRelay(_)
-            )
-        {
-            required.insert(LifecycleCapability::ControllerFileRelay);
-            crate::node_config::sections::external_execution::require_relay_scope(
-                &contract.controller_transport,
-                backend.relay_scope_setting(),
-                &contract.settings,
-            )?;
-        }
-        // This is inherent to the admitted cleanup proof. Reconciliation is
-        // optional: an unknown outcome may remain quarantined with its capacity
-        // reserved, but cannot be converted into an unsupported stronger fact.
-        required.insert(LifecycleCapability::ExactTerminalObservation);
-        let effective = backend.lifecycle_capabilities();
-        if require_activation {
-            match runtime_basis {
-                RuntimeAdmissionBasis::OrdinarySignedRelationship => ensure!(
-                    contract.runtime_qualification.is_some()
-                        == effective
-                            .contains(&LifecycleCapability::IndependentGuestRuntimeAdmission),
-                    "external runtime qualification relationship differs from installed adapter admission"
-                ),
-                // A provider whose activation stages the runtime itself admits
-                // it independently of any prior qualification; the session
-                // being qualified is then the product it stages.
-                RuntimeAdmissionBasis::RestoredOwnerMeasurement => ensure!(
-                    backend.stages_guest_runtime_upload()
-                        || !effective
-                            .contains(&LifecycleCapability::IndependentGuestRuntimeAdmission),
-                    "qualification-only startup cannot satisfy adapter independent guest runtime admission"
-                ),
-            }
-        }
-        let missing: BTreeSet<_> = required.difference(&effective).copied().collect();
-        ensure!(
-            missing.is_empty(),
-            "external lifecycle adapter lacks required capabilities: {missing:?}"
-        );
+        require_adapter_capabilities(
+            backend.as_ref(),
+            contract,
+            required,
+            require_activation,
+            runtime_basis,
+        )?;
         Ok(backend)
     }
 
@@ -2000,7 +1890,7 @@ impl ExternalPlacementBackendRegistry {
     /// any credential. This qualifies nothing: it serves only the offline
     /// steps that must precede the credential read, such as lease admission,
     /// and full qualification still follows before any provider contact.
-    fn installed(
+    pub(crate) fn installed(
         &self,
         contract: &ExternalPlacementBackendContract,
     ) -> Result<Arc<dyn ExternalPlacementBackend>> {
@@ -2368,18 +2258,6 @@ fn admit_current_runtime_qualification(
             qualification,
             &contract.guest_runtime_manifest_hash,
         )?;
-        // The probe snapshot locator is rejoined to this node's own provider
-        // journal, which a remote testimony cannot satisfy. Refuse rather
-        // than skip the rejoin.
-        ensure!(
-            remote
-                .evidence
-                .result
-                .probe_evidence
-                .get("runtime_snapshot_locator")
-                .is_none(),
-            "remote qualification testimony cannot carry a runtime snapshot locator"
-        );
         (
             remote.qualification_attestation_hash,
             remote.evidence,
@@ -2393,13 +2271,37 @@ fn admit_current_runtime_qualification(
             state,
             qualification,
             &contract.guest_runtime_manifest_hash,
+            None,
         )?;
         (witness.attestation_hash, witness.evidence, None)
     };
+    retain_admitted_runtime_qualification(
+        state,
+        contract,
+        binding_hash,
+        &qualification.owner_principal,
+        attestation_hash,
+        evidence,
+        remote_testimony,
+    )
+}
+
+/// Retain one admitted proof for the launch: the launch shape it was
+/// qualified under is compared first, then the retained proof is verified.
+fn retain_admitted_runtime_qualification(
+    state: &AppState,
+    contract: &ExternalPlacementBackendContract,
+    binding_hash: &str,
+    owner_principal: &str,
+    attestation_hash: String,
+    evidence: ryeos_state::external_content::products::qualification::ProductQualificationEvidence,
+    remote_testimony: Option<ryeos_state::objects::RetainedRemoteQualificationTestimony>,
+) -> Result<Option<ryeos_state::objects::RetainedExternalRuntimeQualification>> {
+    require_qualified_launch_shape(contract, &evidence)?;
     let retained = ryeos_state::objects::RetainedExternalRuntimeQualification {
         binding_hash: binding_hash.to_owned(),
         guest_runtime_manifest_hash: contract.guest_runtime_manifest_hash.clone(),
-        owner_principal: qualification.owner_principal.clone(),
+        owner_principal: owner_principal.to_owned(),
         proof: ryeos_state::external_content::products::composition::AdmittedProductQualification {
             attestation_hash,
             evidence,
@@ -2407,21 +2309,108 @@ fn admit_current_runtime_qualification(
         remote_testimony,
     };
     retained.validate()?;
-    let source = verify_retained_runtime_proof(state, &retained)?;
-    crate::operator_runtime_snapshot::verify_probe_snapshot_locator(
-        state,
-        &retained.proof,
-        &source,
-        &contract.backend,
-        &retained.owner_principal,
-    )?;
-    state.external_placement_backends.verify_runtime_probe(
-        contract,
-        &RuntimeProbeInput::from_product(&retained.proof),
-        &source,
-        binding_hash,
-    )?;
+    verify_retained_runtime_proof(state, &retained)?;
     Ok(Some(retained))
+}
+
+/// The shape a binding launches under: an HTTPS controller is dialed by the
+/// guest, so its sandbox is created with an egress allow-list (the lease's, or
+/// the controller host) and it captures the binding's network inputs; a
+/// file-relay controller needs no guest network, so its sandbox denies all.
+/// Hosts are not compared: a qualification names a host that never resolves
+/// and a lease names the real controller.
+struct BindingLaunchShape {
+    controller_transport:
+        ryeos_external_execution_contract::runtime_snapshot::LaunchControllerTransport,
+    sandbox_network_policy_kind: &'static str,
+    network_inputs:
+        Option<ryeos_external_execution_contract::runtime_snapshot::LaunchNetworkInputs>,
+}
+
+fn binding_launch_shape(contract: &ExternalPlacementBackendContract) -> BindingLaunchShape {
+    use ryeos_external_execution_contract::runtime_snapshot::{
+        LaunchControllerTransport, LaunchNetworkInput, LaunchNetworkInputs,
+        LaunchSandboxNetworkPolicy,
+    };
+    match &contract.controller_transport {
+        ryeos_state::external_execution::transport::ExternalControllerTransportSelection::HttpJson(http) => {
+            let input = |selection: &ryeos_state::external_execution::transport::ExternalNetworkInputSelection| {
+                LaunchNetworkInput {
+                    source: selection.source.clone(),
+                    max_bytes: selection.max_bytes,
+                }
+            };
+            BindingLaunchShape {
+                controller_transport: LaunchControllerTransport::Https,
+                sandbox_network_policy_kind: LaunchSandboxNetworkPolicy::AllowList {
+                    hosts: Default::default(),
+                }
+                .kind(),
+                network_inputs: Some(LaunchNetworkInputs {
+                    resolver: input(&http.network_inputs.resolver),
+                    hosts: input(&http.network_inputs.hosts),
+                }),
+            }
+        }
+        ryeos_state::external_execution::transport::ExternalControllerTransportSelection::ControllerFileRelay(_) => {
+            BindingLaunchShape {
+                controller_transport: LaunchControllerTransport::Relay,
+                sandbox_network_policy_kind: LaunchSandboxNetworkPolicy::DenyAll.kind(),
+                network_inputs: None,
+            }
+        }
+    }
+}
+
+/// Refuse a launch whose shape differs from the shape its qualification
+/// retained, naming the differing field and both values. The policy kind is
+/// compared, not hosts (the launch's hosts are not known here); transport and
+/// the network-input sources are compared exactly. The retained basis
+/// (declared or verified) is record only and never changes the comparison.
+fn compare_launch_shape(
+    qualified: &ryeos_external_execution_contract::runtime_snapshot::LaunchShape,
+    launch: &BindingLaunchShape,
+) -> Result<()> {
+    ensure!(
+        qualified.controller_transport == launch.controller_transport,
+        "launch shape differs from the qualified shape: launch_shape.controller_transport \
+         qualified {:?}, launch {:?}",
+        qualified.controller_transport,
+        launch.controller_transport
+    );
+    ensure!(
+        qualified.sandbox_network_policy.kind() == launch.sandbox_network_policy_kind,
+        "launch shape differs from the qualified shape: launch_shape.sandbox_network_policy \
+         qualified {}, launch {}",
+        qualified.sandbox_network_policy.kind(),
+        launch.sandbox_network_policy_kind
+    );
+    match (&qualified.network_inputs, &launch.network_inputs) {
+        (None, None) => {}
+        (Some(qualified), Some(launch)) => {
+            if let Some(difference) = qualified.first_difference(launch) {
+                bail!(
+                    "launch shape differs from the qualified shape: {difference} \
+                     (qualified versus launch)"
+                );
+            }
+        }
+        (qualified, launch) => bail!(
+            "launch shape differs from the qualified shape: launch_shape.network_inputs \
+             qualified {qualified:?}, launch {launch:?}"
+        ),
+    }
+    Ok(())
+}
+
+fn require_qualified_launch_shape(
+    contract: &ExternalPlacementBackendContract,
+    evidence: &ryeos_state::external_content::products::qualification::ProductQualificationEvidence,
+) -> Result<()> {
+    let Some(retained) = evidence.retained_launch_shape() else {
+        bail!("the runtime qualification retained no launch shape");
+    };
+    compare_launch_shape(&retained.shape, &binding_launch_shape(contract))
 }
 
 /// Rejoin the session's CAS-owned guest-runtime proof to the exact signed
@@ -2466,20 +2455,8 @@ fn require_retained_session_runtime_qualification(
     else {
         return Ok(());
     };
-    let source = verify_retained_runtime_proof(state, retained)?;
-    crate::operator_runtime_snapshot::verify_probe_snapshot_locator(
-        state,
-        &retained.proof,
-        &source,
-        &contract.backend,
-        &retained.owner_principal,
-    )?;
-    state.external_placement_backends.verify_runtime_probe(
-        &contract,
-        &RuntimeProbeInput::from_product(&retained.proof),
-        &source,
-        binding.digest(),
-    )
+    verify_retained_runtime_proof(state, retained)?;
+    Ok(())
 }
 
 /// What a retained product-sourced session must and must not carry: its
@@ -2684,7 +2661,6 @@ fn verify_retained_runtime_proof(
     )?;
     let source = ryeos_external_execution::guest_runtime_product::derive_guest_owner_runtime_manifest_identity(
         &manifest,
-        state.identity.verifying_key(),
     )?;
     ensure!(
         source.manifest_hash == *manifest_hash
@@ -2969,6 +2945,66 @@ pub fn preflight_external_qualification_guest(
     Ok(())
 }
 
+/// The adapter's effective capability set against what the program and the
+/// placement require. Compose and launch judge it with this one function.
+fn require_adapter_capabilities(
+    backend: &dyn ExternalPlacementBackend,
+    contract: &ExternalPlacementBackendContract,
+    mut required: BTreeSet<LifecycleCapability>,
+    require_activation: bool,
+    runtime_basis: RuntimeAdmissionBasis,
+) -> Result<()> {
+    // Allocation without an installed activation operation strands a paid
+    // occurrence. Require startup capability before any provider contact.
+    if require_activation {
+        required.insert(LifecycleCapability::SupervisorActivation);
+    }
+    // A relay transport moves files through the adapter's relay operation;
+    // a binding must not select it over an adapter that does not declare
+    // that operation. Retained cleanup never relays, so it is not gated.
+    if require_activation
+        && matches!(
+            contract.controller_transport,
+            ryeos_state::external_execution::transport::ExternalControllerTransportSelection::ControllerFileRelay(_)
+        )
+    {
+        required.insert(LifecycleCapability::ControllerFileRelay);
+        crate::node_config::sections::external_execution::require_relay_scope(
+            &contract.controller_transport,
+            backend.relay_scope_setting(),
+            &contract.settings,
+        )?;
+    }
+    // This is inherent to the admitted cleanup proof. Reconciliation is
+    // optional: an unknown outcome may remain quarantined with its capacity
+    // reserved, but cannot be converted into an unsupported stronger fact.
+    required.insert(LifecycleCapability::ExactTerminalObservation);
+    let effective = backend.lifecycle_capabilities();
+    if require_activation {
+        match runtime_basis {
+            // Current guest mechanism testimony is mandatory for every
+            // ordinary start (admit_current_runtime_qualification), so no
+            // relation between the binding's qualification and the
+            // adapter's capability set is left to judge here.
+            RuntimeAdmissionBasis::OrdinarySignedRelationship => {}
+            // A provider whose activation stages the runtime itself admits
+            // it independently of any prior qualification; the session
+            // being qualified is then the product it stages.
+            RuntimeAdmissionBasis::RestoredOwnerMeasurement => ensure!(
+                backend.stages_guest_runtime_upload()
+                    || !effective.contains(&LifecycleCapability::IndependentGuestRuntimeAdmission),
+                "qualification-only startup cannot satisfy adapter independent guest runtime admission"
+            ),
+        }
+    }
+    let missing: BTreeSet<_> = required.difference(&effective).copied().collect();
+    ensure!(
+        missing.is_empty(),
+        "external lifecycle adapter lacks required capabilities: {missing:?}"
+    );
+    Ok(())
+}
+
 /// Resolve one explicitly content-backed requirement against uniquely matching
 /// signed placement configuration. No credential access or provider operation.
 pub fn prepare_content_candidate_program(
@@ -2976,6 +3012,7 @@ pub fn prepare_content_candidate_program(
     requirement: &ryeos_state::external_execution::admission::ExternalCandidateRequirement,
     qualification_use: &ryeos_state::external_execution::admission::ExternalCandidateQualificationUse,
     realizations: &ryeos_state::objects::ExternalContentRealizationSet,
+    placement: ryeos_state::external_execution::admission::ExternalProgramPlacement,
 ) -> Result<(
     ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
     ryeos_state::objects::RetainedExternalRuntimeContentQualification,
@@ -3027,7 +3064,7 @@ pub fn prepare_content_candidate_program(
         &retained.evidence.purpose.subject else { bail!("runtime content proof lost its activated source"); };
     content
         .verify_verifier_realizations(realizations, &requirement.runtime_product_declaration_id)?;
-    let program = requirement.resolve_for_content(&retained, qualification_use)?;
+    let program = requirement.resolve_for_content(&retained, qualification_use, placement)?;
     binding.check_program(&program)?;
     Ok((program, retained))
 }
@@ -6242,11 +6279,7 @@ impl<'a> ExternalPlacementOwner<'a> {
             None => {
                 let (lease, credential) = admit_fresh_lease_then_read_credential(
                     self.state,
-                    capsule
-                        .structured_session_profile
-                        .as_ref()
-                        .map(|profile| &profile.contract),
-                    capsule.lifecycle.ready_timeout_ms,
+                    program,
                     || {
                         crate::dedicated_session_service::ensure_hosted_contact_deadline(
                             self.state, &session,
@@ -6267,12 +6300,9 @@ impl<'a> ExternalPlacementOwner<'a> {
                 .external_placement_backends
                 .qualify(&contract, &credential, &admitted)?;
         if existing.is_none() {
+            // The supervisor journal window was judged with the lease, before
+            // the credential was read.
             require_guest_package_artifact_floor(&contract, backend.as_ref())?;
-            crate::external_supervisor_native::external_supervisor_journal_quota(
-                self.state.node_policy.as_ref(),
-                &contract,
-                contract.timeout_seconds,
-            )?;
         }
         let contact_gate = self
             .state
@@ -9050,6 +9080,11 @@ impl ExternalPlacementReconciliation {
                     placement,
                     outcome = outcome.as_str(),
                     last_phase = report.last_phase().map(|step| step.as_str()),
+                    refusal_site = match &report {
+                        GuestOwnerActivationReport::Refused { site, .. } =>
+                            site.map(|site| site.as_str()),
+                        _ => None,
+                    },
                     supervisor_exit = supervisor_exit.map(|exit| exit.status.to_string()),
                     supervisor_stderr_tail = supervisor_exit.map(|exit| exit.stderr_tail.as_str()),
                     "external activation guest owner report"
@@ -9177,16 +9212,15 @@ fn read_placement_credential(
     )
 }
 
-/// A fresh placement's lease admission, then its placement credential, in
-/// that order. Admission runs through the exact installed backend generation
-/// the binding names and needs only the session's profile, its deadline, the
-/// binding and node policy, so a refused lease returns before the vault is
-/// touched. `session_deadline` is asked only when a lease is needed. The
-/// caller still fully qualifies the backend with the credential afterwards.
+/// A fresh placement's judgment, then its placement credential, in that
+/// order. The judgment runs through the exact installed backend generation the
+/// binding names and needs only the admitted program, its deadline, the
+/// binding and node policy, so a refusal returns before the vault is touched.
+/// `session_deadline` is asked only when a lease is needed. The caller still
+/// fully qualifies the backend with the credential afterwards.
 fn admit_fresh_lease_then_read_credential(
     state: &AppState,
-    profile_contract: Option<&serde_json::Value>,
-    ready_timeout_ms: u64,
+    program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
     session_deadline: impl FnOnce() -> Result<Option<i64>>,
     contract: &ExternalPlacementBackendContract,
     credential_access: &crate::vault::placement::PlacementCredentialAccess,
@@ -9198,88 +9232,104 @@ fn admit_fresh_lease_then_read_credential(
     PlacementCredential,
 )> {
     let installed = state.external_placement_backends.installed(contract)?;
-    let lease = admit_session_lease(
-        state,
-        profile_contract,
-        ready_timeout_ms,
-        session_deadline,
+    let lease = judge_placement(
+        program,
         contract,
         installed.as_ref(),
+        state.node_policy.as_ref(),
+        Some(session_deadline),
     )?;
     let credential = read_placement_credential(state, credential_access)?;
     Ok((lease, credential))
 }
 
-/// Stage-one lease admission for a fresh placed session: the binding's
-/// adapter judges the lease [`session_lease_request`] builds, offline. Returns
-/// the admitted request bytes, encoded for the reservation, and the lease's
-/// charge against the node budget at the budget weight of the provider spec
-/// that admitted it, which the reservation takes in its own transaction. A
-/// session with no structured-session profile needs no lease. A session whose
-/// deadline the lease could not cover is refused before the adapter is asked.
-fn admit_session_lease(
-    state: &AppState,
-    profile_contract: Option<&serde_json::Value>,
-    ready_timeout_ms: u64,
-    session_deadline: impl FnOnce() -> Result<Option<i64>>,
+/// The one judgment of what a placement needs against what the node, the
+/// binding and the adapter provide, with no credential and no provider
+/// contact. Compose runs it before it publishes a binding; launch runs it,
+/// with the same inputs, before it reads a credential. Launch adds only the
+/// session's own deadline, which depends on live state.
+///
+/// In order: the adapter's capability set against what the program and the
+/// transport require; the lease the program's placement asks for (built from
+/// the program alone, then the session deadline when launch supplies one, then
+/// the binding's adapter admits it offline); and the node's supervisor journal
+/// window against the binding's whole occurrence lifetime. Returns the
+/// admitted request bytes, encoded for the reservation, and the lease's
+/// charge at the admitting provider spec's budget weight, when the program
+/// needs a lease.
+pub(crate) fn judge_placement(
+    program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
     contract: &ExternalPlacementBackendContract,
     backend: &dyn ExternalPlacementBackend,
+    policy: &ryeos_node_runtime::node_policy::NodePolicySnapshot,
+    session_deadline: Option<impl FnOnce() -> Result<Option<i64>>>,
 ) -> Result<
     Option<(
         String,
         crate::runtime_db::external_execution::ExternalLeaseCharge,
     )>,
 > {
-    let Some(profile_contract) = profile_contract else {
-        return Ok(None);
-    };
-    let budget = state
-        .node_policy
+    require_adapter_capabilities(
+        backend,
+        contract,
+        program.requirement.required_lifecycle_capabilities.clone(),
+        true,
+        RuntimeAdmissionBasis::OrdinarySignedRelationship,
+    )?;
+    let budget = policy
         .require::<ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmissionPolicy>()?
         .external_lease_budget
         .as_ref();
-    let Some((inputs, charge)) =
-        session_lease_request(profile_contract, ready_timeout_ms, contract, budget)?
-    else {
-        return Ok(None);
+    let lease = match session_lease_request(&program.placement, contract, budget)? {
+        None => None,
+        Some((inputs, charge)) => {
+            let margin_seconds = budget
+                .map(|budget| budget.turn_end_margin_seconds)
+                .context(
+                    "lease refused: this node's execution policy declares no external lease budget",
+                )?;
+            if let Some(session_deadline) = session_deadline {
+                lease_lifecycle::refuse_session_unfit_for_fresh_lease(
+                    session_deadline()?,
+                    charge.lifetime_seconds,
+                    margin_seconds,
+                    lillux::time::timestamp_millis(),
+                )?;
+            }
+            let admitted = backend.admit_lease(
+                &inputs,
+                lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(
+                    u64::from(contract.contact_timeout_seconds),
+                )),
+            )?;
+            let charge = charge
+                .weighted_by(admitted.budget_weight)
+                .with_context(|| format!("lease refused for workload `{}`", inputs.workload))?;
+            Some((
+                ExternalAllocationReservation::encode_admitted_adapter_request(&admitted.request)?,
+                charge,
+            ))
+        }
     };
-    let margin_seconds = budget
-        .map(|budget| budget.turn_end_margin_seconds)
-        .context("lease refused: this node's execution policy declares no external lease budget")?;
-    lease_lifecycle::refuse_session_unfit_for_fresh_lease(
-        session_deadline()?,
-        charge.lifetime_seconds,
-        margin_seconds,
-        lillux::time::timestamp_millis(),
+    crate::external_supervisor_native::external_supervisor_journal_quota(
+        policy,
+        contract,
+        contract.timeout_seconds,
     )?;
-    let admitted = backend.admit_lease(
-        &inputs,
-        lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(u64::from(
-            contract.contact_timeout_seconds,
-        ))),
-    )?;
-    let charge = charge
-        .weighted_by(admitted.budget_weight)
-        .with_context(|| format!("lease refused for workload `{}`", inputs.workload))?;
-    Ok(Some((
-        ExternalAllocationReservation::encode_admitted_adapter_request(&admitted.request)?,
-        charge,
-    )))
+    Ok(lease)
 }
 
 /// The lease a placed session needs, if any, and its charge before the
 /// admitting provider spec's budget weight is known.
 ///
-/// Only a session whose admitted structured-session profile names `lease`
-/// or `guest` requirements needs a lease; any other is placed without one.
-/// The request is built from signed data alone: the profile's workload class
-/// and requirement lists, the one host the guest may reach (the binding's
-/// HTTPS controller origin), the binding's execution timeout as the lease
-/// lifetime and the session's readiness budget as its activation deadline.
-/// The node's lease budget must exist and allow that lifetime.
+/// Only a program whose placement names `lease` or `guest` requirements needs
+/// a lease; any other is placed without one. The request is built from the
+/// program's placement alone, the one host the guest may reach (the binding's
+/// HTTPS controller origin) and the binding's execution timeout as the lease
+/// lifetime; the placement's readiness budget is its activation deadline. The
+/// node's lease budget must exist and allow that lifetime.
 fn session_lease_request(
-    profile_contract: &serde_json::Value,
-    ready_timeout_ms: u64,
+    placement: &ryeos_state::external_execution::admission::ExternalProgramPlacement,
     contract: &ExternalPlacementBackendContract,
     budget: Option<&ryeos_node_runtime::node_policy::sections::execution::ExternalLeaseBudget>,
 ) -> Result<
@@ -9288,15 +9338,10 @@ fn session_lease_request(
         crate::runtime_db::external_execution::UnweightedLeaseCharge,
     )>,
 > {
-    let Some(requirements) =
-        ryeos_engine::structured_session_profile::placement_requirements(profile_contract)?
-    else {
-        return Ok(None);
-    };
-    if requirements.lease.is_empty() && requirements.guest.is_empty() {
+    if !placement.needs_lease() {
         return Ok(None);
     }
-    let workload = requirements.workload_class;
+    let workload = placement.workload_class.clone();
     let budget = budget.with_context(|| {
         format!(
             "lease refused: workload `{workload}` needs a remote lease and this node's \
@@ -9324,11 +9369,11 @@ fn session_lease_request(
         )?;
     let inputs = crate::external_lifecycle_adapter::lease_admission::LeaseAdmissionInputs {
         workload,
-        requires_before_spend: requirements.lease,
-        requires_from_guest: requirements.guest,
+        requires_before_spend: placement.lease.clone(),
+        requires_from_guest: placement.guest.clone(),
         controller_host,
         maximum_lifetime_seconds: contract.timeout_seconds,
-        activation_deadline_seconds: u32::try_from(ready_timeout_ms.div_ceil(1_000))
+        activation_deadline_seconds: u32::try_from(placement.ready_timeout_ms.div_ceil(1_000))
             .context("lease activation deadline exceeds its bound")?,
     };
     Ok(Some((inputs, charge)))
@@ -9991,6 +10036,30 @@ pub mod test_support {
         credential: &[u8],
         qualification: &PlacementQualificationSelection,
     ) -> Result<()> {
+        install_precontact_binding_with_settings_and_timeout(
+            state,
+            program,
+            controller,
+            tls_root_certificates_der_base64,
+            settings,
+            credential,
+            qualification,
+            60,
+        )
+    }
+
+    /// The same binding with its execution timeout, which is also the lease
+    /// lifetime of a leased session, stated.
+    pub fn install_precontact_binding_with_settings_and_timeout(
+        state: &mut AppState,
+        program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
+        controller: impl Into<crate::node_config::sections::external_execution::ComposedTestTransport>,
+        tls_root_certificates_der_base64: Vec<String>,
+        settings: serde_json::Value,
+        credential: &[u8],
+        qualification: &PlacementQualificationSelection,
+        timeout_seconds: u32,
+    ) -> Result<()> {
         let (
             backend,
             backend_hash,
@@ -10005,7 +10074,7 @@ pub mod test_support {
             connector_hash,
             connector_bytes,
         ) = installed_artifact_coordinates(state, &program.requirement.provider_declaration_id)?;
-        let binding = crate::node_config::sections::external_execution::InstalledExternalExecutionBinding::composed_test_fixture_with_settings(
+        let binding = crate::node_config::sections::external_execution::InstalledExternalExecutionBinding::composed_test_fixture_with_settings_and_timeout(
             program,
             controller,
             tls_root_certificates_der_base64,
@@ -10023,6 +10092,7 @@ pub mod test_support {
             connector_bytes,
             settings,
             qualification,
+            timeout_seconds,
         )?;
         let credential_access = binding.credential_access()?;
         state.vault.provision_placement_credential(
@@ -11142,6 +11212,198 @@ pub mod test_support {
 
 #[cfg(test)]
 mod tests {
+    fn relay_launch() -> BindingLaunchShape {
+        use ryeos_external_execution_contract::runtime_snapshot::LaunchControllerTransport;
+        BindingLaunchShape {
+            controller_transport: LaunchControllerTransport::Relay,
+            sandbox_network_policy_kind: "deny_all",
+            network_inputs: None,
+        }
+    }
+
+    fn https_launch(
+        inputs: ryeos_external_execution_contract::runtime_snapshot::LaunchNetworkInputs,
+    ) -> BindingLaunchShape {
+        use ryeos_external_execution_contract::runtime_snapshot::LaunchControllerTransport;
+        BindingLaunchShape {
+            controller_transport: LaunchControllerTransport::Https,
+            sandbox_network_policy_kind: "allow_list",
+            network_inputs: Some(inputs),
+        }
+    }
+
+    #[test]
+    fn a_launch_shape_that_differs_from_the_qualified_one_is_refused_with_both_values() {
+        use ryeos_external_execution_contract::runtime_snapshot::{
+            LaunchNetworkInputs, LaunchShape,
+        };
+        // Hosts are not compared: the qualification's host never resolves.
+        let https = LaunchShape::https_allow_list(
+            ["controller.invalid".to_owned()],
+            LaunchNetworkInputs::operator(),
+        );
+        compare_launch_shape(&https, &https_launch(LaunchNetworkInputs::operator())).unwrap();
+        compare_launch_shape(&LaunchShape::relay_deny_all(), &relay_launch()).unwrap();
+        let transport = format!(
+            "{:#}",
+            compare_launch_shape(&https, &relay_launch()).unwrap_err()
+        );
+        assert!(
+            transport.contains("launch_shape.controller_transport")
+                && transport.contains("Https")
+                && transport.contains("Relay"),
+            "{transport}"
+        );
+        let mut deny = https_launch(LaunchNetworkInputs::operator());
+        deny.sandbox_network_policy_kind = "deny_all";
+        let policy = format!("{:#}", compare_launch_shape(&https, &deny).unwrap_err());
+        assert!(
+            policy.contains("launch_shape.sandbox_network_policy")
+                && policy.contains("allow_list")
+                && policy.contains("deny_all"),
+            "{policy}"
+        );
+    }
+
+    #[test]
+    fn a_binding_that_captures_other_network_sources_than_the_proof_retained_is_refused() {
+        use ryeos_external_execution_contract::runtime_snapshot::{
+            LaunchNetworkInputs, LaunchShape,
+        };
+        let qualified = LaunchShape::https_allow_list(
+            ["controller.invalid".to_owned()],
+            LaunchNetworkInputs::operator(),
+        );
+        let mut resolver = LaunchNetworkInputs::operator();
+        resolver.resolver.source = "/ryeos/activation/network-resolver".into();
+        let message = format!(
+            "{:#}",
+            compare_launch_shape(&qualified, &https_launch(resolver)).unwrap_err()
+        );
+        assert!(
+            message.contains("launch_shape.network_inputs.resolver.source")
+                && message.contains("/ryeos/activation/network-resolver")
+                && message.contains("/etc/resolv.conf"),
+            "{message}"
+        );
+        let mut hosts = LaunchNetworkInputs::operator();
+        hosts.hosts.source = "/etc/other-hosts".into();
+        let message = format!(
+            "{:#}",
+            compare_launch_shape(&qualified, &https_launch(hosts)).unwrap_err()
+        );
+        assert!(
+            message.contains("launch_shape.network_inputs.hosts.source")
+                && message.contains("/etc/other-hosts")
+                && message.contains("/etc/hosts"),
+            "{message}"
+        );
+        // A proof qualified for other sources than the constant is the truth
+        // the launch compares with, not the constant.
+        let mut own = LaunchNetworkInputs::operator();
+        own.hosts.source = "/etc/other-hosts".into();
+        let own_shape =
+            LaunchShape::https_allow_list(["controller.invalid".to_owned()], own.clone());
+        compare_launch_shape(&own_shape, &https_launch(own)).unwrap();
+    }
+
+    fn qualified_evidence()
+    -> ryeos_state::external_content::products::qualification::ProductQualificationEvidence {
+        let selections = ryeos_state::external_content::products::qualification::test_support::qualified_runtime_selections(
+            &"a".repeat(64),
+        )
+        .unwrap();
+        selections
+            .get("auxiliary")
+            .unwrap()
+            .qualification
+            .clone()
+            .unwrap()
+            .evidence
+    }
+
+    fn with_declared_shape(
+        mut evidence: ryeos_state::external_content::products::qualification::ProductQualificationEvidence,
+        shape: Option<ryeos_external_execution_contract::runtime_snapshot::LaunchShape>,
+    ) -> ryeos_state::external_content::products::qualification::ProductQualificationEvidence {
+        use ryeos_state::external_content::products::qualification::{
+            ProductQualificationLaunchShapeBasis, ProductQualificationRetainedLaunchShape,
+        };
+        evidence.policy_source.policy.launch_shape = shape.clone();
+        evidence.execution_proof.launch_shape =
+            shape.map(|shape| ProductQualificationRetainedLaunchShape {
+                shape,
+                basis: ProductQualificationLaunchShapeBasis::Declared,
+            });
+        evidence
+    }
+
+    #[test]
+    fn a_proof_that_retained_no_launch_shape_is_refused() {
+        let binding = InstalledExternalExecutionBinding::direct_test_fixture(30);
+        let contract = binding.backend_contract();
+        let evidence = with_declared_shape(qualified_evidence(), None);
+        assert!(evidence.execution_proof.subordinate_attempt.is_none());
+        let error = require_qualified_launch_shape(&contract, &evidence).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("the runtime qualification retained no launch shape"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn launch_admission_compares_the_shape_the_proof_retained_with_the_binding() {
+        use ryeos_external_execution_contract::runtime_snapshot::{
+            LaunchNetworkInputs, LaunchShape,
+        };
+        let binding = InstalledExternalExecutionBinding::direct_test_fixture(30);
+        let contract = binding.backend_contract();
+        // A declared shape that states the binding's own shape admits it; the
+        // basis never changes the comparison.
+        let declared = with_declared_shape(
+            qualified_evidence(),
+            Some(LaunchShape::https_allow_list(
+                ["controller.invalid".to_owned()],
+                LaunchNetworkInputs::operator(),
+            )),
+        );
+        require_qualified_launch_shape(&contract, &declared).unwrap();
+        // The binding's controller is https with a guest network allow-list;
+        // a proof qualified under the relay shape does not qualify it.
+        let relay = with_declared_shape(qualified_evidence(), Some(LaunchShape::relay_deny_all()));
+        let message = format!(
+            "{:#}",
+            require_qualified_launch_shape(&contract, &relay).unwrap_err()
+        );
+        assert!(
+            message.contains("launch_shape.controller_transport")
+                && message.contains("Relay")
+                && message.contains("Https"),
+            "{message}"
+        );
+        // A proof qualified for other sources than the binding captures.
+        let mut other = LaunchNetworkInputs::operator();
+        other.resolver.source = "/etc/other-resolv.conf".into();
+        let sources = with_declared_shape(
+            qualified_evidence(),
+            Some(LaunchShape::https_allow_list(
+                ["controller.invalid".to_owned()],
+                other,
+            )),
+        );
+        let message = format!(
+            "{:#}",
+            require_qualified_launch_shape(&contract, &sources).unwrap_err()
+        );
+        assert!(
+            message.contains("launch_shape.network_inputs.resolver.source")
+                && message.contains("/etc/other-resolv.conf")
+                && message.contains("/etc/resolv.conf"),
+            "{message}"
+        );
+    }
+
     fn fixture_guest_package(
         contract: &ExternalPlacementBackendContract,
         reservation: &ExternalAllocationReservation,
@@ -11640,7 +11902,8 @@ mod tests {
         }
     }
 
-    fn program() -> ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram {
+    pub(super) fn program()
+    -> ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram {
         let runtime_recipe =
             ryeos_state::external_execution::admission::ExternalCandidateRuntimeRecipe {
                 schema: 2,
@@ -11686,6 +11949,12 @@ mod tests {
             qualification_attestation_hash: "2".repeat(64),
             selection_identity_digest: "c".repeat(64),
             runtime_recipe_digest,
+            placement: ryeos_state::external_execution::admission::ExternalProgramPlacement {
+                workload_class: "fixture.workload".into(),
+                lease: Vec::new(),
+                guest: Vec::new(),
+                ready_timeout_ms: 60_000,
+            },
         }
     }
 
@@ -11933,9 +12202,9 @@ mod tests {
             ryeos_node_runtime::identity::NodeIdentity::load(&root.join("node-key.pem")).unwrap();
         let verified = ryeos_external_execution::guest_import_authorization::verify_signed_guest_occurrence_assignment(
             signed.clone(),
-            identity.verifying_key(),
         )
         .unwrap();
+        assert_eq!(verified.controller_key(), identity.verifying_key());
         assert_eq!(
             verified.assignment().occurrence_id,
             occurrence.occurrence_id
@@ -12762,57 +13031,6 @@ mod tests {
     }
 
     #[test]
-    fn runtime_probe_interpretation_requires_an_exact_installed_backend() {
-        let binding = RetainedExternalExecutionBinding::test_fixture();
-        let contract = binding.backend_contract();
-        let selections = ryeos_state::external_content::products::qualification::test_support::qualified_runtime_selections(
-            &contract.guest_runtime_manifest_hash,
-        )
-        .unwrap();
-        let proof = selections
-            .get("auxiliary")
-            .unwrap()
-            .qualification
-            .as_ref()
-            .unwrap();
-        let input = RuntimeProbeInput::from_product(proof);
-        assert_eq!(
-            input.runtime_source,
-            ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotSource::CapturedProduct {
-                product_witness_hash: proof.evidence.product_witness_hash.clone(),
-            }
-        );
-        assert_eq!(input.qualification_attestation_hash, proof.attestation_hash);
-        assert_eq!(
-            input.subject_manifest_hash,
-            proof.evidence.result.subject_manifest_hash
-        );
-        assert_eq!(input.probe_evidence, proof.evidence.result.probe_evidence);
-        let source =
-            ryeos_external_execution::guest_runtime_product::GuestOwnerRuntimeManifestIdentity {
-                manifest_hash: contract.guest_runtime_manifest_hash.clone(),
-                owner_executable_sha256: "7".repeat(64),
-                controller_root_blob_sha256: "8".repeat(64),
-                controller_public_root: format!("ed25519:{}", "A".repeat(44)),
-            };
-        assert!(
-            ExternalPlacementBackendRegistry::default()
-                .verify_runtime_probe(&contract, &input, &source, binding.digest(),)
-                .is_err()
-        );
-        let registry =
-            ExternalPlacementBackendRegistry::from_backends(vec![Arc::new(FixtureBackend {
-                artifact: contract.backend_artifact_hash.clone(),
-            })])
-            .unwrap();
-        assert!(
-            registry
-                .verify_runtime_probe(&contract, &input, &source, binding.digest(),)
-                .is_err()
-        );
-    }
-
-    #[test]
     fn lifecycle_capabilities_are_required_before_contact() {
         let binding = InstalledExternalExecutionBinding::test_fixture();
         let contract = binding.backend_contract();
@@ -12848,15 +13066,15 @@ mod tests {
                 remote_testimony: None,
             },
         );
-        assert!(
-            registry
-                .qualify(
-                    &unverified,
-                    &credential,
-                    &AdmittedExternalExecutionProgram::StructuredSession(program()),
-                )
-                .is_err()
-        );
+        // An adapter that does not itself require independent guest runtime
+        // admission still starts on the binding's mandatory qualification.
+        registry
+            .qualify(
+                &unverified,
+                &credential,
+                &AdmittedExternalExecutionProgram::StructuredSession(program()),
+            )
+            .unwrap();
         let qualified_backend = Arc::new(FaultBackend {
             capabilities: BTreeSet::from([
                 LifecycleCapability::SupervisorActivation,
@@ -12867,18 +13085,19 @@ mod tests {
         });
         let qualified_registry =
             ExternalPlacementBackendRegistry::from_backends(vec![qualified_backend]).unwrap();
-        assert!(
-            qualified_registry
-                .qualify(
-                    &contract,
-                    &credential,
-                    &AdmittedExternalExecutionProgram::StructuredSession(program()),
-                )
-                .is_err(),
-            "an active independent-runtime adapter cannot admit a missing relationship"
-        );
-        // The registry checks the shape. Session admission and first contact
+        // The ordinary-session relation between the binding's qualification and
+        // the adapter's capability set is gone: guest mechanism testimony is
+        // mandatory for every ordinary start and is judged by
+        // admit_current_runtime_qualification, not by this registry. The
+        // registry checks the shape. Session admission and first contact
         // independently authenticate the exact witness and adapter probe.
+        qualified_registry
+            .qualify(
+                &contract,
+                &credential,
+                &AdmittedExternalExecutionProgram::StructuredSession(program()),
+            )
+            .unwrap();
         qualified_registry
             .qualify(
                 &unverified,
@@ -14558,6 +14777,7 @@ mod tests {
                     owner_public_key_hex: hex::encode(
                         authority.owner_signing_key().verifying_key().to_bytes(),
                     ),
+                    controller_public_key_hex: hex::encode(root.verifying_key().to_bytes()),
                     attachment_deadline_ms: assignment.attachment_deadline_ms,
                 },
                 &root,
@@ -14568,7 +14788,6 @@ mod tests {
             ryeos_external_execution_contract::canonical_json(&signed_assignment).unwrap();
         ryeos_external_execution::guest_import_authorization::verify_guest_import_documents(
             &import_bytes,
-            &root.verifying_key(),
             assignment.guest_runtime_manifest_hash,
             &assignment_bytes,
         )
@@ -14583,7 +14802,6 @@ mod tests {
         let verified_delivery =
             ryeos_external_execution::guest_import_authorization::verify_guest_import_documents(
                 &delivered,
-                &root.verifying_key(),
                 assignment.guest_runtime_manifest_hash,
                 &assignment_bytes,
             )
@@ -14626,7 +14844,6 @@ mod tests {
         assert!(
             ryeos_external_execution::guest_import_authorization::verify_guest_import_documents(
                 &import_bytes,
-                &root.verifying_key(),
                 &"7".repeat(64),
                 &assignment_bytes,
             )
@@ -15440,6 +15657,7 @@ mod tests {
                     step: Step::Install,
                     last_phase: Some(Step::Install),
                     detail: None,
+                    site: None,
                 },
                 true,
             ),

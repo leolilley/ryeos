@@ -53,6 +53,40 @@ impl<'a> From<&'a GuestScenario<'_>> for GuestProtocolScenario<'a> {
     }
 }
 
+/// Environment variables the local client may overlay on a guest process.
+/// Everything else (PATH, TMPDIR, HOME...) must come from the guest's own
+/// process environment, so the client's environment is never forwarded.
+const CLOSED_ENV: [&str; 12] = [
+    "NO_COLOR",
+    "TERM",
+    "LANG",
+    "LC_CTYPE",
+    "LC_ALL",
+    "COLORTERM",
+    "PAGER",
+    "GIT_PAGER",
+    "GH_PAGER",
+    "CODEX_CI",
+    "CODEX_THREAD_ID",
+    "CODEX_PERMISSION_PROFILE",
+];
+
+fn check_process_env(params: &Value) -> Result<()> {
+    let Some(env) = params.get("env") else {
+        return Ok(());
+    };
+    let env = env
+        .as_object()
+        .context("guest launch environment is not an object")?;
+    for key in env.keys() {
+        ensure!(
+            CLOSED_ENV.contains(&key.as_str()),
+            "guest launch environment carries unexpected variable {key}"
+        );
+    }
+    Ok(())
+}
+
 fn json_lines(encoded: &Value, forwarded_prefix: Option<usize>) -> Result<Vec<Value>> {
     let encoded = encoded.as_str().context("transcript absent")?;
     ensure!(encoded.len() <= 1_400_000, "encoded transcript bound");
@@ -206,6 +240,7 @@ pub fn check_guest_protocol(
                         && params["cwd"] == scenario.guest_cwd_uri,
                     "unexpected guest launch recipe"
                 );
+                check_process_env(params)?;
                 let command = argv[2].as_str().context("guest command absent")?;
                 ensure!(
                     command == scenario.guest_command || command == secret_command,
@@ -681,5 +716,30 @@ mod tests {
         let mut elsewhere = input.clone();
         elsewhere[1]["params"]["path"] = json!("file:///workspace/other");
         assert!(check_guest_observation(&observation(&elsewhere, &output), &scenario).is_err());
+    }
+
+    #[test]
+    fn process_env_accepts_only_the_closed_set() {
+        check_process_env(&json!({})).unwrap();
+        check_process_env(&json!({"env":{}})).unwrap();
+        check_process_env(&json!({"env":{
+            "NO_COLOR":"1","TERM":"dumb","LANG":"C.UTF-8","LC_CTYPE":"C.UTF-8",
+            "LC_ALL":"C.UTF-8","COLORTERM":"","PAGER":"cat","GIT_PAGER":"cat",
+            "GH_PAGER":"cat","CODEX_CI":"1","CODEX_THREAD_ID":"t",
+            "CODEX_PERMISSION_PROFILE":"p"
+        }}))
+        .unwrap();
+    }
+
+    #[test]
+    fn process_env_refuses_forwarded_local_environment() {
+        for key in ["PATH", "TMPDIR"] {
+            let error = check_process_env(&json!({"env":{"TERM":"dumb", key:"/x"}}))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(key), "{error}");
+        }
+        assert!(check_process_env(&json!({"env":["PATH"]})).is_err());
+        assert!(check_process_env(&json!({"env":null})).is_err());
     }
 }

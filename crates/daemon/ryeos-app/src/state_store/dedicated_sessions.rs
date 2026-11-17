@@ -988,6 +988,82 @@ impl StateStore {
         )
     }
 
+    /// Trusted-process-group counterpart of `reserve_dedicated_worker_scope`:
+    /// same shutdown and workspace admission, same pre-contact fence. No child
+    /// may be spawned until this write commits.
+    pub fn reserve_dedicated_worker_trusted_holding(
+        &self,
+        placement_thread_id: &str,
+        worker_instance_id: &str,
+        boot_epoch: u64,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        if !self
+            .process_attachment_admission_open
+            .load(Ordering::Acquire)
+        {
+            bail!("worker holding admission is closed for daemon shutdown");
+        }
+        let session = g
+            .runtime_db
+            .dedicated_session(placement_thread_id)?
+            .ok_or_else(|| anyhow!("worker holding has no admitted dedicated session"))?;
+        self.authorize_dedicated_workspace_contact_locked(
+            &g,
+            placement_thread_id,
+            &session.workspace_id,
+        )?;
+        g.runtime_db.reserve_dedicated_worker_trusted_holding(
+            placement_thread_id,
+            worker_instance_id,
+            boot_epoch,
+        )
+    }
+
+    pub fn retire_dedicated_worker_trusted_holding(
+        &self,
+        placement_thread_id: &str,
+        worker_instance_id: &str,
+        boot_epoch: u64,
+    ) -> Result<()> {
+        self.lock()?
+            .runtime_db
+            .retire_dedicated_worker_trusted_holding(
+                placement_thread_id,
+                worker_instance_id,
+                boot_epoch,
+            )
+    }
+
+    pub fn dedicated_worker_trusted_holding(
+        &self,
+        placement_thread_id: &str,
+        worker_instance_id: &str,
+        boot_epoch: u64,
+    ) -> Result<Option<runtime_db::DedicatedWorkerTrustedHolding>> {
+        self.lock()?.runtime_db.dedicated_worker_trusted_holding(
+            placement_thread_id,
+            worker_instance_id,
+            boot_epoch,
+        )
+    }
+
+    /// The one decision of what an unattached trusted launcher's recorded host
+    /// lifetime proves. Boot reconciliation and the operator's terminate both
+    /// call it; the daemon evaluates it holding the node state lock.
+    pub fn unattached_trusted_holding_proof(
+        &self,
+        placement_thread_id: &str,
+        worker_instance_id: &str,
+        boot_epoch: u64,
+    ) -> Result<runtime_db::UnattachedTrustedHoldingProof> {
+        self.lock()?.runtime_db.unattached_trusted_holding_proof(
+            placement_thread_id,
+            worker_instance_id,
+            boot_epoch,
+        )
+    }
+
     pub fn dedicated_worker_scope(
         &self,
         placement_thread_id: &str,

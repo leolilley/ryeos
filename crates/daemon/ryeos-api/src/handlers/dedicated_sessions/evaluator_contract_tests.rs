@@ -334,7 +334,8 @@ config_schema: {type: object, properties: {}, additionalProperties: false}
                 engine,
                 finalized.resolution(),
             )?;
-            let protocol = resolve_direct_terminator_protocol(engine, &request)?;
+            let protocol =
+                resolve_direct_terminator_protocol(engine, &request, &self.state.isolation)?;
             let guard = authority.acquire_shared_guard()?;
             let closure = prepared.admit_execution_closure(
                 &cas,

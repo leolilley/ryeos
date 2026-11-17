@@ -1,10 +1,15 @@
-<!-- ryeos:signed:2026-11-12T23:57:18Z:62679218016a5c899a3a25fd99082c1eba575da56892047b2d7d99b5d384975f:bAEhXmCk6ifwSNdwtR82yqs1c3oRimNyD4eUHD+ZbeNZDlodS8CjJ4ZwbWMOgxBl592OwF4/cBzbVZJpdnR7Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T12:59:02Z:28a097bcc44a2886ee8b03ef2e16eb081c8769be08cc96bb8e10d590e5a15528:UFZxZTcd5kptvHlzv9RZ6Fe1Efy5J9/HpH6P1C3WbiNKRmrMhLZKVtXX4e8ZIkeIaWlahw7ukBcB3/AB4QSvCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Consumer verifier callback boundary
 
 The `ryeos-codex-runtime-verifier` crate and `codex-runtime-verifier` binary interpret a finite credential-free diagnostic on
 an already measured restored occurrence. It has a distinct signed callback
-protocol, `protocol:ryeos/core/qualification_consumer_callback`, selected by
-`tool:codex/qualification/consumer-runtime-verifier`. The Tool selects the
+protocol, the `qualification_consumer_callback` class, listed by
+`tool:codex/qualification/consumer-runtime-verifier` as two descriptors,
+`protocol:ryeos/core/qualification_consumer_callback_contained` and
+`protocol:ryeos/core/qualification_consumer_callback_trusted`. Each declares the
+node holding it needs; the node selects the one it meets, so one Tool and one
+qualification serve both holdings (the guest-wire verifier keeps the
+holding-free `protocol:ryeos/core/qualification_consumer_callback`). The Tool selects the
 `--consumer-controller` entrypoint and the Codex bundle owns its static payload.
 An ordinary Tool launch cannot mint the sealed qualification-purpose grant.
 

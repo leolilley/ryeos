@@ -424,7 +424,7 @@ pub fn check_observation_response(
                 evidence.ok_or_else(|| anyhow::anyhow!("consumer evidence bytes are absent"))?;
             let bytes = ryeos_external_execution_contract::canonical_json(&evidence)?;
             let challenge = ConsumerRuntimeChallenge {
-                schema: 1,
+                schema: ryeos_external_execution_contract::restored_runtime_measurement::CONSUMER_RUNTIME_CHALLENGE_SCHEMA,
                 intent: attempt.intent,
                 selection: original.selection.clone(),
             };
@@ -487,11 +487,13 @@ pub(crate) mod tests {
             verifier_ref: "tool:fixtures/qualify_runtime".into(),
             subject_declaration_id: "runtime".into(),
             allowed_claims: vec!["command_probe".into(), "extension_probe".into()],
-            minimum_verifier_process_settlement: VerifierProcessSettlementAuthority::ScopeEmpty,
+            minimum_verifier_process_settlement: Some(
+                VerifierProcessSettlementAuthority::ScopeEmpty,
+            ),
             verifier_parameters: json!({"scope":"bounded_fixture"}),
             consumer_execution_context: None,
-            requires_guarantees: Vec::new(),
             producer_scenarios: BTreeMap::new(),
+            launch_shape: None,
         }
     }
 
@@ -538,6 +540,10 @@ pub(crate) mod tests {
             environment_binding: "environment".into(),
         };
         purpose.policy_source.policy.consumer_execution_context = Some(context.clone());
+        purpose
+            .policy_source
+            .policy
+            .minimum_verifier_process_settlement = None;
         purpose.policy_source.policy.producer_scenarios.insert(
             "direct_codex".into(),
             ProductQualificationProducerScenario {
@@ -545,6 +551,7 @@ pub(crate) mod tests {
                 remote_probe_input: None,
                 remote_verifier: None,
                 consumer_worker_request: None,
+                launch_shape: None,
             },
         );
         purpose.producer_recipe_sources.insert(
@@ -682,6 +689,9 @@ pub(crate) mod tests {
             remote_probe_input: None,
             remote_verifier: Some(selection.clone()),
             consumer_worker_request: None,
+            launch_shape: Some(
+                ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(),
+            ),
         };
         let source = QualificationRemoteVerifierSource {
             policy_resolution_blob_hash: "1".repeat(64),
@@ -745,6 +755,8 @@ pub(crate) mod tests {
                 payload_blob_hash: "6".repeat(64),
             },
             archive_member_digests: BTreeMap::new(),
+            launch_shape:
+                ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(),
         };
         policy
             .policy
@@ -765,6 +777,7 @@ pub(crate) mod tests {
             .policy
             .consumer_execution_context
             .clone();
+        policy.policy.minimum_verifier_process_settlement = None;
         policy.policy.allowed_claims = vec![
             "independent_candidate_diagnostic".into(),
             "qualification_worker_command".into(),

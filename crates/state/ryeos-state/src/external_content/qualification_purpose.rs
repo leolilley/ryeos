@@ -23,7 +23,7 @@ use super::products::{validate_canonical_unsuffixed_ref, validate_hash, validate
 use super::qualification_execution::QualificationExecutionPurposeView;
 use super::qualification_subject::ContentQualificationSubject;
 
-pub const QUALIFICATION_LAUNCH_PURPOSE_SCHEMA: &str = "ryeos.qualification_launch_purpose.v6";
+pub const QUALIFICATION_LAUNCH_PURPOSE_SCHEMA: &str = "ryeos.qualification_launch_purpose.v7";
 
 /// These sources have different authentication and CAS retention rules. An
 /// activation receipt is never a producer witness or product relationship.
@@ -458,7 +458,7 @@ pub(crate) mod tests {
         });
         assert!(unexpected.validate().is_err());
         let mut predecessor = purpose;
-        predecessor.schema = "ryeos.qualification_launch_purpose.v5".into();
+        predecessor.schema = "ryeos.qualification_launch_purpose.v6".into();
         assert!(predecessor.validate().is_err());
     }
 

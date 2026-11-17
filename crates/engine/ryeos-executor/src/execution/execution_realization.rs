@@ -51,7 +51,14 @@ pub(crate) fn project_launch_isolation_ceilings(
     let composed = resolution
         .map(|resolution| &resolution.composed.composed)
         .unwrap_or(&empty);
-    let mut filesystem = execution.project_filesystem_authority_ceiling(composed)?;
+    // An item that lists several admissible protocols takes the filesystem
+    // ceiling of the one this node selects; any other item projects as before.
+    let mut filesystem = ryeos_engine::protocols::project_node_filesystem_authority_ceiling(
+        execution,
+        composed,
+        &engine.protocols,
+        state.isolation.as_ref(),
+    )?;
     let mut network = execution.project_network_authority_ceiling(composed)?;
     if let Some(parent) = parent_thread_id {
         let (parent_filesystem, parent_network) =

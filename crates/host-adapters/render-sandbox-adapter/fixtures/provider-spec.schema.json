@@ -422,7 +422,7 @@
             "plan": { "$ref": "#/$defs/settings_plan_source" },
             "region": { "$ref": "#/$defs/settings_region_source" },
             "timeoutSeconds": { "$ref": "#/$defs/qualification_lifetime_source" },
-            "networkPolicy": { "type": "object", "additionalProperties": false, "required": ["literal"], "properties": { "literal": { "type": "object", "additionalProperties": false, "required": ["type"], "properties": { "type": { "const": "deny-all" } } } } },
+            "networkPolicy": { "type": "object", "additionalProperties": false, "required": ["source"], "properties": { "source": { "const": "qualification.guest_network_allow" } } },
             "snapshotId": { "$ref": "#/$defs/qualification_snapshot_source" }
           }
         },

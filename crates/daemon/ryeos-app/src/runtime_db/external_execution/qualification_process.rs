@@ -33,6 +33,9 @@ pub(crate) struct QualificationWorkerProcessRecord {
     pub channel_binding_digest: String,
     pub process_identity: crate::process::ExecutionProcessIdentity,
     pub provider_configuration: ryeos_external_execution_contract::ProviderConfigurationLaunchInput,
+    /// The protocol the node selected for this Worker and the filesystem
+    /// authority its holding granted, recorded at attachment.
+    pub selected_holding: crate::external_qualification_local::QualificationWorkerSelectedHolding,
     pub daemon_generation_id: String,
     pub phase: QualificationWorkerProcessPhase,
     pub attached_at_ms: i64,
@@ -68,6 +71,15 @@ impl QualificationWorkerProcessRecord {
         }
         crate::process::validate_execution_process_identity_shape(&self.process_identity)?;
         self.provider_configuration.validate()?;
+        self.selected_holding.validate()?;
+        // The holding's filesystem authority must agree with how the process
+        // is held: a retained containment goes with a confined filesystem, and
+        // a bare process group with node policy. A record claiming the other
+        // pairing names a holding the process cannot have run under.
+        require_holding_matches_containment(
+            &self.selected_holding,
+            self.process_identity.process_scope.is_some(),
+        )?;
         // The owner is the trusted process-group lane (no scope) or the
         // enforced path's retained descendant containment (PID-namespace
         // init or cgroup scope); the shape check above validates its record.
@@ -99,6 +111,20 @@ impl QualificationWorkerProcessRecord {
     }
 }
 
+/// A retained containment goes with a confined filesystem, and a bare process
+/// group with node policy. A record claiming the other pairing names a holding
+/// the process cannot have run under.
+fn require_holding_matches_containment(
+    holding: &crate::external_qualification_local::QualificationWorkerSelectedHolding,
+    contained: bool,
+) -> Result<()> {
+    ensure!(
+        contained != (holding.filesystem_authority() == "node_policy"),
+        "qualification Worker selected holding contradicts its retained process containment"
+    );
+    Ok(())
+}
+
 /// This value can be constructed only by checking the retained exact process.
 /// A stale or unavailable observation never authorizes terminal settlement.
 pub(crate) struct QualificationWorkerDeathProof {
@@ -123,7 +149,8 @@ fn read_process(
     conn.query_row(
         "SELECT accepted_root_id,accepted_capsule_hash,qualification_operation_id,
                 qualification_occurrence_id,channel_binding_digest,process_identity_json,
-                daemon_generation_id,phase,attached_at_ms,terminal_at_ms,provider_configuration_json
+                daemon_generation_id,phase,attached_at_ms,terminal_at_ms,provider_configuration_json,
+                selected_protocol_ref,selected_filesystem_authority
          FROM external_qualification_worker_process WHERE placement_thread_id=?1",
         [placement],
         |row| {
@@ -139,6 +166,8 @@ fn read_process(
                 row.get::<_, i64>(8)?,
                 row.get::<_, Option<i64>>(9)?,
                 row.get::<_, String>(10)?,
+                row.get::<_, String>(11)?,
+                row.get::<_, String>(12)?,
             ))
         },
     )
@@ -156,6 +185,8 @@ fn read_process(
             attached_at_ms,
             terminal_at_ms,
             provider_configuration_json,
+            selected_protocol_ref,
+            selected_filesystem_authority,
         )| {
             ensure!(
                 process_identity_json.len() <= 64 * 1024,
@@ -177,6 +208,11 @@ fn read_process(
                 channel_binding_digest,
                 process_identity,
                 provider_configuration: decode_configuration_input(&provider_configuration_json)?,
+                selected_holding:
+                    crate::external_qualification_local::QualificationWorkerSelectedHolding::new(
+                        &selected_protocol_ref,
+                        &selected_filesystem_authority,
+                    )?,
                 daemon_generation_id,
                 phase: QualificationWorkerProcessPhase::parse(&phase)?,
                 attached_at_ms,
@@ -524,6 +560,7 @@ impl RuntimeDb {
         process_identity: &crate::process::ExecutionProcessIdentity,
         daemon_generation_id: &str,
         configuration: &crate::external_connector::PreparedProviderConfigurationObservation,
+        selected_holding: &crate::external_qualification_local::QualificationWorkerSelectedHolding,
     ) -> Result<QualificationWorkerProcessRecord> {
         self.conn.with_sql(|conn| {
             let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
@@ -608,6 +645,7 @@ impl RuntimeDb {
                 channel_binding_digest,
                 process_identity: process_identity.clone(),
                 provider_configuration: configuration_input.clone(),
+                selected_holding: selected_holding.clone(),
                 daemon_generation_id: daemon_generation_id.to_owned(),
                 phase: QualificationWorkerProcessPhase::Attached,
                 attached_at_ms: now,
@@ -627,7 +665,7 @@ impl RuntimeDb {
             );
             tx.execute(
                 "INSERT INTO external_qualification_worker_process VALUES
-             (?1,?2,?3,?4,?5,?6,?7,?8,'attached',?9,NULL,?10)",
+             (?1,?2,?3,?4,?5,?6,?7,?8,'attached',?9,NULL,?10,?11,?12)",
                 params![
                     record.placement_thread_id,
                     record.accepted_root_id,
@@ -639,6 +677,8 @@ impl RuntimeDb {
                     record.daemon_generation_id,
                     record.attached_at_ms,
                     configuration_json,
+                    record.selected_holding.protocol_ref(),
+                    record.selected_holding.filesystem_authority(),
                 ],
             )?;
             qualification_local_start::attach_local_worker_tx(
@@ -687,6 +727,44 @@ impl RuntimeDb {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::external_qualification_local::QualificationWorkerSelectedHolding as Holding;
+
+    #[test]
+    fn selected_holding_is_bounded_non_empty_and_pairs_with_its_containment() {
+        let contained = Holding::new(
+            "protocol:ryeos/core/contained_structured_session",
+            "captured_execution",
+        )
+        .unwrap();
+        assert_eq!(
+            contained.protocol_ref(),
+            "protocol:ryeos/core/contained_structured_session"
+        );
+        assert_eq!(contained.filesystem_authority(), "captured_execution");
+        let trusted = Holding::new(
+            "protocol:ryeos/core/trusted_structured_session",
+            "node_policy",
+        )
+        .unwrap();
+        require_holding_matches_containment(&contained, true).unwrap();
+        require_holding_matches_containment(&trusted, false).unwrap();
+        assert!(require_holding_matches_containment(&contained, false).is_err());
+        assert!(require_holding_matches_containment(&trusted, true).is_err());
+
+        for (protocol, authority) in [
+            ("", "node_policy"),
+            ("protocol:ryeos/core/x", ""),
+            ("tool:ryeos/core/x", "node_policy"),
+            (" protocol:ryeos/core/x", "node_policy"),
+            ("protocol:ryeos/core/x", "Node Policy"),
+        ] {
+            assert!(
+                Holding::new(protocol, authority).is_err(),
+                "{protocol:?} {authority:?}"
+            );
+        }
+        assert!(Holding::new(&format!("protocol:{}", "a".repeat(300)), "node_policy").is_err());
+    }
 
     #[test]
     fn trusted_connector_joins_group_birth_not_just_numeric_pgid() {
@@ -789,10 +867,11 @@ mod tests {
             }))
             .unwrap(),
         );
-        // Group-proved peers reach only trusted-lane Workers; contained
-        // peers only contained Workers. A group-proved peer can therefore
-        // never be retained against a contained Worker, so the historical
-        // containment branch is reachable only by contained admissions.
+        // Group-proved peers reach only Workers launched under the trusted
+        // process-group protocol; contained peers only Workers launched under
+        // the contained protocol. A group-proved peer can therefore never be
+        // retained against a contained Worker, so the historical containment
+        // branch is reachable only by contained admissions.
         let held = contained.process_scope.clone().unwrap();
         require_basis_matches_holder(PeerBasis::Group, &trusted).unwrap();
         require_basis_matches_holder(PeerBasis::Contained(&held), &contained).unwrap();

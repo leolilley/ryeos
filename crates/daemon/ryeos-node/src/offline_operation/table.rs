@@ -392,6 +392,11 @@ static OPERATIONS: &[OperationSpec] = &[
                 max_bytes: 256 * KIB,
                 required: false,
             },
+            InputSlot {
+                name: "launch_shape",
+                max_bytes: 4 * KIB,
+                required: true,
+            },
         ],
         preconditions: &[FACT_RUNTIME_SNAPSHOTS],
         expected_result: &[],
