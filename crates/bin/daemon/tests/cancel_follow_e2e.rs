@@ -362,11 +362,10 @@ async fn start_run(mock: MockProvider) -> (Run, FastFixture) {
 /// Execute `graph:<name>`; it suspends on its follow. Returns the run id (the
 /// first segment).
 async fn launch_suspended_graph(run: &mut Run, graph: &str, params: Value) -> String {
-    let fut = run.h.post_execute(
-        &format!("graph:{graph}"),
-        run.project.path().to_str().unwrap(),
-        params,
-    );
+    let item_ref = format!("graph:{graph}");
+    let fut = run
+        .h
+        .post_execute(&item_ref, run.project.path().to_str().unwrap(), params);
     let (status, body) = match tokio::time::timeout(Duration::from_secs(45), fut).await {
         Ok(Ok(pair)) => pair,
         Ok(Err(e)) => {
