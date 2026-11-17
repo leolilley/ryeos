@@ -1068,6 +1068,9 @@ fn replay_reset_summary(report: ryeos_state::operational::ReplayIndexResetReport
         ReplayIndexResetScope::AllReplayRecords => {
             "retire all replay rows, including provider-call rows"
         }
+        ReplayIndexResetScope::AbsentStore => {
+            "no operational store; the next start creates a fresh one"
+        }
     };
     format!(
         "epoch {} -> {}: {scope}",
@@ -6307,6 +6310,10 @@ mod tests {
             (
                 ReplayIndexResetScope::AllReplayRecords,
                 "retire all replay rows, including provider-call rows",
+            ),
+            (
+                ReplayIndexResetScope::AbsentStore,
+                "no operational store; the next start creates a fresh one",
             ),
         ] {
             let report = ReplayIndexResetReport {

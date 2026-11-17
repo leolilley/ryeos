@@ -19,9 +19,8 @@ default = []
 stub-driver = []
 
 [dependencies]
-libc = { workspace = true }
+lillux = { workspace = true }
 serde_json = { workspace = true }
-signal-hook = { workspace = true }
 uuid = { workspace = true }
 
 [lints]

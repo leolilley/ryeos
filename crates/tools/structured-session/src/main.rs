@@ -1191,8 +1191,24 @@ fn run(lifecycle: &mut BridgeLifecycle) -> Result<()> {
     // The version is checked before the typed decode, so an older profile is
     // refused by its schema rather than by a field the current one dropped.
     require_current_profile_schema(&profile_value)?;
-    let profile: StructuredSessionProfile =
+    let item_route_params =
+        match optional_env(ryeos_engine::route_fixed_params::ROUTE_FIXED_PARAMS_ENV)? {
+            None => Default::default(),
+            Some(encoded) => {
+                let decoded: Value =
+                    serde_json::from_str(&encoded).context("decode item route_fixed_params")?;
+                let params = ryeos_engine::route_fixed_params::parse_route_fixed_params(&decoded)?;
+                ryeos_engine::route_fixed_params::check_route_fixed_params_against_profile(
+                    &profile_value,
+                    &route_set,
+                    &params,
+                )?;
+                params
+            }
+        };
+    let mut profile: StructuredSessionProfile =
         serde_json::from_value(profile_value).context("decode structured-session profile")?;
+    extend_route_fixed_params(&mut profile.routes, &item_route_params)?;
     if profile.schema_version
         != ryeos_engine::structured_session_profile::STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION
     {
@@ -4792,6 +4808,30 @@ fn perform_http_request(
     serde_json::from_slice(&body).context("decode structured workload HTTP response")
 }
 
+/// Extend each named route's `fixed_params` with the signed item's pins, before
+/// any command is served. A pin that collides with a field the profile route
+/// already fixes or fills is refused, never overridden; per-command
+/// `apply_route_parameters` then refuses a caller that names a pinned field and
+/// the merged request still passes the route's request schema.
+fn extend_route_fixed_params(
+    routes: &mut [RouteRule],
+    item_params: &ryeos_engine::route_fixed_params::RouteFixedParams,
+) -> Result<()> {
+    for (route_id, fields) in item_params {
+        let route = routes
+            .iter_mut()
+            .find(|route| &route.id == route_id)
+            .ok_or_else(|| anyhow!("item route_fixed_params names undefined route `{route_id}`"))?;
+        for (field, value) in fields {
+            if route.fixed_params.contains_key(field) || route.workspace_fields.contains(field) {
+                bail!("item route_fixed_params cannot override profile field `{field}`");
+            }
+            route.fixed_params.insert(field.clone(), value.clone());
+        }
+    }
+    Ok(())
+}
+
 fn apply_route_parameters(route: &RouteRule, params: &mut Value, workspace: &str) -> Result<()> {
     let object = params
         .as_object_mut()
@@ -5602,6 +5642,46 @@ mod tests {
             let mut params = json!({"authorityOverride": value});
             assert!(apply_route_parameters(&rule, &mut params, "/workspace").is_err());
         }
+    }
+
+    #[test]
+    fn item_route_pins_extend_the_route_and_a_caller_cannot_override_them() {
+        let mut routes = vec![
+            serde_json::from_value::<RouteRule>(json!({
+                "id":"session.start",
+                "method":"thread/start",
+                "effect_class":"session_mutation",
+                "request_schema":"request.json",
+                "response_schema":"response.json",
+                "fixed_params":{"access":"read_write"},
+                "workspace_fields":["cwd"],
+                "result_retention":"ephemeral"
+            }))
+            .unwrap(),
+        ];
+        let pins = ryeos_engine::route_fixed_params::parse_route_fixed_params(
+            &json!({"session.start": {"effort": "high"}}),
+        )
+        .unwrap();
+        extend_route_fixed_params(&mut routes, &pins).unwrap();
+        let mut admitted = json!({"prompt": "go"});
+        apply_route_parameters(&routes[0], &mut admitted, "/workspace").unwrap();
+        assert_eq!(admitted["effort"], "high");
+        assert_eq!(admitted["access"], "read_write");
+        let mut overridden = json!({"effort": "low"});
+        assert!(apply_route_parameters(&routes[0], &mut overridden, "/workspace").is_err());
+        for colliding in ["access", "cwd"] {
+            let pins = ryeos_engine::route_fixed_params::parse_route_fixed_params(
+                &json!({"session.start": {colliding: "x"}}),
+            )
+            .unwrap();
+            assert!(extend_route_fixed_params(&mut routes.clone(), &pins).is_err());
+        }
+        let unknown = ryeos_engine::route_fixed_params::parse_route_fixed_params(
+            &json!({"missing.route": {"a": 1}}),
+        )
+        .unwrap();
+        assert!(extend_route_fixed_params(&mut routes, &unknown).is_err());
     }
 
     #[test]
