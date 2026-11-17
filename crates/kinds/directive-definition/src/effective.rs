@@ -190,6 +190,22 @@ pub struct LimitsSpec {
     pub depth: Option<u32>,
     #[serde(default)]
     pub duration_seconds: Option<u64>,
+    /// Seconds before the run deadline's hard stop at which the model is told
+    /// time is short. `0` omits the wrap-up notice.
+    #[serde(default)]
+    pub wrap_up_seconds: Option<u64>,
+    /// This directive's share of the run deadline.
+    #[serde(default)]
+    pub deadline: Option<DeadlineSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeadlineSpec {
+    /// Seconds this directive keeps for its own settling after its
+    /// descendants are due.
+    #[serde(default)]
+    pub reserve_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -242,6 +258,26 @@ pub struct OutputSpec {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn limits_accept_the_run_deadline_share_and_reject_unknown_deadline_keys() {
+        let parsed = parse_effective_header(&json!({
+            "limits": {
+                "turns": 4,
+                "wrap_up_seconds": 45,
+                "deadline": {"reserve_seconds": 20},
+            },
+        }))
+        .unwrap();
+        let limits = parsed.limits.unwrap();
+        assert_eq!(limits.wrap_up_seconds, Some(45));
+        assert_eq!(limits.deadline.unwrap().reserve_seconds, Some(20));
+
+        assert!(
+            parse_effective_header(&json!({"limits": {"deadline": {"hold_back_ms": 5}}})).is_err(),
+            "the hold-back is daemon-derived and not authorable"
+        );
+    }
 
     #[test]
     fn parser_projects_engine_owned_fields_and_keeps_strict_owned_shapes() {

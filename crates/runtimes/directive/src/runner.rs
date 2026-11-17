@@ -12,6 +12,7 @@ use crate::dispatcher::{DispatchKind, Dispatcher};
 use crate::harness::{Harness, HookAction};
 use crate::result_guard::ResultGuard;
 use crate::resume::{ResumeDisposition, ResumeState};
+use crate::run_clock::{RunClock, RunPhase};
 use ryeos_accounting::{
     AttemptBudgetState, BillableDimension, ChargeReconciliationAuthority, HexDigest,
     ProviderAccountingAuthority, ProviderAttemptGetParams, ProviderAttemptMarkIssuedParams,
@@ -279,6 +280,9 @@ fn state_after_serial_tool_result(
 #[derive(Debug)]
 pub enum State {
     CheckingLimits,
+    /// The run deadline's hard stop: the execution settles as a deadline stop
+    /// without starting another turn or tool call.
+    DeadlineStopped,
     CallingProvider,
     Streaming {
         // The full sequence of streamed events, kept for diagnostic
@@ -397,6 +401,10 @@ pub struct Runner {
     /// Whether the corrective turn has been granted in this segment —
     /// bounds the nudge to exactly one extra turn.
     return_nudge_sent: bool,
+    /// Whether the run-deadline wrap-up input is already in the transcript.
+    /// Rebuilt from the replayed record on resume, so a recovered or
+    /// continued segment never repeats it.
+    wrap_up_delivered: bool,
     /// What to do at the context-window continuation boundary: disabled
     /// (default) → stop with current state; enabled → self-continue.
     continuation_config: ContinuationConfig,
@@ -439,6 +447,63 @@ enum ProviderRetryWaitOutcome {
     DeadlineReached,
     Cancelled,
     Interrupted,
+}
+
+/// What the run deadline decides at the start of a turn.
+enum RunDeadlineBoundary {
+    Proceed,
+    HardStop,
+}
+
+/// The text the model receives when the run enters its wrap-up phase. It is
+/// the only push of time information; the `time_left` tool answers on demand.
+fn wrap_up_message(remaining_ms: u64, outputs_declared: bool) -> String {
+    let seconds = remaining_ms.div_ceil(1_000);
+    let finish = if outputs_declared {
+        "Finish with `directive_return` carrying every declared output."
+    } else {
+        "Finish with your best result."
+    };
+    format!(
+        "Deadline notice: about {seconds} seconds remain before this run is stopped. \
+         Do not start new lines of work. Record what you have, hand off anything \
+         unfinished, and wrap up now. {finish}"
+    )
+}
+
+/// Sets the live-interrupt flag when the run's hard stop arrives, and keeps
+/// setting it until dropped, so a model call that begins at the boundary is
+/// cut too. The run's own limits check decides the stop.
+struct DeadlineInterruptTimer {
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl DeadlineInterruptTimer {
+    fn start(
+        clock: RunClock,
+        interrupt_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        let task = tokio::spawn(async move {
+            let wait_ms = clock
+                .hard_stop_at_ms()
+                .saturating_sub(lillux::time::timestamp_millis());
+            tokio::time::sleep(std::time::Duration::from_millis(
+                u64::try_from(wait_ms).unwrap_or(0),
+            ))
+            .await;
+            loop {
+                interrupt_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        });
+        Self { task }
+    }
+}
+
+impl Drop for DeadlineInterruptTimer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 /// Wait for a daemon-admitted durable retry deadline while retaining live
@@ -1024,6 +1089,7 @@ impl Runner {
             directive_outputs: outputs,
             return_nudge,
             return_nudge_sent: false,
+            wrap_up_delivered: false,
             continuation_config: continuation,
             sampling,
             reasoning,
@@ -1092,6 +1158,7 @@ impl Runner {
         let resume_disposition = resume.disposition;
         let resume_active_provider_turn = resume.active_provider_turn;
         let provider_retry_testimony_digests = resume.provider_retry_testimony_digests;
+        let wrap_up_delivered = resume.deadline_wrap_up_delivered;
         let last_turn_coordinate = resume.last_turn_coordinate;
         if let Some(active_turn) = resume_active_provider_turn {
             let expected = last_turn_coordinate
@@ -1167,6 +1234,7 @@ impl Runner {
         runner.resume_disposition = resume_disposition;
         runner.resume_active_provider_turn = resume_active_provider_turn;
         runner.provider_retry_testimony_digests = provider_retry_testimony_digests;
+        runner.wrap_up_delivered = wrap_up_delivered;
         runner.return_nudge_sent = recovered_return_nudge_seen(
             &runner.messages,
             &runner.return_nudge,
@@ -1190,6 +1258,44 @@ impl Runner {
     ///
     /// Drained ONLY at safe turn boundaries (never between an assistant tool-call
     /// message and its tool results), so the folded wire history is well-formed.
+    /// The run deadline's boundary at the start of a turn. At the hard stop
+    /// the run stops; in the wrap-up phase the model is told once, as a
+    /// durable harness input, that time is short. A recovered provider turn
+    /// takes no new input, since its transcript is already fixed.
+    async fn run_deadline_boundary(&mut self) -> Result<RunDeadlineBoundary, String> {
+        let Some(clock) = self.harness.run_clock() else {
+            return Ok(RunDeadlineBoundary::Proceed);
+        };
+        let now_ms = lillux::time::timestamp_millis();
+        match clock.phase_at(now_ms) {
+            RunPhase::HardStop => Ok(RunDeadlineBoundary::HardStop),
+            RunPhase::WrapUp
+                if !self.wrap_up_delivered && self.resume_active_provider_turn.is_none() =>
+            {
+                let text = wrap_up_message(
+                    clock.remaining_ms(now_ms),
+                    self.directive_outputs
+                        .as_deref()
+                        .is_some_and(|outputs| !outputs.is_empty()),
+                );
+                // Pinned so a continuation's trimmed start still carries it.
+                let input = ryeos_runtime::CognitionInput::text("harness", &text)
+                    .with_kind(ryeos_runtime::cognition::KIND_DEADLINE_WRAP_UP)
+                    .pinned();
+                self.callback
+                    .emit_cognition_input(&input)
+                    .await
+                    .map_err(|e| {
+                        format!("resume-critical deadline wrap-up input append failed: {e}")
+                    })?;
+                self.messages.push(ProviderMessage::user(text));
+                self.wrap_up_delivered = true;
+                Ok(RunDeadlineBoundary::Proceed)
+            }
+            RunPhase::WrapUp | RunPhase::Running => Ok(RunDeadlineBoundary::Proceed),
+        }
+    }
+
     async fn poll_pending_input(&mut self) -> Result<bool, String> {
         let inputs = self
             .callback
@@ -1242,6 +1348,12 @@ impl Runner {
 
     pub async fn run(&mut self) -> anyhow::Result<RuntimeResult> {
         let mut guard = RunGuard { finalized: false };
+        // At the run deadline's hard stop this cuts whatever model call is in
+        // flight; the stop itself is decided at the next limits check.
+        let _deadline_timer = self
+            .harness
+            .run_clock()
+            .map(|clock| DeadlineInterruptTimer::start(clock, self.harness.interrupted_flag()));
         // The entrypoint has already attached the process and durably moved
         // the thread to running before it constructs the runner.
         // Ledger routes (Paid / ExplicitlyFree sealed authority): the daemon
@@ -1342,6 +1454,17 @@ impl Runner {
                         }
                         state = State::Errored { error: e };
                         continue;
+                    }
+                    match self.run_deadline_boundary().await {
+                        Ok(RunDeadlineBoundary::Proceed) => {}
+                        Ok(RunDeadlineBoundary::HardStop) => {
+                            state = State::DeadlineStopped;
+                            continue;
+                        }
+                        Err(error) => {
+                            state = State::RecoveryRequired { error };
+                            continue;
+                        }
                     }
                     // Steer drain (between-turns boundary): fold any operator
                     // inputs staged since the last cognition before calling the
@@ -3721,6 +3844,29 @@ impl Runner {
                         )
                         .into(),
                     );
+                }
+
+                State::DeadlineStopped => {
+                    let stopped_at_ms = lillux::time::timestamp_millis();
+                    let result = json!({
+                        "outcome": "deadline",
+                        "phase": "hard_stop",
+                        "deadline_at_ms": self.harness.run_clock().map(|clock| clock.end_at_ms()),
+                        "stopped_at_ms": stopped_at_ms,
+                        "turn": turn,
+                        "wrap_up_delivered": self.wrap_up_delivered,
+                    });
+                    let runtime_result = RuntimeResult {
+                        success: false,
+                        status: RuntimeResultStatus::TimedOut,
+                        thread_id: self.thread_id.clone(),
+                        result: Some(result),
+                        outputs: json!({}),
+                        cost: Some(self.budget.cost()),
+                        warnings: Vec::new(),
+                    };
+                    guard.finalized = true;
+                    return Ok(Self::attach_warnings(runtime_result, &mut warnings));
                 }
 
                 State::Cancelled => {
@@ -6362,7 +6508,16 @@ mod tests {
         ) -> Result<Value, CallbackError> {
             Ok(Value::Null)
         }
-        async fn append_event(&self, _: &str, _: &str, _: Value) -> Result<Value, CallbackError> {
+        async fn append_event(
+            &self,
+            _: &str,
+            event_type: &str,
+            payload: Value,
+        ) -> Result<Value, CallbackError> {
+            self.record(
+                "append_event",
+                &json!({"event_type": event_type, "payload": payload}),
+            );
             Ok(json!({}))
         }
         async fn append_events(
@@ -6514,6 +6669,10 @@ mod tests {
     }
 
     fn ledger_runner(mock: Arc<ScriptedLedger>) -> Runner {
+        ledger_runner_with_policy(mock, make_policy())
+    }
+
+    fn ledger_runner_with_policy(mock: Arc<ScriptedLedger>, policy: EnvelopePolicy) -> Runner {
         let provider = ProviderConfig {
             category: None,
             family: ProtocolFamily::ChatCompletions,
@@ -6534,7 +6693,7 @@ mod tests {
             messages: vec![],
             tools: vec![],
             system_prompt: None,
-            harness: Harness::new(&make_policy(), 0, None),
+            harness: Harness::new(&policy, 0, None),
             continuation: ContinuationConfig::Flag(true),
             budget: BudgetTracker::new(usd("1")),
             callback: CallbackClient::from_inner(
@@ -6640,6 +6799,118 @@ mod tests {
 
     fn unset_flag() -> Arc<AtomicBool> {
         Arc::new(AtomicBool::new(false))
+    }
+
+    /// A policy whose run ends `end_in_ms` from now, with a 10 s reserve and a
+    /// 20 s wrap-up phase: the hard stop is 10 s before the end and the
+    /// wrap-up notice starts 20 s before that.
+    fn deadline_policy(end_in_ms: i64) -> EnvelopePolicy {
+        let mut limits = HardLimits::default();
+        limits.deadline.reserve_seconds = 10;
+        limits.deadline.at_ms = Some(lillux::time::timestamp_millis() + end_in_ms);
+        limits
+            .runtime
+            .insert(crate::run_clock::WRAP_UP_SECONDS_LIMIT.to_string(), 20);
+        EnvelopePolicy {
+            effective_caps: vec![],
+            hard_limits: limits,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_wrap_up_notice_is_recorded_once_and_only_in_its_phase() {
+        // 100 s left: the wrap-up window opens in 70 s, so nothing is said yet.
+        let mock = Arc::new(ScriptedLedger::new("authority"));
+        let mut runner = ledger_runner_with_policy(mock.clone(), deadline_policy(100_000));
+        assert!(matches!(
+            runner.run_deadline_boundary().await,
+            Ok(RunDeadlineBoundary::Proceed)
+        ));
+        assert!(mock.recorded("append_event").is_empty());
+
+        // 25 s left: the hard stop is 15 s away and the wrap-up window opened 5 s ago.
+        let mock = Arc::new(ScriptedLedger::new("authority"));
+        let mut runner = ledger_runner_with_policy(mock.clone(), deadline_policy(25_000));
+        for _ in 0..3 {
+            assert!(matches!(
+                runner.run_deadline_boundary().await,
+                Ok(RunDeadlineBoundary::Proceed)
+            ));
+        }
+        let appended = mock.recorded("append_event");
+        assert_eq!(appended.len(), 1, "exactly one durable notice");
+        assert_eq!(appended[0]["event_type"], "cognition_in");
+        assert_eq!(appended[0]["payload"]["origin"], "harness");
+        assert_eq!(appended[0]["payload"]["kind"], "deadline_wrap_up");
+        assert_eq!(appended[0]["payload"]["pinned"], true);
+        assert_eq!(runner.messages.len(), 1);
+        assert_eq!(runner.messages[0].role(), "user");
+        assert!(
+            runner.messages[0]
+                .text()
+                .unwrap()
+                .starts_with("Deadline notice")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_recovered_run_does_not_repeat_the_wrap_up_notice() {
+        let mock = Arc::new(ScriptedLedger::new("authority"));
+        let mut runner = ledger_runner_with_policy(mock.clone(), deadline_policy(25_000));
+        runner.wrap_up_delivered = true;
+        assert!(matches!(
+            runner.run_deadline_boundary().await,
+            Ok(RunDeadlineBoundary::Proceed)
+        ));
+        assert!(mock.recorded("append_event").is_empty());
+        assert!(runner.messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_hard_stop_and_a_run_without_a_deadline() {
+        let mock = Arc::new(ScriptedLedger::new("authority"));
+        // The end is 5 s away and the reserve is 10 s: the hard stop passed.
+        let mut runner = ledger_runner_with_policy(mock.clone(), deadline_policy(5_000));
+        assert!(matches!(
+            runner.run_deadline_boundary().await,
+            Ok(RunDeadlineBoundary::HardStop)
+        ));
+        assert!(mock.recorded("append_event").is_empty());
+
+        let mut runner = ledger_runner(mock.clone());
+        assert!(matches!(
+            runner.run_deadline_boundary().await,
+            Ok(RunDeadlineBoundary::Proceed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_interrupt_timer_sets_the_flag_at_the_hard_stop_and_stops_with_its_owner() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let mut limits = HardLimits::default();
+        limits.deadline.at_ms = Some(lillux::time::timestamp_millis() + 150);
+        let clock = RunClock::from_limits(&limits).unwrap();
+        let timer = DeadlineInterruptTimer::start(clock, flag.clone());
+        assert!(!flag.load(std::sync::atomic::Ordering::Relaxed));
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(flag.load(std::sync::atomic::Ordering::Relaxed));
+        drop(timer);
+        flag.store(false, std::sync::atomic::Ordering::Relaxed);
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        assert!(
+            !flag.load(std::sync::atomic::Ordering::Relaxed),
+            "a dropped timer stops setting the flag"
+        );
+    }
+
+    #[test]
+    fn the_wrap_up_text_names_the_time_and_the_way_to_finish() {
+        let with_outputs = wrap_up_message(12_400, true);
+        assert!(with_outputs.contains("13 seconds"));
+        assert!(with_outputs.contains("directive_return"));
+        let without = wrap_up_message(5_000, false);
+        assert!(without.contains("5 seconds"));
+        assert!(!without.contains("directive_return"));
     }
 
     #[tokio::test]

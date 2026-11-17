@@ -22,9 +22,9 @@ use ryeos_accounting::{
 mod effective;
 
 pub use effective::{
-    ContinuationConfig, ContinuationEnabled, DIRECTIVE_EFFECTIVE_HEADER_KEYS, DirectiveEffectClass,
-    DirectiveHeader, LimitsSpec, OutputSpec, ReturnNudge, parse_effective_header,
-    resolve_external_effect_authority,
+    ContinuationConfig, ContinuationEnabled, DIRECTIVE_EFFECTIVE_HEADER_KEYS, DeadlineSpec,
+    DirectiveEffectClass, DirectiveHeader, LimitsSpec, OutputSpec, ReturnNudge,
+    parse_effective_header, resolve_external_effect_authority,
 };
 
 pub const MODEL_BINDING: &str = "model";

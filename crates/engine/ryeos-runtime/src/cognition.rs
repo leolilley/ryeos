@@ -46,6 +46,10 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+/// Kind of the harness input that tells the model its run is nearly out of
+/// time. Readers that do not know it treat it as any other harness input.
+pub const KIND_DEADLINE_WRAP_UP: &str = "deadline_wrap_up";
+
 /// One input to cognition: what the model is given as a user message.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

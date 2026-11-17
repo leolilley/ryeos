@@ -71,6 +71,12 @@ impl Harness {
         }
     }
 
+    /// The run deadline clock, when the daemon stamped an end on this
+    /// execution.
+    pub fn run_clock(&self) -> Option<crate::run_clock::RunClock> {
+        crate::run_clock::RunClock::from_limits(&self.limits)
+    }
+
     pub fn cancelled_flag(&self) -> Arc<AtomicBool> {
         self.cancelled.clone()
     }

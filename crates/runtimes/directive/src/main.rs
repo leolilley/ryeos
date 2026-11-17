@@ -18,6 +18,7 @@ mod provider_adapter;
 mod provider_transport_timing;
 mod result_guard;
 mod resume;
+mod run_clock;
 mod runner;
 mod spend_verifier;
 mod startup_timing;
