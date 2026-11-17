@@ -19,7 +19,8 @@ name: Remote cargo
 # job succeeded and whose artifact is unexpired (1 day retention), and prints
 # the next sha and run id. It fails if none is available, and refuses if the
 # branch differs from that next sha on any path the state would overwrite or
-# delete (merge origin/next, or avoid those paths). No bundle refresh runs here.
+# delete, or anywhere under bundles/ (merge origin/next, or avoid those paths).
+# Crate source differences only warn: bundle bins come from next's crates. No bundle refresh runs here.
 # bundles=none (default) runs cargo on the plain checkout.
 on:
   workflow_dispatch:

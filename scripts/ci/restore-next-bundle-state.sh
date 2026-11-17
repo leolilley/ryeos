@@ -13,9 +13,14 @@
 # between S and HEAD, because unpacking would silently replace the branch's
 # version of that file with next's. Untracked/ignored generated files
 # (populated bin trees, signatures) never differ in git, so they restore freely.
-# If it refuses because the branch is merely behind next, merge origin/next.
-# Branch changes to crate sources do not touch state paths but can make the
-# prebuilt bundle bins stale relative to the branch; that only warns.
+# It is also refused when anything under bundles/ differs between S and HEAD,
+# even a tracked file the refresh did not modify: the state's bins and
+# signatures were produced from S's bundle sources, so a branch with other
+# bundle sources would load a mismatched, partly stale bundle. If it refuses
+# because the branch is merely behind next, merge origin/next (the newest next
+# run whose bundles job has finished is used, so wait for it if next just moved).
+# Branch changes to crate sources can make the prebuilt bundle bins stale
+# relative to the branch; that only warns.
 #
 # Usage: restore-next-bundle-state.sh   (repository root; needs GH_TOKEN, GITHUB_REPOSITORY)
 set -euo pipefail
@@ -61,9 +66,10 @@ sort -u "$work/state-paths" "$work/deleted-paths" > "$work/touched"
 git fetch --no-tags --depth=1 origin "$sha"
 git diff --name-only "$sha" HEAD | sort -u > "$work/differs"
 
-conflicts="$(comm -12 "$work/touched" "$work/differs")"
+{ comm -12 "$work/touched" "$work/differs"; grep '^bundles/' "$work/differs" || true; } | sort -u > "$work/conflicts"
+conflicts="$(cat "$work/conflicts")"
 if [[ -n "$conflicts" ]]; then
-    echo "::error::Refusing to restore next's bundle state: this branch differs from next $sha on paths the state would overwrite or delete, so the run would test next's version, not the branch's. Merge origin/next into the branch, or keep branch edits out of these paths."
+    echo "::error::Refusing to restore next's bundle state: this branch differs from next $sha on paths the state would overwrite or delete, or on bundle sources the state was built from, so the run would test next's version, not the branch's. Merge origin/next into the branch, or keep branch edits out of these paths."
     echo "$conflicts" | sed 's/^/  conflict: /'
     exit 1
 fi
