@@ -151,23 +151,8 @@ jobs:
           finally:
               shutil.rmtree(tmp)
 
-          # Legacy fixtures signed in March-April 2026 under the retired short-fingerprint
-          # key (4b987fd4e40303ac) and an older hash rule. They never matched the current
-          # rule; the supervised smoke passes without them. Refresh or delete them, then drop this list.
-          LEGACY = {
-              "tests/e2e/manual-directives/.ai/knowledge/test-findings.md",
-              "tests/e2e/manual-directives/.ai/knowledge/test/context/alt-identity.md",
-              "tests/e2e/manual-directives/.ai/knowledge/test/context/base-identity.md",
-              "tests/e2e/manual-directives/.ai/knowledge/test/context/hook-routed-rules.md",
-              "tests/e2e/manual-directives/.ai/knowledge/test/context/leaf-checklist.md",
-              "tests/e2e/manual-directives/.ai/knowledge/test/context/mid-rules.md",
-              "tests/e2e/manual-directives/.ai/tools/mcp/servers/ryeosd.yaml",
-          }
-
           stale = checked = 0
           for name, data in signed_files():
-              if name in LEGACY:
-                  continue
               try:
                   first = data.decode("utf-8").splitlines()[:2]
               except UnicodeDecodeError:
