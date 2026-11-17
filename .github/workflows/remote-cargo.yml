@@ -1,0 +1,95 @@
+name: Remote cargo
+
+# Runs one cargo command for a branch on a GitHub-hosted runner, so threads can
+# verify work in parallel instead of queueing on the shared local cargo guard.
+# Dispatch it on the branch to check:
+#
+#   gh workflow run remote-cargo.yml --ref work/<branch> \
+#     -f command=test -f args="-p ryeos-ui --lib"
+#
+# The args are split on whitespace and passed to cargo as separate arguments;
+# they are never evaluated by a shell. No bundle refresh runs here, so tests that
+# load populated bundle bins (most daemon e2e) belong to the CI workflow instead.
+on:
+  workflow_dispatch:
+    inputs:
+      command:
+        description: "cargo subcommand"
+        required: true
+        default: test
+        type: choice
+        options:
+          - test
+          - clippy
+          - check
+          - build
+          - fmt
+      args:
+        description: "Arguments after the subcommand, e.g. -p ryeos-ui --lib, or -p ryeosd --all-targets -- -D warnings"
+        required: true
+        type: string
+      label:
+        description: "Optional short label shown in the run name"
+        required: false
+        default: ""
+        type: string
+
+run-name: "remote cargo ${{ inputs.command }} ${{ inputs.label }} (${{ github.ref_name }})"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: sccache
+  CARGO_INCREMENTAL: "0"
+  GATE_BUILD_JOBS: 0
+  GATE_TEST_THREADS: 0
+
+jobs:
+  cargo:
+    name: cargo ${{ inputs.command }} ${{ inputs.label }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      # Read the CI workflow's crate cache but never save one: many branches
+      # dispatch this, and per-run saves would evict the CI caches.
+      - name: Restore cargo artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: workspace-crates-v1
+          cache-workspace-crates: true
+          save-if: false
+
+      - name: Prepare the runner
+        run: ./scripts/ci/prepare-runner.sh
+
+      - name: Run cargo
+        env:
+          CARGO_SUBCOMMAND: ${{ inputs.command }}
+          CARGO_ARGS: ${{ inputs.args }}
+        run: |
+          set -euo pipefail
+          read -r -a extra <<<"$CARGO_ARGS"
+          echo "cargo $CARGO_SUBCOMMAND ${extra[*]}"
+          cargo "$CARGO_SUBCOMMAND" "${extra[@]}"

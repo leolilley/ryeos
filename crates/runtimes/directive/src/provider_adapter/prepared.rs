@@ -164,24 +164,10 @@ pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<Prepar
     };
 
     let transport = match &provider.transport {
-        ryeos_directive_definition::ProviderTransportConfig::RemoteHttp { base_url } => {
-            let stream_url = provider.extra.get("stream_url").and_then(|v| v.as_str());
-            // Resolve {model} template in base_url (e.g. gemini profiles use
-            // `{model}:streamGenerateContent`).
-            let base_resolved = base_url.replace("{model}", model);
-            let url = match stream_url {
-                Some("") => base_resolved,
-                Some(su) => format!(
-                    "{}{}",
-                    base_resolved.trim_end_matches('/'),
-                    if su.starts_with('/') {
-                        su.to_string()
-                    } else {
-                        format!("/{}", su)
-                    }
-                ),
-                None => format!("{}/chat/completions", base_resolved.trim_end_matches('/')),
-            };
+        ryeos_directive_definition::ProviderTransportConfig::RemoteHttp { .. } => {
+            let url = provider.effective_request_url(model).ok_or_else(|| {
+                anyhow::anyhow!("remote HTTP provider transport has no request URL")
+            })?;
             PreparedProviderTransport::RemoteHttp {
                 method: reqwest::Method::POST,
                 url,

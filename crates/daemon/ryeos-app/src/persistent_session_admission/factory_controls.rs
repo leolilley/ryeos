@@ -293,6 +293,7 @@ session:
             ready_timeout_ms: 1000,
             request_timeout_ms: 1000,
             idle_timeout_ms: 1000,
+            max_lifetime_seconds_ceiling: 603_600,
         },
         wire: PersistentSessionWireContract {
             channel_env: "RYEOS_SESSION_FD".into(),
