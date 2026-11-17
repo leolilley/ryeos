@@ -2357,7 +2357,11 @@ mod tests {
 
         let messages = reconstruct_messages(&events).unwrap();
         assert_eq!(messages[0].text().as_deref(), Some(exact));
-        let (wire, system) = crate::provider_adapter::messages::convert_messages(&messages, &None);
+        let (wire, system) = crate::provider_adapter::messages::convert_messages(
+            &messages,
+            &None,
+            &Default::default(),
+        );
         assert!(system.is_none());
         assert_eq!(wire[0]["content"].as_str(), Some(exact));
         assert!(wire[0]["content"].is_string());

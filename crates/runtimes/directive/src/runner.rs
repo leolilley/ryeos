@@ -2363,6 +2363,28 @@ impl Runner {
                                 };
                                 continue;
                             }
+                            // A turn that owes a replayable reasoning value under
+                            // a `refuse` rule and holds none fails here, after its
+                            // usage is settled and before it is recorded or any
+                            // tool it proposed is dispatched.
+                            if let Some(missing) = self
+                                .provider_config
+                                .schemas
+                                .as_ref()
+                                .and_then(|schemas| schemas.reasoning.as_ref())
+                                .and_then(|reasoning| {
+                                    crate::provider_adapter::reasoning_replay::owed_missing_in_turn(
+                                        &self.messages,
+                                        &resp.message,
+                                        reasoning,
+                                    )
+                                })
+                            {
+                                state = State::Errored {
+                                    error: missing.to_string(),
+                                };
+                                continue;
+                            }
                             let finish = finish_label(crate::directive::normalize_finish_reason(
                                 resp.finish_reason.as_deref(),
                             ));
@@ -2857,6 +2879,13 @@ impl Runner {
                             StreamEvent::ReasoningDelta(text) => {
                                 reasoning_count += 1;
                                 tracing::trace!(len = text.len(), "reasoning delta received");
+                            }
+                            StreamEvent::ReasoningArtefact { capture_id, value } => {
+                                tracing::trace!(
+                                    capture_id = %capture_id,
+                                    bytes = value.to_string().len(),
+                                    "reasoning artefact captured"
+                                );
                             }
                             StreamEvent::Usage(update) => {
                                 // Mid-stream usage is informational — the
@@ -5048,6 +5077,42 @@ fn provider_reported_spend_runtime_cost(usd: ryeos_runtime::envelope::UsdNanos) 
     }
 }
 
+/// Ends a launch that is refused before the runner starts: records the
+/// failure on the thread and returns the terminal result. Used where the
+/// refusal is decided from the recorded chain and the launch alone.
+pub(crate) async fn refuse_launch(
+    callback: &CallbackClient,
+    thread_id: &str,
+    error: &str,
+    cost: ryeos_runtime::envelope::RuntimeCost,
+) -> anyhow::Result<RuntimeResult> {
+    let failure = runtime_failure_payload(error, thread_id, 0, None);
+    callback.emit_error(error).await?;
+    callback
+        .finalize_thread(TerminalCompletion {
+            status: ThreadTerminalStatus::Failed,
+            outcome_code: Some("failed".to_string()),
+            result: None,
+            error: Some(failure.clone()),
+            cost: Some(
+                serde_json::to_value(&cost)
+                    .expect("validated directive cost must serialize for terminal settlement"),
+            ),
+            outputs: json!({}),
+            warnings: Vec::new(),
+        })
+        .await?;
+    Ok(RuntimeResult {
+        success: false,
+        status: RuntimeResultStatus::Failed,
+        thread_id: thread_id.to_string(),
+        result: Some(failure),
+        outputs: json!({}),
+        cost: Some(cost),
+        warnings: Vec::new(),
+    })
+}
+
 fn runtime_failure_payload(
     error: &str,
     thread_id: &str,
@@ -5147,6 +5212,7 @@ mod tests {
                 sha256: sha256.to_string(),
                 raw_len,
             }),
+            artefact: None,
         }
     }
 

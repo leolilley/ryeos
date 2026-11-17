@@ -526,6 +526,34 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
         let resume_id = resume_id
             .as_deref()
             .expect("a resume has a thread to resume");
+        // A provider entry may refuse a mid-conversation change of the system
+        // text, the tool inventory or the reasoning policy. That is decided
+        // before the thread is continued or anything is recorded, so a refused
+        // launch leaves the chain exactly as it was.
+        if let Some(recorded) = &resume_state.frame {
+            let refused = provider
+                .schemas
+                .as_ref()
+                .and_then(|schemas| schemas.frame_stability.as_ref())
+                .map_or(&[][..], |stability| stability.refuse_change_of.as_slice());
+            if let Some(component) =
+                launch_records::refused_frame_change(recorded, &launch_frame.payload, refused)
+            {
+                let error = format!(
+                    "frame_change_refused: the provider entry refuses a changed {} within one \
+                     conversation (recorded frame_seq {})",
+                    component.as_str(),
+                    recorded.frame_seq
+                );
+                return runner::refuse_launch(
+                    &callback,
+                    &envelope.thread_id,
+                    &error,
+                    budget.cost(),
+                )
+                .await;
+            }
+        }
         if !same_thread_resume
             && let Err(e) = callback
                 .append_runtime_event(
@@ -543,8 +571,7 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
 
         // The frame in force: the one the chain recorded, unless this launch
         // gives the model something different, which is recorded as the next
-        // frame. A provider entry that refuses a mid-conversation change would
-        // refuse here; none declares that yet.
+        // frame. A change a provider entry refuses was ruled out above.
         let frame_to_record = match &resume_state.frame {
             Some(recorded) if recorded.same_as(&launch_frame.payload) => None,
             Some(recorded) => {

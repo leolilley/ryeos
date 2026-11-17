@@ -2437,6 +2437,17 @@ fn validate_reasoning_capture_and_replay(
     if config.capture.len() > 16 {
         bail!("provider config{context}: reasoning.capture may declare at most 16 rules");
     }
+    if config
+        .capture
+        .iter()
+        .filter(|rule| matches!(rule, ReasoningCaptureRule::ToolCallField { .. }))
+        .count()
+        > 1
+    {
+        bail!(
+            "provider config{context}: reasoning.capture may declare at most one tool_call_field rule, since a call holds one artefact"
+        );
+    }
     let mut ids = std::collections::BTreeSet::new();
     let mut captures_artefact = false;
     for rule in &config.capture {
@@ -2548,7 +2559,11 @@ fn validate_reasoning_capture_and_replay(
                 placement.from
             );
         };
-        validate_reasoning_identifier("reasoning replay target key", placement.into.key(), context)?;
+        validate_reasoning_identifier(
+            "reasoning replay target key",
+            placement.into.key(),
+            context,
+        )?;
         let kind_matches = match (rule, &placement.into) {
             (
                 ReasoningCaptureRule::TextDelta { .. } | ReasoningCaptureRule::Blocks { .. },
@@ -3190,7 +3205,10 @@ mod reasoning_capture_config_tests {
     #[test]
     fn an_artefact_placement_needs_a_compat_group() {
         let mut shape = claude_shape();
-        shape["replay"].as_object_mut().unwrap().remove("compat_group");
+        shape["replay"]
+            .as_object_mut()
+            .unwrap()
+            .remove("compat_group");
         assert!(validate(shape).is_err());
     }
 
@@ -3209,7 +3227,9 @@ mod reasoning_capture_config_tests {
         control.validate("").expect("control validates");
         let mut anthropic = provider_with("event_typed", claude_shape());
         anthropic.family = ProtocolFamily::AnthropicMessages;
-        let error = anthropic.validate("").expect_err("capture needs delta_merge");
+        let error = anthropic
+            .validate("")
+            .expect_err("capture needs delta_merge");
         assert!(error.to_string().contains("delta_merge"), "{error}");
     }
 
@@ -3250,7 +3270,10 @@ mod reasoning_capture_config_tests {
     fn two_placements_may_not_write_the_same_key() {
         let mut shape = text_shape();
         let placement = shape["replay"]["placements"][0].clone();
-        shape["replay"]["placements"].as_array_mut().unwrap().push(placement);
+        shape["replay"]["placements"]
+            .as_array_mut()
+            .unwrap()
+            .push(placement);
         assert!(validate(shape).is_err());
     }
 

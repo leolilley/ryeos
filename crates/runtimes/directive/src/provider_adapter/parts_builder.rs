@@ -4,16 +4,38 @@
 //! one reasoning part, and a tool call is a part of its own at the point it
 //! completed.
 
-use ryeos_provider_contract::{Part, ReasoningPart, Role};
+use ryeos_provider_contract::{Artefact, Part, ReasoningPart, Role};
+use serde_json::Value;
 
-use crate::directive::{ProviderMessage, ToolCall, synthesised_call_id};
+use super::reasoning_capture::envelope;
+use crate::directive::{ProviderMessage, ToolCall, ToolCallArtefact, synthesised_call_id};
 
 #[derive(Debug, Default)]
 pub struct PartsBuilder {
     parts: Vec<Part>,
+    /// The compat group stamped on every artefact this builder records.
+    group: Option<String>,
 }
 
 impl PartsBuilder {
+    /// A builder whose artefacts carry `group`, the compat group the provider
+    /// entry declares.
+    pub fn new(group: Option<&str>) -> Self {
+        Self {
+            parts: Vec::new(),
+            group: group.map(str::to_string),
+        }
+    }
+
+    /// A completed opaque reasoning block, as a part of its own. Reasoning
+    /// text stays in adjacent text-only parts, so the two never fuse.
+    pub fn push_reasoning_artefact(&mut self, capture_id: &str, value: Value) {
+        self.parts.push(Part::Reasoning(ReasoningPart {
+            text: None,
+            artefact: Some(Artefact(envelope(capture_id, self.group.as_deref(), value))),
+        }));
+    }
+
     pub fn push_text(&mut self, text: &str) {
         if text.is_empty() {
             return;
@@ -42,11 +64,20 @@ impl PartsBuilder {
     /// A completed tool call. A call the provider issued without an id keeps
     /// an empty id until [`Self::finish`] gives it one.
     pub fn push_call(&mut self, call: ToolCall) {
-        self.parts.push(Part::tool_call(
-            call.id.unwrap_or_default(),
-            call.name,
-            call.arguments,
-        ));
+        self.push_call_with_artefact(call, None);
+    }
+
+    /// A completed tool call with the value a capture rule collected for it.
+    pub fn push_call_with_artefact(&mut self, call: ToolCall, artefact: Option<ToolCallArtefact>) {
+        let mut part = Part::tool_call(call.id.unwrap_or_default(), call.name, call.arguments);
+        if let (Part::ToolCall(call_part), Some(artefact)) = (&mut part, artefact) {
+            call_part.artefact = Some(Artefact(envelope(
+                &artefact.capture_id,
+                self.group.as_deref(),
+                artefact.value,
+            )));
+        }
+        self.parts.push(part);
     }
 
     /// Joined text of every text part.
