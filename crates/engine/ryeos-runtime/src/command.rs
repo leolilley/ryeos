@@ -364,6 +364,9 @@ pub enum ControlFlagBinding {
     /// Presence → authorize project-backed child roots to receive independent
     /// private COW generations retained for explicit owner disposition.
     RetainChildResults,
+    /// Presence → demand the live project explicitly (`project.intent: live`):
+    /// a launch whose resolved root is not the live project is refused.
+    LiveProject,
     /// Presence → exclude the operator vault from an otherwise ordinary
     /// project-environment overlay.
     ExcludeOperatorVault,

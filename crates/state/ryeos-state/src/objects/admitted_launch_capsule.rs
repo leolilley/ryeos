@@ -45,10 +45,13 @@ use super::{
 // byte-bounded member-source proof and exact runtime-definition owner on every
 // BundleExecutor identity. V37 seals the admitted recipient principal and its
 // own scopes into every vault-reading environment authority (project overlay
-// and vault namespace), as provider environments already did. Every schema change here requires a matching
+// and vault namespace), as provider environments already did. V38 records the
+// request's live-project intent (`default` or `live`) in every live project
+// authority; an explicit live demand is refused wherever the resolved root is
+// not live. Every schema change here requires a matching
 // Operational dispatch-effect replay-index epoch bump, which retires effects
 // sealed under predecessor capsule contracts.
-pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 37;
+pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 38;
 pub const MAX_ADMITTED_LAUNCH_CAPSULE_BYTES: usize = 16 * 1024 * 1024;
 pub const ADMITTED_DIRECT_COMMAND_ROOT: &str = "/ryeos/admitted-direct-command";
 pub const ADMITTED_DIRECT_PROJECT_ROOT: &str = "/ryeos/admitted-project";

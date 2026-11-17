@@ -1,0 +1,17 @@
+# ryeos:signed:2026-11-16T23:14:24Z:b82065901ea9e51fdc36159ca88d76abb98c14ccc43f1e156e7a9781a949863a:K2kRZhmKlJ18AwUnI+z8/ErhR+C+PdQPQBGKrtX4+zsccLf2vaiUCzrwnueJZULzPq0ZI+nhkCiPphSxp3NjDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- bundle
+- profile-sign
+description: Sign an init profile with a publisher key
+forms:
+- slots:
+  - field: profile
+    matcher: path
+- slots:
+  - field: profile
+    matcher: path
+  - field: key
+    matcher: path
+dispatch:
+  kind: execute_ref
+  execute: service:bundle/profile-sign
