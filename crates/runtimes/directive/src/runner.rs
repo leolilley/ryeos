@@ -7665,6 +7665,52 @@ mod frame_refusal_tests {
         ) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
+        async fn replay_events(&self, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({"events": []}))
+        }
+        async fn bundle_events_append(&self, _: &str, r: Value) -> Result<Value, CallbackError> {
+            Ok(r)
+        }
+        async fn bundle_events_read_chain(
+            &self,
+            _: &str,
+            _: Value,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({"events": []}))
+        }
+        async fn bundle_events_scan(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({"events": []}))
+        }
+        async fn vault_put(&self, _: &str, r: Value) -> Result<Value, CallbackError> {
+            Ok(r)
+        }
+        async fn vault_get(&self, _: &str, r: Value) -> Result<Value, CallbackError> {
+            Ok(r)
+        }
+        async fn vault_delete(&self, _: &str, r: Value) -> Result<Value, CallbackError> {
+            Ok(r)
+        }
+        async fn vault_list(&self, _: &str, r: Value) -> Result<Value, CallbackError> {
+            Ok(r)
+        }
+        async fn claim_commands(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn complete_command(
+            &self,
+            _: &str,
+            _: i64,
+            _: &str,
+            _: Value,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn publish_artifact(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn get_facets(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(Value::Null)
+        }
     }
 
     fn provider(refuse: Option<Value>) -> ProviderConfig {
