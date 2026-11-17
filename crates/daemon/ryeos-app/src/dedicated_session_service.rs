@@ -5677,7 +5677,7 @@ fn completion_worker_result(state: &AppState, session: &DedicatedSessionRecord) 
                     sequence,
                     digest,
                 )?
-                .map(|(batch, _)| batch),
+                .map(|(batch, _, _)| batch),
                 _ => None,
             }
         }
