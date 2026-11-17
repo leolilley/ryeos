@@ -355,6 +355,7 @@ mod tests {
                     exchange: "exchange".to_string(),
                     work: 0,
                     duration_s: None,
+                    members: Vec::new(),
                     seq: index as i64,
                 })
             })

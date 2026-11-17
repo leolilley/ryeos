@@ -69,14 +69,6 @@
       ]
     },
     {
-      "item": "recap",
-      "id": "rc:msg:6",
-      "exchange": "msg:6",
-      "work": 1,
-      "duration_s": 5,
-      "seq": 16
-    },
-    {
       "item": "entry",
       "id": "out:T-0001",
       "type": "outcome",

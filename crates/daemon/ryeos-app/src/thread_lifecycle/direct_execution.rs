@@ -1332,6 +1332,8 @@ impl PreparedItemPlan {
             }
             let limit = if name == ryeos_state::objects::SESSION_PROCESS_ENVIRONMENT_ENV {
                 ryeos_state::objects::MAX_PREPARED_SESSION_PROCESS_ENVIRONMENT_BYTES
+            } else if name == ryeos_engine::route_fixed_params::ROUTE_FIXED_PARAMS_ENV {
+                ryeos_engine::route_fixed_params::MAX_ROUTE_FIXED_PARAMS_BYTES
             } else {
                 4096
             };
