@@ -198,7 +198,10 @@ class PersistentSessionProtocolTests(unittest.TestCase):
                     self.assertEqual(frame["kind"], "final", session.diagnostics())
                     answer = frame["body"]
                     self.assertIsInstance(answer, dict)
-                    self.assertEqual(answer["answer"]["message"]["content"], "OK")
+                    self.assertEqual(
+                        answer["answer"]["message"],
+                        {"role": "assistant", "parts": [{"type": "text", "text": "OK"}]},
+                    )
                     self.assertEqual(answer["answer"]["finish_reason"], "stop")
                     self.assertTrue(deltas, "real session produced no streaming delta")
                     self.assertEqual(
@@ -230,8 +233,8 @@ class PersistentSessionProtocolTests(unittest.TestCase):
                 terminal = read_frame(session.parent)
             self.assertEqual(terminal["kind"], "final", session.diagnostics())
             self.assertEqual(
-                terminal["body"]["answer"]["message"]["content"],
-                "OK",
+                terminal["body"]["answer"]["message"],
+                {"role": "assistant", "parts": [{"type": "text", "text": "OK"}]},
             )
             self.assertIsNone(session.process.poll(), session.diagnostics())
         finally:

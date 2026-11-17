@@ -5,7 +5,8 @@ use serde_json::{Value, json};
 use crate::budget::BudgetTracker;
 use crate::continuation::ContinuationCheck;
 use crate::directive::{
-    DIRECTIVE_RETURN_TOOL, ExecutionConfig, FinishReason, ProviderMessage, StreamEvent, ToolSchema,
+    DIRECTIVE_RETURN_TOOL, ExecutionConfig, FinishReason, ProviderMessage, ProviderMessageExt,
+    StreamEvent, ToolSchema,
 };
 use crate::dispatcher::{DispatchKind, Dispatcher};
 use crate::harness::{Harness, HookAction};
@@ -24,6 +25,7 @@ use ryeos_directive_definition::{
 };
 #[cfg(test)]
 use ryeos_directive_definition::{PricingConfig, ProtocolFamily, ProviderTransportConfig};
+use ryeos_provider_contract::{Part, ToolResultStatus};
 use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::envelope::{
     EnvelopeAccountingScope, RuntimeCost, RuntimeResult, RuntimeResultStatus,
@@ -33,6 +35,17 @@ use ryeos_runtime::events::RuntimeEventType;
 use ryeos_runtime::{TerminalCompletion, ThreadTerminalStatus};
 
 mod request_context;
+
+/// The tools a launch offers the model on its first turn: the tools its
+/// capabilities admit, plus the lifecycle return tool when outputs are
+/// declared. This is the inventory a frame records.
+pub(crate) fn launch_inventory(
+    tools: &[ToolSchema],
+    effective_caps: &[String],
+    outputs: Option<&[OutputSpec]>,
+) -> Vec<ToolSchema> {
+    visible_provider_tools(tools, effective_caps, outputs, true)
+}
 
 use request_context::{initial_messages, visible_provider_tools};
 
@@ -65,6 +78,17 @@ async fn block_at_directive_recovery_test_cut(callback: &CallbackClient, stage: 
     }
 }
 
+/// The recorded `finish` token for a normalised finish reason.
+fn finish_label(reason: FinishReason) -> &'static str {
+    match reason {
+        FinishReason::Stop => "stop",
+        FinishReason::ToolCalls => "tool_calls",
+        FinishReason::Length => "length",
+        FinishReason::ContentFilter => "content_filter",
+        FinishReason::Other => "other",
+    }
+}
+
 /// Rendered model-visible tool result plus SSE emission metadata. Shared by
 /// the serial and batch dispatch paths so their emitted shapes cannot diverge.
 #[derive(Debug)]
@@ -75,6 +99,26 @@ struct RenderedToolResult {
     truncated: bool,
     duplicate_of: Option<String>,
     truncated_reason: Option<&'static str>,
+    status: ToolResultStatus,
+}
+
+impl RenderedToolResult {
+    /// The recorded `tool_call_result` for this rendering.
+    fn payload(&self, operation_id: &str, call_id: &str) -> ryeos_runtime::ToolResultPayload {
+        ryeos_runtime::ToolResultPayload {
+            operation_id: operation_id.to_string(),
+            call_id: call_id.to_string(),
+            tool: self.tool.clone(),
+            status: self.status,
+            parts: vec![Part::text(self.content.clone())],
+            guard: ryeos_runtime::ToolResultGuard {
+                result_size_bytes: self.raw_size,
+                truncated: self.truncated,
+                truncated_reason: self.truncated_reason.map(str::to_string),
+                duplicate_of: self.duplicate_of.clone(),
+            },
+        }
+    }
 }
 
 /// One model-proposed call paired with its RyeOS logical occurrence.
@@ -85,6 +129,10 @@ struct RenderedToolResult {
 pub(crate) struct ToolOccurrence {
     pub call: crate::directive::ToolCall,
     pub operation_id: String,
+    /// The turn number along the chain that proposed the call.
+    pub turn: u32,
+    /// The ordinal of the call among the tool calls of that turn.
+    pub call_index: usize,
     /// The braid already contains this occurrence's `tool_call_start`.
     pub start_recorded: bool,
     /// The harness already charged this proposed non-lifecycle tool call.
@@ -189,13 +237,12 @@ fn recovered_return_nudge_seen(
     let expected = return_nudge.message(&declared);
     let Some(last_assistant) = messages
         .iter()
-        .rposition(|message| message.role == "assistant")
+        .rposition(|message| message.role() == "assistant")
     else {
         return false;
     };
     messages[last_assistant + 1..].iter().any(|message| {
-        message.role == "user"
-            && message.content.as_ref().and_then(Value::as_str) == Some(expected.as_str())
+        message.role() == "user" && message.text().as_deref() == Some(expected.as_str())
     })
 }
 
@@ -301,6 +348,10 @@ pub enum State {
 pub struct Runner {
     messages: Vec<ProviderMessage>,
     tools: Vec<ToolSchema>,
+    /// The names of the tools the launch offers the model: the tool
+    /// inventory the frame records. A turn that offers a different set
+    /// records its offered names on its turn marker.
+    inventory_tool_names: Vec<String>,
     dispatcher: Dispatcher,
     harness: Harness,
     budget: BudgetTracker,
@@ -938,10 +989,16 @@ impl Runner {
 
         let effective_caps = harness.effective_caps().to_vec();
         let dispatcher = Dispatcher::new(tools.clone(), effective_caps);
+        let inventory_tool_names =
+            launch_inventory(&tools, harness.effective_caps(), outputs.as_deref())
+                .into_iter()
+                .map(|tool| tool.name)
+                .collect();
 
         Self {
             messages: initial_messages,
             tools,
+            inventory_tool_names,
             dispatcher,
             harness,
             budget,
@@ -1143,13 +1200,7 @@ impl Runner {
             return Ok(false);
         }
         for s in &inputs {
-            self.messages.push(ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!(s.content)),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            });
+            self.messages.push(ProviderMessage::user(s.content.clone()));
         }
         tracing::info!(
             folded = inputs.len(),
@@ -1311,11 +1362,28 @@ impl Runner {
                 State::CallingProvider => {
                     let turn_start = Instant::now();
                     self.harness.record_turn();
+                    // Filter tools by effective_caps so the LLM only sees
+                    // tools it can actually call (saves context, avoids the
+                    // "model names a tool the dispatcher would reject" path).
+                    let visible_tools_owned = visible_provider_tools(
+                        &self.tools,
+                        self.harness.effective_caps(),
+                        self.directive_outputs.as_deref(),
+                        self.harness.tool_calls_available(),
+                    );
                     if let Some(active_turn) = self.resume_active_provider_turn.take() {
                         turn = active_turn;
                     } else {
                         turn += 1;
-                        if let Err(e) = self.callback.emit_turn_start(turn).await {
+                        // The turn marker names the offered tools only when
+                        // they differ from the frame's inventory.
+                        let offered: Vec<String> = visible_tools_owned
+                            .iter()
+                            .map(|tool| tool.name.clone())
+                            .collect();
+                        let tools_offered =
+                            (offered != self.inventory_tool_names).then_some(offered);
+                        if let Err(e) = self.callback.emit_turn_start(turn, tools_offered).await {
                             state = State::RecoveryRequired {
                                 error: format!(
                                     "resume-critical callback emit_turn_start failed: {e}"
@@ -1335,15 +1403,6 @@ impl Runner {
                     // in-progress generation.
                     self.harness.take_interrupt();
                     let interrupt_flag = self.harness.interrupted_flag();
-                    // Filter tools by effective_caps so the LLM only sees
-                    // tools it can actually call (saves context, avoids the
-                    // "model names a tool the dispatcher would reject" path).
-                    let visible_tools_owned = visible_provider_tools(
-                        &self.tools,
-                        self.harness.effective_caps(),
-                        self.directive_outputs.as_deref(),
-                        self.harness.tool_calls_available(),
-                    );
                     // §1 retry loop. A provider failure with an outcome-safe
                     // classification — a configured status response or a
                     // connection-establishment failure — is re-attempted with
@@ -1586,12 +1645,7 @@ impl Runner {
                             // one ephemeral delta (chunk cadence is transport
                             // texture, not evidence); the durable record of the
                             // turn still comes from emit_turn_complete.
-                            if let Some(text) = response
-                                .message
-                                .content
-                                .as_ref()
-                                .and_then(serde_json::Value::as_str)
-                            {
+                            if let Some(text) = response.message.text() {
                                 let _ = self
                                     .callback
                                     .append_runtime_event(
@@ -2176,23 +2230,17 @@ impl Runner {
                                 };
                                 continue;
                             }
-                            let cognition_tool_calls = match resp
-                                .message
-                                .tool_calls
-                                .as_ref()
-                                .map(serde_json::to_value)
-                                .transpose()
+                            if let Err(error) =
+                                crate::directive::ensure_distinct_call_ids(&resp.message)
                             {
-                                Ok(value) => value,
-                                Err(e) => {
-                                    state = State::Errored {
-                                        error: format!(
-                                            "serialize cognition tool calls for turn completion: {e}"
-                                        ),
-                                    };
-                                    continue;
-                                }
-                            };
+                                state = State::Errored {
+                                    error: format!("{error}"),
+                                };
+                                continue;
+                            }
+                            let finish = finish_label(crate::directive::normalize_finish_reason(
+                                resp.finish_reason.as_deref(),
+                            ));
                             let provider_accounting = Some(json!({
                                 "attempt_id": format!("{}:{turn}:{}", self.thread_id, attempt + 1),
                                 "attempt_number": attempt + 1,
@@ -2221,10 +2269,9 @@ impl Runner {
                                 .callback
                                 .emit_turn_complete(
                                     turn,
+                                    finish,
                                     token_counts,
-                                    resp.message.content.clone(),
-                                    cognition_tool_calls,
-                                    resp.message.reasoning_content.clone(),
+                                    resp.message.parts.clone(),
                                     provider_accounting,
                                 )
                                 .await
@@ -2237,18 +2284,13 @@ impl Runner {
                                 continue;
                             }
                             self.messages.push(resp.message.clone());
-                            if resp
-                                .message
-                                .tool_calls
-                                .as_ref()
-                                .is_some_and(|calls| !calls.is_empty())
-                            {
+                            if resp.message.has_tool_calls() {
                                 block_at_directive_recovery_test_cut(
                                     &self.callback,
                                     "tool_proposal_recorded",
                                 )
                                 .await;
-                            } else if resp.message.content.is_some() {
+                            } else if resp.message.content_value().is_some() {
                                 block_at_directive_recovery_test_cut(
                                     &self.callback,
                                     "final_cognition_recorded",
@@ -2348,18 +2390,15 @@ impl Runner {
                             }
 
                             // Seal the partial as a transcript-bearing
-                            // cognition_out{interrupted:true} (content/reasoning
-                            // only, no tool_calls) so the braid holds an honest,
-                            // foldable consequence. Only after that RyeOS
-                            // boundary do we render it as the provider-wire
-                            // assistant message needed by the redirected call.
+                            // cognition_out with finish "interrupted" (the
+                            // complete text and reasoning parts, no tool
+                            // calls) so the braid holds an honest, foldable
+                            // consequence. The recorded parts are the message
+                            // the redirected call sees.
+                            let interrupted_message = partial_cognition.into_provider_message();
                             if let Err(e) = self
                                 .callback
-                                .emit_turn_interrupted(
-                                    turn,
-                                    partial_cognition.content.clone(),
-                                    partial_cognition.reasoning_content.clone(),
-                                )
+                                .emit_turn_interrupted(turn, interrupted_message.parts.clone())
                                 .await
                             {
                                 state = State::RecoveryRequired {
@@ -2369,8 +2408,7 @@ impl Runner {
                                 };
                                 continue;
                             }
-                            self.messages
-                                .push(partial_cognition.into_provider_message());
+                            self.messages.push(interrupted_message);
 
                             // Back to the between-turns boundary: CheckingLimits
                             // folds the queued input (DECISION 2: if the poll is
@@ -2721,48 +2759,39 @@ impl Runner {
                     let last = self.messages.last().cloned();
                     match last {
                         Some(msg) => {
-                            let has_tool_calls =
-                                msg.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty());
-                            let has_content = msg.content.as_ref().is_some_and(|c| {
-                                !c.is_null() && c.as_str().is_none_or(|s| !s.is_empty())
-                            });
-
-                            if has_tool_calls {
-                                if let Some(ref tool_calls) = msg.tool_calls {
-                                    let occurrences = tool_calls
-                                        .iter()
-                                        .enumerate()
-                                        .map(|(call_index, call)| ToolOccurrence {
-                                            call: call.clone(),
-                                            operation_id:
-                                                crate::resume::directive_tool_operation_id(
-                                                    &self.thread_id,
-                                                    turn,
-                                                    call_index,
-                                                ),
-                                            start_recorded: false,
-                                            counted: false,
-                                            spawn_counted: false,
-                                        })
-                                        .collect::<Vec<_>>();
-                                    // Lifecycle-bearing batches keep the
-                                    // strict serial path; plain batches
-                                    // dispatch through the bounded window.
-                                    if batch_is_lifecycle_bearing(&occurrences) {
-                                        State::DispatchingTools {
-                                            pending: occurrences,
-                                            index: 0,
-                                        }
-                                    } else {
-                                        State::DispatchingToolBatch {
-                                            pending: occurrences,
-                                        }
+                            if msg.has_tool_calls() {
+                                let occurrences = msg
+                                    .calls()
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(call_index, call)| ToolOccurrence {
+                                        call: call.clone(),
+                                        operation_id: crate::resume::directive_tool_operation_id(
+                                            &self.thread_id,
+                                            turn,
+                                            call_index,
+                                        ),
+                                        turn,
+                                        call_index,
+                                        start_recorded: false,
+                                        counted: false,
+                                        spawn_counted: false,
+                                    })
+                                    .collect::<Vec<_>>();
+                                // Lifecycle-bearing batches keep the
+                                // strict serial path; plain batches
+                                // dispatch through the bounded window.
+                                if batch_is_lifecycle_bearing(&occurrences) {
+                                    State::DispatchingTools {
+                                        pending: occurrences,
+                                        index: 0,
                                     }
                                 } else {
-                                    State::CheckingContinuation
+                                    State::DispatchingToolBatch {
+                                        pending: occurrences,
+                                    }
                                 }
-                            } else if has_content || msg.content.is_some() {
-                                let content = msg.content.unwrap_or(Value::Null);
+                            } else if let Some(content) = msg.content_value() {
                                 // Steer pre-finalize drain (finding C): a no-tool
                                 // content response is about to finalize. If an
                                 // operator input is pending, fold it and take
@@ -2811,10 +2840,15 @@ impl Runner {
                             if let Err(e) = self
                                 .callback
                                 .emit_tool_dispatch(
-                                    &occurrence.operation_id,
-                                    &tc.name,
-                                    tc.id.as_deref(),
-                                    self.harness.effective_caps(),
+                                    &ryeos_runtime::callback_client::ToolDispatchEvent {
+                                        operation_id: &occurrence.operation_id,
+                                        tool: &tc.name,
+                                        call_id: tc.id.as_deref().unwrap_or_default(),
+                                        item_ref: self.dispatcher.item_ref(&tc.name).as_deref(),
+                                        turn: occurrence.turn,
+                                        call_index: occurrence.call_index,
+                                        effective_caps: self.harness.effective_caps(),
+                                    },
                                 )
                                 .await
                             {
@@ -2976,10 +3010,15 @@ impl Runner {
                             if let Err(e) = self
                                 .callback
                                 .emit_tool_dispatch(
-                                    &occurrence.operation_id,
-                                    &tc.name,
-                                    tc.id.as_deref(),
-                                    self.harness.effective_caps(),
+                                    &ryeos_runtime::callback_client::ToolDispatchEvent {
+                                        operation_id: &occurrence.operation_id,
+                                        tool: &tc.name,
+                                        call_id: tc.id.as_deref().unwrap_or_default(),
+                                        item_ref: self.dispatcher.item_ref(&tc.name).as_deref(),
+                                        turn: occurrence.turn,
+                                        call_index: occurrence.call_index,
+                                        effective_caps: self.harness.effective_caps(),
+                                    },
                                 )
                                 .await
                             {
@@ -3226,17 +3265,19 @@ impl Runner {
                                 // Fire tool_call_result for chain visibility
                                 let outputs_json = serde_json::to_string(&args).unwrap_or_default();
                                 let outputs_size = outputs_json.len() as u64;
+                                let outputs_result = RenderedToolResult {
+                                    tool: DIRECTIVE_RETURN_TOOL.to_string(),
+                                    content: outputs_json,
+                                    raw_size: outputs_size,
+                                    truncated: false,
+                                    duplicate_of: None,
+                                    truncated_reason: None,
+                                    status: ToolResultStatus::Ok,
+                                };
                                 if let Err(e) = self
                                     .callback
                                     .emit_tool_result(
-                                        &operation_id,
-                                        &call_id,
-                                        DIRECTIVE_RETURN_TOOL,
-                                        &outputs_json,
-                                        false,
-                                        None,
-                                        outputs_size,
-                                        None,
+                                        &outputs_result.payload(&operation_id, &call_id),
                                     )
                                     .await
                                 {
@@ -3264,18 +3305,18 @@ impl Runner {
                     // push error as tool message, and let the LLM retry.
                     // (Non-fatal — the LLM can correct its outputs.)
                     let failure_size = tool_result_content.len() as u64;
+                    let failure_result = RenderedToolResult {
+                        tool: DIRECTIVE_RETURN_TOOL.to_string(),
+                        content: tool_result_content.clone(),
+                        raw_size: failure_size,
+                        truncated: false,
+                        duplicate_of: None,
+                        truncated_reason: None,
+                        status: ToolResultStatus::Error,
+                    };
                     if let Err(e) = self
                         .callback
-                        .emit_tool_result(
-                            &operation_id,
-                            &call_id,
-                            DIRECTIVE_RETURN_TOOL,
-                            &tool_result_content,
-                            false,
-                            Some("error_envelope"),
-                            failure_size,
-                            None,
-                        )
+                        .emit_tool_result(&failure_result.payload(&operation_id, &call_id))
                         .await
                     {
                         state = State::RecoveryRequired {
@@ -3283,13 +3324,11 @@ impl Runner {
                         };
                         continue;
                     }
-                    self.messages.push(ProviderMessage {
-                        role: "tool".to_string(),
-                        content: Some(json!(tool_result_content)),
-                        tool_calls: None,
-                        tool_call_id: Some(call_id),
-                        reasoning_content: None,
-                    });
+                    self.messages.push(ProviderMessage::tool_result_with_status(
+                        call_id,
+                        tool_result_content,
+                        ToolResultStatus::Error,
+                    ));
                     State::CheckingContinuation
                 }
 
@@ -3452,7 +3491,7 @@ impl Runner {
                             let result = self
                                 .messages
                                 .last()
-                                .and_then(|m| m.content.clone())
+                                .and_then(|m| m.content_value())
                                 .unwrap_or(Value::Null);
                             State::Finalizing { result }
                         }
@@ -3495,7 +3534,10 @@ impl Runner {
                             let nudge = self.return_nudge.message(&declared_outputs);
                             // Durable stimulus so the corrective turn is
                             // braid-visible and exactly reconstructable.
-                            if let Err(e) = self.callback.emit_stimulus(&nudge).await {
+                            let nudge_input =
+                                ryeos_runtime::CognitionInput::text("harness", &nudge)
+                                    .with_kind("nudge");
+                            if let Err(e) = self.callback.emit_cognition_input(&nudge_input).await {
                                 state = State::RecoveryRequired {
                                     error: format!(
                                         "resume-critical return_nudge stimulus append failed: {e}"
@@ -3503,13 +3545,7 @@ impl Runner {
                                 };
                                 continue;
                             }
-                            self.messages.push(ProviderMessage {
-                                role: "user".to_string(),
-                                content: Some(json!(nudge)),
-                                tool_calls: None,
-                                tool_call_id: None,
-                                reasoning_content: None,
-                            });
+                            self.messages.push(ProviderMessage::user(nudge));
                             state = State::CheckingLimits;
                             continue;
                         }
@@ -3799,6 +3835,7 @@ impl Runner {
             truncated: guarded.truncated,
             duplicate_of: guarded.duplicate_of,
             truncated_reason: guarded.truncated.then_some("result_guard"),
+            status: ToolResultStatus::Ok,
         }
     }
 
@@ -3828,7 +3865,8 @@ impl Runner {
             content,
             truncated,
             duplicate_of: None,
-            truncated_reason: Some("error_envelope"),
+            truncated_reason: truncated.then_some("oversized_error"),
+            status: ToolResultStatus::Error,
         }
     }
 
@@ -3843,26 +3881,15 @@ impl Runner {
         rendered: RenderedToolResult,
     ) -> Result<(), String> {
         self.callback
-            .emit_tool_result(
-                &operation_id,
-                &call_id,
-                &rendered.tool,
-                &rendered.content,
-                rendered.truncated,
-                rendered.truncated_reason,
-                rendered.raw_size,
-                rendered.duplicate_of.as_deref(),
-            )
+            .emit_tool_result(&rendered.payload(&operation_id, &call_id))
             .await
             .map_err(|e| format!("resume-critical callback emit_tool_result failed: {e}"))?;
         block_at_directive_recovery_test_cut(&self.callback, "tool_observation_recorded").await;
-        self.messages.push(ProviderMessage {
-            role: "tool".to_string(),
-            content: Some(json!(rendered.content)),
-            tool_calls: None,
-            tool_call_id: Some(call_id),
-            reasoning_content: None,
-        });
+        self.messages.push(ProviderMessage::tool_result_with_status(
+            call_id,
+            rendered.content,
+            rendered.status,
+        ));
         Ok(())
     }
 
@@ -4001,8 +4028,7 @@ impl Runner {
                     record_hash,
                     answer,
                 } => {
-                    let message: ProviderMessage =
-                        serde_json::from_value(serde_json::to_value(answer.message)?)?;
+                    let message = answer.message;
                     return Ok(LedgerAdmission::Replayed {
                         record_hash,
                         response: crate::provider_adapter::http::AdapterResponse {
@@ -4596,14 +4622,19 @@ impl Runner {
         match self.callback.emit_thread_usage(usage).await {
             Ok(()) => Ok(()),
             Err(append_error) => {
-                let replay = self.callback.replay_thread(&self.thread_id).await.map_err(
-                    |replay_error| {
+                let replay = self
+                    .callback
+                    .replay_thread(
+                        &self.thread_id,
+                        Some(&[RuntimeEventType::ThreadUsage.as_str()]),
+                    )
+                    .await
+                    .map_err(|replay_error| {
                         anyhow::anyhow!(
                             "resume-critical callback emit_thread_usage failed: {append_error}; \
                              ACK recovery replay also failed: {replay_error}"
                         )
-                    },
-                )?;
+                    })?;
                 if replay.events.iter().rev().any(|event| {
                     event.event_type == RuntimeEventType::ThreadUsage.as_str()
                         && event.payload == expected
@@ -4904,6 +4935,8 @@ mod tests {
                 arguments: serde_json::json!({}),
             },
             operation_id: "1".repeat(64),
+            turn: 1,
+            call_index: 0,
             start_recorded: false,
             counted: false,
             spawn_counted: false,
@@ -4931,13 +4964,21 @@ mod tests {
     fn error_envelopes_are_bounded_and_retain_honest_metadata() {
         let small = Runner::rendered_error_envelope("t", "{\"error\":\"no\"}".to_string());
         assert!(!small.truncated);
-        assert_eq!(small.truncated_reason, Some("error_envelope"));
+        assert_eq!(small.status, ToolResultStatus::Error);
+        assert_eq!(small.truncated_reason, None);
         assert_eq!(small.raw_size, small.content.len() as u64);
 
         let oversized_body = "secret".repeat(MAX_ERROR_ENVELOPE_BYTES);
         let oversized = Runner::rendered_error_envelope("t", oversized_body.clone());
         assert!(oversized.truncated);
-        assert_eq!(oversized.truncated_reason, Some("error_envelope"));
+        assert_eq!(oversized.status, ToolResultStatus::Error);
+        assert_eq!(oversized.truncated_reason, Some("oversized_error"));
+        let recorded = oversized.payload(&"a".repeat(64), "call-1");
+        recorded.validate().unwrap();
+        assert_eq!(
+            recorded.guard.result_size_bytes,
+            oversized_body.len() as u64
+        );
         assert_eq!(oversized.raw_size, oversized_body.len() as u64);
         assert!(oversized.content.len() < MAX_ERROR_ENVELOPE_BYTES);
         assert!(!oversized.content.contains("secretsecret"));
@@ -5234,13 +5275,7 @@ mod tests {
         };
 
         let runner = Runner::new(RunnerConfig {
-            messages: vec![ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!("hello")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            }],
+            messages: vec![ProviderMessage::user("hello")],
             tools: vec![],
             system_prompt: Some("You are helpful".to_string()),
             harness: Harness::new(&make_policy(), 0, None),
@@ -5270,8 +5305,8 @@ mod tests {
         });
 
         assert_eq!(runner.messages.len(), 2);
-        assert_eq!(runner.messages[0].role, "system");
-        assert_eq!(runner.messages[1].role, "user");
+        assert_eq!(runner.messages[0].role(), "system");
+        assert_eq!(runner.messages[1].role(), "user");
     }
 
     #[test]
@@ -5364,13 +5399,7 @@ mod tests {
         let mut budget = BudgetTracker::new(usd("1"));
         budget.report(10, 5, usd("0.25")).unwrap();
         let runner = Runner::new(RunnerConfig {
-            messages: vec![ProviderMessage {
-                role: "assistant".to_string(),
-                content: Some(json!("hello")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            }],
+            messages: vec![ProviderMessage::assistant_text("hello")],
             tools: vec![],
             system_prompt: None,
             harness: Harness::new(&make_policy(), 0, None),
@@ -6336,7 +6365,12 @@ mod tests {
         async fn append_event(&self, _: &str, _: &str, _: Value) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
-        async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> {
+        async fn append_events(
+            &self,
+            _: &str,
+            _: Vec<Value>,
+            _: ryeos_runtime::callback::EventAppendOptions,
+        ) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
         async fn replay_events(&self, _: Value) -> Result<Value, CallbackError> {

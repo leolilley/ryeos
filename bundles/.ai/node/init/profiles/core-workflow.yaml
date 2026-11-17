@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-16T13:27:47Z:2d640a9944eddd8aec71eb4f6bc1d53f0808bb589e5f1243360460ffbf793460:LkV2eMqsXifrFmrBaK8ssai8o8ATxLIGVmZyCH7oIsh7Q7TgoZyL83T/FOHNvPH0xIXFu4zjSEIZCNCLEnomCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T01:21:16Z:98854942f8db33575a632323dcc79048e0c86ccce4e4621ff449e5428c87c59d:mJNYaYe6u4Qe7uuPC6fE5EpTOF5ESrsZ5AXXzZCHKcf97yiNySoRILJc6hlAjm4rVHfQhPsMH8HqUCFknVuIAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus the graph workflow bundles.
 schema: 1
 exact_bundles:
@@ -156,6 +156,17 @@ policies:
     default_retention: durable
     item_authored_retention: allow
     minimum_terminal_for: null
+  thread_attachments:
+    schema: 1
+    max_bytes_per_attachment: 4194304
+    max_attachments_per_turn: 16
+    max_attachments_per_run: 256
+    accepted_media_types:
+      - application/json
+      - image/gif
+      - image/jpeg
+      - image/png
+      - image/webp
   maintenance:
     schema: 5
     # Process-scoped native envelopes for stopped-node maintenance, keyed by

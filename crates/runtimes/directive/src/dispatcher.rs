@@ -87,6 +87,16 @@ impl Dispatcher {
         })
     }
 
+    /// The canonical reference of the item a tool name resolves to, or `None`
+    /// for a name that resolves to no item: an unknown tool, or the
+    /// `directive_return` lifecycle signal.
+    pub fn item_ref(&self, tool_name: &str) -> Option<String> {
+        if tool_name == DIRECTIVE_RETURN_TOOL {
+            return None;
+        }
+        self.find_tool(tool_name)
+    }
+
     fn find_tool(&self, name: &str) -> Option<String> {
         for tool in &self.tools {
             if tool.name == name {
@@ -127,6 +137,14 @@ mod tests {
             },
         ];
         Dispatcher::new(tools, caps)
+    }
+
+    #[test]
+    fn item_ref_names_the_resolved_item_and_nothing_for_lifecycle_or_unknown_tools() {
+        let d = make_dispatcher(vec!["ryeos.execute.tool.*".to_string()]);
+        assert_eq!(d.item_ref("read_file").as_deref(), Some("tool:read_file"));
+        assert_eq!(d.item_ref("no_such_tool"), None);
+        assert_eq!(d.item_ref(DIRECTIVE_RETURN_TOOL), None);
     }
 
     #[test]

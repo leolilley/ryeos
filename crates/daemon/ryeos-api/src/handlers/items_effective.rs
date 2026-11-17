@@ -309,6 +309,7 @@ fn read_launch_digest(
         thread_id: Some(thread_id.to_string()),
         after_chain_seq: None,
         limit: 500,
+        event_types: None,
     })?;
     let launch_type = RuntimeEventType::AsLaunchedResolution.as_str();
     for record in replay.events {

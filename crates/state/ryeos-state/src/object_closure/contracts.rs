@@ -85,6 +85,7 @@ pub(super) const CURRENT_OBJECT_KINDS: &[&str] = &[
     "ryeos.source_closure_manifest",
     "source_manifest",
     "state_manifest",
+    "thread_attachment",
     "thread_event",
     "thread_snapshot",
     "workspace_output_capture",
@@ -256,6 +257,11 @@ const CURRENT_OBJECT_CONTRACTS: &[ObjectContract] = &[
         kind: crate::objects::STATE_MANIFEST_KIND,
         validate: validate_state_manifest,
         links: links_state_manifest,
+    },
+    ObjectContract {
+        kind: crate::objects::THREAD_ATTACHMENT_KIND,
+        validate: validate_thread_attachment,
+        links: links_thread_attachment,
     },
     ObjectContract {
         kind: "thread_event",
@@ -502,6 +508,10 @@ fn validate_source_manifest(value: &Value) -> anyhow::Result<()> {
 
 fn validate_state_manifest(value: &Value) -> anyhow::Result<()> {
     crate::objects::StateManifest::from_current_value(value.clone()).map(|_| ())
+}
+
+fn validate_thread_attachment(value: &Value) -> anyhow::Result<()> {
+    crate::objects::ThreadAttachment::from_value(value).map(|_| ())
 }
 
 fn validate_thread_event(value: &Value) -> anyhow::Result<()> {
@@ -1482,6 +1492,18 @@ fn links_thread_event(value: &Value) -> Result<ContractLinks, String> {
             )?;
         }
     }
+    if let Some(payload) = value.get("payload") {
+        for hash in crate::objects::payload_attachment_refs(payload)
+            .map_err(|error| format!("invalid thread event attachment references: {error:#}"))?
+        {
+            super::push_typed_hash(
+                hash,
+                ExpectedObject::Kind(crate::objects::THREAD_ATTACHMENT_KIND),
+                None,
+                &mut links.object_edges,
+            )?;
+        }
+    }
     if let Some(registered) = super::links_registered_event(value)? {
         links.object_edges.extend(registered.object_edges);
         links.blob_hashes.extend(registered.blob_hashes);
@@ -1837,6 +1859,12 @@ fn links_project_tree(value: &Value) -> Result<ContractLinks, String> {
     Ok(links)
 }
 
+fn links_thread_attachment(value: &Value) -> Result<ContractLinks, String> {
+    let mut links = ContractLinks::leaf();
+    super::push_required_hash(value, "blob_hash", &mut links.blob_hashes)?;
+    Ok(links)
+}
+
 fn links_project_file(value: &Value) -> Result<ContractLinks, String> {
     let mut links = ContractLinks::leaf();
     super::push_required_hash(value, "blob_hash", &mut links.blob_hashes)?;
@@ -2157,6 +2185,101 @@ mod tests {
         changed = value;
         changed["schema"] = serde_json::json!(0);
         assert!((contract.links)(&changed).is_err());
+    }
+
+    #[test]
+    fn thread_attachment_roots_only_its_blob() {
+        let attachment = crate::objects::ThreadAttachment {
+            media_type: "image/png".to_owned(),
+            byte_length: 5,
+            blob_hash: "b".repeat(64),
+        };
+        let value = attachment.to_value();
+        let contract = contract(crate::objects::THREAD_ATTACHMENT_KIND).unwrap();
+        (contract.validate)(&value).unwrap();
+        let links = (contract.links)(&value).unwrap();
+        assert_eq!(links.blob_hashes, vec![attachment.blob_hash]);
+        assert!(links.object_edges.is_empty() && links.large_object_hashes.is_empty());
+        let mut changed = value.clone();
+        changed["media_type"] = serde_json::json!("Image/PNG");
+        assert!((contract.validate)(&changed).is_err());
+        changed = value;
+        changed["blob_hash"] = serde_json::json!("not-a-hash");
+        assert!((contract.validate)(&changed).is_err());
+        assert!((contract.links)(&changed).is_err());
+    }
+
+    fn thread_event_value(event_type: &str, payload: Value) -> Value {
+        serde_json::json!({
+            "schema": 1,
+            "kind": "thread_event",
+            "chain_root_id": "chain",
+            "chain_seq": 1,
+            "thread_id": "thread",
+            "thread_seq": 1,
+            "event_type": event_type,
+            "durability": "durable",
+            "ts": "2026-01-01T00:00:00Z",
+            "prev_chain_event_hash": null,
+            "prev_thread_event_hash": null,
+            "payload": payload,
+        })
+    }
+
+    #[test]
+    fn any_thread_event_type_links_its_attachment_refs() {
+        let first = "a".repeat(64);
+        let second = "b".repeat(64);
+        for event_type in ["cognition_frame", "tool_call_result", "milestone"] {
+            let value = thread_event_value(
+                event_type,
+                serde_json::json!({"attachment_refs": [first, second]}),
+            );
+            let links = links_thread_event(&value).unwrap();
+            let hashes = links
+                .object_edges
+                .iter()
+                .map(|edge| edge.hash.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                hashes,
+                vec![first.as_str(), second.as_str()],
+                "{event_type}"
+            );
+            assert!(links.object_edges.iter().all(|edge| edge.expected
+                == ExpectedObject::Kind("thread_attachment")
+                && edge.history_graph.is_none()));
+        }
+        let none = thread_event_value("cognition_in", serde_json::json!({"turn": 1}));
+        assert!(links_thread_event(&none).unwrap().object_edges.is_empty());
+    }
+
+    #[test]
+    fn malformed_attachment_refs_are_refused_by_links_and_validation() {
+        let hash = "a".repeat(64);
+        let too_many = (0..65)
+            .map(|index| format!("{index:064x}"))
+            .collect::<Vec<_>>();
+        for refs in [
+            serde_json::json!("not-a-list"),
+            serde_json::json!([1]),
+            serde_json::json!(["not-a-hash"]),
+            serde_json::json!(["A".repeat(64)]),
+            serde_json::json!([hash, hash]),
+            serde_json::json!(too_many),
+        ] {
+            let value = thread_event_value(
+                "cognition_frame",
+                serde_json::json!({"attachment_refs": refs}),
+            );
+            assert!(links_thread_event(&value).is_err(), "{refs}");
+            assert!(validate_thread_event(&value).is_err(), "{refs}");
+        }
+        let valid = thread_event_value(
+            "cognition_frame",
+            serde_json::json!({"attachment_refs": [hash]}),
+        );
+        validate_thread_event(&valid).unwrap();
     }
 
     #[test]

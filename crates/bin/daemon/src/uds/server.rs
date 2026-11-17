@@ -1531,10 +1531,25 @@ fn event_storage_policy(
         .require::<ryeos_node_runtime::node_policy::sections::event_storage::EventStoragePolicy>()
 }
 
+/// The node's signed `thread_attachments` policy, which bounds the
+/// attachments a runtime may store with an event append.
+fn thread_attachments_policy(
+    state: &AppState,
+) -> Result<&ryeos_node_runtime::node_policy::sections::thread_attachments::ThreadAttachmentsPolicy>
+{
+    state.node_policy.require::<
+        ryeos_node_runtime::node_policy::sections::thread_attachments::ThreadAttachmentsPolicy,
+    >()
+}
+
 fn handle_append_event(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
     let params: EventAppendParams =
         serde_json::from_value(params.clone()).context("invalid events.append params")?;
-    let persisted = state.events.append(&params, event_storage_policy(state)?)?;
+    let persisted = state.events.append(
+        &params,
+        event_storage_policy(state)?,
+        thread_attachments_policy(state)?,
+    )?;
     // Publish AFTER persistence so live subscribers receive the same
     // chain_seq the event store recorded. Persistence-first is the
     // contract; SSE consumers replay from the event store on lag.
@@ -1550,9 +1565,11 @@ fn handle_append_event_batch(
 ) -> Result<serde_json::Value> {
     let params: EventAppendBatchParams =
         serde_json::from_value(params.clone()).context("invalid events.append_batch params")?;
-    let result = state
-        .events
-        .append_batch(&params, event_storage_policy(state)?)?;
+    let result = state.events.append_batch(
+        &params,
+        event_storage_policy(state)?,
+        thread_attachments_policy(state)?,
+    )?;
     // Publish the whole batch in persisted order under one hub-lock acquire:
     // each thread's lane sees its events in order, and the firehose sees the
     // batch contiguously without interleaving a concurrent publisher.
@@ -1628,16 +1645,29 @@ fn handle_poll_input(params: &serde_json::Value, state: &AppState) -> Result<ser
         );
     }
 
-    // A `cognition_in` carries only `content` — the intent is a delivery concern,
-    // not part of the braid. Indexed (durable) so resume folds it in order.
-    let events: Vec<ryeos_app::state_store::NewEventRecord> = pending
+    // A steer is a `cognition_in` with origin `operator` and one text part.
+    // The intent is a delivery concern, not part of the braid. Indexed
+    // (durable) so resume folds it in order.
+    let encoded: Result<Vec<ryeos_app::state_store::NewEventRecord>> = pending
         .iter()
-        .map(|s| ryeos_app::state_store::NewEventRecord {
-            event_type: "cognition_in".to_string(),
-            storage_class: "indexed".to_string(),
-            payload: json!({ "content": s.content }),
+        .map(|input| {
+            let operator_input =
+                ryeos_runtime::cognition::CognitionInput::text("operator", input.content.clone());
+            operator_input.validate()?;
+            Ok(ryeos_app::state_store::NewEventRecord {
+                event_type: "cognition_in".to_string(),
+                storage_class: "indexed".to_string(),
+                payload: ryeos_runtime::cognition::to_payload(&operator_input)?,
+            })
         })
         .collect();
+    let events = match encoded {
+        Ok(events) => events,
+        Err(error) => {
+            state.live_input.restore_front(thread_id, pending);
+            return Err(error.context("failed to encode operator input as cognition_in"));
+        }
+    };
 
     match state
         .threads
@@ -2457,6 +2487,7 @@ mod tests {
                     ryeos_node_runtime::node_policy::default_launch_trust_record(),
                     ryeos_node_runtime::node_policy::default_authorization_record(),
                     ryeos_node_runtime::node_policy::shipped_event_storage_record(),
+                    ryeos_node_runtime::node_policy::shipped_thread_attachments_record(),
                     Arc::new(
                         ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(
                         ),
@@ -2612,6 +2643,7 @@ mod tests {
         state.threads.mark_running(thread_id).unwrap();
     }
 
+    /// The text of every recorded input, checking each is an operator input.
     fn cognition_inputs(state: &AppState, thread_id: &str) -> Vec<String> {
         state
             .state_store
@@ -2620,9 +2652,10 @@ mod tests {
             .into_iter()
             .filter(|event| event.event_type == "cognition_in")
             .map(|event| {
-                event.payload["content"]
+                assert_eq!(event.payload["origin"], "operator");
+                event.payload["parts"][0]["text"]
                     .as_str()
-                    .expect("cognition_in content")
+                    .expect("cognition_in text part")
                     .to_string()
             })
             .collect()
@@ -5520,6 +5553,7 @@ mod tests {
                 thread_id: Some("T-events-1".to_string()),
                 after_chain_seq: None,
                 limit: 10,
+                event_types: None,
             })
             .unwrap();
         let events = replay.events;
@@ -5647,6 +5681,7 @@ mod tests {
                 thread_id: Some("T-ephemeral-1".to_string()),
                 after_chain_seq: None,
                 limit: 100,
+                event_types: None,
             })
             .unwrap();
         assert!(
@@ -5720,6 +5755,7 @@ mod tests {
                 thread_id: Some("T-journal-1".to_string()),
                 after_chain_seq: None,
                 limit: 100,
+                event_types: None,
             })
             .unwrap();
         assert!(
@@ -5779,6 +5815,7 @@ mod tests {
                 thread_id: Some("T-floor-1".to_string()),
                 after_chain_seq: None,
                 limit: 100,
+                event_types: None,
             })
             .unwrap();
         assert!(

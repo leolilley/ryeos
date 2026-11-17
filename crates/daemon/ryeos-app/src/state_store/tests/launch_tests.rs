@@ -2045,6 +2045,177 @@ fn running_output_observations_are_fenced_by_exact_launch_owner() {
     );
 }
 
+fn running_thread_for_attachments(thread_id: &str) -> TestStateStore {
+    let store = test_store();
+    store
+        .create_thread_for_test(&thread_record(thread_id, thread_id))
+        .unwrap();
+    store
+        .claim_thread_launch(thread_id, "claim-attachments", "daemon:test")
+        .unwrap();
+    store.mark_thread_running(thread_id, None).unwrap();
+    store
+}
+
+fn frame_event(storage_class: &str, refs: &[String]) -> NewEventRecord {
+    NewEventRecord {
+        event_type: ryeos_state::event_types::COGNITION_FRAME.into(),
+        storage_class: storage_class.into(),
+        payload: json!({"frame_seq": 1, "attachment_refs": refs}),
+    }
+}
+
+#[test]
+fn replay_returns_only_the_requested_event_types_and_counts_only_those() {
+    let thread_id = "T-replay-filter";
+    let store = running_thread_for_attachments(thread_id);
+    let events = [
+        "cognition_in",
+        "observation",
+        "cognition_out",
+        "observation",
+    ]
+    .map(|event_type| NewEventRecord {
+        event_type: event_type.into(),
+        storage_class: "indexed".into(),
+        payload: json!({"kind": event_type}),
+    });
+    store
+        .append_events_if_thread_running(thread_id, thread_id, &events)
+        .unwrap()
+        .unwrap();
+    let types = |page: &PersistedEventPage| {
+        page.events
+            .iter()
+            .map(|event| event.event_type.clone())
+            .collect::<Vec<_>>()
+    };
+    let wanted = ["observation".to_owned()];
+    let page = store
+        .replay_events_of_types(
+            thread_id,
+            Some(thread_id),
+            None,
+            10,
+            1024 * 1024,
+            Some(&wanted),
+        )
+        .unwrap();
+    assert_eq!(types(&page), ["observation", "observation"]);
+    assert!(!page.has_more);
+
+    // The limit counts only matching events, so a page of one still reports
+    // the second match as more.
+    let page = store
+        .replay_events_of_types(
+            thread_id,
+            Some(thread_id),
+            None,
+            1,
+            1024 * 1024,
+            Some(&wanted),
+        )
+        .unwrap();
+    assert_eq!(types(&page), ["observation"]);
+    assert!(page.has_more);
+
+    let everything = store
+        .replay_events_of_types(thread_id, Some(thread_id), None, 20, 1024 * 1024, None)
+        .unwrap();
+    assert!(types(&everything).contains(&"thread_created".to_owned()));
+    assert_eq!(types(&everything), replayed_event_types(&store, thread_id));
+}
+
+#[test]
+fn an_append_stores_the_attachments_its_events_name() {
+    let thread_id = "T-attach-store";
+    let store = running_thread_for_attachments(thread_id);
+    let upload = NewThreadAttachment {
+        media_type: "application/json".into(),
+        bytes: b"{\"tools\":[]}".to_vec(),
+    };
+    let object =
+        ryeos_state::objects::ThreadAttachment::for_bytes(&upload.media_type, &upload.bytes)
+            .unwrap();
+    let hash = object.object_hash().unwrap();
+
+    let persisted = store
+        .append_events_with_attachments_if_thread_running(
+            thread_id,
+            thread_id,
+            &[frame_event("indexed", std::slice::from_ref(&hash))],
+            std::slice::from_ref(&upload),
+        )
+        .unwrap()
+        .expect("running thread accepts the append");
+    assert_eq!(persisted.len(), 1);
+
+    let cas = store.state_authority.cas_store().unwrap();
+    assert_eq!(cas.get_object(&hash).unwrap(), Some(object.to_value()));
+    assert_eq!(
+        cas.get_blob(&object.blob_hash).unwrap().as_deref(),
+        Some(upload.bytes.as_slice())
+    );
+
+    // A later append may name the same attachment without uploading it again.
+    assert!(
+        store
+            .append_events_with_attachments_if_thread_running(
+                thread_id,
+                thread_id,
+                &[frame_event("indexed", &[hash])],
+                &[],
+            )
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn an_append_refuses_a_reference_to_an_attachment_that_is_not_stored() {
+    let thread_id = "T-attach-missing";
+    let store = running_thread_for_attachments(thread_id);
+    let before = replayed_event_types(&store, thread_id);
+    let error = store
+        .append_events_with_attachments_if_thread_running(
+            thread_id,
+            thread_id,
+            &[frame_event("indexed", &["ab".repeat(32)])],
+            &[],
+        )
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("not stored"), "{error:#}");
+    assert_eq!(replayed_event_types(&store, thread_id), before);
+}
+
+#[test]
+fn an_append_refuses_attachment_references_on_a_non_indexed_event() {
+    let thread_id = "T-attach-class";
+    let store = running_thread_for_attachments(thread_id);
+    let upload = NewThreadAttachment {
+        media_type: "image/png".into(),
+        bytes: b"pixels".to_vec(),
+    };
+    let hash = ryeos_state::objects::ThreadAttachment::for_bytes(&upload.media_type, &upload.bytes)
+        .unwrap()
+        .object_hash()
+        .unwrap();
+    for class in ["journal_only", "ephemeral"] {
+        let error = store
+            .append_events_with_attachments_if_thread_running(
+                thread_id,
+                thread_id,
+                &[frame_event(class, std::slice::from_ref(&hash))],
+                std::slice::from_ref(&upload),
+            )
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("cannot name attachments"),
+            "{class}: {error:#}"
+        );
+    }
+}
+
 #[test]
 fn claimed_created_thread_accepts_exact_launch_attempt_audit() {
     let store = test_store();

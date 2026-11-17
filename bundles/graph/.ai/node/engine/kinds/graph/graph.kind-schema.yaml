@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T01:40:10Z:23fd9e1d6e7b4a11adb44968c1d4af3a8af194b277f6cd82000eee398687d264:yUrZ5euI78fM/Grcgh9+mfbGbQspXLMsW7EFnqRKkypcpqwHSIezJRFO1gFVoSkV4auc2Kusi39KsyMfn25hDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T05:02:42Z:44f787d4e22dd5bf4088f8349ba77e436376b0a524dec88172b422b24f75d497:1b5TggEc44zvd7QIgzRjgu6wN6AzjcqBoicsY2gIE1rQlARiBUfT/K4ud9ayDe/W9fSQyehL42BFBOW2tPuDAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/graph"
 inventory_policy:
   admission:
@@ -38,7 +38,7 @@ execution:
     root_executable: true
     # A graph walker has NO interrupt contract. There is no in-flight signal a
     # running segment-walk honors and reseals as a partial turn (the way a
-    # directive folds SIGUSR1 into an `interrupted: true` cognition_out).
+    # directive folds SIGUSR1 into a `finish: "interrupted"` cognition_out).
     # Declaring interrupt support would let `allowed_actions` offer — and
     # `commands/submit` accept — an `interrupt` command the walker cannot
     # service, i.e. undefined behavior. So the profile withholds it:

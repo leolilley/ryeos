@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-16T13:27:47Z:28bd01fe292411ee7423e2caf17b5d0566fb31957726fd13f0a8f6735f31241e:giOrvoHPAOJLf2fg55O3ycTclsmHVbEA+HAiMf0bizZIxMBAh84TSXWxngcn4E6wQl/knj4zyRvVynFgDf5MDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T01:21:16Z:1e8c29b81791375f61c6a699fcf80c3f0a2c3144673204a0fb568d789d08e0f0:mZOXODIYY9DO9Oz1SfGPb9HHYL7GqkUC1oZEFKEUtY7dpEmZVooRTVS8kYFPr0FPlP+mWRHe+UFzDIp/tTfgAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus scheduling.
 schema: 1
 exact_bundles:
@@ -156,6 +156,17 @@ policies:
     default_retention: durable
     item_authored_retention: allow
     minimum_terminal_for: null
+  thread_attachments:
+    schema: 1
+    max_bytes_per_attachment: 4194304
+    max_attachments_per_turn: 16
+    max_attachments_per_run: 256
+    accepted_media_types:
+      - application/json
+      - image/gif
+      - image/jpeg
+      - image/png
+      - image/webp
   maintenance:
     schema: 5
     # Process-scoped native envelopes for stopped-node maintenance, keyed by
