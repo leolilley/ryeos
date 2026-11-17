@@ -420,14 +420,15 @@ impl ComposeTransportRequest {
 
 /// Host adapter contact inputs and the pinned bounds an operator binding uses.
 pub(crate) fn operator_network_inputs() -> ExternalNetworkInputPolicy {
+    let sources = ryeos_external_execution_contract::operator_network_inputs();
     ExternalNetworkInputPolicy {
         resolver: ExternalNetworkInputSelection {
-            source: "/etc/resolv.conf".into(),
-            max_bytes: 64 * 1024,
+            source: sources.resolver_source.into(),
+            max_bytes: sources.resolver_max_bytes,
         },
         hosts: ExternalNetworkInputSelection {
-            source: "/etc/hosts".into(),
-            max_bytes: 64 * 1024,
+            source: sources.hosts_source.into(),
+            max_bytes: sources.hosts_max_bytes,
         },
     }
 }
@@ -593,6 +594,9 @@ pub struct ComposeRequest<'a> {
     pub runtime_qualification: Option<Value>,
     pub runtime_content_qualification: Option<Value>,
     pub limits: ComposeLimits,
+    /// The node's verified signed policy: what compose judges the placement
+    /// against, with the same function launch runs.
+    pub node_policy: &'a ryeos_node_runtime::node_policy::NodePolicySnapshot,
 }
 
 /// What was installed. It carries no credential and no vault key.
@@ -674,6 +678,22 @@ pub(crate) fn compose_with_resolver(
     })?;
     let signed = sign_node_document(&serde_yaml::to_string(&document)?, &identity)?;
     let installed = admit_signed_binding(request.app_root, &request.id, &signed, &identity)?;
+    // Judge the placement exactly as launch will, before anything is
+    // published: a binding the adapter, the node policy or the program's
+    // lease cannot meet is refused here, with no provider contact.
+    let contract = installed.backend_contract();
+    let backend = resolved
+        .placement_backends
+        .installed(&contract)
+        .context("the composed binding names no installed lifecycle adapter generation")?;
+    crate::external_placement::judge_placement(
+        &request.program,
+        &contract,
+        backend.as_ref(),
+        request.node_policy,
+        None::<fn() -> Result<Option<i64>>>,
+    )
+    .context("the placement is refused at compose")?;
     let path = publish_signed_document(
         request.app_root,
         SECTION_NAME,
@@ -1127,6 +1147,12 @@ pub(crate) mod tests {
             qualification_attestation_hash: "2".repeat(64),
             selection_identity_digest: "c".repeat(64),
             runtime_recipe_digest,
+            placement: ryeos_state::external_execution::admission::ExternalProgramPlacement {
+                workload_class: "fixture.workload".into(),
+                lease: Vec::new(),
+                guest: Vec::new(),
+                ready_timeout_ms: 60_000,
+            },
         }
     }
 
@@ -1660,6 +1686,7 @@ pub(crate) mod tests {
             runtime_qualification: None,
             runtime_content_qualification: None,
             limits: ComposeLimits::default(),
+            node_policy: &node_policy(10_000_000, None),
         }));
         assert!(
             format!("{error:#}").contains("load installed bundle registrations"),
@@ -1879,7 +1906,72 @@ pub(crate) mod tests {
 
     /// A stopped node with an identity, a vault key pair, the state lock and
     /// real connector and configuration-adapter executables.
+    /// A node policy whose supervisor journal window is `operation_millis`
+    /// and whose execution policy carries `lease_budget`.
+    fn node_policy(
+        operation_millis: u64,
+        lease_budget: Option<
+            ryeos_node_runtime::node_policy::sections::execution::ExternalLeaseBudget,
+        >,
+    ) -> ryeos_node_runtime::node_policy::NodePolicySnapshot {
+        let envelope = crate::external_supervisor_native::test_supervisor_journal_envelope();
+        let maintenance = ryeos_scheduler_contract::NodeMaintenancePolicy {
+            schema: 1,
+            schedules: Vec::new(),
+            offline_reset: None,
+            offline_native: [(
+                crate::external_supervisor_native::EXTERNAL_SUPERVISOR_JOURNAL_CLASS.to_owned(),
+                ryeos_scheduler_contract::OfflineNativeQuota {
+                    max_native_storage_bytes: envelope.storage_bytes,
+                    max_native_allocator_steps: envelope.allocator_steps,
+                    max_native_connections: envelope.connections,
+                    max_operation_millis: operation_millis,
+                    max_cleanup_millis: envelope.cleanup_millis,
+                    max_cleanup_steps: envelope.cleanup_steps,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            remote_offline_operations: Vec::new(),
+        };
+        let execution =
+            ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmissionPolicy {
+                schema: 4,
+                max_live_fanout: 1,
+                max_private_materialization_copy_bytes: 1024 * 1024,
+                host_env_passthrough: vec![],
+                workload_client: None,
+                resource_authority: None,
+                producer_resource_ceiling: None,
+                external_lease_budget: lease_budget,
+                external_wall_clock_requirement: None,
+            };
+        ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
+            std::sync::Arc::new(maintenance),
+            std::sync::Arc::new(execution),
+        ])
+    }
+
+    fn lease_budget() -> ryeos_node_runtime::node_policy::sections::execution::ExternalLeaseBudget {
+        ryeos_node_runtime::node_policy::sections::execution::ExternalLeaseBudget {
+            max_concurrent_leases: 2,
+            max_lease_lifetime_seconds: 4 * 60 * 60,
+            daily_lease_seconds: 8 * 60 * 60,
+            turn_end_margin_seconds: 30,
+        }
+    }
+
+    /// A program that needs one remote lease.
+    fn leased_program() -> AdmittedExternalCandidateProgram {
+        let mut program = program();
+        program.placement.lease = vec![lillux::process_control::CapabilityRequirement::Name(
+            "lease.create_bound".into(),
+        )];
+        program
+    }
+
     struct StoppedNode {
+        policy: ryeos_node_runtime::node_policy::NodePolicySnapshot,
         root: tempfile::TempDir,
         lock: ryeos_node_runtime::state_lock::StateLock,
         connector: PathBuf,
@@ -1909,6 +2001,7 @@ pub(crate) mod tests {
         let adapter = root.path().join("configuration-adapter");
         installed::write_executable(&adapter, b"configuration adapter executable bytes");
         StoppedNode {
+            policy: node_policy(10_000_000, Some(lease_budget())),
             root,
             lock,
             connector,
@@ -1992,6 +2085,7 @@ pub(crate) mod tests {
             runtime_qualification: None,
             runtime_content_qualification: None,
             limits: ComposeLimits::default(),
+            node_policy: &node.policy,
         }
     }
 
@@ -1999,6 +2093,374 @@ pub(crate) mod tests {
         node.root
             .path()
             .join(".ai/node/external_execution/operator.yaml")
+    }
+
+    /// Compose a request and report whether it was refused and whether a
+    /// binding was published.
+    fn compose_over(
+        node: &StoppedNode,
+        request: ComposeRequest<'_>,
+        backend: std::sync::Arc<dyn crate::external_placement::ExternalPlacementBackend>,
+    ) -> (Result<ComposeReport>, bool) {
+        let resolved = installed_artifacts(node, Some(PROVIDER_ID), vec![backend]);
+        let result = compose_with_resolver(request, |_| Ok(resolved));
+        (result, binding_path(node).exists())
+    }
+
+    fn backend_with(
+        capabilities: std::collections::BTreeSet<
+            ryeos_external_execution_contract::LifecycleCapability,
+        >,
+        admits_leases: bool,
+    ) -> std::sync::Arc<dyn crate::external_placement::ExternalPlacementBackend> {
+        installed::CoordinateOnlyBackend::shared_with(
+            TEST_BACKEND_ID,
+            &"d".repeat(64),
+            SETTINGS_SCHEMA,
+            &"1".repeat(64),
+            &"e".repeat(64),
+            capabilities,
+            admits_leases,
+        )
+    }
+
+    fn full_capabilities()
+    -> std::collections::BTreeSet<ryeos_external_execution_contract::LifecycleCapability> {
+        use ryeos_external_execution_contract::LifecycleCapability::*;
+        [SupervisorActivation, ExactTerminalObservation].into()
+    }
+
+    #[test]
+    fn compose_refuses_an_adapter_without_the_capabilities_the_placement_needs() {
+        let node = stopped_node();
+        let (result, published) = compose_over(
+            &node,
+            compose_request(&node, TEST_BACKEND_ID),
+            backend_with(Default::default(), false),
+        );
+        let error = format!("{:#}", refusal(result));
+        assert!(
+            error.contains("the placement is refused at compose")
+                && error.contains("external lifecycle adapter lacks required capabilities"),
+            "{error}"
+        );
+        assert!(!published, "a refused composition published a binding");
+    }
+
+    #[test]
+    fn compose_refuses_a_lease_its_adapter_refuses() {
+        let node = stopped_node();
+        let mut request = compose_request(&node, TEST_BACKEND_ID);
+        request.program = leased_program();
+        let (result, published) =
+            compose_over(&node, request, backend_with(full_capabilities(), false));
+        let error = format!("{:#}", refusal(result));
+        assert!(error.contains("admits no leases"), "{error}");
+        assert!(!published);
+
+        // The same program composes once the adapter admits the lease.
+        let mut request = compose_request(&node, TEST_BACKEND_ID);
+        request.program = leased_program();
+        let (result, published) =
+            compose_over(&node, request, backend_with(full_capabilities(), true));
+        result.unwrap();
+        assert!(published);
+    }
+
+    #[test]
+    fn compose_refuses_a_lease_program_without_a_node_lease_budget() {
+        let mut node = stopped_node();
+        node.policy = node_policy(10_000_000, None);
+        let mut request = compose_request(&node, TEST_BACKEND_ID);
+        request.program = leased_program();
+        let (result, published) =
+            compose_over(&node, request, backend_with(full_capabilities(), true));
+        let error = format!("{:#}", refusal(result));
+        assert!(
+            error.contains("declares no external lease budget"),
+            "{error}"
+        );
+        assert!(!published);
+    }
+
+    #[test]
+    fn compose_refuses_a_lease_program_over_a_relay_transport() {
+        let node = stopped_node();
+        let mut request = compose_request(&node, TEST_BACKEND_ID);
+        request.program = leased_program();
+        request.transport = relay();
+        request.settings = relay_settings();
+        let mut capabilities = full_capabilities();
+        capabilities
+            .insert(ryeos_external_execution_contract::LifecycleCapability::ControllerFileRelay);
+        let (result, published) = compose_over(&node, request, backend_with(capabilities, true));
+        let error = format!("{:#}", refusal(result));
+        assert!(
+            error.contains("names no HTTPS controller origin"),
+            "{error}"
+        );
+        assert!(!published);
+    }
+
+    #[test]
+    fn compose_names_the_largest_observation_timeout_the_journal_window_funds() {
+        // The default binding lives contact 30 + 2 x observation 120 +
+        // execution 600 + cleanup 300 = 1170 s; a 1000 s window leaves
+        // 1000 - 930 = 70 s for the two observations, 35 s each.
+        let mut node = stopped_node();
+        node.policy = node_policy(1_000_000, None);
+        let (result, published) = compose_over(
+            &node,
+            compose_request(&node, TEST_BACKEND_ID),
+            backend_with(full_capabilities(), false),
+        );
+        let error = format!("{:#}", refusal(result));
+        assert!(
+            error.contains("the largest observation timeout this window funds is 35 s")
+                && error.contains("the binding names 120 s"),
+            "{error}"
+        );
+        assert!(!published);
+
+        // A window that the other three timeouts already exceed funds none.
+        node.policy = node_policy(900_000, None);
+        let (result, _) = compose_over(
+            &node,
+            compose_request(&node, TEST_BACKEND_ID),
+            backend_with(full_capabilities(), false),
+        );
+        let error = format!("{:#}", refusal(result));
+        assert!(error.contains("no observation timeout fits"), "{error}");
+    }
+
+    /// The recorded P17 refusal: a node window of 4860 s against a binding
+    /// whose lifetime is contact 60 + 2 x observation 480 + execution 3600 +
+    /// cleanup 300 = 4920 s. Compose refuses it, naming both numbers and the
+    /// 450 s observation timeout the window funds.
+    #[test]
+    fn compose_refuses_the_recorded_journal_window_of_4860000_against_4920000() {
+        let mut node = stopped_node();
+        node.policy = node_policy(4_860_000, Some(lease_budget()));
+        let mut request = compose_request(&node, TEST_BACKEND_ID);
+        request.program = leased_program();
+        request.limits = ComposeLimits {
+            timeout_seconds: 3_600,
+            contact_timeout_seconds: 60,
+            observation_timeout_seconds: 480,
+            cleanup_timeout_seconds: 300,
+            ..ComposeLimits::default()
+        };
+        let (result, published) =
+            compose_over(&node, request, backend_with(full_capabilities(), true));
+        let error = format!("{:#}", refusal(result));
+        assert!(
+            error.contains("operation window of 4860000 ms is shorter than the occurrence lifetime of 4920000 ms")
+                && error.contains(
+                    "the largest observation timeout this window funds is 450 s, the binding names 480 s"
+                ),
+            "{error}"
+        );
+        assert!(!published);
+    }
+
+    /// The recorded lease refusal for the `codex.authoring.remote` workload
+    /// class: a guarantee its adapter's spec does not derive refuses compose,
+    /// naming the workload class and the missing guarantee. The class is a
+    /// fixture value here, so the name is asserted as the program carries it.
+    #[test]
+    fn compose_refusal_of_an_unmet_lease_requirement_names_the_workload_and_the_guarantee() {
+        const UNDERIVED: &str = "lease.fenced_exclusive";
+        let spec = installed::DerivedLeaseSpec::new(vec![
+            installed::SpecOperation::CreateOnceBoundToReservation,
+            installed::SpecOperation::ObserveExactOccurrence,
+        ]);
+        let backend = installed::CoordinateOnlyBackend::shared_with_lease_spec(
+            TEST_BACKEND_ID,
+            &"d".repeat(64),
+            SETTINGS_SCHEMA,
+            &"1".repeat(64),
+            &"e".repeat(64),
+            full_capabilities(),
+            spec,
+        );
+        let mut program = leased_program();
+        program.placement.workload_class = "codex.authoring.remote".into();
+        program.placement.lease = vec![
+            serde_json::from_value(serde_json::json!({
+                "name": UNDERIVED, "accept": ["provider_attested"]
+            }))
+            .unwrap(),
+        ];
+        let node = stopped_node();
+        let mut request = compose_request(&node, TEST_BACKEND_ID);
+        request.program = program;
+        let (result, published) = compose_over(&node, request, backend);
+        let error = format!("{:#}", refusal(result));
+        assert!(
+            error.contains(UNDERIVED) && error.contains("codex.authoring.remote"),
+            "{error}"
+        );
+        assert!(!published);
+    }
+
+    /// A binding's network inputs are the contract crate's one definition, and
+    /// the transport compose selects carries exactly those values.
+    #[test]
+    fn binding_network_inputs_are_the_contract_definition() {
+        let sources = ryeos_external_execution_contract::operator_network_inputs();
+        let policy = operator_network_inputs();
+        assert_eq!(policy.resolver.source, sources.resolver_source);
+        assert_eq!(policy.resolver.max_bytes, sources.resolver_max_bytes);
+        assert_eq!(policy.hosts.source, sources.hosts_source);
+        assert_eq!(policy.hosts.max_bytes, sources.hosts_max_bytes);
+        policy.validate().unwrap();
+        let selected = select_transport(&ComposeTransportRequest::FileRelay {
+            owner_workspace_id: "w".into(),
+            private_mailbox_parent: ryeos_external_execution_contract::GUEST_OCCURRENCES_ROOT
+                .into(),
+        })
+        .unwrap();
+        assert_eq!(selected.network_inputs, policy);
+    }
+
+    /// Compose and launch judge a placement with one function over one input
+    /// shape: the verdict `judge_placement` gives for a program, binding,
+    /// adapter and policy is the refusal compose carries for the same ones.
+    #[test]
+    fn compose_and_launch_share_one_placement_judgment() {
+        let node = stopped_node();
+        let backend = backend_with(full_capabilities(), false);
+        let program = leased_program();
+        let (result, _) = compose_over(
+            &node,
+            {
+                let mut request = compose_request(&node, TEST_BACKEND_ID);
+                request.program = program.clone();
+                request
+            },
+            backend.clone(),
+        );
+        let compose_error = format!("{:#}", refusal(result));
+
+        // The contract launch would judge: the binding as compose composed
+        // it, read back through the loader's own admission.
+        let (compose_ok, published) = compose_over(
+            &node,
+            compose_request(&node, TEST_BACKEND_ID),
+            backend_with(full_capabilities(), false),
+        );
+        compose_ok.unwrap();
+        assert!(published);
+        let identity = ryeos_node_runtime::identity::NodeIdentity::load(
+            &node.root.path().join(".ai/node/identity/private_key.pem"),
+        )
+        .unwrap();
+        let signed = std::fs::read_to_string(binding_path(&node)).unwrap();
+        let contract = admit_signed_binding(node.root.path(), BINDING_ID, &signed, &identity)
+            .unwrap()
+            .backend_contract();
+        let launch_error = format!(
+            "{:#}",
+            crate::external_placement::judge_placement(
+                &program,
+                &contract,
+                backend.as_ref(),
+                &node.policy,
+                // Launch's only addition: the session's own deadline, one the
+                // lease covers.
+                Some(|| Ok(Some(lillux::time::timestamp_millis() + 10_000))),
+            )
+            .unwrap_err()
+        );
+        assert!(
+            compose_error.ends_with(&launch_error),
+            "compose `{compose_error}` is not launch's `{launch_error}`"
+        );
+    }
+
+    /// A lease guarantee the provider's spec does not derive from its
+    /// operation kinds is refused at compose, and launch's judgment of the
+    /// same inputs is the same refusal.
+    #[test]
+    fn compose_and_launch_refuse_a_lease_guarantee_the_spec_does_not_derive() {
+        use installed::{DerivedLeaseSpec, SpecOperation};
+        const UNDERIVED: &str = "lease.fenced_exclusive";
+
+        let spec = DerivedLeaseSpec::new(vec![
+            SpecOperation::CreateOnceBoundToReservation,
+            SpecOperation::ObserveExactOccurrence,
+        ]);
+        assert!(
+            !spec.derived_guarantees().contains(UNDERIVED),
+            "the spec must not derive {UNDERIVED}"
+        );
+        let backend = installed::CoordinateOnlyBackend::shared_with_lease_spec(
+            TEST_BACKEND_ID,
+            &"d".repeat(64),
+            SETTINGS_SCHEMA,
+            &"1".repeat(64),
+            &"e".repeat(64),
+            full_capabilities(),
+            spec,
+        );
+        let attested = |name: &str| -> lillux::process_control::CapabilityRequirement {
+            serde_json::from_value(
+                serde_json::json!({"name": name, "accept": ["provider_attested"]}),
+            )
+            .unwrap()
+        };
+        let mut program = program();
+        program.placement.lease = vec![attested("lease.create_bound"), attested(UNDERIVED)];
+        let mut derived_program = program.clone();
+        derived_program.placement.lease = vec![attested("lease.create_bound")];
+
+        // The same program composes when the guarantee is one the spec derives.
+        let node = stopped_node();
+        let mut request = compose_request(&node, TEST_BACKEND_ID);
+        request.program = derived_program.clone();
+        let (result, published) = compose_over(&node, request, backend.clone());
+        result.unwrap();
+        assert!(published);
+
+        let node = stopped_node();
+        let mut request = compose_request(&node, TEST_BACKEND_ID);
+        request.program = program.clone();
+        let (result, published) = compose_over(&node, request, backend.clone());
+        let compose_error = format!("{:#}", refusal(result));
+        assert!(compose_error.contains(UNDERIVED), "{compose_error}");
+        assert!(!published);
+
+        // Launch's judgment: the binding as an unrefused compose publishes it,
+        // read back through the loader's own admission.
+        let node = stopped_node();
+        let mut request = compose_request(&node, TEST_BACKEND_ID);
+        request.program = derived_program;
+        let (compose_ok, _) = compose_over(&node, request, backend.clone());
+        compose_ok.unwrap();
+        let identity = ryeos_node_runtime::identity::NodeIdentity::load(
+            &node.root.path().join(".ai/node/identity/private_key.pem"),
+        )
+        .unwrap();
+        let signed = std::fs::read_to_string(binding_path(&node)).unwrap();
+        let contract = admit_signed_binding(node.root.path(), BINDING_ID, &signed, &identity)
+            .unwrap()
+            .backend_contract();
+        let launch_error = format!(
+            "{:#}",
+            crate::external_placement::judge_placement(
+                &program,
+                &contract,
+                backend.as_ref(),
+                &node.policy,
+                Some(|| Ok(Some(lillux::time::timestamp_millis() + 10_000))),
+            )
+            .unwrap_err()
+        );
+        assert!(launch_error.contains(UNDERIVED), "{launch_error}");
+        assert!(
+            compose_error.ends_with(&launch_error),
+            "compose `{compose_error}` is not launch's `{launch_error}`"
+        );
     }
 
     #[test]

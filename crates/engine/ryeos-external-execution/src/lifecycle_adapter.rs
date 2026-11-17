@@ -19,7 +19,6 @@ const MAX_LIFECYCLE_ADAPTER_OPEN_FILES: u64 = 256;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LifecycleAdapterInvocation {
     Inspect,
-    VerifyRuntimeProbe,
     Operate,
     /// Stage-one lease admission: an offline verdict on whether the signed
     /// provider spec can meet a workload's lease requirements, given only
@@ -80,7 +79,6 @@ impl LifecycleAdapterInvocation {
     fn argument(self) -> &'static str {
         match self {
             Self::Inspect => "inspect",
-            Self::VerifyRuntimeProbe => "verify-runtime-probe",
             Self::Operate => "operate",
             Self::AdmitLease => "admit-lease",
             Self::AwaitLeaseReady => "await-lease-ready",
@@ -267,7 +265,6 @@ mod tests {
         );
         for invocation in [
             LifecycleAdapterInvocation::Inspect,
-            LifecycleAdapterInvocation::VerifyRuntimeProbe,
             LifecycleAdapterInvocation::Operate,
             LifecycleAdapterInvocation::QualifySnapshotCreate,
             LifecycleAdapterInvocation::QualifySnapshotTerminate,

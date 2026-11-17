@@ -730,6 +730,7 @@ pub(crate) fn verify_ready(
         boot_id,
         verified_input_digests,
         ready_at_ms: _,
+        network_inputs: _,
     } = boot;
     ensure!(
         verified_input_digests
@@ -1345,6 +1346,7 @@ mod tests {
                 .map(|digest| (*digest).to_owned())
                 .collect(),
             ready_at_ms: 1_000,
+            network_inputs: Vec::new(),
         }
     }
 

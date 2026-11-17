@@ -269,7 +269,7 @@ impl Guest {
                 releases: Arc::clone(&releases),
             },
         )
-        .with_lease_ready(LeaseReadyPlan::observe(verified_inputs).unwrap());
+        .with_lease_ready(LeaseReadyPlan::observe(verified_inputs, Vec::new()).unwrap());
         let ready = runtime
             .publish_ready(supervisor_key)
             .unwrap()

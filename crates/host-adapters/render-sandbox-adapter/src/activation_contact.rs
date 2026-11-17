@@ -108,6 +108,7 @@ fn observe_owner_report(
                             step,
                             last_phase: stdout.last_phase(),
                             detail: stdout.refusal_detail().map(str::to_owned),
+                            site: stdout.refusal_site(),
                         };
                     }
                     Err(_) => {
@@ -911,6 +912,7 @@ mod tests {
                 step: Step::Install,
                 last_phase: Some(Step::Install),
                 detail: None,
+                site: None,
             }
         );
         assert_eq!(

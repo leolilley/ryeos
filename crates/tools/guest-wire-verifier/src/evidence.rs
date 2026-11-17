@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 
-pub const EVIDENCE_SCHEMA: &str = "ryeos.guest_wire_evidence.v1";
+pub const EVIDENCE_SCHEMA: &str = "ryeos.guest_wire_evidence.v3";
 pub const MAX_EVIDENCE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,7 +28,6 @@ pub const MAX_EVIDENCE_BYTES: usize = 64 * 1024;
 pub struct SubjectEvidence {
     pub owner_executable_sha256: String,
     pub manifest_hash: String,
-    pub controller_public_root: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,6 +87,10 @@ pub struct GuestWireEvidence {
     pub applied_launch_receipt_digest: String,
     pub candidate_program_digest: String,
     pub owner_exit: OwnerExit,
+    /// The archive members' digests under the field every consumer verifier's
+    /// evidence uses (`CONSUMER_EVIDENCE_ARCHIVE_MEMBERS_FIELD`), which the
+    /// node checks against the retained signed source.
+    #[serde(rename = "archive_member_digests")]
     pub member_digests: BTreeMap<String, String>,
     pub schema_pins: SchemaPins,
 }
@@ -141,6 +144,10 @@ impl GuestWireEvidence {
             "guest evidence names a different subject than the origin measured"
         );
         ensure!(
+            self.probe.manifest_hash == self.subject.manifest_hash,
+            "guest probe ran a different runtime than the measured subject"
+        );
+        ensure!(
             self.schema_pins.guest_inputs == expected.guest_inputs_schema
                 && self.schema_pins.launcher_spec == expected.launcher_spec_schema
                 && self.projection.schema == expected.guest_inputs_schema
@@ -192,7 +199,6 @@ pub(crate) mod tests {
             subject: SubjectEvidence {
                 owner_executable_sha256: "2".repeat(64),
                 manifest_hash: "3".repeat(64),
-                controller_public_root: "ed25519:root".into(),
             },
             member_digests: BTreeMap::from([
                 ("launcher".to_owned(), "4".repeat(64)),
@@ -211,7 +217,7 @@ pub(crate) mod tests {
             euid: 0,
             subject: expected.subject,
             probe: ProbeEvidence {
-                manifest_hash: "6".repeat(64),
+                manifest_hash: "3".repeat(64),
                 public_key: "ed25519:probe".into(),
             },
             projection: SchemaDigest {
@@ -266,8 +272,8 @@ pub(crate) mod tests {
                 Box::new(|e| e.subject.manifest_hash = "0".repeat(64)),
             ),
             (
-                "subject root",
-                Box::new(|e| e.subject.controller_public_root = "x".into()),
+                "probe runtime",
+                Box::new(|e| e.probe.manifest_hash = "6".repeat(64)),
             ),
             (
                 "projection pin",
@@ -319,5 +325,18 @@ pub(crate) mod tests {
         value["extra"] = serde_json::json!(1);
         let bytes = ryeos_external_execution_contract::canonical_json(&value).unwrap();
         assert!(GuestWireEvidence::parse_and_verify(&bytes, &expected()).is_err());
+    }
+
+    #[test]
+    fn archive_member_digests_travel_under_the_node_checked_field() {
+        let value: serde_json::Value =
+            serde_json::from_slice(&evidence().canonical_bytes().unwrap()).unwrap();
+        let field =
+            ryeos_external_execution::restoration_verifier_delivery::CONSUMER_EVIDENCE_ARCHIVE_MEMBERS_FIELD;
+        assert_eq!(
+            value[field],
+            serde_json::to_value(expected().member_digests).unwrap()
+        );
+        assert!(value.get("member_digests").is_none());
     }
 }

@@ -656,6 +656,9 @@ pub fn collect_scripted_turn<T: AppServerTransport>(
         {
             break bytes;
         }
+        if let Some(reason) = imported.read_native_failure(native_control)? {
+            anyhow::bail!("consumer native guest failed: {reason}");
+        }
         ensure!(
             !deadline.has_elapsed(),
             "consumer native observation deadline expired"

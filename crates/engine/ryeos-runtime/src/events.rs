@@ -615,6 +615,9 @@ pub enum RuntimeEventType {
     /// A launch augmentation reused a process-local projection instead of
     /// fabricating a child execution. Kept outside the composed launch input.
     LaunchAugmentationCacheHit,
+    /// Daemon-authored record of the root kind a launch attempt's process
+    /// inputs were laid out in (no paths).
+    ProcessInputRootSelected,
     /// A `(key, value)` metadata tag stamped on a thread post-launch (cohort
     /// identity, e.g. `fleet`/`game`). Event-backed so it survives a projection
     /// rebuild, unlike a bare facet-table write.
@@ -704,6 +707,7 @@ impl RuntimeEventType {
             Self::AsLaunchedRefBindings => wire::AS_LAUNCHED_REF_BINDINGS,
             Self::RuntimeLaunchFacts => wire::RUNTIME_LAUNCH_FACTS,
             Self::LaunchAugmentationCacheHit => wire::LAUNCH_AUGMENTATION_CACHE_HIT,
+            Self::ProcessInputRootSelected => wire::PROCESS_INPUT_ROOT_SELECTED,
             Self::ThreadFacetSet => wire::THREAD_FACET_SET,
             Self::ThreadReconciled => wire::THREAD_RECONCILED,
             Self::OrphanProcessKilled => wire::ORPHAN_PROCESS_KILLED,
@@ -764,6 +768,7 @@ impl RuntimeEventType {
             wire::AS_LAUNCHED_REF_BINDINGS => Ok(Self::AsLaunchedRefBindings),
             wire::RUNTIME_LAUNCH_FACTS => Ok(Self::RuntimeLaunchFacts),
             wire::LAUNCH_AUGMENTATION_CACHE_HIT => Ok(Self::LaunchAugmentationCacheHit),
+            wire::PROCESS_INPUT_ROOT_SELECTED => Ok(Self::ProcessInputRootSelected),
             wire::THREAD_FACET_SET => Ok(Self::ThreadFacetSet),
             wire::THREAD_RECONCILED => Ok(Self::ThreadReconciled),
             wire::ORPHAN_PROCESS_KILLED => Ok(Self::OrphanProcessKilled),
@@ -872,6 +877,7 @@ impl RuntimeEventType {
             | Self::AsLaunchedRefBindings
             | Self::RuntimeLaunchFacts
             | Self::LaunchAugmentationCacheHit
+            | Self::ProcessInputRootSelected
             | Self::ThreadFacetSet
             | Self::ThreadReconciled
             | Self::OrphanProcessKilled
@@ -947,6 +953,7 @@ impl RuntimeEventType {
             | Self::AsLaunchedRefBindings
             | Self::RuntimeLaunchFacts
             | Self::LaunchAugmentationCacheHit
+            | Self::ProcessInputRootSelected
             | Self::ThreadFacetSet
             | Self::ThreadReconciled
             | Self::OrphanProcessKilled
@@ -1159,6 +1166,7 @@ mod tests {
             RuntimeEventType::AsLaunchedRefBindings,
             RuntimeEventType::RuntimeLaunchFacts,
             RuntimeEventType::LaunchAugmentationCacheHit,
+            RuntimeEventType::ProcessInputRootSelected,
             RuntimeEventType::ThreadFacetSet,
             RuntimeEventType::ThreadReconciled,
             RuntimeEventType::OrphanProcessKilled,
@@ -1280,6 +1288,7 @@ mod tests {
             wire::AS_LAUNCHED_REF_BINDINGS,
             wire::RUNTIME_LAUNCH_FACTS,
             wire::LAUNCH_AUGMENTATION_CACHE_HIT,
+            wire::PROCESS_INPUT_ROOT_SELECTED,
             wire::THREAD_FACET_SET,
             wire::THREAD_RECONCILED,
             wire::ORPHAN_PROCESS_KILLED,

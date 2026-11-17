@@ -90,6 +90,9 @@ pub const AS_LAUNCHED_RESOLUTION: &str = "as_launched_resolution";
 pub const AS_LAUNCHED_REF_BINDINGS: &str = "as_launched_ref_bindings";
 pub const RUNTIME_LAUNCH_FACTS: &str = "runtime_launch_facts";
 pub const LAUNCH_AUGMENTATION_CACHE_HIT: &str = "launch_augmentation_cache_hit";
+/// Daemon-authored, once per launch attempt: the kind of root the process's
+/// inputs were laid out in (`live`, `sparse_private`, `pinned`, ...). Names no path.
+pub const PROCESS_INPUT_ROOT_SELECTED: &str = "process_input_root_selected";
 pub const THREAD_FACET_SET: &str = "thread_facet_set";
 pub const THREAD_RECONCILED: &str = "thread_reconciled";
 pub const ORPHAN_PROCESS_KILLED: &str = "orphan_process_killed";

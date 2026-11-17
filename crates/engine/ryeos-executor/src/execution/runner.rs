@@ -2996,10 +2996,12 @@ struct ProtocolLaunchEnv {
 fn resolved_terminator_protocol<'a>(
     engine: &'a ryeos_engine::engine::Engine,
     resolved: &ResolvedExecutionRequest,
+    isolation: &ryeos_engine::isolation::IsolationRuntime,
 ) -> Result<&'a ryeos_engine::protocols::VerifiedProtocol> {
     let kind = &resolved.resolved_item.kind;
-    let protocol =
-        ryeos_app::thread_lifecycle::resolve_direct_terminator_protocol(engine, resolved)?;
+    let protocol = ryeos_app::thread_lifecycle::resolve_direct_terminator_protocol(
+        engine, resolved, isolation,
+    )?;
     let remote_consumer = resolved
         .root_admission
         .as_ref()
@@ -3156,17 +3158,44 @@ fn promoted_scoped_producer_commands(
     Ok((commands, requires_ingress_handoff))
 }
 
+/// The containment the sealed root demands, under the holding of the protocol
+/// the launch was admitted with. The holding is read from the retained
+/// descriptor in the admitted closure, so the wait path, the detached task and
+/// a recovered launch all apply the one protocol selected at admission and none
+/// selects again.
 fn admitted_root_requires_process_scope(
     metadata: &ryeos_app::launch_metadata::RuntimeLaunchMetadata,
 ) -> Result<ryeos_app::thread_lifecycle::ProcessContainmentRequirement> {
-    metadata
-        .sealed_root_request
-        .as_ref()
-        .map(|sealed| sealed.process_containment_for_qualification())
-        .transpose()
-        .map(|required| {
-            required.unwrap_or(ryeos_app::thread_lifecycle::ProcessContainmentRequirement::None)
-        })
+    let Some(sealed) = metadata.sealed_root_request.as_ref() else {
+        return Ok(ryeos_app::thread_lifecycle::ProcessContainmentRequirement::None);
+    };
+    let holding = retained_protocol_holding(metadata)?;
+    sealed.process_containment_for_qualification_under(holding.as_ref())
+}
+
+/// The holding declared by the signed protocol descriptor retained in the
+/// admitted closure, if the launch has a closure and the protocol declares one.
+fn retained_protocol_holding(
+    metadata: &ryeos_app::launch_metadata::RuntimeLaunchMetadata,
+) -> Result<Option<ryeos_engine::protocols::ProtocolHolding>> {
+    use ryeos_state::objects::AdmittedExecutionClosure;
+    let Some(
+        AdmittedExecutionClosure::DirectItemExecutor {
+            protocol_descriptor_document: document,
+            ..
+        }
+        | AdmittedExecutionClosure::ManagedRuntime {
+            protocol_descriptor_document: document,
+            ..
+        },
+    ) = metadata.admitted_execution_closure.as_ref()
+    else {
+        return Ok(None);
+    };
+    let body = lillux::signature::strip_signature_lines(document);
+    let descriptor: ryeos_engine::protocols::ProtocolDescriptor = serde_yaml::from_str(&body)
+        .context("decode retained protocol descriptor for qualification containment")?;
+    Ok(descriptor.holding)
 }
 
 /// A host-direct grant that requires a scope seals the launch's containment
@@ -3587,20 +3616,7 @@ pub(crate) struct PreparedProcessInputs {
 fn retained_resolution_has_filesystem_bindings(
     resolution: &ryeos_engine::resolution::ResolutionOutput,
 ) -> Result<bool> {
-    let has_source = resolution
-        .composed
-        .derived
-        .contains_key(ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY);
-    // Runtime-root realizations are not project fold-back exclusions, but
-    // still require exact filesystem binding before this process can launch.
-    let has_external = resolution
-        .composed
-        .derived
-        .get(ryeos_state::objects::EXTERNAL_REALIZATIONS_DERIVED_KEY)
-        .map(ryeos_state::objects::ExternalContentRealizationSet::from_value)
-        .transpose()?
-        .is_some_and(|realizations| !realizations.is_empty());
-    Ok(has_source || has_external)
+    ryeos_engine::execution_contract::derived_has_filesystem_bindings(&resolution.composed.derived)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3630,12 +3646,26 @@ fn process_project_class(provenance: &ExecutionProvenance) -> ProcessProjectClas
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProcessInputRootSelection {
-    Existing,
-    SparsePrivate,
-    PinnedReadOnlyPrivate,
-    CandidateIntegrationPrivate,
+pub(crate) use ryeos_engine::execution_contract::{
+    LIVE_PROJECT_UNAVAILABLE_CODE, LiveProjectUnavailableToSourcedRuntime,
+    ProcessInputRootSelection, live_project_refusal_applies,
+};
+
+fn process_input_root_kind(
+    project: ProcessProjectClass,
+    root: ProcessInputRootSelection,
+) -> ryeos_engine::execution_contract::ProcessInputRootKind {
+    use ryeos_engine::execution_contract::ProcessInputRootKind as Kind;
+    match root {
+        ProcessInputRootSelection::SparsePrivate => Kind::SparsePrivate,
+        ProcessInputRootSelection::PinnedReadOnlyPrivate => Kind::Pinned,
+        ProcessInputRootSelection::CandidateIntegrationPrivate => Kind::CandidateIntegration,
+        ProcessInputRootSelection::Existing => match project {
+            ProcessProjectClass::Live => Kind::Live,
+            ProcessProjectClass::Projectless => Kind::Projectless,
+            ProcessProjectClass::PinnedReadOnly | ProcessProjectClass::PinnedCow => Kind::Pinned,
+        },
+    }
 }
 
 /// Hand the already-admitted physical input root to isolation without changing
@@ -4144,26 +4174,6 @@ fn restore_process_workspace_output_generation(
     )
 }
 
-/// Stable refusal code: a live project authority was requested for a tool
-/// whose retained filesystem bindings force a private admitted-input root.
-pub(crate) const LIVE_PROJECT_UNAVAILABLE_CODE: &str =
-    "live_project_unavailable_to_sourced_runtime";
-
-/// Typed refusal for a launch whose live project authority could never reach
-/// the process. Converted to `DispatchError::LaunchPolicyForbidden` by
-/// `external_content::classify_quarantined_large_object`.
-#[derive(Debug, thiserror::Error)]
-#[error("{message}")]
-pub(crate) struct LiveProjectUnavailableToSourcedRuntime {
-    pub(crate) message: String,
-}
-
-/// The guard fires wherever the request explicitly demanded the live project
-/// and the resolved root is not the existing (live) root.
-fn live_project_refusal_applies(root: ProcessInputRootSelection, demands_live: bool) -> bool {
-    demands_live && root != ProcessInputRootSelection::Existing
-}
-
 fn live_project_unavailable_error(
     resolution: &ryeos_engine::resolution::ResolutionOutput,
     access: ryeos_state::objects::LiveProjectAccess,
@@ -4186,25 +4196,13 @@ fn live_project_unavailable_error(
         .composed
         .derived
         .contains_key(ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY);
-    let reason = if has_source {
-        "the runtime declares source_scope, so the tool runs from a private admitted-input root holding only its verified source"
-    } else {
-        "the tool retains external content, so it runs from a private admitted-input root"
-    };
     let access = match access {
         ryeos_state::objects::LiveProjectAccess::ReadOnly => "read_only",
         ryeos_state::objects::LiveProjectAccess::ReadWrite => "read_write",
     };
-    LiveProjectUnavailableToSourcedRuntime {
-        message: format!(
-            "{LIVE_PROJECT_UNAVAILABLE_CODE}: `{tool}` (runtime `{runtime}`) was launched with \
-             an explicit live project demand ({access}), but {reason}; the live project is never mounted \
-             and project writes would be silently discarded. Use an `@subprocess` tool without \
-             source_scope for live project access, or run with `--pin-project` / a pinned project \
-             policy for a copy-on-write generation, or return structured results instead of writing \
-             to the project."
-        ),
-    }
+    ryeos_engine::execution_contract::live_project_unavailable_error(
+        tool, &runtime, has_source, access,
+    )
 }
 
 /// A large object scrub quarantined surfaces here, at store redemption after
@@ -4312,6 +4310,15 @@ pub(crate) fn prepare_process_inputs(
             live.access,
         )));
     }
+    // Record what the tool actually gets; the sealed capsule only knows the
+    // request's intent. Kind only, no paths.
+    state
+        .threads
+        .record_process_input_root_selected(
+            thread_id,
+            process_input_root_kind(project_class, root_selection),
+        )
+        .context("record the selected process input root")?;
     let pinned_read_only_private_root =
         root_selection == ProcessInputRootSelection::PinnedReadOnlyPrivate;
     let candidate_integration_private_root =
@@ -5330,7 +5337,8 @@ pub async fn run_and_wait(
     {
         prepared_plan.ensure_no_project_local_interpreter(params.provenance.effective_path())?;
     }
-    let protocol = resolved_terminator_protocol(&engine, &params.resolved)?;
+    let protocol =
+        resolved_terminator_protocol(&engine, &params.resolved, wait_launch_isolation.as_ref())?;
     let stdout_shape = protocol.descriptor.stdout.shape;
     let wait_cas_guard = state
         .state_store
@@ -6508,7 +6516,8 @@ pub async fn run_detached(
     {
         prepared_plan.ensure_no_project_local_interpreter(params.provenance.effective_path())?;
     }
-    let protocol = resolved_terminator_protocol(&engine, &params.resolved)?;
+    let protocol =
+        resolved_terminator_protocol(&engine, &params.resolved, bg_launch_isolation.as_ref())?;
     let bg_cas_guard = state
         .state_store
         .pinned_state_authority()?
@@ -9836,6 +9845,7 @@ mod tests {
         let authority = ryeos_app::execution_policy::resolve_offline_local_live_project_authority(
             &path,
             state.isolation.as_ref(),
+            ryeos_engine::execution_contract::LiveIntent::Default,
         )
         .unwrap();
         let provenance =
@@ -9915,6 +9925,7 @@ mod tests {
         let authority = ryeos_app::execution_policy::resolve_offline_local_live_project_authority(
             &path,
             state.isolation.as_ref(),
+            ryeos_engine::execution_contract::LiveIntent::Default,
         )
         .unwrap();
         let provenance =

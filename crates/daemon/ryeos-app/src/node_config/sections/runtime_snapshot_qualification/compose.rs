@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 use ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerifierSelection;
+use ryeos_external_execution_contract::runtime_snapshot::LaunchShape;
 use serde::{Deserialize, Serialize};
 
 use super::{QualificationDocument, RuntimeSnapshotQualificationSection, SECTION_NAME};
@@ -26,7 +27,7 @@ use crate::node_config::sections::runtime_snapshot_production::compose::installe
 pub const MAX_PROVIDER_SPEC_BYTES: usize = 64 * 1024;
 
 /// Protocol of the qualification document this composer emits.
-const QUALIFICATION_PROTOCOL: &str = "ryeos.runtime-snapshot-qualification.v4";
+const QUALIFICATION_PROTOCOL: &str = "ryeos.runtime-snapshot-qualification.v5";
 
 /// Budgets of one qualification attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +63,9 @@ pub struct QualificationComposeRequest<'a> {
     /// Consumer verifier selections keyed by scenario id, as a JSON object;
     /// absent means none.
     pub consumer_verifiers: Option<serde_json::Value>,
+    /// The launch shape every occurrence under this binding is created with,
+    /// as a JSON object. Every binding states its shape; there is no default.
+    pub launch_shape: serde_json::Value,
     pub limits: QualificationLimits,
 }
 
@@ -102,13 +106,15 @@ pub fn compose_runtime_snapshot_qualification_binding(
             Some(value) => serde_json::from_value(value).context("invalid consumer verifiers")?,
             None => BTreeMap::new(),
         };
+    let launch_shape: LaunchShape =
+        serde_json::from_value(request.launch_shape).context("invalid launch shape")?;
     let identity = load_node_identity(request.app_root)?;
     let producer =
         installed_production_binding(request.app_root, &request.snapshot_binding_id, &identity)?;
     let settings = producer.settings().clone();
     let document = QualificationDocument {
         kind: "node".into(),
-        schema: 4,
+        schema: 5,
         protocol: QUALIFICATION_PROTOCOL.into(),
         production_binding_id: producer.id().to_owned(),
         production_binding_digest: producer.digest().to_owned(),
@@ -117,6 +123,7 @@ pub fn compose_runtime_snapshot_qualification_binding(
         settings,
         verifier_artifact_hash: request.verifier_artifact_hash,
         consumer_verifiers,
+        launch_shape,
         contact_timeout_seconds: request.limits.contact_timeout_seconds,
         delivery_timeout_seconds: request.limits.delivery_timeout_seconds,
         maximum_lifetime_seconds: request.limits.maximum_lifetime_seconds,
@@ -248,6 +255,7 @@ pub(crate) fn repin_qualification(
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_launch_shape;
     use super::*;
     use crate::node_config::sections::runtime_snapshot_production::compose::tests::{
         StoppedNode, install_production, stopped_node,
@@ -264,6 +272,7 @@ mod tests {
             provider_spec: PROVIDER_SPEC.to_vec(),
             verifier_artifact_hash: "3".repeat(64),
             consumer_verifiers: None,
+            launch_shape: serde_json::to_value(test_launch_shape()).unwrap(),
             limits: QualificationLimits::default(),
         }
     }
@@ -292,6 +301,19 @@ mod tests {
         let document: QualificationDocument = serde_json::from_value(body).unwrap();
         document.validate().unwrap();
         assert_eq!(document.settings["sandbox_group_id"], "sbg-exact");
+    }
+
+    #[test]
+    fn the_binding_carries_the_launch_shape_it_was_composed_with() {
+        let node = stopped_node();
+        install_production(&node, "snapshot-producer");
+        let report =
+            compose_runtime_snapshot_qualification_binding(request(&node, "qualifier")).unwrap();
+        let signed = std::fs::read_to_string(&report.path).unwrap();
+        let identity = load_node_identity(node.root.path()).unwrap();
+        let body = verify_node_signed(&signed, &identity, "binding").unwrap();
+        let document: QualificationDocument = serde_json::from_value(body).unwrap();
+        assert_eq!(document.launch_shape, test_launch_shape());
     }
 
     #[test]
@@ -358,6 +380,10 @@ mod tests {
             refused(&|r| r.consumer_verifiers = Some(serde_json::json!({"s": {"bogus": 1}})))
                 .contains("consumer verifiers")
         );
+        assert!(
+            refused(&|r| r.launch_shape = serde_json::json!({"bogus": 1})).contains("launch shape")
+        );
+        assert!(refused(&|r| r.launch_shape = serde_json::Value::Null).contains("launch shape"));
         assert!(refused(&|r| r.limits.maximum_lifetime_seconds = 3601).contains("budget"));
         assert!(refused(&|r| r.limits.delivery_timeout_seconds = 59).contains("budget"));
         assert!(refused(&|r| r.snapshot_binding_id = "../x".into()).contains("id is invalid"));

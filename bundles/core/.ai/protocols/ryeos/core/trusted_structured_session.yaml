@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-17T06:27:45Z:c95126d5db09c35f89bcbdabf943feb5e9b746ac033ae487fbda5797aa385d1f:Rs644TjopQTdrYACbz9TV4mfv1gJArH/JsY5tKHvGC98/TqYjJkm335Q2yTeIZMioPykhyXkFJ9Qbtf4Q4T6DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T06:56:49Z:922baa67a6fb82624f2a3006e16e29a4c40b06b8001ab5d8e0ad55f9f31cf94c:oPyxGvhS58/wyp9zkrpIpHmGuyBFbmVqRQGNgnd3AUN1Ozn/L4fEenBpcZipOv//A7OUWu3SSevyu/s5ZXfsAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: protocol
 name: trusted_structured_session
 category: ryeos/core
@@ -39,3 +39,8 @@ session:
   wire_protocol: ryeos.structured-session
   wire_version: 2
   max_frame_bytes: 16777216
+holding:
+  requires_guarantees:
+    - { name: sessions:trusted_process_group, accept: [trusted] }
+  filesystem_authority: node_policy
+  root_settlement: trusted_process_group_absent

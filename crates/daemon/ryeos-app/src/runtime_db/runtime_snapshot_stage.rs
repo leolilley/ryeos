@@ -871,7 +871,6 @@ impl RuntimeDb {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::Engine as _;
     use ryeos_external_execution_contract::runtime_snapshot::{
         RUNTIME_SNAPSHOT_CREATE_RESULT_SCHEMA, RUNTIME_SNAPSHOT_INTENT_SCHEMA,
         RUNTIME_SNAPSHOT_RESULT_SCHEMA, RUNTIME_SNAPSHOT_STAGE_SCHEMA,
@@ -899,10 +898,6 @@ mod tests {
             },
             guest_runtime_manifest_hash: "8".repeat(64),
             owner_executable_sha256: "9".repeat(64),
-            controller_public_root: format!(
-                "ed25519:{}",
-                base64::engine::general_purpose::STANDARD.encode([3u8; 32])
-            ),
             upload_sha256: "a".repeat(64),
             upload_bytes: 1024,
             attempt_deadline_ms: now + 60_000,

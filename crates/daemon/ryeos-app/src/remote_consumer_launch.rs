@@ -141,6 +141,9 @@ mod tests {
             }),
             consumer_worker_request: None,
             remote_probe_input: Some(json!({"controller":{"scenario":"probe"}})),
+            launch_shape: Some(
+                ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(),
+            ),
         }
     }
 
@@ -155,11 +158,13 @@ mod tests {
                 verifier_ref: VERIFIER.into(),
                 subject_declaration_id: "runtime".into(),
                 allowed_claims: vec!["command_probe".into()],
-                minimum_verifier_process_settlement: VerifierProcessSettlementAuthority::ScopeEmpty,
+                minimum_verifier_process_settlement: Some(
+                    VerifierProcessSettlementAuthority::ScopeEmpty,
+                ),
                 verifier_parameters: json!({"scope":"bounded_fixture"}),
                 consumer_execution_context: None,
-                requires_guarantees: Vec::new(),
                 producer_scenarios: BTreeMap::from([("probe".to_owned(), scenario(remote))]),
+                launch_shape: None,
             },
         }
     }

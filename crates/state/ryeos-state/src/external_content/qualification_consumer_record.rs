@@ -211,7 +211,6 @@ impl RemoteProbeInputRecord {
                 && lillux::valid_hash(&self.prerequisite.challenge_digest)
                 && lillux::valid_hash(&self.prerequisite.manifest_hash)
                 && lillux::valid_hash(&self.prerequisite.owner_executable_sha256)
-                && !self.prerequisite.controller_public_root.is_empty()
                 && self.prerequisite.manifest_hash == self.purpose.subject_manifest_hash,
             "remote probe prerequisite is not the measured subject"
         );
@@ -273,7 +272,6 @@ mod tests {
                 challenge_digest: "d".repeat(64),
                 manifest_hash: purpose.subject_manifest_hash.clone(),
                 owner_executable_sha256: "e".repeat(64),
-                controller_public_root: "ed25519:fixture".into(),
             },
             purpose,
             coordinate,
