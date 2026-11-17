@@ -2564,14 +2564,16 @@ fn validate_reasoning_capture_and_replay(
             placement.into.key(),
             context,
         )?;
-        let kind_matches = match (rule, &placement.into) {
+        let kind_matches = matches!(
+            (rule, &placement.into),
             (
                 ReasoningCaptureRule::TextDelta { .. } | ReasoningCaptureRule::Blocks { .. },
-                ReplayTarget::MessageField(_),
-            ) => true,
-            (ReasoningCaptureRule::ToolCallField { .. }, ReplayTarget::ToolCallField(_)) => true,
-            _ => false,
-        };
+                ReplayTarget::MessageField(_)
+            ) | (
+                ReasoningCaptureRule::ToolCallField { .. },
+                ReplayTarget::ToolCallField(_)
+            )
+        );
         if !kind_matches {
             bail!(
                 "provider config{context}: reasoning replay of capture {:?} cannot go into that kind of target",
