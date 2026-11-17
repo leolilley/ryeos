@@ -376,6 +376,13 @@ fn timeline_for(
     })
 }
 
+/// Whether the chain's root status says no more work is happening in the
+/// chain. A `continued` root hands its work to a successor in the same chain,
+/// so it is not settled.
+fn chain_settled(status: &str) -> bool {
+    status != "continued" && crate::routes::invokers::stream_helpers::is_terminal_status(status)
+}
+
 fn window_response(
     chain_root_id: &str,
     definition_ref: &str,
@@ -386,6 +393,17 @@ fn window_response(
     since: Option<i64>,
 ) -> Result<Value> {
     let timeline = &folded.timeline;
+    // An activity a dead thread left running must not read as work in
+    // progress, so a settled chain has no lane whatever its entries say.
+    let settled = summary
+        .get("status")
+        .and_then(Value::as_str)
+        .is_some_and(chain_settled);
+    let lane = if settled {
+        None
+    } else {
+        timeline.lane.as_ref()
+    };
     let older = older_count(timeline.items.len(), limit);
     let window = &timeline.items[older..];
     let mut response = json!({
@@ -398,7 +416,7 @@ fn window_response(
         "summary": summary,
         "undeclared": serde_json::to_value(&timeline.undeclared)?,
         "notice_noun": serde_json::to_value(&timeline.notice_noun)?,
-        "lane": serde_json::to_value(&timeline.lane)?,
+        "lane": serde_json::to_value(lane)?,
     });
     let Some(since) = since else {
         response["items"] = serde_json::to_value(window)?;
@@ -548,6 +566,27 @@ mod tests {
         let idle =
             window_response("c", "config:x", "d", &folded(1, 9), summary(), 200, None).unwrap();
         assert_eq!(idle["lane"], Value::Null);
+    }
+
+    #[test]
+    fn a_settled_chain_has_no_lane_whatever_its_entries_say() {
+        let mut state = folded(1, 9);
+        let mut timeline = timeline(1);
+        timeline.lane = Some(ryeos_timeline::Lane {
+            label: "Working".to_string(),
+            entry: "act:1".to_string(),
+        });
+        state.timeline = Arc::new(timeline);
+        let respond = |status: &str| {
+            let summary = chain_summary(status, &ThreadUsageTotals::default());
+            window_response("c", "config:x", "d", &state, summary, 200, None).unwrap()
+        };
+        for status in ["running", "created", "continued"] {
+            assert_eq!(respond(status)["lane"]["label"], "Working", "{status}");
+        }
+        for status in ["killed", "timed_out", "failed", "cancelled", "completed"] {
+            assert_eq!(respond(status)["lane"], Value::Null, "{status}");
+        }
     }
 
     #[test]

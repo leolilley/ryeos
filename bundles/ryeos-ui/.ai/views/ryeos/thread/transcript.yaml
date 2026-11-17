@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-17T06:42:40Z:cb7f9bfaa8d8a5fc2dac475148daca3f09189811fb67ccd29edf75813cbcd8db:Vh3op3HcQmIe44DARJjk/dKDty6caDOphC2WuAc+4zlwaHAICBai55mo/d8Ug1es31fWZYBTd4IaWeVZrJMkCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T21:49:16Z:d59cd705f72ca7ccaeb5ed220b6b1fbbe1b0e1394f22c8cccbf4dd11531fc0e7:KM9rD44zxDbJq6GMsX3ucdvs7wRA3LzqdF3DViDI0vSmi+M9sK5VXTupfrOvHCk++K1U3o6CQvtjF0kOFLUOBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: thread-transcript
 title: Activity
 version: "1.0.0"
@@ -50,5 +50,42 @@ affordances:
       facet: timeline.window
       value:
         limit: "{record.next_limit}"
+  # Answering a docked pending ask: the digest-fenced service the approvals
+  # views call. A client lists these beside an ask only where the surface
+  # admits them. The record is the ask's own fields plus the chain id.
+  - id: accept
+    label: Approve
+    producer: selection
+    visible_when:
+      all:
+        - { field: type, equals: ask }
+        - { field: state, equals: pending }
+    enabled_when: { field: accept_allowed, equals: true }
+    disabled_reason: This approval request cannot be accepted; decline it or inspect its authority.
+    invoke:
+      plane: rye
+      ref: service:worker-executions/resolve-approval
+      args:
+        chain_root_id: "{record.chain_root_id}"
+        approval_id: "{record.approval_id}"
+        request_digest: "{record.request_digest}"
+        accept: true
+      notice: Approval accepted
+  - id: decline
+    label: Decline
+    producer: selection
+    visible_when:
+      all:
+        - { field: type, equals: ask }
+        - { field: state, equals: pending }
+    invoke:
+      plane: rye
+      ref: service:worker-executions/resolve-approval
+      args:
+        chain_root_id: "{record.chain_root_id}"
+        approval_id: "{record.approval_id}"
+        request_digest: "{record.request_digest}"
+        accept: false
+      notice: Approval declined
 refresh:
   on_hint: thread

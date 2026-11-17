@@ -10,8 +10,8 @@ use ryeos_client_base::ui::timeline::RyeOsTimelineEntryVm;
 use ryeos_client_base::ui::view_model::{
     RyeOsInputVm, RyeOsRowDetailVm, RyeOsRowVm, RyeOsSectionVm, RyeOsSourceStatusVm,
     RyeOsTableCoverageVm, RyeOsTableHierarchyVm, RyeOsTableRowVm, RyeOsTextLineVm,
-    RyeOsTileIntentVm, RyeOsTimelineDockVm, RyeOsTimelineLaneVm, RyeOsTone, RyeOsViewHeadingVm,
-    RyeOsViewSupplementVm, RyeOsViewTabVm, RyeOsViewVm,
+    RyeOsTileIntentVm, RyeOsTimelineDockActionVm, RyeOsTimelineDockVm, RyeOsTimelineLaneVm,
+    RyeOsTone, RyeOsViewHeadingVm, RyeOsViewSupplementVm, RyeOsViewTabVm, RyeOsViewVm,
 };
 use ryeos_client_base::ui::{
     RyeOsKey, RyeOsKeyEvent, RyeOsKeyModifiers, RyeOsUiEvent, RyeOsUiIntent,
@@ -1395,27 +1395,61 @@ fn timeline_foot(
             } => (primary.clone(), meta.clone(), *tone),
             other => (other.label(), None, RyeOsTone::Warn),
         };
-        foot = foot.child(
-            row()
-                .key(format!("dock:{instance:?}:{}", ask.id))
-                .w_full()
-                .min_w(0.0)
-                .px(16.0)
-                .py(10.0)
-                .center_y()
-                .fill(p.plane_raised)
-                .border_sides([1.0, 0.0, 0.0, 0.0], p.line)
-                .role("status")
-                .label(ask.entry.label())
-                .child(entry_line(
-                    &primary,
-                    meta.as_deref(),
-                    p.tone(tone, p.text),
-                    500.0,
-                )),
-        );
+        let mut line = row()
+            .key(format!("dock:{instance:?}:{}", ask.id))
+            .w_full()
+            .min_w(0.0)
+            .px(16.0)
+            .py(10.0)
+            .center_y()
+            .fill(p.plane_raised)
+            .border_sides([1.0, 0.0, 0.0, 0.0], p.line)
+            .gap(8.0)
+            .child(entry_line(
+                &primary,
+                meta.as_deref(),
+                p.tone(tone, p.text),
+                500.0,
+            ));
+        for action in &ask.actions {
+            line = line.child(dock_action(action));
+        }
+        foot = foot.child(line);
     }
     foot
+}
+
+/// One answering action beside a docked ask. One the ask's authority does not
+/// allow is drawn faint, with its reason as its label, and does nothing.
+fn dock_action(action: &RyeOsTimelineDockActionVm) -> El {
+    let p = Palette::get();
+    let button = text(action.label.clone())
+        .font(theme::ui(12.0))
+        .px(10.0)
+        .py(5.0)
+        .border(1.0, p.line_strong)
+        .role("button");
+    match &action.intent {
+        Some(intent) => {
+            let intent = intent.clone();
+            button
+                .color(p.text)
+                .fill(p.plane)
+                .hover(p.plane_selected)
+                .label(action.label.clone())
+                .on_press(move |app: &mut App| {
+                    app.ui(RyeOsUiEvent::Activate {
+                        intent: intent.clone(),
+                    });
+                })
+        }
+        None => button.color(p.faint).label(
+            action
+                .disabled_reason
+                .clone()
+                .unwrap_or_else(|| action.label.clone()),
+        ),
+    }
 }
 
 /// Estimated height of a timeline entry not yet measured.

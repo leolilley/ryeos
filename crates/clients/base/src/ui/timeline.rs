@@ -188,6 +188,22 @@ pub struct RyeOsTimelineDockVm {
     /// The ask entry's id.
     pub id: String,
     pub entry: RyeOsTimelineEntryVm,
+    /// What the view lets the operator do with the ask. Empty where the
+    /// surface does not admit answering, so an observation-only surface shows
+    /// the ask without buttons.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<RyeOsTimelineDockActionVm>,
+}
+
+/// One action on a docked ask: a view affordance eligible for the ask.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RyeOsTimelineDockActionVm {
+    pub label: String,
+    /// The affordance's invocation; absent when it is not enabled for this ask.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<RyeOsUiIntent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled_reason: Option<String>,
 }
 
 /// The role of one service item: its entry type, or `cluster` / `recap`.
@@ -525,23 +541,99 @@ pub(crate) fn timeline_lane(response: &Value, items: &[Value]) -> Option<RyeOsTi
     })
 }
 
-/// The asks whose latest state is pending, in window order.
-pub(crate) fn pending_asks(items: &[Value]) -> Vec<RyeOsTimelineDockVm> {
+/// The actions a docked ask offers: the view's affordances that declare when
+/// they are visible and are visible for the ask's record. The activate
+/// affordance and affordances with no condition belong to the transcript, not
+/// to an ask. The record is the ask's fields and the chain id, so an
+/// affordance names them as `{record.<field>}`. An affordance the surface does
+/// not admit is already absent from the binding.
+fn dock_actions(
+    binding: &super::content::ViewBinding,
+    instance_key: &crate::ids::RyeOsViewInstanceKey,
+    view_ref: &str,
+    record: &Value,
+) -> Vec<RyeOsTimelineDockActionVm> {
+    let activate = super::view_model::activate_affordance(binding);
+    binding
+        .affordances
+        .iter()
+        .filter_map(|affordance| {
+            let id = affordance.get("id").and_then(Value::as_str)?;
+            affordance.get("visible_when")?;
+            if activate.as_deref() == Some(id) {
+                return None;
+            }
+            let eligibility = super::content::affordance_eligibility(affordance, record);
+            if !eligibility.visible {
+                return None;
+            }
+            Some(RyeOsTimelineDockActionVm {
+                label: affordance
+                    .get("label")
+                    .and_then(Value::as_str)
+                    .unwrap_or(id)
+                    .to_string(),
+                intent: eligibility
+                    .enabled
+                    .then(|| RyeOsUiIntent::InvokeAffordance {
+                        instance_key: instance_key.clone(),
+                        view_ref: view_ref.to_string(),
+                        affordance_id: id.to_string(),
+                        record: record.clone(),
+                    }),
+                disabled_reason: eligibility.disabled_reason,
+            })
+        })
+        .collect()
+}
+
+/// The asks whose latest state is pending, in window order, with the actions
+/// the view offers for each.
+pub(crate) fn pending_asks(
+    binding: &super::content::ViewBinding,
+    response: &Value,
+    items: &[Value],
+    instance_key: &crate::ids::RyeOsViewInstanceKey,
+    view_ref: &str,
+) -> Vec<RyeOsTimelineDockVm> {
     let mut entries = Vec::new();
     window_entries(items, &mut entries);
+    let chain_root_id = response
+        .get("chain_root_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     entries
         .into_iter()
         .filter(|entry| {
             entry.get("type").and_then(Value::as_str) == Some("ask")
                 && entry.get("state").and_then(Value::as_str) == Some("pending")
         })
-        .map(|entry| RyeOsTimelineDockVm {
-            id: entry
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            entry: entry_vm(entry),
+        .map(|entry| {
+            let slot_text = |name: &str| slot(entry, name);
+            // Without the fence fields an ask cannot be answered from here.
+            let actions = match (slot_text("approval_id"), slot_text("request_digest")) {
+                (Some(approval_id), Some(request_digest)) if !chain_root_id.is_empty() => {
+                    let record = serde_json::json!({
+                        "type": "ask",
+                        "state": "pending",
+                        "chain_root_id": chain_root_id,
+                        "approval_id": approval_id,
+                        "request_digest": request_digest,
+                        "accept_allowed": slot_text("accept_allowed") == Some("true"),
+                    });
+                    dock_actions(binding, instance_key, view_ref, &record)
+                }
+                _ => Vec::new(),
+            };
+            RyeOsTimelineDockVm {
+                id: entry
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                entry: entry_vm(entry),
+                actions,
+            }
         })
         .collect()
 }
@@ -1162,32 +1254,15 @@ pub(crate) fn fold_timeline_window(
 /// The transient live cognition stream as a trailing block, if the buffer
 /// belongs to the route's current head thread. Rendered accent-toned with a
 /// cursor so it reads as in-progress; it disappears once the durable
-/// timeline is refetched.
+/// timeline is refetched. Whether work is in progress is the status lane's
+/// to say, not this block's.
 pub(crate) fn live_delta_entry(core: &RyeOsCore) -> Option<RyeOsTimelineEntryVm> {
     let head = core.focused_input_route().thread?;
-    // Streaming output for the head thread → render it with a trailing cursor.
-    if let Some(buf) = core.data.live_delta.as_ref()
-        && !buf.text.is_empty()
-        && buf.thread == head
-    {
-        return Some(RyeOsTimelineEntryVm::Block {
-            text: format!("{}▍", buf.text),
-            tone: RyeOsTone::Accent,
-        });
-    }
-    // No streaming tail yet, but the head thread is still running → a quiet
-    // working indicator so the feed reads as alive.
-    if core.head_thread_running(&head) {
-        return Some(RyeOsTimelineEntryVm::Line {
-            primary: "▍ working…".to_string(),
-            meta: None,
-            tone: RyeOsTone::Accent,
-            intent: None,
-            secondary_intent: None,
-            state: None,
-        });
-    }
-    None
+    let buf = core.data.live_delta.as_ref()?;
+    (!buf.text.is_empty() && buf.thread == head).then(|| RyeOsTimelineEntryVm::Block {
+        text: format!("{}▍", buf.text),
+        tone: RyeOsTone::Accent,
+    })
 }
 
 impl RyeOsCore {
@@ -2218,7 +2293,7 @@ mod tests {
             entry("p", "prose", json!({"body": "x"})),
             cluster,
         ];
-        let docked = pending_asks(&items);
+        let docked = pending_asks(&binding, &json!({}), &items, &instance(), "view:t");
         assert_eq!(
             docked.iter().map(|ask| ask.id.as_str()).collect::<Vec<_>>(),
             ["ask:1", "ask:in-cluster"]
@@ -2238,7 +2313,144 @@ mod tests {
                 .flatten()
                 .any(|source| source.key == "item:ask:1")
         );
-        assert!(pending_asks(&[ask_entry("ask:2", "denied")]).is_empty());
+        assert!(
+            pending_asks(
+                &binding,
+                &json!({}),
+                &[ask_entry("ask:2", "denied")],
+                &instance(),
+                "view:t"
+            )
+            .is_empty()
+        );
+    }
+
+    fn answering_binding(admitted: bool) -> super::super::content::ViewBinding {
+        let mut affordances = vec![json!({
+            "id": "older", "label": "Load older",
+            "invoke": {"plane": "ui", "facet": "timeline.window", "value": {"limit": "{record.next_limit}"}}
+        })];
+        if admitted {
+            let invoke = |accept: bool| {
+                json!({
+                    "plane": "rye", "ref": "service:worker-executions/resolve-approval",
+                    "args": {
+                        "chain_root_id": "{record.chain_root_id}",
+                        "approval_id": "{record.approval_id}",
+                        "request_digest": "{record.request_digest}",
+                        "accept": accept
+                    }
+                })
+            };
+            let when = json!({"all": [
+                {"field": "type", "equals": "ask"}, {"field": "state", "equals": "pending"}
+            ]});
+            affordances.push(json!({
+                "id": "accept", "label": "Approve", "producer": "selection",
+                "visible_when": when, "invoke": invoke(true),
+                "enabled_when": {"field": "accept_allowed", "equals": true},
+                "disabled_reason": "cannot accept"
+            }));
+            affordances.push(json!({
+                "id": "decline", "label": "Decline", "producer": "selection",
+                "visible_when": when, "invoke": invoke(false)
+            }));
+        }
+        serde_json::from_value(json!({
+            "widget": "timeline",
+            "sources": { "default": {
+                "ref": "service:ui/ryeos-ui/timeline/thread", "collection": "items"
+            } },
+            "selection": { "activate": "older" },
+            "affordances": affordances
+        }))
+        .unwrap()
+    }
+
+    fn fenced_ask(accept_allowed: &str) -> Value {
+        with(
+            entry(
+                "ask:ap-1",
+                "ask",
+                json!({"headline": "approval requested: write", "approval_id": "ap-1",
+                       "request_digest": "dg-1", "accept_allowed": accept_allowed}),
+            ),
+            "state",
+            json!("pending"),
+        )
+    }
+
+    #[test]
+    fn a_docked_ask_offers_the_actions_the_view_admits_with_only_the_fence() {
+        let response = json!({"chain_root_id": "C-1"});
+        let docked = pending_asks(
+            &answering_binding(true),
+            &response,
+            &[fenced_ask("true")],
+            &instance(),
+            "view:t",
+        );
+        let actions = &docked[0].actions;
+        assert_eq!(
+            actions
+                .iter()
+                .map(|action| action.label.as_str())
+                .collect::<Vec<_>>(),
+            ["Approve", "Decline"]
+        );
+        match &actions[0].intent {
+            Some(RyeOsUiIntent::InvokeAffordance {
+                view_ref,
+                affordance_id,
+                record,
+                ..
+            }) => {
+                assert_eq!(view_ref, "view:t");
+                assert_eq!(affordance_id, "accept");
+                assert_eq!(record["chain_root_id"], "C-1");
+                assert_eq!(record["approval_id"], "ap-1");
+                assert_eq!(record["request_digest"], "dg-1");
+            }
+            other => panic!("expected an affordance invocation, got {other:?}"),
+        }
+
+        // A contract that does not admit accepting disables Approve with its
+        // reason; Decline stays available.
+        let refused = pending_asks(
+            &answering_binding(true),
+            &response,
+            &[fenced_ask("false")],
+            &instance(),
+            "view:t",
+        );
+        let actions = &refused[0].actions;
+        assert_eq!(actions[0].intent, None);
+        assert_eq!(actions[0].disabled_reason.as_deref(), Some("cannot accept"));
+        assert!(actions[1].intent.is_some());
+    }
+
+    #[test]
+    fn an_ask_has_no_actions_where_the_surface_does_not_admit_them_or_without_the_fence() {
+        let response = json!({"chain_root_id": "C-1"});
+        // Observation-only surfaces carry a binding with no answering affordance.
+        let observed = pending_asks(
+            &answering_binding(false),
+            &response,
+            &[fenced_ask("true")],
+            &instance(),
+            "view:t",
+        );
+        assert_eq!(observed.len(), 1);
+        assert!(observed[0].actions.is_empty());
+        // An ask with no digest slot cannot be answered.
+        let unfenced = pending_asks(
+            &answering_binding(true),
+            &response,
+            &[ask_entry("ask:2", "pending")],
+            &instance(),
+            "view:t",
+        );
+        assert!(unfenced[0].actions.is_empty());
     }
 
     #[test]

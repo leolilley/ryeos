@@ -14,7 +14,7 @@ use crate::view_set::{TileState, ViewLocalState};
 mod dialogs;
 mod execution;
 mod session;
-pub use super::timeline::{RyeOsTimelineDockVm, RyeOsTimelineLaneVm};
+pub use super::timeline::{RyeOsTimelineDockActionVm, RyeOsTimelineDockVm, RyeOsTimelineLaneVm};
 pub use dialogs::{RyeOsCommandChoice, RyeOsDialogVm, RyeOsShortcutEntryVm, RyeOsTileIntentVm};
 pub use execution::RyeOsTimelineEntryVm;
 use execution::{facet_backed_response, focused_timeline_entry, retry_intent_for_focused_row};
@@ -1628,7 +1628,13 @@ fn bound_view_vm_keyed(
                 affordance_hints: affordance_hints(binding),
                 entries: folded.entries,
                 lane: super::timeline::timeline_lane(response, window_items),
-                dock: super::timeline::pending_asks(window_items),
+                dock: super::timeline::pending_asks(
+                    binding,
+                    response,
+                    window_items,
+                    instance_key,
+                    view_ref,
+                ),
                 entry_ids,
                 entry_roles,
                 entry_cursors,
@@ -3109,6 +3115,26 @@ fn context_command_items(
             secondary_intent: None,
             enabled: true,
         });
+    }
+
+    // A pending ask docked in the focused timeline offers the view's answering
+    // actions, so a client with no pointer can answer it too.
+    if let Some(RyeOsViewVm::Timeline { dock, .. }) =
+        focused.and_then(|instance| view_vm_for_instance(core, instance))
+    {
+        for ask in dock {
+            for action in ask.actions {
+                if let Some(intent) = action.intent {
+                    items.push(RyeOsCommandChoice {
+                        label: format!("{}: {}", action.label, ask.entry.label()),
+                        hint: "pending ask".to_string(),
+                        intent,
+                        secondary_intent: None,
+                        enabled: true,
+                    });
+                }
+            }
+        }
     }
 
     // The focused row's non-activate affordances (e.g. Cancel on a thread row),

@@ -105,6 +105,19 @@ pub fn draw_foot(
             } => (primary.clone(), meta.clone(), *tone),
             other => (other.label(), None, RyeOsTone::Warn),
         };
+        // The answering actions are listed beside the ask; the command
+        // overlay runs them.
+        let labels: Vec<&str> = ask
+            .actions
+            .iter()
+            .filter(|action| action.intent.is_some())
+            .map(|action| action.label.as_str())
+            .collect();
+        let meta = if labels.is_empty() {
+            meta
+        } else {
+            Some(labels.join(" · "))
+        };
         surface.draw_text(
             x,
             y + 1 + index,
@@ -709,6 +722,7 @@ mod tests {
         let dock = [RyeOsTimelineDockVm {
             id: "ask:1".to_string(),
             entry: line("approval requested: write"),
+            actions: Vec::new(),
         }];
         let mut surface = TextSurface::new(40, 2);
         let rect = Rect {
