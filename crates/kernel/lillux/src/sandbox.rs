@@ -7599,91 +7599,92 @@ mod imp {
         #[test]
         #[ignore = "native namespace component control; explicitly opt in on a supported host"]
         fn sealed_mount_descriptors_do_not_scale_with_mount_count() {
-            const CHILD: &str = "LILLUX_SEALED_MOUNT_FD_CHILD";
             // At two descriptors per mount (retained pin plus inherited
             // source) this many mounts cannot fit under the limit below.
             const MOUNTS: usize = 100;
             const LIMIT: libc::rlim_t = 190;
-            if std::env::var_os(CHILD).is_none() {
-                // Namespace creation needs a single-threaded process, so the
-                // child runs the test on its main thread.
-                let status = std::process::Command::new(std::env::current_exe().unwrap())
-                    .args([
-                        "--ignored",
-                        "--test-threads=1",
-                        "--exact",
-                        "sandbox::imp::namespace_source_tests::sealed_mount_descriptors_do_not_scale_with_mount_count",
-                        "--nocapture",
-                    ])
-                    .env(CHILD, "1")
-                    .status()
-                    .unwrap();
-                assert!(status.success());
+            // Namespace creation needs a single-threaded process and the
+            // limit must not leak into the harness, so the work runs in a
+            // forked child that reports through its exit status.
+            let pid = unsafe { libc::fork() };
+            assert!(pid >= 0);
+            if pid != 0 {
+                let mut status = 0;
+                assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+                assert!(
+                    libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+                    "forked preparation child failed: status {status}"
+                );
                 return;
             }
-            let sources = ["/bin", "/usr", "/lib", "/lib64"]
-                .into_iter()
-                .filter(|path| Path::new(path).exists())
-                .map(|path| {
-                    (
-                        PathBuf::from(path),
-                        crate::secure_fs::pin_canonical_mount_source(
-                            &std::fs::canonicalize(path).unwrap(),
+            let outcome = std::panic::catch_unwind(|| {
+                let sources = ["/bin", "/usr", "/lib", "/lib64"]
+                    .into_iter()
+                    .filter(|path| Path::new(path).exists())
+                    .map(|path| {
+                        (
+                            PathBuf::from(path),
+                            crate::secure_fs::pin_canonical_mount_source(
+                                &std::fs::canonicalize(path).unwrap(),
+                            )
+                            .unwrap(),
                         )
-                        .unwrap(),
+                    })
+                    .collect::<Vec<_>>();
+                let sealed = (0..MOUNTS)
+                    .map(|index| {
+                        crate::sealed_memfd(c"many-sealed-mounts", format!("{index}").as_bytes())
+                            .unwrap()
+                    })
+                    .collect::<Vec<_>>();
+                let mut request = super::super::tests::minimal_request();
+                request.executable = "/bin/sh".into();
+                request.argv0 = "sh".into();
+                request.cwd = "/".into();
+                request.arguments = vec!["-c".into(), "exit 0".into()];
+                request.mounts = sources
+                    .iter()
+                    .map(|(destination, source)| LinuxSandboxMount {
+                        source_fd: source.inherited_descriptor().unwrap(),
+                        destination: destination.clone(),
+                        access: LinuxSandboxMountAccess::ReadOnly,
+                        layer: 0,
+                    })
+                    .chain(
+                        sealed
+                            .iter()
+                            .enumerate()
+                            .map(|(index, source)| LinuxSandboxMount {
+                                source_fd: source.inherited_descriptor().unwrap(),
+                                destination: PathBuf::from(format!("/sealed/{index}")),
+                                access: LinuxSandboxMountAccess::ReadOnly,
+                                layer: 0,
+                            }),
                     )
-                })
-                .collect::<Vec<_>>();
-            let sealed = (0..MOUNTS)
-                .map(|index| {
-                    crate::sealed_memfd(c"many-sealed-mounts", format!("{index}").as_bytes())
-                        .unwrap()
-                })
-                .collect::<Vec<_>>();
-            let mut request = super::super::tests::minimal_request();
-            request.executable = "/bin/sh".into();
-            request.argv0 = "sh".into();
-            request.cwd = "/".into();
-            request.arguments = vec!["-c".into(), "exit 0".into()];
-            request.mounts = sources
-                .iter()
-                .map(|(destination, source)| LinuxSandboxMount {
-                    source_fd: source.inherited_descriptor().unwrap(),
-                    destination: destination.clone(),
-                    access: LinuxSandboxMountAccess::ReadOnly,
-                    layer: 0,
-                })
-                .chain(
-                    sealed
-                        .iter()
-                        .enumerate()
-                        .map(|(index, source)| LinuxSandboxMount {
-                            source_fd: source.inherited_descriptor().unwrap(),
-                            destination: PathBuf::from(format!("/sealed/{index}")),
-                            access: LinuxSandboxMountAccess::ReadOnly,
-                            layer: 0,
-                        }),
+                    .collect();
+                let expected = LinuxSandboxMountPreparationCommitments::from_admitted_mounts(
+                    &request.mounts,
+                    &[],
                 )
-                .collect();
-            let expected =
-                LinuxSandboxMountPreparationCommitments::from_admitted_mounts(&request.mounts, &[])
-                    .unwrap();
-            // The sandbox child inherits this limit. Every descriptor already
-            // open stays valid; only new allocations are bounded.
-            let limit = libc::rlimit {
-                rlim_cur: LIMIT,
-                rlim_max: LIMIT,
-            };
-            assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
-            let deadline =
-                crate::time::MonotonicDeadline::after(std::time::Duration::from_secs(10));
-            let (mut held, pipes) = super::super::prepare_linux_sandbox_piped(request)
-                .expect("preparation must not exhaust descriptors");
-            let observed = held.mount_preparation_receipt();
-            let cleanup = held.terminate_namespace_for_export_until(deadline);
-            drop((held, pipes, sources, sealed));
-            let observed = observed.expect("mount preparation receipt");
-            assert!(observed.matches_commitments(&expected), "{cleanup:?}");
+                .unwrap();
+                // The sandbox child inherits this limit. Every descriptor already
+                // open stays valid; only new allocations are bounded.
+                let limit = libc::rlimit {
+                    rlim_cur: LIMIT,
+                    rlim_max: LIMIT,
+                };
+                assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+                let deadline =
+                    crate::time::MonotonicDeadline::after(std::time::Duration::from_secs(10));
+                let (mut held, pipes) = super::super::prepare_linux_sandbox_piped(request)
+                    .expect("preparation must not exhaust descriptors");
+                let observed = held.mount_preparation_receipt();
+                let cleanup = held.terminate_namespace_for_export_until(deadline);
+                drop((held, pipes, sources, sealed));
+                let observed = observed.expect("mount preparation receipt");
+                assert!(observed.matches_commitments(&expected), "{cleanup:?}");
+            });
+            unsafe { libc::_exit(i32::from(outcome.is_err())) };
         }
 
         #[test]
