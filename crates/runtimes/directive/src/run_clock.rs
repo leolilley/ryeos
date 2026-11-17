@@ -95,6 +95,31 @@ impl RunClock {
     }
 }
 
+/// The `time_left` tool's answer: where the run stands against its deadline.
+/// Every field but `now_ms` is `null` when the run has no deadline.
+/// `remaining_ms` counts down to the hard stop, the last moment new work can
+/// start; `deadline_at_ms` is when the daemon would kill the execution.
+pub(crate) fn time_left_report(clock: Option<&RunClock>, now_ms: i64) -> serde_json::Value {
+    match clock {
+        Some(clock) => serde_json::json!({
+            "now_ms": now_ms,
+            "deadline_at_ms": clock.end_at_ms(),
+            "remaining_ms": clock.remaining_ms(now_ms),
+            "phase": clock.phase_at(now_ms).as_str(),
+            "wrap_up_at_ms": clock.wrap_up_at_ms(),
+            "hard_stop_at_ms": clock.hard_stop_at_ms(),
+        }),
+        None => serde_json::json!({
+            "now_ms": now_ms,
+            "deadline_at_ms": null,
+            "remaining_ms": null,
+            "phase": null,
+            "wrap_up_at_ms": null,
+            "hard_stop_at_ms": null,
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,5 +182,33 @@ mod tests {
         assert_eq!(clock.remaining_ms(960_000), 10_000);
         assert_eq!(clock.remaining_ms(970_000), 0);
         assert_eq!(clock.remaining_ms(5_000_000), 0);
+    }
+
+    #[test]
+    fn time_left_reports_each_phase_and_nulls_without_a_deadline() {
+        let clock = RunClock::from_limits(&limits(Some(1_000_000), 30, 60)).unwrap();
+        let running = time_left_report(Some(&clock), 100_000);
+        assert_eq!(running["phase"], "running");
+        assert_eq!(running["remaining_ms"], 870_000);
+        assert_eq!(running["deadline_at_ms"], 1_000_000);
+        assert_eq!(running["hard_stop_at_ms"], 970_000);
+        assert_eq!(running["wrap_up_at_ms"], 910_000);
+        assert_eq!(running["now_ms"], 100_000);
+        assert_eq!(time_left_report(Some(&clock), 930_000)["phase"], "wrap_up");
+        let stopped = time_left_report(Some(&clock), 990_000);
+        assert_eq!(stopped["phase"], "hard_stop");
+        assert_eq!(stopped["remaining_ms"], 0);
+
+        let none = time_left_report(None, 5);
+        assert_eq!(none["now_ms"], 5);
+        for field in [
+            "deadline_at_ms",
+            "remaining_ms",
+            "phase",
+            "wrap_up_at_ms",
+            "hard_stop_at_ms",
+        ] {
+            assert!(none[field].is_null(), "{field}");
+        }
     }
 }

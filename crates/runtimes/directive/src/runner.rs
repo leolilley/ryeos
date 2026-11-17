@@ -6,7 +6,7 @@ use crate::budget::BudgetTracker;
 use crate::continuation::ContinuationCheck;
 use crate::directive::{
     DIRECTIVE_RETURN_TOOL, ExecutionConfig, FinishReason, ProviderMessage, ProviderMessageExt,
-    StreamEvent, ToolSchema,
+    StreamEvent, TIME_LEFT_TOOL, ToolSchema,
 };
 use crate::dispatcher::{DispatchKind, Dispatcher};
 use crate::harness::{Harness, HookAction};
@@ -39,13 +39,15 @@ mod request_context;
 
 /// The tools a launch offers the model on its first turn: the tools its
 /// capabilities admit, plus the lifecycle return tool when outputs are
-/// declared. This is the inventory a frame records.
+/// declared and the in-process `time_left` tool when the run has a deadline.
+/// This is the inventory a frame records.
 pub(crate) fn launch_inventory(
     tools: &[ToolSchema],
     effective_caps: &[String],
     outputs: Option<&[OutputSpec]>,
+    run_deadline: bool,
 ) -> Vec<ToolSchema> {
-    visible_provider_tools(tools, effective_caps, outputs, true)
+    visible_provider_tools(tools, effective_caps, outputs, true, run_deadline)
 }
 
 use request_context::{initial_messages, visible_provider_tools};
@@ -1054,11 +1056,15 @@ impl Runner {
 
         let effective_caps = harness.effective_caps().to_vec();
         let dispatcher = Dispatcher::new(tools.clone(), effective_caps);
-        let inventory_tool_names =
-            launch_inventory(&tools, harness.effective_caps(), outputs.as_deref())
-                .into_iter()
-                .map(|tool| tool.name)
-                .collect();
+        let inventory_tool_names = launch_inventory(
+            &tools,
+            harness.effective_caps(),
+            outputs.as_deref(),
+            harness.run_clock().is_some(),
+        )
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
 
         Self {
             messages: initial_messages,
@@ -1258,6 +1264,14 @@ impl Runner {
     ///
     /// Drained ONLY at safe turn boundaries (never between an assistant tool-call
     /// message and its tool results), so the folded wire history is well-formed.
+    /// The `time_left` tool's answer, read from the run clock now.
+    fn time_left_report(&self) -> Value {
+        crate::run_clock::time_left_report(
+            self.harness.run_clock().as_ref(),
+            lillux::time::timestamp_millis(),
+        )
+    }
+
     /// The run deadline's boundary at the start of a turn. At the hard stop
     /// the run stops; in the wrap-up phase the model is told once, as a
     /// durable harness input, that time is short. A recovered provider turn
@@ -1493,6 +1507,7 @@ impl Runner {
                         self.harness.effective_caps(),
                         self.directive_outputs.as_deref(),
                         self.harness.tool_calls_available(),
+                        self.harness.run_clock().is_some(),
                     );
                     if let Some(active_turn) = self.resume_active_provider_turn.take() {
                         turn = active_turn;
@@ -3049,39 +3064,46 @@ impl Runner {
                     index,
                     spawn_counted,
                 } => {
-                    let tool_result: RenderedToolResult = match self
-                        .preflight_tool_call(
-                            &operation_id,
-                            &tool_name,
-                            &raw_args,
-                            &call_id,
-                            spawn_counted,
-                        )
-                        .await
-                    {
-                        Ok(request) => match self.callback.dispatch_action(*request).await {
-                            Ok(response) => {
-                                block_at_directive_recovery_test_cut(
-                                    &self.callback,
-                                    "tool_settled",
-                                )
-                                .await;
-                                self.rendered_success(&tool_name, &response.result)
-                            }
-                            Err(e) if e.runtime_action_outcome_unknown() => {
-                                state = State::RecoveryRequired {
-                                    error: format!(
-                                        "runtime action {operation_id} outcome is unknown: {e}"
-                                    ),
-                                };
-                                continue;
-                            }
-                            Err(e) => Self::rendered_error_envelope(
+                    // `time_left` is answered in process from the run clock; it
+                    // never reaches the daemon.
+                    let local_report =
+                        (tool_name == TIME_LEFT_TOOL).then(|| self.time_left_report());
+                    let tool_result: RenderedToolResult = match local_report {
+                        Some(report) => self.rendered_success(&tool_name, &report),
+                        None => match self
+                            .preflight_tool_call(
+                                &operation_id,
                                 &tool_name,
-                                callback_error_envelope(&e),
-                            ),
+                                &raw_args,
+                                &call_id,
+                                spawn_counted,
+                            )
+                            .await
+                        {
+                            Ok(request) => match self.callback.dispatch_action(*request).await {
+                                Ok(response) => {
+                                    block_at_directive_recovery_test_cut(
+                                        &self.callback,
+                                        "tool_settled",
+                                    )
+                                    .await;
+                                    self.rendered_success(&tool_name, &response.result)
+                                }
+                                Err(e) if e.runtime_action_outcome_unknown() => {
+                                    state = State::RecoveryRequired {
+                                        error: format!(
+                                            "runtime action {operation_id} outcome is unknown: {e}"
+                                        ),
+                                    };
+                                    continue;
+                                }
+                                Err(e) => Self::rendered_error_envelope(
+                                    &tool_name,
+                                    callback_error_envelope(&e),
+                                ),
+                            },
+                            Err(body) => Self::rendered_error_envelope(&tool_name, body),
                         },
-                        Err(body) => Self::rendered_error_envelope(&tool_name, body),
                     };
 
                     if let Err(error) = self
@@ -3118,6 +3140,9 @@ impl Runner {
                         /// Preflight refusal: an error-envelope body that never
                         /// passes the result guard, exactly like the serial path.
                         Immediate(String),
+                        /// Answered in process (`time_left`); folded in call
+                        /// order like a dispatched result.
+                        Local(Value),
                     }
                     let mut prepared: Vec<(String, String, String, BatchWork)> =
                         Vec::with_capacity(pending.len());
@@ -3163,18 +3188,22 @@ impl Runner {
                         let call_id = tc.id.clone().unwrap_or_default();
                         let raw_args = tc.arguments.to_string();
                         let work = if occurrence.counted || self.harness.try_record_tool_call() {
-                            match self
-                                .preflight_tool_call(
-                                    &occurrence.operation_id,
-                                    &tc.name,
-                                    &raw_args,
-                                    &call_id,
-                                    occurrence.spawn_counted,
-                                )
-                                .await
-                            {
-                                Ok(request) => BatchWork::Dispatch(Some(request)),
-                                Err(body) => BatchWork::Immediate(body),
+                            if tc.name == TIME_LEFT_TOOL {
+                                BatchWork::Local(self.time_left_report())
+                            } else {
+                                match self
+                                    .preflight_tool_call(
+                                        &occurrence.operation_id,
+                                        &tc.name,
+                                        &raw_args,
+                                        &call_id,
+                                        occurrence.spawn_counted,
+                                    )
+                                    .await
+                                {
+                                    Ok(request) => BatchWork::Dispatch(Some(request)),
+                                    Err(body) => BatchWork::Immediate(body),
+                                }
                             }
                         } else {
                             BatchWork::Immediate(tool_call_limit_error())
@@ -3229,7 +3258,7 @@ impl Runner {
                                     BatchWork::Dispatch(slot) => {
                                         slot.take().expect("dispatch slot spawns once")
                                     }
-                                    BatchWork::Immediate(_) => {
+                                    BatchWork::Immediate(_) | BatchWork::Local(_) => {
                                         unreachable!("dispatch_indices selects only Dispatch work")
                                     }
                                 };
@@ -3277,6 +3306,7 @@ impl Runner {
                             BatchWork::Immediate(body) => {
                                 Self::rendered_error_envelope(&tool_name, body)
                             }
+                            BatchWork::Local(report) => self.rendered_success(&tool_name, &report),
                             BatchWork::Dispatch(unstarted_request) => match outcomes.remove(&index)
                             {
                                 Some(Ok(response)) => {
@@ -6901,6 +6931,24 @@ mod tests {
             !flag.load(std::sync::atomic::Ordering::Relaxed),
             "a dropped timer stops setting the flag"
         );
+    }
+
+    #[tokio::test]
+    async fn the_time_left_answer_follows_the_runner_clock() {
+        let mock = Arc::new(ScriptedLedger::new("authority"));
+        let runner = ledger_runner_with_policy(mock.clone(), deadline_policy(25_000));
+        let report = runner.time_left_report();
+        assert_eq!(report["phase"], "wrap_up");
+        let remaining = report["remaining_ms"].as_u64().unwrap();
+        assert!((14_000..=15_000).contains(&remaining), "{remaining}");
+        assert_eq!(
+            report["hard_stop_at_ms"].as_i64().unwrap() - report["now_ms"].as_i64().unwrap(),
+            i64::try_from(remaining).unwrap()
+        );
+
+        let no_deadline = ledger_runner(mock).time_left_report();
+        assert!(no_deadline["phase"].is_null());
+        assert!(no_deadline["now_ms"].is_i64());
     }
 
     #[test]
