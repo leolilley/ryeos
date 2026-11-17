@@ -187,19 +187,26 @@ impl InspectionSourcePlan {
 
 /// Stable Operational provenance is not a disposable inspection destination.
 /// All coordinates are protocol-owned; metadata alone issues no native grant.
+///
+/// `marker` is absent exactly when the whole store is absent: no database, no
+/// sidecars and no initialization marker. That is the state an operator
+/// leaves after setting aside a store this binary has no migration for, as
+/// the version refusal instructs; the reset then carries no Operational
+/// authority and the next start creates a fresh store. A store with any file
+/// present but no marker is refused, as before.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct OperationalSourcePlan {
     directory_identity: String,
     roles: [Option<SourceFact>; 4],
-    marker: SourceFact,
+    marker: Option<SourceFact>,
 }
 
 /// The actual original metadata pins, separately retained from signed facts.
 /// No drop/metadata comparison constitutes disposal or funding settlement.
 pub(super) struct OperationalSourcePins {
     roles: [Option<Arc<lillux_sqlite::RetainedOriginalMetadataPin>>; 4],
-    marker: Arc<lillux_sqlite::RetainedOriginalMetadataPin>,
+    marker: Option<Arc<lillux_sqlite::RetainedOriginalMetadataPin>>,
 }
 impl OperationalSourcePins {
     pub(super) fn main(&self) -> Result<&Arc<lillux_sqlite::RetainedOriginalMetadataPin>> {
@@ -207,8 +214,10 @@ impl OperationalSourcePins {
             .as_ref()
             .context("original Operational main pin absent")
     }
-    pub(super) fn marker(&self) -> &Arc<lillux_sqlite::RetainedOriginalMetadataPin> {
-        &self.marker
+    pub(super) fn marker(&self) -> Result<&Arc<lillux_sqlite::RetainedOriginalMetadataPin>> {
+        self.marker
+            .as_ref()
+            .context("original Operational marker pin absent")
     }
     /// Exact original present-role inventory, followed by the marker. These
     /// Arc clones retain the same physical owners; no descriptor is duplicated.
@@ -219,12 +228,12 @@ impl OperationalSourcePins {
             .iter()
             .enumerate()
             .filter_map(|(index, pin)| pin.as_ref().map(|pin| (index as u8, pin.clone())))
-            .chain(std::iter::once((4, self.marker.clone())))
+            .chain(self.marker.iter().map(|marker| (4, marker.clone())))
             .collect()
     }
     pub(super) fn retained_count(&self) -> usize {
         // Inventory size only, never evidence of physical retirement.
-        self.roles.iter().flatten().count() + 1
+        self.roles.iter().flatten().count() + usize::from(self.marker.is_some())
     }
 }
 impl SourceFact {
@@ -290,12 +299,17 @@ impl OperationalSourcePlan {
                     Some(unsafe { lillux_sqlite::RetainedOriginalMetadataPin::issued(pin) });
             }
         }
-        let marker_pin = runtime
-            .open_mount_entry(OsStr::new(
-                ryeos_state::operational::OPERATIONAL_INITIALIZED_FILENAME,
-            ))?
-            .context("established Operational initialization marker absent")?;
-        let marker = SourceFact::capture_pin(runtime, &marker_pin)?;
+        let marker_pin = runtime.open_mount_entry(OsStr::new(
+            ryeos_state::operational::OPERATIONAL_INITIALIZED_FILENAME,
+        ))?;
+        ensure!(
+            marker_pin.is_some() || roles.iter().all(Option::is_none),
+            "established Operational initialization marker absent"
+        );
+        let marker = marker_pin
+            .as_ref()
+            .map(|pin| SourceFact::capture_pin(runtime, pin))
+            .transpose()?;
         let plan = Self {
             directory_identity: serde_json::to_string(&runtime.identity()?)?,
             roles,
@@ -306,7 +320,8 @@ impl OperationalSourcePlan {
         // against the canonical original fact, under this same namespace.
         let pins = OperationalSourcePins {
             roles: pins,
-            marker: unsafe { lillux_sqlite::RetainedOriginalMetadataPin::issued(marker_pin) },
+            marker: marker_pin
+                .map(|pin| unsafe { lillux_sqlite::RetainedOriginalMetadataPin::issued(pin) }),
         };
         plan.require_current(runtime, &pins)?;
         namespace.ensure_protects(runtime)?;
@@ -317,27 +332,34 @@ impl OperationalSourcePlan {
             !self.directory_identity.is_empty(),
             "Operational source directory absent"
         );
+        let Some(marker) = &self.marker else {
+            ensure!(
+                self.roles.iter().all(Option::is_none),
+                "Operational files are present without their initialization marker"
+            );
+            return Ok(());
+        };
         ensure!(
             self.roles[0].is_some(),
             "established Operational main is absent"
         );
-        for fact in self
-            .roles
-            .iter()
-            .flatten()
-            .chain(std::iter::once(&self.marker))
-        {
+        for fact in self.roles.iter().flatten().chain(std::iter::once(marker)) {
             ensure!(
                 fact.byte_length <= i64::MAX as u64,
                 "Operational source extent exceeds native range"
             );
         }
         ensure!(
-            self.marker.byte_length
+            marker.byte_length
                 == ryeos_state::operational::OPERATIONAL_INITIALIZED_CONTENT.len() as u64,
             "Operational initialization marker has invalid extent"
         );
         Ok(())
+    }
+    /// The whole store is absent: there is no Operational authority to
+    /// inspect, retire or carry across the cut.
+    pub(super) fn is_absent(&self) -> bool {
+        self.marker.is_none()
     }
     pub(super) fn validate_with_copies(&self, copies: &[InspectionSourcePlan; 2]) -> Result<()> {
         self.validate()?;
@@ -370,7 +392,7 @@ impl OperationalSourcePlan {
             .map(|(name, fact)| (name, fact.as_ref()))
             .chain(std::iter::once((
                 OsString::from(ryeos_state::operational::OPERATIONAL_INITIALIZED_FILENAME),
-                Some(&self.marker),
+                self.marker.as_ref(),
             )))
         {
             ensure!(
@@ -447,14 +469,19 @@ impl OperationalSourcePlan {
         pins: &OperationalSourcePins,
     ) -> Result<()> {
         self.require_directory(runtime)?;
-        self.marker
-            .require_retained_pin(runtime, pins.marker(), true)?;
-        let current = runtime
-            .open_mount_entry(OsStr::new(
-                ryeos_state::operational::OPERATIONAL_INITIALIZED_FILENAME,
-            ))?
-            .context("Operational marker coordinate disappeared")?;
-        self.marker.require_pin(runtime, &current, true)
+        let current = runtime.open_mount_entry(OsStr::new(
+            ryeos_state::operational::OPERATIONAL_INITIALIZED_FILENAME,
+        ))?;
+        let Some(marker) = &self.marker else {
+            ensure!(
+                current.is_none() && pins.marker.is_none(),
+                "Operational marker appeared after an absent-store admission"
+            );
+            return Ok(());
+        };
+        marker.require_retained_pin(runtime, pins.marker()?, true)?;
+        let current = current.context("Operational marker coordinate disappeared")?;
+        marker.require_pin(runtime, &current, true)
     }
     /// Caller must irreversibly debit the real original read/memory dimensions
     /// before the actual alias-excluding reader. No default debit is supplied.
@@ -465,6 +492,9 @@ impl OperationalSourcePlan {
         debit_original_read: impl FnOnce(u64, u64) -> Result<()>,
     ) -> Result<()> {
         self.require_marker_identity(runtime, pins)?;
+        if self.is_absent() {
+            return Ok(());
+        }
         let expected = ryeos_state::operational::OPERATIONAL_INITIALIZED_CONTENT;
         // The guarded reader allocates and may read one extra growth byte.
         let maximum = u64::try_from(expected.len())?
@@ -577,6 +607,51 @@ mod controls {
         let (copies, _, _) =
             capture_sources(&directory, &temp.path().join("runtime.sqlite3"), false).unwrap();
         (temp, directory, namespace, copies)
+    }
+
+    #[test]
+    fn a_wholly_absent_operational_store_is_admitted_as_carrying_nothing() {
+        let (temp, directory, namespace, copies) = operational_fixture();
+        for name in [
+            ryeos_state::operational::OPERATIONAL_DB_FILENAME,
+            ryeos_state::operational::OPERATIONAL_INITIALIZED_FILENAME,
+        ] {
+            std::fs::remove_file(temp.path().join(name)).unwrap();
+        }
+        let (plan, pins) = OperationalSourcePlan::capture(&directory, &namespace, &copies).unwrap();
+        assert!(plan.is_absent());
+        assert_eq!(pins.retained_count(), 0);
+        assert!(pins.retirement_pins().is_empty());
+        plan.require_current(&directory, &pins).unwrap();
+        plan.require_marker(&directory, &pins, |_, _| {
+            panic!("an absent marker is never read or debited")
+        })
+        .unwrap();
+        // The admission is exact: a marker appearing afterwards is refused.
+        std::fs::write(
+            temp.path()
+                .join(ryeos_state::operational::OPERATIONAL_INITIALIZED_FILENAME),
+            ryeos_state::operational::OPERATIONAL_INITIALIZED_CONTENT,
+        )
+        .unwrap();
+        assert!(plan.require_current(&directory, &pins).is_err());
+    }
+
+    #[test]
+    fn operational_files_without_their_marker_are_refused() {
+        let (temp, directory, namespace, copies) = operational_fixture();
+        std::fs::remove_file(
+            temp.path()
+                .join(ryeos_state::operational::OPERATIONAL_INITIALIZED_FILENAME),
+        )
+        .unwrap();
+        let error = OperationalSourcePlan::capture(&directory, &namespace, &copies)
+            .err()
+            .expect("a partial store is refused");
+        assert!(
+            format!("{error:#}").contains("initialization marker absent"),
+            "{error:#}"
+        );
     }
 
     #[test]

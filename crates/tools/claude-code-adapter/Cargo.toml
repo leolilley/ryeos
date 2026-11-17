@@ -1,0 +1,27 @@
+[package]
+name = "ryeos-claude-code-adapter"
+version = "0.1.0"
+edition = "2024"
+description = "Stdio adapter that speaks the structured-session wire for the claude-code bundle (Claude Code driver, plus a test-only stub)"
+license.workspace = true
+repository = "https://github.com/leolilley/ryeos"
+
+[[bin]]
+name = "claude-code-adapter"
+path = "src/main.rs"
+
+[features]
+default = []
+# Compiles the scripted stub driver. The stub answers sessions without running
+# Claude Code, so it is opt-in: only the test bundle refresh
+# (`populate-bundles.sh --build-profile test`) enables it. A default build has
+# no stub and refuses the stub knob outright.
+stub-driver = []
+
+[dependencies]
+lillux = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+
+[lints]
+workspace = true

@@ -532,6 +532,21 @@ struct NotificationRule {
     observations: Vec<ObservationRule>,
     #[serde(default)]
     ceremony_clear: bool,
+    /// Marks the notification whose durable payload is the execution's
+    /// result. The pushed event carries the marker so the daemon can read the
+    /// result back from the retained observation batch.
+    #[serde(default)]
+    result: bool,
+    /// Where the result payload reports usage. The daemon applies it when
+    /// settling the execution; the bridge only accepts the field.
+    #[serde(default)]
+    #[allow(dead_code)]
+    result_cost: Option<serde_json::Value>,
+    /// Which result value marks a failed turn. The daemon applies it when
+    /// settling the execution; the bridge only accepts the field.
+    #[serde(default)]
+    #[allow(dead_code)]
+    result_status: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1176,8 +1191,24 @@ fn run(lifecycle: &mut BridgeLifecycle) -> Result<()> {
     // The version is checked before the typed decode, so an older profile is
     // refused by its schema rather than by a field the current one dropped.
     require_current_profile_schema(&profile_value)?;
-    let profile: StructuredSessionProfile =
+    let item_route_params =
+        match optional_env(ryeos_engine::route_fixed_params::ROUTE_FIXED_PARAMS_ENV)? {
+            None => Default::default(),
+            Some(encoded) => {
+                let decoded: Value =
+                    serde_json::from_str(&encoded).context("decode item route_fixed_params")?;
+                let params = ryeos_engine::route_fixed_params::parse_route_fixed_params(&decoded)?;
+                ryeos_engine::route_fixed_params::check_route_fixed_params_against_profile(
+                    &profile_value,
+                    &route_set,
+                    &params,
+                )?;
+                params
+            }
+        };
+    let mut profile: StructuredSessionProfile =
         serde_json::from_value(profile_value).context("decode structured-session profile")?;
+    extend_route_fixed_params(&mut profile.routes, &item_route_params)?;
     if profile.schema_version
         != ryeos_engine::structured_session_profile::STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION
     {
@@ -1951,12 +1982,21 @@ fn resolve_pinned_executable_with_delivery(
     if matches.next().is_some() {
         bail!("workload realization id is ambiguous");
     }
-    if realization.mode != ryeos_state::objects::ExternalContentMode::Pinned
+    // A pinned closure (file or tree) is always admissible. The one other
+    // shape is a captured bundle binary: a single regular file whose
+    // manifest carries exactly one entry. A captured tree is never a
+    // workload executable.
+    let captured_single_file = realization.mode
+        == ryeos_state::objects::ExternalContentMode::Captured
+        && realization.kind == ryeos_state::objects::ExternalContentKind::File
+        && realization.entry_count == 1;
+    if (realization.mode != ryeos_state::objects::ExternalContentMode::Pinned
+        && !captured_single_file)
         || !lillux::valid_hash(&realization.manifest_hash)
         || realization.entry_count == 0
         || realization.total_bytes == 0
     {
-        bail!("workload realization is not a non-empty pinned closure");
+        bail!("workload realization is not a non-empty pinned closure or a captured single file");
     }
     let mount = std::path::Path::new(&realization.mount);
     if mount.as_os_str().is_empty()
@@ -3736,7 +3776,7 @@ impl StructuredWorkload {
                     self.emit_command_progress(&observations)?;
                     // The notification's lifecycle authority is request-correlated,
                     // not duplicated in the independent pushed-observation stream.
-                    return self.push_event(json!({"event_type":rule.event_type,"payload":payload,"session_observations":[]}));
+                    return self.push_event(notification_event(&rule, payload, Vec::new()));
                 }
                 if self.profile.routes.iter().any(|route| {
                     route
@@ -3751,11 +3791,7 @@ impl StructuredWorkload {
                 if rule.ceremony_clear {
                     self.ceremony_active = false;
                 }
-                self.push_event(json!({
-                    "event_type":rule.event_type,
-                    "payload":payload,
-                    "session_observations":observations
-                }))
+                self.push_event(notification_event(&rule, payload, observations))
             }
             (None, None) => bail!("structured workload message has neither id nor method"),
         }
@@ -3983,6 +4019,21 @@ impl StructuredWorkload {
             .map_err(|_| anyhow!("structured-session event queue is poisoned"))?
             .push(event)
     }
+}
+
+/// The pushed event for one durable notification. Only a result-marked
+/// notification carries the `result` flag, so every other event keeps its
+/// exact prior shape.
+fn notification_event(rule: &NotificationRule, payload: Value, observations: Vec<Value>) -> Value {
+    let mut event = json!({
+        "event_type":rule.event_type,
+        "payload":payload,
+        "session_observations":observations
+    });
+    if rule.result {
+        event["result"] = Value::Bool(true);
+    }
+    event
 }
 
 fn render_workload_invocation_result(
@@ -4757,6 +4808,30 @@ fn perform_http_request(
     serde_json::from_slice(&body).context("decode structured workload HTTP response")
 }
 
+/// Extend each named route's `fixed_params` with the signed item's pins, before
+/// any command is served. A pin that collides with a field the profile route
+/// already fixes or fills is refused, never overridden; per-command
+/// `apply_route_parameters` then refuses a caller that names a pinned field and
+/// the merged request still passes the route's request schema.
+fn extend_route_fixed_params(
+    routes: &mut [RouteRule],
+    item_params: &ryeos_engine::route_fixed_params::RouteFixedParams,
+) -> Result<()> {
+    for (route_id, fields) in item_params {
+        let route = routes
+            .iter_mut()
+            .find(|route| &route.id == route_id)
+            .ok_or_else(|| anyhow!("item route_fixed_params names undefined route `{route_id}`"))?;
+        for (field, value) in fields {
+            if route.fixed_params.contains_key(field) || route.workspace_fields.contains(field) {
+                bail!("item route_fixed_params cannot override profile field `{field}`");
+            }
+            route.fixed_params.insert(field.clone(), value.clone());
+        }
+    }
+    Ok(())
+}
+
 fn apply_route_parameters(route: &RouteRule, params: &mut Value, workspace: &str) -> Result<()> {
     let object = params
         .as_object_mut()
@@ -5043,6 +5118,28 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
     use std::os::unix::net::UnixStream;
     use std::os::unix::process::CommandExt as _;
+
+    #[test]
+    fn only_the_result_notification_event_carries_the_result_marker() {
+        let profile: Value = serde_json::from_str(include_str!(
+            "../../../../bundles/claude-code/.ai/workers/claude-code/lib/hosted/structured-session.profile.json"
+        ))
+        .unwrap();
+        let rules: Vec<NotificationRule> =
+            serde_json::from_value(profile["notifications"].clone()).unwrap();
+        for rule in rules {
+            let event = notification_event(&rule, json!({"turn_id":"t1"}), Vec::new());
+            if rule.method == "turn/completed" {
+                assert!(rule.result);
+                assert_eq!(event["result"], json!(true));
+            } else {
+                assert!(!rule.result);
+                assert!(event.get("result").is_none(), "{}", rule.method);
+            }
+            assert_eq!(event["payload"], json!({"turn_id":"t1"}));
+            assert_eq!(event["event_type"], json!(rule.event_type));
+        }
+    }
 
     fn external_request_contract(route_id: &str) -> (RouteRule, HashMap<String, Value>) {
         let profile: Value = serde_json::from_str(include_str!(
@@ -5545,6 +5642,46 @@ mod tests {
             let mut params = json!({"authorityOverride": value});
             assert!(apply_route_parameters(&rule, &mut params, "/workspace").is_err());
         }
+    }
+
+    #[test]
+    fn item_route_pins_extend_the_route_and_a_caller_cannot_override_them() {
+        let mut routes = vec![
+            serde_json::from_value::<RouteRule>(json!({
+                "id":"session.start",
+                "method":"thread/start",
+                "effect_class":"session_mutation",
+                "request_schema":"request.json",
+                "response_schema":"response.json",
+                "fixed_params":{"access":"read_write"},
+                "workspace_fields":["cwd"],
+                "result_retention":"ephemeral"
+            }))
+            .unwrap(),
+        ];
+        let pins = ryeos_engine::route_fixed_params::parse_route_fixed_params(
+            &json!({"session.start": {"effort": "high"}}),
+        )
+        .unwrap();
+        extend_route_fixed_params(&mut routes, &pins).unwrap();
+        let mut admitted = json!({"prompt": "go"});
+        apply_route_parameters(&routes[0], &mut admitted, "/workspace").unwrap();
+        assert_eq!(admitted["effort"], "high");
+        assert_eq!(admitted["access"], "read_write");
+        let mut overridden = json!({"effort": "low"});
+        assert!(apply_route_parameters(&routes[0], &mut overridden, "/workspace").is_err());
+        for colliding in ["access", "cwd"] {
+            let pins = ryeos_engine::route_fixed_params::parse_route_fixed_params(
+                &json!({"session.start": {colliding: "x"}}),
+            )
+            .unwrap();
+            assert!(extend_route_fixed_params(&mut routes.clone(), &pins).is_err());
+        }
+        let unknown = ryeos_engine::route_fixed_params::parse_route_fixed_params(
+            &json!({"missing.route": {"a": 1}}),
+        )
+        .unwrap();
+        assert!(extend_route_fixed_params(&mut routes, &unknown).is_err());
     }
 
     #[test]
@@ -6959,6 +7096,54 @@ server.serve_forever()
             .is_err(),
             "a file realization must not discard an executable-member prefix"
         );
+    }
+
+    #[test]
+    fn captured_single_file_is_a_workload_executable_and_nothing_else_captured_is() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("fixture-worker");
+        std::fs::write(&executable, b"fixture").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let sealed = |kind: &str, mode: &str, entries: u64| {
+            serde_json::to_string(&json!([{
+                "id":"fixture",
+                "kind":kind,
+                "mode":mode,
+                "manifest_hash":"a".repeat(64),
+                "entry_count":entries,
+                "total_bytes":7,
+                "mount_root":"project",
+                "mount":"fixture-worker"
+            }]))
+            .unwrap()
+        };
+        let resolve = |sealed: &str| {
+            resolve_pinned_executable(
+                root.path(),
+                sealed,
+                "fixture",
+                std::path::Path::new("fixture-worker"),
+            )
+        };
+        let (descriptor, argv0, authorities) = resolve(&sealed("file", "captured", 1)).unwrap();
+        assert_eq!(std::fs::read(descriptor).unwrap(), b"fixture");
+        assert_eq!(argv0.file_name().unwrap(), "fixture-worker");
+        assert_eq!(authorities.len(), 2);
+        assert!(
+            resolve(&sealed("file", "captured", 2)).is_err(),
+            "a captured file manifest holds exactly one entry"
+        );
+        assert!(
+            resolve(&sealed("file", "captured", 0)).is_err(),
+            "an empty captured manifest is not an executable"
+        );
+        assert!(
+            resolve(&sealed("tree", "captured", 1)).is_err(),
+            "a captured tree is never a workload executable"
+        );
+        assert!(resolve(&sealed("file", "pinned", 1)).is_ok());
     }
 
     #[test]

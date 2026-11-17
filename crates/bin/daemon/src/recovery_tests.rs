@@ -1962,6 +1962,7 @@ fn store_structured_session_capsule(state: &AppState) -> (String, String, serde_
             ready_timeout_ms: 1,
             request_timeout_ms: 1,
             idle_timeout_ms: 1,
+            max_lifetime_seconds_ceiling: 603_600,
         },
         wire: PersistentSessionWireContract {
             channel_env: "RYEOS_SESSION_FD".to_owned(),
@@ -2321,6 +2322,7 @@ async fn hosted_startup_replays_root_outboxes_before_detaching_the_old_worker_ep
                         "request_digest":request_digest,
                         "worker_boot_epoch":1,
                         "response_digest":response_digest,
+                        "succeeded":true,
                         "canonical_batch":response_batch,
                     }),
                 },

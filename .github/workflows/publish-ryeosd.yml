@@ -264,6 +264,46 @@ jobs:
           echo "archive_exists=$ARCHIVE_EXISTS" >> "$GITHUB_OUTPUT"
           echo "checksum_exists=$CHECKSUM_EXISTS" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve immutable node binary assets
+        id: node-binary-assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.qualify.outputs.version }}
+        run: |
+          TAG="v${VERSION}"
+          ARCHIVE="ryeos-node-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          CHECKSUM="${ARCHIVE}.sha256"
+          ARTIFACT_DIR="$RUNNER_TEMP/ryeos-node-binaries-artifacts"
+          ARCHIVE_EXISTS=false
+          CHECKSUM_EXISTS=false
+          [[ ! -e "$ARTIFACT_DIR" ]] || {
+            echo "::error::Node binary artifact workspace already exists: $ARTIFACT_DIR"
+            exit 1
+          }
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            EXISTING_ASSETS="$(gh release view "$TAG" --json assets --jq '.assets[].name')"
+            ARCHIVE_COUNT="$(grep -Fxc "$ARCHIVE" <<<"$EXISTING_ASSETS" || true)"
+            CHECKSUM_COUNT="$(grep -Fxc "$CHECKSUM" <<<"$EXISTING_ASSETS" || true)"
+            if (( ARCHIVE_COUNT > 1 || CHECKSUM_COUNT > 1 )); then
+              echo "::error::Duplicate immutable node binary assets exist for $TAG"
+              exit 1
+            fi
+            if (( ARCHIVE_COUNT == 1 )); then ARCHIVE_EXISTS=true; fi
+            if (( CHECKSUM_COUNT == 1 )); then CHECKSUM_EXISTS=true; fi
+          fi
+          if [[ "$CHECKSUM_EXISTS" != "$ARCHIVE_EXISTS" ]]; then
+            echo "::error::Unsafe partial node binary release state for $TAG; refusing regeneration"
+            exit 1
+          fi
+          if [[ "$ARCHIVE_EXISTS" == true ]]; then
+            mkdir "$ARTIFACT_DIR"
+            gh release download "$TAG" --dir "$ARTIFACT_DIR" --pattern "$ARCHIVE"
+            gh release download "$TAG" --dir "$ARTIFACT_DIR" --pattern "$CHECKSUM"
+            (cd "$ARTIFACT_DIR" && sha256sum --check "$CHECKSUM")
+          fi
+          echo "archive_exists=$ARCHIVE_EXISTS" >> "$GITHUB_OUTPUT"
+          echo "checksum_exists=$CHECKSUM_EXISTS" >> "$GITHUB_OUTPUT"
+
       - name: Assert publisher key secret exists
         env:
           PUBLISHER_KEY: ${{ secrets.RYEOS_PUBLISHER_KEY }}
@@ -378,6 +418,7 @@ jobs:
         env:
           ARCHIVE_EXISTS: ${{ steps.bundle-assets.outputs.archive_exists }}
           WORKLOAD_CLIENT_ARCHIVE_EXISTS: ${{ steps.workload-client-assets.outputs.archive_exists }}
+          NODE_BINARIES_ARCHIVE_EXISTS: ${{ steps.node-binary-assets.outputs.archive_exists }}
           STANDARD_EXISTS: ${{ steps.resolve-images.outputs.standard_exists }}
           CENTRAL_EXISTS: ${{ steps.resolve-images.outputs.central_exists }}
           LOCAL_INFERENCE_EXISTS: ${{ steps.resolve-images.outputs.local_inference_exists }}
@@ -386,6 +427,7 @@ jobs:
           targets=()
           [[ "$ARCHIVE_EXISTS" == true ]] || targets+=(bundle-artifact)
           [[ "$WORKLOAD_CLIENT_ARCHIVE_EXISTS" == true ]] || targets+=(workload-client-artifact)
+          [[ "$NODE_BINARIES_ARCHIVE_EXISTS" == true ]] || targets+=(node-binaries-artifact)
           [[ "$STANDARD_EXISTS" == true ]] || targets+=(standard)
           [[ "$CENTRAL_EXISTS" == true ]] || targets+=(central-host)
           [[ "$LOCAL_INFERENCE_EXISTS" == true ]] || targets+=(local-inference)
@@ -416,6 +458,7 @@ jobs:
             BUILD_DATE=${{ needs.qualify.outputs.build_date }}
             ARTIFACT_DIR=${{ runner.temp }}/ryeos-release-artifacts
             WORKLOAD_CLIENT_ARTIFACT_DIR=${{ runner.temp }}/ryeos-workload-client-artifacts
+            NODE_BINARIES_ARTIFACT_DIR=${{ runner.temp }}/ryeos-node-binaries-artifacts
             STANDARD_TAG=${{ steps.resolve-images.outputs.standard_candidate_tag }}
             CENTRAL_HOST_TAG=${{ steps.resolve-images.outputs.central_candidate_tag }}
             LOCAL_INFERENCE_TAG=${{ steps.resolve-images.outputs.local_inference_candidate_tag }}
@@ -550,6 +593,44 @@ jobs:
             --source-date-epoch "$SOURCE_DATE_EPOCH" \
             --archive "$PUBLISHED_DIR/$(basename "$ARCHIVE")" \
             --checksum "$PUBLISHED_DIR/$(basename "$CHECKSUM")"
+
+      - name: Publish immutable node binary assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.qualify.outputs.version }}
+          ARCHIVE_EXISTS: ${{ steps.node-binary-assets.outputs.archive_exists }}
+          CHECKSUM_EXISTS: ${{ steps.node-binary-assets.outputs.checksum_exists }}
+        run: |
+          TAG="v${VERSION}"
+          ARTIFACT_DIR="$RUNNER_TEMP/ryeos-node-binaries-artifacts"
+          NAME="ryeos-node-${VERSION}-x86_64-unknown-linux-gnu"
+          ARCHIVE="$ARTIFACT_DIR/${NAME}.tar.gz"
+          CHECKSUM="${ARCHIVE}.sha256"
+          test -s "$ARCHIVE"
+          test -s "$CHECKSUM"
+          # The archive holds exactly the node pair and the license, under one
+          # versioned directory, and the checksum names the archive it sits by.
+          EXPECTED_LISTING="$(printf '%s\n' "${NAME}/" "${NAME}/LICENSE" "${NAME}/bin/" "${NAME}/bin/ryeos" "${NAME}/bin/ryeosd")"
+          [[ "$(tar -tzf "$ARCHIVE" | LC_ALL=C sort)" == "$(LC_ALL=C sort <<<"$EXPECTED_LISTING")" ]] || {
+            echo "::error::Node binary archive has unexpected contents"
+            exit 1
+          }
+          (cd "$ARTIFACT_DIR" && sha256sum --check "$(basename "$CHECKSUM")")
+          if [[ "$ARCHIVE_EXISTS" != true ]]; then
+            gh release upload "$TAG" "$ARCHIVE"
+          fi
+          if [[ "$CHECKSUM_EXISTS" != true ]]; then
+            gh release upload "$TAG" "$CHECKSUM"
+          fi
+
+          PUBLISHED_DIR="$RUNNER_TEMP/verified-published-node-binaries"
+          [[ ! -e "$PUBLISHED_DIR" ]]
+          mkdir "$PUBLISHED_DIR"
+          gh release download "$TAG" --dir "$PUBLISHED_DIR" \
+            --pattern "$(basename "$ARCHIVE")" \
+            --pattern "$(basename "$CHECKSUM")"
+          (cd "$PUBLISHED_DIR" && sha256sum --check "$(basename "$CHECKSUM")")
+          cmp "$ARCHIVE" "$PUBLISHED_DIR/$(basename "$ARCHIVE")"
 
       - name: Resolve release image digests
         id: release-digests

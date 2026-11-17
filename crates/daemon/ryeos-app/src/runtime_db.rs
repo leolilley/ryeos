@@ -2511,6 +2511,7 @@ CREATE TABLE IF NOT EXISTS dedicated_session (
     bounded_outcome_json TEXT,
     disposition_resume_state TEXT,
     terminal_reason TEXT,
+    continued_from_placement TEXT,
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
     CHECK (
@@ -2540,6 +2541,13 @@ CREATE INDEX IF NOT EXISTS idx_dedicated_session_owner_state
 
 CREATE INDEX IF NOT EXISTS idx_dedicated_session_chain
     ON dedicated_session(chain_root_id, placement_thread_id);
+
+-- A completed placement's upstream conversation is continued at most once:
+-- the successor names its predecessor placement here, and no second
+-- placement can name the same one.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_dedicated_session_continued_from
+    ON dedicated_session(continued_from_placement)
+    WHERE continued_from_placement IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS dedicated_session_command (
     placement_thread_id TEXT NOT NULL,
@@ -2676,7 +2684,11 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // (`activation_json`, required) and the keyed digests of slot values it was
 // last used with (`slot_value_digests_json`, nullable); an epoch-135 store
 // lacks both columns and refuses.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 136;
+// Epoch 137: `dedicated_session.continued_from_placement` records the
+// completed predecessor placement a worker continuation was admitted from,
+// with a unique partial index so a predecessor is continued at most once; an
+// epoch-136 store lacks the column and refuses.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 137;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -6102,6 +6114,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         not_null: false,
                     },
                     sqlite_schema::ColumnSpec {
+                        name: "continued_from_placement",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
                         name: "created_at_ms",
                         col_type: "INTEGER",
                         pk: false,
@@ -6717,6 +6735,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                 table: "dedicated_session",
                 columns: &["chain_root_id", "placement_thread_id"],
                 unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_dedicated_session_continued_from",
+                table: "dedicated_session",
+                columns: &["continued_from_placement"],
+                unique: true,
             },
             sqlite_schema::IndexSpec {
                 name: "idx_dedicated_session_command_state",
@@ -9340,7 +9364,77 @@ impl RuntimeDb {
         session: NewDedicatedSession<'_>,
         remote_thread_id: Option<&str>,
     ) -> Result<()> {
-        self.admit_dedicated_session_transaction(session, remote_thread_id, None)
+        self.admit_dedicated_session_transaction(session, remote_thread_id, None, None)
+    }
+
+    /// Admit a placement that continues a completed predecessor's upstream
+    /// conversation: it carries the predecessor's upstream session id and
+    /// records the predecessor placement. The unique index on the recorded
+    /// predecessor makes a second continuation of it fail in the same
+    /// transaction that would have admitted it.
+    pub fn admit_dedicated_session_continuing(
+        &self,
+        session: NewDedicatedSession<'_>,
+        remote_thread_id: &str,
+        continued_from_placement: &str,
+    ) -> Result<()> {
+        validate_bounded_runtime_text(
+            "continued-from placement thread id",
+            continued_from_placement,
+            256,
+        )?;
+        self.admit_dedicated_session_transaction(
+            session,
+            Some(remote_thread_id),
+            None,
+            Some(continued_from_placement),
+        )
+    }
+
+    /// The placement already admitted to continue `placement_thread_id`, if
+    /// any.
+    pub fn dedicated_session_continuing(
+        &self,
+        placement_thread_id: &str,
+    ) -> Result<Option<String>> {
+        self.conn.with_sql(|conn| {
+            validate_bounded_runtime_text(
+                "dedicated placement thread id",
+                placement_thread_id,
+                256,
+            )?;
+            Ok(conn
+                .query_row(
+                    "SELECT placement_thread_id FROM dedicated_session
+                      WHERE continued_from_placement=?1",
+                    [placement_thread_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?)
+        })
+    }
+
+    /// The predecessor placement this placement was admitted to continue.
+    pub fn dedicated_session_continued_from(
+        &self,
+        placement_thread_id: &str,
+    ) -> Result<Option<String>> {
+        self.conn.with_sql(|conn| {
+            validate_bounded_runtime_text(
+                "dedicated placement thread id",
+                placement_thread_id,
+                256,
+            )?;
+            Ok(conn
+                .query_row(
+                    "SELECT continued_from_placement FROM dedicated_session
+                      WHERE placement_thread_id=?1",
+                    [placement_thread_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .flatten())
+        })
     }
 
     /// Atomically convert a durable cross-site credential-generation
@@ -9354,7 +9448,12 @@ impl RuntimeDb {
         reservation_id: &str,
     ) -> Result<()> {
         validate_bounded_runtime_text("credential reservation id", reservation_id, 256)?;
-        self.admit_dedicated_session_transaction(session, remote_thread_id, Some(reservation_id))
+        self.admit_dedicated_session_transaction(
+            session,
+            remote_thread_id,
+            Some(reservation_id),
+            None,
+        )
     }
 
     fn admit_dedicated_session_transaction(
@@ -9362,6 +9461,7 @@ impl RuntimeDb {
         session: NewDedicatedSession<'_>,
         remote_thread_id: Option<&str>,
         reservation_id: Option<&str>,
+        continued_from_placement: Option<&str>,
     ) -> Result<()> {
         self.conn.with_sql(|conn| {
             for (label, value) in [
@@ -9445,11 +9545,11 @@ impl RuntimeDb {
                 candidate_validation_hash, publication_result, completion_worker_boot_epoch,
                 completion_command_sequence,
                 completion_request_digest, completion_turn_id, completion_operation_id,
-                bounded_outcome_json, terminal_reason,
+                bounded_outcome_json, terminal_reason, continued_from_placement,
                 created_at_ms, updated_at_ms
              ) SELECT ?1, ?2, ?3, ?4, ?10, 1, ?5, ?6, ?7, ?8, ?9, ?12, NULL,
                        'admitted', 'none', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-                       NULL, ?11, ?11
+                       NULL, ?13, ?11, ?11
                WHERE EXISTS(SELECT 1 FROM credential_profile
                  WHERE profile_id=?8 AND owner_principal=?3 AND credential_generation=?9
                    AND lock_owner=?10 AND state IN ('unauthenticated','enrolling','confirming','active'))",
@@ -9467,6 +9567,7 @@ impl RuntimeDb {
                     session.credential_lock_owner,
                     now,
                     remote_thread_id,
+                    continued_from_placement,
                 ],
             )?;
             if changed != 1 {
@@ -12527,18 +12628,20 @@ impl RuntimeDb {
         placement_thread_id: &str,
         command_sequence: u64,
         worker_boot_epoch: u64,
+        succeeded: bool,
         result: &serde_json::Value,
     ) -> Result<()> {
+        let state = if succeeded { "completed" } else { "failed" };
         self.conn.with_sql(|conn| {
             let result_json = serde_json::to_string(result)?;
             validate_bounded_runtime_text("recovered command result", &result_json, 256 * 1024)?;
             let now = lillux::time::timestamp_millis() as i64;
             let tx = conn.unchecked_transaction()?;
             let changed = tx.execute(
-                "UPDATE dedicated_session_command SET state='completed', result_json=?4, updated_at_ms=?5
+                "UPDATE dedicated_session_command SET state=?6, result_json=?4, updated_at_ms=?5
               WHERE placement_thread_id=?1 AND command_sequence=?2 AND worker_boot_epoch=?3
                 AND state IN ('dispatched','outcome_unknown')",
-                params![placement_thread_id, i64::try_from(command_sequence)?, i64::try_from(worker_boot_epoch)?, result_json, now],
+                params![placement_thread_id, i64::try_from(command_sequence)?, i64::try_from(worker_boot_epoch)?, result_json, now, state],
             )?;
             let session_changed = tx.execute(
                 "UPDATE dedicated_session SET send_boundary='settled',
@@ -12567,14 +12670,16 @@ impl RuntimeDb {
         placement_thread_id: &str,
         command_sequence: u64,
         worker_boot_epoch: u64,
+        succeeded: bool,
         result: &serde_json::Value,
     ) -> Result<()> {
+        let state = if succeeded { "completed" } else { "failed" };
         self.conn.with_sql(|conn| {
             let result_json = serde_json::to_string(result)?;
             validate_bounded_runtime_text("recovered command result", &result_json, 256 * 1024)?;
             let changed = conn.execute(
                 "UPDATE dedicated_session_command
-                SET state='completed', result_json=?4, updated_at_ms=?5
+                SET state=?6, result_json=?4, updated_at_ms=?5
               WHERE placement_thread_id=?1 AND command_sequence=?2 AND worker_boot_epoch=?3
                 AND state IN ('dispatched','outcome_unknown')
                 AND EXISTS(SELECT 1 FROM dedicated_session WHERE placement_thread_id=?1)",
@@ -12583,7 +12688,8 @@ impl RuntimeDb {
                     i64::try_from(command_sequence)?,
                     i64::try_from(worker_boot_epoch)?,
                     result_json,
-                    lillux::time::timestamp_millis() as i64
+                    lillux::time::timestamp_millis() as i64,
+                    state
                 ],
             )?;
             if changed != 1 {
@@ -25896,6 +26002,95 @@ mod tests {
     }
 
     #[test]
+    fn a_predecessor_is_continued_by_at_most_one_placement() {
+        let (_tmp, db) = fresh_db();
+        create_locked_profile(&db, "P-lineage", "worker-lineage");
+        for workspace in ["W-predecessor", "W-successor", "W-rival"] {
+            db.conn
+                .with_sql(|connection| {
+                    Ok(connection.execute(
+                        "INSERT INTO execution_workspace (
+                        workspace_id, thread_id, launch_owner, backend_id,
+                        base_snapshot, root_path, state, created_at_ms, updated_at_ms
+                     ) VALUES (?1, 'T-lineage', 'owner', 'backend',
+                               'a', '/tmp/workspace-lineage', 'ready', 1, 1)",
+                        [workspace],
+                    )?)
+                })
+                .unwrap();
+        }
+        let session = |placement: &'static str, workspace: &'static str| NewDedicatedSession {
+            placement_thread_id: placement,
+            chain_root_id: placement,
+            owner_principal: "fp:operator",
+            admitted_capsule_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            workspace_id: workspace,
+            candidate_required: false,
+            candidate_disposition: DedicatedCandidateDisposition::OwnerDecision,
+            credential_profile_id: "P-lineage",
+            credential_generation: 1,
+            credential_lock_owner: "worker-lineage",
+        };
+        db.admit_dedicated_session_with_remote(
+            session("T-predecessor", "W-predecessor"),
+            Some("upstream-lineage"),
+        )
+        .unwrap();
+        assert_eq!(
+            db.dedicated_session_continuing("T-predecessor").unwrap(),
+            None
+        );
+        assert_eq!(
+            db.dedicated_session_continued_from("T-predecessor")
+                .unwrap(),
+            None
+        );
+
+        db.admit_dedicated_session_continuing(
+            session("T-successor", "W-successor"),
+            "upstream-lineage",
+            "T-predecessor",
+        )
+        .unwrap();
+        assert_eq!(
+            db.dedicated_session_continuing("T-predecessor")
+                .unwrap()
+                .as_deref(),
+            Some("T-successor")
+        );
+        assert_eq!(
+            db.dedicated_session_continued_from("T-successor")
+                .unwrap()
+                .as_deref(),
+            Some("T-predecessor")
+        );
+        assert_eq!(
+            db.dedicated_session("T-successor")
+                .unwrap()
+                .unwrap()
+                .remote_thread_id
+                .as_deref(),
+            Some("upstream-lineage"),
+            "the successor is admitted with the predecessor's upstream session"
+        );
+
+        // The unique lineage index refuses a second continuation of the same
+        // predecessor in the admitting transaction.
+        let error = db
+            .admit_dedicated_session_continuing(
+                session("T-rival", "W-rival"),
+                "upstream-lineage",
+                "T-predecessor",
+            )
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("continued_from_placement"),
+            "{error:#}"
+        );
+        assert!(db.dedicated_session("T-rival").unwrap().is_none());
+    }
+
+    #[test]
     fn dedicated_worker_recovery_retains_prior_boot_and_attaches_next_epoch() {
         let (_tmp, db) = fresh_db();
         create_locked_profile(&db, "P-recover", "worker-recover-1");
@@ -26034,6 +26229,7 @@ mod tests {
             "T-recover",
             recovered_reattach.command_sequence,
             2,
+            true,
             &serde_json::json!({"redacted":true}),
         )
         .unwrap();
@@ -26135,6 +26331,7 @@ mod tests {
             "T-recover",
             terminal_recovered.command_sequence,
             2,
+            true,
             &serde_json::json!({"redacted":true}),
         )
         .unwrap();
@@ -27884,6 +28081,7 @@ mod tests {
             "T-ledger",
             recovered_command.command_sequence,
             1,
+            true,
             &serde_json::json!({"redacted":true,"response_digest":"c".repeat(64)}),
         )
         .unwrap();

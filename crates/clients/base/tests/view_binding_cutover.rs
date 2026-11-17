@@ -46,7 +46,7 @@ const VIEW_BEHAVIOR_GOLDENS: &[(&str, &str)] = &[
     ),
     (
         "view:ryeos/home/overview",
-        "7bee4bf0bd63749a10249d4c29af93c7b4bc4b4e151c1391e2d77176c4e3488e",
+        "c6dad9ccb70adf8e8df83d3f34ddf344bb966046a81d34195818af8877fa6085",
     ),
     (
         "view:ryeos/input",
@@ -70,7 +70,7 @@ const VIEW_BEHAVIOR_GOLDENS: &[(&str, &str)] = &[
     ),
     (
         "view:ryeos/node/events",
-        "f87d2a200935a980a74ba52b3b8b5c6fa3e8a1575fbaf9c052298970ddd11424",
+        "2d0dc2e761a99f230cfb338efa5126682984ea9261939a8628852cd69539b86a",
     ),
     (
         "view:ryeos/node/gc",
@@ -405,6 +405,125 @@ fn activity_sections_expose_their_source_coverage_without_executable_activation(
         );
         assert_eq!(rows[0].primary, "failed");
     }
+}
+
+fn attention_items() -> Value {
+    json!({"attention": [
+        {
+            "id": "approval:A-1", "kind": "approval", "title": "Approval requested",
+            "tone": "warn", "state": "pending",
+            "subject": {"chain_root_id": "T-chain", "thread_id": "T-place"},
+            "detail": {
+                "summary": "command_execution", "approval_id": "A-1",
+                "request_digest": "d",
+            },
+            "actions": {"open": true, "accept": false, "decline": true},
+        },
+        {
+            "id": "failed_run:T-head", "kind": "failed_run", "title": "Run failed",
+            "tone": "danger", "state": "failed",
+            "subject": {"chain_root_id": "T-chain2", "thread_id": "T-head"},
+            "detail": {"summary": "directive:x"},
+            "actions": {"open": true},
+        },
+    ]})
+}
+
+#[test]
+fn home_attention_section_projects_every_kind_through_the_one_item_shape() {
+    let views =
+        ryeos_engine::test_support::workspace_root().join("bundles/ryeos-ui/.ai/views/ryeos");
+    let raw: Value =
+        serde_yaml::from_str(&fs::read_to_string(views.join("home/overview.yaml")).unwrap())
+            .unwrap();
+    let section = raw["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|section| section["collection"] == "attention")
+        .expect("home lists the attention queue");
+    assert!(
+        raw["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|section| section["collection"] != "candidates"),
+        "candidates arrive as items of the one attention list"
+    );
+    let binding: ryeos_client_base::ui::content::SectionBinding =
+        serde_json::from_value(section.clone()).unwrap();
+    let rows = ryeos_client_base::ui::content::project_section(&binding, &attention_items());
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].primary, "Approval requested");
+    assert_eq!(rows[0].meta.as_deref(), Some("command_execution"));
+    assert_eq!(rows[0].tone.as_deref(), Some("warn"));
+    assert_eq!(rows[1].primary, "Run failed");
+    assert_eq!(rows[1].tone.as_deref(), Some("danger"));
+
+    let activate = binding.activate.as_deref().unwrap();
+    let open = raw["affordances"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|affordance| affordance["id"] == activate)
+        .unwrap();
+    assert_eq!(
+        open["invoke"]["merge"]["work"]["thread"],
+        "{record.subject.thread_id}"
+    );
+    assert_eq!(open["invoke"]["open_view"], "view:ryeos/work/overview");
+}
+
+#[test]
+fn review_pending_gates_decisions_on_the_item_actions_map() {
+    let views =
+        ryeos_engine::test_support::workspace_root().join("bundles/ryeos-ui/.ai/views/ryeos");
+    let raw: Value =
+        serde_yaml::from_str(&fs::read_to_string(views.join("review/pending.yaml")).unwrap())
+            .unwrap();
+    assert_eq!(raw["sources"]["default"]["collection"], "attention");
+    let affordance = |id: &str| {
+        raw["affordances"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|affordance| affordance["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    let items = attention_items();
+    let items = items["attention"].as_array().unwrap();
+    let eligibility = |id: &str, record: &Value| {
+        ryeos_client_base::ui::content::affordance_eligibility(&affordance(id), record)
+    };
+
+    // A pending approval the daemon marked accept-ineligible stays visible but
+    // disabled, with the reason; decline stays enabled.
+    let accept = eligibility("accept", &items[0]);
+    assert!(accept.visible && !accept.enabled);
+    assert!(accept.disabled_reason.is_some());
+    let decline = eligibility("decline", &items[0]);
+    assert!(decline.visible && decline.enabled);
+    let mut allowed = items[0].clone();
+    allowed["actions"]["accept"] = json!(true);
+    assert!(eligibility("accept", &allowed).enabled);
+
+    // A failed run offers no decision, only opening its work.
+    assert!(!eligibility("accept", &items[1]).visible);
+    assert!(!eligibility("decline", &items[1]).visible);
+    assert!(eligibility("inspect_work", &items[1]).visible);
+
+    // The decision binds the exact approval through the item's subject and detail.
+    let invoke = &affordance("accept")["invoke"];
+    assert_eq!(
+        invoke["args"]["chain_root_id"],
+        "{record.subject.chain_root_id}"
+    );
+    assert_eq!(invoke["args"]["approval_id"], "{record.detail.approval_id}");
+    assert_eq!(
+        invoke["args"]["request_digest"],
+        "{record.detail.request_digest}"
+    );
 }
 
 #[test]

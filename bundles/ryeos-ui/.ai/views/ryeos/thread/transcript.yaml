@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-16T07:56:53Z:bcb75690df67ebe9a7c2690f36b60e5224ecdfd96c16bef05770d87bef711075:2I9T3JzGJow46NQboKH0rnmrq37+0g+C2U2Y7BEHBlRbzvSUtL4R37pzj0rEQgQ8vK8xH4YOi3voWW/6MkUpAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T04:34:06Z:780739aa81315478568cd50e9387f99771881a245b19e3f730577b7ea20a3160:kJxhB36B2lHaEnXYDhiBDgt2WSGzim41Bw9vlJD56fN0yURhWUoAuB8nJHb5teEjnHfOWWCmUuFSjtW5MibzCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: thread-transcript
 title: Activity
 version: "1.0.0"
@@ -13,8 +13,9 @@ sources:
     ref: service:ui/ryeos-ui/timeline/thread
     params:
       chain_root_id: "@facet:input.route.chain_root"
-      limit: "200"
+      limit: "@facet:timeline.window.limit|200"
     collection: items
+    dynamic_parameters: [since_chain_seq]
 projections:
   expand:
     fields:
@@ -27,5 +28,17 @@ projections:
       - slots.reason
       - slots.tool
       - slots.target
+# Activating the "N older" line widens the window: the service names the wider
+# limit and the affordance writes it to the facet the source reads.
+selection:
+  activate: older
+affordances:
+  - id: older
+    label: Load older
+    invoke:
+      plane: ui
+      facet: timeline.window
+      value:
+        limit: "{record.next_limit}"
 refresh:
   on_hint: thread

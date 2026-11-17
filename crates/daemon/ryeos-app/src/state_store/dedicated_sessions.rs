@@ -17,6 +17,38 @@ impl StateStore {
             .admit_dedicated_session_with_remote(session, Some(remote_thread_id))
     }
 
+    pub fn admit_dedicated_session_continuing(
+        &self,
+        session: NewDedicatedSession<'_>,
+        remote_thread_id: &str,
+        continued_from_placement: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.admit_dedicated_session_continuing(
+            session,
+            remote_thread_id,
+            continued_from_placement,
+        )
+    }
+
+    pub fn dedicated_session_continuing(
+        &self,
+        placement_thread_id: &str,
+    ) -> Result<Option<String>> {
+        let g = self.lock()?;
+        g.runtime_db
+            .dedicated_session_continuing(placement_thread_id)
+    }
+
+    pub fn dedicated_session_continued_from(
+        &self,
+        placement_thread_id: &str,
+    ) -> Result<Option<String>> {
+        let g = self.lock()?;
+        g.runtime_db
+            .dedicated_session_continued_from(placement_thread_id)
+    }
+
     pub fn admit_dedicated_session_from_reservation(
         &self,
         session: NewDedicatedSession<'_>,
@@ -350,6 +382,7 @@ impl StateStore {
         placement_thread_id: &str,
         command_sequence: u64,
         worker_boot_epoch: u64,
+        succeeded: bool,
         result: &Value,
     ) -> Result<()> {
         let g = self.lock()?;
@@ -357,6 +390,7 @@ impl StateStore {
             placement_thread_id,
             command_sequence,
             worker_boot_epoch,
+            succeeded,
             result,
         )
     }
@@ -366,6 +400,7 @@ impl StateStore {
         placement_thread_id: &str,
         command_sequence: u64,
         worker_boot_epoch: u64,
+        succeeded: bool,
         result: &Value,
     ) -> Result<()> {
         let g = self.lock()?;
@@ -373,6 +408,7 @@ impl StateStore {
             placement_thread_id,
             command_sequence,
             worker_boot_epoch,
+            succeeded,
             result,
         )
     }

@@ -34,7 +34,7 @@ ARG PUBLICATION_STAGE=published
 # a mismatched invocation would only miss the cache, never change a binary.
 # SOURCE_DATE_EPOCH and the RYEOS_* build coordinates are deliberately not
 # set here: they change every commit and would defeat the layer.
-FROM rust:1.95-slim@sha256:e14e87345b4d5964ddcc3491d27ee046a0f23820f340c3c1e24da6880141f7c0 AS dependency-toolchain
+FROM rust:1.95-slim-bookworm@sha256:d7482085ff5b415f84dba5647ae71606650bdef00db7aeb69f4b3d170c3e4082 AS dependency-toolchain
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl gzip openssl pkg-config libssl-dev tar xz-utils \
@@ -92,7 +92,8 @@ RUN mkdir -p /usr/local/cargo/git && \
       --package ryeos-external-guest-restoration-verifier \
       --package ryeos-render-sandbox-lifecycle-adapter \
       --package modal-guest-launcher \
-      --package ryeos-modal-sandbox-lifecycle-adapter && \
+      --package ryeos-modal-sandbox-lifecycle-adapter \
+      --package ryeos-claude-code-adapter && \
     cargo chef cook --release --locked --recipe-path recipe.json \
       --package lillux --package ryeos-lillux-oci-hook && \
     RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
@@ -142,7 +143,7 @@ if left:
     sys.exit("workspace artifacts remain: %s" % left)
 PY
 
-FROM rust:1.95-slim@sha256:e14e87345b4d5964ddcc3491d27ee046a0f23820f340c3c1e24da6880141f7c0 AS compiled-publication
+FROM rust:1.95-slim-bookworm@sha256:d7482085ff5b415f84dba5647ae71606650bdef00db7aeb69f4b3d170c3e4082 AS compiled-publication
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl gzip openssl pkg-config libssl-dev tar xz-utils \
@@ -514,6 +515,49 @@ COPY --from=published /out/ /
 
 FROM scratch AS workload-client-artifact
 COPY --from=published /workload-out/ /
+
+# The node pair exactly as the standard image installs it, packaged for hosts
+# that have neither Docker nor Rust. `ryeos-core-tools` is not included: it
+# travels in the bundles archive under core/.ai/bin, which is where a node
+# resolves it. The archive is produced from the same compiled pair that
+# the standard image copies, never from a second build.
+FROM standard-pair AS node-binaries-package
+ARG VERSION
+ARG SOURCE_DATE_EPOCH
+ARG VCS_REF=unknown
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+RUN test -n "$VERSION" && \
+    test -n "$SOURCE_DATE_EPOCH" && \
+    test "$(/build/target/standard/ryeosd build-info --revision)" = "$VCS_REF" && \
+    /build/target/standard/ryeos --version >/dev/null && \
+    name="ryeos-node-${VERSION}-x86_64-unknown-linux-gnu" && \
+    mkdir -p "/node-stage/$name/bin" /node-out && \
+    install -m 0755 /build/target/standard/ryeosd "/node-stage/$name/bin/ryeosd" && \
+    install -m 0755 /build/target/standard/ryeos "/node-stage/$name/bin/ryeos" && \
+    install -m 0644 /build/LICENSE "/node-stage/$name/LICENSE" && \
+    tar -C /node-stage --sort=name --mtime="@${SOURCE_DATE_EPOCH}" \
+      --owner=0 --group=0 --numeric-owner -cf - "$name" \
+      | gzip -n -9 > "/node-out/${name}.tar.gz" && \
+    (cd /node-out && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256")
+
+# The archive is published for plain hosts, so prove it on the oldest base it
+# claims: a stock bookworm image with none of the build's development
+# libraries. The packaged binaries must start there (glibc 2.36 and the
+# runtime shared libraries a fresh host has), or the release fails here
+# instead of shipping an archive that cannot run.
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS node-binaries-verify
+ARG VERSION
+ARG VCS_REF=unknown
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+COPY --from=node-binaries-package /node-out/ /node-out/
+RUN name="ryeos-node-${VERSION}-x86_64-unknown-linux-gnu" && \
+    (cd /node-out && sha256sum --check "${name}.tar.gz.sha256") && \
+    mkdir /verify && tar -C /verify -xzf "/node-out/${name}.tar.gz" && \
+    test "$("/verify/$name/bin/ryeosd" build-info --revision)" = "$VCS_REF" && \
+    "/verify/$name/bin/ryeos" --version >/dev/null
+
+FROM scratch AS node-binaries-artifact
+COPY --from=node-binaries-verify /node-out/ /
 
 FROM scratch AS contained-oci-hook-artifact
 COPY --from=contained-publication /contained-hook-out/ /
@@ -976,7 +1020,7 @@ ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
 # never runs the publication step and holds no publisher key: only the node
 # binaries are compiled here, from the tagged source and lockfile, with the
 # controller's exact native features. The bundles are the released bytes.
-FROM rust:1.95-slim@sha256:e14e87345b4d5964ddcc3491d27ee046a0f23820f340c3c1e24da6880141f7c0 AS controller-release-binaries
+FROM rust:1.95-slim-bookworm@sha256:d7482085ff5b415f84dba5647ae71606650bdef00db7aeb69f4b3d170c3e4082 AS controller-release-binaries
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl gzip openssl pkg-config libssl-dev tar xz-utils \

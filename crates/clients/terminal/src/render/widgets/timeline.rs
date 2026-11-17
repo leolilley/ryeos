@@ -499,6 +499,7 @@ mod tests {
             meta: None,
             tone: RyeOsTone::Neutral,
             intent: None,
+            secondary_intent: None,
         }
     }
 

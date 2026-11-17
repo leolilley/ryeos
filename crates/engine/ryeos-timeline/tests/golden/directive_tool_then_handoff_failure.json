@@ -73,7 +73,8 @@
       "id": "rc:msg:6",
       "exchange": "msg:6",
       "work": 1,
-      "duration_s": 5
+      "duration_s": 5,
+      "seq": 16
     },
     {
       "item": "entry",
@@ -87,7 +88,8 @@
       "counts_as": null,
       "slots": {
         "headline": "failed",
-        "reason": "runtime_exited_without_callback_finalization"
+        "reason": "runtime_exited_without_callback_finalization",
+        "retry_input": "<scrubbed content 2444 chars>"
       },
       "seq": [
         16,

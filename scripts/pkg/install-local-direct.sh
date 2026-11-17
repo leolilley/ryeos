@@ -9,8 +9,8 @@
 #     The set membership is the single source of truth in
 #     scripts/pkg/bundle-sets.sh (standard = core, scheduling, knowledge,
 #     directive, graph, ryeos-docs, ryeos-ui, codex, opencode, web, browser;
-#     development adds central-auth, environment-qualification and
-#     render-sandbox; the lean sets are subsets).
+#     development adds central-auth, environment-qualification,
+#     render-sandbox and claude-code; the lean sets are subsets).
 #   - ryeos init copies bundle sources into ~/.local/share/ryeos
 #
 # Use the AUR flow for package-manager ownership. Use this script for fast

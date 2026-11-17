@@ -1,0 +1,42 @@
+# ryeos:signed:2026-11-17T01:34:29Z:eafc410a7ad9685bc078ceb63d78d1f81e2bc7984204380c6afc649eb19f8760:MI5Jzhxf6PhEByG9KDGhn4CWwPhvUOhCmAycLtEQpZDAuE0b5WIAiHGxTwBJ/+WfKW1dVZdWAITYjes8Z6gRDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "0.1.0"
+category: claude-code
+description: "Run one completion-fenced read-write Claude Code turn and retain its private candidate for owner review."
+config:
+  worker_ref: null
+  environment_binding: environment
+  required_credential_state: active
+  route_set: session
+  allowed_effect_classes:
+    - external_effect
+    - pure_read
+    - session_mutation
+  credential_home_env: RYEOS_WORKLOAD_HOME
+  workspace_env: RYEOS_WORKSPACE
+  require_pinned_cow: true
+  required_terminal_publication: retain_result
+  max_lifetime_seconds: 14400
+  recover_upstream_session: true
+  mode:
+    kind: bounded_turn
+    session_start_route: session.start
+    turn_start_route: turn.start
+    max_uncontacted_attempts: 3
+  candidate_disposition: retained_for_review
+  # Signed ceilings a goal payload cannot set or widen. The session-start
+  # route refuses a goal payload that names a pinned field.
+  route_fixed_params:
+    session.start:
+      effort: high
+      tools: [Read, Grep, Glob, Edit, Write, Bash]
+  # The worker never calls back into RyeOS tools.
+  workload_client_delegation_caps: []
+limits:
+  turns: 1
+  duration_seconds: 15000
+requires:
+  capabilities:
+    declared:
+      - ryeos.runtime.dedicated_session.start
+      - ryeos.runtime.dedicated_session.command
+      - ryeos.runtime.dedicated_session.terminate

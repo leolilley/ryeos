@@ -40,6 +40,17 @@ impl ParserDispatcher {
         }
     }
 
+    /// This dispatcher's parser and handler set, reading and filling `results`
+    /// instead of its own cache. Passes that build a dispatcher each over the
+    /// same parser set share parse results through one cache.
+    pub fn with_parse_results(&self, results: Arc<ParseResultCache>) -> Self {
+        Self {
+            parser_tools: self.parser_tools.clone(),
+            handlers: Arc::clone(&self.handlers),
+            parse_results: results,
+        }
+    }
+
     pub fn with_parser_tools(&self, parser_tools: ParserRegistry) -> Self {
         Self {
             parser_tools,
@@ -227,5 +238,25 @@ impl ParserDispatcher {
                 "parser handler returned unexpected response to validate_config: {other:?}"
             ))),
         }
+    }
+}
+
+#[cfg(test)]
+mod shared_cache_tests {
+    use super::*;
+
+    #[test]
+    fn with_parse_results_replaces_the_cache_and_keeps_the_sets() {
+        let dispatcher =
+            ParserDispatcher::new(ParserRegistry::empty(), Arc::new(HandlerRegistry::empty()));
+        let shared = Arc::new(ParseResultCache::default());
+        let first = dispatcher.with_parse_results(Arc::clone(&shared));
+        let second = dispatcher.with_parse_results(Arc::clone(&shared));
+        assert!(Arc::ptr_eq(&first.parse_results, &second.parse_results));
+        assert!(!Arc::ptr_eq(
+            &first.parse_results,
+            &dispatcher.parse_results
+        ));
+        assert_eq!(first.fingerprint(), dispatcher.fingerprint());
     }
 }
