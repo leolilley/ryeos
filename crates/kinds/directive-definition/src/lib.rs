@@ -429,7 +429,7 @@ pub struct ReplayPlacement {
     pub on_missing: OnMissing,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ReplayTarget {
     /// A top-level key of the rendered assistant message.

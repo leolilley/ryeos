@@ -64,6 +64,23 @@ pub fn plant_provider_priced(
     signer: &SigningKey,
     paid: bool,
 ) -> anyhow::Result<()> {
+    plant_provider_with(root, base_url, signer, paid, "")
+}
+
+/// The stub provider as `plant_provider_priced`, with `schemas_extra` (YAML
+/// whose top-level keys are children of `schemas:`, for example a `reasoning:`
+/// block) spliced in after the fixed streaming and output-limit blocks.
+pub fn plant_provider_with(
+    root: &Path,
+    base_url: &str,
+    signer: &SigningKey,
+    paid: bool,
+    schemas_extra: &str,
+) -> anyhow::Result<()> {
+    let schemas_extra: String = schemas_extra
+        .lines()
+        .map(|line| format!("  {line}\n"))
+        .collect();
     let pricing = if paid {
         r#"pricing:
   input_per_million: "2"
@@ -105,7 +122,7 @@ schemas:
   streaming:
     mode: delta_merge
   output_limit: {{path: max_tokens, semantics: provider_native_output_tokens}}
-{pricing}"#
+{schemas_extra}{pricing}"#
     );
     let signed = lillux::signature::sign_content(&body, signer, "#", None);
     std::fs::write(dir.join("stub.yaml"), signed)?;
@@ -184,6 +201,25 @@ pub fn plant_directive(
     limits: Option<(u64, u64)>,
     signer: &SigningKey,
 ) -> anyhow::Result<()> {
+    plant_directive_with(root, header_extra, limits, None, signer)
+}
+
+/// The probe directive with an optional provider-neutral reasoning policy,
+/// given as the lines under `model.reasoning:` (for example
+/// `"mode: enabled\neffort: high"`).
+pub fn plant_directive_with(
+    root: &Path,
+    header_extra: &str,
+    limits: Option<(u64, u64)>,
+    reasoning: Option<&str>,
+    signer: &SigningKey,
+) -> anyhow::Result<()> {
+    let reasoning: String = reasoning
+        .map(|lines| {
+            let body: String = lines.lines().map(|line| format!("    {line}\n")).collect();
+            format!("  reasoning:\n{body}")
+        })
+        .unwrap_or_default();
     let path = root.join(".ai/directives/probe/run.md");
     std::fs::create_dir_all(path.parent().expect("directive parent"))?;
     let limits = limits
@@ -200,7 +236,7 @@ inputs:
     required: false
 model:
   tier: general
-requires:
+{reasoning}requires:
   capabilities:
     declared:
       - "ryeos.execute.tool.*"
@@ -224,6 +260,13 @@ pub struct RigOptions {
     pub marker_sleep_seconds: u64,
     /// Plant the provider with a signed tariff so spend limits reserve money.
     pub paid_provider: bool,
+    /// YAML spliced under the provider's `schemas:` (see
+    /// `plant_provider_with`), for example a `reasoning:` capture and replay
+    /// declaration. Empty plants the fixed provider unchanged.
+    pub provider_schemas_extra: String,
+    /// Lines under the directive's `model.reasoning:`, when it sets a
+    /// reasoning policy.
+    pub directive_reasoning: Option<String>,
 }
 
 impl Default for RigOptions {
@@ -236,6 +279,8 @@ impl Default for RigOptions {
             nap_seconds: 1.0,
             marker_sleep_seconds: 25,
             paid_provider: false,
+            provider_schemas_extra: String::new(),
+            directive_reasoning: None,
         }
     }
 }
@@ -249,9 +294,49 @@ pub struct Rig {
     /// fixture state was ready (just before the daemon was spawned).
     pub spawn_at: Instant,
     pub started_at: Instant,
+    /// The fixture's publisher key, for re-signing planted items.
+    pub publisher: SigningKey,
 }
 
+/// Where the fixture bundle holding the stub provider lives under the node.
+const PROVIDER_BUNDLE: &str = "fixture-stub-model-config";
+
 impl Rig {
+    /// Re-plants the stub provider with different `schemas_extra`, re-signed
+    /// by the fixture publisher. A launch after a node restart sees the new
+    /// entry, and its configuration hash differs from the old one.
+    pub fn replant_provider(&self, schemas_extra: &str, paid: bool) -> anyhow::Result<()> {
+        let root = self
+            .h
+            .state_path
+            .join(ryeos_engine::AI_DIR)
+            .join("bundles")
+            .join(PROVIDER_BUNDLE);
+        plant_provider_with(
+            &root,
+            &self.stub.base_url,
+            &self.publisher,
+            paid,
+            schemas_extra,
+        )
+    }
+
+    /// Re-plants the probe directive, re-signed, with a different reasoning
+    /// policy. The next launch or resume sees the changed model policy.
+    pub fn replant_directive(
+        &self,
+        header_extra: &str,
+        reasoning: Option<&str>,
+    ) -> anyhow::Result<()> {
+        plant_directive_with(
+            self.project.path(),
+            header_extra,
+            None,
+            reasoning,
+            &self.publisher,
+        )
+    }
+
     pub fn marker_path(&self) -> PathBuf {
         self.aux.path().join("marker.log")
     }
@@ -275,6 +360,7 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
     let stub = StubServer::start(Script::from_yaml_str(script_yaml)?).await;
     let url = stub.base_url.clone();
     let paid_provider = opts.paid_provider;
+    let schemas_extra = opts.provider_schemas_extra.clone();
     let spawn_cell: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
     let spawn_cell_tweak = spawn_cell.clone();
     let started_at = Instant::now();
@@ -286,7 +372,13 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
                 "fixture-stub-model-config",
                 fixture,
                 |bundle_root| {
-                    plant_provider_priced(bundle_root, &url, &fixture.publisher, paid_provider)
+                    plant_provider_with(
+                        bundle_root,
+                        &url,
+                        &fixture.publisher,
+                        paid_provider,
+                        &schemas_extra,
+                    )
                 },
             )
         };
@@ -338,7 +430,13 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
         ),
         &fixture.publisher,
     )?;
-    plant_directive(root, opts.header_extra, opts.limits, &fixture.publisher)?;
+    plant_directive_with(
+        root,
+        opts.header_extra,
+        opts.limits,
+        opts.directive_reasoning.as_deref(),
+        &fixture.publisher,
+    )?;
     Ok(Rig {
         h,
         stub,
@@ -346,6 +444,7 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
         aux,
         spawn_at,
         started_at,
+        publisher: fixture.publisher.clone(),
     })
 }
 

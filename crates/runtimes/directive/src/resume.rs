@@ -3097,6 +3097,84 @@ mod tests {
         assert_eq!(carried[0].role(), "user");
     }
 
+    fn assistant_with_artefact(text: &str, artefact: Value) -> ProviderMessage {
+        ProviderMessage::new(
+            ryeos_provider_contract::Role::Assistant,
+            vec![
+                ryeos_provider_contract::Part::Reasoning(ryeos_provider_contract::ReasoningPart {
+                    text: None,
+                    artefact: Some(ryeos_provider_contract::Artefact(artefact)),
+                }),
+                ryeos_provider_contract::Part::text(text),
+            ],
+        )
+    }
+
+    fn artefacts_of(messages: &[ProviderMessage]) -> Vec<Value> {
+        messages
+            .iter()
+            .flat_map(|message| message.parts.iter())
+            .filter_map(|part| match part {
+                ryeos_provider_contract::Part::Reasoning(reasoning) => reasoning
+                    .artefact
+                    .as_ref()
+                    .map(|artefact| artefact.0.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_successor_keeps_the_artefacts_of_kept_turns_whole_and_drops_the_rest_with_their_turns() {
+        let envelope = |n: u32| json!({"capture": "blocks", "group": "g", "value": {"n": n, "text": "é\u{1F600}"}});
+        let conversation = vec![
+            folded(ProviderMessage::user("launch"), true),
+            folded(assistant_with_artefact("a1", envelope(1)), false),
+            folded(ProviderMessage::user("u2"), false),
+            folded(assistant_with_artefact("a2", envelope(2)), false),
+        ];
+        let all = carry_into_successor(conversation.clone(), 8).unwrap();
+        assert_eq!(artefacts_of(&all), [envelope(1), envelope(2)]);
+        let recent = carry_into_successor(conversation, 1).unwrap();
+        assert_eq!(artefacts_of(&recent), [envelope(2)]);
+    }
+
+    #[test]
+    fn reconstructed_messages_hold_recorded_artefact_parts_unchanged() {
+        let envelope = json!({"capture": "blocks", "group": "g", "value": {"b": [1, 2.5, null]}});
+        let call_envelope = json!({"capture": "sig", "group": "g", "value": {"s": "x"}});
+        let events = vec![
+            ReplayedEventRecord {
+                event_type: "cognition_in".to_string(),
+                payload: input("go"),
+            },
+            ReplayedEventRecord {
+                event_type: "cognition_out".to_string(),
+                payload: json!({
+                    "turn": 1,
+                    "parts": [
+                        {"type": "reasoning", "text": "shown"},
+                        {"type": "reasoning", "artefact": envelope},
+                        {"type": "tool_call", "call_id": "c1", "name": "t",
+                         "arguments": {}, "artefact": call_envelope},
+                    ],
+                    "finish": "tool_calls",
+                }),
+            },
+        ];
+        let messages = reconstruct_messages(&events).unwrap();
+        assert_eq!(artefacts_of(&messages), [envelope]);
+        let call_artefact = messages[1]
+            .parts
+            .iter()
+            .find_map(|part| match part {
+                ryeos_provider_contract::Part::ToolCall(call) => call.artefact.clone(),
+                _ => None,
+            })
+            .expect("the call keeps its artefact");
+        assert_eq!(call_artefact.0, call_envelope);
+    }
+
     #[test]
     fn a_zero_carry_still_keeps_pinned_inputs() {
         let conversation = vec![

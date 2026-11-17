@@ -6570,4 +6570,187 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","
             FinishReason::Length
         );
     }
+
+    // ── Reasoning capture through the stream parser ──────────────────────
+
+    fn capture_rules(rules: Value) -> Vec<ryeos_directive_definition::ReasoningCaptureRule> {
+        serde_json::from_value(rules).expect("capture rules")
+    }
+
+    fn sse(frames: &[Value]) -> String {
+        frames
+            .iter()
+            .map(|frame| format!("data: {frame}\n\n"))
+            .collect()
+    }
+
+    fn delta_frame(delta: Value) -> Value {
+        json!({"choices": [{"index": 0, "delta": delta, "finish_reason": null}]})
+    }
+
+    fn finish_frame(reason: &str) -> Value {
+        json!({"choices": [{"index": 0, "delta": {}, "finish_reason": reason}]})
+    }
+
+    fn parse_with(
+        rules: &[ryeos_directive_definition::ReasoningCaptureRule],
+        frames: &[Value],
+    ) -> Vec<StreamEvent> {
+        let mut state = HashMap::new();
+        let mut events = Vec::new();
+        for frame in frames {
+            events.extend(parse_sse_events_with_state(
+                &sse(std::slice::from_ref(frame)),
+                Some("delta_merge"),
+                None,
+                rules,
+                &mut state,
+            ));
+        }
+        events
+    }
+
+    #[test]
+    fn a_claude_shaped_stream_yields_text_then_one_artefact_per_block() {
+        let rules = capture_rules(json!([
+            {"id": "text", "kind": "text_delta", "fields": ["reasoning_content"]},
+            {"id": "blocks", "kind": "blocks", "field": "thinking_blocks",
+             "merge_keys": ["thinking"], "close_key": "signature",
+             "whole_types": ["redacted_thinking"]}
+        ]));
+        let events = parse_with(
+            &rules,
+            &[
+                delta_frame(json!({"reasoning_content": "hm"})),
+                delta_frame(json!({"thinking_blocks": [{"type": "thinking", "thinking": "hm"}]})),
+                delta_frame(
+                    json!({"thinking_blocks": [{"type": "thinking", "thinking": "", "signature": "SIG"}]}),
+                ),
+                delta_frame(
+                    json!({"thinking_blocks": [{"type": "redacted_thinking", "data": "xx"}]}),
+                ),
+                delta_frame(json!({"content": "hi"})),
+                finish_frame("stop"),
+            ],
+        );
+        let kinds: Vec<&str> = events
+            .iter()
+            .map(|event| match event {
+                StreamEvent::ReasoningDelta(_) => "text",
+                StreamEvent::ReasoningArtefact { .. } => "artefact",
+                StreamEvent::Delta(_) => "content",
+                StreamEvent::Finish { .. } => "finish",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(kinds, ["text", "artefact", "artefact", "content", "finish"]);
+        let StreamEvent::ReasoningArtefact { capture_id, value } = &events[1] else {
+            panic!("artefact")
+        };
+        assert_eq!(capture_id, "blocks");
+        assert_eq!(
+            value,
+            &json!({"type": "thinking", "thinking": "hm", "signature": "SIG"})
+        );
+    }
+
+    #[test]
+    fn a_block_cut_at_the_length_limit_is_dropped_with_a_warning() {
+        let rules = capture_rules(json!([
+            {"id": "blocks", "kind": "blocks", "field": "thinking_blocks",
+             "merge_keys": ["thinking"], "close_key": "signature"}
+        ]));
+        let events = parse_with(
+            &rules,
+            &[
+                delta_frame(json!({"thinking_blocks": [{"type": "thinking", "thinking": "open"}]})),
+                finish_frame("length"),
+            ],
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, StreamEvent::ReasoningArtefact { .. }))
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::Warning { code, .. } if code == "reasoning_artefact_incomplete"
+        )));
+        assert!(matches!(events.last(), Some(StreamEvent::Finish { .. })));
+    }
+
+    #[test]
+    fn a_tool_call_field_rides_only_the_call_that_carried_it() {
+        let rules = capture_rules(json!([
+            {"id": "sig", "kind": "tool_call_field", "field": "extra_content", "merge": "last"}
+        ]));
+        let call = |id: &str, extra: Option<Value>| {
+            let mut entry = json!({"id": id, "type": "function",
+                "function": {"name": "t", "arguments": "{}"}});
+            if let Some(extra) = extra {
+                entry["extra_content"] = extra;
+            }
+            delta_frame(json!({"tool_calls": [entry]}))
+        };
+        let events = parse_with(
+            &rules,
+            &[
+                call("a", Some(json!({"sig": "S"}))),
+                call("b", None),
+                finish_frame("tool_calls"),
+            ],
+        );
+        let uses: Vec<(&Option<String>, &Option<crate::directive::ToolCallArtefact>)> = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::ToolUse { id, artefact, .. } => Some((id, artefact)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(uses.len(), 2);
+        assert_eq!(uses[0].0.as_deref(), Some("a"));
+        assert_eq!(uses[0].1.as_ref().unwrap().value, json!({"sig": "S"}));
+        assert!(uses[1].1.is_none());
+    }
+
+    #[test]
+    fn no_declared_rules_means_no_reasoning_is_read() {
+        let events = parse_with(
+            &[],
+            &[
+                delta_frame(json!({"reasoning_content": "x", "reasoning": "y", "thinking": "z"})),
+                finish_frame("stop"),
+            ],
+        );
+        assert!(events.iter().all(|event| !matches!(
+            event,
+            StreamEvent::ReasoningDelta(_) | StreamEvent::ReasoningArtefact { .. }
+        )));
+    }
+
+    #[test]
+    fn artefact_bytes_count_toward_the_per_turn_cap() {
+        let cap = 131_072_u64;
+        let artefact = |bytes: usize| StreamEvent::ReasoningArtefact {
+            capture_id: "blocks".to_string(),
+            value: json!({"thinking": "x".repeat(bytes)}),
+        };
+        let mut meter = StreamOutputMeter::default();
+        meter
+            .accept(&artefact(100 * 1024), cap, 0)
+            .expect("under the cap");
+        assert!(meter.total_bytes() > 100 * 1024);
+
+        // Thinking returned both as text and inside the block spends the cap
+        // twice, so the doubled turn trips the cap instead of growing the
+        // recorded event past it.
+        let mut doubled = StreamOutputMeter::default();
+        doubled
+            .accept(&StreamEvent::ReasoningDelta("x".repeat(70 * 1024)), cap, 0)
+            .expect("text alone fits");
+        let error = doubled
+            .accept(&artefact(70 * 1024), cap, 0)
+            .expect_err("the second copy exceeds the cap");
+        assert!(error.downcast_ref::<LocalOutputByteLimitError>().is_some());
+    }
 }

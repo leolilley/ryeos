@@ -214,4 +214,50 @@ mod tests {
         let kinds: Vec<_> = parts.iter().map(|part| part.type_name()).collect();
         assert_eq!(kinds, ["reasoning", "text"]);
     }
+
+    #[test]
+    fn artefacts_are_parts_of_their_own_stamped_with_the_group() {
+        let mut builder = PartsBuilder::new(Some("g1"));
+        builder.push_reasoning("shown");
+        builder.push_reasoning_artefact("blocks", json!({"n": 1}));
+        builder.push_reasoning("more");
+        builder.push_call_with_artefact(
+            call(Some("a"), "tool"),
+            Some(ToolCallArtefact {
+                capture_id: "sig".to_string(),
+                value: json!({"s": 1}),
+            }),
+        );
+        let message = builder.finish(1);
+        let envelope = |capture: &str, value: Value| json!({"capture": capture, "group": "g1", "value": value});
+        let parts = serde_json::to_value(&message.parts).unwrap();
+        assert_eq!(
+            parts,
+            json!([
+                {"type": "reasoning", "text": "shown"},
+                {"type": "reasoning", "artefact": envelope("blocks", json!({"n": 1}))},
+                {"type": "reasoning", "text": "more"},
+                {"type": "tool_call", "call_id": "a", "name": "tool", "arguments": {},
+                 "artefact": envelope("sig", json!({"s": 1}))},
+            ])
+        );
+    }
+
+    #[test]
+    fn a_builder_without_a_group_stamps_none() {
+        let mut builder = PartsBuilder::default();
+        builder.push_reasoning_artefact("blocks", json!(1));
+        let parts = serde_json::to_value(&builder.finish(1).parts).unwrap();
+        assert!(parts[0]["artefact"].get("group").is_none());
+    }
+
+    #[test]
+    fn an_interrupted_turn_keeps_complete_artefact_parts() {
+        let mut builder = PartsBuilder::new(Some("g"));
+        builder.push_reasoning_artefact("blocks", json!(1));
+        builder.push_call(call(Some("a"), "tool"));
+        let kept = builder.interrupted_parts();
+        assert_eq!(kept.len(), 1);
+        assert!(matches!(&kept[0], Part::Reasoning(_)));
+    }
 }
