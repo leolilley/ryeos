@@ -261,11 +261,16 @@ config:
     Ok(())
 }
 
-/// Live, non-zombie pids whose environment names `thread_id` as their
-/// `RYEOS_THREAD_ID`: the thread's runtime and anything it started that kept
-/// the environment.
+/// Live, non-zombie pids whose environment names `thread_id` as their thread:
+/// `RYEOSD_THREAD_ID` for a runtime that calls the daemon over its socket (a
+/// directive runtime) and `RYEOS_THREAD_ID` for a tool process. These are the
+/// two names the daemon itself accepts when it verifies a persisted runtime
+/// pid, and the thread's recorded pid is not exposed through the API.
 fn processes_of_thread(thread_id: &str) -> Vec<i32> {
-    let needle = format!("RYEOS_THREAD_ID={thread_id}");
+    let needles = [
+        format!("RYEOSD_THREAD_ID={thread_id}"),
+        format!("RYEOS_THREAD_ID={thread_id}"),
+    ];
     let mut pids = Vec::new();
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return pids;
@@ -283,7 +288,7 @@ fn processes_of_thread(thread_id: &str) -> Vec<i32> {
         };
         let carries = environ
             .split(|byte| *byte == 0)
-            .any(|var| var == needle.as_bytes());
+            .any(|var| needles.iter().any(|needle| var == needle.as_bytes()));
         if carries && pid_alive(pid) {
             pids.push(pid);
         }
