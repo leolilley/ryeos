@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T21:39:36Z:4292514865b17ed910b493a3c8d951266e552fb6cfabc0a9b71f387021e4dd40:2L7YaBrsJuxYpC2opT9m8lWpHvqYKIkNC3ZkEFn9Aq20C3jOCxw7ATelTp8VQEWx7iHkOUuBu0aCOOR+i05ICg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T13:46:05Z:24d56fd8f6dbb5119fab1ea31eb72acdd8f709c57bd649d67dfa01a3f17fd793:naZU02OQcr2CiMAS2tQErTcLKvVfrctURx8nzmg/PkjShOc/pXLWYJdn5vjvfebx4JnpdN/h86QQgYWh/o9sCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, external-execution, runtime-snapshot, qualification, recompose, operator]
@@ -18,7 +18,7 @@ bindings, each composed on a stopped node (see the
 | Binding | Section | Composed by | Pins |
 |---|---|---|---|
 | `render-snapshot` | `runtime_snapshot_production` | `snapshot-compose` | lifecycle adapter generation, snapshot production spec, provider scope, credential generation |
-| `render-snapshot-qualification` | `runtime_snapshot_qualification` | `snapshot-qualification-compose` | the production binding's id and digest, provider spec, restoration verifier, consumer verifier selections |
+| `render-snapshot-qualification` | `runtime_snapshot_qualification` | `snapshot-qualification-compose` | the production binding's id and digest, provider spec, restoration verifier, launch shape, consumer verifier selections |
 | `codex-qualification-session` | `external_execution` | `qualification-session-compose` | lifecycle and provider executables, the snapshot id, the qualified runtime, credential generation |
 
 The ids are the operator's; the names above are the convention these docs use.
@@ -39,7 +39,9 @@ back in line in this order:
    what is installed.
 2. **Derive consumer selections, if any.** When the qualification binding
    selects consumer verifiers, start the node, run
-   `ryeos external-content derive-consumer-qualification-context`, save the
+   `ryeos external-content derive-consumer-qualification-context <policy-ref>
+   <relationship-ref> <subject-manifest-hash>` (the relationship is the one in
+   that Config joining the policy's Worker to the policy), save the
    response's `consumer_verifier_selections` map (scenario id to selection) as
    a JSON file, and stop the node again. The scenario source
    digest is only known to a running node.

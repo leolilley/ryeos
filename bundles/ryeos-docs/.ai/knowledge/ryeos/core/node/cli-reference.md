@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-16T13:27:47Z:c70306990ee08fe4f248013af949bbabd8b1fb21cafecf8cc00708e6e0d6ebe4:j41rHIlsGlDTcAHbos9kTzGeUwX/VwBWlqyn3/nNtRW/7Pi1K84tKmv0TCi33ZWrbV2yODC7J31vIyOMMpGVAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-17T01:35:34Z:82cd443223607c8d11a98dd2df0eaf9a3570c782a7b010fbef2cc8abf4b66e38:hxWgtWhaBCx5eyrabXrBBuYAaPAHUhGBuH1lLGb6iZgLilG95JceIAltgOFvSO1D8U3+00H3u9zCg8vg/s1AAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -627,15 +627,25 @@ a fresh credential generation: provision it with `provision-credential
 ```bash
 ryeos node external-execution snapshot-qualification-compose --id <binding-id> \
   --snapshot-binding <production-id> --provider-spec <provider-spec.json> \
-  --verifier <restoration-verifier-hash> [--consumer-verifiers <file>] \
-  [--contact-timeout-seconds <s>] [--delivery-timeout-seconds <s>] \
-  [--maximum-lifetime-seconds <s>] [--app-root <dir>] [--json]
+  --verifier <restoration-verifier-hash> --launch-shape <file> \
+  [--consumer-verifiers <file>] [--contact-timeout-seconds <s>] \
+  [--delivery-timeout-seconds <s>] [--maximum-lifetime-seconds <s>] [--app-root <dir>] [--json]
 ```
 
 Composes one `runtime_snapshot_qualification` binding anchored to an installed
 production binding: it pins that binding's id and digest and reuses its
-provider settings. `--consumer-verifiers` is a JSON object mapping scenario id
-to a consumer verifier selection (`scenario_source_digest`,
+provider settings. `--launch-shape` is required: a JSON object stating the
+shape every occurrence under the binding is created with, for example
+`{"controller_transport": "https", "sandbox_network_policy": {"kind":
+"allow_list", "hosts": ["controller.example"]}, "network_inputs": {"resolver":
+{"source": "/etc/resolv.conf", "max_bytes": 65536}, "hosts": {"source":
+"/etc/hosts", "max_bytes": 65536}}}` (an https shape declares the resolver and
+hosts sources its launches capture; a relay shape declares none) or `{"controller_transport":
+"relay", "sandbox_network_policy": {"kind": "deny_all"}}`. There is no default
+shape; a composition without the file is refused naming the input. The
+provider sandbox is created under that network policy, and a launch whose
+shape differs is refused. `--consumer-verifiers` is a JSON object mapping
+scenario id to a consumer verifier selection (`scenario_source_digest`,
 `verifier_artifact_hash`, `archive_budget`), the output of the running node's
 consumer qualification context derive. It uses the producer's credential.
 

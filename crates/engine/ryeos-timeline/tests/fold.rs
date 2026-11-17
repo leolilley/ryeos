@@ -85,7 +85,10 @@ fn entry_ids(timeline: &Timeline) -> Vec<(String, String)> {
                     .iter()
                     .map(|e| (e.id.clone(), format!("{:?}", e.kind))),
             ),
-            Item::Recap(_) => {}
+            Item::Recap(r) => ids.extend(entry_ids(&Timeline {
+                items: r.members.clone(),
+                undeclared: Default::default(),
+            })),
         }
     }
     ids
@@ -115,67 +118,245 @@ fn synthetic(seq: i64, ts: &str, event_type: &str, payload: Value) -> Value {
     json!({"chain_seq": seq, "thread_id": "T-1", "ts": ts, "event_type": event_type, "payload": payload})
 }
 
-/// Mechanism test on constructed events: clusters, a recap, and a failure that
-/// breaks a cluster. Real multi-call chains replace this once captured.
-#[test]
-fn consecutive_finished_activities_cluster_and_a_failure_breaks_the_run() {
-    let def = definition();
-    let mut evs = vec![synthetic(
-        1,
-        "2026-11-16T00:00:00Z",
-        "cognition_in",
-        json!({"content": "go"}),
-    )];
-    let mut seq = 2;
-    for (i, truncated) in [None, None, Some("error_envelope"), None, None]
-        .into_iter()
-        .enumerate()
-    {
-        let op = format!("{:064x}", i + 1);
-        evs.push(synthetic(
-            seq,
-            "2026-11-16T00:00:01Z",
-            "tool_call_start",
-            json!({"operation_id": op, "tool": "t"}),
-        ));
-        seq += 1;
-        let mut result = json!({"operation_id": op, "result_size_bytes": 10, "tool": "t"});
-        if let Some(r) = truncated {
-            result["truncated_reason"] = json!(r);
-        }
-        evs.push(synthetic(
-            seq,
-            "2026-11-16T00:00:05Z",
-            "tool_call_result",
-            result,
-        ));
-        seq += 1;
+/// One finished operation as a start and a result event; `failed` makes the
+/// result an error envelope.
+fn op(seq: &mut i64, n: usize, start: &str, end: &str, failed: bool) -> Vec<Value> {
+    let id = format!("{n:064x}");
+    let mut result = json!({"operation_id": id, "result_size_bytes": 10, "tool": "t"});
+    if failed {
+        result["truncated_reason"] = json!("error_envelope");
     }
-    evs.push(synthetic(
-        seq,
-        "2026-11-16T00:00:09Z",
-        "cognition_out",
-        json!({"content": "done"}),
-    ));
-    let timeline = fold(&evs, &def).unwrap();
-    let kinds: Vec<String> = timeline
-        .items
+    let out = vec![
+        synthetic(
+            *seq,
+            start,
+            "tool_call_start",
+            json!({"operation_id": id, "tool": "t"}),
+        ),
+        synthetic(*seq + 1, end, "tool_call_result", result),
+    ];
+    *seq += 2;
+    out
+}
+
+fn say(seq: &mut i64, ts: &str, text: &str) -> Value {
+    *seq += 1;
+    synthetic(*seq - 1, ts, "cognition_out", json!({"content": text}))
+}
+
+fn ask(seq: &mut i64, ts: &str, text: &str) -> Value {
+    *seq += 1;
+    synthetic(*seq - 1, ts, "cognition_in", json!({"content": text}))
+}
+
+fn shape_of(items: &[Item]) -> Vec<String> {
+    items
         .iter()
         .map(|i| match i {
             Item::Entry(e) => format!("{:?}", e.kind),
             Item::Cluster(c) => format!("cluster[{}]", c.headline),
-            Item::Recap(r) => format!("recap[{} work, {:?}s]", r.work, r.duration_s),
+            Item::Recap(r) => format!(
+                "recap[{} work, {:?}s: {}]",
+                r.work,
+                r.duration_s,
+                shape_of(&r.members).join(", ")
+            ),
         })
-        .collect();
+        .collect()
+}
+
+fn shape(evs: &[Value]) -> Vec<String> {
+    shape_of(&fold(evs, &definition()).unwrap().items)
+}
+
+const T0: &str = "2026-11-16T00:00:00Z";
+const T1: &str = "2026-11-16T00:00:01Z";
+const T5: &str = "2026-11-16T00:00:05Z";
+const T9: &str = "2026-11-16T00:00:09Z";
+
+/// A run of finished operations merges under counted nouns; a failed one
+/// escapes and breaks the run; a lone operation stays a row. The exchange has
+/// no outcome yet, so it is live and the turn fold leaves it open.
+#[test]
+fn operations_cluster_and_a_failure_escapes_the_group() {
+    let mut seq = 2;
+    let mut evs = vec![ask(&mut 1, T0, "go")];
+    for (i, failed) in [false, false, true, false, false].into_iter().enumerate() {
+        evs.extend(op(&mut seq, i + 1, T1, T5, failed));
+    }
+    evs.push(say(&mut seq, T9, "done"));
     assert_eq!(
-        kinds,
-        vec![
+        shape(&evs),
+        [
             "Message",
             "cluster[2 operations]",
             "Activity",
             "cluster[2 operations]",
-            "recap[5 work, Some(9)s]",
             "Prose"
+        ]
+    );
+}
+
+/// "Failed" is data: a tone the definition lists escapes even when the
+/// entry's state is a finished one.
+#[test]
+fn escape_policy_is_read_from_the_definition() {
+    let yaml = |escape: &str| {
+        Definition::from_yaml(&format!(
+            r#"
+folds:
+  escape: {escape}
+  group_states: [done]
+events:
+  tool_call_start:
+    - emit: [{{type: activity, key: [payload.id], state: done, counts_as: other, tone: [{{default: warn}}]}}]
+"#
+        ))
+        .unwrap()
+    };
+    let evs: Vec<Value> = (1..=3)
+        .map(|n| synthetic(n, T0, "tool_call_start", json!({"id": n})))
+        .collect();
+    let with = |escape| shape_of(&fold(&evs, &yaml(escape)).unwrap().items);
+    assert_eq!(
+        with("{tones: [warn]}"),
+        ["Activity", "Activity", "Activity"]
+    );
+    assert_eq!(with("{states: [failed]}"), ["cluster[3 other]"]);
+}
+
+/// A link breaks the run of operations around it.
+#[test]
+fn a_link_breaks_a_run() {
+    let mut seq = 2;
+    let mut evs = vec![ask(&mut 1, T0, "go")];
+    evs.extend(op(&mut seq, 1, T1, T5, false));
+    evs.extend(op(&mut seq, 2, T1, T5, false));
+    let b = format!("{:064x}", 2);
+    evs.push(synthetic(
+        seq,
+        T5,
+        "child_thread_spawned",
+        json!({"child_thread_id": "T-9", "item_id": "x", "operation_id": b}),
+    ));
+    seq += 1;
+    evs.extend(op(&mut seq, 3, T1, T5, false));
+    evs.extend(op(&mut seq, 4, T1, T5, false));
+    assert_eq!(
+        shape(&evs),
+        [
+            "Message",
+            "cluster[2 operations]",
+            "Link",
+            "cluster[2 operations]"
+        ]
+    );
+}
+
+/// Two or more consecutive notices fold under the notice noun; a lone one and
+/// notices split by prose stay rows.
+#[test]
+fn consecutive_notices_fold_and_a_lone_one_stays() {
+    let mut seq = 2;
+    let mut evs = vec![ask(&mut 1, T0, "go")];
+    for (kind, payload) in [
+        ("milestone", json!({"kind": "a"})),
+        ("cost_untracked", json!({"model": "m"})),
+        ("milestone", json!({"kind": "b"})),
+    ] {
+        evs.push(synthetic(seq, T1, kind, payload));
+        seq += 1;
+    }
+    evs.push(say(&mut seq, T5, "ok"));
+    evs.push(synthetic(seq, T9, "milestone", json!({"kind": "c"})));
+    assert_eq!(
+        shape(&evs),
+        ["Message", "cluster[3 system events]", "Prose", "Marker"]
+    );
+}
+
+/// A finished exchange folds its work under one recap with the duration of
+/// the stretch; the next exchange is live and stays open.
+#[test]
+fn a_finished_turn_folds_and_a_live_one_stays_open() {
+    let mut seq = 2;
+    let mut evs = vec![ask(&mut 1, T0, "first")];
+    evs.extend(op(&mut seq, 1, T1, T5, false));
+    evs.extend(op(&mut seq, 2, T5, T9, false));
+    evs.push(say(&mut seq, T9, "answer"));
+    evs.push(ask(&mut seq, T9, "second"));
+    evs.extend(op(&mut seq, 3, T1, T5, false));
+    evs.extend(op(&mut seq, 4, T1, T5, false));
+    evs.push(say(&mut seq, T9, "answer two"));
+    assert_eq!(
+        shape(&evs),
+        [
+            "Message",
+            "recap[2 work, Some(8)s: cluster[2 operations]]",
+            "Prose",
+            "Message",
+            "cluster[2 operations]",
+            "Prose"
+        ]
+    );
+}
+
+/// The last exchange finishes when its own outcome follows the answer, and
+/// an exchange without an answer never folds.
+#[test]
+fn an_outcome_finishes_the_last_turn_and_no_answer_keeps_it_open() {
+    let mut seq = 2;
+    let mut evs = vec![ask(&mut 1, T0, "go")];
+    evs.extend(op(&mut seq, 1, T1, T5, false));
+    let unanswered = {
+        let mut e = evs.clone();
+        e.push(synthetic(
+            seq,
+            T9,
+            "thread_failed",
+            json!({"outcome_code": "boom", "message": "x"}),
+        ));
+        e
+    };
+    assert_eq!(shape(&unanswered), ["Message", "Activity", "Outcome"]);
+    evs.push(say(&mut seq, T5, "answer"));
+    evs.push(synthetic(
+        seq,
+        T9,
+        "thread_completed",
+        json!({"outcome_code": "success"}),
+    ));
+    assert_eq!(
+        shape(&evs),
+        [
+            "Message",
+            "recap[1 work, Some(4)s: Activity]",
+            "Prose",
+            "Outcome"
+        ]
+    );
+}
+
+/// A failed operation inside a finished turn stays a visible row and splits
+/// the work into two recaps, so entry order never changes.
+#[test]
+fn a_failure_stays_visible_inside_a_folded_turn() {
+    let mut seq = 2;
+    let mut evs = vec![ask(&mut 1, T0, "go")];
+    evs.extend(op(&mut seq, 1, T1, T5, false));
+    evs.extend(op(&mut seq, 2, T5, T5, true));
+    evs.extend(op(&mut seq, 3, T5, T9, false));
+    evs.push(say(&mut seq, T9, "answer"));
+    evs.push(ask(&mut seq, T9, "next"));
+    assert_eq!(
+        shape(&evs),
+        [
+            "Message",
+            "recap[1 work, Some(4)s: Activity]",
+            "Activity",
+            "recap[1 work, Some(4)s: Activity]",
+            "Prose",
+            "Message"
         ]
     );
 }
@@ -411,6 +592,112 @@ events:
         "grep"
     );
     assert_eq!(find(&timeline, "pro:4/3").unwrap().slots["body"], "done");
+}
+
+/// A lookup without `array`/`find` takes the latest earlier value of the same
+/// thread where `get` resolves, skipping events that lack it.
+#[test]
+fn a_bare_lookup_takes_the_latest_earlier_value_of_the_same_thread() {
+    let def = Definition::from_yaml(
+        r#"
+events:
+  thread_failed:
+    - emit:
+        - type: outcome
+          key: [thread_id]
+          project:
+            retry_input: {lookup: {event: cognition_in, get: payload.content}}
+"#,
+    )
+    .unwrap();
+    let evs = vec![
+        ev(
+            1,
+            "2026-11-16T00:00:00Z",
+            "T-1",
+            "cognition_in",
+            json!({"content": "first"}),
+        ),
+        ev(
+            2,
+            "2026-11-16T00:00:01Z",
+            "T-1",
+            "cognition_in",
+            json!({"content": "second"}),
+        ),
+        ev(
+            3,
+            "2026-11-16T00:00:02Z",
+            "T-2",
+            "cognition_in",
+            json!({"content": "other thread"}),
+        ),
+        ev(
+            4,
+            "2026-11-16T00:00:03Z",
+            "T-1",
+            "cognition_in",
+            json!({"attachments": 1}),
+        ),
+        ev(5, "2026-11-16T00:00:04Z", "T-1", "thread_failed", json!({})),
+        ev(6, "2026-11-16T00:00:05Z", "T-3", "thread_failed", json!({})),
+    ];
+    let timeline = fold(&evs, &def).unwrap();
+    assert_eq!(
+        find(&timeline, "out:T-1")
+            .unwrap()
+            .slots
+            .get("retry_input")
+            .map(String::as_str),
+        Some("second")
+    );
+    assert!(
+        !find(&timeline, "out:T-3")
+            .unwrap()
+            .slots
+            .contains_key("retry_input")
+    );
+}
+
+/// Only a failed thread carries `retry_input`; killed and timed-out ones
+/// cannot be continued.
+#[test]
+fn only_a_failed_thread_projects_retry_input() {
+    let def = definition();
+    let run = |terminal: &str| {
+        let evs = vec![
+            ev(
+                1,
+                "2026-11-16T00:00:00Z",
+                "T-1",
+                "cognition_in",
+                json!({"content": "go"}),
+            ),
+            ev(
+                2,
+                "2026-11-16T00:00:01Z",
+                "T-1",
+                terminal,
+                json!({"outcome_code": "x"}),
+            ),
+        ];
+        fold(&evs, &def).unwrap()
+    };
+    let failed = run("thread_failed");
+    assert_eq!(
+        find(&failed, "out:T-1")
+            .unwrap()
+            .slots
+            .get("retry_input")
+            .map(String::as_str),
+        Some("go")
+    );
+    for terminal in ["thread_killed", "thread_timed_out", "thread_completed"] {
+        let timeline = run(terminal);
+        if let Some(entry) = find(&timeline, "out:T-1") {
+            assert!(!entry.slots.contains_key("retry_input"), "{terminal}");
+        }
+    }
 }
 
 fn pushed_in_chunks(all: &[Value], size: usize, def: &Definition) -> Timeline {

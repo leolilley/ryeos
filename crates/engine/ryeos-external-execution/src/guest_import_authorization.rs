@@ -1,8 +1,10 @@
 //! Exact controller-to-guest admission before one-shot package import.
 //!
-//! The trusted root must come from the qualified installed guest runtime.
-//! A separate root-signed assignment delegates the per-occurrence owner key;
-//! neither that key nor the assignment may be inferred from the upload.
+//! The controller-signed assignment arrives through the launch the controller
+//! sets and names the controller key it verifies under. It delegates the
+//! per-occurrence owner key; neither that key nor the assignment may be
+//! inferred from the upload. The installed runtime contributes its measured
+//! manifest identity, not a trust root.
 
 use anyhow::{Context as _, Result, ensure};
 use lillux::crypto::{Signature, Signer as _, SigningKey, Verifier as _, VerifyingKey};
@@ -18,7 +20,6 @@ use crate::guest_runtime_product::{
     GuestOwnerRuntimeManifestIdentity, derive_guest_owner_runtime_manifest_identity,
 };
 
-const CONTROLLER_ROOT_FILE: &str = "controller-root.hex";
 const OWNER_PROFILE_FILE: &str = "guest-owner-profile.json";
 const MAX_OWNER_PROFILE_BYTES: u64 = 4 * 1024;
 
@@ -130,7 +131,6 @@ pub struct ObservedGuestRuntime {
     root: lillux::PinnedDirectory,
     root_identity: lillux::PinnedDirectoryIdentity,
     manifest_hash: String,
-    controller_root: VerifyingKey,
     profile: GuestOwnerRuntimeProfile,
 }
 
@@ -139,27 +139,6 @@ impl ObservedGuestRuntime {
         let root_identity = root.identity()?;
         let manifest = ryeos_state::observe_external_content_tree_exact(root)?;
         let manifest_hash = ryeos_state::external_content_manifest_digest(&manifest)?;
-        let root_file = root
-            .open_pinned_regular(OsStr::new(CONTROLLER_ROOT_FILE), false)?
-            .context("installed guest runtime has no controller root")?;
-        ensure!(
-            matches!(root_file.permission_mode()?, 0o444 | 0o644),
-            "installed controller root has unexpected file mode"
-        );
-        let observation = root_file.observation()?;
-        ensure!(
-            observation.size() == 64,
-            "installed controller root has wrong length"
-        );
-        let bytes = root_file.read_stable_bounded(&observation, 64)?;
-        let root_bytes: [u8; 32] = hex::decode(&bytes)?
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("installed controller root changed length"))?;
-        let controller_root = VerifyingKey::from_bytes(&root_bytes)?;
-        ensure!(
-            !controller_root.is_weak(),
-            "installed controller root is weak"
-        );
         let profile_file = root
             .open_pinned_regular(OsStr::new(OWNER_PROFILE_FILE), false)?
             .context("installed guest runtime has no owner profile")?;
@@ -188,7 +167,6 @@ impl ObservedGuestRuntime {
             root: root.try_clone()?,
             root_identity,
             manifest_hash,
-            controller_root,
             profile,
         })
     }
@@ -197,7 +175,7 @@ impl ObservedGuestRuntime {
         &self.manifest_hash
     }
 
-    /// Strict four-entry owner-product measurement for a restored snapshot.
+    /// Strict three-entry owner-product measurement for a restored snapshot.
     /// This is intentionally separate from generic installed-runtime
     /// observation and grants no provider or snapshot identity by itself.
     pub fn measure_exact_owner_product(&self) -> Result<GuestOwnerRuntimeManifestIdentity> {
@@ -210,10 +188,8 @@ impl ObservedGuestRuntime {
             ryeos_state::external_content_manifest_digest(&manifest)? == self.manifest_hash,
             "installed runtime changed before owner-product measurement"
         );
-        let identity = derive_guest_owner_runtime_manifest_identity(
-            &serde_json::to_value(&manifest)?,
-            &self.controller_root,
-        )?;
+        let identity =
+            derive_guest_owner_runtime_manifest_identity(&serde_json::to_value(&manifest)?)?;
         ensure!(
             identity.manifest_hash == self.manifest_hash,
             "owner-product measurement changed manifest identity"
@@ -236,9 +212,7 @@ impl ObservedGuestRuntime {
         );
         let current = Self::observe(&self.root)?;
         ensure!(
-            current.manifest_hash == self.manifest_hash
-                && current.controller_root == self.controller_root
-                && current.profile == self.profile,
+            current.manifest_hash == self.manifest_hash && current.profile == self.profile,
             "installed guest runtime drifted before operation"
         );
         self.root.ensure_path_binding()?;
@@ -253,7 +227,7 @@ impl ObservedGuestRuntime {
     }
 
     /// A mutable occurrence journal or source may not become an ambient
-    /// entry beneath the exact runtime tree used as the controller-root anchor.
+    /// entry beneath the exact measured runtime tree.
     pub fn require_disjoint_directory_tree(&self, other: &lillux::PinnedDirectory) -> Result<()> {
         self.root.require_disjoint_directory_tree(other)?;
         Ok(())
@@ -270,18 +244,19 @@ impl ObservedGuestRuntime {
         self.recheck()?;
         verify_guest_import_documents(
             signed_import_bytes,
-            &self.controller_root,
             &self.manifest_hash,
             signed_assignment_bytes,
         )
     }
 }
 
-/// Root-authenticated delegation of the exact per-occurrence owner key.
-/// The root key must be pinned by the qualified guest runtime, not supplied
-/// alongside the signed assignment by the provider or uploaded package.
+/// Controller-authenticated delegation of the exact per-occurrence owner key.
+/// The controller key is the one the signed assignment names; it reaches the
+/// guest through the launch the controller sets, never through the uploaded
+/// package.
 pub struct VerifiedGuestOccurrenceAssignment {
     assignment: GuestOccurrenceAssignmentDocument,
+    controller_key: VerifyingKey,
     owner_key: VerifyingKey,
 }
 
@@ -290,17 +265,27 @@ impl VerifiedGuestOccurrenceAssignment {
         self.assignment.borrowed()
     }
 
+    pub fn controller_key(&self) -> &VerifyingKey {
+        &self.controller_key
+    }
+
     pub fn owner_key(&self) -> &VerifyingKey {
         &self.owner_key
     }
 }
 
+/// Sign `assignment` as `controller`. The document must already name the
+/// controller's own public key; a different named key is refused.
 pub fn sign_guest_occurrence_assignment(
     assignment: GuestOccurrenceAssignmentDocument,
-    controller_root: &SigningKey,
+    controller: &SigningKey,
 ) -> Result<SignedGuestOccurrenceAssignment> {
+    ensure!(
+        assignment.controller_public_key_hex == hex::encode(controller.verifying_key().to_bytes()),
+        "guest assignment names a controller key other than its signer's"
+    );
     assignment.validate_shape()?;
-    let signature = controller_root.sign(&assignment.signing_bytes()?);
+    let signature = controller.sign(&assignment.signing_bytes()?);
     Ok(SignedGuestOccurrenceAssignment {
         assignment,
         signature_hex: hex::encode(signature.to_bytes()),
@@ -309,18 +294,8 @@ pub fn sign_guest_occurrence_assignment(
 
 pub fn verify_signed_guest_occurrence_assignment(
     signed: SignedGuestOccurrenceAssignment,
-    trusted_root: &VerifyingKey,
 ) -> Result<VerifiedGuestOccurrenceAssignment> {
-    signed.validate_shape()?;
-    let signature_bytes: [u8; 64] = hex::decode(&signed.signature_hex)?
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("guest assignment signature changed length"))?;
-    trusted_root
-        .verify(
-            &signed.assignment.signing_bytes()?,
-            &Signature::from_bytes(&signature_bytes),
-        )
-        .context("guest assignment was not signed by its installed controller root")?;
+    let controller_key = signed.verify_controller_signature()?;
     let owner_bytes: [u8; 32] = hex::decode(&signed.assignment.owner_public_key_hex)?
         .try_into()
         .map_err(|_| anyhow::anyhow!("guest owner key changed length"))?;
@@ -328,6 +303,7 @@ pub fn verify_signed_guest_occurrence_assignment(
     ensure!(!owner_key.is_weak(), "guest owner key is weak");
     Ok(VerifiedGuestOccurrenceAssignment {
         assignment: signed.assignment,
+        controller_key,
         owner_key,
     })
 }
@@ -400,12 +376,11 @@ fn verify_guest_import_authorization(
 }
 
 /// Parse and join the two different input authorities at the guest importer.
-/// The caller supplies the root key from its independently qualified runtime,
-/// a root-signed assignment through its placement channel, and the separately
-/// delivered signed import. Neither document can define the trusted root.
+/// The caller supplies a controller-signed assignment through its placement
+/// channel and the separately delivered signed import. The uploaded package
+/// can define neither the controller key nor the delegated owner key.
 pub fn verify_guest_import_documents(
     signed_bytes: &[u8],
-    trusted_root: &VerifyingKey,
     installed_guest_runtime_manifest_hash: &str,
     signed_assignment_bytes: &[u8],
 ) -> Result<VerifiedGuestImportAuthorization> {
@@ -425,7 +400,7 @@ pub fn verify_guest_import_documents(
             == signed_assignment_bytes,
         "signed guest occurrence assignment is not canonical"
     );
-    let assignment = verify_signed_guest_occurrence_assignment(signed_assignment, trusted_root)?;
+    let assignment = verify_signed_guest_occurrence_assignment(signed_assignment)?;
     ensure!(
         assignment.assignment().guest_runtime_manifest_hash
             == installed_guest_runtime_manifest_hash,
@@ -441,9 +416,9 @@ pub fn verify_guest_import_documents(
     verify_guest_import_authorization(signed, assignment.owner_key(), &assignment.assignment())
 }
 
-/// The controller signs only an already checked, exact occurrence assignment.
-/// A guest must still verify against its independently provisioned key and
-/// assignment before creating the durable import owner.
+/// The delegated owner signs only an already checked, exact occurrence
+/// assignment. A guest must still verify the controller-signed assignment
+/// that delegates this key before creating the durable import owner.
 pub fn sign_guest_import_authorization(
     authorization: GuestImportAuthorization,
     controller: &SigningKey,
@@ -575,11 +550,9 @@ mod tests {
     }
 
     #[test]
-    fn installed_runtime_observation_rechecks_root_and_all_content_before_import() {
+    fn installed_runtime_observation_rechecks_all_content_before_import() {
         let directory = tempfile::tempdir().unwrap();
         let root_key = SigningKey::from_bytes(&[43; 32]);
-        let root_file = directory.path().join(CONTROLLER_ROOT_FILE);
-        std::fs::write(&root_file, hex::encode(root_key.verifying_key().to_bytes())).unwrap();
         let profile_file = directory.path().join(OWNER_PROFILE_FILE);
         std::fs::write(
             &profile_file,
@@ -636,6 +609,7 @@ mod tests {
                 supervisor_runtime_hash: assignment.supervisor_runtime_hash.into(),
                 guest_runtime_manifest_hash: assignment.guest_runtime_manifest_hash.into(),
                 owner_public_key_hex: hex::encode(owner_key.verifying_key().to_bytes()),
+                controller_public_key_hex: hex::encode(root_key.verifying_key().to_bytes()),
                 attachment_deadline_ms: assignment.attachment_deadline_ms,
             },
             &root_key,
@@ -664,19 +638,12 @@ mod tests {
                 .contains("drifted")
         );
         std::fs::remove_file(directory.path().join("ambient-entry")).unwrap();
-        std::fs::write(
-            &root_file,
-            hex::encode(SigningKey::from_bytes(&[44; 32]).verifying_key().to_bytes()),
-        )
-        .unwrap();
-        assert!(
-            observed
-                .verify_import_documents(&import_bytes, &assignment_bytes)
-                .is_err()
-        );
-        std::fs::set_permissions(&root_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        observed
+            .verify_import_documents(&import_bytes, &assignment_bytes)
+            .unwrap();
+        std::fs::set_permissions(&profile_file, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(ObservedGuestRuntime::observe(&runtime).is_err());
-        std::fs::set_permissions(&root_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(&profile_file, std::fs::Permissions::from_mode(0o644)).unwrap();
         std::fs::write(&profile_file, br#"{"schema":1,"owner_timeout_seconds":6000,"private_source_max_bytes":33554432,"private_source_max_inodes":1024}"#).unwrap();
         assert!(ObservedGuestRuntime::observe(&runtime).is_err());
     }
@@ -769,30 +736,33 @@ mod tests {
             supervisor_runtime_hash: assignment.supervisor_runtime_hash.into(),
             guest_runtime_manifest_hash: assignment.guest_runtime_manifest_hash.into(),
             owner_public_key_hex: hex::encode(controller.verifying_key().to_bytes()),
+            controller_public_key_hex: hex::encode(root.verifying_key().to_bytes()),
             attachment_deadline_ms: assignment.attachment_deadline_ms,
         };
         let signed_bytes = ryeos_external_execution_contract::canonical_json(&signed).unwrap();
+        assert!(
+            sign_guest_occurrence_assignment(
+                assignment_document.clone(),
+                &SigningKey::from_bytes(&[42; 32])
+            )
+            .is_err(),
+            "a signer cannot name another controller's key"
+        );
         let signed_assignment =
             sign_guest_occurrence_assignment(assignment_document.clone(), &root).unwrap();
         let assignment_bytes =
             ryeos_external_execution_contract::canonical_json(&signed_assignment).unwrap();
         let verified = verify_guest_import_documents(
             &signed_bytes,
-            &root.verifying_key(),
             assignment.guest_runtime_manifest_hash,
             &assignment_bytes,
         )
         .unwrap();
         assert_eq!(verified.authorization().occurrence_id, "occ-1");
         assert!(
-            verify_guest_import_documents(
-                &signed_bytes,
-                &root.verifying_key(),
-                &"9".repeat(64),
-                &assignment_bytes,
-            )
-            .is_err(),
-            "root-signed coordinates cannot substitute for installed runtime measurement"
+            verify_guest_import_documents(&signed_bytes, &"9".repeat(64), &assignment_bytes,)
+                .is_err(),
+            "controller-signed coordinates cannot substitute for installed runtime measurement"
         );
 
         let mut different_assignment = assignment_document.clone();
@@ -802,7 +772,6 @@ mod tests {
         assert!(
             verify_guest_import_documents(
                 &signed_bytes,
-                &root.verifying_key(),
                 assignment.guest_runtime_manifest_hash,
                 &ryeos_external_execution_contract::canonical_json(&differently_signed).unwrap(),
             )
@@ -815,18 +784,16 @@ mod tests {
         assert!(
             verify_guest_import_documents(
                 &signed_bytes,
-                &root.verifying_key(),
                 assignment.guest_runtime_manifest_hash,
                 &ryeos_external_execution_contract::canonical_json(&wrong_owner).unwrap(),
             )
             .is_err()
         );
-        let mut altered_signature = signed_assignment;
+        let mut altered_signature = signed_assignment.clone();
         altered_signature.assignment.occurrence_id = "occ-other".into();
         assert!(
             verify_guest_import_documents(
                 &signed_bytes,
-                &root.verifying_key(),
                 assignment.guest_runtime_manifest_hash,
                 &ryeos_external_execution_contract::canonical_json(&altered_signature).unwrap(),
             )
@@ -837,20 +804,22 @@ mod tests {
         assert!(
             verify_guest_import_documents(
                 &signed_bytes,
-                &root.verifying_key(),
                 assignment.guest_runtime_manifest_hash,
                 &padded,
             )
             .is_err()
         );
+        let mut renamed_controller = signed_assignment;
+        renamed_controller.assignment.controller_public_key_hex =
+            hex::encode(SigningKey::from_bytes(&[42; 32]).verifying_key().to_bytes());
         assert!(
             verify_guest_import_documents(
                 &signed_bytes,
-                &SigningKey::from_bytes(&[42; 32]).verifying_key(),
                 assignment.guest_runtime_manifest_hash,
-                &assignment_bytes,
+                &ryeos_external_execution_contract::canonical_json(&renamed_controller).unwrap(),
             )
-            .is_err()
+            .is_err(),
+            "an assignment must verify under the controller key it names"
         );
     }
 

@@ -74,6 +74,29 @@ pub struct ProtocolDescriptor {
     /// direct launch artifact identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_evidence: Option<ryeos_handler_protocol::ExecutionEvidenceProjectorDeclWire>,
+
+    /// What a node must hold to run an item under this protocol, as data.
+    /// Absent means the protocol asks nothing of the node beyond its ordinary
+    /// admission. An item that lists several admissible protocols needs each
+    /// of them to declare a holding so the node can pick the one it meets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holding: Option<ProtocolHolding>,
+}
+
+/// The guarantees and authorities a node holds while it runs a process under
+/// one protocol. The requirements use the node-capability grammar and the
+/// names a node already reports; the authorities reuse the isolation and
+/// settlement vocabularies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProtocolHolding {
+    /// Capabilities a node must report before it may run this protocol.
+    pub requires_guarantees: Vec<lillux::process_control::CapabilityRequirement>,
+    /// Filesystem authority ceiling the process runs under.
+    pub filesystem_authority: crate::isolation::IsolationFilesystemAuthorityCeiling,
+    /// What settlement of the process root the node must observe at the end.
+    pub root_settlement:
+        ryeos_state::external_content::products::qualification::VerifierProcessSettlementAuthority,
 }
 
 /// Signed selection of qualification authority, not a Tool-kind shortcut.
@@ -399,6 +422,51 @@ pub fn validate_persistent_session_protocol(
     Ok(session)
 }
 
+/// Shape of a declared holding, and for a session protocol its agreement with
+/// the session block: the holding's filesystem authority is the one the
+/// workspace authority implies and its root settlement is the one the cleanup
+/// authority implies, so the two cannot contradict each other.
+pub fn validate_protocol_holding(descriptor: &ProtocolDescriptor) -> Result<(), String> {
+    use ryeos_state::external_content::products::qualification::VerifierProcessSettlementAuthority as Settlement;
+
+    let Some(holding) = &descriptor.holding else {
+        return Ok(());
+    };
+    ryeos_state::node_guarantees::validate_required_guarantees(&holding.requires_guarantees)
+        .map_err(|error| format!("holding: {error}"))?;
+    let Some(session) = &descriptor.session else {
+        return Ok(());
+    };
+    let expected_authority = session.workspace_authority.filesystem_ceiling();
+    if holding.filesystem_authority != expected_authority {
+        return Err(format!(
+            "holding filesystem_authority {:?} contradicts the session workspace authority, which implies {expected_authority:?}",
+            holding.filesystem_authority
+        ));
+    }
+    let expected_settlement = match session.cleanup_authority {
+        PersistentSessionCleanupAuthority::DescendantContainment => Settlement::ContainmentEmpty,
+        PersistentSessionCleanupAuthority::TrustedProcessGroup => {
+            Settlement::TrustedProcessGroupAbsent
+        }
+        PersistentSessionCleanupAuthority::LocalProcessScope => Settlement::ScopeEmpty,
+        PersistentSessionCleanupAuthority::NotRequired
+        | PersistentSessionCleanupAuthority::ExternalPlacementIncarnation => {
+            return Err(format!(
+                "holding is not defined for a session whose cleanup authority is {:?}",
+                session.cleanup_authority
+            ));
+        }
+    };
+    if holding.root_settlement != expected_settlement {
+        return Err(format!(
+            "holding root_settlement {:?} contradicts the session cleanup authority, which implies {expected_settlement:?}",
+            holding.root_settlement
+        ));
+    }
+    Ok(())
+}
+
 /// Portable contract shape only; this cannot admit node or driver authority.
 pub fn validate_session_resource_cleanup_contract(
     session: &PersistentSessionProtocol,
@@ -537,6 +605,7 @@ mod tests {
             captured_compatible_callback: None,
             session: None,
             execution_evidence: None,
+            holding: None,
         }
     }
 
@@ -589,6 +658,7 @@ mod tests {
                 max_frame_bytes: 4096,
             }),
             execution_evidence: None,
+            holding: None,
         }
     }
 
@@ -738,5 +808,153 @@ mod tests {
             .unwrap()
             .remove("cleanup_authority");
         assert!(serde_json::from_value::<ProtocolDescriptor>(value).is_err());
+    }
+
+    fn holding_value(
+        guarantees: serde_json::Value,
+        authority: &str,
+        settlement: &str,
+    ) -> ProtocolHolding {
+        serde_json::from_value(serde_json::json!({
+            "requires_guarantees": guarantees,
+            "filesystem_authority": authority,
+            "root_settlement": settlement,
+        }))
+        .unwrap()
+    }
+
+    fn held_session(
+        cleanup: PersistentSessionCleanupAuthority,
+        workspace: PersistentSessionWorkspaceAuthority,
+        holding: ProtocolHolding,
+    ) -> ProtocolDescriptor {
+        let mut descriptor =
+            persistent_protocol(PersistentSessionProcessMode::ExclusiveSession, cleanup);
+        descriptor.session.as_mut().unwrap().workspace_authority = workspace;
+        descriptor.holding = Some(holding);
+        descriptor
+    }
+
+    #[test]
+    fn a_holding_that_agrees_with_its_session_block_is_valid() {
+        let contained = held_session(
+            PersistentSessionCleanupAuthority::DescendantContainment,
+            PersistentSessionWorkspaceAuthority::EphemeralScratch,
+            holding_value(
+                serde_json::json!([
+                    "isolation:enforced",
+                    {"any_of": ["termination:scope", "termination:pid_namespace"]},
+                ]),
+                "captured_execution",
+                "containment_empty",
+            ),
+        );
+        validate_protocol_holding(&contained).unwrap();
+        let trusted = held_session(
+            PersistentSessionCleanupAuthority::TrustedProcessGroup,
+            PersistentSessionWorkspaceAuthority::RuntimeWorkspace,
+            holding_value(
+                serde_json::json!([
+                    {"name": "sessions:trusted_process_group", "accept": ["trusted"]},
+                ]),
+                "node_policy",
+                "trusted_process_group_absent",
+            ),
+        );
+        validate_protocol_holding(&trusted).unwrap();
+        let scoped = held_session(
+            PersistentSessionCleanupAuthority::LocalProcessScope,
+            PersistentSessionWorkspaceAuthority::RuntimeWorkspace,
+            holding_value(
+                serde_json::json!(["termination:scope"]),
+                "node_policy",
+                "scope_empty",
+            ),
+        );
+        validate_protocol_holding(&scoped).unwrap();
+    }
+
+    #[test]
+    fn a_holding_that_contradicts_its_session_block_is_refused() {
+        let guarantees = serde_json::json!(["isolation:enforced"]);
+        let wrong_authority = held_session(
+            PersistentSessionCleanupAuthority::DescendantContainment,
+            PersistentSessionWorkspaceAuthority::EphemeralScratch,
+            holding_value(guarantees.clone(), "node_policy", "containment_empty"),
+        );
+        let error = validate_protocol_holding(&wrong_authority).unwrap_err();
+        assert!(error.contains("filesystem_authority"), "{error}");
+        let wrong_settlement = held_session(
+            PersistentSessionCleanupAuthority::DescendantContainment,
+            PersistentSessionWorkspaceAuthority::EphemeralScratch,
+            holding_value(
+                guarantees.clone(),
+                "captured_execution",
+                "trusted_process_group_absent",
+            ),
+        );
+        let error = validate_protocol_holding(&wrong_settlement).unwrap_err();
+        assert!(error.contains("root_settlement"), "{error}");
+        let undefined = held_session(
+            PersistentSessionCleanupAuthority::ExternalPlacementIncarnation,
+            PersistentSessionWorkspaceAuthority::RuntimeWorkspace,
+            holding_value(guarantees, "node_policy", "scope_empty"),
+        );
+        assert!(validate_protocol_holding(&undefined).is_err());
+    }
+
+    #[test]
+    fn a_holding_needs_bounded_non_empty_guarantees() {
+        let mut descriptor = method_protocol();
+        descriptor.holding = Some(holding_value(
+            serde_json::json!(["isolation:enforced"]),
+            "node_policy",
+            "trusted_process_group_absent",
+        ));
+        validate_protocol_holding(&descriptor).unwrap();
+        for guarantees in [
+            serde_json::json!([]),
+            serde_json::json!([""]),
+            serde_json::json!(vec!["a"; 17]),
+        ] {
+            descriptor.holding = Some(holding_value(
+                guarantees,
+                "node_policy",
+                "trusted_process_group_absent",
+            ));
+            assert!(validate_protocol_holding(&descriptor).is_err());
+        }
+    }
+
+    #[test]
+    fn a_descriptor_without_a_holding_is_valid_and_keeps_its_serialized_identity() {
+        let descriptor = method_protocol();
+        validate_protocol_holding(&descriptor).unwrap();
+        let value = serde_json::to_value(&descriptor).unwrap();
+        assert!(value.get("holding").is_none());
+    }
+
+    #[test]
+    fn a_holding_block_is_closed_and_complete() {
+        let mut value = serde_json::to_value(method_protocol()).unwrap();
+        value["holding"] = serde_json::json!({
+            "requires_guarantees": ["isolation:enforced"],
+            "filesystem_authority": "captured_execution",
+            "root_settlement": "containment_empty",
+        });
+        let decoded: ProtocolDescriptor = serde_json::from_value(value.clone()).unwrap();
+        assert!(decoded.holding.is_some());
+        let mut unknown = value.clone();
+        unknown["holding"]["extra"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<ProtocolDescriptor>(unknown).is_err());
+        for field in [
+            "requires_guarantees",
+            "filesystem_authority",
+            "root_settlement",
+        ] {
+            let mut missing = value.clone();
+            missing["holding"].as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<ProtocolDescriptor>(missing).is_err());
+        }
     }
 }

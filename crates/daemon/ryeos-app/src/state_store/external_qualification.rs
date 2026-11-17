@@ -1081,6 +1081,7 @@ impl StateStore {
         process_identity: &crate::process::ExecutionProcessIdentity,
         daemon_generation_id: &str,
         configuration: &crate::external_connector::PreparedProviderConfigurationObservation,
+        selected_holding: &crate::external_qualification_local::QualificationWorkerSelectedHolding,
     ) -> Result<runtime_db::external_execution::QualificationWorkerProcessRecord> {
         let _permit = self.acquire_write_permit()?;
         self.lock()?.runtime_db.attach_qualification_worker_process(
@@ -1088,6 +1089,7 @@ impl StateStore {
             process_identity,
             daemon_generation_id,
             configuration,
+            selected_holding,
         )
     }
 

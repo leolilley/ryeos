@@ -1,6 +1,6 @@
-# ryeos:signed:2026-09-08T05:52:27Z:0a78b64b85819593d10b55de6cfce69c09f4406a39738ef3c64a2c064a5dbc2a:mSOVmSXydnLwmlnyzXsW96/gK0uIFtfQQ7OUxcUeSAQP2RxmdOedt68gdegepKhcI15vQLeQBZrzGdTyZ/w0CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T12:20:23Z:cd36fc3d1c1e0117bbc219dfa237bb733b48fd917c36aa9c8ab629f1fdb0b9ac:+7I7hFYZFUUKJTQl09rEzOtSxYqhH/ce5MW0RghkIk1XwmnYyJzazs1BxbX05A8kdxxHe2xkzflk8VNRQeaPDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/protocol"
-version: "1.0.0"
+version: "1.1.0"
 location:
   directory: protocols
 effective_trust:
@@ -25,6 +25,7 @@ composed_value_contract:
   required: {}
   optional:
     execution_evidence: { type: single, prim: mapping }
+    holding: { type: single, prim: mapping }
 metadata:
   rules:
     name:

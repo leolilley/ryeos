@@ -56,9 +56,10 @@ pub const TERMINAL_CONTROL_BYTES: u64 = 4096;
 /// atomic; its externally visible receipts are Retained and Applied only.
 pub const Q_FINISH_FRAMES: u32 = 8;
 pub const Q_FINISH_BYTES: u64 = 128 * 1024;
-const SIGNATURE_DOMAIN: &[u8] = b"ryeos.external-execution.frame.v1\0";
+const SIGNATURE_DOMAIN: &[u8] = b"ryeos.external-execution.frame.v2\0";
 /// Bounds on what a supervisor may report about its own boot and host.
 pub const MAX_READY_VERIFIED_INPUTS: usize = 8;
+pub const MAX_READY_NETWORK_INPUTS: usize = 4;
 pub const MAX_CAPABILITY_REPORT_ENTRIES: usize = 64;
 const MAX_CAPABILITY_NAME_BYTES: usize = 128;
 const MAX_CAPABILITY_TEXT_BYTES: usize = 512;
@@ -216,6 +217,38 @@ pub struct SupervisorReadyBoot {
     /// for, so it is informational: no window is checked against it, and the
     /// controller's authoritative Ready time is its own clock at receipt.
     pub ready_at_ms: i64,
+    /// The network inputs as the supervisor sees them in its own mount
+    /// namespace at boot: for each source path of the binding's network-input
+    /// policy, the byte length and sha256 of the bytes the supervisor
+    /// resolves names with. Taken where the bytes are consumed, so the
+    /// controller compares what was mounted, not what was requested.
+    pub network_inputs: Vec<ObservedNetworkInput>,
+}
+
+/// One network-input source as a supervisor observed it at boot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObservedNetworkInput {
+    /// The source path the bytes were read from, as the policy names it.
+    pub source: String,
+    pub bytes: u64,
+    pub sha256: String,
+}
+
+impl ObservedNetworkInput {
+    fn validate(&self) -> Result<()> {
+        transport::ExternalNetworkInputSelection {
+            source: self.source.clone(),
+            max_bytes: transport::MAX_EXTERNAL_NETWORK_INPUT_BYTES,
+        }
+        .validate()?;
+        ensure!(
+            self.bytes <= transport::MAX_EXTERNAL_NETWORK_INPUT_BYTES,
+            "supervisor Ready network input exceeds its byte bound"
+        );
+        hash(&self.sha256)?;
+        Ok(())
+    }
 }
 
 impl SupervisorReadyBoot {
@@ -233,6 +266,13 @@ impl SupervisorReadyBoot {
             self.ready_at_ms > 0,
             "supervisor Ready time is not a positive wall-clock reading"
         );
+        ensure!(
+            self.network_inputs.len() <= MAX_READY_NETWORK_INPUTS,
+            "supervisor Ready network-input list exceeds its bound"
+        );
+        for input in &self.network_inputs {
+            input.validate()?;
+        }
         Ok(())
     }
 }
@@ -1749,6 +1789,7 @@ mod tests {
             boot_id: "997aad14-f3e6-4990-9d40-d1068e5a38d5".into(),
             verified_input_digests: vec!["1".repeat(64), "2".repeat(64)],
             ready_at_ms: 10,
+            network_inputs: Vec::new(),
         }
     }
 

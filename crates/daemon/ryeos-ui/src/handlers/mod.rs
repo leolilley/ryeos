@@ -3,6 +3,7 @@
 use ryeos_api::registry::ServiceDescriptor;
 
 pub mod signed_item_topology;
+pub mod ui_attention;
 pub mod ui_dimension;
 pub mod ui_field;
 pub mod ui_field_comparison;

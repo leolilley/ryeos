@@ -29,13 +29,12 @@ use lillux::time::{Duration, MonotonicDeadline};
 use provider_spec::{PlanValue, ProviderSpec, RouteName, RouteTarget};
 use ryeos_external_execution_contract::{
     LIFECYCLE_ADAPTER_EXECUTABLE_FD_ENV, LIFECYCLE_ADAPTER_PROTOCOL, LIFECYCLE_BOOTSTRAP_FD_ENV,
-    LIFECYCLE_CREDENTIAL_FD_ENV, LIFECYCLE_HOSTS_FD_ENV, LIFECYCLE_HOSTS_SHA256_ENV,
-    LIFECYCLE_NETWORK_POLICY_SHA256_ENV, LIFECYCLE_PROVIDER_SPEC_FD_ENV,
-    LIFECYCLE_PROVIDER_SPEC_SHA256_ENV, LIFECYCLE_REQUEST_FD_ENV, LIFECYCLE_RESOLVER_FD_ENV,
-    LIFECYCLE_RESOLVER_SHA256_ENV, LIFECYCLE_SETTINGS_FD_ENV, LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV,
-    LIFECYCLE_SIGNED_IMPORT_FD_ENV, LifecycleAdapterInspectionRequest,
-    LifecycleAdapterInspectionResponse, LifecycleAdapterRequest, LifecycleAdapterResponse,
-    LifecycleArtifactInspection, LifecycleArtifactRole, LifecycleRuntimeProbeRequest,
+    LIFECYCLE_HOSTS_FD_ENV, LIFECYCLE_HOSTS_SHA256_ENV, LIFECYCLE_NETWORK_POLICY_SHA256_ENV,
+    LIFECYCLE_PROVIDER_SPEC_FD_ENV, LIFECYCLE_PROVIDER_SPEC_SHA256_ENV, LIFECYCLE_REQUEST_FD_ENV,
+    LIFECYCLE_RESOLVER_FD_ENV, LIFECYCLE_RESOLVER_SHA256_ENV, LIFECYCLE_SETTINGS_FD_ENV,
+    LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV, LIFECYCLE_SIGNED_IMPORT_FD_ENV,
+    LifecycleAdapterInspectionRequest, LifecycleAdapterInspectionResponse, LifecycleAdapterRequest,
+    LifecycleAdapterResponse, LifecycleArtifactInspection, LifecycleArtifactRole,
     MAX_LIFECYCLE_PROVIDER_SPEC_BYTES, MAX_LIFECYCLE_REQUEST_BYTES, canonical_json,
     from_json_slice_strict,
 };
@@ -399,18 +398,26 @@ fn main() {
             "render lifecycle adapter failed closed: {}",
             class.word()
         );
-        std::process::exit(class.exit_code());
+        std::process::exit(match class {
+            // An error no step classified still names the invocation that
+            // failed, by a stable exit code and no text.
+            fail_class::FailClass::Other => {
+                fail_class::unclassified_exit_code(std::env::args().nth(1).as_deref())
+            }
+            _ => class.exit_code(),
+        });
     }
 }
 
 fn run() -> Result<()> {
+    use fail_class::{Classify as _, FailClass};
     let adapter = unsafe {
         lillux::take_inherited_descriptor_authority_from_env(LIFECYCLE_ADAPTER_EXECUTABLE_FD_ENV)
     }
-    .map_err(anyhow::Error::msg)?;
+    .map_err(anyhow::Error::msg)
+    .classed(FailClass::ExecutableAuthority)?;
     match std::env::args().nth(1).as_deref() {
         Some("inspect") => inspect(&adapter),
-        Some("verify-runtime-probe") => verify_runtime_probe(&adapter),
         Some("operate") => operate(),
         Some("admit-lease") => ryeos_remote_lease_core::admit_lease(ADAPTER_ID, parse_lease_spec),
         Some("await-lease-ready") => {
@@ -447,54 +454,6 @@ fn run() -> Result<()> {
         Some("list-provider-resources") => inventory::list_provider_resources(&adapter),
         _ => anyhow::bail!("unsupported lifecycle invocation"),
     }
-}
-
-fn verify_runtime_probe(adapter: &lillux::InheritedDescriptorAuthority) -> Result<()> {
-    ensure!(
-        [
-            LIFECYCLE_CREDENTIAL_FD_ENV,
-            LIFECYCLE_RESOLVER_FD_ENV,
-            LIFECYCLE_HOSTS_FD_ENV,
-            LIFECYCLE_PROVIDER_SPEC_FD_ENV,
-            LIFECYCLE_BOOTSTRAP_FD_ENV,
-            LIFECYCLE_SIGNED_IMPORT_FD_ENV,
-            LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV,
-        ]
-        .into_iter()
-        .all(|name| std::env::var_os(name).is_none()),
-        "runtime probe interpretation received contact authority"
-    );
-    let request_bytes = read_sealed_env(LIFECYCLE_REQUEST_FD_ENV, MAX_LIFECYCLE_REQUEST_BYTES)?;
-    let request: LifecycleRuntimeProbeRequest =
-        from_json_slice_strict(&request_bytes, MAX_LIFECYCLE_REQUEST_BYTES)?;
-    request.validate()?;
-    ensure!(
-        request.canonical_bytes()? == request_bytes
-            && request.adapter_id == ADAPTER_ID
-            && request.source.manifest_hash
-                == request
-                    .probe_evidence
-                    .get("guest_runtime_manifest_hash")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default(),
-        "runtime probe request differs from exact Render adapter or source"
-    );
-    verify_artifact(adapter, &request.adapter_artifact_hash, None)?;
-    let settings_bytes = read_sealed_env(LIFECYCLE_SETTINGS_FD_ENV, MAX_SETTINGS_BYTES)?;
-    ensure!(
-        lillux::sha256_hex(&settings_bytes) == request.settings_digest,
-        "runtime probe settings digest changed"
-    );
-    let settings_value: serde_json::Value =
-        from_json_slice_strict(&settings_bytes, MAX_SETTINGS_BYTES)?;
-    ensure!(
-        canonical_json(&settings_value)? == settings_bytes,
-        "runtime probe settings are noncanonical"
-    );
-    let settings: Settings = serde_json::from_value(settings_value)?;
-    validate_settings(&settings)?;
-    let response = snapshot_qualification::interpret_authenticated_request(&request, &settings)?;
-    write_response(&response)
 }
 
 /// Parse the captured provider spec a lease operation reads, under its
@@ -621,43 +580,57 @@ fn inspect(adapter: &lillux::InheritedDescriptorAuthority) -> Result<()> {
 }
 
 fn operate() -> Result<()> {
+    use fail_class::{Classify as _, FailClass, ensure_class};
     // Start the one operation deadline before reading any request/configuration
     // descriptor. The signed parent budget is never renewed by local work.
-    let mut deadline = operation_deadline()?;
+    let mut deadline = operation_deadline().classed(FailClass::Deadline)?;
     let cancellation = NetworkCancellation::default();
-    let _signal_cancellation = SignalCancellation::install(cancellation.clone())?;
-    let request_bytes = read_sealed_env(LIFECYCLE_REQUEST_FD_ENV, MAX_LIFECYCLE_REQUEST_BYTES)?;
+    let _signal_cancellation = SignalCancellation::install(cancellation.clone())
+        .classed(FailClass::CancellationInstall)?;
+    let request_bytes = read_sealed_env(LIFECYCLE_REQUEST_FD_ENV, MAX_LIFECYCLE_REQUEST_BYTES)
+        .classed(FailClass::RequestParse)?;
     let request: LifecycleAdapterRequest =
-        from_json_slice_strict(&request_bytes, MAX_LIFECYCLE_REQUEST_BYTES)?;
-    request.validate()?;
+        from_json_slice_strict(&request_bytes, MAX_LIFECYCLE_REQUEST_BYTES)
+            .classed(FailClass::RequestParse)?;
+    request.validate().classed(FailClass::RequestParse)?;
     ensure!(
-        request.canonical_bytes()? == request_bytes,
+        request.canonical_bytes().classed(FailClass::RequestParse)? == request_bytes,
         "operation request is noncanonical"
     );
     let maximum_provider_spec_bytes = usize::try_from(MAX_LIFECYCLE_PROVIDER_SPEC_BYTES)?;
     let provider_spec_bytes =
-        read_sealed_env(LIFECYCLE_PROVIDER_SPEC_FD_ENV, maximum_provider_spec_bytes)?;
+        read_sealed_env(LIFECYCLE_PROVIDER_SPEC_FD_ENV, maximum_provider_spec_bytes)
+            .classed(FailClass::SpecDigest)?;
     let provider_spec_sha256 = std::env::var(LIFECYCLE_PROVIDER_SPEC_SHA256_ENV)
-        .context("missing captured provider spec digest")?;
+        .context("missing captured provider spec digest")
+        .classed(FailClass::SpecDigest)?;
     let schema_digest = lillux::sha256_hex(include_bytes!("../fixtures/settings.schema.json"));
     let (provider_spec, _provider_spec_sha256) =
-        parse_provider_spec_bytes(&provider_spec_bytes, &provider_spec_sha256, &schema_digest)?;
+        parse_provider_spec_bytes(&provider_spec_bytes, &provider_spec_sha256, &schema_digest)
+            .classed(FailClass::SpecDigest)?;
     // A remote Codex lease's admitted request names its guest egress. It
     // selects the exact policy the create requests and every read of the
     // Sandbox must echo. A policy the signed spec cannot create fails closed
     // here, before any credential or network input is read.
-    let lease_egress = match ryeos_remote_lease_core::read_lease_admission()? {
+    let lease_egress = match ryeos_remote_lease_core::read_lease_admission()
+        .classed(FailClass::LeaseAdmissionInput)?
+    {
         Some(admission) => {
-            ensure!(
-                admission.adapter_id == ADAPTER_ID
-                    && admission.provider_spec_sha256 == provider_spec_sha256,
-                "lease admission names a different adapter or provider spec"
-            );
+            if admission.adapter_id != ADAPTER_ID
+                || admission.provider_spec_sha256 != provider_spec_sha256
+            {
+                return Err(anyhow::anyhow!(
+                    "lease admission names a different adapter or provider spec"
+                )
+                .context(FailClass::LeaseAdmissionInput));
+            }
             admission.guest_network_allow
         }
         None => BTreeSet::new(),
     };
-    let egress_policy = provider_spec.egress_policy(&lease_egress)?;
+    let egress_policy = provider_spec
+        .egress_policy(&lease_egress)
+        .classed(FailClass::EgressPolicy)?;
     // A disabled signed profile cannot turn an already claimed activation
     // into a silent pending observation. Reject before reading guest inputs,
     // network inputs, or credentials. Reconciliation remains observation-only
@@ -709,24 +682,36 @@ fn operate() -> Result<()> {
         None
     };
     if let LifecycleAdapterRequest::Allocate { reservation, .. } = &request {
-        deadline = request_deadline(reservation.contact_deadline_ms, deadline)?;
+        deadline = request_deadline(reservation.contact_deadline_ms, deadline)
+            .classed(FailClass::Deadline)?;
     }
     if let LifecycleAdapterRequest::ActivateSupervisor { activation, .. } = &request {
-        deadline = request_deadline(activation.attachment_deadline_ms, deadline)?;
+        deadline = request_deadline(activation.attachment_deadline_ms, deadline)
+            .classed(FailClass::Deadline)?;
     }
-    let settings_bytes = read_sealed_env(LIFECYCLE_SETTINGS_FD_ENV, MAX_SETTINGS_BYTES)?;
-    ensure!(
+    let settings_bytes = read_sealed_env(LIFECYCLE_SETTINGS_FD_ENV, MAX_SETTINGS_BYTES)
+        .classed(FailClass::SettingsDigest)?;
+    ensure_class!(
+        FailClass::SettingsDigest,
         lillux::sha256_hex(&settings_bytes) == request.common().settings_digest,
         "settings digest changed"
     );
     let settings_value: serde_json::Value =
-        from_json_slice_strict(&settings_bytes, MAX_SETTINGS_BYTES)?;
-    ensure!(
-        lillux::canonical_json(&settings_value)?.as_bytes() == settings_bytes,
+        from_json_slice_strict(&settings_bytes, MAX_SETTINGS_BYTES)
+            .classed(FailClass::SettingsShape)?;
+    ensure_class!(
+        FailClass::SettingsShape,
+        lillux::canonical_json(&settings_value)
+            .map_err(anyhow::Error::from)
+            .classed(FailClass::SettingsShape)?
+            .as_bytes()
+            == settings_bytes,
         "settings are noncanonical"
     );
-    let settings: Settings = serde_json::from_value(settings_value)?;
-    validate_settings(&settings)?;
+    let settings: Settings = serde_json::from_value(settings_value)
+        .map_err(anyhow::Error::from)
+        .classed(FailClass::SettingsShape)?;
+    validate_settings(&settings).classed(FailClass::SettingsShape)?;
     let network = network_context_from_captured_inputs()?;
 
     let response = match &request {
@@ -887,8 +872,9 @@ fn verify_signed_import_handoff(
     Ok(signed)
 }
 
-/// Correlation only; the qualified guest verifies the node-root signature
-/// and its own installed runtime identity before trusting the delegated key.
+/// Correlation plus the controller signature: the assignment must verify
+/// under the controller key it names, which the guest uses in turn before
+/// checking its own installed runtime identity and trusting the delegated key.
 fn verify_signed_assignment_handoff(
     bytes: &[u8],
     import: &ryeos_external_execution_contract::guest_import_authorization::SignedGuestImportAuthorization,
@@ -903,6 +889,7 @@ fn verify_signed_assignment_handoff(
         canonical_json(&signed)? == bytes,
         "signed guest assignment handoff is noncanonical"
     );
+    signed.verify_controller_signature()?;
     let assignment = &signed.assignment;
     let authorization = &import.authorization;
     ensure!(
@@ -1290,6 +1277,18 @@ fn exact_terminal_timestamp<'a>(
 }
 
 fn has_json_content_type(headers: &[Header]) -> bool {
+    has_media_type(headers, "application/json")
+}
+
+/// A run stream's response type. Render sends `text/event-stream;
+/// charset=utf-8`; the same single-header, single-charset rule as JSON.
+fn has_event_stream_content_type(headers: &[Header]) -> bool {
+    has_media_type(headers, "text/event-stream")
+}
+
+/// Exactly one Content-Type header of visible ASCII naming `media_type`,
+/// optionally with the single parameter `charset=utf-8`.
+fn has_media_type(headers: &[Header], media_type: &str) -> bool {
     let mut values = headers
         .iter()
         .filter(|header| header.name.eq_ignore_ascii_case("content-type"));
@@ -1304,14 +1303,15 @@ fn has_json_content_type(headers: &[Header]) -> bool {
     {
         return false;
     }
-    std::str::from_utf8(header.value()).is_ok_and(is_json_content_type_value)
+    std::str::from_utf8(header.value()).is_ok_and(|value| is_media_type_value(value, media_type))
 }
 
-fn is_json_content_type_value(value: &str) -> bool {
+fn is_media_type_value(value: &str, expected: &str) -> bool {
     let mut parts = value.split(';');
-    if !parts.next().is_some_and(|media_type| {
-        trim_http_ows(media_type).eq_ignore_ascii_case("application/json")
-    }) {
+    if !parts
+        .next()
+        .is_some_and(|media_type| trim_http_ows(media_type).eq_ignore_ascii_case(expected))
+    {
         return false;
     }
     let Some(parameter) = parts.next() else {
@@ -1840,6 +1840,42 @@ mod offline_fixture_tests {
     use std::os::unix::fs::PermissionsExt as _;
 
     #[test]
+    fn run_streams_accept_renders_charset_and_nothing_looser() {
+        let headers = |values: &[&str]| -> Vec<Header> {
+            values
+                .iter()
+                .map(|value| Header::new("Content-Type", *value))
+                .collect()
+        };
+        // Recorded from Render's run stream, 2026-11-12.
+        assert!(has_event_stream_content_type(&headers(&[
+            "text/event-stream; charset=utf-8"
+        ])));
+        assert!(has_event_stream_content_type(&headers(&[
+            "text/event-stream"
+        ])));
+        assert!(has_event_stream_content_type(&headers(&[
+            "Text/Event-Stream;charset=UTF-8"
+        ])));
+        for refused in [
+            &["text/plain; charset=utf-8"][..],
+            &["text/event-stream; charset=latin-1"][..],
+            &["text/event-stream; charset=utf-8; extra=1"][..],
+            &["text/event-stream", "text/event-stream"][..],
+            &[][..],
+        ] {
+            assert!(
+                !has_event_stream_content_type(&headers(refused)),
+                "{refused:?}"
+            );
+        }
+        assert!(has_json_content_type(&headers(&[
+            "application/json; charset=utf-8"
+        ])));
+        assert!(!has_json_content_type(&headers(&["text/event-stream"])));
+    }
+
+    #[test]
     fn only_a_direct_refusal_of_the_create_proves_no_sandbox() {
         for status in [400, 401, 403, 404, 409, 422, 429] {
             assert!(create_status_refuses(status), "{status}");
@@ -1891,7 +1927,7 @@ mod offline_fixture_tests {
         use ryeos_external_execution_contract::guest_import_authorization::{
             GUEST_IMPORT_AUTHORIZATION_SCHEMA, GUEST_OCCURRENCE_ASSIGNMENT_SCHEMA,
             GuestImportAuthorization, GuestOccurrenceAssignmentDocument,
-            SignedGuestImportAuthorization, SignedGuestOccurrenceAssignment,
+            SignedGuestImportAuthorization,
         };
         use ryeos_external_execution_contract::staging_package::{
             GUEST_IMPORT_TICKET_SCHEMA, GuestImportTicket,
@@ -2022,23 +2058,27 @@ mod offline_fixture_tests {
         let canonical = canonical_json(&signed).unwrap();
         verify_signed_import_handoff(&canonical, &request).unwrap();
         let authorization = &signed.authorization;
-        let assignment = SignedGuestOccurrenceAssignment {
-            assignment: GuestOccurrenceAssignmentDocument {
-                schema: GUEST_OCCURRENCE_ASSIGNMENT_SCHEMA,
-                placement_thread_id: authorization.placement_thread_id.clone(),
-                admitted_capsule_hash: authorization.admitted_capsule_hash.clone(),
-                base_snapshot_hash: authorization.base_snapshot_hash.clone(),
-                execution_binding_hash: authorization.execution_binding_hash.clone(),
-                allocation_request_digest: authorization.allocation_request_digest.clone(),
-                occurrence_id: authorization.occurrence_id.clone(),
-                activation_request_digest: authorization.activation_request_digest.clone(),
-                supervisor_runtime_hash: authorization.supervisor_runtime_hash.clone(),
-                guest_runtime_manifest_hash: authorization.guest_runtime_manifest_hash.clone(),
-                owner_public_key_hex: hex::encode(owner.verifying_key().to_bytes()),
-                attachment_deadline_ms: authorization.attachment_deadline_ms,
-            },
-            signature_hex: "0".repeat(128),
-        };
+        let node = SigningKey::from_bytes(&[43; 32]);
+        let assignment =
+            ryeos_external_execution::guest_import_authorization::sign_guest_occurrence_assignment(
+                GuestOccurrenceAssignmentDocument {
+                    schema: GUEST_OCCURRENCE_ASSIGNMENT_SCHEMA,
+                    placement_thread_id: authorization.placement_thread_id.clone(),
+                    admitted_capsule_hash: authorization.admitted_capsule_hash.clone(),
+                    base_snapshot_hash: authorization.base_snapshot_hash.clone(),
+                    execution_binding_hash: authorization.execution_binding_hash.clone(),
+                    allocation_request_digest: authorization.allocation_request_digest.clone(),
+                    occurrence_id: authorization.occurrence_id.clone(),
+                    activation_request_digest: authorization.activation_request_digest.clone(),
+                    supervisor_runtime_hash: authorization.supervisor_runtime_hash.clone(),
+                    guest_runtime_manifest_hash: authorization.guest_runtime_manifest_hash.clone(),
+                    owner_public_key_hex: hex::encode(owner.verifying_key().to_bytes()),
+                    controller_public_key_hex: hex::encode(node.verifying_key().to_bytes()),
+                    attachment_deadline_ms: authorization.attachment_deadline_ms,
+                },
+                &node,
+            )
+            .unwrap();
         let assignment_bytes = canonical_json(&assignment).unwrap();
         verify_signed_assignment_handoff(&assignment_bytes, &signed).unwrap();
         let command = guest_owner_run_command(&assignment_bytes).unwrap();
@@ -2095,6 +2135,21 @@ mod offline_fixture_tests {
         assert!(
             verify_signed_assignment_handoff(&canonical_json(&bad_owner).unwrap(), &signed)
                 .is_err()
+        );
+        let mut unsigned = assignment.clone();
+        unsigned.signature_hex = "0".repeat(128);
+        assert!(
+            verify_signed_assignment_handoff(&canonical_json(&unsigned).unwrap(), &signed).is_err()
+        );
+        let mut renamed_controller = assignment.clone();
+        renamed_controller.assignment.controller_public_key_hex =
+            hex::encode(owner.verifying_key().to_bytes());
+        assert!(
+            verify_signed_assignment_handoff(
+                &canonical_json(&renamed_controller).unwrap(),
+                &signed
+            )
+            .is_err()
         );
         let mut changed_assignment = assignment.clone();
         changed_assignment.assignment.occurrence_id = "occ-other".into();

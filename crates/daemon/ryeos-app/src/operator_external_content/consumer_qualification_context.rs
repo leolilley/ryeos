@@ -20,9 +20,6 @@ use ryeos_state::external_content::products::composition::{
     ExternalProductSlotDeclaration, ProductRelationship, ProductRelationships,
 };
 use ryeos_state::external_content::products::qualification::ProductQualificationConsumerExecutionContext;
-use ryeos_state::external_content::products::qualification_variants::{
-    NodeGuarantees, QualificationVariant, QualificationVariants, require_policy_guarantees,
-};
 use ryeos_state::external_content::qualification_consumer_record::MAX_CONSUMER_INPUT_RECORD_BYTES;
 use ryeos_state::objects::{
     ExternalContentKind, ExternalContentManifestEntryKind, ExternalContentRealization,
@@ -41,16 +38,16 @@ use crate::handler_context::HandlerContext;
 use crate::state::AppState;
 use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 
-/// Inputs name the signed variant set, the signed relationship Config
+/// Inputs name the signed qualification policy, the signed relationship Config
 /// that selects the runtime product, and the exact manifest of the runtime
-/// product the consumer will be handed. The variant set lists each accepted
-/// policy (worker, environment, worker execution and runtime declaration)
-/// with the guarantees it requires; the guarantees this node reports select
-/// exactly one.
+/// product the consumer will be handed. The policy names the Worker,
+/// environment, worker execution and runtime declaration; the relationship
+/// within the Config is the one whose consumer is that Worker and whose
+/// qualification policy is this policy, so it is derived rather than named.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConsumerQualificationContextRequest {
-    pub variants_ref: String,
+    pub policy_ref: String,
     pub relationship_ref: String,
     pub subject_manifest_hash: String,
 }
@@ -61,7 +58,7 @@ impl ConsumerQualificationContextRequest {
             bail!("subject_manifest_hash must be a 64-character lowercase hex digest");
         }
         for (field, value) in [
-            ("variants_ref", &self.variants_ref),
+            ("policy_ref", &self.policy_ref),
             ("relationship_ref", &self.relationship_ref),
         ] {
             if value.is_empty() {
@@ -70,6 +67,114 @@ impl ConsumerQualificationContextRequest {
         }
         Ok(())
     }
+}
+
+/// A probe-lane qualification policy (one whose remote scenarios ship a probe
+/// input to a restored guest, with no consumer Worker) has no Worker or
+/// relationship to derive a use context from; its snapshot qualification
+/// binding still needs, per remote scenario, the verifier selection the launch
+/// will require. This form derives only those selections, from the same
+/// prepared verifier sources the launch uses.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProbeVerifierSelectionRequest {
+    pub policy_ref: String,
+    pub subject_manifest_hash: String,
+}
+
+impl ProbeVerifierSelectionRequest {
+    fn validate(&self) -> anyhow::Result<()> {
+        if !lillux::valid_hash(&self.subject_manifest_hash) {
+            bail!("subject_manifest_hash must be a 64-character lowercase hex digest");
+        }
+        if self.policy_ref.is_empty() {
+            bail!("policy_ref must not be empty");
+        }
+        Ok(())
+    }
+}
+
+/// `consumer_verifier_selections` has the same meaning and file use as in
+/// [`ConsumerQualificationContextResponse`].
+#[derive(Debug, Clone, Serialize)]
+pub struct ProbeVerifierSelectionResponse {
+    pub policy_ref: String,
+    pub subject_manifest_hash: String,
+    pub consumer_verifier_selections: BTreeMap<String, ConsumerRuntimeVerifierSelection>,
+}
+
+/// The two request forms of the derivation service, told apart by their
+/// closed field sets.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum QualificationContextDerivation {
+    Worker(ConsumerQualificationContextRequest),
+    Probe(ProbeVerifierSelectionRequest),
+}
+
+pub async fn derive_any(
+    state: Arc<AppState>,
+    context: HandlerContext,
+    request: QualificationContextDerivation,
+) -> anyhow::Result<serde_json::Value> {
+    match request {
+        QualificationContextDerivation::Worker(request) => Ok(serde_json::to_value(
+            derive(state, context, request).await?,
+        )?),
+        QualificationContextDerivation::Probe(request) => {
+            crate::operator_authority::require_admitted_operator(&state, &context)?;
+            request.validate()?;
+            let response = tokio::task::spawn_blocking(move || derive_probe(&state, &request))
+                .await
+                .context("probe verifier selection task stopped")??;
+            Ok(serde_json::to_value(response)?)
+        }
+    }
+}
+
+fn derive_probe(
+    state: &AppState,
+    request: &ProbeVerifierSelectionRequest,
+) -> anyhow::Result<ProbeVerifierSelectionResponse> {
+    require_unguarded_resolution("probe verifier selection derivation")?;
+    let policy_source = resolve_current_bundle_qualification_policy(state, &request.policy_ref)?;
+    ensure!(
+        policy_source.policy.consumer_execution_context.is_none(),
+        "qualification policy {} has a consumer execution context; derive it from its relationship",
+        request.policy_ref
+    );
+    let mut consumer_verifier_selections = BTreeMap::new();
+    for (scenario_id, facts) in
+        remote_verifier_facts(state, &policy_source, &request.subject_manifest_hash)?
+    {
+        ensure!(
+            facts.lane == RemoteVerifierLane::Probe,
+            "remote scenario {scenario_id} of {} is not a probe scenario",
+            request.policy_ref
+        );
+        // The probe delivery ships the record, the verifier and the signed
+        // archive members; no retained product enters it.
+        let archive_budget = archive_budget_for(&[], &facts)
+            .with_context(|| format!("remote scenario {scenario_id} archive budget"))?;
+        consumer_verifier_selections.insert(
+            scenario_id,
+            ConsumerRuntimeVerifierSelection {
+                scenario_source_digest: facts.scenario_source_digest,
+                verifier_artifact_hash: facts.verifier_artifact_hash,
+                archive_budget,
+            },
+        );
+    }
+    ensure!(
+        !consumer_verifier_selections.is_empty(),
+        "qualification policy {} selects no remote verifier",
+        request.policy_ref
+    );
+    Ok(ProbeVerifierSelectionResponse {
+        policy_ref: request.policy_ref.clone(),
+        subject_manifest_hash: request.subject_manifest_hash.clone(),
+        consumer_verifier_selections,
+    })
 }
 
 /// Size of the tar block every archive header, data run and trailer is
@@ -92,8 +197,6 @@ const TAR_INLINE_NAME_BYTES: usize = 100;
 pub struct ConsumerQualificationContextResponse {
     pub policy_ref: String,
     pub relationship_name: String,
-    /// The guarantees the selected variant required of this node.
-    pub requires_guarantees: Vec<lillux::process_control::CapabilityRequirement>,
     pub subject_manifest_hash: String,
     pub bundle_generation_identity: String,
     pub verifier_parameters: serde_json::Value,
@@ -117,44 +220,19 @@ fn derive_blocking(
     state: &AppState,
     request: &ConsumerQualificationContextRequest,
 ) -> anyhow::Result<ConsumerQualificationContextResponse> {
-    let reported = state.isolation.reported_guarantees();
-    derive_for_guarantees(
-        state,
-        request,
-        NodeGuarantees::new(&reported, state.isolation.capability_floor()),
-    )
-}
-
-/// Derive for the variant selected by `guarantees`, the guarantees this node
-/// reports; kept separate so selection is exercised against any reported set.
-fn derive_for_guarantees(
-    state: &AppState,
-    request: &ConsumerQualificationContextRequest,
-    guarantees: NodeGuarantees<'_>,
-) -> anyhow::Result<ConsumerQualificationContextResponse> {
     require_unguarded_resolution("consumer qualification context derivation")?;
-    let variant = select_variant(state, &request.variants_ref, guarantees)?;
-    let policy_source = resolve_current_bundle_qualification_policy(state, &variant.policy_ref)?;
-    // The variant set and the policy it names must agree on what they
-    // require, so a policy cannot be selected under weaker guarantees than
-    // the policy itself declares (or than the set advertised).
-    ensure!(
-        policy_source.policy.requires_guarantees == variant.requires_guarantees,
-        "qualification policy {} declares different required guarantees than the variant set that selected it",
-        variant.policy_ref
-    );
-    require_policy_guarantees(
-        &policy_source.policy.requires_guarantees,
-        guarantees,
-        &variant.policy_ref,
-    )?;
+    let policy_source = resolve_current_bundle_qualification_policy(state, &request.policy_ref)?;
     let signed_context = policy_source
         .policy
         .consumer_execution_context
         .clone()
         .context("qualification policy has no consumer execution context")?;
-    let relationship =
-        resolve_relationship(state, &request.relationship_ref, &variant.relationship_name)?;
+    let relationship = resolve_relationship(
+        state,
+        &request.relationship_ref,
+        &request.policy_ref,
+        &signed_context.worker_ref,
+    )?;
     let prepared = prepare_current_bundle_consumer_content_inputs(
         state,
         &policy_source,
@@ -233,9 +311,8 @@ fn derive_for_guarantees(
     // Nothing was published: dropping the staged content leaves node state
     // exactly as it was.
     Ok(ConsumerQualificationContextResponse {
-        policy_ref: variant.policy_ref.clone(),
-        relationship_name: variant.relationship_name.clone(),
-        requires_guarantees: variant.requires_guarantees.clone(),
+        policy_ref: request.policy_ref.clone(),
+        relationship_name: relationship.name.clone(),
         subject_manifest_hash: request.subject_manifest_hash.clone(),
         bundle_generation_identity: prepared.definitions.bundle_generation_identity.clone(),
         verifier_parameters: qualification_use.parameters()?,
@@ -389,31 +466,35 @@ fn require_slot_matches_context(
     Ok(())
 }
 
-/// Read the signed variant set and select the one variant whose required
-/// guarantees this node holds.
-fn select_variant(
-    state: &AppState,
-    variants_ref: &str,
-    guarantees: NodeGuarantees<'_>,
-) -> anyhow::Result<QualificationVariant> {
-    state.engine.with_checked_bundle_generation(|generation| {
-        let authored =
-            resolve_consumer_definition_in_generation(generation, variants_ref, "config")?;
-        let set = QualificationVariants::from_value(
-            authored
-                .composed
-                .composed
-                .get("qualification_variants")
-                .context("variant Config has no qualification_variants")?,
-        )?;
-        Ok(set.select(guarantees)?.clone())
-    })
+/// The one relationship that joins `worker_ref` to `policy_ref`: its consumer
+/// is that Worker and its qualification policy is that policy. None or several
+/// is a refusal, never a pick.
+fn unique_relationship<'a>(
+    relationships: &'a ProductRelationships,
+    policy_ref: &str,
+    worker_ref: &str,
+) -> anyhow::Result<&'a ProductRelationship> {
+    let mut matching = relationships.relationships.iter().filter(|relationship| {
+        relationship.consumer.canonical_ref == worker_ref
+            && relationship.qualification.policy_ref.as_deref() == Some(policy_ref)
+    });
+    let selected = matching.next().with_context(|| {
+        format!(
+            "no product relationship has consumer {worker_ref} and qualification policy {policy_ref}"
+        )
+    })?;
+    ensure!(
+        matching.next().is_none(),
+        "several product relationships have consumer {worker_ref} and qualification policy {policy_ref}"
+    );
+    Ok(selected)
 }
 
 fn resolve_relationship(
     state: &AppState,
     relationship_ref: &str,
-    name: &str,
+    policy_ref: &str,
+    worker_ref: &str,
 ) -> anyhow::Result<ProductRelationship> {
     state.engine.with_checked_bundle_generation(|generation| {
         let authored =
@@ -426,7 +507,7 @@ fn resolve_relationship(
                 .context("product relationship Config has no relationships")?
                 .clone(),
         )?;
-        Ok(relationships.select(name)?.clone())
+        Ok(unique_relationship(&relationships, policy_ref, worker_ref)?.clone())
     })
 }
 
@@ -444,8 +525,6 @@ mod tests {
         ExternalContentKind, ExternalContentMode, ExternalContentMountRoot,
         ExternalContentRealization, ExternalContentRealizationSet,
     };
-
-    use ryeos_engine::isolation::GuaranteeHost;
 
     use super::*;
 
@@ -695,7 +774,7 @@ mod tests {
     #[test]
     fn request_refuses_a_malformed_manifest_digest() {
         let request = ConsumerQualificationContextRequest {
-            variants_ref: "config:test/qualification-variants".into(),
+            policy_ref: "config:test/consumer-qualification".into(),
             relationship_ref: "config:codex/guest-runtime-products".into(),
             subject_manifest_hash: "not-a-digest".into(),
         };
@@ -713,29 +792,44 @@ mod tests {
         let policy_path = test_bundle.join(".ai/config/test/consumer-qualification.yaml");
         fs::create_dir_all(policy_path.parent().unwrap())?;
         let signer = SigningKey::from_bytes(&[7u8; 32]);
-        let variants_path = test_bundle.join(".ai/config/test/qualification-variants.yaml");
-        let variants = r#"category: test
+        let relationships_path = test_bundle.join(".ai/config/test/relationships.yaml");
+        let relationships = r#"category: test
 version: "1.0.0"
-qualification_variants:
-  schema: ryeos.qualification_variants.v1
-  variants:
-    - policy_ref: config:test/consumer-qualification
-      relationship_name: runtime_to_external_authoring_worker
-      requires_guarantees: [test:held]
+product_relationships:
+  schema: ryeos.product_relationships.v1
+  relationships:
+    - name: runtime_to_external_authoring_worker
+      producer:
+        canonical_ref: graph:codex/guest-runtime-production
+        recipe_binding: product_recipe
+        product_name: runtime
+        parameters: {}
+      consumer:
+        canonical_ref: worker:codex/external-hosted-authoring
+        declaration_id: guest-runtime
+      required_product:
+        shape: tree
+        storage: large_content
+        bounds:
+          maximum_entries: 3
+          maximum_depth: 3
+          maximum_file_bytes: 268435456
+          maximum_total_bytes: 268435456
+      qualification:
+        policy_ref: config:test/consumer-qualification
+        required_claims: [runtime_qualified]
 "#;
         fs::write(
-            &variants_path,
-            lillux::signature::sign_content(variants, &signer, "#", None),
+            &relationships_path,
+            lillux::signature::sign_content(relationships, &signer, "#", None),
         )?;
         let policy = r#"category: test
 version: "1.0.0"
 product_qualification_policy:
   schema: ryeos.product_qualification_policy.v5
   verifier_ref: tool:fixtures/qualify_runtime
-  requires_guarantees: [test:held]
   subject_declaration_id: guest-runtime
   allowed_claims: [runtime_qualified]
-  minimum_verifier_process_settlement: scope_empty
   verifier_parameters: {}
   consumer_execution_context:
     worker_ref: worker:codex/external-hosted-authoring
@@ -790,33 +884,11 @@ product_qualification_policy:
                 .with_registered_bundle_roots(registered),
         );
         let request = ConsumerQualificationContextRequest {
-            variants_ref: "config:test/qualification-variants".into(),
-            relationship_ref: "config:codex/guest-runtime-products".into(),
+            policy_ref: "config:test/consumer-qualification".into(),
+            relationship_ref: "config:test/relationships".into(),
             subject_manifest_hash: "a".repeat(64),
         };
-        // A node reporting no guarantee holds neither fixture variant: the
-        // refusal names each candidate and what it lacks.
-        let none = derive_blocking(&state, &request)
-            .err()
-            .context("a node holding no variant's guarantees selected one")?;
-        ensure!(
-            none.to_string().contains("no qualification variant")
-                && none
-                    .to_string()
-                    .contains("config:test/consumer-qualification")
-                && none
-                    .to_string()
-                    .contains("does not know how to prove test:held"),
-            "refusal does not name the candidate and its unmet guarantee: {none:#}"
-        );
-        let mut held = lillux::process_control::HostCapabilities::default();
-        held.provide(
-            "test:held",
-            lillux::process_control::ProofSource::Measured,
-            "test",
-            "held by the fixture node",
-        );
-        let refusal = derive_for_guarantees(&state, &request, NodeGuarantees::new(&held, &[]))
+        let refusal = derive_blocking(&state, &request)
             .err()
             .context("a missing environment definition was admitted")?;
         ensure!(
@@ -825,89 +897,139 @@ product_qualification_policy:
                 .contains("config:codex/environments/absent"),
             "refusal does not name the absent environment: {refusal:#}"
         );
+        // A relationship Config that joins no Worker to this policy refuses
+        // before any content is prepared.
+        let unjoined = ConsumerQualificationContextRequest {
+            policy_ref: "config:test/consumer-qualification".into(),
+            relationship_ref: "config:codex/guest-runtime-products".into(),
+            subject_manifest_hash: "a".repeat(64),
+        };
+        let refusal = derive_blocking(&state, &unjoined)
+            .err()
+            .context("a relationship Config that names another policy was admitted")?;
+        ensure!(
+            refusal
+                .to_string()
+                .contains("no product relationship has consumer"),
+            "{refusal:#}"
+        );
+        // The probe form never derives a Worker-lane policy: its use context
+        // would be skipped.
+        let probe = ProbeVerifierSelectionRequest {
+            policy_ref: "config:test/consumer-qualification".into(),
+            subject_manifest_hash: "a".repeat(64),
+        };
+        let refusal = derive_probe(&state, &probe)
+            .err()
+            .context("the probe form derived a consumer-context policy")?;
+        ensure!(
+            refusal
+                .to_string()
+                .contains("has a consumer execution context"),
+            "{refusal:#}"
+        );
         Ok(())
     }
 
-    fn inspection(
-        trusted_process_group: bool,
-        cgroup_scope: bool,
-        pid_namespace: bool,
-    ) -> ryeos_engine::isolation::IsolationInspection {
-        use ryeos_engine::isolation::{
-            DescendantContainmentReadiness, PidNamespaceContainmentQualification,
+    #[test]
+    fn the_two_request_forms_are_told_apart_by_their_closed_fields() -> Result<()> {
+        let worker: QualificationContextDerivation = serde_json::from_value(serde_json::json!({
+            "policy_ref": "config:p", "relationship_ref": "config:r",
+            "subject_manifest_hash": "a".repeat(64)}))?;
+        ensure!(matches!(worker, QualificationContextDerivation::Worker(_)));
+        let probe: QualificationContextDerivation = serde_json::from_value(serde_json::json!({
+            "policy_ref": "config:p", "subject_manifest_hash": "a".repeat(64)}))?;
+        ensure!(matches!(probe, QualificationContextDerivation::Probe(_)));
+        for mixed in [
+            serde_json::json!({"variants_ref": "config:v", "policy_ref": "config:p",
+                "relationship_ref": "config:r", "subject_manifest_hash": "a".repeat(64)}),
+            serde_json::json!({"policy_ref": "config:p"}),
+        ] {
+            ensure!(
+                serde_json::from_value::<QualificationContextDerivation>(mixed.clone()).is_err(),
+                "accepted {mixed}"
+            );
+        }
+        let malformed = ProbeVerifierSelectionRequest {
+            policy_ref: "config:p".into(),
+            subject_manifest_hash: "not-a-digest".into(),
         };
-        let mut inspection = ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring()
-            .inspection()
-            .clone();
-        inspection.filesystem.readable = vec!["{verified_code}".into()];
-        inspection.filesystem.writable = vec!["{project}".into()];
-        inspection.process_scope_readiness.descendant_containment =
-            DescendantContainmentReadiness {
-                cgroup_scope,
-                pid_namespace: if pid_namespace {
-                    PidNamespaceContainmentQualification::qualified_by(
-                        lillux::process_control::ProofSource::Measured,
-                        "probed",
-                    )
-                } else {
-                    PidNamespaceContainmentQualification::not_probed("not probed")
+        ensure!(malformed.validate().is_err());
+        Ok(())
+    }
+
+    fn relationship(name: &str, consumer: &str, policy: Option<&str>) -> ProductRelationship {
+        serde_json::from_value(serde_json::json!({
+            "name": name,
+            "producer": {
+                "canonical_ref": "graph:fixtures/runtime",
+                "recipe_binding": "product_recipe",
+                "product_name": "runtime",
+                "parameters": {},
+            },
+            "consumer": {"canonical_ref": consumer, "declaration_id": "guest-runtime"},
+            "required_product": {
+                "shape": "tree",
+                "storage": "large_content",
+                "bounds": {
+                    "maximum_entries": 3,
+                    "maximum_depth": 3,
+                    "maximum_file_bytes": 1024,
+                    "maximum_total_bytes": 4096,
                 },
-                trusted_process_group,
-            };
-        inspection
+            },
+            "qualification": {
+                "policy_ref": policy,
+                "required_claims": if policy.is_some() { vec!["claim"] } else { vec![] },
+            },
+        }))
+        .unwrap()
+    }
+
+    fn set(relationships: Vec<ProductRelationship>) -> ProductRelationships {
+        ProductRelationships {
+            schema:
+                ryeos_state::external_content::products::composition::PRODUCT_RELATIONSHIPS_SCHEMA
+                    .into(),
+            relationships,
+        }
     }
 
     #[test]
-    fn shipped_codex_variants_are_selected_by_the_guarantees_a_node_reports() -> Result<()> {
-        let path = ryeos_engine::test_support::workspace_root()
-            .join("bundles/codex/.ai/config/codex/qualification-variants.yaml");
-        let document: serde_json::Value = serde_yaml::from_str(&fs::read_to_string(path)?)?;
-        let variants = QualificationVariants::from_value(&document["qualification_variants"])?;
-        let relationship = |view: &lillux::process_control::HostCapabilities| {
-            variants
-                .select(NodeGuarantees::new(view, &[]))
-                .map(|variant| variant.relationship_name.clone())
-                .map_err(|error| error.to_string())
-        };
-        // Enforced isolation with a qualified containment mechanism.
-        for (cgroup_scope, pid_namespace) in [(true, false), (false, true), (true, true)] {
-            let view = inspection(false, cgroup_scope, pid_namespace)
-                .reported_guarantees(true, &GuaranteeHost::default());
-            ensure!(
-                relationship(&view) == Ok("runtime_to_external_authoring_worker".to_owned()),
-                "contained node: {:?}",
-                relationship(&view)
-            );
-        }
-        // Node policy accepting trusted sessions on a node that does not
-        // enforce isolation; a qualified mechanism alone is not enforcement.
-        let view =
-            inspection(true, false, false).reported_guarantees(false, &GuaranteeHost::default());
+    fn the_relationship_is_the_unique_one_joining_the_worker_to_the_policy() -> Result<()> {
+        let worker = "worker:fixtures/authoring";
+        let policy = "config:fixtures/policy";
+        let relationships = set(vec![
+            relationship("unqualified", "tool:fixtures/verifier", None),
+            relationship("other_policy", worker, Some("config:fixtures/other")),
+            relationship("selected", worker, Some(policy)),
+        ]);
+        ensure!(unique_relationship(&relationships, policy, worker)?.name == "selected");
+
+        let none = unique_relationship(&relationships, "config:fixtures/absent", worker)
+            .err()
+            .context("an unjoined policy selected a relationship")?;
         ensure!(
-            relationship(&view)
-                == Ok("runtime_to_external_authoring_worker_trusted_lane".to_owned()),
-            "trusted node: {:?}",
-            relationship(&view)
+            none.to_string().contains("no product relationship"),
+            "{none}"
         );
-        // Neither: enforced without containment, or nothing at all.
-        for (enforced, trusted) in [(true, false), (false, false)] {
-            let view = inspection(trusted, false, false)
-                .reported_guarantees(enforced, &GuaranteeHost::default());
-            let refusal = relationship(&view)
-                .err()
-                .context("a node holding neither selected a variant")?;
-            ensure!(
-                refusal.contains("no qualification variant")
-                    && refusal.contains("config:codex/consumer-qualification-policy-trusted-lane"),
-                "{refusal}"
-            );
-        }
-        // Enforced isolation never lets a trusted-session acceptance stand in.
-        let view =
-            inspection(true, false, false).reported_guarantees(true, &GuaranteeHost::default());
         ensure!(
-            relationship(&view).is_err(),
-            "enforced uncontained node selected a variant"
+            unique_relationship(&relationships, policy, "worker:fixtures/other").is_err(),
+            "a different Worker selected a relationship"
+        );
+
+        let several = set(vec![
+            relationship("first", worker, Some(policy)),
+            relationship("second", worker, Some(policy)),
+        ]);
+        let refusal = unique_relationship(&several, policy, worker)
+            .err()
+            .context("an ambiguous join selected a relationship")?;
+        ensure!(
+            refusal
+                .to_string()
+                .contains("several product relationships"),
+            "{refusal}"
         );
         Ok(())
     }

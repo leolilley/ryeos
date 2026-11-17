@@ -2229,7 +2229,7 @@ impl RyeOsCore {
         let Some(response) = self.data.sources.get(source_key) else {
             return;
         };
-        let layout = super::timeline::timeline_layout_for(binding, response);
+        let layout = super::timeline::timeline_layout_for(binding, response, &instance, view_ref);
         let previous_by_key: HashMap<String, (String, Option<u64>)> = previous
             .as_ref()
             .map(|cache| {
@@ -3021,7 +3021,12 @@ impl RyeOsCore {
                 let layout = match self.data.timeline_sources.get(&source_key) {
                     Some(cache) => &cache.layout,
                     None => {
-                        built = super::timeline::timeline_layout_for(binding, response);
+                        built = super::timeline::timeline_layout_for(
+                            binding,
+                            response,
+                            &tile.instance_key,
+                            self.mounted_view_ref(&tile.instance_key).unwrap_or(""),
+                        );
                         &built
                     }
                 };

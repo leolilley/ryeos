@@ -36,6 +36,9 @@ pub struct QualificationRemoteVerifierSource {
     /// Signed probe input of a Worker-less scenario, retained verbatim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_probe_input: Option<serde_json::Value>,
+    /// The launch shape the signed scenario requires, retained verbatim and
+    /// committed by `scenario_source_digest`.
+    pub launch_shape: ryeos_external_execution_contract::runtime_snapshot::LaunchShape,
     pub selection: ProductQualificationRemoteVerifierSelection,
     pub payload_bytes: u64,
     pub payload_mode: u32,
@@ -52,6 +55,48 @@ pub struct QualificationRemoteVerifierSource {
 }
 
 impl QualificationRemoteVerifierSource {
+    /// Equality over signed content. The producer source compares by its
+    /// content identity, never by the process-local Bundle generation it was
+    /// resolved under, so a retained source re-verifies after a restart.
+    pub fn same_signed_source(&self, other: &Self) -> bool {
+        let Self {
+            scenario_source_digest,
+            policy_resolution_blob_hash,
+            recipe_resolution_blob_hash,
+            producer_source,
+            remote_probe_input,
+            launch_shape,
+            selection,
+            payload_bytes,
+            payload_mode,
+            signed_items,
+            signed_bundle_manifests,
+            signer_keys,
+            executor,
+            archive_member_digests,
+        } = self;
+        *scenario_source_digest == other.scenario_source_digest
+            && *policy_resolution_blob_hash == other.policy_resolution_blob_hash
+            && *recipe_resolution_blob_hash == other.recipe_resolution_blob_hash
+            && producer_source
+                .as_ref()
+                .map(ProductProducerRecipeSourceIdentity::content_identity)
+                == other
+                    .producer_source
+                    .as_ref()
+                    .map(ProductProducerRecipeSourceIdentity::content_identity)
+            && *remote_probe_input == other.remote_probe_input
+            && *launch_shape == other.launch_shape
+            && *selection == other.selection
+            && *payload_bytes == other.payload_bytes
+            && *payload_mode == other.payload_mode
+            && *signed_items == other.signed_items
+            && *signed_bundle_manifests == other.signed_bundle_manifests
+            && *signer_keys == other.signer_keys
+            && *executor == other.executor
+            && *archive_member_digests == other.archive_member_digests
+    }
+
     pub fn validate(&self) -> Result<()> {
         validate_hash(
             "retained policy resolution",
@@ -76,6 +121,7 @@ impl QualificationRemoteVerifierSource {
             remote_verifier: Some(self.selection.clone()),
             consumer_worker_request: None,
             remote_probe_input: self.remote_probe_input.clone(),
+            launch_shape: Some(self.launch_shape.clone()),
         };
         ensure!(
             self.scenario_source_digest
@@ -320,6 +366,9 @@ pub(crate) mod tests {
             remote_verifier: Some(selection.clone()),
             consumer_worker_request: None,
             remote_probe_input: None,
+            launch_shape: Some(
+                ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(),
+            ),
         };
         let source = QualificationRemoteVerifierSource {
             policy_resolution_blob_hash: "1".repeat(64),
@@ -383,17 +432,39 @@ pub(crate) mod tests {
                 payload_blob_hash: "6".repeat(64),
             },
             archive_member_digests: BTreeMap::new(),
+            launch_shape:
+                ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(),
         };
         let mut policy_scenario = scenario;
         policy_scenario.consumer_worker_request =
             Some(super::super::tests::test_worker_request("fixture"));
         policy.policy.consumer_execution_context =
             Some(super::super::tests::test_consumer_context());
+        policy.policy.minimum_verifier_process_settlement = None;
         policy
             .policy
             .producer_scenarios
             .insert("remote_codex".into(), policy_scenario);
         (source, policy)
+    }
+
+    #[test]
+    fn signed_source_equality_ignores_only_the_process_local_generation() {
+        let (source, _) = fixture();
+        let mut restarted = source.clone();
+        restarted
+            .producer_source
+            .as_mut()
+            .unwrap()
+            .bundle_generation_identity = "generation-2".into();
+        assert!(source.same_signed_source(&restarted));
+        assert_ne!(source, restarted);
+        let mut changed = restarted.clone();
+        changed.producer_source.as_mut().unwrap().recipe_digest = "d".repeat(64);
+        assert!(!source.same_signed_source(&changed));
+        let mut changed = restarted;
+        changed.payload_bytes += 1;
+        assert!(!source.same_signed_source(&changed));
     }
 
     #[test]
@@ -449,11 +520,16 @@ pub(crate) mod tests {
     ) {
         let (mut source, mut policy) = fixture();
         policy.policy.consumer_execution_context = None;
+        policy.policy.minimum_verifier_process_settlement =
+            Some(super::super::VerifierProcessSettlementAuthority::ScopeEmpty);
         let scenario = ProductQualificationProducerScenario {
             recipe_ref: None,
             remote_verifier: Some(source.selection.clone()),
             consumer_worker_request: None,
             remote_probe_input: Some(serde_json::json!({"probe":"a"})),
+            launch_shape: Some(
+                ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(),
+            ),
         };
         policy.policy.producer_scenarios.clear();
         policy
@@ -486,6 +562,9 @@ pub(crate) mod tests {
             remote_verifier: Some(with_member.selection.clone()),
             consumer_worker_request: None,
             remote_probe_input: None,
+            launch_shape: Some(
+                ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(),
+            ),
         };
         with_member.scenario_source_digest = scenario
             .remote_verifier_source_digest(with_member.producer_source.as_ref())

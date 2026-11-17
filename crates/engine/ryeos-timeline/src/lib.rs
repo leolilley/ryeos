@@ -32,11 +32,40 @@ pub struct Definition {
     /// Counting nouns for clusters, in display order.
     #[serde(default)]
     pub vocabulary: Vec<Noun>,
+    /// Policy for the cluster and turn-fold passes.
+    #[serde(default)]
+    pub folds: Folds,
     /// Which events link threads into the viewed thread's story.
     #[serde(default)]
     pub spine: Vec<SpineEdge>,
     /// Rules per event type. The first rule whose `when` holds applies.
     pub events: BTreeMap<String, Vec<Rule>>,
+}
+
+/// Policy for the passes over entries.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Folds {
+    /// Entries that never hide inside a group or a folded turn.
+    #[serde(default)]
+    pub escape: Escape,
+    /// States in which an operation is finished and may join a cluster.
+    #[serde(default)]
+    pub group_states: Vec<String>,
+    /// Vocabulary noun under which two or more consecutive markers fold.
+    /// Absent means notices never fold.
+    #[serde(default)]
+    pub notice: Option<String>,
+}
+
+/// An entry escapes when its state or tone is listed.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Escape {
+    #[serde(default)]
+    pub states: Vec<String>,
+    #[serde(default)]
+    pub tones: Vec<String>,
 }
 
 /// An event of `event` type links thread `from` to thread `to` (both paths into
@@ -216,15 +245,20 @@ pub enum Slot {
     Lookup { lookup: Lookup },
 }
 
-/// A value taken from an earlier event of the same thread: the latest event of
-/// type `event` whose array at `array` has an element whose `find.0` equals
-/// this event's `find.1`; the slot is that element's `get`.
+/// A value taken from an earlier event of the same thread.
+///
+/// With `array` and `find`: the latest event of type `event` whose array at
+/// `array` has an element whose `find.0` equals this event's `find.1`; the slot
+/// is that element's `get`. Without them: the latest event of type `event`
+/// where `get` resolves; the slot is that value.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Lookup {
     pub event: String,
-    pub array: String,
-    pub find: (String, String),
+    #[serde(default)]
+    pub array: Option<String>,
+    #[serde(default)]
+    pub find: Option<(String, String)>,
     pub get: String,
 }
 
@@ -278,10 +312,13 @@ pub struct Cluster {
 pub struct Recap {
     pub id: String,
     pub exchange: String,
+    /// Operations among the members, not events.
     pub work: usize,
     pub duration_s: Option<i64>,
-    /// Highest `chain_seq` among the exchange's entries: the recap changes
-    /// only when one of them does.
+    /// The folded work: entries and clusters, in order.
+    pub members: Vec<Item>,
+    /// Highest `chain_seq` among the members and the entries that finished
+    /// the exchange: the recap changes only when one of them does.
     pub seq: i64,
 }
 

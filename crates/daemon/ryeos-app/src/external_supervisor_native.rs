@@ -4,7 +4,7 @@
 //! occurrence's bootstrap, so the supervisor funds its in-process native host
 //! from node-signed data rather than from a value of its own choosing.
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail};
 use ryeos_node_runtime::node_policy::NodePolicySnapshot;
 use ryeos_scheduler_contract::{NodeMaintenancePolicy, OfflineNativeQuota};
 use ryeos_state::external_execution::transport::ExternalSupervisorNativeEnvelope;
@@ -51,11 +51,28 @@ pub(crate) fn external_supervisor_journal_quota(
     ryeos_node_runtime::node_policy::sections::maintenance::validate_offline_native_quota(&quota)
         .with_context(|| format!("offline native `{EXTERNAL_SUPERVISOR_JOURNAL_CLASS}` quota"))?;
     let lifetime = external_supervisor_occurrence_lifetime_ms(contract, execution_timeout_seconds)?;
-    ensure!(
-        quota.max_operation_millis >= lifetime,
-        "offline native `{EXTERNAL_SUPERVISOR_JOURNAL_CLASS}` operation window of {} ms is shorter than the occurrence lifetime of {lifetime} ms",
-        quota.max_operation_millis
-    );
+    if quota.max_operation_millis < lifetime {
+        // The lifetime is contact + 2 x observation + execution + cleanup, so
+        // the largest observation timeout the window funds is what remains
+        // after the other three, halved.
+        let other_seconds = u64::from(contract.contact_timeout_seconds)
+            .saturating_add(u64::from(execution_timeout_seconds))
+            .saturating_add(u64::from(contract.cleanup_timeout_seconds));
+        let fit = (quota.max_operation_millis / 1_000)
+            .checked_sub(other_seconds)
+            .map(|remaining| remaining / 2);
+        let advice = match fit {
+            Some(seconds) if seconds > 0 => format!(
+                "the largest observation timeout this window funds is {seconds} s, the binding names {} s",
+                contract.observation_timeout_seconds
+            ),
+            _ => "no observation timeout fits: contact, execution and cleanup alone exceed the window".to_owned(),
+        };
+        bail!(
+            "offline native `{EXTERNAL_SUPERVISOR_JOURNAL_CLASS}` operation window of {} ms is shorter than the occurrence lifetime of {lifetime} ms; {advice}",
+            quota.max_operation_millis
+        );
+    }
     Ok(quota)
 }
 

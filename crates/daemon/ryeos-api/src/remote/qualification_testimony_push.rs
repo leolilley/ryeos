@@ -60,6 +60,10 @@ async fn prepare(
     let request = request.clone();
     let ctx = ctx.clone();
     tokio::task::spawn_blocking(move || {
+        // The origin re-verifies its qualification before preparing it, and a
+        // verifier on the pinned project lane needs its retained snapshot.
+        let project_context_resolver =
+            crate::handlers::qualification_project_context::resolver(state.as_ref());
         let operator = OperatorPublicIdentity::load(&state.config.app_root)
             .context("load configured operator identity for testimony export")?;
         match &request.content {
@@ -70,6 +74,7 @@ async fn prepare(
                 &request.qualification_hash,
                 &request.acceptance_policy_ref,
                 &now,
+                project_context_resolver.as_ref(),
             ),
             Some(selection) => prepare_content_testimony_blocking(
                 &state,

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-04T06:36:05Z:87e6e293ba7047f6f2755a469d28f5b443f38a81c84dc89d285004e639f68a2f:AU3tI0khELoStPrC3ZEj1mEEB6/FXcNuyLSXlIRf7v3GNb/OQWRzatUdMd5MReykwxhGLoO6lD8m4hx8GUiKBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-12T08:00:41Z:ac928bccf1752cd57ba80c027c04b1bad341f0ab9ac0a5cc7f37569a96f294ce:tuoobR5XIE3f6cYEbfP5Pssx7ASX5mFuQPjtk7+guOnPOPnrBFeU0jxxTGm2MKDWqi0Dm419WhOYB3yr97aiDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex/qualification
 version: "1.0.0"
 description: >-
@@ -28,7 +28,7 @@ external_product_slots:
   # composition edge; the product never leaves the node.
   - id: subject
     relationship_ref: config:codex/guest-owner-runtime-products
-    relationship: owner_to_guest_wire_verifier
+    relationship: owner_to_guest_wire_verifier_subject
     kind: tree
     mount_root: execution_runtime
     mount: guest-owner-runtime

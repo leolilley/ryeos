@@ -6501,6 +6501,21 @@ pub async fn terminate_session_with_bounded_outcome(
     let worker_boot_epoch = session
         .worker_boot_epoch
         .ok_or_else(|| anyhow!("dedicated session has no worker epoch"))?;
+    if state
+        .state_store
+        .worker_process(worker_instance_id)?
+        .is_none()
+    {
+        return terminate_session_without_worker_row(
+            state,
+            &session,
+            worker_instance_id,
+            worker_boot_epoch,
+            reason,
+            bounded_outcome.as_ref(),
+        )
+        .await;
+    }
     if let Some(fence) = completion_fence {
         validate_hosted_command_completion_fence(state, &session, fence)?;
     }
@@ -6611,6 +6626,87 @@ pub async fn terminate_session_with_bounded_outcome(
         "placement_thread_id":placement_thread_id,
         "state":terminal.state,
         "reason":reason
+    }))
+}
+
+/// A session whose worker row is missing: the launcher may or may not have
+/// existed. Only the host lifetime recorded before its spawn can prove it gone,
+/// through the same function boot reconciliation uses. The daemon evaluates
+/// that proof holding the node state lock, which proves the recording node has
+/// exited. Anything else refuses and says what is true.
+async fn terminate_session_without_worker_row(
+    state: &AppState,
+    session: &DedicatedSessionRecord,
+    worker_instance_id: &str,
+    worker_boot_epoch: u64,
+    reason: &str,
+    bounded_outcome: Option<&DedicatedSessionBoundedOutcome>,
+) -> Result<Value> {
+    use crate::runtime_db::UnattachedTrustedHoldingProof as Proof;
+    let placement_thread_id = session.placement_thread_id.as_str();
+    if reason == "completed" {
+        bail!("a session without a recorded worker cannot be declared completed");
+    }
+    match state.state_store.unattached_trusted_holding_proof(
+        placement_thread_id,
+        worker_instance_id,
+        worker_boot_epoch,
+    )? {
+        Proof::Ended => {}
+        Proof::NotEnded => bail!(
+            "the session's worker was never recorded and its launcher is not proved gone; \
+             cleanup is unproved until this node starts under a new host lifetime"
+        ),
+        Proof::Undecided(why) => bail!(
+            "the session's worker was never recorded and its host lifetime cannot be decided \
+             ({why}); cleanup is unproved until this node starts under a new host lifetime"
+        ),
+        Proof::Absent => {
+            // No trusted holding. A scope reservation means the session was
+            // launched as a contained process scope, whose retained evidence
+            // (not a host lifetime) is what settles it; otherwise nothing at
+            // all was recorded for the launcher.
+            if state
+                .state_store
+                .dedicated_worker_scope(placement_thread_id, worker_instance_id, worker_boot_epoch)?
+                .is_some()
+            {
+                bail!(
+                    "the session's worker was never recorded and its launcher belongs to a \
+                     contained process scope; only the retained scope evidence can settle it, \
+                     and a host lifetime does not apply to this form"
+                )
+            }
+            bail!(
+                "the session's worker was never recorded and no host lifetime or scope was \
+                 recorded for its launcher; cleanup cannot be proved"
+            )
+        }
+    }
+    if let Some(outcome) = bounded_outcome {
+        state
+            .state_store
+            .reserve_dedicated_session_bounded_outcome(placement_thread_id, outcome)?;
+    }
+    let deadline = prepare_external_candidate_termination(state, session, reason, None).await?;
+    settle_external_candidate_termination(state, session, deadline).await?;
+    state.state_store.fail_dedicated_session_start(
+        placement_thread_id,
+        worker_instance_id,
+        worker_boot_epoch,
+        reason,
+        true,
+    )?;
+    notify_projection_change(placement_thread_id);
+    if bounded_outcome.is_some() {
+        return canonical_terminal_session_projection(state, placement_thread_id);
+    }
+    Ok(json!({
+        "chain_root_id":session.chain_root_id,
+        "placement_thread_id":placement_thread_id,
+        "state":"terminal",
+        "reason":reason,
+        "prior_outcome":"unknown",
     }))
 }
 

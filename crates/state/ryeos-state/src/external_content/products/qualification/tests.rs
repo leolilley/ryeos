@@ -50,12 +50,19 @@ fn policy() -> ProductQualificationPolicy {
         verifier_ref: "tool:fixtures/qualify_runtime".into(),
         subject_declaration_id: "runtime".into(),
         allowed_claims: vec!["command_probe".into(), "extension_probe".into()],
-        minimum_verifier_process_settlement: VerifierProcessSettlementAuthority::ScopeEmpty,
+        minimum_verifier_process_settlement: Some(VerifierProcessSettlementAuthority::ScopeEmpty),
         verifier_parameters: json!({"scope":"bounded_fixture"}),
         consumer_execution_context: None,
-        requires_guarantees: Vec::new(),
         producer_scenarios: BTreeMap::new(),
+        launch_shape: Some(declared_shape()),
     }
+}
+
+pub(crate) fn declared_shape() -> ryeos_external_execution_contract::runtime_snapshot::LaunchShape {
+    ryeos_external_execution_contract::runtime_snapshot::LaunchShape::https_allow_list(
+        ["controller.invalid".to_owned()],
+        ryeos_external_execution_contract::runtime_snapshot::LaunchNetworkInputs::operator(),
+    )
 }
 
 #[test]
@@ -68,6 +75,7 @@ fn consumer_execution_context_requires_typed_canonical_refs() {
         worker_execution_ref: "worker_execution:codex/bounded-turn".into(),
         environment_binding: "environment".into(),
     });
+    policy.minimum_verifier_process_settlement = None;
     policy.validate().unwrap();
     let relationship_consumer = ProductRelationshipConsumer {
         canonical_ref: "worker:codex/external-hosted-authoring".into(),
@@ -141,6 +149,10 @@ fn consumer_execution_requires_remote_consumer_proof() {
             worker_execution_ref: "worker_execution:codex/bounded-turn".into(),
             environment_binding: "environment".into(),
         });
+    evidence
+        .policy_source
+        .policy
+        .minimum_verifier_process_settlement = None;
     let error = validate_qualification_execution(
         &evidence.policy_source,
         &evidence.verifier,
@@ -167,6 +179,10 @@ fn consumer_launch_purpose_fixture() -> QualificationLaunchPurpose {
         environment_binding: "environment".into(),
     };
     purpose.policy_source.policy.consumer_execution_context = Some(context.clone());
+    purpose
+        .policy_source
+        .policy
+        .minimum_verifier_process_settlement = None;
     purpose.policy_source.policy.producer_scenarios.insert(
         "direct_codex".into(),
         ProductQualificationProducerScenario {
@@ -174,6 +190,7 @@ fn consumer_launch_purpose_fixture() -> QualificationLaunchPurpose {
             recipe_ref: Some("config:codex/direct-probe".into()),
             remote_verifier: None,
             consumer_worker_request: None,
+            launch_shape: None,
         },
     );
     purpose.producer_recipe_sources.insert(
@@ -696,6 +713,7 @@ fn launch_purpose_pins_every_signed_producer_recipe_source() {
             recipe_ref: Some(recipe_ref.clone()),
             remote_verifier: None,
             consumer_worker_request: None,
+            launch_shape: None,
         },
     );
     assert!(purpose.validate().is_err());
@@ -798,7 +816,10 @@ fn signed_policy_distinguishes_scope_from_trusted_process_group_settlement() {
         .as_object_mut()
         .unwrap()
         .remove("minimum_verifier_process_settlement");
-    assert!(ProductQualificationPolicy::from_value(&policy_wire).is_err());
+    assert!(
+        ProductQualificationPolicy::from_value(&policy_wire).is_err(),
+        "a policy without a consumer context requires a minimum"
+    );
     policy_wire["minimum_verifier_process_settlement"] = json!("unknown");
     assert!(ProductQualificationPolicy::from_value(&policy_wire).is_err());
     policy_wire["minimum_verifier_process_settlement"] = json!("scope_empty");
@@ -807,18 +828,63 @@ fn signed_policy_distinguishes_scope_from_trusted_process_group_settlement() {
     let mut evidence = evidence();
     evidence.verifier.process_settlement_authority =
         Some(VerifierProcessSettlementAuthority::TrustedProcessGroupAbsent);
+    evidence
+        .origin_holdings
+        .verifier
+        .process_settlement_authority =
+        VerifierProcessSettlementAuthority::TrustedProcessGroupAbsent;
     assert!(evidence.validate().is_err());
     evidence
         .policy_source
         .policy
         .minimum_verifier_process_settlement =
-        VerifierProcessSettlementAuthority::TrustedProcessGroupAbsent;
+        Some(VerifierProcessSettlementAuthority::TrustedProcessGroupAbsent);
     evidence.validate().unwrap();
     evidence.verifier.process_settlement_authority =
         Some(VerifierProcessSettlementAuthority::ScopeEmpty);
+    evidence
+        .origin_holdings
+        .verifier
+        .process_settlement_authority = VerifierProcessSettlementAuthority::ScopeEmpty;
     evidence.validate().unwrap();
     evidence.verifier.process_settlement_authority = None;
     assert!(evidence.validate().is_err());
+}
+
+#[test]
+fn minimum_settlement_is_present_exactly_when_the_policy_has_no_consumer_context() {
+    let mut probe = policy();
+    probe.validate().unwrap();
+    probe.minimum_verifier_process_settlement = None;
+    assert!(
+        probe
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("requires a minimum verifier settlement")
+    );
+
+    let mut consumer = policy();
+    consumer.consumer_execution_context = Some(test_consumer_context());
+    assert!(
+        consumer
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("names no minimum")
+    );
+    consumer.minimum_verifier_process_settlement = None;
+    consumer.validate().unwrap();
+    let wire = serde_json::to_value(&consumer).unwrap();
+    assert!(wire.get("minimum_verifier_process_settlement").is_none());
+    assert!(wire.get("requires_guarantees").is_none());
+    assert_eq!(
+        ProductQualificationPolicy::from_value(&wire).unwrap(),
+        consumer
+    );
+    let mut stale = wire;
+    stale["requires_guarantees"] = json!(["isolation:enforced"]);
+    assert!(ProductQualificationPolicy::from_value(&stale).is_err());
 }
 
 #[test]
@@ -855,7 +921,7 @@ fn containment_empty_settlement_is_ordered_between_the_trusted_group_and_a_scope
         ProductQualificationPolicy::from_value(&policy_wire)
             .unwrap()
             .minimum_verifier_process_settlement,
-        ContainmentEmpty
+        Some(ContainmentEmpty)
     );
 }
 
@@ -872,6 +938,7 @@ fn execution_proof_requires_exact_bounded_participants_and_contract_identity() {
     graph.verifier.artifact_identity = graph_artifact_identity();
     graph.verifier.process_settlement_witness_digest = None;
     graph.verifier.process_settlement_authority = None;
+    graph.origin_holdings.verifier.execution_protocol = "protocol:fixtures/graph".into();
     graph.execution_proof = execution_proof(&graph.verifier.artifact_identity);
     let mut child = direct.verifier.clone();
     child.chain_root_id = "T-probe".into();
@@ -899,6 +966,13 @@ fn execution_proof_requires_exact_bounded_participants_and_contract_identity() {
         .policy_source
         .policy
         .minimum_verifier_process_settlement =
+        Some(VerifierProcessSettlementAuthority::TrustedProcessGroupAbsent);
+    // The managed verifier's holding may claim no more than a participant proved.
+    assert!(weak_participant.validate().is_err());
+    weak_participant
+        .origin_holdings
+        .verifier
+        .process_settlement_authority =
         VerifierProcessSettlementAuthority::TrustedProcessGroupAbsent;
     weak_participant.validate().unwrap();
     for mutate in [
@@ -983,6 +1057,7 @@ fn scoped_attempt_proof_is_exact_distinct_and_bound_to_signed_scenario() {
             recipe_ref: Some(source.canonical_ref.clone()),
             remote_verifier: None,
             consumer_worker_request: None,
+            launch_shape: None,
         },
     );
     let scoped = ProductQualificationScopedAttemptProof {
@@ -1115,6 +1190,10 @@ pub(crate) fn execution_proof(
         },
         participants: Vec::new(),
         subordinate_attempt: None,
+        launch_shape: Some(ProductQualificationRetainedLaunchShape {
+            shape: declared_shape(),
+            basis: ProductQualificationLaunchShapeBasis::Declared,
+        }),
     }
 }
 
@@ -1223,6 +1302,14 @@ pub(crate) fn evidence() -> ProductQualificationEvidence {
             effective_definition_digest: "6".repeat(64),
             publisher_fingerprint: "7".repeat(64),
             policy,
+        },
+        origin_holdings: ProductQualificationOriginHoldings {
+            verifier: OriginHolding {
+                execution_protocol: "protocol:fixtures/qualified".into(),
+                filesystem_authority: "node_policy".into(),
+                process_settlement_authority: VerifierProcessSettlementAuthority::ScopeEmpty,
+            },
+            worker: None,
         },
         consumer_content: None,
         qualification_worker_transcript_manifest_hash: None,
@@ -1363,6 +1450,7 @@ fn subject_selection(evidence: &ProductQualificationEvidence) -> ResolvedExterna
         relationship_name: relationship.name.clone(),
         relationship_ref: "config:fixtures/build_recipe".into(),
         relationship_raw_content_digest: "8".repeat(64),
+        relationship_project_dependent: false,
         relationship,
         witness_hash: evidence.product_witness_hash.clone(),
         witness_source: evidence.witness_source.clone(),
@@ -1658,6 +1746,10 @@ fn purpose_owns_the_exact_signed_remote_verifier_inventory() {
     let local = consumer_launch_purpose_fixture();
     purpose.policy_source.policy.consumer_execution_context =
         local.policy_source.policy.consumer_execution_context;
+    purpose
+        .policy_source
+        .policy
+        .minimum_verifier_process_settlement = None;
     purpose.consumer_definitions = local.consumer_definitions;
     purpose.consumer_content = local.consumer_content;
     let content = purpose.consumer_content.as_mut().unwrap();
@@ -1766,15 +1858,14 @@ fn purpose_owns_the_exact_signed_remote_verifier_inventory() {
         scenario_input: json!({}),
     };
     let mut attempt = ryeos_external_execution_contract::restored_runtime_measurement::RestoredVerifierAttemptIntent {
-        schema: 2,
+        schema: ryeos_external_execution_contract::restored_runtime_measurement::RESTORED_VERIFIER_ATTEMPT_SCHEMA,
         operation_id: String::new(),
         qualification_operation_id: "a".repeat(64),
         restored_occurrence_id: "fixture-occurrence".into(),
         verifier_artifact_hash: selection.verifier_artifact_hash.clone(),
         upload_sha256: "e".repeat(64), upload_bytes: 1,
         purpose: ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose::ConsumerRuntime {
-            coordinate: coordinate.clone(), nonce_hex: "f".repeat(64), guest_runtime_manifest_hash: "e".repeat(64),
-        },
+            coordinate: coordinate.clone(), nonce_hex: "f".repeat(64), guest_runtime_manifest_hash: "e".repeat(64), launch_shape: ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(), },
         attempt_deadline_ms: 1000,
     };
     attempt.operation_id = attempt.derived_operation_id().unwrap();
@@ -1861,6 +1952,7 @@ fn product_evidence_refuses_predecessor_use_retention_schema() {
         "ryeos.product_qualification_evidence.v10",
         "ryeos.product_qualification_evidence.v12",
         "ryeos.product_qualification_evidence.v13",
+        "ryeos.product_qualification_evidence.v14",
     ] {
         predecessor["schema"] = json!(schema);
         assert!(ProductQualificationEvidence::from_value(&predecessor).is_err());
@@ -1880,7 +1972,7 @@ fn remote_subordinate_proof_fixture() -> ProductQualificationRemoteConsumerProof
     };
     let root = evidence().verifier;
     let mut intent = RestoredVerifierAttemptIntent {
-        schema: 2,
+        schema: ryeos_external_execution_contract::restored_runtime_measurement::RESTORED_VERIFIER_ATTEMPT_SCHEMA,
         operation_id: String::new(),
         qualification_operation_id: "1".repeat(64),
         restored_occurrence_id: "fixture-occurrence".into(),
@@ -1902,8 +1994,7 @@ fn remote_subordinate_proof_fixture() -> ProductQualificationRemoteConsumerProof
                 prerequisite_measurement_observation_digest: "9".repeat(64),
             },
             nonce_hex: "a".repeat(64),
-            guest_runtime_manifest_hash: "b".repeat(64),
-        },
+            guest_runtime_manifest_hash: "b".repeat(64), launch_shape: ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(), },
     };
     intent.operation_id = intent.derived_operation_id().unwrap();
     let observation = ConsumerVerifierAdapterObservation {
@@ -1992,6 +2083,7 @@ fn remote_subordinate_proof_binds_root_occurrence_and_timely_observation() {
 fn remote_verifier_selection_is_signed_distinct_and_source_committed() {
     let mut value = policy();
     value.consumer_execution_context = Some(test_consumer_context());
+    value.minimum_verifier_process_settlement = None;
     let mut scenario = ProductQualificationProducerScenario {
         remote_probe_input: None,
         recipe_ref: Some("config:fixtures/recipe".into()),
@@ -2001,6 +2093,9 @@ fn remote_verifier_selection_is_signed_distinct_and_source_committed() {
             archive_members: Default::default(),
         }),
         consumer_worker_request: Some(test_worker_request("first")),
+        launch_shape: Some(
+            ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(),
+        ),
     };
     value
         .producer_scenarios
@@ -2136,6 +2231,7 @@ fn remote_verifier_selection_is_signed_distinct_and_source_committed() {
 fn scenario_worker_request_is_bounded_signed_data_distinct_from_verifier_source() {
     let mut policy = policy();
     policy.consumer_execution_context = Some(test_consumer_context());
+    policy.minimum_verifier_process_settlement = None;
     let scenario = ProductQualificationProducerScenario {
         remote_probe_input: None,
         recipe_ref: Some("config:fixtures/recipe".into()),
@@ -2145,6 +2241,9 @@ fn scenario_worker_request_is_bounded_signed_data_distinct_from_verifier_source(
             archive_members: Default::default(),
         }),
         consumer_worker_request: Some(test_worker_request("initial")),
+        launch_shape: Some(
+            ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(),
+        ),
     };
     let source = ProductProducerRecipeSourceIdentity {
         bundle_generation_identity: "generation-1".into(),
@@ -2388,6 +2487,7 @@ fn producer_scenarios_are_finite_canonical_signed_config_refs_only() {
             recipe_ref: Some("config:fixtures/independent-runtime/native-codex-producer".into()),
             remote_verifier: None,
             consumer_worker_request: None,
+            launch_shape: None,
         },
     );
     assert!(value.validate().is_ok());
@@ -2407,6 +2507,7 @@ fn producer_scenarios_are_finite_canonical_signed_config_refs_only() {
                 recipe_ref: Some("config:fixtures/recipe".into()),
                 remote_verifier: None,
                 consumer_worker_request: None,
+                launch_shape: None,
             },
         );
         assert!(invalid.validate().is_err(), "accepted scenario {name:?}");
@@ -2435,6 +2536,7 @@ fn producer_scenarios_are_finite_canonical_signed_config_refs_only() {
                 recipe_ref: Some("config:fixtures/recipe".into()),
                 remote_verifier: None,
                 consumer_worker_request: None,
+                launch_shape: None,
             },
         );
     }
@@ -2614,6 +2716,15 @@ fn consumer_q_evidence_fixture() -> ProductQualificationEvidence {
     let purpose = consumer_launch_purpose_fixture();
     evidence.policy_source.policy.consumer_execution_context =
         purpose.policy_source.policy.consumer_execution_context;
+    evidence
+        .policy_source
+        .policy
+        .minimum_verifier_process_settlement = None;
+    evidence.origin_holdings.worker = Some(OriginHolding {
+        execution_protocol: "protocol:fixtures/worker_session".into(),
+        filesystem_authority: "captured_execution".into(),
+        process_settlement_authority: VerifierProcessSettlementAuthority::ContainmentEmpty,
+    });
     evidence.consumer_content = purpose.consumer_content;
     evidence
         .consumer_content
@@ -2639,6 +2750,9 @@ fn consumer_q_evidence_fixture() -> ProductQualificationEvidence {
                 session_setup: json!({"route":"session.start","body":{}}),
                 body: json!({"route":"turn.start","body":{"prompt":"bounded"}}),
             }),
+            launch_shape: Some(
+                ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(),
+            ),
         },
     );
     let remote = remote_subordinate_proof_fixture();
@@ -2653,6 +2767,10 @@ fn consumer_q_evidence_fixture() -> ProductQualificationEvidence {
         },
     });
     evidence.qualification_worker_transcript_manifest_hash = Some(hash);
+    evidence.execution_proof.launch_shape = Some(ProductQualificationRetainedLaunchShape {
+        shape: ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(),
+        basis: ProductQualificationLaunchShapeBasis::Verified,
+    });
     evidence.execution_proof.subordinate_attempt =
         Some(ProductQualificationSubordinateAttemptProof::RemoteConsumer { proof: remote });
     evidence.verifier.result_digest = evidence.result.digest().unwrap();
@@ -2709,6 +2827,10 @@ fn consumer_evidence_requires_exact_q_reference_and_signed_remote_request() {
     );
     let mut no_remote = valid.clone();
     no_remote.execution_proof.subordinate_attempt = None;
+    no_remote.execution_proof.launch_shape = Some(ProductQualificationRetainedLaunchShape {
+        shape: declared_shape(),
+        basis: ProductQualificationLaunchShapeBasis::Declared,
+    });
     assert!(
         no_remote
             .validate()
@@ -2853,6 +2975,9 @@ fn probe_scenario() -> ProductQualificationProducerScenario {
         remote_verifier: Some(probe_selection()),
         consumer_worker_request: None,
         remote_probe_input: Some(json!({"controller":{"scenario":"probe"}})),
+        launch_shape: Some(
+            ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(),
+        ),
     }
 }
 
@@ -2905,6 +3030,7 @@ fn policy_remote_scenarios_must_match_the_consumer_context() {
 
     let mut with_context = worker_free.clone();
     with_context.consumer_execution_context = Some(test_consumer_context());
+    with_context.minimum_verifier_process_settlement = None;
     assert!(with_context.validate().is_err());
 
     let mut worker_scenario = probe_scenario();
@@ -2917,6 +3043,7 @@ fn policy_remote_scenarios_must_match_the_consumer_context() {
     assert!(missing_probe.validate().is_err());
     let mut missing_worker = policy();
     missing_worker.consumer_execution_context = Some(test_consumer_context());
+    missing_worker.minimum_verifier_process_settlement = None;
     missing_worker
         .producer_scenarios
         .insert("remote".into(), worker_scenario.clone());
@@ -3037,6 +3164,10 @@ fn probe_execution_needs_no_q_transcript_without_a_consumer_context() {
             "terminal_observation_sha256": canonical_value_digest(&serde_json::to_value(&remote.terminal_observation).unwrap()).unwrap(),
         },
     });
+    evidence.execution_proof.launch_shape = Some(ProductQualificationRetainedLaunchShape {
+        shape: ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(),
+        basis: ProductQualificationLaunchShapeBasis::Verified,
+    });
     evidence.execution_proof.subordinate_attempt =
         Some(ProductQualificationSubordinateAttemptProof::RemoteConsumer { proof: remote });
     evidence.verifier.result_digest = evidence.result.digest().unwrap();
@@ -3083,22 +3214,136 @@ fn portable_consumer_identity_ignores_only_the_generation_identity() {
 }
 
 #[test]
-fn policy_required_guarantees_are_declared_data_and_absent_when_unset() {
-    let unset = serde_json::to_value(policy()).unwrap();
-    assert!(unset.get("requires_guarantees").is_none());
-    let mut declared = policy();
-    declared.requires_guarantees = serde_json::from_value(json!([
-        "isolation:enforced",
-        {"name": "sessions:trusted_process_group", "accept": ["trusted"]},
-    ]))
-    .unwrap();
-    let value = serde_json::to_value(&declared).unwrap();
-    assert_eq!(value["requires_guarantees"][0], "isolation:enforced");
+fn origin_holdings_are_required_exact_and_part_of_the_semantic_identity() {
+    let valid = evidence();
+    valid.validate().unwrap();
+    let wire = serde_json::to_value(&valid).unwrap();
     assert_eq!(
-        ProductQualificationPolicy::from_value(&value).unwrap(),
-        declared
+        wire["origin_holdings"]["verifier"]["execution_protocol"],
+        "protocol:fixtures/qualified"
     );
-    let mut malformed = value;
-    malformed["requires_guarantees"] = json!([""]);
-    assert!(ProductQualificationPolicy::from_value(&malformed).is_err());
+    assert!(wire["origin_holdings"]["worker"].is_null());
+    assert_eq!(
+        ProductQualificationEvidence::from_value(&wire).unwrap(),
+        valid
+    );
+
+    let mut missing = wire.clone();
+    missing.as_object_mut().unwrap().remove("origin_holdings");
+    assert!(ProductQualificationEvidence::from_value(&missing).is_err());
+    let mut missing_worker = wire.clone();
+    missing_worker["origin_holdings"]
+        .as_object_mut()
+        .unwrap()
+        .remove("worker");
+    assert!(ProductQualificationEvidence::from_value(&missing_worker).is_err());
+    let mut unknown = wire.clone();
+    unknown["origin_holdings"]["verifier"]["extra"] = json!(true);
+    assert!(ProductQualificationEvidence::from_value(&unknown).is_err());
+
+    let mut wrong_protocol = valid.clone();
+    wrong_protocol.origin_holdings.verifier.execution_protocol = "protocol:fixtures/other".into();
+    assert!(
+        wrong_protocol
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("differs from the verifier's admitted protocol")
+    );
+    let mut wrong_settlement = valid.clone();
+    wrong_settlement
+        .origin_holdings
+        .verifier
+        .process_settlement_authority = VerifierProcessSettlementAuthority::ContainmentEmpty;
+    assert!(
+        wrong_settlement
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("differs from the verifier's settlement")
+    );
+    let mut malformed = valid.clone();
+    malformed.origin_holdings.verifier.filesystem_authority = "Node Policy".into();
+    assert!(malformed.validate().is_err());
+    let mut unowned_worker = valid.clone();
+    unowned_worker.origin_holdings.worker = Some(unowned_worker.origin_holdings.verifier.clone());
+    assert!(unowned_worker.validate().is_err());
+
+    let consumer = consumer_q_evidence_fixture();
+    consumer.validate().unwrap();
+    let mut no_worker = consumer.clone();
+    no_worker.origin_holdings.worker = None;
+    assert!(no_worker.validate().is_err());
+
+    let mut changed_holding = valid.clone();
+    changed_holding
+        .origin_holdings
+        .verifier
+        .filesystem_authority = "captured_execution".into();
+    assert_ne!(
+        valid.semantic_identity_value().unwrap(),
+        changed_holding.semantic_identity_value().unwrap()
+    );
+}
+
+#[test]
+fn remote_verifier_scenario_requires_its_launch_shape_and_commits_it() {
+    use ryeos_external_execution_contract::runtime_snapshot::LaunchShape;
+    let scenario = ProductQualificationProducerScenario {
+        remote_probe_input: Some(json!({"probe": "a"})),
+        recipe_ref: None,
+        remote_verifier: Some(probe_selection()),
+        consumer_worker_request: None,
+        launch_shape: Some(LaunchShape::relay_deny_all()),
+    };
+    scenario.validate().unwrap();
+    let mut undeclared = scenario.clone();
+    undeclared.launch_shape = None;
+    assert!(undeclared.validate().is_err());
+    // A local recipe scenario may declare a shape too; its proof retains it
+    // as declared.
+    let mut local = scenario.clone();
+    local.remote_verifier = None;
+    local.remote_probe_input = None;
+    local.recipe_ref = Some("config:fixtures/recipe".into());
+    local.validate().unwrap();
+    let mut changed = scenario.clone();
+    changed.launch_shape = Some(declared_shape());
+    assert_ne!(
+        scenario.remote_verifier_source_digest(None).unwrap(),
+        changed.remote_verifier_source_digest(None).unwrap()
+    );
+}
+
+#[test]
+fn a_proof_retains_the_shape_its_policy_declares_with_its_basis() {
+    let valid = evidence();
+    valid.validate().unwrap();
+    assert_eq!(
+        valid.retained_launch_shape().unwrap().basis,
+        ProductQualificationLaunchShapeBasis::Declared
+    );
+    // A proof that retained nothing, a different shape, or the wrong basis
+    // contradicts the signed policy.
+    let mut dropped = valid.clone();
+    dropped.execution_proof.launch_shape = None;
+    assert!(dropped.validate().is_err());
+    let mut other = valid.clone();
+    other.execution_proof.launch_shape.as_mut().unwrap().shape =
+        ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all();
+    assert!(other.validate().is_err());
+    let mut verified = valid.clone();
+    verified
+        .execution_proof
+        .launch_shape
+        .as_mut()
+        .unwrap()
+        .basis = ProductQualificationLaunchShapeBasis::Verified;
+    assert!(verified.validate().is_err());
+    // A policy that declares none retains none, and says so.
+    let mut undeclared = valid;
+    undeclared.policy_source.policy.launch_shape = None;
+    undeclared.execution_proof.launch_shape = None;
+    undeclared.validate().unwrap();
+    assert!(undeclared.retained_launch_shape().is_none());
 }

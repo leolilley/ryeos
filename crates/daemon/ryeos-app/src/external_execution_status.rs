@@ -470,7 +470,11 @@ fn profile_status(
                     Attention::Operator,
                     format!(
                         "the session's outcome is unknown after a daemon restart and nothing \
-                         else will end it; {terminate}"
+                         else will end it; {terminate}. If that refuses because the worker \
+                         was never recorded, its cleanup is unproved until this node starts \
+                         under a new host lifetime (a container restart on an enclosure-witnessed \
+                         host, otherwise a reboot); the next start then settles the session and \
+                         releases the profile"
                     ),
                 ),
                 _ => (

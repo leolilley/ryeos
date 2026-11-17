@@ -74,6 +74,26 @@ fn write_signed(
 // Guest-runtime product qualification
 // ---------------------------------------------------------------------------
 
+/// The shape an ordinary lane's guest-runtime policy declares and its binding
+/// launches under: https with an egress allow-list, capturing the operator's
+/// network-input sources. A lane that binds its own sources declares them
+/// with [`launch_shape_with_sources`].
+pub fn ordinary_launch_shape() -> ryeos_external_execution_contract::runtime_snapshot::LaunchShape {
+    launch_shape_with_sources(
+        ryeos_external_execution_contract::runtime_snapshot::LaunchNetworkInputs::operator(),
+    )
+}
+
+/// An https allow-list launch shape that captures `network_inputs`.
+pub fn launch_shape_with_sources(
+    network_inputs: ryeos_external_execution_contract::runtime_snapshot::LaunchNetworkInputs,
+) -> ryeos_external_execution_contract::runtime_snapshot::LaunchShape {
+    ryeos_external_execution_contract::runtime_snapshot::LaunchShape::https_allow_list(
+        ["controller.invalid".to_owned()],
+        network_inputs,
+    )
+}
+
 /// Verifier parameters of the guest-runtime policy. The guest verifier has no
 /// Worker consumer context; the object only keeps the policy and its tool
 /// bound to one another.
@@ -179,6 +199,7 @@ pub fn write_guest_runtime_sources_for(
     verifier_runtime_manifest_hash: &str,
     required_claims: &[&str],
     product: &GuestProductStorage,
+    launch_shape: &ryeos_external_execution_contract::runtime_snapshot::LaunchShape,
 ) {
     assert!(
         required_claims.windows(2).all(|pair| pair[0] < pair[1])
@@ -203,6 +224,7 @@ pub fn write_guest_runtime_sources_for(
             GUEST_RUNTIME_VERIFIER_REF,
             &GUEST_RUNTIME_CLAIMS,
             &parameters,
+            Some(launch_shape),
         ),
     );
     write_signed(
@@ -796,6 +818,7 @@ components:
             CONTENT_VERIFIER_REF,
             CONTENT_RUNTIME_CLAIMS,
             sources.verifier_parameters,
+            None,
         ),
     );
     write_signed(
