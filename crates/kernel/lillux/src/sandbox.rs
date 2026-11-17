@@ -2835,14 +2835,14 @@ mod imp {
             let original = admitted.source_fd;
             let mut mount = admitted.clone();
             if *from_request {
-                if !sources.contains_key(&original) {
+                if let std::collections::btree_map::Entry::Vacant(entry) = sources.entry(original) {
                     let staging = sealed_staging.as_ref().ok_or_else(|| {
                         "sealed source lacks private staging authority".to_string()
                     })?;
-                    sources.insert(
-                        original,
-                        materialize_sealed_mount_source(raw_fd(original)?, &staging.content)?,
-                    );
+                    entry.insert(materialize_sealed_mount_source(
+                        raw_fd(original)?,
+                        &staging.content,
+                    )?);
                 }
                 mount.source_fd = sources[&original].inherited_descriptor()?;
             }
