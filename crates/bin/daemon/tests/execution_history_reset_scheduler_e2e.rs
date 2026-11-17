@@ -1137,7 +1137,11 @@ fn checkpoint_stopped_wal(path: &Path) -> Result<()> {
             bytes.chunks_exact(8).fold(seed, |(s0, s1), pair| {
                 let read = |b: &[u8]| {
                     let b: [u8; 4] = b.try_into().unwrap();
-                    if big_endian { u32::from_be_bytes(b) } else { u32::from_le_bytes(b) }
+                    if big_endian {
+                        u32::from_be_bytes(b)
+                    } else {
+                        u32::from_le_bytes(b)
+                    }
                 };
                 let s0 = s0.wrapping_add(read(&pair[..4])).wrapping_add(s1);
                 (s0, s1.wrapping_add(read(&pair[4..])).wrapping_add(s0))
