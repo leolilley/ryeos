@@ -5950,6 +5950,31 @@ struct FinalizeFailedOnDrop<'a> {
     error: Option<Value>,
 }
 
+/// Hand an interrupted managed launch back to the durable recovery journal
+/// after the daemon closed admission for shutdown.
+///
+/// Clean shutdown deliberately retains the exact unpublished managed
+/// workspace for claim-fenced recovery. The runtime wait has already
+/// compare-cleared its process attachment, so the in-memory deletion alarm is
+/// disarmed before ownership returns to the workspace journal; leaving it
+/// armed would report an expected handoff as a leaked guard even though
+/// deletion would be incorrect. The resume budget is re-armed so the next
+/// start resumes the thread with a full allowance.
+fn preserve_managed_row_for_shutdown(
+    state: &AppState,
+    thread_id: &str,
+    provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
+    lifecycle_owner: &mut super::process_attachment::LifecycleOwnerGuard,
+    message: &'static str,
+) -> BuildAndLaunchError {
+    let _ = state.state_store.reset_resume_attempts(thread_id);
+    if let Some(workspace) = provenance.workspace_lifeline().as_ref() {
+        workspace.disarm();
+    }
+    lifecycle_owner.disarm();
+    BuildAndLaunchError::Internal(anyhow::anyhow!(message))
+}
+
 /// Dispose the two launch owners in the only safe order for the observed
 /// process state. Before an owned wait settles, lifecycle cleanup must stop a
 /// possibly-live tree before generic failure finalization. Afterwards there is
@@ -8083,6 +8108,21 @@ async fn run_claimed_thread_row_inner(
                     "runtime requested recovery without an exact settled attached wait"
                 )));
             }
+            // Shutdown kills the runtime, which surfaces here as a recovery
+            // request. A successor launched now would keep this Store alive
+            // through the stop, so the thread is handed back to restart
+            // recovery instead, exactly as for a terminal result. Only a
+            // settled wait proves no process tree is left, so an unsettled
+            // wait keeps the stop-first owner-drop cleanup above.
+            if !state.state_store.process_attachment_admission_is_open() {
+                return Err(preserve_managed_row_for_shutdown(
+                    state,
+                    &thread_id,
+                    provenance,
+                    lifecycle_owner,
+                    "runtime recovery interrupted by daemon shutdown; row preserved for recovery",
+                ));
+            }
             let launch_metadata = state
                 .state_store
                 .get_launch_metadata(&thread_id)?
@@ -8124,6 +8164,15 @@ async fn run_claimed_thread_row_inner(
                     return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
                         "same-thread recovery lost its exact active launch owner"
                     )));
+                }
+                RuntimeRecoveryClaimRotation::AdmissionClosed => {
+                    return Err(preserve_managed_row_for_shutdown(
+                        state,
+                        &thread_id,
+                        provenance,
+                        lifecycle_owner,
+                        "runtime recovery interrupted by daemon shutdown; row preserved for recovery",
+                    ));
                 }
                 RuntimeRecoveryClaimRotation::Rotated {
                     claim: next_claim,
@@ -8201,20 +8250,13 @@ async fn run_claimed_thread_row_inner(
     };
 
     if !state.state_store.process_attachment_admission_is_open() {
-        let _ = state.state_store.reset_resume_attempts(&thread_id);
-        // Clean shutdown deliberately retains the exact unpublished managed
-        // workspace for claim-fenced recovery.  The runtime wait has already
-        // compare-cleared its process attachment, so disarm the in-memory
-        // deletion alarm before returning ownership to the durable workspace
-        // journal.  Leaving it armed reports an expected handoff as a leaked
-        // guard even though deletion would be incorrect here.
-        if let Some(workspace) = provenance.workspace_lifeline().as_ref() {
-            workspace.disarm();
-        }
-        lifecycle_owner.disarm();
-        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-            "managed runtime interrupted by daemon shutdown; row preserved for recovery"
-        )));
+        return Err(preserve_managed_row_for_shutdown(
+            state,
+            &thread_id,
+            provenance,
+            lifecycle_owner,
+            "managed runtime interrupted by daemon shutdown; row preserved for recovery",
+        ));
     }
 
     // 12. Build response from DB thread. Normally the runtime already
@@ -9876,11 +9918,19 @@ fn prepare_and_spawn_successor_recovery_inner(
     successor_id: &str,
     mode: SuccessorMode,
 ) -> Result<RecoveryLaunchOutcome, BuildAndLaunchError> {
-    let claim = match ThreadLaunchClaim::acquire(&state, successor_id)? {
-        ThreadLaunchClaimOutcome::Claimed(claim) => *claim,
-        ThreadLaunchClaimOutcome::AlreadyClaimed => {
+    let claim = match ThreadLaunchClaim::acquire(&state, successor_id) {
+        Ok(ThreadLaunchClaimOutcome::Claimed(claim)) => *claim,
+        Ok(ThreadLaunchClaimOutcome::AlreadyClaimed) => {
             return Ok(RecoveryLaunchOutcome::Skipped("already_claimed"));
         }
+        Err(error) if super::launch_claim::is_launch_admission_closed(&error) => {
+            tracing::info!(
+                thread_id = %successor_id,
+                "successor recovery skipped: daemon is shutting down"
+            );
+            return Ok(RecoveryLaunchOutcome::Skipped("admission_closed"));
+        }
+        Err(error) => return Err(error.into()),
     };
     let successor_id = successor_id.to_string();
     tokio::spawn(async move {

@@ -7501,6 +7501,27 @@ async fn drain_running_threads(state: &AppState, latch: &DrainLatch) -> DrainOut
         }
     }
 
+    // Killing a runtime wakes its launch future, which unwinds and releases its
+    // claim and the AppState clones it holds. The live Store can close only
+    // once those futures are gone, and nothing else awaits them, so wait here
+    // on the shared drain deadline. Admission is already closed, so no new
+    // launch can register and the set only shrinks.
+    let launch_owners_drained = match state
+        .state_store
+        .wait_for_launch_owners_quiesced(drain_deadline)
+        .await
+    {
+        Ok(()) => true,
+        Err(threads) => {
+            tracing::error!(
+                count = threads.len(),
+                threads = ?threads,
+                "shutdown drain timed out with launch owners still registered"
+            );
+            false
+        }
+    };
+
     // Normal: no attachment may remain. Latched: every remaining attachment
     // must be one this drain proved dead and deferred.
     let attached_drained = match state.state_store.list_attached_thread_ids() {
@@ -7587,6 +7608,7 @@ async fn drain_running_threads(state: &AppState, latch: &DrainLatch) -> DrainOut
         && attached_snapshot_clean
         && attached_drained
         && in_process_drained
+        && launch_owners_drained
         && in_process_authoritative_clean;
     match (clean, mode) {
         (false, _) => DrainOutcome::Unproved,
