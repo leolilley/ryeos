@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-17T14:14:58Z:93e50029663718fe2712bc8df2c3f96331c952dc81dd52ce932d5863252e4cba:Qp1gQKNr/bE45kVD1bnZreI+bUx1FN9acZaB/pCzROeN4Y4sxXAptApasVkTkS2GifytOEyiBmzdqFLDeBCbAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T15:16:28Z:9137eda851ae6314167cbdbdf0dcdf514905c75cd402c1326e6ac570fab98dd7:owvaM+HOt7F2PPKQdYv+YES/78XH/agWld3+fV7D1lG7xky1Ih4LL6jLT3W9RBCb0vISwT5pXAzwmY9H/0gsCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Thread timeline definition: how a chain's events fold into timeline items.
 # Declarative data read by the timeline service; the fold engine names no event type itself.
 category: ryeos/ui/timeline
@@ -109,6 +109,11 @@ events:
           when: {eq: [item_last, true], one_of: [payload.finish, [interrupted]]}
           tone: [{default: warn}]
           project: {headline: {join: [{path: payload.turn, prefix: "turn interrupted · "}]}}
+        - type: marker
+          key: [thread_id, payload.turn]
+          when: {eq: [item_last, true], one_of: [payload.finish, [length]]}
+          tone: [{default: warn}]
+          project: {headline: {join: [{path: payload.turn, prefix: "turn cut at the output limit · "}]}}
 
   # The stable frame of a conversation is written once at launch.
   cognition_frame: [{drop: true}]
@@ -348,11 +353,25 @@ events:
           project: {detail: {join: [{path: payload.steps, prefix: "steps: "}]}}
 
   # Provider and accounting notices.
+  # A retry after a mid-stream cut voids the live fragments of that turn
+  # published so far; the headline says so when any were emitted.
   provider_retry:
+    - when: {ne: [payload.supersedes.output_events, 0]}
+      emit:
+        - type: marker
+          tone: [{default: warn}]
+          project:
+            headline:
+              join:
+                - {path: payload.attempt, prefix: "provider retry, attempt "}
+                - {path: payload.supersedes.output_events, prefix: "partial output superseded, live events: "}
+            reason: payload.retry_advance.decision.reason.kind
     - emit:
         - type: marker
           tone: [{default: warn}]
-          project: {headline: {join: [{path: payload.attempt, prefix: "provider retry, attempt "}]}, reason: payload.error}
+          project:
+            headline: {join: [{path: payload.attempt, prefix: "provider retry, attempt "}]}
+            reason: payload.retry_advance.decision.reason.kind
   cost_untracked:
     - emit:
         - type: marker

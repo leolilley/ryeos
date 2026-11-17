@@ -226,6 +226,26 @@ pub enum ProviderRetryReason {
     MidStream { live_output_events_emitted: u64 },
 }
 
+impl ProviderRetryReason {
+    /// True when the failure leaves it unknown whether the provider acted on
+    /// the request: the request may have reached it and a response was lost or
+    /// cut. A status the provider returned, or a failure before the request
+    /// could have been sent, leaves the outcome known.
+    pub const fn leaves_outcome_unknown(&self) -> bool {
+        match self {
+            Self::Status { .. }
+            | Self::Send {
+                connect_phase: true,
+            } => false,
+            Self::Timeout
+            | Self::Send {
+                connect_phase: false,
+            }
+            | Self::MidStream { .. } => true,
+        }
+    }
+}
+
 /// Exact runtime decision to advance one failed physical provider attempt.
 /// The daemon validates the current coordinate from its reservation row and
 /// persists this decision in the same transaction as terminal settlement.
@@ -647,6 +667,30 @@ pub fn provider_attempt_request_hash(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_lost_or_cut_responses_leave_the_outcome_unknown() {
+        assert!(ProviderRetryReason::Timeout.leaves_outcome_unknown());
+        assert!(
+            ProviderRetryReason::Send {
+                connect_phase: false
+            }
+            .leaves_outcome_unknown()
+        );
+        assert!(
+            ProviderRetryReason::MidStream {
+                live_output_events_emitted: 0
+            }
+            .leaves_outcome_unknown()
+        );
+        assert!(!ProviderRetryReason::Status { code: 503 }.leaves_outcome_unknown());
+        assert!(
+            !ProviderRetryReason::Send {
+                connect_phase: true
+            }
+            .leaves_outcome_unknown()
+        );
+    }
 
     #[test]
     fn shared_derivations_are_deterministic_and_component_sensitive() {

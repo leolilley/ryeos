@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T06:02:00Z:d7423beedffd535db84268a92444238a330a97dbc26ff967bdcdd57f83a2ca30:9VwppGvEbr9Bml6zEGY5AWreZjW4DU4RHBg4/F96i7yrWtHuE4SJzBELnMiCP+FLl2xqH9sR2AeqjD+1zbhIDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-17T11:14:08Z:b411e8950d5a2b145774b4db8b368572be1e814ad994218f1485d17d08c060d3:NfP+bNvOAHHz6Ohdpsmu0/m87XxFUFFIGNO5MwP6Wrv+Ss5YV2UVwCljjZEYQV1MQpn02N/3Q1j6BsvWs7xwDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/directives
 tags: [directive, authoring, frontmatter]
@@ -67,6 +67,16 @@ Instructions for the runtime.
   Each in-flight dispatch holds one dedicated daemon connection for the
   child's whole duration, so raise the bound with the node's connection
   budget and concurrent-directive count in mind.
+
+- `provider_contact` (`once` default, or `repeatable`): your declaration that
+  issuing this directive's model calls twice has no effect beyond the charge
+  (no provider-hosted tools, no server-side state). Only a `repeatable`
+  directive on a remote provider route may retry a model call after a failure
+  that leaves it unknown whether the provider acted (timeout, dropped stream),
+  and only as far as the signed execution config's
+  `unknown_outcome_retry.max_retries` allows. Each such retry is charged the
+  full reserved maximum. It is separate from `effects`, which concerns record
+  and replay of the answer.
 
 Only runtime limits are enforced; prose instructions such as "call the tool
 once" are not. Set `limits.tool_calls` (and `limits.turns`) to bound a run, and

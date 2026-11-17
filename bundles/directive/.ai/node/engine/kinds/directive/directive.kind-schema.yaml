@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-11T02:56:41Z:e1bfb221a1670e7c3778668b5086ec79c8b8fd563a30b25bb5b638949a5ad5f5:15HovDktCGGRh580NfK59HqGWdSwOKcjvwVl5f//Hjr+79Jax1P/iZCICekoDcFZ34cudyvPer6eTkRMJMe4Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T11:14:08Z:46f6938d9fc50f93597efe40edc1c7beebecc048b826e406dae3e1553247cc24:5aH6vMCNDOrcKxzHHtNpmxZUJqz1jfTJY9KUzSZ98VesPUgVi2KeW3saAP7l3wynScfO1gp6jLsOU1OXe0hDCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/directive"
 inventory_policy:
   admission:
@@ -111,6 +111,14 @@ composer_config:
     - name: effects
       strategy: replace_root_last
       expect_value_type: string
+    # Author vouching that issuing this directive's model calls more than once
+    # has no effect beyond their charge (`once` | `repeatable`; absent means
+    # once). It gates retry after a provider failure that leaves it unknown
+    # whether the call was acted on; it is independent of `effects`, which
+    # concerns record and replay of the answer.
+    - name: provider_contact
+      strategy: replace_root_last
+      expect_value_type: string
   policy_facts:
     - name: effective_caps
       path: [requires, capabilities, declared]
@@ -150,6 +158,10 @@ composed_value_contract:
       prim: mapping
     # Effect class for the provider boundary; see the composer field above.
     effects:
+      type: single
+      prim: string
+    # Repeatability declaration; see the composer field above.
+    provider_contact:
       type: single
       prim: string
 metadata:

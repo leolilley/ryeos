@@ -22,6 +22,7 @@ use ryeos_accounting::{
 };
 use ryeos_directive_definition::{
     ContinuationConfig, OutputSpec, ProviderConfig, ReasoningConfig, ReturnNudge, SamplingConfig,
+    UnknownOutcomeClass,
 };
 #[cfg(test)]
 use ryeos_directive_definition::{PricingConfig, ProtocolFamily, ProviderTransportConfig};
@@ -140,6 +141,55 @@ pub(crate) struct ToolOccurrence {
     /// A recovered child-bearing start already charged the spawn-attempt
     /// counter reconstructed from the signed tool catalog.
     pub spawn_counted: bool,
+    /// The call's streamed arguments were not valid JSON. It is never
+    /// dispatched; the model gets an error result instead.
+    pub malformed: Option<ryeos_runtime::MalformedCall>,
+}
+
+/// Failure text for a turn the provider ended at its output limit when the
+/// signed policy does not recover it.
+const OUTPUT_LIMIT_ERROR: &str = "provider_output_limit_reached: provider ended the \
+     response at its declared/native output limit; this is \
+     distinct from a RyeOS-local output byte limit";
+
+/// The model-visible error for a call whose arguments did not parse.
+fn malformed_call_error(malformed: &ryeos_runtime::MalformedCall) -> String {
+    format!(
+        "arguments were not valid JSON: {} bytes, sha256 {}; resend the call with complete arguments",
+        malformed.raw_len, malformed.sha256
+    )
+}
+
+/// Malformed-argument facts for one completed turn, by call ordinal. The
+/// stream yields one `ToolUse` event per tool-call part in part order; a count
+/// that disagrees with the assembled message is a defect, not a guess.
+fn malformed_calls_of_turn(
+    events: &[StreamEvent],
+    message: &ProviderMessage,
+) -> anyhow::Result<Vec<ryeos_runtime::MalformedCall>> {
+    let mut malformed = Vec::new();
+    let mut tool_use_count = 0usize;
+    for event in events {
+        let StreamEvent::ToolUse { malformed_args, .. } = event else {
+            continue;
+        };
+        if let Some(args) = malformed_args {
+            malformed.push(ryeos_runtime::MalformedCall {
+                call_index: u32::try_from(tool_use_count)
+                    .map_err(|_| anyhow::anyhow!("tool call ordinal exceeds u32"))?,
+                raw_len: u64::try_from(args.raw_len).unwrap_or(u64::MAX),
+                sha256: args.sha256.clone(),
+            });
+        }
+        tool_use_count += 1;
+    }
+    if !malformed.is_empty() && tool_use_count != message.calls().len() {
+        anyhow::bail!(
+            "provider stream carried {tool_use_count} tool_use events but the assembled turn has {} tool calls; cannot attribute malformed arguments",
+            message.calls().len()
+        );
+    }
+    Ok(malformed)
 }
 
 /// Whether one assistant message's tool-call batch carries the
@@ -304,6 +354,7 @@ pub enum State {
         tool_name: String,
         operation_id: String,
         raw_args: String,
+        malformed: Option<ryeos_runtime::MalformedCall>,
         pending: Vec<ToolOccurrence>,
         index: usize,
         spawn_counted: bool,
@@ -318,6 +369,7 @@ pub enum State {
         call_id: String,
         operation_id: String,
         raw_args: String,
+        malformed: Option<ryeos_runtime::MalformedCall>,
     },
     FiringHooks {
         occurrence: ryeos_runtime::callback::HookDispatchOccurrence,
@@ -411,6 +463,13 @@ pub struct Runner {
     /// Connection pooling keeps TCP/TLS handshakes to a minimum.
     http_client: reqwest::Client,
     resume_pending_tools: Vec<ToolOccurrence>,
+    /// Malformed-argument facts of the turn just recorded, read when its
+    /// tool calls become occurrences.
+    turn_malformed_calls: Vec<ryeos_runtime::MalformedCall>,
+    /// Trailing turns in a row that ended at the provider's output limit.
+    /// Derived from the record on resume; non-zero means the latest recorded
+    /// turn ended at the limit.
+    consecutive_length_turns: u32,
     resume_disposition: ResumeDisposition,
     resume_active_provider_turn: Option<u32>,
     provider_retry_testimony_digests: std::collections::BTreeSet<String>,
@@ -606,20 +665,20 @@ struct CostBreakdown {
 }
 
 /// Decide whether a failed provider call should be retried, and if so, how long
-/// to back off first (§1). Returns `None` when the error is not retryable or the
+/// to back off first. Returns `None` when the error is not retryable or the
 /// retry budget (`execution.retries`) is spent.
 ///
 /// Only a [`ProviderStreamError`](crate::provider_adapter::ProviderStreamError)
-/// is retryable — the adapter classifies exactly the transient transport/
-/// provider classes with an outcome-safe retry contract (an explicit retryable
-/// status or a failure that never established a connection). Everything else —
-/// including timeout, non-connect send failure, and a stream that dies mid-read —
-/// has a potentially accepted external effect and stays fail-fast. Invalid
-/// model, auth, context overflow, and a
-/// live callback publication failure — stays fail-fast. `never_retry` (status
+/// is retryable. A configured status response and a connection-establishment
+/// failure are always admissible. A timeout, a post-connect send failure and a
+/// stream that dies mid-read leave it unknown whether the provider acted; they
+/// are admissible only when `execution.unknown_outcome_retry` (already reduced
+/// to the launch-sealed ceiling) names the class and the failed attempt is
+/// within its first `max_retries`. Invalid model, auth, context overflow, and a
+/// live callback publication failure stay fail-fast. `never_retry` (status
 /// codes as strings) is an absolute denylist that overrides
 /// `retry_status_codes`. Backoff is exponential from `backoff_base_ms`
-/// (`base * 2^attempt`).
+/// (`base * 2^attempt`), capped at `backoff_max_ms`.
 #[cfg(test)]
 fn retry_backoff(
     err: &anyhow::Error,
@@ -640,18 +699,19 @@ fn retry_classification(
         Some(ProviderStreamError::Status { code, .. }) => {
             ProviderRetryReason::Status { code: *code }
         }
-        Some(ProviderStreamError::Timeout { .. }) => return None,
+        Some(ProviderStreamError::Timeout { .. }) => ProviderRetryReason::Timeout,
         // A reqwest connect-phase failure did not establish the provider
         // connection. Other `.send()` failures can occur after request bytes
-        // crossed the boundary and therefore have an uncertain outcome.
-        Some(ProviderStreamError::Send { connect: true, .. }) => ProviderRetryReason::Send {
-            connect_phase: true,
+        // crossed the boundary and therefore have an unknown outcome.
+        Some(ProviderStreamError::Send { connect, .. }) => ProviderRetryReason::Send {
+            connect_phase: *connect,
         },
-        Some(ProviderStreamError::Send { connect: false, .. }) => return None,
-        // Once a stream opened, the provider accepted the request. Identical
-        // message bytes are not a provider deduplication key and retrying may
-        // duplicate spend or consequences.
-        Some(ProviderStreamError::MidStream(_)) => return None,
+        // Once a stream opened, the provider may have acted on the request;
+        // the outcome is unknown.
+        Some(ProviderStreamError::MidStream(mid_stream)) => ProviderRetryReason::MidStream {
+            live_output_events_emitted: u64::try_from(mid_stream.live_output_events_emitted)
+                .unwrap_or(u64::MAX),
+        },
         None => return None,
     };
     retry_delay_for_reason(&reason, attempt.checked_add(1)?, execution).map(|delay| (delay, reason))
@@ -680,33 +740,86 @@ fn retry_delay_for_reason(
             !execution.never_retry.contains(&code.to_string())
                 && execution.retry_status_codes.contains(code)
         }
-        // Current production classification never creates these reasons. Keep
-        // their decoder behavior closed for retained historical testimony.
-        ProviderRetryReason::Timeout | ProviderRetryReason::MidStream { .. } => false,
         ProviderRetryReason::Send {
             connect_phase: true,
         } => true,
+        ProviderRetryReason::Timeout => unknown_outcome_admitted(
+            UnknownOutcomeClass::Timeout,
+            failed_attempt_number,
+            execution,
+        ),
         ProviderRetryReason::Send {
             connect_phase: false,
-        } => false,
+        } => unknown_outcome_admitted(UnknownOutcomeClass::Send, failed_attempt_number, execution),
+        ProviderRetryReason::MidStream { .. } => unknown_outcome_admitted(
+            UnknownOutcomeClass::MidStream,
+            failed_attempt_number,
+            execution,
+        ),
     };
     if !admitted {
         return None;
     }
     let factor = 1u64 << attempt.min(16);
-    let delay_ms = execution.backoff_base_ms.saturating_mul(factor);
+    let delay_ms = execution
+        .backoff_base_ms
+        .saturating_mul(factor)
+        .min(execution.backoff_max_ms);
     Some(lillux::time::Duration::from_millis(delay_ms))
+}
+
+/// Whether closing the failed attempt before a retry must see valid usage.
+/// A failure that leaves the provider outcome unknown never has final usage to
+/// show; when the signed policy and sealed ceiling already admit the retry
+/// (classification only returns a reason in that case), the daemon ledger
+/// bounds the cost by charging the attempt's reserved maximum, so the
+/// fail-closed usage requirement does not apply. Known-outcome retries keep it.
+fn retry_requires_attempt_usage(reason: &ProviderRetryReason, fail_closed: bool) -> bool {
+    fail_closed && !reason.leaves_outcome_unknown()
+}
+
+/// Whether a retry after an unknown provider outcome is within policy: the
+/// class is named and the failed attempt is among the first `max_retries`.
+fn unknown_outcome_admitted(
+    class: UnknownOutcomeClass,
+    failed_attempt_number: u32,
+    execution: &ExecutionConfig,
+) -> bool {
+    execution
+        .unknown_outcome_retry
+        .as_ref()
+        .is_some_and(|policy| {
+            failed_attempt_number <= policy.max_retries && policy.on.contains(&class)
+        })
+}
+
+/// What a retry abandons: the failed attempt of a turn and the count of live
+/// output fragments it had published. A reader voids every progressive
+/// fragment of that turn published since its marker or the previous retry.
+/// The value is derived from the decision so recovery can check it exactly.
+pub(crate) fn retry_supersedes(decision: &ProviderRetryDecision) -> Value {
+    let output_events = match decision.reason {
+        ProviderRetryReason::MidStream {
+            live_output_events_emitted,
+        } => live_output_events_emitted,
+        _ => 0,
+    };
+    json!({
+        "turn": decision.turn,
+        "attempt": decision.failed_attempt_number,
+        "output_events": output_events,
+    })
 }
 
 fn retry_policy_digest(execution: &ExecutionConfig) -> anyhow::Result<HexDigest> {
     let value = json!({
-        "schema": "ryeos.directive.provider-retry-policy.v1",
+        "schema": "ryeos.directive.provider-retry-policy.v2",
         "retries": execution.retries,
         "retry_status_codes": execution.retry_status_codes,
         "never_retry": execution.never_retry,
         "backoff_base_ms": execution.backoff_base_ms,
-        "retry_on_timeout": execution.retry_on_timeout,
-        "retry_mid_stream": execution.retry_mid_stream,
+        "backoff_max_ms": execution.backoff_max_ms,
+        "unknown_outcome_retry": execution.unknown_outcome_retry,
         "accounting": execution.accounting,
     });
     let canonical = lillux::canonical_json(&value)?;
@@ -1051,6 +1164,8 @@ impl Runner {
                 .build()
                 .expect("reqwest client builder"),
             resume_pending_tools: Vec::new(),
+            turn_malformed_calls: Vec::new(),
+            consecutive_length_turns: 0,
             resume_disposition: ResumeDisposition::ContinueProvider,
             resume_active_provider_turn: None,
             provider_retry_testimony_digests: std::collections::BTreeSet::new(),
@@ -1092,6 +1207,7 @@ impl Runner {
         let resume_disposition = resume.disposition;
         let resume_active_provider_turn = resume.active_provider_turn;
         let provider_retry_testimony_digests = resume.provider_retry_testimony_digests;
+        let trailing_length_turns = resume.trailing_length_turns;
         let last_turn_coordinate = resume.last_turn_coordinate;
         if let Some(active_turn) = resume_active_provider_turn {
             let expected = last_turn_coordinate
@@ -1167,6 +1283,7 @@ impl Runner {
         runner.resume_disposition = resume_disposition;
         runner.resume_active_provider_turn = resume_active_provider_turn;
         runner.provider_retry_testimony_digests = provider_retry_testimony_digests;
+        runner.consecutive_length_turns = trailing_length_turns;
         runner.return_nudge_sent = recovered_return_nudge_seen(
             &runner.messages,
             &runner.return_nudge,
@@ -1406,9 +1523,11 @@ impl Runner {
                     // §1 retry loop. A provider failure with an outcome-safe
                     // classification — a configured status response or a
                     // connection-establishment failure — is re-attempted with
-                    // exponential backoff. Timeout, post-connect send failure,
-                    // and mid-stream cut remain explicit uncertain outcomes;
-                    // identical message bytes are not an idempotency key.
+                    // capped exponential backoff. Timeout, post-connect send
+                    // failure, and mid-stream cut have unknown outcomes and are
+                    // re-attempted only within the sealed unknown-outcome
+                    // ceiling; identical message bytes are not an idempotency
+                    // key, so that ceiling needs an explicit author declaration.
                     // Anything not
                     // classified as a `ProviderStreamError` (invalid bytes, a
                     // live callback publication failure) routes to
@@ -1703,7 +1822,10 @@ impl Runner {
                                 if let Some((delay, reason)) =
                                     retry_classification(error, attempt, &self.execution)
                                 {
-                                    let usage_required = self.accounting_fail_closed();
+                                    let usage_required = retry_requires_attempt_usage(
+                                        &reason,
+                                        self.accounting_fail_closed(),
+                                    );
                                     let ambiguous_without_accounting = error
                                         .downcast_ref::<crate::provider_adapter::ProviderStreamError>()
                                         .is_some_and(|error| matches!(
@@ -1862,7 +1984,11 @@ impl Runner {
                                 let Some(decision) = prepared_retry else {
                                     if provider_outcome_is_uncertain(&e) {
                                         break Err(anyhow::anyhow!(
-                                            "provider_outcome_uncertain: the provider may have accepted the issued request; automatic retry is forbidden without admitted deduplication or outcome lookup; original error: {e:#}"
+                                            "provider_outcome_uncertain: the provider may have accepted the issued request and this failure was not retried; a retry after an unknown outcome needs the directive to declare `provider_contact: repeatable` on a remote provider route and `execution.unknown_outcome_retry` to name this failure class within its first max_retries attempts (sealed ceiling {}); original error: {e:#}",
+                                            self.execution
+                                                .unknown_outcome_retry
+                                                .as_ref()
+                                                .map_or(0, |policy| policy.max_retries)
                                         ));
                                     }
                                     break Err(e);
@@ -2190,15 +2316,14 @@ impl Runner {
                                     continue;
                                 }
                             }
-                            if crate::directive::normalize_finish_reason(
+                            let ended_at_output_limit = crate::directive::normalize_finish_reason(
                                 resp.finish_reason.as_deref(),
-                            ) == FinishReason::Length
+                            ) == FinishReason::Length;
+                            if ended_at_output_limit
+                                && self.consecutive_length_turns >= self.output_limit_allowance()
                             {
                                 state = State::Errored {
-                                    error: "provider_output_limit_reached: provider ended the \
-                                            response at its declared/native output limit; this is \
-                                            distinct from a RyeOS-local output byte limit"
-                                        .to_string(),
+                                    error: OUTPUT_LIMIT_ERROR.to_string(),
                                 };
                                 continue;
                             }
@@ -2265,6 +2390,16 @@ impl Runner {
                                 "response_id": &resp.response_id,
                                 "replayed_from": &turn_replayed_from,
                             }));
+                            let malformed_calls =
+                                match malformed_calls_of_turn(&events, &resp.message) {
+                                    Ok(calls) => calls,
+                                    Err(error) => {
+                                        state = State::Errored {
+                                            error: format!("{error:#}"),
+                                        };
+                                        continue;
+                                    }
+                                };
                             if let Err(e) = self
                                 .callback
                                 .emit_turn_complete(
@@ -2273,6 +2408,7 @@ impl Runner {
                                     token_counts,
                                     resp.message.parts.clone(),
                                     provider_accounting,
+                                    malformed_calls.clone(),
                                 )
                                 .await
                             {
@@ -2283,6 +2419,12 @@ impl Runner {
                                 };
                                 continue;
                             }
+                            self.turn_malformed_calls = malformed_calls;
+                            self.consecutive_length_turns = if ended_at_output_limit {
+                                self.consecutive_length_turns.saturating_add(1)
+                            } else {
+                                0
+                            };
                             self.messages.push(resp.message.clone());
                             if resp.message.has_tool_calls() {
                                 block_at_directive_recovery_test_cut(
@@ -2776,6 +2918,14 @@ impl Runner {
                                         start_recorded: false,
                                         counted: false,
                                         spawn_counted: false,
+                                        malformed: self
+                                            .turn_malformed_calls
+                                            .iter()
+                                            .find(|malformed| {
+                                                usize::try_from(malformed.call_index).ok()
+                                                    == Some(call_index)
+                                            })
+                                            .cloned(),
                                     })
                                     .collect::<Vec<_>>();
                                 // Lifecycle-bearing batches keep the
@@ -2790,6 +2940,40 @@ impl Runner {
                                     State::DispatchingToolBatch {
                                         pending: occurrences,
                                     }
+                                }
+                            } else if self.consecutive_length_turns > 0 {
+                                // The turn ended at the output limit and made no
+                                // tool call: its text is incomplete, so it must
+                                // not finalize. Record the policy's message as a
+                                // harness input and take another turn, within the
+                                // policy's bound and the turn limit.
+                                let message = self
+                                    .execution
+                                    .on_output_limit
+                                    .as_ref()
+                                    .map(|policy| policy.message.clone());
+                                match message {
+                                    Some(message) if self.can_start_another_turn() => {
+                                        let input = ryeos_runtime::CognitionInput::text(
+                                            "harness", &message,
+                                        )
+                                        .with_kind("output_limit");
+                                        if let Err(e) =
+                                            self.callback.emit_cognition_input(&input).await
+                                        {
+                                            State::RecoveryRequired {
+                                                error: format!(
+                                                    "resume-critical output_limit input append failed: {e}"
+                                                ),
+                                            }
+                                        } else {
+                                            self.messages.push(ProviderMessage::user(message));
+                                            State::CheckingLimits
+                                        }
+                                    }
+                                    _ => State::Errored {
+                                        error: OUTPUT_LIMIT_ERROR.to_string(),
+                                    },
                                 }
                             } else if let Some(content) = msg.content_value() {
                                 // Steer pre-finalize drain (finding C): a no-tool
@@ -2879,6 +3063,7 @@ impl Runner {
                                 call_id: tc.id.clone().unwrap_or_default(),
                                 operation_id: occurrence.operation_id,
                                 raw_args: tc.arguments.to_string(),
+                                malformed: occurrence.malformed,
                             }
                         } else if !occurrence.counted && !self.harness.try_record_tool_call() {
                             let call_id = tc.id.clone().unwrap_or_default();
@@ -2909,6 +3094,7 @@ impl Runner {
                                 tool_name: tc.name.clone(),
                                 operation_id: occurrence.operation_id,
                                 raw_args: tc.arguments.to_string(),
+                                malformed: occurrence.malformed,
                                 pending,
                                 index,
                                 spawn_counted: occurrence.spawn_counted,
@@ -2922,6 +3108,7 @@ impl Runner {
                     tool_name,
                     operation_id,
                     raw_args,
+                    malformed,
                     pending,
                     index,
                     spawn_counted,
@@ -2933,6 +3120,7 @@ impl Runner {
                             &raw_args,
                             &call_id,
                             spawn_counted,
+                            malformed.as_ref(),
                         )
                         .await
                     {
@@ -3047,6 +3235,7 @@ impl Runner {
                                     &raw_args,
                                     &call_id,
                                     occurrence.spawn_counted,
+                                    occurrence.malformed.as_ref(),
                                 )
                                 .await
                             {
@@ -3227,6 +3416,7 @@ impl Runner {
                     call_id,
                     operation_id,
                     raw_args,
+                    malformed,
                 } => {
                     // directive_return is a lifecycle signal, not a
                     // dispatchable tool. The LLM calls it using the
@@ -3237,8 +3427,11 @@ impl Runner {
                     //   3. Fire tool_call_result for chain visibility
                     //   4. Publish directive_outputs artifact
                     //   5. Finalize thread
-                    let tool_result_content = match crate::adapter::parse_tool_arguments(&raw_args)
-                    {
+                    let parsed_arguments = match &malformed {
+                        Some(malformed) => Err(malformed_call_error(malformed)),
+                        None => crate::adapter::parse_tool_arguments(&raw_args),
+                    };
+                    let tool_result_content = match parsed_arguments {
                         Ok(args) => {
                             let validation_error = directive_output_validation_error(
                                 self.directive_outputs.as_deref(),
@@ -3752,7 +3945,14 @@ impl Runner {
         raw_args: &str,
         call_id: &str,
         spawn_already_counted: bool,
+        malformed: Option<&ryeos_runtime::MalformedCall>,
     ) -> Result<Box<ryeos_runtime::callback::DispatchActionRequest>, String> {
+        if let Some(malformed) = malformed {
+            return Err(serde_json::to_string(
+                &json!({ "error": malformed_call_error(malformed) }),
+            )
+            .unwrap_or_else(|_| "{\"error\":\"malformed arguments\"}".to_string()));
+        }
         match self
             .dispatcher
             .resolve(tool_name, raw_args, Some(call_id.to_string()))
@@ -4285,6 +4485,14 @@ impl Runner {
         }
     }
 
+    /// Turns in a row that may end at the output limit under the signed policy.
+    fn output_limit_allowance(&self) -> u32 {
+        self.execution
+            .on_output_limit
+            .as_ref()
+            .map_or(0, |policy| policy.max_consecutive)
+    }
+
     fn validate_retry_advance(
         &self,
         advance: &ProviderRetryAdvance,
@@ -4342,6 +4550,7 @@ impl Runner {
                     "max_retries": self.execution.retries,
                     "backoff_ms": advance.decision.backoff_ms,
                     "decision_digest": digest,
+                    "supersedes": retry_supersedes(&advance.decision),
                     "retry_advance": advance,
                 }),
             )
@@ -4927,6 +5136,75 @@ mod tests {
         ryeos_accounting::UsdNanos::parse_canonical(canonical).unwrap()
     }
 
+    fn tool_use_event(name: &str, malformed: Option<(usize, &str)>) -> StreamEvent {
+        StreamEvent::ToolUse {
+            id: Some(format!("call-{name}")),
+            name: name.to_string(),
+            arguments: json!({}),
+            stream_key: format!("k-{name}"),
+            argument_bytes: 0,
+            malformed_args: malformed.map(|(raw_len, sha256)| crate::directive::MalformedArgs {
+                sha256: sha256.to_string(),
+                raw_len,
+            }),
+        }
+    }
+
+    fn assistant_calls(names: &[&str]) -> ProviderMessage {
+        ProviderMessage::assistant(
+            Some("working".to_string()),
+            names
+                .iter()
+                .map(|name| crate::directive::ToolCall {
+                    id: Some(format!("call-{name}")),
+                    name: (*name).to_string(),
+                    arguments: json!({}),
+                })
+                .collect(),
+            None,
+        )
+    }
+
+    #[test]
+    fn malformed_calls_are_attributed_by_tool_call_ordinal_in_stream_order() {
+        let sha = "ab".repeat(32);
+        let events = vec![
+            StreamEvent::Delta("working".to_string()),
+            tool_use_event("first", None),
+            tool_use_event("second", Some((17, &sha))),
+            tool_use_event("third", None),
+        ];
+        let message = assistant_calls(&["first", "second", "third"]);
+        let malformed = malformed_calls_of_turn(&events, &message).unwrap();
+        assert_eq!(malformed.len(), 1);
+        assert_eq!(malformed[0].call_index, 1);
+        assert_eq!(malformed[0].raw_len, 17);
+        assert_eq!(malformed[0].sha256, sha);
+        assert_eq!(
+            malformed_call_error(&malformed[0]),
+            format!(
+                "arguments were not valid JSON: 17 bytes, sha256 {sha}; resend the call with complete arguments"
+            )
+        );
+
+        // A clean turn, and a replayed turn with no stream events, record nothing.
+        assert!(
+            malformed_calls_of_turn(&events[..2], &assistant_calls(&["first"]))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(malformed_calls_of_turn(&[], &message).unwrap().is_empty());
+    }
+
+    #[test]
+    fn malformed_attribution_refuses_a_stream_that_disagrees_with_the_message() {
+        let sha = "cd".repeat(32);
+        let events = vec![tool_use_event("only", Some((3, &sha)))];
+        let error =
+            malformed_calls_of_turn(&events, &assistant_calls(&["only", "extra"])).unwrap_err();
+        assert!(error.to_string().contains("cannot attribute"));
+    }
+
     fn tool_call(name: &str) -> ToolOccurrence {
         ToolOccurrence {
             call: crate::directive::ToolCall {
@@ -4940,6 +5218,7 @@ mod tests {
             start_recorded: false,
             counted: false,
             spawn_counted: false,
+            malformed: None,
         }
     }
 
@@ -5816,7 +6095,6 @@ mod tests {
             retry_status_codes: vec![429, 500, 502, 503],
             never_retry: vec!["401".into(), "403".into(), "404".into()],
             backoff_base_ms: 1000,
-            retry_on_timeout: false,
             ..ExecutionConfig::default()
         }
     }
@@ -5891,17 +6169,198 @@ mod tests {
         assert_eq!(retry_backoff(&send_err(true), 2, &cfg), None);
     }
 
+    fn timeout_err() -> anyhow::Error {
+        anyhow::Error::new(crate::provider_adapter::ProviderStreamError::Timeout {
+            detail: "timed out".into(),
+        })
+    }
+
+    fn post_connect_send_err() -> anyhow::Error {
+        anyhow::Error::new(crate::provider_adapter::ProviderStreamError::Send {
+            connect: false,
+            detail: "send failed after connection".into(),
+        })
+    }
+
+    fn mid_stream_err() -> anyhow::Error {
+        anyhow::Error::new(crate::provider_adapter::ProviderStreamError::MidStream(
+            Box::new(crate::provider_adapter::streaming::ProviderMidStreamError {
+                live_output_events_emitted: 42,
+                accepted_bytes: 128,
+                accepted_output_events: 3,
+                usage: None,
+                generation_header_id: None,
+                response_id: None,
+                requested_output_tokens: Some(32_768),
+                detail: "stream chunk error: operation timed out".into(),
+            }),
+        ))
+    }
+
+    fn unknown_policy_cfg(
+        retries: u32,
+        max_retries: u32,
+        on: Vec<UnknownOutcomeClass>,
+    ) -> ExecutionConfig {
+        ExecutionConfig {
+            retries,
+            unknown_outcome_retry: Some(ryeos_directive_definition::UnknownOutcomeRetryPolicy {
+                max_retries,
+                on,
+            }),
+            ..retry_cfg()
+        }
+    }
+
     #[test]
-    fn retry_backoff_never_retries_outcome_uncertain_timeout() {
-        let timeout = || {
-            anyhow::Error::new(crate::provider_adapter::ProviderStreamError::Timeout {
-                detail: "timed out".into(),
-            })
+    fn unknown_outcomes_are_never_retried_without_a_policy() {
+        let cfg = retry_cfg();
+        for attempt in 0..3 {
+            assert_eq!(retry_backoff(&timeout_err(), attempt, &cfg), None);
+            assert_eq!(retry_backoff(&post_connect_send_err(), attempt, &cfg), None);
+            assert_eq!(retry_backoff(&mid_stream_err(), attempt, &cfg), None);
+        }
+    }
+
+    #[test]
+    fn unknown_outcomes_retry_only_for_named_classes_in_the_first_n_attempts() {
+        use std::time::Duration;
+        let all = vec![
+            UnknownOutcomeClass::Timeout,
+            UnknownOutcomeClass::Send,
+            UnknownOutcomeClass::MidStream,
+        ];
+        let cfg = unknown_policy_cfg(5, 2, all);
+        for err in [timeout_err(), post_connect_send_err(), mid_stream_err()] {
+            assert_eq!(
+                retry_backoff(&err, 0, &cfg),
+                Some(Duration::from_millis(1000))
+            );
+            assert_eq!(
+                retry_backoff(&err, 1, &cfg),
+                Some(Duration::from_millis(2000))
+            );
+            // The third failed attempt is past max_retries.
+            assert_eq!(retry_backoff(&err, 2, &cfg), None);
+        }
+
+        let only_mid = unknown_policy_cfg(5, 2, vec![UnknownOutcomeClass::MidStream]);
+        assert_eq!(retry_backoff(&timeout_err(), 0, &only_mid), None);
+        assert_eq!(retry_backoff(&post_connect_send_err(), 0, &only_mid), None);
+        assert!(retry_backoff(&mid_stream_err(), 0, &only_mid).is_some());
+
+        // `retries` caps first even when max_retries is not validated here.
+        let capped = unknown_policy_cfg(1, 5, vec![UnknownOutcomeClass::Timeout]);
+        assert!(retry_backoff(&timeout_err(), 0, &capped).is_some());
+        assert_eq!(retry_backoff(&timeout_err(), 1, &capped), None);
+    }
+
+    #[test]
+    fn unknown_outcome_classification_carries_the_closed_reason() {
+        let cfg = unknown_policy_cfg(
+            3,
+            3,
+            vec![
+                UnknownOutcomeClass::Timeout,
+                UnknownOutcomeClass::Send,
+                UnknownOutcomeClass::MidStream,
+            ],
+        );
+        assert!(matches!(
+            retry_classification(&timeout_err(), 0, &cfg),
+            Some((_, ProviderRetryReason::Timeout))
+        ));
+        assert!(matches!(
+            retry_classification(&post_connect_send_err(), 0, &cfg),
+            Some((
+                _,
+                ProviderRetryReason::Send {
+                    connect_phase: false
+                }
+            ))
+        ));
+        assert!(matches!(
+            retry_classification(&mid_stream_err(), 0, &cfg),
+            Some((
+                _,
+                ProviderRetryReason::MidStream {
+                    live_output_events_emitted: 42
+                }
+            ))
+        ));
+    }
+
+    #[test]
+    fn stored_unknown_outcome_decision_revalidates_only_under_the_same_policy() {
+        let cfg = unknown_policy_cfg(3, 2, vec![UnknownOutcomeClass::MidStream]);
+        let reason = ProviderRetryReason::MidStream {
+            live_output_events_emitted: 1,
         };
-        let mut cfg = retry_cfg();
-        assert_eq!(retry_backoff(&timeout(), 0, &cfg), None);
-        cfg.retry_on_timeout = false;
-        assert_eq!(retry_backoff(&timeout(), 0, &cfg), None);
+        assert!(retry_delay_for_reason(&reason, 2, &cfg).is_some());
+        assert!(retry_delay_for_reason(&reason, 3, &cfg).is_none());
+        let narrowed = unknown_policy_cfg(3, 2, vec![UnknownOutcomeClass::Timeout]);
+        assert!(retry_delay_for_reason(&reason, 1, &narrowed).is_none());
+        assert_ne!(
+            retry_policy_digest(&cfg).unwrap(),
+            retry_policy_digest(&narrowed).unwrap()
+        );
+    }
+
+    #[test]
+    fn backoff_is_capped_by_backoff_max_ms() {
+        use std::time::Duration;
+        let cfg = ExecutionConfig {
+            retries: 10,
+            backoff_base_ms: 1000,
+            backoff_max_ms: 5000,
+            ..retry_cfg()
+        };
+        let delays: Vec<_> = (0..6)
+            .map(|attempt| retry_backoff(&status_err(503), attempt, &cfg).unwrap())
+            .collect();
+        assert_eq!(
+            delays,
+            [1000, 2000, 4000, 5000, 5000, 5000].map(Duration::from_millis)
+        );
+    }
+
+    #[test]
+    fn unknown_outcome_retry_is_not_blocked_by_fail_closed_usage_but_known_retries_are() {
+        for unknown in [
+            ProviderRetryReason::Timeout,
+            ProviderRetryReason::Send {
+                connect_phase: false,
+            },
+            ProviderRetryReason::MidStream {
+                live_output_events_emitted: 3,
+            },
+        ] {
+            assert!(!retry_requires_attempt_usage(&unknown, true));
+            assert!(!retry_requires_attempt_usage(&unknown, false));
+        }
+        for known in [
+            ProviderRetryReason::Status { code: 503 },
+            ProviderRetryReason::Send {
+                connect_phase: true,
+            },
+        ] {
+            assert!(retry_requires_attempt_usage(&known, true));
+            assert!(!retry_requires_attempt_usage(&known, false));
+        }
+        // Without an admitted ceiling classification yields no reason at all,
+        // so the unknown-outcome failure reaches the uncertainty error, never a
+        // retry, whatever the budget.
+        let refused = retry_cfg();
+        assert!(retry_classification(&timeout_err(), 0, &refused).is_none());
+        let admitted = unknown_policy_cfg(2, 2, vec![UnknownOutcomeClass::Timeout]);
+        assert!(retry_classification(&timeout_err(), 0, &admitted).is_some());
+    }
+
+    #[test]
+    fn statuses_504_and_529_are_retryable_by_default() {
+        let cfg = ExecutionConfig::default();
+        assert!(retry_backoff(&status_err(504), 0, &cfg).is_some());
+        assert!(retry_backoff(&status_err(529), 0, &cfg).is_some());
     }
 
     #[test]
@@ -5913,31 +6372,6 @@ mod tests {
         let cfg = retry_cfg();
         let e = anyhow::anyhow!("non-utf8 SSE chunk: invalid byte sequence");
         assert_eq!(retry_backoff(&e, 0, &cfg), None);
-    }
-
-    #[test]
-    fn retry_backoff_never_retries_outcome_uncertain_mid_stream() {
-        // A stream cut mid-read proves provider contact. Identical request bytes
-        // do not make a second provider effect safe.
-        let mid_stream = || {
-            anyhow::Error::new(crate::provider_adapter::ProviderStreamError::MidStream(
-                Box::new(crate::provider_adapter::streaming::ProviderMidStreamError {
-                    live_output_events_emitted: 42,
-                    accepted_bytes: 128,
-                    accepted_output_events: 3,
-                    usage: None,
-                    generation_header_id: None,
-                    response_id: None,
-                    requested_output_tokens: Some(32_768),
-                    detail: "stream chunk error: operation timed out".into(),
-                }),
-            ))
-        };
-        let mut cfg = retry_cfg();
-        assert_eq!(retry_backoff(&mid_stream(), 0, &cfg), None);
-        assert_eq!(retry_backoff(&mid_stream(), 1, &cfg), None);
-        cfg.retry_mid_stream = false;
-        assert_eq!(retry_backoff(&mid_stream(), 0, &cfg), None);
     }
 
     #[test]

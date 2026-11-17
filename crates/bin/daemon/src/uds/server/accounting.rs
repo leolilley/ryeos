@@ -610,6 +610,33 @@ pub(super) fn handle_provider_attempt_mark_issued(
     Ok(serde_json::to_value(response)?)
 }
 
+/// Gate a retry that follows an unknown provider outcome. The ceiling comes
+/// from the sealed launch authority, never from runtime-supplied or mutable
+/// configuration, so a runtime cannot widen what the admitted launch allows.
+/// Other retry reasons are not judged here.
+fn check_unknown_outcome_retry(
+    retry: &ryeos_accounting::ProviderRetryDecision,
+    transport: &TransportCoordinate,
+    sealed_ceiling: u32,
+) -> Result<()> {
+    if !retry.reason.leaves_outcome_unknown() {
+        return Ok(());
+    }
+    if !matches!(transport, TransportCoordinate::RemoteHttp { .. }) {
+        anyhow::bail!(
+            "provider retry after an unknown outcome is refused: the transport does not admit repeated contact"
+        );
+    }
+    if retry.failed_attempt_number > sealed_ceiling {
+        anyhow::bail!(
+            "provider retry after an unknown outcome is refused: failed attempt {} exceeds the sealed ceiling {}",
+            retry.failed_attempt_number,
+            sealed_ceiling
+        );
+    }
+    Ok(())
+}
+
 pub(super) fn handle_provider_attempt_settle(
     params: &Value,
     state: &AppState,
@@ -649,6 +676,21 @@ pub(super) fn handle_provider_attempt_settle(
         || request.coordinate.authority_digest != authority.authority_digest.as_str()
     {
         anyhow::bail!("provider settlement coordinate contradicts admitted launch authority");
+    }
+    // The retry's `reason` is runtime-asserted, exactly like the spend and
+    // completion the runtime also reports: the daemon cannot observe which
+    // failure the runtime saw. This gate bounds how many unknown-outcome
+    // retries a launch may issue and on which transport; the transport is
+    // sealed through the request hash. A runtime that mislabels a failure can
+    // only spend attempts already bounded by the ceiling and the ledger.
+    if let Some(retry) = &request.retry {
+        check_unknown_outcome_retry(
+            retry,
+            &request.coordinate.transport,
+            sealed
+                .external_effect_authority
+                .unknown_outcome_retry_ceiling,
+        )?;
     }
     let binding = ledger
         .reservation_publication_binding(&request.attempt_id)?
@@ -1590,6 +1632,80 @@ pub(super) fn handle_provider_attempt_local_stream_control(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn retry_decision(
+        failed_attempt_number: u32,
+        reason: ryeos_accounting::ProviderRetryReason,
+    ) -> ryeos_accounting::ProviderRetryDecision {
+        let digest = HexDigest::new(lillux::sha256_hex(b"retry")).unwrap();
+        ryeos_accounting::ProviderRetryDecision {
+            turn: 1,
+            failed_attempt_number,
+            next_attempt_number: failed_attempt_number + 1,
+            backoff_ms: 0,
+            reason,
+            failure_digest: digest.clone(),
+            retry_policy_digest: digest,
+        }
+    }
+
+    fn remote() -> TransportCoordinate {
+        TransportCoordinate::RemoteHttp {
+            method: "POST".to_owned(),
+            url: "https://example.test/v1".to_owned(),
+        }
+    }
+
+    fn local_worker() -> TransportCoordinate {
+        TransportCoordinate::AdmittedLocalWorker {
+            worker_ref: "worker:fixtures/local".to_owned(),
+            effective_definition_digest: "d".repeat(64),
+            capsule_hash: "c".repeat(64),
+            execution_realization_hash: "e".repeat(64),
+        }
+    }
+
+    #[test]
+    fn unknown_outcome_retry_refusal_matrix() {
+        use ryeos_accounting::ProviderRetryReason as Reason;
+        let unknown = [
+            Reason::Timeout,
+            Reason::Send {
+                connect_phase: false,
+            },
+            Reason::MidStream {
+                live_output_events_emitted: 3,
+            },
+        ];
+        for reason in unknown {
+            // Undeclared: ceiling 0 refuses every attempt.
+            assert!(
+                check_unknown_outcome_retry(&retry_decision(1, reason.clone()), &remote(), 0)
+                    .is_err()
+            );
+            // Boundary: attempt equal to the ceiling passes, one past refuses.
+            check_unknown_outcome_retry(&retry_decision(2, reason.clone()), &remote(), 2).unwrap();
+            assert!(
+                check_unknown_outcome_retry(&retry_decision(3, reason.clone()), &remote(), 2)
+                    .is_err()
+            );
+            // A local worker never gains repeated contact, whatever the ceiling.
+            assert!(
+                check_unknown_outcome_retry(&retry_decision(1, reason), &local_worker(), 5)
+                    .is_err()
+            );
+        }
+        // Known outcomes are not judged by this gate.
+        for reason in [
+            Reason::Status { code: 503 },
+            Reason::Send {
+                connect_phase: true,
+            },
+        ] {
+            check_unknown_outcome_retry(&retry_decision(9, reason.clone()), &remote(), 0).unwrap();
+            check_unknown_outcome_retry(&retry_decision(9, reason), &local_worker(), 0).unwrap();
+        }
+    }
     use ryeos_accounting::{
         ChargeReconciliationAuthority, HexDigest, SpendAccounting, SpendBoundAuthority,
         SpendBoundCommitments, UsdNanos, VerifiedPreparedSpendBound,
