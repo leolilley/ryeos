@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-12T00:01:52Z:3c01d8955735df4608595a12fe5fcd8d0fcc0f84b801fc2d4adf5c98963bd422:7JH/6X4vxyyfNkX4t9A5yIaGM5M3/gyCOUjs2jC8Agn1n2LuNexZG63AdrG5SIk50jG8RIutAVBATbwM0zcIBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T22:20:51Z:4765e0c2eb4c5251f403224bb4f469abf9a54f7c81abd32a0e6cc0141de261ec:s7FzgdHRe+ENC8cxo2DnJDkjk1NwjalRMbe49eFTUufH8NXS31AHJf7v79JkslgeB6pRshl8BjpjU6fiZI8yCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: render-sandbox
 version: "0.1.0"
 description: "Early-access Render Sandbox lifecycle adapter with qualified-guest one-shot startup, retained file relay and a controller-relayed guest channel; reconciliation remains pending"

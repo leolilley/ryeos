@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-16T12:02:07Z:fce96fcfe3f1450695c4c0ee51456c75fb21a7ba828914b9f76c5b499faf2ed0:7NRgsl0ldEqClGXgdg1Ezto0pTp27VfstW9bLNtWqIN/Sta/LrqBa1uiCd3EzU1l4aisSg7BAuD468CIkJRgAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-17T22:20:51Z:8ae27b7ef7b1683c8d6dea58371dfe4c0a56998f53c7882da95365efb292238c:J06z/hMQ+Ts0aWXXlAkowq1UVvLp9vk2i69mGkAneZp6KuvnG2v9tsc6oY9QI/n2k3D+f2lCSp9ac4f3PZkoAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # RyeOS Claude Code
 
 Provider data for hosting Claude Code through RyeOS's generic
