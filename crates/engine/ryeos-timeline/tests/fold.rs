@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use ryeos_timeline::{Definition, Item, Timeline, fold};
+use ryeos_timeline::{Definition, Folder, Item, Timeline, fold};
 use serde_json::{Value, json};
 
 fn dir() -> PathBuf {
@@ -517,4 +517,43 @@ fn only_a_failed_thread_projects_retry_input() {
             assert!(!entry.slots.contains_key("retry_input"), "{terminal}");
         }
     }
+}
+
+fn pushed_in_chunks(all: &[Value], size: usize, def: &Definition) -> Timeline {
+    let mut folder = Folder::new(def.clone());
+    for chunk in all.chunks(size) {
+        folder.push(chunk).unwrap();
+    }
+    folder.timeline()
+}
+
+/// Pushing events in any split equals folding them at once, including a
+/// continuation whose late edge grows the spine.
+#[test]
+fn pushing_in_any_split_equals_one_fold() {
+    let def = definition();
+    for name in FIXTURES {
+        let all = events(name);
+        let whole = fold(&all, &def).unwrap();
+        for size in [1, 2, 3, all.len().div_ceil(2).max(1), all.len().max(1)] {
+            assert_eq!(
+                pushed_in_chunks(&all, size, &def),
+                whole,
+                "{name} by {size}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_push_out_of_order_is_refused_and_appends_nothing() {
+    let def = definition();
+    let all = events("tool_run_completed");
+    let mut folder = Folder::new(def.clone());
+    folder.push(&all[..2]).unwrap();
+    let before = folder.timeline();
+    assert!(folder.push(&all[1..3]).is_err());
+    assert_eq!(folder.timeline(), before);
+    folder.push(&all[2..]).unwrap();
+    assert_eq!(folder.timeline(), fold(&all, &def).unwrap());
 }
