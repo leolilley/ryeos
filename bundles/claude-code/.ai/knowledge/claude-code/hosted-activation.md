@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-16T23:03:58Z:06f29ce6f931a4c071bacbd91e4464c5c38ee25bfa82bb38749b983adfecf369:QTo6roSbc4dX5F+gZAin8tBxOfGjZVN97+DlshCgy3g3vME4V6PA6ekGqarypyvY3cED2HqHJjFXvX4kSlZ7Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-17T10:07:49Z:2fd694c9d8dd55125c1a2fde6a2f905d5d5635cfcf5aa52d377b553a341cb63c:kJuoD83jwlVYTR/BdpmpqkvZ0T2Yd6gEMFRdpdrNCXFJTPB2FXlmjWD6mauBwzK77xWJvcK1JM7jJ4Ijmda0Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: claude-code
 tags: [claude-code, hosted-worker, activation, runbook]
