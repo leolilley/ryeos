@@ -329,6 +329,9 @@ requires:
   capabilities:
     declared:
       - ryeos.execute.directive.probe/run
+      # A follow child cannot hold authority its parent lacks, and the probe
+      # directive declares the tool wildcard.
+      - "ryeos.execute.tool.*"
 limits:
   deadline:
     reserve_seconds: 20
@@ -429,6 +432,9 @@ requires:
   capabilities:
     declared:
       - ryeos.execute.directive.probe/run
+      # A follow child cannot hold authority its parent lacks, and the probe
+      # directive declares the tool wildcard.
+      - "ryeos.execute.tool.*"
 config:
   start: call
   on_error: continue
