@@ -1095,33 +1095,36 @@ fn accepted_expressions() {
     );
 }
 
-/// Forms accepted today that nothing in the repository uses.
+/// Forms the `cron` crate accepted that nothing in the repository uses
+/// (`@` nicknames, the optional year field, fields run together without
+/// separators, spaces inside a list or range). The in-house evaluator
+/// refuses them; before the swap every one of these was accepted.
 #[test]
-fn exotic_expressions_accepted_today() {
+fn exotic_expressions_refused_since_in_house_evaluator() {
     check(
         "exotic",
         &[
-            (["@yearly"], "ok"),
-            (["@monthly"], "ok"),
-            (["@weekly"], "ok"),
-            (["@daily"], "ok"),
-            (["@hourly"], "ok"),
-            (["  @daily  "], "ok"),
-            (["0 0 0 * * * *"], "ok"),
-            (["0 0 0 1 1 * 2030"], "ok"),
-            (["0 0 0 * * * 2030-2040"], "ok"),
-            (["0 0 0 * * * */5"], "ok"),
-            (["0 0 0 * * * 1970"], "ok"),
-            (["0 0 0 * * * 2100"], "ok"),
-            (["******"], "ok"),
-            (["* * * * * * *"], "ok"),
-            (["**/5 * * * * *"], "ok"),
-            (["0 0 1, 2 * * *"], "ok"),
-            (["0 0 1 ,2 * * *"], "ok"),
-            (["0 0 1 , 2 * * *"], "ok"),
-            (["0 0 4 * * * "], "ok"),
-            (["0 0 0 * * Mon - Fri"], "ok"),
-            (["0 0 0 * * 1 - 5"], "ok"),
+            (["@yearly"], "refused"),
+            (["@monthly"], "refused"),
+            (["@weekly"], "refused"),
+            (["@daily"], "refused"),
+            (["@hourly"], "refused"),
+            (["  @daily  "], "refused"),
+            (["0 0 0 * * * *"], "refused"),
+            (["0 0 0 1 1 * 2030"], "refused"),
+            (["0 0 0 * * * 2030-2040"], "refused"),
+            (["0 0 0 * * * */5"], "refused"),
+            (["0 0 0 * * * 1970"], "refused"),
+            (["0 0 0 * * * 2100"], "refused"),
+            (["******"], "refused"),
+            (["* * * * * * *"], "refused"),
+            (["**/5 * * * * *"], "refused"),
+            (["0 0 1, 2 * * *"], "refused"),
+            (["0 0 1 ,2 * * *"], "refused"),
+            (["0 0 1 , 2 * * *"], "refused"),
+            (["0 0 4 * * * "], "refused"),
+            (["0 0 0 * * Mon - Fri"], "refused"),
+            (["0 0 0 * * 1 - 5"], "refused"),
         ],
         |[expr]| accepts(expr).to_owned(),
     );
