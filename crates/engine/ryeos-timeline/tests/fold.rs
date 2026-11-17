@@ -974,3 +974,48 @@ fn chunks_image_first_inputs_and_retry_read_only_the_latest_input() {
         "an image-only latest input offers no retry, not an older text"
     );
 }
+
+/// A followed child's settlement updates its link: the outcome kind sets the
+/// state and tone, and the result summary becomes the body. A failed child
+/// escapes the run it sits in.
+#[test]
+fn a_settled_child_gives_its_link_the_outcome_and_summary() {
+    let def = definition();
+    let settle = |kind: &str, status: &str| {
+        let b = format!("{:064x}", 2);
+        let evs = vec![
+            ask(&mut 1, T0, "go"),
+            synthetic(
+                2,
+                T1,
+                "child_thread_spawned",
+                json!({"child_thread_id": "T-9", "item_id": "worker", "operation_id": b}),
+            ),
+            synthetic(
+                3,
+                T5,
+                "child_thread_settled",
+                json!({"child_thread_id": "T-9", "follow_key": "f", "status": status,
+                       "outcome_kind": kind, "result_summary": "all done",
+                       "truncated": false, "cost": {"total_usd": 0.25}}),
+            ),
+        ];
+        fold(&evs, &def).unwrap()
+    };
+    let done = settle("completed", "completed");
+    let link = find(&done, "lnk:T-9").expect("link");
+    assert_eq!(link.state.as_deref(), Some("done"));
+    assert_eq!(link.tone.as_deref(), Some("good"));
+    assert_eq!(link.slots["body"], "all done");
+    assert_eq!(link.slots["headline"], "worker");
+    for (kind, status, state, tone) in [
+        ("cancelled", "cancelled", "stopped", "warn"),
+        ("deadline", "timed_out", "timed_out", "danger"),
+        ("worker_failure", "failed", "failed", "danger"),
+    ] {
+        let timeline = settle(kind, status);
+        let link = find(&timeline, "lnk:T-9").expect("link");
+        assert_eq!(link.state.as_deref(), Some(state), "{kind}");
+        assert_eq!(link.tone.as_deref(), Some(tone), "{kind}");
+    }
+}
