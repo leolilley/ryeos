@@ -1085,19 +1085,12 @@ const SQLITE_HEADER_APPLICATION_ID: u64 = 68;
 ///
 /// The test process links the guarded native SQLite host, which refuses an
 /// unissued open, so the stamp is written straight into the database header
-/// (a 4-byte big-endian field). That is exact only while no WAL frame can
-/// shadow the header page, which a gracefully stopped node guarantees by
-/// checkpointing and removing its WAL on the last close.
+/// (a 4-byte big-endian field). A stopped node may still hold committed WAL
+/// frames that would shadow the header page, so they are first checkpointed
+/// into the database file.
 fn stamp_predecessor(path: &Path, offset: u64, edit: impl Fn(u32) -> u32) -> Result<u32> {
     use std::io::{Read, Seek, SeekFrom, Write};
-    let mut wal = path.as_os_str().to_owned();
-    wal.push("-wal");
-    let wal_len = std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0);
-    anyhow::ensure!(
-        wal_len == 0,
-        "{} still holds {wal_len} WAL bytes; a stopped node must have checkpointed it",
-        path.display()
-    );
+    checkpoint_stopped_wal(path)?;
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -1111,6 +1104,97 @@ fn stamp_predecessor(path: &Path, offset: u64, edit: impl Fn(u32) -> u32) -> Res
     file.write_all(&predecessor.to_be_bytes())?;
     file.sync_all()?;
     Ok(predecessor)
+}
+
+/// Checkpoint the WAL of a store whose node has stopped, as SQLite would on
+/// its last close: copy every frame up to the last valid commit frame into
+/// the database file, truncate the file to that commit's size, then remove
+/// the WAL and its shared-memory index. A frame is valid while its salts
+/// match the WAL header and its cumulative checksum holds.
+fn checkpoint_stopped_wal(path: &Path) -> Result<()> {
+    use std::io::{Seek, SeekFrom, Write};
+    let sibling = |suffix: &str| {
+        let mut name = path.as_os_str().to_owned();
+        name.push(suffix);
+        PathBuf::from(name)
+    };
+    let (wal_path, shm_path) = (sibling("-wal"), sibling("-shm"));
+    let wal = match std::fs::read(&wal_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error).context(format!("read {}", wal_path.display())),
+    };
+    if wal.len() >= 32 {
+        let word = |at: usize| u32::from_be_bytes(wal[at..at + 4].try_into().unwrap());
+        let magic = word(0);
+        anyhow::ensure!(
+            magic & !1 == 0x377f_0682,
+            "{} is not a SQLite WAL",
+            wal_path.display()
+        );
+        let big_endian = magic & 1 == 1;
+        let checksum = |seed: (u32, u32), bytes: &[u8]| {
+            bytes.chunks_exact(8).fold(seed, |(s0, s1), pair| {
+                let read = |b: &[u8]| {
+                    let b: [u8; 4] = b.try_into().unwrap();
+                    if big_endian { u32::from_be_bytes(b) } else { u32::from_le_bytes(b) }
+                };
+                let s0 = s0.wrapping_add(read(&pair[..4])).wrapping_add(s1);
+                (s0, s1.wrapping_add(read(&pair[4..])).wrapping_add(s0))
+            })
+        };
+        let page_size = match word(8) {
+            1 => 65_536,
+            size => size as usize,
+        };
+        let salts = (word(16), word(20));
+        let mut running = checksum((0, 0), &wal[..24]);
+        anyhow::ensure!(
+            running == (word(24), word(28)),
+            "{} has a corrupt header",
+            wal_path.display()
+        );
+        let mut pending = Vec::new();
+        let mut committed: Option<(Vec<(u32, usize)>, u32)> = None;
+        let mut at = 32;
+        while at + 24 + page_size <= wal.len() {
+            let (page, commit) = (word(at), word(at + 4));
+            if (word(at + 8), word(at + 12)) != salts {
+                break;
+            }
+            running = checksum(running, &wal[at..at + 8]);
+            running = checksum(running, &wal[at + 24..at + 24 + page_size]);
+            if running != (word(at + 16), word(at + 20)) {
+                break;
+            }
+            pending.push((page, at + 24));
+            if commit != 0 {
+                committed = Some((pending.clone(), commit));
+            }
+            at += 24 + page_size;
+        }
+        if let Some((frames, pages)) = committed {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .with_context(|| format!("open {} to checkpoint it", path.display()))?;
+            for (page, data) in frames {
+                file.seek(SeekFrom::Start(u64::from(page - 1) * page_size as u64))?;
+                file.write_all(&wal[data..data + page_size])?;
+            }
+            file.set_len(u64::from(pages) * page_size as u64)?;
+            file.sync_all()?;
+        }
+    }
+    for leftover in [wal_path, shm_path] {
+        match std::fs::remove_file(&leftover) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                return Err(error).context(format!("remove {}", leftover.display()));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// A node issued before two clean cuts that ship together (a runtime schema
