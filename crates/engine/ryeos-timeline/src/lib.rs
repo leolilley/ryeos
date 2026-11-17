@@ -258,9 +258,14 @@ pub enum Slot {
 /// Candidates are the earlier events of type `event` for which `when`, if
 /// present, holds (it is evaluated against the earlier event), latest first.
 ///
-/// With `array` and `find`: the first candidate whose array at `array` has an
+/// With `when`, only the latest candidate is read: `when` names the one event
+/// the value must come from, and if that event has no matching element or no
+/// `get`, the slot is absent rather than an older event's value. Without
+/// `when`, the search runs back to the first candidate that yields a value.
+///
+/// With `array` and `find`: the candidate's array at `array` must have an
 /// element matching `find`; the slot is that element's `get`. Without them:
-/// the first candidate where `get` resolves; the slot is that value.
+/// the slot is the candidate's `get`.
 ///
 /// `find` is either `[field, path]` (the element's `field` equals the value
 /// at `path` in the event being folded) or `{field, equals}` (the element's

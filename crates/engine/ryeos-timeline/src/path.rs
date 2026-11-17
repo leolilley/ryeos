@@ -126,21 +126,23 @@ fn lookup_value(lookup: &crate::Lookup, event: &Value, cx: &Context) -> Option<S
         (None, None) => None,
         _ => return None,
     };
-    cx.history.iter().rev().find_map(|previous| {
-        if previous.get("event_type").and_then(Value::as_str) != Some(lookup.event.as_str())
-            || previous.get("thread_id") != Some(thread)
-            || !when_holds(&lookup.when, previous, cx)
-        {
-            return None;
-        }
-        match element_match {
-            None => get(previous, &lookup.get).map(text),
-            Some((array, field, wanted)) => get(previous, array)?
-                .as_array()?
-                .iter()
-                .find(|element| get(element, field) == Some(wanted))
-                .and_then(|element| get(element, &lookup.get))
-                .map(text),
-        }
-    })
+    let read = |previous: &Value| match element_match {
+        None => get(previous, &lookup.get).map(text),
+        Some((array, field, wanted)) => get(previous, array)?
+            .as_array()?
+            .iter()
+            .find(|element| get(element, field) == Some(wanted))
+            .and_then(|element| get(element, &lookup.get))
+            .map(text),
+    };
+    let mut candidates = cx.history.iter().rev().filter(|previous| {
+        previous.get("event_type").and_then(Value::as_str) == Some(lookup.event.as_str())
+            && previous.get("thread_id") == Some(thread)
+            && when_holds(&lookup.when, previous, cx)
+    });
+    if lookup.when.is_some() {
+        candidates.next().and_then(read)
+    } else {
+        candidates.find_map(read)
+    }
 }

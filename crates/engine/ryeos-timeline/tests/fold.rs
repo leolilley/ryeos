@@ -899,3 +899,78 @@ events:
         ["pro:1/1", "pro:1/2", "mrk:1/2", "pro:2/1", "pro:2/2"]
     );
 }
+
+fn all_entries(items: &[Item]) -> Vec<&ryeos_timeline::Entry> {
+    items
+        .iter()
+        .flat_map(|item| match item {
+            Item::Entry(e) => vec![e],
+            Item::Cluster(c) => c.members.iter().collect(),
+            Item::Recap(r) => all_entries(&r.members),
+        })
+        .collect()
+}
+
+/// A chunked input draws one message from its first chunk; a context chunk
+/// draws nothing; an input that opens with an image opens its own exchange;
+/// and the retry input is read from the latest operator input only, so an
+/// image-only one offers no retry rather than an older text.
+#[test]
+fn chunks_image_first_inputs_and_retry_read_only_the_latest_input() {
+    let def = definition();
+    let chunk = |seq, origin: &str, index: u32, text: &str| {
+        ev(
+            seq,
+            "2026-11-17T00:00:00Z",
+            "T-1",
+            "cognition_in",
+            json!({"schema_version": 1, "origin": origin, "content_hash": "h",
+                   "chunk_index": index, "chunk_count": 2, "content_chunk": text}),
+        )
+    };
+    let evs = vec![
+        ev(
+            1,
+            "2026-11-17T00:00:00Z",
+            "T-1",
+            "cognition_in",
+            json!({"origin": "operator", "parts": [{"type": "text", "text": "first"}]}),
+        ),
+        chunk(2, "operator", 0, "hello "),
+        chunk(3, "operator", 1, "world"),
+        chunk(4, "context", 0, "ctx"),
+        ev(
+            5,
+            "2026-11-17T00:00:01Z",
+            "T-1",
+            "cognition_in",
+            json!({"origin": "operator", "parts": [{"type": "image",
+                   "media_type": "image/png", "attachment": "a", "byte_length": 10}]}),
+        ),
+        ev(6, "2026-11-17T00:00:02Z", "T-1", "thread_failed", json!({})),
+    ];
+    let timeline = fold(&evs, &def).unwrap();
+    let entries = all_entries(&timeline.items);
+    let at = |seq: i64| -> Vec<&ryeos_timeline::Entry> {
+        entries.iter().copied().filter(|e| e.seq.0 == seq).collect()
+    };
+    assert_eq!(at(2).len(), 1, "the first chunk draws the message");
+    assert_eq!(at(2)[0].slots["body"], "hello ");
+    assert!(
+        at(3).is_empty() && at(4).is_empty(),
+        "later and context chunks draw nothing"
+    );
+    let image = at(5);
+    assert_eq!(image.len(), 1);
+    assert!(image[0].exchange.is_some());
+    assert_ne!(
+        image[0].exchange,
+        at(2)[0].exchange,
+        "the image opens its own exchange"
+    );
+    let outcome = find(&timeline, "out:T-1").expect("outcome");
+    assert!(
+        !outcome.slots.contains_key("retry_input"),
+        "an image-only latest input offers no retry, not an older text"
+    );
+}

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-17T07:37:42Z:563547510b3911ae5c0d5623c49ea5494d4714306bb24289d199e6baf34c86c2:BtE3jBLFzumynxhiQwhR/FwKlCBnBYT9lKnss14/U8qwrGQtg+19ANAE94XV5UOtWk1EyUZ6+qxjlnByEed2Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T08:37:04Z:b5b18dfacec7918b031b0555f3bcf72f3726165da98d7052cb83b8a72f0419f2:ijqeqfp9wHlossY14vZa7dpeSuUgO7UZcWCL/lV8xzd9f0k+UEqMkf2o+b7GeABu7foS1II13RlD0mVVIK0IAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Thread timeline definition: how a chain's events fold into timeline items.
 # Declarative data read by the timeline service; the fold engine names no event type itself.
 category: ryeos/ui/timeline
@@ -37,6 +37,15 @@ events:
   # Harness input is a notice, a compaction input a divider; context and the
   # turn marker add nothing to draw.
   cognition_in:
+    # A large text input arrives in chunks: the first draws the message.
+    - when: {has: payload.content_chunk}
+      emit:
+        - type: message
+          when: {eq: [payload.chunk_index, 0], one_of: [payload.origin, [operator, launch]]}
+          starts_exchange: true
+          project:
+            body: payload.content_chunk
+            detail: {join: [{path: payload.chunk_count, prefix: "chunks: "}]}
     - when: {one_of: [payload.origin, [operator, launch]]}
       over: payload.parts
       emit:
@@ -44,11 +53,22 @@ events:
           when: {eq: [item_index, 0], has: item.text}
           starts_exchange: true
           project: {body: item.text}
+        # An input that opens with an image still opens the exchange.
+        - type: marker
+          when: {eq: [item_index, 0], lacks: item.text}
+          starts_exchange: true
+          project:
+            headline:
+              join:
+                - {path: item.media_type, prefix: "image · "}
+                - {path: item.byte_length, format: bytes}
+                - {path: item.width, prefix: "w "}
+                - {path: item.height, prefix: "h "}
         - type: prose
           when: {eq: [item.type, text], ne: [item_index, 0]}
           project: {body: item.text}
         - type: marker
-          when: {eq: [item.type, image]}
+          when: {eq: [item.type, image], ne: [item_index, 0]}
           project:
             headline:
               join:
