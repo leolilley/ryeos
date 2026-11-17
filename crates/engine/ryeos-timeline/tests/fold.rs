@@ -1013,3 +1013,22 @@ fn a_provider_retry_marker_names_the_reason_and_any_superseded_output() {
     let clean = headlines(&[retry(1, 0)]);
     assert_eq!(clean, vec!["provider retry, attempt 1".to_string()]);
 }
+
+#[test]
+fn a_turn_cut_at_the_output_limit_draws_a_marker() {
+    let def = definition();
+    let cut = ev(
+        1,
+        "2026-11-18T00:00:00Z",
+        "T-1",
+        "cognition_out",
+        json!({
+            "turn": 4,
+            "finish": "length",
+            "parts": [{"type": "text", "text": "partial answer"}],
+        }),
+    );
+    let text = serde_json::to_string(&fold(&[cut], &def).unwrap()).unwrap();
+    assert!(text.contains("turn cut at the output limit · 4"), "{text}");
+    assert!(text.contains("partial answer"), "{text}");
+}

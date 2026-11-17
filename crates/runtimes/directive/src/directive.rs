@@ -144,10 +144,27 @@ pub struct ExecutionConfig {
     /// unknown outcome and shares the early attempts with `retries`.
     #[serde(default)]
     pub unknown_outcome_retry: Option<ryeos_directive_definition::UnknownOutcomeRetryPolicy>,
+    /// Recovery when the provider ends a turn at its output limit. Absent, or
+    /// `max_consecutive: 0`, fails the thread as before. When enabled, the turn
+    /// is recorded with `finish: "length"` and, if it carried no tool calls, a
+    /// harness input carrying `message` starts the next turn.
+    #[serde(default)]
+    pub on_output_limit: Option<OutputLimitPolicy>,
     /// Execution-owned provider-attempt accounting policy. Wire parsing stays
     /// in the signed provider schema; budget/failure behavior belongs here.
     #[serde(default)]
     pub accounting: AttemptAccountingConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OutputLimitPolicy {
+    /// How many turns in a row may end at the output limit before the thread
+    /// fails. `0` disables recovery.
+    pub max_consecutive: u32,
+    /// The harness input recorded after a turn that ended at the limit with no
+    /// tool call.
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -241,6 +258,7 @@ impl Default for ExecutionConfig {
             tool_concurrency: default_tool_concurrency(),
             backoff_max_ms: default_backoff_max_ms(),
             unknown_outcome_retry: None,
+            on_output_limit: None,
             accounting: AttemptAccountingConfig::default(),
         }
     }
@@ -259,6 +277,15 @@ impl ExecutionConfig {
                 "execution.backoff_max_ms ({}) must not be below execution.backoff_base_ms ({})",
                 self.backoff_max_ms,
                 self.backoff_base_ms
+            );
+        }
+        if let Some(policy) = &self.on_output_limit
+            && (policy.message.trim().is_empty()
+                || policy.message.len() > 4096
+                || policy.message.chars().any(char::is_control))
+        {
+            anyhow::bail!(
+                "execution.on_output_limit.message must be 1-4096 bytes without control characters"
             );
         }
         if let Some(policy) = &self.unknown_outcome_retry {
@@ -830,6 +857,27 @@ mod tests {
         .unwrap();
         let error = over.validate().unwrap_err();
         assert!(error.to_string().contains("must not exceed"));
+    }
+
+    #[test]
+    fn output_limit_policy_parses_and_validates_its_message() {
+        let cfg: ExecutionConfig = serde_yaml::from_str(
+            "on_output_limit:\n  max_consecutive: 2\n  message: \"Continue from where it stopped.\"\n",
+        )
+        .unwrap();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.on_output_limit.as_ref().unwrap().max_consecutive, 2);
+        assert!(ExecutionConfig::default().on_output_limit.is_none());
+
+        let blank: ExecutionConfig = serde_yaml::from_str(
+            "on_output_limit:\n  max_consecutive: 1\n  message: \"  \"\n",
+        )
+        .unwrap();
+        assert!(blank.validate().is_err());
+        assert!(
+            serde_yaml::from_str::<ExecutionConfig>("on_output_limit:\n  max_consecutive: 1\n")
+                .is_err()
+        );
     }
 
     #[test]

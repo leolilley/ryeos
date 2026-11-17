@@ -43,6 +43,9 @@ pub struct ResumeState {
     /// Exact retry decisions already represented in the current thread braid.
     /// Used only to make testimony append lost-reply recovery idempotent.
     pub provider_retry_testimony_digests: std::collections::BTreeSet<String>,
+    /// Final turns in a row, ending at the latest recorded turn of this exact
+    /// native thread, that ended at the provider's output limit.
+    pub trailing_length_turns: u32,
     /// The latest frame recorded on the path: what the model was given besides
     /// the conversation. `None` when the path recorded none.
     pub frame: Option<CognitionFramePayload>,
@@ -199,6 +202,7 @@ pub async fn load_resume_state(
     // recorded. A predecessor thread's part of the path is what a successor
     // started from, so it is carried the way the successor's start carried it:
     // pinned inputs, then the most recent turns.
+    let trailing_length_turns = trailing_length_turns(&events[own_start..])?;
     let frame = latest_frame(&events)?;
     let predecessor = fold_messages(&events[..own_start])?;
     let own = fold_messages(&events[own_start..])?;
@@ -216,8 +220,26 @@ pub async fn load_resume_state(
         thread_usage,
         result_guard,
         provider_retry_testimony_digests,
+        trailing_length_turns,
         frame,
     })
+}
+
+/// Count the final turns, newest first, that ended at the output limit,
+/// stopping at the first final turn that did not. Derived from the record so
+/// resume needs no separate counter.
+fn trailing_length_turns(events: &[ReplayedEventRecord]) -> Result<u32> {
+    let mut count = 0u32;
+    for event in events.iter().rev() {
+        if final_cognition_turn(event)?.is_none() {
+            continue;
+        }
+        if event.payload.get("finish").and_then(Value::as_str) != Some("length") {
+            break;
+        }
+        count = count.saturating_add(1);
+    }
+    Ok(count)
 }
 
 /// Parse a replayed `tool_call_result` into its typed payload. A payload in
@@ -2737,6 +2759,49 @@ mod tests {
             error
                 .to_string()
                 .contains("outside its active provider turn")
+        );
+    }
+
+    #[test]
+    fn trailing_length_turns_are_derived_from_the_newest_finals() {
+        let event = |event_type: &str, payload: Value| ReplayedEventRecord {
+            event_type: event_type.to_string(),
+            payload,
+        };
+        let length = |turn: u32| {
+            event(
+                "cognition_out",
+                json!({"turn": turn, "parts": text_parts("cut"), "finish": "length"}),
+            )
+        };
+        let stop = |turn: u32| event("cognition_out", out(turn, "done"));
+        let harness_input = event(
+            "cognition_in",
+            json!({"origin": "harness", "kind": "output_limit", "parts": text_parts("continue")}),
+        );
+        let fragment = event("cognition_out", json!({"turn": 3, "delta": "partial"}));
+
+        assert_eq!(trailing_length_turns(&[]).unwrap(), 0);
+        assert_eq!(trailing_length_turns(&[stop(1)]).unwrap(), 0);
+        assert_eq!(
+            trailing_length_turns(&[stop(1), length(2), harness_input.clone()]).unwrap(),
+            1
+        );
+        assert_eq!(
+            trailing_length_turns(&[
+                stop(1),
+                length(2),
+                harness_input.clone(),
+                fragment,
+                length(3)
+            ])
+            .unwrap(),
+            2
+        );
+        // A clean turn after the cuts ends the run of them.
+        assert_eq!(
+            trailing_length_turns(&[length(1), harness_input, stop(2)]).unwrap(),
+            0
         );
     }
 

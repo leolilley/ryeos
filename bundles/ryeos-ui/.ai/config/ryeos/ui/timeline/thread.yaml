@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-17T11:18:31Z:e56af7bdaac1725553bcfbd523b8b089b4104201dddd0a836b876799c4b21e9c:KH1RiRuwXqaELyc2F2vsNQFq81ytHTVUZn7d27DVt4dfdql04HUfQrlVz950icPDTRCbaZjufnw7bhAsihN0Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T11:22:49Z:534ff2bff50a23047979497056996a0eb5e3095aaebb560048fef9c88f200988:7P/mBLOUVAeIYX5YMZ9vxGjbMUAjWwtsYWp0oHD2XiPxwBohTgvwzE1o8vFdxFMJ05G/wyZY5Cn9hTtF+CtwCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Thread timeline definition: how a chain's events fold into timeline items.
 # Declarative data read by the timeline service; the fold engine names no event type itself.
 category: ryeos/ui/timeline
@@ -108,6 +108,11 @@ events:
           when: {eq: [item_last, true], one_of: [payload.finish, [interrupted]]}
           tone: [{default: warn}]
           project: {headline: {join: [{path: payload.turn, prefix: "turn interrupted · "}]}}
+        - type: marker
+          key: [thread_id, payload.turn]
+          when: {eq: [item_last, true], one_of: [payload.finish, [length]]}
+          tone: [{default: warn}]
+          project: {headline: {join: [{path: payload.turn, prefix: "turn cut at the output limit · "}]}}
 
   # The stable frame of a conversation is written once at launch.
   cognition_frame: [{drop: true}]

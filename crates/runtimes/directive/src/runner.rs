@@ -146,6 +146,12 @@ pub(crate) struct ToolOccurrence {
     pub malformed: Option<ryeos_runtime::MalformedCall>,
 }
 
+/// Failure text for a turn the provider ended at its output limit when the
+/// signed policy does not recover it.
+const OUTPUT_LIMIT_ERROR: &str = "provider_output_limit_reached: provider ended the \
+     response at its declared/native output limit; this is \
+     distinct from a RyeOS-local output byte limit";
+
 /// The model-visible error for a call whose arguments did not parse.
 fn malformed_call_error(malformed: &ryeos_runtime::MalformedCall) -> String {
     format!(
@@ -460,6 +466,10 @@ pub struct Runner {
     /// Malformed-argument facts of the turn just recorded, read when its
     /// tool calls become occurrences.
     turn_malformed_calls: Vec<ryeos_runtime::MalformedCall>,
+    /// Trailing turns in a row that ended at the provider's output limit.
+    /// Derived from the record on resume; non-zero means the latest recorded
+    /// turn ended at the limit.
+    consecutive_length_turns: u32,
     resume_disposition: ResumeDisposition,
     resume_active_provider_turn: Option<u32>,
     provider_retry_testimony_digests: std::collections::BTreeSet<String>,
@@ -1143,6 +1153,7 @@ impl Runner {
                 .expect("reqwest client builder"),
             resume_pending_tools: Vec::new(),
             turn_malformed_calls: Vec::new(),
+            consecutive_length_turns: 0,
             resume_disposition: ResumeDisposition::ContinueProvider,
             resume_active_provider_turn: None,
             provider_retry_testimony_digests: std::collections::BTreeSet::new(),
@@ -1184,6 +1195,7 @@ impl Runner {
         let resume_disposition = resume.disposition;
         let resume_active_provider_turn = resume.active_provider_turn;
         let provider_retry_testimony_digests = resume.provider_retry_testimony_digests;
+        let trailing_length_turns = resume.trailing_length_turns;
         let last_turn_coordinate = resume.last_turn_coordinate;
         if let Some(active_turn) = resume_active_provider_turn {
             let expected = last_turn_coordinate
@@ -1259,6 +1271,7 @@ impl Runner {
         runner.resume_disposition = resume_disposition;
         runner.resume_active_provider_turn = resume_active_provider_turn;
         runner.provider_retry_testimony_digests = provider_retry_testimony_digests;
+        runner.consecutive_length_turns = trailing_length_turns;
         runner.return_nudge_sent = recovered_return_nudge_seen(
             &runner.messages,
             &runner.return_nudge,
@@ -2288,15 +2301,14 @@ impl Runner {
                                     continue;
                                 }
                             }
-                            if crate::directive::normalize_finish_reason(
+                            let ended_at_output_limit = crate::directive::normalize_finish_reason(
                                 resp.finish_reason.as_deref(),
-                            ) == FinishReason::Length
+                            ) == FinishReason::Length;
+                            if ended_at_output_limit
+                                && self.consecutive_length_turns >= self.output_limit_allowance()
                             {
                                 state = State::Errored {
-                                    error: "provider_output_limit_reached: provider ended the \
-                                            response at its declared/native output limit; this is \
-                                            distinct from a RyeOS-local output byte limit"
-                                        .to_string(),
+                                    error: OUTPUT_LIMIT_ERROR.to_string(),
                                 };
                                 continue;
                             }
@@ -2393,6 +2405,11 @@ impl Runner {
                                 continue;
                             }
                             self.turn_malformed_calls = malformed_calls;
+                            self.consecutive_length_turns = if ended_at_output_limit {
+                                self.consecutive_length_turns.saturating_add(1)
+                            } else {
+                                0
+                            };
                             self.messages.push(resp.message.clone());
                             if resp.message.has_tool_calls() {
                                 block_at_directive_recovery_test_cut(
@@ -2909,6 +2926,39 @@ impl Runner {
                                     State::DispatchingToolBatch {
                                         pending: occurrences,
                                     }
+                                }
+                            } else if self.consecutive_length_turns > 0 {
+                                // The turn ended at the output limit and made no
+                                // tool call: its text is incomplete, so it must
+                                // not finalize. Record the policy's message as a
+                                // harness input and take another turn, within the
+                                // policy's bound and the turn limit.
+                                let message = self
+                                    .execution
+                                    .on_output_limit
+                                    .as_ref()
+                                    .map(|policy| policy.message.clone());
+                                match message {
+                                    Some(message) if self.can_start_another_turn() => {
+                                        let input =
+                                            ryeos_runtime::CognitionInput::text("harness", &message)
+                                                .with_kind("output_limit");
+                                        if let Err(e) =
+                                            self.callback.emit_cognition_input(&input).await
+                                        {
+                                            State::RecoveryRequired {
+                                                error: format!(
+                                                    "resume-critical output_limit input append failed: {e}"
+                                                ),
+                                            }
+                                        } else {
+                                            self.messages.push(ProviderMessage::user(message));
+                                            State::CheckingLimits
+                                        }
+                                    }
+                                    _ => State::Errored {
+                                        error: OUTPUT_LIMIT_ERROR.to_string(),
+                                    },
                                 }
                             } else if let Some(content) = msg.content_value() {
                                 // Steer pre-finalize drain (finding C): a no-tool
@@ -4418,6 +4468,14 @@ impl Runner {
                 last_error.unwrap_or_else(|| "no error recorded".to_string())
             )),
         }
+    }
+
+    /// Turns in a row that may end at the output limit under the signed policy.
+    fn output_limit_allowance(&self) -> u32 {
+        self.execution
+            .on_output_limit
+            .as_ref()
+            .map_or(0, |policy| policy.max_consecutive)
     }
 
     fn validate_retry_advance(

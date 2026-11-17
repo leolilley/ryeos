@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-17T11:20:51Z:f7d706dd7c84ef54e23b6b296e2ef115d53cf880eae502a76a6d794f33b6cb0f:z22grEXhsvVjDsrb0k/mXQwBYDJs8DdeaSNfD+oK9ixbB3ykYCWqS2AHhKgbZHv9xHowyktOPWeJwsILof1KAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-17T11:22:49Z:ccc0cb2d5e5f102856fc3a2a99aebb1ed5b3915b97b5b6f240047057a4f761ea:hctVpY4vyLSTnIZsC6kvwH6cQdMhgryh7btz951Er1M4Qi+3N4pQzgY3di9Nnta+fnovXTeqVHG53aCUgevWDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/runtimes
 tags: [runtime, directive, llm, callbacks]
@@ -57,6 +57,15 @@ arguments were not valid JSON (byte length and hash) and to resend the call.
 The call counts against `limits.tool_calls`. A malformed `directive_return`
 gets the same error result and the run continues. Resume rebuilds the decision
 from the recorded turn.
+
+## Turns cut at the output limit
+
+When the signed execution config sets `on_output_limit`, a turn the provider
+ended at its output limit is recorded with `finish: "length"` instead of failing
+the thread. A cut turn with no tool call is followed by a `cognition_in` with
+`origin: "harness"` and `kind: "output_limit"` carrying the configured message,
+then another turn. The run of trailing `length` turns is read back from the
+record on resume and bounded by `max_consecutive`.
 
 ## Durable tool loop
 
