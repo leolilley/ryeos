@@ -1,0 +1,20 @@
+# ryeos:signed:2026-11-16T09:38:06Z:58822786b56adade4e2c65755bafa124b57435a64663a577f603296b93b432b7:hvKG9wzIAxcGzFUULErkZQGHC2FtUq1SGoSeAuO2tytKZdD1TMIu9ZlLcM0b20f1QZmp5zXEV6GbTmz0mYkFCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [claude-code, profile, create]
+description: "Create one node-private Claude Code credential profile that activates from the delivered model key and gateway address"
+forms:
+  - slots:
+      - field: profile_id
+defaults:
+  activation:
+    kind: delivered_secret
+    names:
+      - ANTHROPIC_API_KEY
+      - ANTHROPIC_BASE_URL
+help:
+  usage: "ryeos claude-code profile create <profile-id>"
+  examples:
+    - "ryeos claude-code profile create disposable"
+dispatch:
+  kind: execute_ref
+  execute: service:credential-profiles/create
+  availability: daemon

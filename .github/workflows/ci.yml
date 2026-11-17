@@ -185,6 +185,9 @@ jobs:
       - name: Check Codex authored contract
         run: python3 bundles/codex/test_contract.py
 
+      - name: Check claude-code authored contract
+        run: python3 -B bundles/claude-code/test_contract.py
+
       - name: Check local-inference authored contract
         run: python3 bundles/local-inference/test_contract.py
 

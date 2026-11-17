@@ -10,15 +10,15 @@
 # Idempotent. Safe to re-run.
 #
 # Usage:
-#   ./scripts/populate-bundles.sh --key <pem-path> --owner <label> [--bundle-set standard|development|central-host|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|core-workflow|core-knowledge|hosted-controller|release-authority|release-artifacts] (--crates "<package ...>" | --all) [--build-profile release|latency-profiling]
+#   ./scripts/populate-bundles.sh --key <pem-path> --owner <label> [--bundle-set standard|development|central-host|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|core-workflow|core-knowledge|hosted-controller|release-authority|release-artifacts] (--crates "<package ...>" | --all) [--build-profile release|latency-profiling|test]
 #
 # Bundle sets:
 #   standard        core + scheduling + knowledge + directive + graph + ryeos-docs +
 #                   ryeos-ui + codex + opencode + web + browser — the default
 #                   local node (default)
 #   development     standard + central-auth + environment-qualification +
-#                   render-sandbox — a developer's node whose local-class
-#                   origin can author runtime snapshot bindings
+#                   render-sandbox + claude-code — a developer's node whose
+#                   local-class origin can author runtime snapshot bindings
 #   central-host    core + central-auth + scheduling + knowledge + directive + graph +
 #                   ryeos-docs + web — workflow node plus the rye/web/search tool and
 #                   app authentication
@@ -63,6 +63,8 @@ CRATES_OVERRIDE="" # space-separated Cargo package list; empty = bundle-set defa
 POPULATE_ALL=0     # explicit opt-in to rebuild the whole bundle set
 # The build profile is an explicit artifact property, not ambient process
 # configuration. Containers pass the same closed value through this CLI.
+# `test` is release optimisation plus the test-only stub driver in the
+# claude-code adapter; it is only for bundle refreshes that feed the test suite.
 BUILD_PROFILE="release"
 
 while [[ $# -gt 0 ]]; do
@@ -83,8 +85,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$BUILD_PROFILE" in
-  release|latency-profiling) ;;
-  *) ryeos_term_fail "invalid build profile: $BUILD_PROFILE (expected release or latency-profiling)"; exit 2 ;;
+  release|latency-profiling|test) ;;
+  *) ryeos_term_fail "invalid build profile: $BUILD_PROFILE (expected release, latency-profiling or test)"; exit 2 ;;
 esac
 
 # Refuse to build the whole workspace implicitly — that full release build is
@@ -257,6 +259,7 @@ CODEX="$ROOT/bundles/codex"
 RENDER_SANDBOX="$ROOT/bundles/render-sandbox"
 MODAL_SANDBOX="$ROOT/bundles/modal-sandbox"
 OPENCODE="$ROOT/bundles/opencode"
+CLAUDE_CODE="$ROOT/bundles/claude-code"
 LOCAL_INFERENCE="$ROOT/bundles/local-inference"
 ENV_QUALIFICATION="$ROOT/bundles/environment-qualification"
 RELEASE_BUNDLE="$ROOT/bundles/bundle-release"
@@ -424,7 +427,8 @@ case "$BUNDLE_SET" in
           ryeos-codex-runtime-verifier \
           ryeos-external-candidate-launcher ryeos-external-candidate-supervisor \
           ryeos-guest-wire-verifier \
-          ryeos-external-guest-restoration-verifier ryeos-render-sandbox-lifecycle-adapter)
+          ryeos-external-guest-restoration-verifier ryeos-render-sandbox-lifecycle-adapter \
+          ryeos-claude-code-adapter)
     ;;
   release-artifacts)
     pkgs=(lillux ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
@@ -438,7 +442,8 @@ case "$BUNDLE_SET" in
           ryeos-external-candidate-launcher ryeos-external-candidate-supervisor \
           ryeos-guest-wire-verifier \
           ryeos-external-guest-restoration-verifier ryeos-render-sandbox-lifecycle-adapter \
-          modal-guest-launcher ryeos-modal-sandbox-lifecycle-adapter)
+          modal-guest-launcher ryeos-modal-sandbox-lifecycle-adapter \
+          ryeos-claude-code-adapter)
     ;;
   central-host)
     pkgs=(lillux ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
@@ -532,6 +537,7 @@ build_static_modal_sandbox_lifecycle_adapter=0
 build_static_codex_external_configuration=0
 build_static_codex_guest_runtime_producer=0
 build_static_codex_runtime_verifier=0
+build_static_claude_code_adapter=0
 build_static_guest_wire_verifier=0
 for p in "${pkgs[@]}"; do
   case "$p" in
@@ -550,6 +556,7 @@ for p in "${pkgs[@]}"; do
     ryeos-codex-external-configuration) build_static_codex_external_configuration=1 ;;
     ryeos-codex-guest-runtime-producer) build_static_codex_guest_runtime_producer=1 ;;
     ryeos-codex-runtime-verifier) build_static_codex_runtime_verifier=1 ;;
+    ryeos-claude-code-adapter) build_static_claude_code_adapter=1 ;;
     ryeos-guest-wire-verifier) build_static_guest_wire_verifier=1 ;;
     *) host_pkgs+=("$p") ;;
   esac
@@ -638,19 +645,36 @@ static_build_labels=()
 (( build_static_codex_external_configuration == 1 )) && static_build_labels+=(ryeos-codex-external-configuration)
 (( build_static_codex_guest_runtime_producer == 1 )) && static_build_labels+=(ryeos-codex-guest-runtime-producer)
 (( build_static_codex_runtime_verifier == 1 )) && static_build_labels+=(ryeos-codex-runtime-verifier)
+(( build_static_claude_code_adapter == 1 )) && static_build_labels+=(ryeos-claude-code-adapter)
 (( build_static_guest_wire_verifier == 1 )) && static_build_labels+=(ryeos-guest-wire-verifier)
 if (( ${#static_build_labels[@]} > 0 )); then
   ryeos_term_update "building selected static worker binaries" "${static_build_labels[*]}"
   ryeos_term_suspend
   # These packages share the same target and flags. One Cargo graph reuses
   # their common dependencies and runs publication only after all succeed.
+  # The test profile builds the claude-code adapter with its stub driver. A
+  # feature is selected per Cargo invocation, so that package builds alone and
+  # every other static package keeps the shared invocation.
   static_build_args=()
+  static_stub_adapter=0
   for package in "${static_build_labels[@]}"; do
-    static_build_args+=(-p "$package")
+    if [[ "$BUILD_PROFILE" == test && "$package" == ryeos-claude-code-adapter ]]; then
+      static_stub_adapter=1
+    else
+      static_build_args+=(-p "$package")
+    fi
   done
   ryeos_term_info "static worker build: ${static_build_labels[*]}"
-  RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
-    "$CARGO" build --release --locked --target "$TRIPLE" "${jobs_args[@]}" "${static_build_args[@]}"
+  if (( ${#static_build_args[@]} > 0 )); then
+    RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
+      "$CARGO" build --release --locked --target "$TRIPLE" "${jobs_args[@]}" "${static_build_args[@]}"
+  fi
+  if (( static_stub_adapter == 1 )); then
+    ryeos_term_info "static worker build: ryeos-claude-code-adapter with features stub-driver"
+    RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
+      "$CARGO" build --release --locked --target "$TRIPLE" "${jobs_args[@]}" \
+      -p ryeos-claude-code-adapter --features stub-driver
+  fi
   ryeos_term_resume "selected static worker build complete"
 else
   ryeos_term_update "retaining static worker binaries" "no static packages selected"
@@ -676,6 +700,9 @@ if bundle_in_set codex; then
   require_static_payload "$PAYLOAD_STAGE/codex/ryeos-external-candidate-launcher"
   require_static_payload "$PAYLOAD_STAGE/codex/ryeos-external-candidate-supervisor"
   require_static_payload "$PAYLOAD_STAGE/codex/ryeos-guest-wire-verifier"
+fi
+if bundle_in_set claude-code; then
+  require_static_payload "$PAYLOAD_STAGE/claude-code/claude-code-adapter"
 fi
 if bundle_in_set render-sandbox; then
   require_static_payload "$PAYLOAD_STAGE/render-sandbox/ryeos-external-guest-restoration-verifier"
@@ -790,6 +817,7 @@ publish_bundle codex "$CODEX" "signed manifests" "$GRAPH" "$KNOWLEDGE"
 publish_bundle render-sandbox "$RENDER_SANDBOX" "signed lifecycle profile" "$GRAPH"
 publish_bundle modal-sandbox "$MODAL_SANDBOX" "signed lifecycle profile" "$GRAPH"
 publish_bundle opencode "$OPENCODE" "signed manifests" "$KNOWLEDGE"
+publish_bundle claude-code "$CLAUDE_CODE" "signed manifests" "$KNOWLEDGE"
 publish_bundle local-inference "$LOCAL_INFERENCE" "signed manifests" "$DIRECTIVE" "$GRAPH" "$KNOWLEDGE"
 publish_bundle bundle-release "$RELEASE_BUNDLE" "signed release-authoring contracts" "$GRAPH"
 publish_bundle bundle-source "$BUNDLE_SOURCE" "signed catalog authority contracts"

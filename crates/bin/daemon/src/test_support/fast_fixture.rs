@@ -137,12 +137,33 @@ const STANDARD_CENTRAL_AUTH_BUNDLE_INVENTORY: &[&str] = &[
     "scheduling",
 ];
 
+/// The authored Development profile: every application bundle, the Render
+/// sandbox adapter and the claude-code worker bundle.
+const DEVELOPMENT_BUNDLE_INVENTORY: &[&str] = &[
+    "browser",
+    "central-auth",
+    "claude-code",
+    "codex",
+    "core",
+    "directive",
+    "environment-qualification",
+    "graph",
+    "knowledge",
+    "opencode",
+    "render-sandbox",
+    "ryeos-docs",
+    "ryeos-ui",
+    "scheduling",
+    "web",
+];
+
 #[derive(Clone, Copy)]
 pub enum FastFixtureProfile {
     Core,
     CoreScheduling,
     Standard,
     StandardCentralAuth,
+    Development,
 }
 
 impl FastFixtureProfile {
@@ -152,6 +173,7 @@ impl FastFixtureProfile {
             Self::CoreScheduling => "core-scheduling",
             Self::Standard => "standard",
             Self::StandardCentralAuth => "standard-central-auth",
+            Self::Development => "development",
         }
     }
 
@@ -161,6 +183,7 @@ impl FastFixtureProfile {
             Self::CoreScheduling => Some(&["core", "scheduling"]),
             Self::Standard => Some(STANDARD_BUNDLE_INVENTORY),
             Self::StandardCentralAuth => Some(STANDARD_CENTRAL_AUTH_BUNDLE_INVENTORY),
+            Self::Development => Some(DEVELOPMENT_BUNDLE_INVENTORY),
         }
     }
 }
@@ -840,6 +863,11 @@ pub fn register_standard_central_auth_composition(
     fixture: &FastFixture,
 ) -> Result<()> {
     register_composition(state_path, fixture, STANDARD_CENTRAL_AUTH_BUNDLE_INVENTORY)
+}
+
+/// Register every bundle selected by the authored Development profile.
+pub fn register_development_composition(state_path: &Path, fixture: &FastFixture) -> Result<()> {
+    register_composition(state_path, fixture, DEVELOPMENT_BUNDLE_INVENTORY)
 }
 
 fn register_composition(

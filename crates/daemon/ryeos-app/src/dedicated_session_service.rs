@@ -515,6 +515,7 @@ fn append_authoritative_observation_batch(
                     "first_sequence": first_sequence,
                     "through_sequence": through_sequence,
                     "upstream_event_type": event.event_type,
+                    "result": event.result,
                     "observation": event.payload,
                 }),
             })
@@ -1421,6 +1422,29 @@ fn admitted_worker_execution_config(
         .ok_or_else(|| anyhow!("hosted root has no admitted worker-execution config"))
 }
 
+/// The one admitted value of a bounded-turn mode's `continuation` field.
+pub const CONTINUATION_COMPLETED_PREDECESSOR: &str = "completed_predecessor";
+
+/// Whether an admitted bounded mode continues a completed predecessor's
+/// upstream conversation instead of starting a session. Absent means a fresh
+/// turn; any value other than the admitted one is a contradictory mode.
+pub fn bounded_mode_is_continuation(worker_execution: &Value) -> Result<bool> {
+    let mode = worker_execution
+        .get("mode")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("hosted root has no admitted worker-execution mode"))?;
+    match mode.get("continuation") {
+        None => Ok(false),
+        Some(Value::String(kind)) if kind == CONTINUATION_COMPLETED_PREDECESSOR => {
+            if mode.contains_key("session_start_route") {
+                bail!("bounded continuation mode names a session-start route");
+            }
+            Ok(true)
+        }
+        Some(_) => bail!("bounded worker mode has an unknown continuation kind"),
+    }
+}
+
 fn admitted_bounded_command_step(
     worker_execution: &Value,
     parameters: &Value,
@@ -1552,6 +1576,7 @@ fn validate_bounded_command_admission(
         }
     }
     validate_next_bounded_attempt(
+        bounded_mode_is_continuation(config)?,
         step,
         attempt,
         command_sequence,
@@ -1560,7 +1585,30 @@ fn validate_bounded_command_admission(
     )
 }
 
-fn bounded_session_deadline(config: &Value, created_at_ms: i64) -> Result<Option<i64>> {
+/// The lifetime in seconds a worker execution states, refused when zero or
+/// above the signed kind ceiling frozen in the admitted session capsule.
+pub fn admitted_lifetime_seconds(config: &Value, ceiling_seconds: u64) -> Result<u64> {
+    config
+        .get("max_lifetime_seconds")
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0 && *value <= ceiling_seconds)
+        .ok_or_else(|| anyhow!("worker execution has no signed lifetime within its kind ceiling"))
+}
+
+/// The signed lifetime ceiling frozen into the session's admitted capsule.
+fn session_lifetime_ceiling(state: &AppState, session: &DedicatedSessionRecord) -> Result<u64> {
+    Ok(
+        admitted_session_capsule(state, &session.admitted_capsule_hash)?
+            .lifecycle
+            .max_lifetime_seconds_ceiling,
+    )
+}
+
+fn bounded_session_deadline(
+    config: &Value,
+    created_at_ms: i64,
+    ceiling_seconds: u64,
+) -> Result<Option<i64>> {
     match config
         .get("mode")
         .and_then(|mode| mode.get("kind"))
@@ -1568,11 +1616,8 @@ fn bounded_session_deadline(config: &Value, created_at_ms: i64) -> Result<Option
     {
         Some("session") => Ok(None),
         Some("bounded_turn") => {
-            let lifetime_seconds = config
-                .get("max_lifetime_seconds")
-                .and_then(Value::as_u64)
-                .filter(|value| *value > 0 && *value <= 603_600)
-                .ok_or_else(|| anyhow!("bounded worker closure has no signed lifetime"))?;
+            let lifetime_seconds = admitted_lifetime_seconds(config, ceiling_seconds)
+                .context("bounded worker closure has no signed lifetime")?;
             let lifetime_ms = i64::try_from(lifetime_seconds)?
                 .checked_mul(1_000)
                 .ok_or_else(|| anyhow!("bounded worker lifetime exceeds timestamp range"))?;
@@ -1613,6 +1658,7 @@ pub(crate) fn ensure_hosted_contact_deadline(
     let session_deadline = bounded_session_deadline(
         admitted_worker_execution_config(&launch)?,
         session.created_at_ms,
+        session_lifetime_ceiling(state, session)?,
     )?;
     let aggregate_deadline = if let Some(scope) = launch.accounting_scope.as_ref() {
         state
@@ -2367,6 +2413,10 @@ pub fn reconcile_command_outboxes(state: &AppState) -> Result<()> {
 struct WorkerEvent {
     event_type: String,
     payload: Value,
+    /// Set by the worker on the one notification its profile marks as the
+    /// execution's result; absent on every other event.
+    #[serde(default)]
+    result: bool,
 }
 
 #[derive(Clone)]
@@ -4852,6 +4902,7 @@ fn bounded_command_contact(
 }
 
 fn validate_next_bounded_attempt(
+    continuation: bool,
     step: &str,
     attempt: u32,
     command_sequence: Option<u64>,
@@ -4882,6 +4933,14 @@ fn validate_next_bounded_attempt(
                 bail!("bounded session start cannot follow a turn attempt");
             }
             (session_attempts.len(), session_contact)
+        }
+        "turn-start" if continuation => {
+            // A continuation resumes an existing upstream session and never
+            // starts one, so its ledger holds no session-start attempt.
+            if !session_attempts.is_empty() {
+                bail!("bounded continuation cannot carry a session-start attempt");
+            }
+            (turn_attempts.len(), turn_contact)
         }
         "turn-start" => {
             let (_, session_sequence) = session_settled
@@ -4957,6 +5016,7 @@ fn bounded_duration_authority_reached(
     let session_deadline = bounded_session_deadline(
         admitted_worker_execution_config(&launch)?,
         session.created_at_ms,
+        session_lifetime_ceiling(state, session)?,
     )?
     .ok_or_else(|| anyhow!("retained worker session was not admitted as a bounded turn"))?;
     let now_ms = lillux::time::timestamp_millis();
@@ -5512,6 +5572,178 @@ pub fn verify_terminal_candidate_publication(
     Ok(())
 }
 
+/// The closed classification a following parent branches on. It is derived
+/// only from the durable bounded outcome and the lifecycle terminal reason:
+/// `completed`, `deadline` (budget exhausted on the duration dimension),
+/// `budget` (any other budget dimension), `approval_required`,
+/// `outcome_unknown`, `worker_failure`, `cancelled` (no bounded outcome, the
+/// session was cancelled) or `failed` (retry exhaustion without contact, or no
+/// bounded outcome and any other terminal reason).
+pub fn terminal_outcome_kind(
+    terminal_reason: Option<&str>,
+    outcome: Option<&DedicatedSessionBoundedOutcome>,
+) -> &'static str {
+    use ryeos_runtime::callback::DedicatedSessionBoundedBudgetDimension as Dimension;
+    match outcome {
+        Some(outcome) => match outcome.kind {
+            DedicatedSessionBoundedOutcomeKind::Completed => "completed",
+            DedicatedSessionBoundedOutcomeKind::BudgetExhausted => {
+                if outcome.dimension == Some(Dimension::Duration) {
+                    "deadline"
+                } else {
+                    "budget"
+                }
+            }
+            DedicatedSessionBoundedOutcomeKind::ApprovalRequired => "approval_required",
+            DedicatedSessionBoundedOutcomeKind::RetryableUncontactedExhausted => "failed",
+            DedicatedSessionBoundedOutcomeKind::OutcomeUnknown => "outcome_unknown",
+            DedicatedSessionBoundedOutcomeKind::WorkerFailure => "worker_failure",
+        },
+        None => match terminal_reason {
+            Some("completed") => "completed",
+            Some("cancelled") => "cancelled",
+            _ => "failed",
+        },
+    }
+}
+
+/// The durable payload of the result-marked notification for the turn named by
+/// the session's completion fence, read back from the retained observation
+/// batch that carried the turn's completion. `Null` when the session has no
+/// completion fence or the batch carried no result-marked event. Reading is
+/// pure: it only follows the already-validated completion fact to its batch.
+fn completion_worker_result(state: &AppState, session: &DedicatedSessionRecord) -> Result<Value> {
+    let Some(fence) = session.completion_fence.as_ref() else {
+        return Ok(Value::Null);
+    };
+    let Some((_, completion)) =
+        hosted_turn_completion_payload(state, session, fence.worker_boot_epoch, &fence.turn_id)?
+    else {
+        return Ok(Value::Null);
+    };
+    let source = completion.get("source").unwrap_or(&Value::Null);
+    let batch = match source.get("kind").and_then(Value::as_str) {
+        Some("pushed_observation_batch") => {
+            let digest = source.get("batch_digest").and_then(Value::as_str);
+            let first = source.get("first_sequence").and_then(Value::as_u64);
+            let through = source.get("through_sequence").and_then(Value::as_u64);
+            match (digest, first, through) {
+                (Some(digest), Some(first), Some(through)) => find_authoritative_batch(
+                    state,
+                    session,
+                    fence.worker_boot_epoch,
+                    digest,
+                    first,
+                    through,
+                )?,
+                _ => None,
+            }
+        }
+        Some("command_response") => {
+            let sequence = source.get("command_sequence").and_then(Value::as_u64);
+            let digest = source.get("request_digest").and_then(Value::as_str);
+            match (sequence, digest) {
+                (Some(sequence), Some(digest)) => find_authoritative_command_observation_batch(
+                    state,
+                    session,
+                    fence.worker_boot_epoch,
+                    sequence,
+                    digest,
+                )?
+                .map(|(batch, _)| batch),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    Ok(batch
+        .map(|batch| select_result_payload(&batch, &fence.turn_id))
+        .unwrap_or(Value::Null))
+}
+
+/// One declaration of the result-marked notification in the admitted profile
+/// (`result_cost` or `result_status`), or `Null` when the profile marks no
+/// result or declares none. Runtime mapping applies it to the result payload
+/// and assumes no payload shape of its own.
+fn result_declaration(state: &AppState, capsule_hash: &str, field: &str) -> Result<Value> {
+    let profile = admitted_structured_protocol(state, capsule_hash)?;
+    Ok(profile
+        .contract
+        .get("notifications")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|rule| rule.get("result").and_then(Value::as_bool) == Some(true))
+        .and_then(|rule| rule.get(field))
+        .cloned()
+        .unwrap_or(Value::Null))
+}
+
+/// Where the admitted profile says the result payload reports its usage.
+fn result_cost_declaration(state: &AppState, capsule_hash: &str) -> Result<Value> {
+    result_declaration(state, capsule_hash, "result_cost")
+}
+
+/// Which value of the result payload the admitted profile says reports a
+/// failed workload turn: `{pointer, failure_values}` or `Null`.
+fn result_status_declaration(state: &AppState, capsule_hash: &str) -> Result<Value> {
+    result_declaration(state, capsule_hash, "result_status")
+}
+
+/// A turn that completed in the protocol sense (`completed`) but whose result
+/// payload carries a declared failure value is a `worker_failure`. Any other
+/// kind, an absent declaration, or a pointer that selects anything other than
+/// a declared string leaves the kind unchanged.
+fn apply_result_status(
+    outcome_kind: &'static str,
+    worker_result: &Value,
+    declared: &Value,
+) -> &'static str {
+    if outcome_kind != "completed" {
+        return outcome_kind;
+    }
+    let reported = declared
+        .get("pointer")
+        .and_then(Value::as_str)
+        .and_then(|pointer| worker_result.pointer(pointer))
+        .and_then(Value::as_str);
+    let failed = match (
+        reported,
+        declared.get("failure_values").and_then(Value::as_array),
+    ) {
+        (Some(reported), Some(values)) => {
+            values.iter().any(|value| value.as_str() == Some(reported))
+        }
+        _ => false,
+    };
+    if failed {
+        "worker_failure"
+    } else {
+        outcome_kind
+    }
+}
+
+/// Pick the result payload for `turn_id` from one canonical batch. One
+/// result-marked event is that turn's result; when a batch carries several,
+/// the payload's own `turn_id` must name the fence's turn.
+fn select_result_payload(batch: &Value, turn_id: &str) -> Value {
+    let marked: Vec<&Value> = batch
+        .get("events")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|event| event.get("result").and_then(Value::as_bool) == Some(true))
+        .filter_map(|event| event.get("payload"))
+        .collect();
+    match marked.as_slice() {
+        [only] => (*only).clone(),
+        many => many
+            .iter()
+            .find(|payload| payload.get("turn_id").and_then(Value::as_str) == Some(turn_id))
+            .map_or(Value::Null, |payload| (*payload).clone()),
+    }
+}
+
 /// Build the bounded worker's compact terminal evidence from its existing
 /// durable authorities. The controller's process-local return value is never
 /// retained as proof: command contact is revalidated against root facts, the
@@ -5529,6 +5761,31 @@ pub fn canonical_terminal_session_projection(
         bail!("canonical terminal session projection requires terminal state");
     }
     let mut result = serde_json::to_value(&session)?;
+    // Both sit beside, never inside, `bounded_execution`: the outcome
+    // testimony digests only the bounded execution, so these presentation
+    // fields cannot disturb it.
+    let worker_result = completion_worker_result(state, &session)?;
+    let worker_result_cost = result_cost_declaration(state, &session.admitted_capsule_hash)?;
+    let worker_result_status = result_status_declaration(state, &session.admitted_capsule_hash)?;
+    let outcome_kind = apply_result_status(
+        terminal_outcome_kind(
+            session.terminal_reason.as_deref(),
+            session.bounded_outcome.as_ref(),
+        ),
+        &worker_result,
+        &worker_result_status,
+    );
+    {
+        let object = result
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("dedicated session projection is not an object"))?;
+        object.insert("worker_result".to_owned(), worker_result);
+        object.insert("worker_result_cost".to_owned(), worker_result_cost);
+        object.insert(
+            "outcome_kind".to_owned(),
+            Value::String(outcome_kind.to_owned()),
+        );
+    }
     if session.candidate_disposition
         != crate::runtime_db::DedicatedCandidateDisposition::RetainedForReview
     {
@@ -5567,7 +5824,16 @@ pub fn canonical_terminal_session_projection(
         canonical_bounded_attempts(&mut session_attempts)?;
     let (turn_attempts, turn_settled, turn_contact) =
         canonical_bounded_attempts(&mut turn_attempts)?;
-    if !turn_attempts.is_empty() && session_settled.is_none() {
+    let launch_capsule = state
+        .state_store
+        .admitted_launch_capsule(placement_thread_id)?
+        .ok_or_else(|| anyhow!("bounded worker admitted launch capsule disappeared"))?;
+    let continuation =
+        bounded_mode_is_continuation(admitted_worker_execution_config(&launch_capsule)?)?;
+    if continuation && !session_attempts.is_empty() {
+        bail!("bounded continuation carries a session-start attempt");
+    }
+    if !continuation && !turn_attempts.is_empty() && session_settled.is_none() {
         bail!("bounded turn was attempted before session start settled");
     }
     if let (Some((_, session_sequence)), Some((_, turn_sequence))) = (session_settled, turn_settled)
@@ -5605,10 +5871,6 @@ pub fn canonical_terminal_session_projection(
     } else {
         "no_command_contact"
     };
-    let launch_capsule = state
-        .state_store
-        .admitted_launch_capsule(placement_thread_id)?
-        .ok_or_else(|| anyhow!("bounded worker admitted launch capsule disappeared"))?;
     let ryeos_state::objects::AdmittedExecutionClosure::ManagedRuntime {
         prepared_runtime_launch,
         ..
@@ -5679,8 +5941,12 @@ pub fn canonical_terminal_session_projection(
         {
             bail!("bounded retry exhaustion is not proved by its admitted attempt ledger")
         }
+        // A continuation whose predecessor conversation could not be resumed
+        // fails before any turn is contacted, so its ledger holds no attempt
+        // at all; that is the only worker failure without contact testimony.
         DedicatedSessionBoundedOutcomeKind::WorkerFailure
-            if terminal_contact != Some("contacted_failed") =>
+            if terminal_contact != Some("contacted_failed")
+                && !(continuation && terminal_contact.is_none()) =>
         {
             bail!("bounded worker failure has no exact failed-contact testimony")
         }
@@ -6477,6 +6743,167 @@ pub fn abort_session_for_root_stop(state: &AppState, placement_thread_id: &str) 
 mod tests {
     use super::*;
 
+    fn bounded(
+        kind: DedicatedSessionBoundedOutcomeKind,
+        dimension: Option<ryeos_runtime::callback::DedicatedSessionBoundedBudgetDimension>,
+    ) -> DedicatedSessionBoundedOutcome {
+        DedicatedSessionBoundedOutcome {
+            kind,
+            dimension,
+            approval: None,
+        }
+    }
+
+    #[test]
+    fn terminal_outcome_kind_maps_every_bounded_outcome() {
+        use DedicatedSessionBoundedOutcomeKind as Kind;
+        use ryeos_runtime::callback::DedicatedSessionBoundedBudgetDimension as Dimension;
+        let cases = [
+            (
+                bounded(Kind::Completed, None),
+                Some("completed"),
+                "completed",
+            ),
+            (
+                bounded(Kind::BudgetExhausted, Some(Dimension::Duration)),
+                Some("cancelled"),
+                "deadline",
+            ),
+            (
+                bounded(Kind::BudgetExhausted, Some(Dimension::WorkerExecutions)),
+                Some("cancelled"),
+                "budget",
+            ),
+            (
+                bounded(Kind::BudgetExhausted, Some(Dimension::ProviderContacts)),
+                Some("cancelled"),
+                "budget",
+            ),
+            (
+                bounded(Kind::ApprovalRequired, None),
+                Some("cancelled"),
+                "approval_required",
+            ),
+            (
+                bounded(Kind::OutcomeUnknown, None),
+                Some("cancelled"),
+                "outcome_unknown",
+            ),
+            (
+                bounded(Kind::WorkerFailure, None),
+                Some("cancelled"),
+                "worker_failure",
+            ),
+            (
+                bounded(Kind::RetryableUncontactedExhausted, None),
+                Some("cancelled"),
+                "failed",
+            ),
+        ];
+        for (outcome, reason, expected) in cases {
+            assert_eq!(
+                terminal_outcome_kind(reason, Some(&outcome)),
+                expected,
+                "{outcome:?}"
+            );
+        }
+        // With no bounded outcome the lifecycle terminal reason decides.
+        assert_eq!(terminal_outcome_kind(Some("cancelled"), None), "cancelled");
+        assert_eq!(terminal_outcome_kind(Some("completed"), None), "completed");
+        assert_eq!(
+            terminal_outcome_kind(Some("credential_revoked"), None),
+            "failed"
+        );
+        assert_eq!(terminal_outcome_kind(None, None), "failed");
+    }
+
+    #[test]
+    fn a_declared_failure_value_turns_a_completed_turn_into_worker_failure() {
+        let declared = json!({"pointer": "/status", "failure_values": ["crashed", "failed"]});
+        for (status, expected) in [
+            ("crashed", "worker_failure"),
+            ("failed", "worker_failure"),
+            ("completed", "completed"),
+            ("interrupted", "completed"),
+        ] {
+            assert_eq!(
+                apply_result_status("completed", &json!({"status": status}), &declared),
+                expected,
+                "{status}"
+            );
+        }
+        // No declaration, an absent or non-string value: unchanged.
+        for result in [
+            json!({"status": "crashed"}),
+            json!({}),
+            json!({"status": 1}),
+            Value::Null,
+        ] {
+            assert_eq!(
+                apply_result_status("completed", &result, &Value::Null),
+                "completed"
+            );
+        }
+        for result in [json!({}), json!({"status": ["failed"]}), Value::Null] {
+            assert_eq!(
+                apply_result_status("completed", &result, &declared),
+                "completed"
+            );
+        }
+        // Only a completed turn is reclassified; other outcomes stand.
+        for kind in [
+            "deadline",
+            "budget",
+            "cancelled",
+            "failed",
+            "approval_required",
+        ] {
+            assert_eq!(
+                apply_result_status(kind, &json!({"status": "crashed"}), &declared),
+                kind
+            );
+        }
+    }
+
+    #[test]
+    fn the_result_payload_is_the_marked_event_for_the_fence_turn() {
+        let marked = |turn: &str, text: &str| {
+            json!({"event_type":"turn.completed","result":true,
+                   "payload":{"turn_id":turn,"result":{"text":text}}})
+        };
+        let plain = json!({"event_type":"turn.started","payload":{"turn_id":"t1"}});
+        let batch =
+            json!({"events":[plain.clone(), marked("t1", "one")],"session_observations":[]});
+        assert_eq!(
+            select_result_payload(&batch, "t1"),
+            json!({"turn_id":"t1","result":{"text":"one"}})
+        );
+        // Several marked events in one batch: the payload names its own turn.
+        let two = json!({"events":[marked("t1", "one"), marked("t2", "two")],
+                         "session_observations":[]});
+        assert_eq!(select_result_payload(&two, "t2")["result"]["text"], "two");
+        assert_eq!(select_result_payload(&two, "t3"), Value::Null);
+        // No marked event, no result.
+        let none = json!({"events":[plain],"session_observations":[]});
+        assert_eq!(select_result_payload(&none, "t1"), Value::Null);
+    }
+
+    #[test]
+    fn a_worker_event_may_carry_the_result_marker_and_defaults_to_unmarked() {
+        let marked: WorkerEvent = serde_json::from_value(
+            json!({"event_type":"turn.completed","payload":{},"result":true}),
+        )
+        .unwrap();
+        assert!(marked.result);
+        let plain: WorkerEvent =
+            serde_json::from_value(json!({"event_type":"turn.started","payload":{}})).unwrap();
+        assert!(!plain.result);
+        assert!(
+            serde_json::from_value::<WorkerEvent>(json!({"event_type":"x","payload":{},"extra":1}))
+                .is_err()
+        );
+    }
+
     #[test]
     fn workload_child_identity_refuses_thread_root_and_owner_contradictions() {
         use crate::runtime_db::RuntimeActionMode;
@@ -6752,16 +7179,70 @@ mod tests {
         );
     }
 
+    fn continuation_admission_config() -> Value {
+        json!({
+            "max_lifetime_seconds":60,
+            "mode":{
+                "kind":"bounded_turn",
+                "continuation":"completed_predecessor",
+                "turn_start_route":"turn.start",
+                "max_uncontacted_attempts":3,
+            },
+        })
+    }
+
     #[test]
-    fn bounded_contact_admission_requires_exact_uncontacted_predecessors() {
-        let session_start = || {
-            let mut record = bounded_command(1, 1, "completed");
-            record.idempotency_key = "bounded:T-placement:session-start:attempt:1".to_owned();
-            record.payload = json!({"route_id":"session.start","payload":{}});
-            vec![(1, record, "contacted_settled")]
-        };
+    fn continuation_mode_is_recognised_and_closed() {
+        assert!(!bounded_mode_is_continuation(&bounded_admission_config()).unwrap());
+        assert!(bounded_mode_is_continuation(&continuation_admission_config()).unwrap());
+        let mut with_session_start = continuation_admission_config();
+        with_session_start["mode"]["session_start_route"] = json!("session.start");
+        assert!(bounded_mode_is_continuation(&with_session_start).is_err());
+        let mut unknown = continuation_admission_config();
+        unknown["mode"]["continuation"] = json!("any_session");
+        assert!(bounded_mode_is_continuation(&unknown).is_err());
+        assert!(bounded_mode_is_continuation(&json!({})).is_err());
+    }
+
+    #[test]
+    fn a_continuation_admits_its_turn_start_and_never_a_session_start() {
+        let config = continuation_admission_config();
+        let parameters = json!({
+            "continue_from":"T-predecessor",
+            "goal":{"turn_start_payload":{"prompt":"go on"}},
+        });
+        let turn = json!({"route_id":"turn.start","payload":{"prompt":"go on"}});
+        assert_eq!(
+            admitted_bounded_command_step(
+                &config,
+                &parameters,
+                "T-placement",
+                "bounded:T-placement:turn-start:attempt:1",
+                "route",
+                &turn,
+            )
+            .unwrap(),
+            Some(("turn-start", 1)),
+        );
+        assert!(
+            admitted_bounded_command_step(
+                &config,
+                &parameters,
+                "T-placement",
+                "bounded:T-placement:session-start:attempt:1",
+                "route",
+                &json!({"route_id":"session.start","payload":{}}),
+            )
+            .is_err(),
+            "a continuation has no admitted session-start route"
+        );
+    }
+
+    #[test]
+    fn a_continuation_turn_needs_no_settled_session_start() {
         assert!(
             validate_next_bounded_attempt(
+                false,
                 "turn-start",
                 1,
                 Some(1),
@@ -6772,6 +7253,53 @@ mod tests {
         );
         assert!(
             validate_next_bounded_attempt(
+                true,
+                "turn-start",
+                1,
+                Some(1),
+                &mut Vec::new(),
+                &mut Vec::new(),
+            )
+            .is_ok()
+        );
+        let mut session_start = bounded_command(1, 1, "completed");
+        session_start.idempotency_key = "bounded:T-placement:session-start:attempt:1".to_owned();
+        assert!(
+            validate_next_bounded_attempt(
+                true,
+                "turn-start",
+                1,
+                Some(2),
+                &mut vec![(1, session_start, "contacted_settled")],
+                &mut Vec::new(),
+            )
+            .is_err(),
+            "a continuation ledger never holds a session-start attempt"
+        );
+    }
+
+    #[test]
+    fn bounded_contact_admission_requires_exact_uncontacted_predecessors() {
+        let session_start = || {
+            let mut record = bounded_command(1, 1, "completed");
+            record.idempotency_key = "bounded:T-placement:session-start:attempt:1".to_owned();
+            record.payload = json!({"route_id":"session.start","payload":{}});
+            vec![(1, record, "contacted_settled")]
+        };
+        assert!(
+            validate_next_bounded_attempt(
+                false,
+                "turn-start",
+                1,
+                Some(1),
+                &mut Vec::new(),
+                &mut Vec::new(),
+            )
+            .is_err()
+        );
+        assert!(
+            validate_next_bounded_attempt(
+                false,
                 "turn-start",
                 1,
                 Some(2),
@@ -6782,6 +7310,7 @@ mod tests {
         );
         assert!(
             validate_next_bounded_attempt(
+                false,
                 "session-start",
                 2,
                 Some(2),
@@ -6799,6 +7328,7 @@ mod tests {
             let mut prior = vec![(1, bounded_command(1, 2, state), contact)];
             assert!(
                 validate_next_bounded_attempt(
+                    false,
                     "turn-start",
                     2,
                     Some(3),
@@ -6811,6 +7341,7 @@ mod tests {
         let mut uncontacted = vec![(1, bounded_command(1, 2, "failed"), "verified_uncontacted")];
         assert!(
             validate_next_bounded_attempt(
+                false,
                 "turn-start",
                 2,
                 Some(3),
@@ -6821,6 +7352,7 @@ mod tests {
         );
         assert!(
             validate_next_bounded_attempt(
+                false,
                 "turn-start",
                 3,
                 Some(3),
@@ -6831,6 +7363,7 @@ mod tests {
         );
         assert!(
             validate_next_bounded_attempt(
+                false,
                 "turn-start",
                 2,
                 Some(2),
@@ -6845,17 +7378,22 @@ mod tests {
     fn bounded_contact_deadline_is_creation_anchored_and_checked_for_overflow() {
         let config = bounded_admission_config();
         assert_eq!(
-            bounded_session_deadline(&config, 123).unwrap(),
+            bounded_session_deadline(&config, 123, 603_600).unwrap(),
             Some(60_123)
         );
-        assert!(bounded_session_deadline(&config, i64::MAX - 1).is_err());
+        assert!(bounded_session_deadline(&config, i64::MAX - 1, 603_600).is_err());
         let mut invalid = config;
         invalid["max_lifetime_seconds"] = json!(0);
-        assert!(bounded_session_deadline(&invalid, 123).is_err());
+        assert!(bounded_session_deadline(&invalid, 123, 603_600).is_err());
+        // The ceiling is read from the signed kind data it is given, not a
+        // fixed number: the same stated lifetime passes or fails with it.
         invalid["max_lifetime_seconds"] = json!(603_601);
-        assert!(bounded_session_deadline(&invalid, 123).is_err());
+        assert!(bounded_session_deadline(&invalid, 123, 603_600).is_err());
+        assert!(bounded_session_deadline(&invalid, 123, 604_800).is_ok());
+        invalid["max_lifetime_seconds"] = json!(100);
+        assert!(bounded_session_deadline(&invalid, 123, 99).is_err());
         assert_eq!(
-            bounded_session_deadline(&json!({"mode":{"kind":"session"}}), 123,).unwrap(),
+            bounded_session_deadline(&json!({"mode":{"kind":"session"}}), 123, 603_600,).unwrap(),
             None
         );
         assert!(validate_hosted_contact_deadlines(Some(60_123), Some(70_000), 60_122).is_ok());
