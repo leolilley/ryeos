@@ -64,6 +64,11 @@ pub enum RyeOsTimelineEntryVm {
         /// Most lines carry no intent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         intent: Option<RyeOsUiIntent>,
+        /// A second, non-activating affordance on the line, surfaced through
+        /// the commands overlay — e.g. retrying the failed turn an outcome
+        /// reports. Most lines carry none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        secondary_intent: Option<RyeOsUiIntent>,
     },
     Pair {
         summary: String,
@@ -191,6 +196,7 @@ fn entry_vm(entry: &Value) -> RyeOsTimelineEntryVm {
                 chain_root_id: thread.to_string(),
                 label: headline.map(str::to_string),
             }),
+            secondary_intent: None,
         },
         "outcome" => {
             let label = state.or(headline).unwrap_or("outcome");
@@ -207,6 +213,7 @@ fn entry_vm(entry: &Value) -> RyeOsTimelineEntryVm {
                 meta: join_meta(&[headline.filter(|text| Some(*text) != Some(label)), detail]),
                 tone,
                 intent,
+                secondary_intent: None,
             }
         }
         "marker" => RyeOsTimelineEntryVm::Line {
@@ -217,6 +224,7 @@ fn entry_vm(entry: &Value) -> RyeOsTimelineEntryVm {
             meta: join_meta(&[if headline.is_some() { detail } else { None }, target]),
             tone,
             intent: None,
+            secondary_intent: None,
         },
         "ask" => RyeOsTimelineEntryVm::Line {
             primary: clip(
@@ -230,13 +238,80 @@ fn entry_vm(entry: &Value) -> RyeOsTimelineEntryVm {
                 RyeOsTone::Accent
             },
             intent: None,
+            secondary_intent: None,
         },
         other => RyeOsTimelineEntryVm::Line {
             primary: if other.is_empty() { "item" } else { other }.to_string(),
             meta: join_meta(&[headline, detail]),
             tone,
             intent: None,
+            secondary_intent: None,
         },
+    }
+}
+
+/// An entry that projects a `retry_input` slot offers that input back as a
+/// pre-filled continuation of its own thread, for the operator to review and
+/// resubmit. The definition decides which entries carry the slot; the client
+/// names no event type.
+fn retry_intent(entry: &Value, chain_root_id: &str) -> Option<RyeOsUiIntent> {
+    let input = slot(entry, "retry_input")?;
+    let thread_id = entry.get("thread").and_then(Value::as_str)?;
+    (!chain_root_id.is_empty()).then(|| RyeOsUiIntent::PrefillRetryTurn {
+        thread_id: thread_id.to_string(),
+        chain_root_id: chain_root_id.to_string(),
+        input: input.to_string(),
+    })
+}
+
+/// Map a thread/chain status to a tone. Matches the typed [`ThreadStatus`]
+/// variants so a new status is a compile error here, not a silently-neutral
+/// string.
+fn status_tone(status: &str) -> RyeOsTone {
+    use super::dto::ThreadStatus;
+    match ThreadStatus::from_wire(status) {
+        ThreadStatus::Running | ThreadStatus::Created => RyeOsTone::Accent,
+        ThreadStatus::Failed | ThreadStatus::Killed | ThreadStatus::TimedOut => RyeOsTone::Danger,
+        ThreadStatus::Cancelled => RyeOsTone::Warn,
+        ThreadStatus::Completed | ThreadStatus::Continued => RyeOsTone::Good,
+        ThreadStatus::Unknown => RyeOsTone::Neutral,
+    }
+}
+
+/// The chain header line from a response's `summary` (chain status and
+/// chain-wide usage totals). `None` when the response carries no summary, so
+/// the header only appears where it means something.
+fn summary_entry(response: &Value) -> Option<RyeOsTimelineEntryVm> {
+    let summary = response.get("summary")?;
+    let status = summary.get("status").and_then(Value::as_str).unwrap_or("");
+    let count = |field: &str| summary.get(field).and_then(Value::as_i64).unwrap_or(0);
+    let cost = summary
+        .get("spend_usd")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    Some(RyeOsTimelineEntryVm::Line {
+        primary: format!(
+            "{status} · ↑{} ↓{} · ${cost:.4} · {} turns",
+            count("input_tokens"),
+            count("output_tokens"),
+            count("turns"),
+        ),
+        meta: None,
+        tone: status_tone(status),
+        intent: None,
+        secondary_intent: None,
+    })
+}
+
+/// The "N older" line that opens a windowed timeline. Activating it runs
+/// `intent`, when the view declares how to widen the window.
+fn older_entry(older: u64, intent: Option<RyeOsUiIntent>) -> RyeOsTimelineEntryVm {
+    RyeOsTimelineEntryVm::Line {
+        primary: format!("{older} older"),
+        meta: None,
+        tone: RyeOsTone::Neutral,
+        intent,
+        secondary_intent: None,
     }
 }
 
@@ -260,10 +335,12 @@ struct LayoutBuilder {
     /// The next entry placed directly in `current` heads that section.
     header_pending: bool,
     indent_by_id: HashMap<String, u8>,
+    /// The chain the response describes; a retry continues within it.
+    chain_root_id: String,
 }
 
 impl LayoutBuilder {
-    fn new() -> Self {
+    fn new(chain_root_id: &str) -> Self {
         Self {
             layout: TimelineLayout {
                 section_parent: vec![None],
@@ -274,6 +351,7 @@ impl LayoutBuilder {
             exchange: None,
             header_pending: false,
             indent_by_id: HashMap::new(),
+            chain_root_id: chain_root_id.to_string(),
         }
     }
 
@@ -327,8 +405,15 @@ impl LayoutBuilder {
     fn push_entry(&mut self, entry: &Value, base: u8, section: usize, header: bool) {
         let indent = self.indent_for(entry, base);
         let key = entry.get("id").and_then(Value::as_str).unwrap_or("");
+        let mut vm = entry_vm(entry);
+        if let RyeOsTimelineEntryVm::Line {
+            secondary_intent, ..
+        } = &mut vm
+        {
+            *secondary_intent = retry_intent(entry, &self.chain_root_id);
+        }
         self.push(
-            entry_vm(entry),
+            vm,
             indent,
             Some(TimelineEntrySource {
                 key: format!("item:{key}"),
@@ -367,6 +452,7 @@ impl LayoutBuilder {
                 meta,
                 tone: RyeOsTone::Neutral,
                 intent: None,
+                secondary_intent: None,
             },
             indent,
             Some(TimelineEntrySource {
@@ -417,23 +503,17 @@ fn item_members(item: &Value) -> &[Value] {
         .map_or(&[][..], Vec::as_slice)
 }
 
-/// Map a service response's items onto the renderer contract. An `older`
-/// count opens the timeline with a non-interactive line.
-pub(crate) fn timeline_layout(items: &[Value], older: u64) -> TimelineLayout {
-    let mut builder = LayoutBuilder::new();
-    if older > 0 {
-        builder.push(
-            RyeOsTimelineEntryVm::Line {
-                primary: format!("{older} older"),
-                meta: None,
-                tone: RyeOsTone::Neutral,
-                intent: None,
-            },
-            0,
-            None,
-            0,
-            false,
-        );
+/// Map a service response's items onto the renderer contract. `lead` entries
+/// (the chain header, the "N older" line) open the timeline as structural
+/// lines with no item behind them.
+pub(crate) fn timeline_layout(
+    items: &[Value],
+    chain_root_id: &str,
+    lead: Vec<RyeOsTimelineEntryVm>,
+) -> TimelineLayout {
+    let mut builder = LayoutBuilder::new(chain_root_id);
+    for entry in lead {
+        builder.push(entry, 0, None, 0, false);
     }
     for item in items {
         builder.item(item);
@@ -441,14 +521,57 @@ pub(crate) fn timeline_layout(items: &[Value], older: u64) -> TimelineLayout {
     builder.layout
 }
 
-/// The layout for a bound timeline view's source response.
+/// The intent behind the "N older" line: the view's `selection.activate`
+/// affordance, handed `{older, next_limit}` as its record. Absent when the
+/// view names no such affordance or the service offers no wider window.
+fn older_intent(
+    binding: &super::content::ViewBinding,
+    response: &Value,
+    older: u64,
+    instance_key: &crate::ids::RyeOsViewInstanceKey,
+    view_ref: &str,
+) -> Option<RyeOsUiIntent> {
+    let next_limit = response.get("next_limit").and_then(Value::as_u64)?;
+    let affordance_id = super::view_model::activate_affordance(binding)?;
+    let record = serde_json::json!({ "older": older, "next_limit": next_limit });
+    let affordance = binding
+        .affordances
+        .iter()
+        .find(|item| item.get("id").and_then(Value::as_str) == Some(affordance_id.as_str()))?;
+    super::content::affordance_eligibility(affordance, &record)
+        .enabled
+        .then(|| RyeOsUiIntent::InvokeAffordance {
+            instance_key: instance_key.clone(),
+            view_ref: view_ref.to_string(),
+            affordance_id,
+            record,
+        })
+}
+
+/// The layout for a bound timeline view's source response, as mounted at
+/// `instance_key`.
 pub(crate) fn timeline_layout_for(
     binding: &super::content::ViewBinding,
     response: &Value,
+    instance_key: &crate::ids::RyeOsViewInstanceKey,
+    view_ref: &str,
 ) -> TimelineLayout {
+    let older = response.get("older").and_then(Value::as_u64).unwrap_or(0);
+    let mut lead = Vec::new();
+    lead.extend(summary_entry(response));
+    if older > 0 {
+        lead.push(older_entry(
+            older,
+            older_intent(binding, response, older, instance_key, view_ref),
+        ));
+    }
     timeline_layout(
         super::content::source_collection(binding, response),
-        response.get("older").and_then(Value::as_u64).unwrap_or(0),
+        response
+            .get("chain_root_id")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+        lead,
     )
 }
 
@@ -513,11 +636,13 @@ fn folded_header(entry: &RyeOsTimelineEntryVm) -> RyeOsTimelineEntryVm {
             meta,
             tone,
             intent,
+            secondary_intent,
         } => RyeOsTimelineEntryVm::Line {
             primary: format!("{primary} ▸"),
             meta: meta.clone(),
             tone: *tone,
             intent: intent.clone(),
+            secondary_intent: secondary_intent.clone(),
         },
         other => other.clone(),
     }
@@ -712,6 +837,7 @@ pub(crate) fn live_delta_entry(core: &RyeOsCore) -> Option<RyeOsTimelineEntryVm>
             meta: None,
             tone: RyeOsTone::Accent,
             intent: None,
+            secondary_intent: None,
         });
     }
     None
@@ -800,7 +926,19 @@ mod tests {
     }
 
     fn layout(items: Vec<Value>, older: u64) -> TimelineLayout {
-        timeline_layout(&items, older)
+        let lead = if older > 0 {
+            vec![older_entry(older, None)]
+        } else {
+            Vec::new()
+        };
+        timeline_layout(&items, "R-1", lead)
+    }
+
+    fn instance() -> crate::ids::RyeOsViewInstanceKey {
+        timeline_core()
+            .mounted_instances()
+            .next()
+            .expect("the timeline view is mounted")
     }
 
     #[test]
@@ -912,6 +1050,7 @@ mod tests {
                 meta,
                 tone,
                 intent,
+                ..
             } => {
                 assert_eq!(primary, "failed — boom");
                 assert_eq!(meta.as_deref(), Some("boom_code"));
@@ -953,6 +1092,7 @@ mod tests {
                     chain_root_id: "T-child".into(),
                     label: Some("study".into()),
                 }),
+                secondary_intent: None,
             }
         );
     }
@@ -1093,9 +1233,177 @@ mod tests {
             "older": 2,
             "items": [entry("p", "prose", json!({"body": "x"}))]
         });
-        let built = timeline_layout_for(&binding, &response);
+        let built = timeline_layout_for(&binding, &response, &instance(), "view:t");
         assert_eq!(built.entries.len(), 2);
         assert_eq!(built.sources[1].as_ref().unwrap().key, "item:p");
+    }
+
+    fn window_binding(activate: Option<&str>) -> super::super::content::ViewBinding {
+        let mut value = json!({
+            "widget": "timeline",
+            "sources": { "default": {
+                "ref": "service:ui/ryeos-ui/timeline/thread", "collection": "items"
+            } },
+            "affordances": [{
+                "id": "older",
+                "invoke": {
+                    "plane": "ui", "facet": "timeline.window",
+                    "value": { "limit": "{record.next_limit}" }
+                }
+            }]
+        });
+        if let Some(activate) = activate {
+            value["selection"] = json!({ "activate": activate });
+        }
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn the_older_line_widens_the_window_through_the_views_affordance() {
+        let response = json!({
+            "older": 40, "next_limit": 400,
+            "items": [entry("p", "prose", json!({"body": "x"}))]
+        });
+        let built = timeline_layout_for(
+            &window_binding(Some("older")),
+            &response,
+            &instance(),
+            "view:t",
+        );
+        assert!(matches!(
+            &built.entries[0],
+            RyeOsTimelineEntryVm::Line {
+                primary,
+                intent: Some(RyeOsUiIntent::InvokeAffordance {
+                    view_ref, affordance_id, record, ..
+                }),
+                ..
+            } if primary == "40 older"
+                && view_ref == "view:t"
+                && affordance_id == "older"
+                && *record == json!({"older": 40, "next_limit": 400})
+        ));
+
+        // No wider window on offer, or no affordance named: the line is a count.
+        let capped = json!({ "older": 40, "items": [] });
+        let built = timeline_layout_for(
+            &window_binding(Some("older")),
+            &capped,
+            &instance(),
+            "view:t",
+        );
+        assert!(matches!(
+            &built.entries[0],
+            RyeOsTimelineEntryVm::Line { intent: None, .. }
+        ));
+        let built = timeline_layout_for(&window_binding(None), &response, &instance(), "view:t");
+        assert!(matches!(
+            &built.entries[0],
+            RyeOsTimelineEntryVm::Line { intent: None, .. }
+        ));
+    }
+
+    #[test]
+    fn the_summary_opens_the_timeline_as_a_header_line() {
+        let binding = window_binding(None);
+        let response = json!({
+            "older": 0,
+            "summary": {
+                "status": "running", "input_tokens": 1200, "output_tokens": 340,
+                "spend_usd": 0.0421, "turns": 3
+            },
+            "items": [entry("p", "prose", json!({"body": "x"}))]
+        });
+        let built = timeline_layout_for(&binding, &response, &instance(), "view:t");
+        assert_eq!(built.entries.len(), 2);
+        match &built.entries[0] {
+            RyeOsTimelineEntryVm::Line { primary, tone, .. } => {
+                assert!(primary.contains("running"), "{primary}");
+                assert!(
+                    primary.contains("1200") && primary.contains("340"),
+                    "{primary}"
+                );
+                assert!(primary.contains("$0.0421"), "{primary}");
+                assert!(primary.contains("3 turns"), "{primary}");
+                assert_eq!(*tone, RyeOsTone::Accent);
+            }
+            other => panic!("expected a header Line, got {other:?}"),
+        }
+        assert!(built.sources[0].is_none());
+
+        // The header precedes the "N older" line; no summary, no header.
+        let older = json!({ "older": 5, "summary": response["summary"], "items": [] });
+        let built = timeline_layout_for(&binding, &older, &instance(), "view:t");
+        assert!(matches!(
+            &built.entries[1],
+            RyeOsTimelineEntryVm::Line { primary, .. } if primary == "5 older"
+        ));
+        let bare = json!({ "items": [] });
+        assert!(
+            timeline_layout_for(&binding, &bare, &instance(), "view:t")
+                .entries
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn status_tone_maps_by_typed_status_variant() {
+        assert_eq!(status_tone("running"), RyeOsTone::Accent);
+        assert_eq!(status_tone("created"), RyeOsTone::Accent);
+        assert_eq!(status_tone("completed"), RyeOsTone::Good);
+        assert_eq!(status_tone("continued"), RyeOsTone::Good);
+        assert_eq!(status_tone("failed"), RyeOsTone::Danger);
+        assert_eq!(status_tone("killed"), RyeOsTone::Danger);
+        assert_eq!(status_tone("timed_out"), RyeOsTone::Danger);
+        assert_eq!(status_tone("cancelled"), RyeOsTone::Warn);
+        assert_eq!(status_tone("some_future_status"), RyeOsTone::Neutral);
+    }
+
+    #[test]
+    fn only_an_entry_with_a_retry_input_offers_retry_within_the_response_chain() {
+        let failed = |slots: Value| {
+            with(
+                with(entry("o", "outcome", slots), "state", json!("failed")),
+                "thread",
+                json!("T-1"),
+            )
+        };
+        let secondary =
+            |items: Vec<Value>, chain: &str| match &timeline_layout(&items, chain, Vec::new())
+                .entries[0]
+            {
+                RyeOsTimelineEntryVm::Line {
+                    secondary_intent, ..
+                } => secondary_intent.clone(),
+                other => panic!("expected a line, got {other:?}"),
+            };
+
+        // A projected input is offered back, retargeted at the entry's thread
+        // in the response's chain.
+        assert_eq!(
+            secondary(
+                vec![failed(
+                    json!({"reason": "boom", "retry_input": "run the thing"})
+                )],
+                "R-1"
+            ),
+            Some(RyeOsUiIntent::PrefillRetryTurn {
+                thread_id: "T-1".into(),
+                chain_root_id: "R-1".into(),
+                input: "run the thing".into(),
+            })
+        );
+        // No input projected (unknown stimulus, or a status the definition does
+        // not make retryable): inspectable, not retryable.
+        assert_eq!(
+            secondary(vec![failed(json!({"reason": "boom"}))], "R-1"),
+            None
+        );
+        // Without a chain there is nothing to continue.
+        assert_eq!(
+            secondary(vec![failed(json!({"retry_input": "x"}))], ""),
+            None
+        );
     }
 
     #[test]

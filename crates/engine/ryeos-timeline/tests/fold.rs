@@ -594,6 +594,112 @@ events:
     assert_eq!(find(&timeline, "pro:4/3").unwrap().slots["body"], "done");
 }
 
+/// A lookup without `array`/`find` takes the latest earlier value of the same
+/// thread where `get` resolves, skipping events that lack it.
+#[test]
+fn a_bare_lookup_takes_the_latest_earlier_value_of_the_same_thread() {
+    let def = Definition::from_yaml(
+        r#"
+events:
+  thread_failed:
+    - emit:
+        - type: outcome
+          key: [thread_id]
+          project:
+            retry_input: {lookup: {event: cognition_in, get: payload.content}}
+"#,
+    )
+    .unwrap();
+    let evs = vec![
+        ev(
+            1,
+            "2026-11-16T00:00:00Z",
+            "T-1",
+            "cognition_in",
+            json!({"content": "first"}),
+        ),
+        ev(
+            2,
+            "2026-11-16T00:00:01Z",
+            "T-1",
+            "cognition_in",
+            json!({"content": "second"}),
+        ),
+        ev(
+            3,
+            "2026-11-16T00:00:02Z",
+            "T-2",
+            "cognition_in",
+            json!({"content": "other thread"}),
+        ),
+        ev(
+            4,
+            "2026-11-16T00:00:03Z",
+            "T-1",
+            "cognition_in",
+            json!({"attachments": 1}),
+        ),
+        ev(5, "2026-11-16T00:00:04Z", "T-1", "thread_failed", json!({})),
+        ev(6, "2026-11-16T00:00:05Z", "T-3", "thread_failed", json!({})),
+    ];
+    let timeline = fold(&evs, &def).unwrap();
+    assert_eq!(
+        find(&timeline, "out:T-1")
+            .unwrap()
+            .slots
+            .get("retry_input")
+            .map(String::as_str),
+        Some("second")
+    );
+    assert!(
+        !find(&timeline, "out:T-3")
+            .unwrap()
+            .slots
+            .contains_key("retry_input")
+    );
+}
+
+/// Only a failed thread carries `retry_input`; killed and timed-out ones
+/// cannot be continued.
+#[test]
+fn only_a_failed_thread_projects_retry_input() {
+    let def = definition();
+    let run = |terminal: &str| {
+        let evs = vec![
+            ev(
+                1,
+                "2026-11-16T00:00:00Z",
+                "T-1",
+                "cognition_in",
+                json!({"content": "go"}),
+            ),
+            ev(
+                2,
+                "2026-11-16T00:00:01Z",
+                "T-1",
+                terminal,
+                json!({"outcome_code": "x"}),
+            ),
+        ];
+        fold(&evs, &def).unwrap()
+    };
+    let failed = run("thread_failed");
+    assert_eq!(
+        find(&failed, "out:T-1")
+            .unwrap()
+            .slots
+            .get("retry_input")
+            .map(String::as_str),
+        Some("go")
+    );
+    for terminal in ["thread_killed", "thread_timed_out", "thread_completed"] {
+        let timeline = run(terminal);
+        if let Some(entry) = find(&timeline, "out:T-1") {
+            assert!(!entry.slots.contains_key("retry_input"), "{terminal}");
+        }
+    }
+}
+
 fn pushed_in_chunks(all: &[Value], size: usize, def: &Definition) -> Timeline {
     let mut folder = Folder::new(def.clone());
     for chunk in all.chunks(size) {

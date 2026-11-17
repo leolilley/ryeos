@@ -26,6 +26,7 @@ use ryeos_app::state::AppState;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::config_loading::{ConfigLoadContext, ConfigSpec, ResolveMode};
 use ryeos_executor::executor::ServiceAvailability;
+use ryeos_state::queries::ThreadUsageTotals;
 use ryeos_timeline::{Definition, Folder, Timeline};
 
 use crate::state::{ChainFold, TimelineCache, TimelineCacheKey};
@@ -87,6 +88,27 @@ fn parse_limit(raw: Option<&Value>) -> Result<usize, HandlerError> {
 /// The window is a suffix of the top-level items: how many precede it.
 fn older_count(total: usize, limit: usize) -> usize {
     total.saturating_sub(limit)
+}
+
+/// The limit that would reveal more of the chain: one default page wider, up
+/// to the cap. `None` when nothing is older than the window or the window is
+/// already as wide as it may get.
+fn next_limit(older: usize, limit: usize) -> Option<usize> {
+    let wider = limit.saturating_add(DEFAULT_LIMIT).min(MAX_LIMIT);
+    (older > 0 && wider > limit).then_some(wider)
+}
+
+/// The chain's header: the root thread's status and the chain-wide usage
+/// totals. Computed on every request, never cached with the fold, so the
+/// status stays current.
+fn chain_summary(status: &str, totals: &ThreadUsageTotals) -> Value {
+    json!({
+        "status": status,
+        "input_tokens": totals.input_tokens,
+        "output_tokens": totals.output_tokens,
+        "spend_usd": totals.spend_usd,
+        "turns": totals.completed_turns,
+    })
 }
 
 /// Resolve the definition config item and parse it. The digest is the sha256
@@ -213,6 +235,7 @@ fn window_response(
     definition_ref: &str,
     definition_digest: &str,
     folded: &Folded,
+    summary: Value,
     limit: usize,
     since: Option<i64>,
 ) -> Result<Value> {
@@ -225,6 +248,8 @@ fn window_response(
         "definition_digest": definition_digest,
         "highest_chain_seq": folded.highest,
         "older": older,
+        "next_limit": next_limit(older, limit),
+        "summary": summary,
         "undeclared": serde_json::to_value(&timeline.undeclared)?,
     });
     let Some(since) = since else {
@@ -291,11 +316,16 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
             next: page.next_cursor,
         })
     })?;
+    let totals = state
+        .state_store
+        .chain_usage_totals(&chain_root_id)
+        .map_err(|error| HandlerError::Internal(format!("{error:#}")))?;
     window_response(
         &chain_root_id,
         &definition_ref,
         &definition_digest,
         &folded,
+        chain_summary(subject.status.as_str(), &totals),
         limit,
         since,
     )
@@ -343,6 +373,48 @@ mod tests {
         }
     }
 
+    fn summary() -> Value {
+        chain_summary("running", &ThreadUsageTotals::default())
+    }
+
+    #[test]
+    fn the_response_carries_the_chain_summary_beside_the_window() {
+        let totals = ThreadUsageTotals {
+            thread_count: 2,
+            completed_turns: 3,
+            input_tokens: 1200,
+            output_tokens: 340,
+            spend_usd: 0.0421,
+        };
+        let summary = chain_summary("running", &totals);
+        let value =
+            window_response("c", "config:x", "d", &folded(1, 9), summary, 200, None).unwrap();
+        assert_eq!(
+            value["summary"],
+            json!({
+                "status": "running",
+                "input_tokens": 1200,
+                "output_tokens": 340,
+                "spend_usd": 0.0421,
+                "turns": 3,
+            })
+        );
+    }
+
+    #[test]
+    fn next_limit_widens_by_a_page_until_the_cap_and_only_when_older_remains() {
+        assert_eq!(next_limit(5, 200), Some(400));
+        assert_eq!(next_limit(5, 1900), Some(MAX_LIMIT));
+        assert_eq!(next_limit(5, MAX_LIMIT), None, "already at the cap");
+        assert_eq!(next_limit(0, 200), None, "nothing older to reveal");
+        let value =
+            window_response("c", "config:x", "d", &folded(500, 9), summary(), 200, None).unwrap();
+        assert_eq!(value["next_limit"], 400);
+        let value =
+            window_response("c", "config:x", "d", &folded(5, 9), summary(), 200, None).unwrap();
+        assert!(value["next_limit"].is_null());
+    }
+
     #[test]
     fn limit_defaults_and_accepts_numbers_and_strings_within_bounds() {
         assert_eq!(parse_limit(None).unwrap(), DEFAULT_LIMIT);
@@ -383,7 +455,8 @@ mod tests {
         assert_eq!(older_count(10, 3), 7);
         assert_eq!(older_count(3, 3), 0);
         assert_eq!(older_count(2, 200), 0);
-        let value = window_response("c", "config:x", "d", &folded(5, 9), 2, None).unwrap();
+        let value =
+            window_response("c", "config:x", "d", &folded(5, 9), summary(), 2, None).unwrap();
         assert_eq!(value["older"], 3);
         assert_eq!(value["highest_chain_seq"], 9);
         assert!(value.get("order").is_none());
@@ -395,7 +468,8 @@ mod tests {
 
     #[test]
     fn since_sends_the_order_and_only_items_that_changed() {
-        let value = window_response("c", "config:x", "d", &folded(5, 9), 4, Some(2)).unwrap();
+        let value =
+            window_response("c", "config:x", "d", &folded(5, 9), summary(), 4, Some(2)).unwrap();
         assert_eq!(
             value["order"],
             json!(["item-1", "item-2", "item-3", "item-4"])
@@ -413,9 +487,9 @@ mod tests {
     fn since_before_a_rewrite_resends_the_whole_window() {
         let mut state = folded(5, 9);
         state.rewritten_at = Some(3);
-        let value = window_response("c", "config:x", "d", &state, 4, Some(1)).unwrap();
+        let value = window_response("c", "config:x", "d", &state, summary(), 4, Some(1)).unwrap();
         assert_eq!(value["items"].as_array().unwrap().len(), 4);
-        let value = window_response("c", "config:x", "d", &state, 4, Some(3)).unwrap();
+        let value = window_response("c", "config:x", "d", &state, summary(), 4, Some(3)).unwrap();
         assert_eq!(value["items"].as_array().unwrap().len(), 1);
     }
 
@@ -508,10 +582,11 @@ mod tests {
             let mut held: Option<Value> = None;
             for count in 1..=events.len() {
                 let now = timeline_for(&cache, &key, &def, store(&events, count)).unwrap();
-                let full = window_response("c", "r", "d", &now, 200, None).unwrap();
+                let full = window_response("c", "r", "d", &now, summary(), 200, None).unwrap();
                 if let Some(previous) = &held {
                     let since = previous["highest_chain_seq"].as_i64().unwrap();
-                    let update = window_response("c", "r", "d", &now, 200, Some(since)).unwrap();
+                    let update =
+                        window_response("c", "r", "d", &now, summary(), 200, Some(since)).unwrap();
                     let merged = merge(previous, &update)
                         .unwrap_or_else(|| panic!("{name} at {count}: an id was missing"));
                     assert_eq!(Value::Array(merged), full["items"], "{name} at {count}");

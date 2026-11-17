@@ -36,6 +36,22 @@ pub(super) fn focused_timeline_entry(
     None
 }
 
+/// The focused feed entry's secondary affordance, such as the retry a failed
+/// outcome carries. Surfaced through the commands overlay (its Shift+Enter
+/// secondary and a distinct "Retry failed turn" item), never a direct feed key,
+/// so Enter stays inspect.
+pub(super) fn retry_intent_for_focused_row(
+    core: &RyeOsCore,
+    instance: &crate::ids::RyeOsViewInstanceKey,
+) -> Option<super::super::event::RyeOsUiIntent> {
+    match focused_timeline_entry(core, instance)? {
+        RyeOsTimelineEntryVm::Line {
+            secondary_intent, ..
+        } => secondary_intent,
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod facet_scope_tests {
     use super::*;
