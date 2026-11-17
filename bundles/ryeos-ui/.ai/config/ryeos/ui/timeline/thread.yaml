@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-17T22:02:50Z:4da54cd8758a7a6e807b2f641e363868691439b818b23b0f83e49103f4d8248f:QT/ypI2np2l9rGCS+ZS71k118aDtNF+7cnwS33IAlkGxztvBjKK3n0ylguZy1EHKuPXc0lWWGlf725XbaU6QAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T22:59:57Z:4da54cd8758a7a6e807b2f641e363868691439b818b23b0f83e49103f4d8248f:QT/ypI2np2l9rGCS+ZS71k118aDtNF+7cnwS33IAlkGxztvBjKK3n0ylguZy1EHKuPXc0lWWGlf725XbaU6QAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Thread timeline definition: how a chain's events fold into timeline items.
 # Declarative data read by the timeline service; the fold engine names no event type itself.
 category: ryeos/ui/timeline
