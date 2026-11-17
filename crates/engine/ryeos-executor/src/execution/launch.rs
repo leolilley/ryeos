@@ -7973,10 +7973,17 @@ async fn run_claimed_thread_row_inner(
                     "runtime requested recovery after a durable stop won"
                 )));
             }
+            if !lifecycle_owner.has_settled_owned_wait() {
+                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "runtime requested recovery without an exact settled attached wait"
+                )));
+            }
             // Shutdown kills the runtime, which surfaces here as a recovery
             // request. A successor launched now would keep this Store alive
             // through the stop, so the thread is handed back to restart
-            // recovery instead, exactly as for a terminal result.
+            // recovery instead, exactly as for a terminal result. Only a
+            // settled wait proves no process tree is left, so an unsettled
+            // wait keeps the stop-first owner-drop cleanup above.
             if !state.state_store.process_attachment_admission_is_open() {
                 return Err(preserve_managed_row_for_shutdown(
                     state,
@@ -7985,11 +7992,6 @@ async fn run_claimed_thread_row_inner(
                     lifecycle_owner,
                     "runtime recovery interrupted by daemon shutdown; row preserved for recovery",
                 ));
-            }
-            if !lifecycle_owner.has_settled_owned_wait() {
-                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-                    "runtime requested recovery without an exact settled attached wait"
-                )));
             }
             let launch_metadata = state
                 .state_store
@@ -9786,11 +9788,19 @@ fn prepare_and_spawn_successor_recovery_inner(
     successor_id: &str,
     mode: SuccessorMode,
 ) -> Result<RecoveryLaunchOutcome, BuildAndLaunchError> {
-    let claim = match ThreadLaunchClaim::acquire(&state, successor_id)? {
-        ThreadLaunchClaimOutcome::Claimed(claim) => *claim,
-        ThreadLaunchClaimOutcome::AlreadyClaimed => {
+    let claim = match ThreadLaunchClaim::acquire(&state, successor_id) {
+        Ok(ThreadLaunchClaimOutcome::Claimed(claim)) => *claim,
+        Ok(ThreadLaunchClaimOutcome::AlreadyClaimed) => {
             return Ok(RecoveryLaunchOutcome::Skipped("already_claimed"));
         }
+        Err(error) if super::launch_claim::is_launch_admission_closed(&error) => {
+            tracing::info!(
+                thread_id = %successor_id,
+                "successor recovery skipped: daemon is shutting down"
+            );
+            return Ok(RecoveryLaunchOutcome::Skipped("admission_closed"));
+        }
+        Err(error) => return Err(error.into()),
     };
     let successor_id = successor_id.to_string();
     tokio::spawn(async move {

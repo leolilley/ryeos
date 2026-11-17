@@ -41,6 +41,14 @@ pub(crate) struct ThreadLaunchClaim {
     canonical_owner: String,
 }
 
+/// True when `error` is the expected refusal of a launch claim after shutdown
+/// closed launch admission.
+pub(crate) fn is_launch_admission_closed(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<ryeos_app::state_store::LaunchAdmissionClosed>()
+        .is_some()
+}
+
 impl ThreadLaunchClaim {
     pub(crate) fn acquire(
         state: &AppState,

@@ -94,6 +94,20 @@ pub struct LaunchPlanningInactive;
 #[error("event append commit state is uncertain")]
 pub struct EventAppendCommitUncertain;
 
+/// A new launch obligation was refused because shutdown closed admission.
+/// Typed so callers can treat the expected refusal as a quiet skip instead of
+/// matching on message text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LaunchAdmissionClosed;
+
+impl std::fmt::Display for LaunchAdmissionClosed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("launch admission is closed: the daemon is shutting down")
+    }
+}
+
+impl std::error::Error for LaunchAdmissionClosed {}
+
 impl StateStore {
     /// Reserve a caller-retained opaque launch coordinate before background
     /// execution starts. The coordinate is not authority by itself: every
@@ -569,7 +583,10 @@ impl StateStore {
     }
 
     /// Atomically claim the right to launch a thread. The sole authorization for
-    /// a spawn — see [`runtime_db::RuntimeDb::claim_thread_launch`].
+    /// a spawn — see [`runtime_db::RuntimeDb::claim_thread_launch`]. Fixture
+    /// only: it does not consult launch admission, so production claims go
+    /// through [`Self::claim_thread_launch_active`].
+    #[cfg(any(test, feature = "test-support"))]
     pub fn claim_thread_launch(
         &self,
         thread_id: &str,
@@ -643,7 +660,9 @@ impl StateStore {
     /// published. Fresh execution paths use this to make creation visible only
     /// after durable spawn ownership exists. The owned executor guard removes
     /// the reservation if creation fails; daemon startup clears reservations
-    /// left by an interrupted process.
+    /// left by an interrupted process. Fixture only: production reservations
+    /// go through [`Self::reserve_fresh_thread_launch_active`].
+    #[cfg(any(test, feature = "test-support"))]
     pub fn reserve_fresh_thread_launch(
         &self,
         thread_id: &str,
@@ -872,7 +891,7 @@ impl StateStore {
     /// registered after the close returns.
     fn require_launch_admission_open(&self) -> Result<()> {
         if !self.process_attachment_admission_is_open() {
-            bail!("launch admission is closed: the daemon is shutting down");
+            return Err(LaunchAdmissionClosed.into());
         }
         Ok(())
     }
