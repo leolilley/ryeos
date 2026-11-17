@@ -579,7 +579,7 @@ fn call_timeline(name: &str, log: &str) {
         if let Some(t) = stamp_ms(l) {
             gaps.push((t - prev, i));
             prev = t;
-            let body = l.splitn(2, "Z ").nth(1).unwrap_or(l);
+            let body = l.split_once("Z ").map_or(l, |x| x.1);
             rendered.push(format!("+{:.0}ms {}", t - t0, trunc(body, 150)));
         }
     }
@@ -595,7 +595,7 @@ fn call_timeline(name: &str, log: &str) {
         .map(|(g, i)| {
             format!(
                 "{g:.0}ms before line {i}: {}",
-                trunc(window[*i].splitn(2, "Z ").nth(1).unwrap_or(""), 140)
+                trunc(window[*i].split_once("Z ").map_or("", |x| x.1), 140)
             )
         })
         .collect();
@@ -635,7 +635,7 @@ fn full_call_dump(name: &str, log: &str) {
     for l in &lines[a..b] {
         let t = stamp_ms(l).unwrap_or(last);
         last = t;
-        entries.push((t, trunc(l.splitn(2, "Z ").nth(1).unwrap_or(l), 230)));
+        entries.push((t, trunc(l.split_once("Z ").map_or(l, |x| x.1), 230)));
     }
     if let Ok(times) = STUB_TIMES.lock() {
         for ms in times.iter() {
@@ -703,7 +703,7 @@ fn contention_report(name: &str, raw_log: &str) {
     }
     say(name, &format!("contention_summary_lines={lines}"));
     let mut rows: Vec<_> = groups.into_iter().collect();
-    rows.sort_by(|a, b| b.1.2.cmp(&a.1.2));
+    rows.sort_by_key(|b| std::cmp::Reverse(b.1.2));
     for ((kind, site), (summaries, samples, total, max)) in rows {
         say(
             name,
