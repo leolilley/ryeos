@@ -1484,3 +1484,46 @@ async fn probe_continuation_and_crash() {
     runtime_kill_probe().await;
     daemon_kill_probe().await;
 }
+
+// ── diagnostics ─────────────────────────────────────────────────────────
+
+fn newer_files(dir: &Path, since: std::time::SystemTime, out: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.is_dir() {
+            if path.file_name().is_some_and(|n| n == "target" || n == ".git") {
+                continue;
+            }
+            newer_files(&path, since, out);
+        } else if meta.modified().is_ok_and(|m| m > since) && out.len() < 25 {
+            out.push(path.display().to_string());
+        }
+    }
+}
+
+/// Lists the files that make the prepared-bundle staleness gate refuse.
+#[test]
+#[ignore = "measurement"]
+fn probe_stale_diagnosis() {
+    let root = common::workspace_root();
+    let manifest = root.join("bundles/browser/.ai/refs/bundles/manifest");
+    let published = std::fs::metadata(&manifest)
+        .and_then(|m| m.modified())
+        .expect("browser manifest ref");
+    let mut newer = Vec::new();
+    newer_files(&root.join("crates"), published, &mut newer);
+    newer_files(&root.join("bundles/browser"), published, &mut newer);
+    for name in ["Cargo.toml", "Cargo.lock"] {
+        newer_files(&root.join(name), published, &mut newer);
+    }
+    say(
+        "stale_diagnosis",
+        &format!("ref_mtime={published:?} newer_files={newer:#?}"),
+    );
+}
