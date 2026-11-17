@@ -7338,7 +7338,8 @@ async fn run_claimed_thread_row_inner(
     // on a missing account — allowance is never re-minted from limits).
     // The gate must be open before the runtime can spawn; reserve/issue
     // callbacks require it and terminal fencing closes it atomically.
-    let mut aggregate_deadline_at_ms = None;
+    // This execution's absolute end: the tree deadline minus its hold-back.
+    let mut run_end_at_ms = None;
     if let (Some(scope), Some(accounting)) = (accounting_scope.as_ref(), state.accounting.as_ref())
     {
         let account_limit = (!hard_limits.spend_usd.is_zero()).then_some(hard_limits.spend_usd);
@@ -7393,9 +7394,46 @@ async fn run_claimed_thread_row_inner(
                     "aggregate execution budget admission failed: {error:#}"
                 ))
             })?;
+        let now_ms = lillux::time::timestamp_millis();
+        let end_at_ms = ryeos_app::run_deadline::effective_end_at_ms(
+            aggregate_budget.deadline_at_ms,
+            hard_limits.deadline.hold_back_ms,
+        );
+        // A continuation, resume or follow successor that finds its end
+        // already passed settles as a typed deadline stop and spawns nothing.
+        // A fresh launch keeps the plain refusal below.
+        let successor_launch = previous_thread_id.is_some()
+            || is_resume
+            || launch_metadata.as_ref().is_some_and(|metadata| {
+                metadata.continuation_source_thread_id.is_some()
+                    || metadata.follow_parent_context.is_some()
+            });
+        if successor_launch && let Some(end_at_ms) = end_at_ms.filter(|end| now_ms >= *end) {
+            crate::dispatch::finalize_method_thread_with_params(
+                state,
+                launch_owner,
+                ryeos_app::run_deadline::elapsed_finalize_params(
+                    &thread_id,
+                    ryeos_app::run_deadline::REASON_ELAPSED_BEFORE_LAUNCH,
+                    end_at_ms,
+                    now_ms,
+                ),
+            )?;
+            return Err(BuildAndLaunchError::from(
+                DispatchError::LaunchPreparationFailed {
+                    code: "deadline_elapsed".to_owned(),
+                    message: "the run deadline passed before this thread could launch; it \
+                              settled as a deadline stop"
+                        .to_owned(),
+                    classification: "policy".to_owned(),
+                    binding: None,
+                    details: Box::new(BTreeMap::new()),
+                },
+            ));
+        }
         if aggregate_budget
             .deadline_at_ms
-            .is_some_and(|deadline| lillux::time::timestamp_millis() >= deadline)
+            .is_some_and(|deadline| now_ms >= deadline)
         {
             return Err(BuildAndLaunchError::from(
                 DispatchError::LaunchPreparationFailed {
@@ -7407,7 +7445,7 @@ async fn run_claimed_thread_row_inner(
                 },
             ));
         }
-        aggregate_deadline_at_ms = aggregate_budget.deadline_at_ms;
+        run_end_at_ms = end_at_ms;
         accounting
             .activate_account(
                 &scope.execution_budget_id,
@@ -7615,7 +7653,14 @@ async fn run_claimed_thread_row_inner(
         },
         EnvelopePolicy {
             effective_caps: effective_caps.clone(),
-            hard_limits: hard_limits.clone(),
+            // The envelope alone carries this execution's absolute end; the
+            // minted callback capability and thread record hold the limits
+            // without it.
+            hard_limits: {
+                let mut limits = hard_limits.clone();
+                limits.deadline.at_ms = run_end_at_ms;
+                limits
+            },
         },
         EnvelopeCallback {
             socket_path: state.config.runtime_uds_path(),
@@ -7848,7 +7893,7 @@ async fn run_claimed_thread_row_inner(
             owns_workspace,
             envelope: &envelope,
             timeout_secs: duration,
-            aggregate_deadline_at_ms,
+            aggregate_deadline_at_ms: run_end_at_ms,
             callback: &callback_owned,
             thread_id: &thread_id_owned,
             launch_owner: &launch_owner_owned,

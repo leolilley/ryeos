@@ -5060,12 +5060,23 @@ fn bounded_duration_authority_reached(
     let budget = accounting
         .execution_resource_budget_snapshot(&scope.execution_budget_id)?
         .ok_or_else(|| anyhow!("bounded worker lost its aggregate budget authority"))?;
-    Ok(budget.deadline_at_ms.is_some_and(|deadline| {
-        let terminalization_boundary = deadline
-            .checked_sub(DEDICATED_SESSION_AGGREGATE_TERMINALIZATION_RESERVE_MS)
-            .unwrap_or(i64::MIN);
-        now_ms >= terminalization_boundary
-    }))
+    // The session ends with the thread that placed it, which leaves its
+    // ancestors the hold-back sealed at that thread's launch.
+    let hold_back_ms = state
+        .state_store
+        .get_launch_metadata(&session.placement_thread_id)?
+        .and_then(|metadata| metadata.deadline_hold_back_ms)
+        .unwrap_or(0);
+    Ok(
+        crate::run_deadline::effective_end_at_ms(budget.deadline_at_ms, hold_back_ms).is_some_and(
+            |deadline| {
+                let terminalization_boundary = deadline
+                    .checked_sub(DEDICATED_SESSION_AGGREGATE_TERMINALIZATION_RESERVE_MS)
+                    .unwrap_or(i64::MIN);
+                now_ms >= terminalization_boundary
+            },
+        ),
+    )
 }
 
 fn validate_hosted_approval_fence(
