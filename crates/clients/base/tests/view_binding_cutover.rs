@@ -17,6 +17,10 @@ use sha2::{Digest, Sha256};
 
 const VIEW_BEHAVIOR_GOLDENS: &[(&str, &str)] = &[
     (
+        "view:ryeos/attention/panel",
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    ),
+    (
         "view:ryeos/chain/timeline",
         "b122348e55a2e68761ebf55a263d758056930de77e2ee230dffa54f8adf077d8",
     ),
@@ -421,14 +425,14 @@ fn attention_items() -> Value {
                 "summary": "command_execution", "approval_id": "A-1",
                 "request_digest": "d",
             },
-            "actions": {"open": true, "accept": false, "decline": true},
+            "actions": {"open": true, "accept": false, "decline": true, "acknowledge": false},
         },
         {
             "id": "failed_run:T-head", "kind": "failed_run", "title": "Run failed",
             "tone": "danger", "state": "failed",
             "subject": {"chain_root_id": "T-chain2", "thread_id": "T-head"},
             "detail": {"summary": "directive:x"},
-            "actions": {"open": true},
+            "actions": {"open": true, "acknowledge": true},
         },
     ]})
 }
@@ -530,6 +534,135 @@ fn review_pending_gates_decisions_on_the_item_actions_map() {
     );
 }
 
+fn view_yaml(origin: &str) -> Value {
+    let views =
+        ryeos_engine::test_support::workspace_root().join("bundles/ryeos-ui/.ai/views/ryeos");
+    serde_yaml::from_str(&fs::read_to_string(views.join(format!("{origin}.yaml"))).unwrap())
+        .unwrap()
+}
+
+fn affordance_of(raw: &Value, id: &str) -> Value {
+    raw["affordances"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|affordance| affordance["id"] == id)
+        .unwrap_or_else(|| panic!("affordance {id}"))
+        .clone()
+}
+
+#[test]
+fn acknowledge_is_offered_where_the_item_allows_it_and_names_only_the_item() {
+    let items = attention_items();
+    let items = items["attention"].as_array().unwrap();
+    for origin in ["review/pending", "attention/panel"] {
+        let raw = view_yaml(origin);
+        let acknowledge = affordance_of(&raw, "acknowledge");
+        let eligibility = |record: &Value| {
+            ryeos_client_base::ui::content::affordance_eligibility(&acknowledge, record)
+        };
+        // The failed run may be hidden; the approval may only be decided.
+        assert!(
+            eligibility(&items[1]).visible && eligibility(&items[1]).enabled,
+            "{origin}"
+        );
+        let approval = eligibility(&items[0]);
+        assert!(
+            !(approval.visible && approval.enabled),
+            "{origin}: an approval cannot be acknowledged"
+        );
+        // The act carries the item's id and nothing the client could retarget.
+        assert_eq!(acknowledge["invoke"]["plane"], "rye");
+        assert_eq!(
+            acknowledge["invoke"]["ref"],
+            "service:ui/ryeos-ui/work/acknowledge"
+        );
+        assert_eq!(
+            acknowledge["invoke"]["args"],
+            json!({"item_id": "{record.id}"})
+        );
+        assert_eq!(acknowledge["category"], "Triage");
+    }
+}
+
+#[test]
+fn the_attention_panel_lists_the_whole_queue_and_acknowledges_on_enter() {
+    let raw = view_yaml("attention/panel");
+    assert_eq!(
+        raw["sources"]["default"]["ref"],
+        "service:ui/ryeos-ui/work/attention"
+    );
+    assert_eq!(raw["sources"]["default"]["collection"], "attention");
+    assert_eq!(raw["selection"]["activate"], "acknowledge");
+    // A disabled acknowledge explains itself; the panel never decides work.
+    let acknowledge = affordance_of(&raw, "acknowledge");
+    assert!(acknowledge["disabled_reason"].is_string());
+    for decision in ["accept", "decline"] {
+        assert!(
+            !raw["affordances"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|affordance| affordance["id"] == decision),
+            "decisions stay in the Work and Review views"
+        );
+    }
+    // Both shared presentations offer the panel as a dialog and admit exactly
+    // its source and its act.
+    let root =
+        ryeos_engine::test_support::workspace_root().join("bundles/ryeos-ui/.ai/config/ryeos/ui");
+    for config in ["presentation.yaml", "terminal-presentation.yaml"] {
+        let shared: Value =
+            serde_yaml::from_str(&fs::read_to_string(root.join(config)).unwrap()).unwrap();
+        let shared = &shared["shared_presentation"];
+        assert!(
+            shared["dialogs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|dialog| dialog["view"] == "view:ryeos/attention/panel"),
+            "{config}"
+        );
+        let admitted = |list: &str, cap: &str| {
+            shared["capabilities"][list]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry == cap)
+        };
+        assert!(
+            admitted(
+                "sources",
+                "ryeos.execute.service.ui/ryeos-ui/work/attention"
+            ),
+            "{config}"
+        );
+        assert!(
+            admitted(
+                "affordances",
+                "ryeos.execute.service.ui/ryeos-ui/work/acknowledge"
+            ),
+            "{config}"
+        );
+    }
+}
+
+#[test]
+fn the_bars_source_is_a_surface_source_read_from_the_one_queue() {
+    let lens: Value = serde_yaml::from_str(
+        &fs::read_to_string(
+            ryeos_engine::test_support::workspace_root()
+                .join("bundles/ryeos-ui/.ai/surfaces/ryeos/ui/lens.yaml"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let source = &lens["sources"]["attention"];
+    assert_eq!(source["ref"], "service:ui/ryeos-ui/work/attention");
+    assert_eq!(source["role"], "attention");
+    assert_eq!(source["refresh"]["on_hint"], json!(["thread", "activity"]));
+}
+
 #[test]
 fn every_bundled_view_resolves_and_validates_under_the_named_source_contract() {
     let repository = fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
@@ -538,7 +671,7 @@ fn every_bundled_view_resolves_and_validates_under_the_named_source_contract() {
     let files = yaml_files_below(&views_root);
     assert_eq!(
         files.len(),
-        48,
+        49,
         "authored inventory includes the Surfaces catalogue and session-details View"
     );
 

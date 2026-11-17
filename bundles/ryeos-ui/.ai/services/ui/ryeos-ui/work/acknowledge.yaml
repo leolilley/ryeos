@@ -1,0 +1,9 @@
+# ryeos:signed:2026-11-17T22:02:50Z:f7e198940267e362a6b4dc1c7ca28d12d97255764c967d0d698fb2e2202de954:hb5GF85nQh971WJ4NFUUWsaCDHDbmQQJ/uXfgnMiTKW5aGCQ6tlaPTduhgxTf+g12rkiV30K6SainwlooF1WDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+required_caps: ["ryeos.execute.service.ui/ryeos-ui/work/acknowledge"]
+name: ryeos-ui/work/acknowledge
+version: "1.0.0"
+description: Acknowledge one item of the principal's own attention queue. The item stays hidden until it has newer activity. A triage record on the item's chain; it decides nothing about the underlying work.
+endpoint: ui.ryeos.work.acknowledge
+availability: daemon_only
+record_thread: false

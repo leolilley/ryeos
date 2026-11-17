@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-16T21:29:33Z:3887c8fcf981655b71e6222fcfae5082aa6e20067357d76cf75391f2ec6c15d0:XoXP+TLL1LVm8VdlqNbMSTJG1StuRZuMmHeoqVG4xv2xZOwOWqWlxsmFkl3tRSe7k+CcO98zUGtKVdm5839wCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T22:02:51Z:36fb1bd9b93c45222debaec417aa85d2fc1ab02d83c094939a2f39429020e281:p/+YyINPISqMimoZ96b2/66Vt1g1CH4P3UZEbN+Qt1ZJXz8EJIy3CNRMG1i2XaxBoCsOCXFFxYmSHFp6yMCbBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-lens
 title: Lens
 version: "1.0.0"
@@ -18,6 +18,13 @@ sources:
   projects:
     ref: service:projects/list
     role: projects
+  # The bars read their counts from this one queue; the daemon counts it and
+  # the clients add nothing.
+  attention:
+    ref: service:ui/ryeos-ui/work/attention
+    role: attention
+    params: { limit: 1 }
+    refresh: { on_hint: [thread, activity] }
   file_read:
     ref: service:ui/ryeos-ui/files/read
     role: file_read

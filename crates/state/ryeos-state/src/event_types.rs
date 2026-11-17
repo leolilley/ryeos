@@ -96,6 +96,10 @@ event_types! {
     RESOURCE_PRECONTACT_BUDGET_TRANSITION_V1 = "resource_precontact_budget_transition_v1";
     COST_UNTRACKED = "cost_untracked";
     THREAD_USAGE = "thread_usage";
+    /// Daemon-authored on the subject's chain when the operator acknowledges an
+    /// attention item: the item id, kind and the acknowledging principal. The
+    /// item stays hidden until it has activity newer than this event.
+    ATTENTION_ACKNOWLEDGED = "attention_acknowledged";
 
     /// Generic domain-event channel: one engine event carrying a namespaced
     /// `kind` plus a free `payload`, emitted by the runtime on behalf of a

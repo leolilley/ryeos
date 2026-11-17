@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-16T21:46:28Z:f594f195c6d91596c1a00af8b360f08e056f684e3eaecc37afcea7d183d1213c:oZSGwGjDCmFJzWjSgDp2OBw9k6N5J3gc0sVtPMOKwv+g6hamdcErVgy/UA06gfkIFjGsQbX9FLStORaXbRDrCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T22:02:50Z:dd3269569a717ba2079b73615e04cdf4cff16e590eceda4903c965d562c60046:mJNCvGMqOLiSdr92acCYoxsnZEQjbsfqQTKpZYzKEb1xbt8/H0sfPwWDO/C4Gb1WZM5+49n90oShSAWeJ90gCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/ui
 version: "1.0.0"
 description: Which sources raise operator attention, and how thread statuses group for presentation.
@@ -6,11 +6,15 @@ description: Which sources raise operator attention, and how thread statuses gro
 # Each source names one store query the attention service implements
 # (approvals_pending, candidates_ready, runs_failed) and the words its items
 # carry. `statuses` lists the thread statuses runs_failed treats as failed;
-# cancelled is left out because the operator asked for it.
+# cancelled is left out because the operator asked for it. `count_label` is the
+# noun the bars show beside the kind's count. `acknowledgeable` says whether an
+# operator may hide the kind's items until they have new activity; an approval
+# blocks work and has no activity to renew, so it can only be decided, never
+# hidden.
 sources:
-  - { kind: approval, query: approvals_pending, title: Approval requested, tone: warn }
-  - { kind: candidate, query: candidates_ready, title: Candidate ready for review, tone: warn }
-  - { kind: failed_run, query: runs_failed, title: Run failed, tone: danger, statuses: [failed, timed_out] }
+  - { kind: approval, query: approvals_pending, title: Approval requested, tone: warn, count_label: approvals, acknowledgeable: false }
+  - { kind: candidate, query: candidates_ready, title: Candidate ready for review, tone: warn, count_label: candidates, acknowledgeable: true }
+  - { kind: failed_run, query: runs_failed, title: Run failed, tone: danger, count_label: failed, acknowledgeable: true, statuses: [failed, timed_out] }
 
 # Thread status to presentation category; a status not listed is unknown.
 phase_categories:

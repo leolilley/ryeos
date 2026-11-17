@@ -997,7 +997,28 @@ fn status_bar_vm(_chrome: &RyeOsChromeVm, core: &RyeOsCore) -> RyeOsStatusBarVm 
     // Root-session project and execution counters become actively misleading
     // once exact mounted attachments span projects.
     // Node health belongs to the top line; the foot remains interaction chrome.
-    let segments = Vec::new();
+    // The one count it carries is the attention queue's, exactly as the daemon
+    // counted it: one segment per kind that has items, in the config's order.
+    let segments = core
+        .data
+        .attention
+        .as_ref()
+        .map(|attention| {
+            attention
+                .counts
+                .by_kind
+                .iter()
+                .filter(|kind| kind.count > 0)
+                .map(|kind| RyeOsStatusSegmentVm {
+                    id: format!("attention:{}", kind.kind),
+                    label: Some(kind.label.clone()),
+                    value: kind.count.to_string(),
+                    tone: tone_from_name(Some(&kind.tone)),
+                    grow: false,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     RyeOsStatusBarVm {
         visible: core.ui.bottom_status_visible,
         segments,
@@ -3043,11 +3064,18 @@ fn focused_row_command_items(
                 .and_then(|v| v.as_str())
                 .unwrap_or(id)
                 .to_string();
+            // A group the view names (`category`) leads the hint, so one list
+            // of a row's actions reads as Open / Decide / Triage.
+            let hint = eligibility
+                .disabled_reason
+                .unwrap_or_else(|| "focused row".to_string());
+            let hint = match aff.get("category").and_then(|v| v.as_str()) {
+                Some(category) if !category.is_empty() => format!("{category} · {hint}"),
+                _ => hint,
+            };
             Some(RyeOsCommandChoice {
                 label,
-                hint: eligibility
-                    .disabled_reason
-                    .unwrap_or_else(|| "focused row".to_string()),
+                hint,
                 intent: RyeOsUiIntent::InvokeAffordance {
                     instance_key: instance_key.clone(),
                     view_ref: view_ref.clone(),
@@ -4921,6 +4949,123 @@ mod tests {
         assert!(
             !items.iter().any(|i| i.label == "Watch"),
             "activate affordance should not be surfaced as a context item"
+        );
+    }
+
+    fn attention_view_session() -> crate::ui::model::BrowserSession {
+        session_with_surface(json!({
+            "name": "t",
+            "tiles": ["view:ryeos/attention/panel"],
+            "views": {
+                "view:ryeos/attention/panel": {
+                    "widget": "table",
+                    "sources": { "default": { "ref": "service:ui/ryeos-ui/work/attention", "collection": "attention" } },
+                    "projections": { "columns": [ { "label": "item", "field": "title" } ] },
+                    "selection": { "activate": "open" },
+                    "affordances": [
+                        { "id": "open", "label": "Open", "category": "Open",
+                          "invoke": { "plane": "ui", "facet": "selection", "value": {"thread_id": "{record.subject.thread_id}"} } },
+                        { "id": "acknowledge", "label": "Acknowledge", "category": "Triage",
+                          "enabled_when": { "field": "actions.acknowledge", "equals": true },
+                          "disabled_reason": "Decide this one; it cannot be hidden.",
+                          "invoke": { "plane": "rye", "ref": "service:ui/ryeos-ui/work/acknowledge",
+                                      "args": { "item_id": "{record.id}" } } },
+                        { "id": "plain", "label": "Plain",
+                          "invoke": { "plane": "ui", "facet": "selection", "value": {"x": 1} } }
+                    ]
+                }
+            }
+        }))
+    }
+
+    #[test]
+    fn command_overlay_groups_a_rows_actions_and_explains_a_disabled_one() {
+        let mut core = test_support_core(attention_view_session());
+        let key = tile_default_source_key(&core, core.active_view_set().unwrap().focused_tile);
+        core.data.sources.insert(
+            key,
+            json!({ "attention": [
+                {"id": "failed_run:T-1", "title": "Run failed", "subject": {"thread_id": "T-1"},
+                 "actions": {"open": true, "acknowledge": true}},
+                {"id": "approval:A-1", "title": "Approval requested", "subject": {"thread_id": "T-2"},
+                 "actions": {"open": true, "acknowledge": false}},
+            ] }),
+        );
+        let hint_of = |core: &RyeOsCore, label: &str| {
+            let items = available_command_items(core);
+            let item = items
+                .iter()
+                .find(|item| item.label == label)
+                .unwrap_or_else(|| panic!("{label} is offered"));
+            (item.hint.clone(), item.enabled)
+        };
+        // An eligible row: the action is enabled and led by its group.
+        assert_eq!(
+            hint_of(&core, "Acknowledge"),
+            ("Triage · focused row".to_string(), true)
+        );
+        // An action with no group keeps the plain hint.
+        assert_eq!(hint_of(&core, "Plain"), ("focused row".to_string(), true));
+
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::SetTileCursor {
+                tile_id: core.active_view_set().unwrap().focused_tile.0.to_string(),
+                index: 1,
+            },
+        });
+        // A row whose kind cannot be hidden: still listed, disabled, with why.
+        assert_eq!(
+            hint_of(&core, "Acknowledge"),
+            (
+                "Triage · Decide this one; it cannot be hidden.".to_string(),
+                false
+            )
+        );
+    }
+
+    #[test]
+    fn the_bars_show_the_daemons_attention_counts_and_nothing_else() {
+        let mut core = test_support_core(attention_view_session());
+        let segments = |core: &RyeOsCore| {
+            build_view_model(core)
+                .presentation
+                .chrome
+                .status_bar
+                .segments
+        };
+        assert!(segments(&core).is_empty(), "no queue reported, no counts");
+
+        core.data.attention = Some(
+            serde_json::from_value(json!({
+                "attention": [],
+                "counts": {"total": 3, "by_kind": [
+                    {"kind": "approval", "label": "approvals", "tone": "warn", "count": 2},
+                    {"kind": "candidate", "label": "candidates", "tone": "warn", "count": 0},
+                    {"kind": "failed_run", "label": "failed", "tone": "danger", "count": 1},
+                ]},
+            }))
+            .unwrap(),
+        );
+        let shown = segments(&core)
+            .into_iter()
+            .map(|segment| (segment.id, segment.label, segment.value, segment.tone))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            shown,
+            vec![
+                (
+                    "attention:approval".to_string(),
+                    Some("approvals".to_string()),
+                    "2".to_string(),
+                    RyeOsTone::Warn
+                ),
+                (
+                    "attention:failed_run".to_string(),
+                    Some("failed".to_string()),
+                    "1".to_string(),
+                    RyeOsTone::Danger
+                ),
+            ]
         );
     }
 

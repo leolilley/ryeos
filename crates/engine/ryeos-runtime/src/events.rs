@@ -671,6 +671,9 @@ pub enum RuntimeEventType {
 
     // ── Usage settlement (O3) ───────────────────────────────────
     ThreadUsage,
+    /// Operator-authored triage record: one attention item was acknowledged.
+    /// Daemon-authored through the attention service; a runtime cannot append it.
+    AttentionAcknowledged,
 }
 
 impl RuntimeEventType {
@@ -732,6 +735,7 @@ impl RuntimeEventType {
             Self::CostUntracked => wire::COST_UNTRACKED,
             Self::Milestone => wire::MILESTONE,
             Self::ThreadUsage => wire::THREAD_USAGE,
+            Self::AttentionAcknowledged => wire::ATTENTION_ACKNOWLEDGED,
         }
     }
 
@@ -795,6 +799,7 @@ impl RuntimeEventType {
             wire::COST_UNTRACKED => Ok(Self::CostUntracked),
             wire::MILESTONE => Ok(Self::Milestone),
             wire::THREAD_USAGE => Ok(Self::ThreadUsage),
+            wire::ATTENTION_ACKNOWLEDGED => Ok(Self::AttentionAcknowledged),
             other if other.trim().is_empty() => bail!("event_type must not be empty"),
             other => bail!("invalid event_type: {other}"),
         }
@@ -899,7 +904,8 @@ impl RuntimeEventType {
             | Self::ProviderAttemptBudgetTransitionV1
             | Self::CostUntracked
             | Self::Milestone
-            | Self::ThreadUsage => false,
+            | Self::ThreadUsage
+            | Self::AttentionAcknowledged => false,
         }
     }
 
@@ -975,7 +981,8 @@ impl RuntimeEventType {
             | Self::ProviderAttemptBudgetTransitionV1
             | Self::CostUntracked
             | Self::Milestone
-            | Self::ThreadUsage => StorageClass::Indexed,
+            | Self::ThreadUsage
+            | Self::AttentionAcknowledged => StorageClass::Indexed,
         }
     }
 }
@@ -1191,6 +1198,7 @@ mod tests {
             RuntimeEventType::CostUntracked,
             RuntimeEventType::Milestone,
             RuntimeEventType::ThreadUsage,
+            RuntimeEventType::AttentionAcknowledged,
         ];
         for v in variants {
             let s = v.as_str();
@@ -1313,6 +1321,7 @@ mod tests {
             wire::COST_UNTRACKED,
             wire::MILESTONE,
             wire::THREAD_USAGE,
+            wire::ATTENTION_ACKNOWLEDGED,
         ]
         .into_iter()
         .map(|name| RuntimeEventType::parse(name).unwrap())

@@ -6,6 +6,12 @@
 //! maps thread statuses to presentation categories and says which statuses
 //! count as a failed run. Adding a source of an existing query is data; a new
 //! query needs a store fact and so is code here.
+//!
+//! An operator may acknowledge an item whose source allows it. The
+//! acknowledgement is a durable `attention_acknowledged` event on the item's
+//! chain. It hides the item until the item has activity newer than the event,
+//! at which point the item is raised again; it never decides the underlying
+//! work.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -19,14 +25,22 @@ use ryeos_app::runtime_db::{
     DedicatedSessionApprovalProjection, DedicatedSessionCandidateAttention,
 };
 use ryeos_app::state::AppState;
-use ryeos_app::state_store::FailedRunAttention;
+use ryeos_app::state_store::{FailedRunAttention, NewEventRecord};
 use ryeos_engine::config_loading::{ConfigLoadContext, ConfigSpec, ResolveMode};
 
 pub const CONFIG_REF: &str = "config:ryeos/ui/attention";
 const CONFIG_PATH: &str = "ryeos/ui/attention.yaml";
 const ITEM_SCHEMA: &str = "ryeos.ui.attention_item.v2";
+const ACK_SCHEMA: &str = "ryeos.ui.attention_acknowledged.v1";
+/// Acknowledgement events read per page of one chain.
+const ACK_PAGE_EVENTS: usize = 500;
+const ACK_PAGE_BYTES: usize = 512 * 1024;
+/// Pages read per chain; acknowledgements beyond this are not seen.
+const ACK_MAX_PAGES: usize = 8;
 /// Threads scanned to scope approvals and candidates to one project.
 const MAX_PROJECT_THREADS: usize = 2_000;
+/// Items scanned per source to find the one being acknowledged.
+const ACK_SCAN_LIMIT: usize = 500;
 
 /// The store queries a source may name. The set is closed because each one is
 /// an implementation over a distinct store fact.
@@ -46,6 +60,14 @@ pub struct Source {
     pub query: Query,
     pub title: String,
     pub tone: String,
+    /// Short noun the bars show next to this kind's count.
+    #[serde(default)]
+    pub count_label: Option<String>,
+    /// Whether an operator may acknowledge this kind's items. An item whose
+    /// activity time never advances must not be acknowledgeable, because an
+    /// acknowledgement could never be cleared.
+    #[serde(default)]
+    pub acknowledgeable: bool,
     /// Thread statuses the `runs_failed` query treats as failed.
     #[serde(default)]
     pub statuses: Vec<String>,
@@ -132,9 +154,62 @@ pub fn load_config(state: &AppState) -> Result<AttentionConfig> {
     Ok(AttentionConfig::from_value(value).map_err(HandlerError::Internal)?)
 }
 
-/// Every attention item for `owner`, oldest first, at most `limit`.
-/// `project_root` narrows the queue to one project.
+/// Every attention item for `owner` that is not acknowledged, oldest first, at
+/// most `limit`. `project_root` narrows the queue to one project.
 pub fn collect(
+    state: &AppState,
+    config: &AttentionConfig,
+    owner: &str,
+    project_root: Option<&Path>,
+    limit: usize,
+) -> Result<Vec<Value>> {
+    let mut items = collect_unacknowledged(state, config, owner, project_root, limit)?;
+    items.truncate(limit);
+    Ok(items)
+}
+
+/// The same queue as [`collect`] without the final truncation, so a caller
+/// can count the whole queue and still return only a page of it. Each source
+/// query is bounded by `source_limit`.
+pub fn collect_unacknowledged(
+    state: &AppState,
+    config: &AttentionConfig,
+    owner: &str,
+    project_root: Option<&Path>,
+    source_limit: usize,
+) -> Result<Vec<Value>> {
+    let mut items = collect_raised(state, config, owner, project_root, source_limit)?;
+    let acknowledgements = acknowledgements(state, owner, &items)?;
+    items.retain(|item| !is_acknowledged(item, &acknowledgements));
+    Ok(items)
+}
+
+/// Counts of a queue by kind, in the config's source order, for the bars.
+/// The counts come from the items the daemon returns; a client adds nothing.
+pub fn counts(config: &AttentionConfig, items: &[Value]) -> Value {
+    let by_kind = config
+        .sources
+        .iter()
+        .filter_map(|source| {
+            let count = items
+                .iter()
+                .filter(|item| item["kind"] == source.kind.as_str())
+                .count();
+            (count > 0).then(|| {
+                json!({
+                    "kind": source.kind,
+                    "label": source.count_label.as_deref().unwrap_or(&source.kind),
+                    "tone": source.tone,
+                    "count": count,
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({"total": items.len(), "by_kind": by_kind})
+}
+
+/// Every item the sources raise for `owner`, acknowledged or not, oldest first.
+fn collect_raised(
     state: &AppState,
     config: &AttentionConfig,
     owner: &str,
@@ -202,8 +277,125 @@ pub fn collect(
             .cmp(&right["since_ms"].as_i64())
             .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
     });
-    items.truncate(limit);
     Ok(items)
+}
+
+/// The latest acknowledgement time, in whole seconds, of each acknowledgeable
+/// item of `items` that `owner` acknowledged. Read from the item's chain.
+fn acknowledgements(
+    state: &AppState,
+    owner: &str,
+    items: &[Value],
+) -> Result<BTreeMap<String, i64>> {
+    let chains = items
+        .iter()
+        .filter(|item| item["actions"]["acknowledge"] == true)
+        .filter_map(|item| item["subject"]["chain_root_id"].as_str())
+        .collect::<BTreeSet<_>>();
+    let wanted = [ryeos_state::event_types::ATTENTION_ACKNOWLEDGED.to_owned()];
+    let mut acknowledged = BTreeMap::<String, i64>::new();
+    for chain_root_id in chains {
+        let mut after = None;
+        for _ in 0..ACK_MAX_PAGES {
+            let page = state.state_store.replay_events_of_types(
+                chain_root_id,
+                None,
+                after,
+                ACK_PAGE_EVENTS,
+                ACK_PAGE_BYTES,
+                Some(&wanted),
+            )?;
+            for event in &page.events {
+                after = Some(event.chain_seq);
+                if event.payload["principal"] != owner {
+                    continue;
+                }
+                let (Some(item_id), Some(secs)) = (
+                    event.payload["item_id"].as_str(),
+                    lillux::time::unix_secs_from_iso8601(&event.ts),
+                ) else {
+                    continue;
+                };
+                let secs = i64::try_from(secs).unwrap_or(i64::MAX);
+                let latest = acknowledged.entry(item_id.to_owned()).or_insert(secs);
+                *latest = (*latest).max(secs);
+            }
+            if !page.has_more {
+                break;
+            }
+        }
+    }
+    Ok(acknowledged)
+}
+
+/// An acknowledged item stays hidden while its activity is no newer than its
+/// acknowledgement. Activity newer than the acknowledgement raises it again.
+/// Times compare in whole seconds, the resolution of an event's timestamp.
+fn is_acknowledged(item: &Value, acknowledgements: &BTreeMap<String, i64>) -> bool {
+    let (Some(id), Some(since_ms)) = (item["id"].as_str(), item["since_ms"].as_i64()) else {
+        return false;
+    };
+    item["actions"]["acknowledge"] == true
+        && acknowledgements
+            .get(id)
+            .is_some_and(|acknowledged_at| since_ms.div_euclid(1000) <= *acknowledged_at)
+}
+
+/// Acknowledge the item `item_id` for `owner`: record it on the item's chain.
+/// An item that is not in the owner's queue, or whose source does not allow
+/// acknowledgement, is refused. Acknowledging an item that is already hidden
+/// records nothing and reports it.
+pub fn acknowledge(
+    state: &AppState,
+    config: &AttentionConfig,
+    owner: &str,
+    item_id: &str,
+) -> Result<Value, HandlerError> {
+    let internal = |error: anyhow::Error| HandlerError::Internal(format!("{error:#}"));
+    let items = collect_raised(state, config, owner, None, ACK_SCAN_LIMIT).map_err(internal)?;
+    let item = items
+        .iter()
+        .find(|item| item["id"] == item_id)
+        .ok_or(HandlerError::NotFound)?;
+    if item["actions"]["acknowledge"] != true {
+        return Err(HandlerError::BadRequest(format!(
+            "attention item `{item_id}` cannot be acknowledged"
+        )));
+    }
+    let existing = acknowledgements(state, owner, std::slice::from_ref(item)).map_err(internal)?;
+    if is_acknowledged(item, &existing) {
+        return Ok(json!({"schema_version": ACK_SCHEMA, "item_id": item_id, "already": true}));
+    }
+    let chain_root_id = item["subject"]["chain_root_id"]
+        .as_str()
+        .ok_or_else(|| HandlerError::Internal("attention item has no chain".into()))?;
+    let thread_id = item["subject"]["thread_id"]
+        .as_str()
+        .ok_or_else(|| HandlerError::Internal("attention item has no thread".into()))?;
+    let persisted = state
+        .state_store
+        .append_events(
+            chain_root_id,
+            thread_id,
+            &[NewEventRecord {
+                event_type: ryeos_state::event_types::ATTENTION_ACKNOWLEDGED.to_owned(),
+                storage_class: "indexed".to_owned(),
+                payload: json!({
+                    "schema_version": ACK_SCHEMA,
+                    "item_id": item_id,
+                    "kind": item["kind"],
+                    "principal": owner,
+                    "item_since_ms": item["since_ms"],
+                }),
+            }],
+        )
+        .map_err(internal)?;
+    Ok(json!({
+        "schema_version": ACK_SCHEMA,
+        "item_id": item_id,
+        "already": false,
+        "chain_seq": persisted.first().map(|event| event.chain_seq),
+    }))
 }
 
 fn actions(entries: &[(&str, bool)]) -> Value {
@@ -225,8 +417,9 @@ fn item(
     since_ms: i64,
     expires_at_ms: Option<i64>,
     detail: Value,
-    actions: Value,
+    mut actions: Value,
 ) -> Value {
+    actions["acknowledge"] = Value::Bool(source.acknowledgeable);
     json!({
         "schema_version": ITEM_SCHEMA,
         "id": format!("{}:{subject_key}", source.kind),
@@ -432,7 +625,7 @@ mod tests {
         assert!(!value.to_string().contains("secret-upstream-id"));
         assert_eq!(
             value["actions"],
-            json!({"open": true, "accept": true, "decline": true})
+            json!({"open": true, "accept": true, "decline": true, "acknowledge": false})
         );
 
         let refused = approval_item(&source(&config, "approval"), &approval("pending", false));
@@ -444,7 +637,7 @@ mod tests {
     }
 
     #[test]
-    fn candidate_item_offers_only_open() {
+    fn candidate_item_offers_open_and_acknowledge() {
         let config = shipped_config();
         let value = candidate_item(
             &source(&config, "candidate"),
@@ -463,7 +656,7 @@ mod tests {
         assert_eq!(value["since_ms"], 5_000);
         assert_eq!(value["expires_at_ms"], Value::Null);
         assert_eq!(value["detail"]["publication_result"], "retained_for_review");
-        assert_eq!(value["actions"], json!({"open": true}));
+        assert_eq!(value["actions"], json!({"open": true, "acknowledge": true}));
     }
 
     fn thread(id: &str, chain_root: &str, owner: &str) -> NewThreadRecord {
@@ -637,6 +830,154 @@ mod tests {
         assert_eq!(value["state"], "failed");
         assert_eq!(value["tone"], "danger");
         assert!(value["since_ms"].as_i64().unwrap() > 0);
-        assert_eq!(value["actions"], json!({"open": true}));
+        assert_eq!(value["actions"], json!({"open": true, "acknowledge": true}));
+    }
+    fn failed_run_config(acknowledgeable: bool) -> AttentionConfig {
+        AttentionConfig::from_value(json!({
+            "sources": [{
+                "kind": "failed_run", "query": "runs_failed", "title": "Run failed",
+                "tone": "danger", "count_label": "failed",
+                "acknowledgeable": acknowledgeable, "statuses": ["failed"],
+            }],
+            "phase_categories": {},
+        }))
+        .unwrap()
+    }
+
+    fn fail_run(state: &AppState, id: &str, owner: &str) {
+        state
+            .state_store
+            .create_thread_for_test(&thread(id, id, owner))
+            .unwrap();
+        finish(state, id, "failed");
+    }
+
+    fn raised_ids(state: &AppState, config: &AttentionConfig, owner: &str) -> Vec<String> {
+        collect(state, config, owner, None, 50)
+            .unwrap()
+            .into_iter()
+            .map(|item| item["id"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn acknowledging_hides_the_item_and_records_it_once() {
+        let (_dir, _owner, state) = crate::test_support::build_test_state();
+        let config = failed_run_config(true);
+        fail_run(&state, "T-a", OWNER);
+        fail_run(&state, "T-b", OWNER);
+        assert_eq!(
+            raised_ids(&state, &config, OWNER),
+            ["failed_run:T-a", "failed_run:T-b"]
+        );
+
+        let first = acknowledge(&state, &config, OWNER, "failed_run:T-a").unwrap();
+        assert_eq!(first["already"], false);
+        // Only the acknowledged item is hidden; the other stays raised.
+        assert_eq!(raised_ids(&state, &config, OWNER), ["failed_run:T-b"]);
+
+        // A second acknowledgement of a hidden item records nothing.
+        let second = acknowledge(&state, &config, OWNER, "failed_run:T-a").unwrap();
+        assert_eq!(second["already"], true);
+        let recorded = state
+            .state_store
+            .replay_events_of_types(
+                "T-a",
+                None,
+                None,
+                10,
+                1 << 20,
+                Some(&[ryeos_state::event_types::ATTENTION_ACKNOWLEDGED.to_owned()]),
+            )
+            .unwrap();
+        assert_eq!(recorded.events.len(), 1);
+        let payload = &recorded.events[0].payload;
+        assert_eq!(payload["item_id"], "failed_run:T-a");
+        assert_eq!(payload["principal"], OWNER);
+        assert_eq!(payload["kind"], "failed_run");
+    }
+
+    #[test]
+    fn new_activity_raises_an_acknowledged_item_again() {
+        let (_dir, _owner, state) = crate::test_support::build_test_state();
+        let config = failed_run_config(true);
+        fail_run(&state, "T-a", OWNER);
+        acknowledge(&state, &config, OWNER, "failed_run:T-a").unwrap();
+        assert!(raised_ids(&state, &config, OWNER).is_empty());
+
+        // The same item, read again after its activity moved past the
+        // acknowledgement, is raised again; the recorded acknowledgement is
+        // untouched.
+        let mut raised = collect_raised(&state, &config, OWNER, None, 50).unwrap();
+        let acknowledgements = acknowledgements(&state, OWNER, &raised).unwrap();
+        assert!(is_acknowledged(&raised[0], &acknowledgements));
+        let since_ms = raised[0]["since_ms"].as_i64().unwrap();
+        raised[0]["since_ms"] = json!(since_ms + 60_000);
+        assert!(!is_acknowledged(&raised[0], &acknowledgements));
+    }
+
+    #[test]
+    fn acknowledgement_compares_whole_seconds() {
+        let item = |since_ms: i64| json!({"id": "failed_run:T", "since_ms": since_ms, "actions": {"acknowledge": true}});
+        let acknowledged = BTreeMap::from([("failed_run:T".to_owned(), 100)]);
+        assert!(is_acknowledged(&item(99_000), &acknowledged));
+        assert!(is_acknowledged(&item(100_999), &acknowledged));
+        assert!(!is_acknowledged(&item(101_000), &acknowledged));
+        // An item the source does not allow to be acknowledged is never hidden.
+        let mut blocked = item(1);
+        blocked["actions"]["acknowledge"] = json!(false);
+        assert!(!is_acknowledged(&blocked, &acknowledged));
+        // Another item's acknowledgement does not apply.
+        let other = BTreeMap::from([("failed_run:U".to_owned(), 100)]);
+        assert!(!is_acknowledged(&item(1), &other));
+    }
+
+    #[test]
+    fn acknowledging_is_scoped_to_the_principals_own_queue() {
+        let (_dir, _owner, state) = crate::test_support::build_test_state();
+        let config = failed_run_config(true);
+        fail_run(&state, "T-mine", OWNER);
+        fail_run(&state, "T-theirs", OTHER);
+        // Another principal's item and an unknown item are both absent.
+        for id in ["failed_run:T-theirs", "failed_run:T-nobody"] {
+            assert!(matches!(
+                acknowledge(&state, &config, OWNER, id),
+                Err(HandlerError::NotFound)
+            ));
+        }
+        acknowledge(&state, &config, OWNER, "failed_run:T-mine").unwrap();
+        // Acknowledging as the owner hides nothing in the other principal's queue.
+        assert_eq!(raised_ids(&state, &config, OTHER), ["failed_run:T-theirs"]);
+    }
+
+    #[test]
+    fn a_source_that_forbids_acknowledgement_refuses_it() {
+        let (_dir, _owner, state) = crate::test_support::build_test_state();
+        let config = failed_run_config(false);
+        fail_run(&state, "T-a", OWNER);
+        assert!(matches!(
+            acknowledge(&state, &config, OWNER, "failed_run:T-a"),
+            Err(HandlerError::BadRequest(_))
+        ));
+        assert_eq!(raised_ids(&state, &config, OWNER), ["failed_run:T-a"]);
+    }
+
+    #[test]
+    fn counts_follow_the_queue_in_source_order() {
+        let config = shipped_config();
+        let item = |kind: &str| json!({"kind": kind});
+        let counts = counts(
+            &config,
+            &[item("failed_run"), item("approval"), item("failed_run")],
+        );
+        assert_eq!(counts["total"], 3);
+        assert_eq!(
+            counts["by_kind"],
+            json!([
+                {"kind": "approval", "label": "approvals", "tone": "warn", "count": 1},
+                {"kind": "failed_run", "label": "failed", "tone": "danger", "count": 2},
+            ])
+        );
+        assert_eq!(super::counts(&config, &[])["by_kind"], json!([]));
     }
 }
