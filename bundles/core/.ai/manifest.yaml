@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T12:53:22Z:c82e65e56af297b662ad76d80d7aedab1127ca5fd7c7513e7614248b90d5d54e:imc5n9PC5Wx88IqVrX97BB3SuqS7Zoy4MHtRUsOXMcMrG9CkkDKT3+jUMfIjg/3MJb3rdx5mukV0NTecAp1yDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T01:35:34Z:37f9b643200e45646c8bad4bc5a1bfb7dd2c1c8d6c1e9347e7c977528a0b572e:O+iKY/CRvG7zBpwCSuRwY6u79DJ6SqK+VWZOfjgLDw2igXtuqsOPznnTFVjW9jiEaPgSsZGz107gSfJNuuVFDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: core
 version: 0.5.0
 description: 'Engine foundation: kind schemas, handlers, parsers, services, tools'
@@ -25,7 +25,7 @@ owns_namespaces:
 - ryeos/core
 isolation_backends:
 - id: linux-lillux
-  protocol: ryeos.isolation-adapter/v15
+  protocol: ryeos.isolation-adapter/v16
   targets:
   - x86_64-unknown-linux-gnu
   - aarch64-unknown-linux-gnu
@@ -53,3 +53,4 @@ isolation_backends:
   - process.nested_sandbox
   - process.target_limits
   - ipc.target_unix_stream
+  - ipc.target_sealed_payload

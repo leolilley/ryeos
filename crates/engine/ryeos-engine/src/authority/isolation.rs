@@ -20,7 +20,8 @@ use ryeos_isolation_protocol::{
     IsolationEnvironment, IsolationFixedParentView, IsolationLoopbackIngress, IsolationMount,
     IsolationMountAccess, IsolationNetwork, IsolationPath, IsolationPidNamespace, IsolationPlan,
     IsolationProjectWorkspace, IsolationTarget, IsolationTargetChannel,
-    IsolationWorkspaceDescendantMount, MAX_AUTHORITIES, WorkspaceLifecycleOperation,
+    IsolationTargetSealedPayload, IsolationWorkspaceDescendantMount, MAX_AUTHORITIES,
+    WorkspaceLifecycleOperation,
 };
 
 mod authority;
@@ -39,7 +40,7 @@ pub use authority::{
     IsolationLiveAccessAuthority, IsolationNetworkAuthorityCeiling,
     IsolationProducerPreparedDirectoryAuthority, IsolationProducerPreparedImmutableFileAuthority,
     IsolationProjectAuthority, IsolationReadOnlyMountAuthority, IsolationRealizationMemberCommand,
-    IsolationTargetChannelAuthority, IsolationVerifiedCode,
+    IsolationTargetChannelAuthority, IsolationTargetSealedPayloadAuthority, IsolationVerifiedCode,
     IsolationWritableRuntimeViewMountAuthority, OriginalProductManifestRole,
 };
 pub use backend::{ResolvedIsolationBackend, VerifiedIsolationBackendCapture};
@@ -2979,6 +2980,43 @@ impl IsolationRuntime {
                 ));
             }
         }
+        if context.target_sealed_payloads.len() > MAX_AUTHORITIES {
+            return Err(refused("too many typed target sealed payloads".to_string()));
+        }
+        let mut previous_payload_fd = None;
+        for payload in context.target_sealed_payloads {
+            if previous_payload_fd.is_some_and(|previous| previous >= payload.target_fd()) {
+                return Err(refused(
+                    "typed target sealed payloads must be strictly sorted by target descriptor"
+                        .to_string(),
+                ));
+            }
+            previous_payload_fd = Some(payload.target_fd());
+            if context
+                .target_channels
+                .iter()
+                .any(|channel| channel.target_fd() == payload.target_fd())
+            {
+                return Err(refused(
+                    "a target descriptor is claimed by both a channel and a sealed payload"
+                        .to_string(),
+                ));
+            }
+            if !channel_environment.insert(payload.env_name()) {
+                return Err(refused(format!(
+                    "duplicate protected target environment variable {}",
+                    payload.env_name()
+                )));
+            }
+            let inherited_descriptor = payload.inherited_descriptor().map_err(|error| {
+                refused(format!("inspect typed target sealed payload: {error}"))
+            })?;
+            if !inherited_descriptors.insert(inherited_descriptor) {
+                return Err(refused(
+                    "typed target sealed payloads alias one inherited descriptor".to_string(),
+                ));
+            }
+        }
         if self.state == IsolationRuntimeState::Enforced
             && context.filesystem_authority_ceiling
                 == IsolationFilesystemAuthorityCeiling::CapturedExecution
@@ -3265,6 +3303,13 @@ impl IsolationRuntime {
                 channel
                     .bind_to_subprocess_request(&mut request)
                     .map_err(|error| refused(format!("bind typed target channel: {error}")))?;
+            }
+            for payload in context.target_sealed_payloads {
+                payload
+                    .bind_to_subprocess_request(&mut request)
+                    .map_err(|error| {
+                        refused(format!("bind typed target sealed payload: {error}"))
+                    })?;
             }
             let requested = request.limits.unwrap_or_default();
             request.limits = Some(lillux::SubprocessLimits {
@@ -5091,6 +5136,26 @@ impl IsolationRuntime {
             });
         }
 
+        let mut sealed_payload_plan = Vec::with_capacity(context.target_sealed_payloads.len());
+        for (index, payload) in context.target_sealed_payloads.iter().enumerate() {
+            let source = IsolationAuthorityId::new(format!("target-sealed-payload-{index}"))
+                .map_err(|error| refused(error.to_string()))?;
+            let inherited_fd = payload.inherited_descriptor().map_err(|error| {
+                refused(format!("inspect target sealed-payload descriptor: {error}"))
+            })?;
+            authorities.push(IsolationAuthority {
+                id: source.clone(),
+                inherited_fd,
+                purpose: IsolationAuthorityPurpose::TargetSealedPayload,
+            });
+            payload.retain_for_child(&mut authority_handles);
+            sealed_payload_plan.push(IsolationTargetSealedPayload {
+                source,
+                target_fd: payload.target_fd(),
+                env_name: payload.env_name().to_owned(),
+            });
+        }
+
         let mut character_device_plan = Vec::new();
         if let Some(devices) = selected_devices {
             character_device_plan.reserve(devices.authorities().len());
@@ -5144,6 +5209,17 @@ impl IsolationRuntime {
                 )));
             }
         }
+        for payload in &sealed_payload_plan {
+            if environment
+                .insert(payload.env_name.clone(), payload.target_fd.to_string())
+                .is_some()
+            {
+                return Err(refused(format!(
+                    "caller cannot provide protected target sealed-payload environment variable {}",
+                    payload.env_name
+                )));
+            }
+        }
         let argv0 = command_argv0.unwrap_or_else(|| command_path.to_string_lossy().into_owned());
         let target_limits = limits
             .filter(|limits| {
@@ -5176,6 +5252,7 @@ impl IsolationRuntime {
             fixed_parent_views,
             project_workspace: project_workspace_plan,
             target_channels: target_channel_plan,
+            target_sealed_payloads: sealed_payload_plan,
             environment: IsolationEnvironment {
                 values: environment,
             },
@@ -8706,6 +8783,7 @@ mod tests {
                     writable_runtime_view_mounts: &[],
                     producer_prepared_mounts: &[],
                     target_channels: &[],
+                    target_sealed_payloads: &[],
                     item_ref: "tool:tests/descriptor-bound-disabled",
                     thread_id: "T-descriptor-bound-disabled",
                     verbatim_env_names: &[],
@@ -8798,6 +8876,7 @@ mod tests {
                     writable_runtime_view_mounts: &[],
                     producer_prepared_mounts: &[],
                     target_channels: &[],
+                    target_sealed_payloads: &[],
                     item_ref: "tool:tests/verified-command",
                     thread_id: "T-verified-command",
                     verbatim_env_names: &[],
@@ -8887,6 +8966,7 @@ mod tests {
                 writable_runtime_view_mounts: &[],
                 producer_prepared_mounts: &[],
                 target_channels: &[],
+                target_sealed_payloads: &[],
                 item_ref: "tool:tests/admitted-host-command",
                 thread_id: "T-admitted-host-command",
                 verbatim_env_names: &[],
@@ -8998,6 +9078,7 @@ mod tests {
                     writable_runtime_view_mounts: &[],
                     producer_prepared_mounts: &[],
                     target_channels: &[],
+                    target_sealed_payloads: &[],
                     item_ref: "tool:tests/owned-command",
                     thread_id: "T-owned-command",
                     verbatim_env_names: &[],
@@ -9072,6 +9153,7 @@ mod tests {
                     writable_runtime_view_mounts: &[],
                     producer_prepared_mounts: &[],
                     target_channels: &[],
+                    target_sealed_payloads: &[],
                     item_ref: "tool:tests/sealed-code",
                     thread_id: "T-sealed-code",
                     verbatim_env_names: &[],
@@ -9203,6 +9285,7 @@ mod tests {
                     writable_runtime_view_mounts: &[],
                     producer_prepared_mounts: &[],
                     target_channels: &[],
+                    target_sealed_payloads: &[],
                     item_ref: "tool:tests/enforced-handoff",
                     thread_id: "T-enforced-handoff",
                     verbatim_env_names: &[],
@@ -9616,6 +9699,7 @@ mod tests {
                     writable_runtime_view_mounts: &[],
                     producer_prepared_mounts: &[],
                     target_channels: &[],
+                    target_sealed_payloads: &[],
                     item_ref: "tool:tests/immutable-project",
                     thread_id: "T-immutable-project",
                     verbatim_env_names: &[],
@@ -9758,6 +9842,7 @@ mod tests {
                 writable_runtime_view_mounts: &[],
                 producer_prepared_mounts: &[],
                 target_channels: &[],
+                target_sealed_payloads: &[],
                 item_ref: "worker:tests/captured-plan",
                 thread_id: "T-captured-plan",
                 verbatim_env_names: &[],
@@ -10067,6 +10152,7 @@ mod tests {
                 writable_runtime_view_mounts: &[],
                 producer_prepared_mounts: &[],
                 target_channels: &[],
+                target_sealed_payloads: &[],
                 item_ref: "worker:tests/bundle-state",
                 thread_id: "T-bundle-state",
                 verbatim_env_names: &[],
@@ -10309,6 +10395,7 @@ mod tests {
                     writable_runtime_view_mounts: &[],
                     producer_prepared_mounts: &[],
                     target_channels: &[],
+                    target_sealed_payloads: &[],
                     item_ref: "tool:tests/mutated-command",
                     thread_id: "T-mutated-command",
                     verbatim_env_names: &[],
@@ -10517,6 +10604,7 @@ mod tests {
                 writable_runtime_view_mounts: &[],
                 producer_prepared_mounts: &[],
                 target_channels: &[],
+                target_sealed_payloads: &[],
                 item_ref: "tool:tests/external-mount",
                 thread_id: "T-external-mount",
                 verbatim_env_names: &[],
@@ -10583,6 +10671,7 @@ mod tests {
                     writable_runtime_view_mounts: std::slice::from_ref(&runtime_view),
                     producer_prepared_mounts: &[],
                     target_channels: &[],
+                    target_sealed_payloads: &[],
                     item_ref: "worker:tests/runtime-view-disabled",
                     thread_id: "T-runtime-view-disabled",
                     verbatim_env_names: &[],
@@ -10677,6 +10766,7 @@ mod tests {
             writable_runtime_view_mounts: &[],
             producer_prepared_mounts: &[],
             target_channels: &[],
+            target_sealed_payloads: &[],
             item_ref: "worker:tests/read-only-checkpoint",
             thread_id: "T-read-only-checkpoint",
             verbatim_env_names: &[],
@@ -10807,6 +10897,7 @@ mod tests {
             writable_runtime_view_mounts: &views,
             producer_prepared_mounts: &[],
             target_channels: &[],
+            target_sealed_payloads: &[],
             item_ref: "worker:tests/runtime-view",
             thread_id: "T-runtime-view",
             verbatim_env_names: &[],
@@ -11068,6 +11159,7 @@ mod tests {
                     writable_runtime_view_mounts: &views,
                     producer_prepared_mounts: &[],
                     target_channels: &[],
+                    target_sealed_payloads: &[],
                     item_ref: "worker:tests/runtime-view-workspace",
                     thread_id: "T-runtime-view-workspace",
                     verbatim_env_names: &[],
@@ -11148,6 +11240,7 @@ mod tests {
                     verified_command: Some(&command),
                     external_read_only_mounts: &[],
                     target_channels: &[],
+                    target_sealed_payloads: &[],
                     item_ref: "worker:tests/runtime-view-workspace",
                     thread_id: "T-runtime-view-workspace",
                     verbatim_env_names: &[],
@@ -11208,6 +11301,7 @@ mod tests {
                 writable_runtime_view_mounts: &[],
                 producer_prepared_mounts: &[],
                 target_channels: &[],
+                target_sealed_payloads: &[],
                 item_ref: "worker:tests/captured",
                 thread_id: "T-captured",
                 verbatim_env_names: &[],
@@ -11310,6 +11404,7 @@ mod tests {
                 writable_runtime_view_mounts: &[],
                 producer_prepared_mounts: &[],
                 target_channels: &[],
+                target_sealed_payloads: &[],
                 item_ref: "worker:tests/captured-callback",
                 thread_id: "T-captured-callback",
                 verbatim_env_names: &[],
@@ -11486,6 +11581,7 @@ mod tests {
             writable_runtime_view_mounts: &[],
             producer_prepared_mounts: &[],
             target_channels: &[],
+            target_sealed_payloads: &[],
             item_ref: "worker:tests/runtime-socket",
             thread_id: "T-runtime-socket",
             verbatim_env_names: &[],
@@ -11663,6 +11759,7 @@ mod tests {
                         writable_runtime_view_mounts: &[],
                         producer_prepared_mounts: &[],
                         target_channels: &[],
+                        target_sealed_payloads: &[],
                         item_ref: "worker:tests/withheld",
                         thread_id: "T-withheld",
                         verbatim_env_names: &[],
@@ -11776,6 +11873,7 @@ mod tests {
                     writable_runtime_view_mounts: &[],
                     producer_prepared_mounts: &[],
                     target_channels: &[],
+                    target_sealed_payloads: &[],
                     item_ref: "tool:tests/captured-verifier",
                     thread_id: "T-captured-verifier",
                     verbatim_env_names: &[],
@@ -11918,6 +12016,7 @@ mod tests {
                     writable_runtime_view_mounts: &[],
                     producer_prepared_mounts: &[],
                     target_channels: &[],
+                    target_sealed_payloads: &[],
                     item_ref: "tool:tests/captured-verifier",
                     thread_id: "T-captured-verifier",
                     verbatim_env_names: &[],
@@ -12120,6 +12219,7 @@ mod tests {
                 writable_runtime_view_mounts: &[],
                 producer_prepared_mounts: &[],
                 target_channels: std::slice::from_ref(&channel),
+                target_sealed_payloads: &[],
                 item_ref: "worker:tests/channel",
                 thread_id: "T-channel",
                 verbatim_env_names: &[],
@@ -12229,6 +12329,7 @@ mod tests {
                     writable_runtime_view_mounts: &[],
                     producer_prepared_mounts: &[],
                     target_channels: &[],
+                    target_sealed_payloads: &[],
                     item_ref: "graph:tests/native-cow",
                     thread_id: "T-native-cow",
                     verbatim_env_names: &[],
@@ -12358,6 +12459,7 @@ mod tests {
                         writable_runtime_view_mounts: &[],
                         producer_prepared_mounts: &[],
                         target_channels: &[],
+                        target_sealed_payloads: &[],
                         item_ref: "tool:tests/containment",
                         thread_id: "T-containment",
                         verbatim_env_names: &[],
@@ -12434,6 +12536,7 @@ mod tests {
             writable_runtime_view_mounts: &[],
             producer_prepared_mounts: &[],
             target_channels: &[],
+            target_sealed_payloads: &[],
             item_ref: "tool:tests/attachment",
             thread_id: "T-attachment",
             verbatim_env_names: &[],
@@ -12496,6 +12599,7 @@ mod tests {
             writable_runtime_view_mounts: &[],
             producer_prepared_mounts: &[],
             target_channels: &[],
+            target_sealed_payloads: &[],
             item_ref: "tool:tests/attachment",
             thread_id: "T-attachment",
             verbatim_env_names: &[],
@@ -12549,6 +12653,7 @@ mod tests {
             writable_runtime_view_mounts: &[],
             producer_prepared_mounts: &[],
             target_channels: &[],
+            target_sealed_payloads: &[],
             item_ref: "tool:tests/live",
             thread_id: "T-live",
             verbatim_env_names: &[],
@@ -12632,6 +12737,7 @@ mod tests {
                     writable_runtime_view_mounts: &[],
                     producer_prepared_mounts: &[],
                     target_channels: &[],
+                    target_sealed_payloads: &[],
                     item_ref: "tool:tests/runtime-workspace",
                     thread_id: "T-runtime-workspace",
                     verbatim_env_names: &[],
@@ -12753,6 +12859,7 @@ mod tests {
             fixed_parent_views: Vec::new(),
             project_workspace: None,
             target_channels: Vec::new(),
+            target_sealed_payloads: Vec::new(),
             environment: IsolationEnvironment {
                 values: BTreeMap::from([("API_TOKEN".to_string(), "first-token".to_string())]),
             },
@@ -12822,6 +12929,7 @@ mod tests {
             fixed_parent_views: Vec::new(),
             project_workspace: None,
             target_channels: Vec::new(),
+            target_sealed_payloads: Vec::new(),
             environment: IsolationEnvironment {
                 values: BTreeMap::new(),
             },
@@ -12871,6 +12979,7 @@ mod tests {
             fixed_parent_views: Vec::new(),
             project_workspace: None,
             target_channels: Vec::new(),
+            target_sealed_payloads: Vec::new(),
             environment: IsolationEnvironment {
                 values: BTreeMap::new(),
             },

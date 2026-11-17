@@ -52,6 +52,7 @@ pub mod external_content_products;
 pub mod external_content_rebind;
 pub mod external_content_release;
 pub mod external_content_scrub;
+pub mod external_content_unregister;
 pub mod external_execution_candidate_program;
 pub mod external_execution_channel;
 pub mod external_execution_product_program;
@@ -246,6 +247,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     external_content_rebind::REBIND_DESCRIPTOR,
     external_content_release::DESCRIPTOR,
     external_content_scrub::DESCRIPTOR,
+    external_content_unregister::DESCRIPTOR,
     external_execution_candidate_program::DESCRIPTOR,
     external_execution_product_program::DESCRIPTOR,
     external_execution_channel::DESCRIPTOR,

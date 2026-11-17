@@ -452,6 +452,9 @@ impl ProductQualificationConsumerContentIdentity {
             }
         }
         validate_session_process_environment(&self.process_environment)?;
+        crate::external_execution::admission::ensure_no_delivered_secrets(
+            &self.process_environment,
+        )?;
         for value in self.process_environment.values() {
             if let SessionProcessEnvironmentValue::RealizationPath { realization_id, .. } = value
                 && !realization_ids.contains(realization_id.as_str())

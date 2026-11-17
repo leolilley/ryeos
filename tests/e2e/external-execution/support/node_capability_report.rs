@@ -89,6 +89,7 @@ pub fn signed_report(
         capacity: BTreeMap::new(),
         floor,
         established_residency: None,
+        in_place_roots: BTreeMap::new(),
     }
     .sign(signer.signing_key())
     .expect("sign the fixture report")

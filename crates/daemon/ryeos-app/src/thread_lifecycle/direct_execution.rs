@@ -1179,6 +1179,35 @@ impl PreparedItemPlan {
         Ok(())
     }
 
+    /// Add the per-realization descriptor delivery document after the
+    /// realization set, root and delivery are bound. It names the files the
+    /// trusted consumer receives as inherited descriptors instead of finding
+    /// them in the runtime view, so it is meaningful only beside a bound set.
+    pub fn bind_persistent_session_external_descriptors(
+        &mut self,
+        descriptors: &str,
+    ) -> Result<()> {
+        let spec = first_subprocess_spec_mut(&mut self.plan)?;
+        if !spec.env.contains_key("RYEOS_EXTERNAL_REALIZATIONS") {
+            bail!("persistent-session external descriptors require a bound realization set");
+        }
+        if spec
+            .env
+            .insert(
+                ryeos_state::objects::EXTERNAL_REALIZATION_DESCRIPTORS_ENV.to_owned(),
+                descriptors.to_owned(),
+            )
+            .is_some()
+        {
+            bail!("persistent-session plan attempts to override external descriptors");
+        }
+        spec.env_sources.insert(
+            ryeos_state::objects::EXTERNAL_REALIZATION_DESCRIPTORS_ENV.to_owned(),
+            RuntimeEnvSource::EnginePlan,
+        );
+        Ok(())
+    }
+
     /// Add the operational realization-set binding after recovering the
     /// admitted plan. The session channel is carried separately as typed
     /// isolation authority and never written into the authored subprocess
@@ -1852,6 +1881,7 @@ impl PreparedItemPlan {
         >,
         inherited_fds: Vec<lillux::InheritedDescriptorAuthority>,
         target_channels: Vec<ryeos_engine::isolation::IsolationTargetChannelAuthority>,
+        target_sealed_payloads: Vec<ryeos_engine::isolation::IsolationTargetSealedPayloadAuthority>,
         lifecycle: &ryeos_state::objects::PersistentSessionLifecycleContract,
         workspace_authority: ryeos_engine::protocols::descriptor::PersistentSessionWorkspaceAuthority,
         network_authority: ryeos_engine::protocols::descriptor::PersistentSessionNetworkAuthority,
@@ -2003,6 +2033,7 @@ impl PreparedItemPlan {
             isolation_external_read_only_mounts: external_mounts,
             isolation_writable_runtime_view_mounts: writable_runtime_view_mounts,
             isolation_target_channels: target_channels,
+            isolation_target_sealed_payloads: target_sealed_payloads,
             isolation_workspace: Some(workspace.to_path_buf()),
             subprocess_limits: Some(lillux::SubprocessLimits {
                 max_open_files: None,
@@ -3804,6 +3835,7 @@ pub fn spawn_item(
             isolation_external_read_only_mounts,
             isolation_writable_runtime_view_mounts: Vec::new(),
             isolation_target_channels,
+            isolation_target_sealed_payloads: Vec::new(),
             isolation_workspace,
             subprocess_limits: plan
                 .subprocess_limits
@@ -5106,6 +5138,51 @@ mod tests {
         assert_eq!(
             spec.env_sources.get("RYEOS_ADMITTED_SOURCE"),
             Some(&RuntimeEnvSource::EnginePlan)
+        );
+    }
+
+    #[test]
+    fn persistent_session_binds_descriptor_delivery_only_beside_a_realization_set() {
+        let root = Path::new("/ryeos/private-runtime-view");
+        let mut prepared = prepared_plan(portable_direct_plan(root));
+        let document = "{\"realizations\":{\"harness\":9},\"schema\":\"ryeos.external_realization_descriptors.v1\"}";
+        assert!(
+            prepared
+                .bind_persistent_session_external_descriptors(document)
+                .is_err()
+        );
+        prepared
+            .bind_persistent_session_spawn_environment(
+                Some("[]"),
+                Some(root),
+                Some(ryeos_state::objects::ExternalRealizationDelivery::PrivateDescriptorRoot),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        prepared
+            .bind_persistent_session_external_descriptors(document)
+            .unwrap();
+        let ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } =
+            &prepared.plan.nodes[0]
+        else {
+            panic!("fixture must dispatch");
+        };
+        assert_eq!(
+            spec.env
+                .get("RYEOS_EXTERNAL_DESCRIPTORS")
+                .map(String::as_str),
+            Some(document)
+        );
+        assert_eq!(
+            spec.env_sources.get("RYEOS_EXTERNAL_DESCRIPTORS"),
+            Some(&RuntimeEnvSource::EnginePlan)
+        );
+        assert!(
+            prepared
+                .bind_persistent_session_external_descriptors(document)
+                .is_err()
         );
     }
 

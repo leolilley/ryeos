@@ -7,6 +7,7 @@
 //! no product selector grants another owner's bytes or ambient filesystem access.
 
 use std::ffi::OsStr;
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context as _, bail};
@@ -53,6 +54,27 @@ pub enum ImportStorage {
     LargeContent,
 }
 
+/// Whether an imported large file is copied into the store or held where
+/// the root keeps it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportHold {
+    /// Hold the file by reference, in place. The root must be declared in
+    /// place by node policy and proven at an accepted grade.
+    InPlace,
+    /// Copy the bytes into the store, whatever the root declares.
+    Owned,
+}
+
+impl ImportHold {
+    fn label(self) -> &'static str {
+        match self {
+            Self::InPlace => "in_place",
+            Self::Owned => "owned",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FilesystemImportRequest {
@@ -63,6 +85,10 @@ pub struct FilesystemImportRequest {
     pub maximum_bytes: u64,
     #[serde(default)]
     pub expected_file_sha256: Option<String>,
+    /// Absent, the root's own declaration decides: a root declared in place
+    /// holds by reference, any other copies.
+    #[serde(default)]
+    pub hold: Option<ImportHold>,
 }
 
 /// Source selection is explicit and closed. Neither a snapshot hash nor a
@@ -340,8 +366,13 @@ async fn import_filesystem(
     if root_policy.root_identity != root_identity {
         bail!("external-content import root filesystem identity changed");
     }
+    let hold = resolve_import_hold(&request, root_policy)?;
+    if let ResolvedHold::InPlace { accept } = &hold {
+        require_in_place_proof(&request, &root_policy.path, accept)?;
+    }
     let request_digest = import_request_digest(
         &request,
+        hold.label(),
         &policy.limits,
         &root_identity,
         state.ignore_matcher.as_ref(),
@@ -358,14 +389,21 @@ async fn import_filesystem(
     } else {
         policy.limits.max_entries
     };
+    // A file held in place writes no bytes to the state filesystem: it needs
+    // room for the manifest, a sidecar and a record, and counts nothing
+    // against the large-store budget.
+    let in_place = matches!(hold, ResolvedHold::InPlace { .. });
+    if in_place {
+        large_store.require_reference_root(&request.root, &root_identity)?;
+    }
     require_import_store_capacity(
         "external-content CAS",
         cas.filesystem_capacity()?,
         policy.limits.minimum_free_bytes,
-        request.maximum_bytes,
+        if in_place { 0 } else { request.maximum_bytes },
         maximum_entries,
     )?;
-    if request.storage == ImportStorage::LargeContent {
+    if request.storage == ImportStorage::LargeContent && !in_place {
         require_import_store_capacity(
             "external-content large store",
             large_store.filesystem_capacity()?,
@@ -374,7 +412,7 @@ async fn import_filesystem(
             maximum_entries,
         )?;
     }
-    if request.storage == ImportStorage::LargeContent {
+    if request.storage == ImportStorage::LargeContent && !in_place {
         let maximum_store_after = large_store
             .total_stored_bytes()?
             .checked_add(request.maximum_bytes)
@@ -420,6 +458,7 @@ async fn import_filesystem(
             &large_store,
             &mut stage,
             request_digest,
+            in_place.then_some(root_identity),
         )?,
     };
     source_root.ensure_path_binding()?;
@@ -427,6 +466,79 @@ async fn import_filesystem(
     drop(_permit);
     drop(guard);
     Ok(response)
+}
+
+/// How one filesystem import holds its bytes, decided from the request and
+/// the root's declaration in signed node policy.
+enum ResolvedHold {
+    Owned,
+    InPlace { accept: Vec<String> },
+}
+
+impl ResolvedHold {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Owned => ImportHold::Owned.label(),
+            Self::InPlace { .. } => ImportHold::InPlace.label(),
+        }
+    }
+}
+
+fn resolve_import_hold(
+    request: &FilesystemImportRequest,
+    root_policy: &ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportRoot,
+) -> anyhow::Result<ResolvedHold> {
+    let wanted = request.hold.unwrap_or(if root_policy.in_place.is_some() {
+        ImportHold::InPlace
+    } else {
+        ImportHold::Owned
+    });
+    match (wanted, root_policy.in_place.as_ref()) {
+        (ImportHold::Owned, _) => Ok(ResolvedHold::Owned),
+        (ImportHold::InPlace, None) => bail!(
+            "external-content import root `{}` is not declared for use in place by node policy",
+            request.root
+        ),
+        (ImportHold::InPlace, Some(policy)) => {
+            if request.shape != ImportShape::File {
+                bail!(
+                    "a tree cannot be held in place: only whole files are served by reference, so \
+                     a tree import from root `{}` is refused; import it with hold `owned`",
+                    request.root
+                );
+            }
+            if request.storage != ImportStorage::LargeContent {
+                bail!("only large-content storage can hold a file in place");
+            }
+            Ok(ResolvedHold::InPlace {
+                accept: policy.accept.clone(),
+            })
+        }
+    }
+}
+
+/// Re-measure the root now and require the proof to meet the grades the
+/// root's declaration accepts. Nothing is copied on trust of an earlier
+/// measurement.
+fn require_in_place_proof(
+    request: &FilesystemImportRequest,
+    root_path: &Path,
+    accept: &[String],
+) -> anyhow::Result<()> {
+    let facts = lillux::process_control::ImmutableRootFacts::observe(root_path);
+    let evidence = lillux::process_control::decide_immutable_root(&facts).map_err(|reason| {
+        anyhow::anyhow!(
+            "root `{}` is not proven immutable, so it cannot hold files in place: {reason}",
+            request.root
+        )
+    })?;
+    lillux::process_control::admit_immutable_root_proof(accept, &evidence).map_err(|reason| {
+        anyhow::anyhow!(
+            "root `{}` is proven immutable only at a grade its declaration does not accept: \
+             {reason}",
+            request.root
+        )
+    })
 }
 
 /// Import one already-verified managed-activation component from a node-owned
@@ -475,6 +587,7 @@ pub fn import_managed_activation_component(
         },
         maximum_bytes,
         expected_file_sha256,
+        hold: Some(ImportHold::Owned),
     };
     if maximum_depth > import_policy.limits.max_depth
         || maximum_entries > import_policy.limits.max_entries
@@ -582,6 +695,7 @@ pub fn import_managed_activation_component(
             &large_store,
             &mut stage,
             request_digest,
+            None,
         )?,
     };
     if response.manifest_hash != component.expected_manifest_hash
@@ -1181,6 +1295,52 @@ fn settle_current_binding_receipt(
     stage.finish_admitted(guard, binding_hash)
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnregisterRequest {
+    pub file_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnregisterResponse {
+    pub file_sha256: String,
+    /// A reference record existed and was removed. The file it named is not
+    /// touched.
+    pub unregistered: bool,
+    /// The object is still resident because the store also owns a copy.
+    pub still_resident_owned: bool,
+}
+
+/// Remove the reference record of one object held in place. The file in the
+/// root is never touched. An execution that holds the object refuses it.
+pub async fn unregister(
+    state: Arc<AppState>,
+    context: HandlerContext,
+    request: UnregisterRequest,
+) -> anyhow::Result<UnregisterResponse> {
+    crate::operator_authority::require_local_configured_operator(&state, &context)?;
+    if !lillux::valid_hash(&request.file_sha256) {
+        bail!("unregister names a large object by its 64-hex sha256");
+    }
+    let authority = state.state_store.pinned_state_authority()?;
+    let _guard = authority.acquire_shared_guard()?;
+    let _permit = state
+        .write_barrier
+        .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
+        .map_err(|error| {
+            anyhow::anyhow!("cannot acquire external-content write permit: {error:#}")
+        })?;
+    let store = authority.large_object_store()?;
+    let unregistered = store.unregister_reference(&request.file_sha256)?;
+    let still_resident_owned = store.has_owned_object(&request.file_sha256)?;
+    Ok(UnregisterResponse {
+        file_sha256: request.file_sha256,
+        unregistered,
+        still_resident_owned,
+    })
+}
+
 pub async fn scrub(state: Arc<AppState>, context: HandlerContext) -> anyhow::Result<ScrubResponse> {
     crate::operator_authority::require_local_configured_operator(&state, &context)?;
     let authority = state.state_store.pinned_state_authority()?;
@@ -1676,6 +1836,7 @@ fn capture_large_import(
     large_store: &ryeos_state::LargeObjectStore,
     stage: &mut ryeos_state::DurableCasUploadStage,
     request_digest: String,
+    hold_in_place: Option<lillux::PinnedDirectoryIdentity>,
 ) -> anyhow::Result<ImportResponse> {
     let bounds = ryeos_state::LargeContentCaptureBounds {
         max_depth: limits.max_depth,
@@ -1695,6 +1856,10 @@ fn capture_large_import(
         cas,
         stage,
         store: large_store,
+        in_place: hold_in_place.map(|root_identity| InPlaceTarget {
+            root_name: request.root.as_str(),
+            root_identity,
+        }),
     };
     let manifest = match request.shape {
         ImportShape::Tree => {
@@ -1918,11 +2083,19 @@ fn resolve_external_content_consumer_from_resolution(
     })
 }
 
+/// The root a large file is held in place in.
+struct InPlaceTarget<'a> {
+    root_name: &'a str,
+    root_identity: lillux::PinnedDirectoryIdentity,
+}
+
 struct DurableLargeSink<'a> {
     guard: &'a ryeos_state::CasMutationGuard,
     cas: &'a lillux::CasStore,
     stage: &'a mut ryeos_state::DurableCasUploadStage,
     store: &'a ryeos_state::LargeObjectStore,
+    /// Set when large files are registered by reference instead of copied.
+    in_place: Option<InPlaceTarget<'a>>,
 }
 
 impl ryeos_state::ExternalLargeContentSink for DurableLargeSink<'_> {
@@ -1933,9 +2106,22 @@ impl ryeos_state::ExternalLargeContentSink for DurableLargeSink<'_> {
         relative_path: &str,
         expected_sha256: Option<&str>,
     ) -> anyhow::Result<ryeos_state::IngestedLargeObject> {
-        let ingested =
-            self.store
-                .ingest_open_regular(file, identity, relative_path, expected_sha256)?;
+        let ingested = match &self.in_place {
+            Some(target) => self.store.register_reference(
+                file,
+                identity,
+                ryeos_state::ReferenceSource {
+                    root_name: target.root_name,
+                    root_identity: target.root_identity,
+                    relative_path,
+                },
+                expected_sha256,
+            )?,
+            None => {
+                self.store
+                    .ingest_open_regular(file, identity, relative_path, expected_sha256)?
+            }
+        };
         self.stage
             .protect_large_object_hash(self.guard, &ingested.file_sha256)?;
         Ok(ingested)
@@ -1966,6 +2152,7 @@ impl ryeos_state::ExternalLargeContentSink for DurableLargeSink<'_> {
 
 fn import_request_digest(
     request: &FilesystemImportRequest,
+    hold: &str,
     limits: &ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportLimits,
     root_identity: &lillux::PinnedDirectoryIdentity,
     configured_ignore: &ryeos_state::ignore::IgnoreMatcher,
@@ -1980,6 +2167,7 @@ fn import_request_digest(
             },
             "maximum_bytes": request.maximum_bytes,
             "expected_file_sha256": request.expected_file_sha256,
+            "hold": hold,
         },
         "selected_root_identity": {
             "logical_name": request.root,
@@ -2061,6 +2249,7 @@ mod tests {
                 storage,
                 maximum_bytes: 4096,
                 expected_file_sha256: None,
+                hold: None,
             };
             let limits =
                 ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportLimits {
@@ -2111,6 +2300,7 @@ mod tests {
                         &large,
                         &mut stage,
                         "a".repeat(64),
+                        None,
                     )
                     .unwrap()
                 }
@@ -2317,6 +2507,67 @@ mod tests {
     }
 
     #[test]
+    fn a_file_from_an_in_place_root_is_held_in_place_and_a_tree_is_refused() {
+        use ryeos_node_runtime::node_policy::sections::external_content::{
+            ExternalContentImportRoot, InPlaceRootPolicy,
+        };
+        let root_identity: lillux::PinnedDirectoryIdentity =
+            serde_json::from_value(serde_json::json!({"filesystem": {"device": 7}, "inode": 11}))
+                .unwrap();
+        let root = |in_place| ExternalContentImportRoot {
+            path: std::path::PathBuf::from("/opt/image"),
+            root_identity,
+            in_place,
+        };
+        let declared = root(Some(InPlaceRootPolicy {
+            accept: vec!["measured".to_owned()],
+        }));
+        let plain = root(None);
+        let request = |shape, storage, hold| FilesystemImportRequest {
+            root: "image".to_owned(),
+            path: "executable".to_owned(),
+            shape,
+            storage,
+            maximum_bytes: 4096,
+            expected_file_sha256: None,
+            hold,
+        };
+        let file = |hold| request(ImportShape::File, ImportStorage::LargeContent, hold);
+        let tree = |hold| request(ImportShape::Tree, ImportStorage::LargeContent, hold);
+
+        // The root's own declaration decides when the request does not.
+        match resolve_import_hold(&file(None), &declared).unwrap() {
+            ResolvedHold::InPlace { accept } => assert_eq!(accept, ["measured"]),
+            ResolvedHold::Owned => panic!("a declared root holds a file in place"),
+        }
+        assert!(matches!(
+            resolve_import_hold(&file(None), &plain).unwrap(),
+            ResolvedHold::Owned
+        ));
+        assert!(matches!(
+            resolve_import_hold(&file(Some(ImportHold::Owned)), &declared).unwrap(),
+            ResolvedHold::Owned
+        ));
+        // A root that did not declare it cannot be asked to hold in place.
+        let error = resolve_import_hold(&file(Some(ImportHold::InPlace)), &plain)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("not declared for use in place"));
+        // A tree is refused rather than half served; owned copies still work.
+        for hold in [None, Some(ImportHold::InPlace)] {
+            let error = resolve_import_hold(&tree(hold), &declared).err().unwrap();
+            assert!(error.to_string().contains("only whole files"), "{error}");
+        }
+        assert!(matches!(
+            resolve_import_hold(&tree(Some(ImportHold::Owned)), &declared).unwrap(),
+            ResolvedHold::Owned
+        ));
+        // Small-content storage never holds in place.
+        let content = request(ImportShape::File, ImportStorage::Content, None);
+        assert!(resolve_import_hold(&content, &declared).is_err());
+    }
+
+    #[test]
     fn import_identity_is_path_free_and_commits_the_open_root_identity() {
         let request = FilesystemImportRequest {
             root: "models".to_owned(),
@@ -2325,6 +2576,7 @@ mod tests {
             storage: ImportStorage::Content,
             maximum_bytes: 4096,
             expected_file_sha256: None,
+            hold: None,
         };
         let limits = ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportLimits {
             max_depth: 8,
@@ -2344,13 +2596,18 @@ mod tests {
             )
             .unwrap()
         };
-        let first = import_request_digest(&request, &limits, &identity(7, 11), &ignore).unwrap();
+        let first =
+            import_request_digest(&request, "owned", &limits, &identity(7, 11), &ignore).unwrap();
         let same_open_root =
-            import_request_digest(&request, &limits, &identity(7, 11), &ignore).unwrap();
+            import_request_digest(&request, "owned", &limits, &identity(7, 11), &ignore).unwrap();
         let rebound_root =
-            import_request_digest(&request, &limits, &identity(8, 11), &ignore).unwrap();
+            import_request_digest(&request, "owned", &limits, &identity(8, 11), &ignore).unwrap();
         assert_eq!(first, same_open_root);
         assert_ne!(first, rebound_root);
+        let in_place =
+            import_request_digest(&request, "in_place", &limits, &identity(7, 11), &ignore)
+                .unwrap();
+        assert_ne!(first, in_place);
     }
 
     #[test]

@@ -1,0 +1,7 @@
+# ryeos:signed:2026-11-16T13:27:47Z:a9858d5335dd8dff76ea45697ffd97757ba792eedca749107d1f69c6baacc16b:glPnlQVYE6mRTpm5lrhdhElf8LAfw1e5GF3/DnwApzRqsLLPWa48Mkbe0M9NnNvFuZSEzvomDZ0W2v8ajbbHCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: external-content.unregister
+required_caps: ["ryeos.execute.service.external-content/unregister"]
+schema:
+  file_sha256: string
+description: "Remove the reference record of one large object held in place by an import root; the file in the root is never touched, and a lease held by a running execution refuses it"

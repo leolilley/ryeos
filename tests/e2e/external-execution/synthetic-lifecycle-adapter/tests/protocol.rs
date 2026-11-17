@@ -396,6 +396,7 @@ fn install_live_engine(
                 ExternalContentImportRoot {
                     path: grant.archive_root.clone(),
                     root_identity,
+                    in_place: None,
                 },
             );
             ManagedExternalContentPolicy {
@@ -409,7 +410,7 @@ fn install_live_engine(
         },
     };
     let import_policy = ExternalContentImportPolicyRecord {
-        schema: 1,
+        schema: 2,
         roots,
         declared_roots: std::collections::BTreeMap::new(),
         limits: ExternalContentImportLimits {
@@ -657,6 +658,7 @@ fn install_active_test_credential_profile(state: &ryeos_app::state::AppState) {
     state
         .state_store
         .create_credential_profile(ryeos_app::runtime_db::NewCredentialProfile {
+            activation: ryeos_app::runtime_db::CredentialActivation::Ceremony,
             profile_id,
             owner_principal: &operator.principal_id(),
             home_id,
@@ -5500,6 +5502,7 @@ async fn run_production_tls_candidate(
             start_lifeline,
             Some(&start_state_root),
             &runtime_environment,
+            ryeos_engine::contracts::DeliveredSecretEnv::empty(),
             Vec::new(),
             &identity,
             observation_sink,

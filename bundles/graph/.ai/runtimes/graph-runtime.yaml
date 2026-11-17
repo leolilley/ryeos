@@ -1,9 +1,10 @@
-# ryeos:signed:2026-09-08T05:52:57Z:05a082c0861bd163f41462aff22036188e5772b9274c3e0678aab550640ad308:s+4qEj5uMb8l+0O2SUtrQ1ivh2T7Ywm7OmHSyJO4zQwQwXtGtUpm0o51uQ4LPISXOj+gcjhBv1jO6Agw2tMnDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T13:20:31Z:dd42b95c77348c77edbfbc3fb288f4d52db433190d63122434e213dbada0b088:FvmiHVIe+TwUXnlu9CPOLhzgQlvV9w3YEHxWr82Ti19GAnfYgyg3Q4wbwP6LNc9dqHtYCi9vpMO0vyyMdhBVAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: runtime
 serves: graph
 default: true
 binary_ref: bin/x86_64-unknown-linux-gnu/ryeos-graph-runtime
 abi_version: "v3"
+writes_child_lineage: true
 required_caps:
   - runtime.execute
 launch_contract:
@@ -57,6 +58,7 @@ launch_contract:
     max_contributions: 0
     max_targets_per_contribution: 0
     max_variables_per_contribution: 0
+    max_delivered_secrets: 0
   financial_authority:
     kind: none
   external_effect_authority:

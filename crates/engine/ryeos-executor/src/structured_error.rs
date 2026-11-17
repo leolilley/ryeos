@@ -268,7 +268,14 @@ impl From<&crate::dispatch_error::DispatchError> for StructuredErrorPayload {
                     Some(quarantined) => {
                         Self::generic(public_error.code(), quarantined.to_string())
                     }
-                    None => Self::generic(public_error.code(), public_error.to_string()),
+                    None => {
+                        match crate::dispatch_error::refused_reference_large_object(public_error) {
+                            Some(refused) => {
+                                Self::generic(public_error.code(), refused.to_string())
+                            }
+                            None => Self::generic(public_error.code(), public_error.to_string()),
+                        }
+                    }
                 },
             },
         };

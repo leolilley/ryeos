@@ -412,6 +412,7 @@ mod tests {
                 writable_runtime_view_mounts: &[],
                 producer_prepared_mounts: &[],
                 target_channels: &[],
+                target_sealed_payloads: &[],
                 item_ref: "tool:test",
                 thread_id: "env-probe-test",
                 verbatim_env_names: &[],

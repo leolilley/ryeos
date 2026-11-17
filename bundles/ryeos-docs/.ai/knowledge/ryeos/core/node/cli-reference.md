@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-16T21:12:48Z:8781c55bdf2d19bc23cd6477d621376efdba051229ac9a4aa7a9dd7613e362b2:xxwYpdN8FICvitVUanp6N4cry6qhKzx8no/Q9HL/tUEuRVG10aRNGjAsJ6BvJRSIvT7gqs56oxOUVaxTI09zDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-17T01:35:34Z:82cd443223607c8d11a98dd2df0eaf9a3570c782a7b010fbef2cc8abf4b66e38:hxWgtWhaBCx5eyrabXrBBuYAaPAHUhGBuH1lLGb6iZgLilG95JceIAltgOFvSO1D8U3+00H3u9zCg8vg/s1AAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -449,6 +449,30 @@ operator discards them with the daemon stopped:
 ```bash
 ryeos node large-objects purge-quarantine [--dry-run | --confirm]
 ```
+
+An object held in place by reference is quarantined by name: scrub writes a
+marker that condemns the exact reference record it read, and nothing is moved,
+because the file belongs to its import root. The marker holds no bytes and
+counts nothing against the budget; the same purge removes it, and the file in
+the root is never touched. Re-registering the object after its root's file is
+repaired writes a new record that the marker no longer condemns.
+
+An import root declared `in_place` in node policy holds large files by
+reference instead of copying them, once the node proves it cannot alter the
+bytes under the root (`ryeos node doctor` reports each such root). Only whole
+files are held in place: a tree import from such a root is refused, and
+`ryeos external-content import ... --hold owned` copies instead. A reference
+leaves the store only through:
+
+```bash
+ryeos external-content unregister <file-sha256>
+```
+
+which removes the record and never the file. If a later node start cannot
+prove the root, or the root or file identity changed, launches that need the
+object refuse by name (`reference_root_unproven`, `reference_root_changed`,
+`reference_file_changed`, `reference_roots_unavailable`, `reference_quarantined`)
+until it is imported again, as owned bytes if need be.
 
 `policy-generation` is the clean-cut path for a node whose complete signed
 policy generation predates the current registered section set. It verifies a

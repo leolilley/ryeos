@@ -21,6 +21,7 @@ pub mod engine_init;
 
 pub mod grant_revocation;
 pub mod identity;
+pub mod in_place_roots;
 pub mod operator_identity;
 
 pub mod remote_delegation;

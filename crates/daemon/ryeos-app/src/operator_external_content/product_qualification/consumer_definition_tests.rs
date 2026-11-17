@@ -364,7 +364,7 @@ fn signed_consumer_environment_requires_its_exact_retained_binding() -> Result<(
     let environment = format!(
         r#"category: test
 version: "1.0.0"
-schema: ryeos.worker_environment.v6
+schema: ryeos.worker_environment.v7
 external_product_slots: []
 worker_ref: worker:codex/external-hosted-authoring
 external_content:

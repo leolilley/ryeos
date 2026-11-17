@@ -1,9 +1,12 @@
-# ryeos:signed:2026-08-24T03:55:19Z:809107a10a83a1476d48785dc85610f4bd3720966fc79697a0eb5af725bd7716:mGCnqjjdt4suwkykRCaHHqdF5uf/NIzTmfEsUMo+RmIx3dKShenKHDXOWBAccsyKdnwd/+P75psoxxR8cmrtBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T09:15:43Z:4788ebdd776cd1a014a44c53fe582345d802375fe63d4611567929a436711901:KwtmArKpwWBjZehux7JneXL+LXRV/37NGrg5M3g1Y/TTSrc/1o2WDNwev2BHxgJSwBmTNMrr4DFn01vCwoF8AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [codex, profile, create]
 description: "Create one node-private Codex credential profile"
 forms:
   - slots:
       - field: profile_id
+defaults:
+  activation:
+    kind: ceremony
 dispatch:
   kind: execute_ref
   execute: service:credential-profiles/create

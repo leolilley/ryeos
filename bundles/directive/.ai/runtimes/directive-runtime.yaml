@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-16T04:15:12Z:349c6f60f5050928435a007d649f31c96b1cafb0622354e35edde09c1deaddc6:ovxAh8SMOpM8nWXvs2GKjk0Nx/z7kgHv7nV/fBj9E0VZDs649vS5x7TvSyQRZ5NTKa1uHsyMjIX9g12RmvFaDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T08:18:29Z:e2a5ae39d6c1f12df201662950f05cc6f921f975a69e146c04a48c45a414f780:1uiNgguXSIBbPrO7K9jea+v5NqbA31SsXWvzlOjg7pKYB01sfxajuiJFlePvPPXqwWc11sDxj7b4oujtKbWkCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: runtime
 serves: directive
 default: true
@@ -99,6 +99,7 @@ launch_contract:
     max_contributions: 0
     max_targets_per_contribution: 0
     max_variables_per_contribution: 0
+    max_delivered_secrets: 0
   financial_authority:
     kind: accounting
   external_effect_authority:

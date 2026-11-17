@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-16T01:40:06Z:cffb8a0c95b1aee27e34f41409045887b9c32e8d4c78efa0564dacd3fb3674cc:CtFSP+jwr7MZ6YlWpfQFlG6Qc3pA9ROmT6XSFQXlo8oA9yRzX6Y6K2CKyIP2CmUsHRfp5S0PcsafjShdFIN/AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T01:35:34Z:016663466f482dfd92cfffdaa0547d51eaf8915f8d2e5135ad2d2636c92bffae:Qoe2dr9vyqiAa+Q9Lb8dQjd+H4H1GMoIF7QWyiE3m9DeSBPzE2/qy6Gdwx/SgblwvWsrox4qDNBhT+nbYQAfCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Bundle-owned conformance tests for the pinned Codex integration data."""
 
 from __future__ import annotations
@@ -770,7 +770,7 @@ class CodexContractTests(unittest.TestCase):
         self.assertEqual(manifest_digest, "f1f39917086d223da68135108afa401fe75d47e2b102ea3f81c699595256bfe5")
         self.assertIn(f"    digest: {manifest_digest}", environment)
         self.assertIn("    - realization_id: command-tools", environment)
-        self.assertIn("schema: ryeos.worker_environment.v6", environment)
+        self.assertIn("schema: ryeos.worker_environment.v7", environment)
         self.assertIn("external_product_slots: []", environment)
         self.assertIn("  process_environment: {}", environment)
         self.assertIn("      relative_directory: bin", environment)

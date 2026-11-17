@@ -2729,6 +2729,9 @@ pub(super) fn resolve_signed_bundle_consumer_environment_definition(
                     bail!("qualification executable search names absent or non-tree content");
                 }
             }
+            ryeos_state::external_execution::admission::ensure_no_delivered_secrets(
+                &process_environment,
+            )?;
             for value in process_environment.values() {
                 let SessionProcessEnvironmentValue::RealizationPath { realization_id, .. } = value
                 else {

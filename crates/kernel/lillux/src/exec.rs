@@ -1966,6 +1966,24 @@ impl InheritedDescriptorAuthority {
         crate::secure_fs::require_effective_user_owned_executable(self.file())
     }
 
+    /// Require this retained descriptor to be a regular file carrying at least
+    /// one executable mode bit. Ownership is not required: a file kept in a
+    /// root the node cannot alter is typically owned by another account.
+    #[cfg(unix)]
+    pub fn require_executable_regular(&self) -> anyhow::Result<()> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let metadata = self.file().metadata()?;
+        anyhow::ensure!(
+            metadata.is_file(),
+            "retained executable descriptor is not a regular file"
+        );
+        anyhow::ensure!(
+            metadata.permissions().mode() & 0o111 != 0,
+            "retained regular file has no executable bit"
+        );
+        Ok(())
+    }
+
     /// Require an owned executable whose contents cannot change after exact
     /// measurement. This checks the retained file, never a diagnostic path.
     pub fn require_write_sealed_executable(&self) -> anyhow::Result<()> {
@@ -2753,6 +2771,10 @@ impl InheritedDescriptorAuthority {
         anyhow::bail!("inherited descriptor inspection is unavailable on this platform")
     }
 
+    pub fn require_executable_regular(&self) -> anyhow::Result<()> {
+        anyhow::bail!("inherited descriptor inspection is unavailable on this platform")
+    }
+
     pub fn require_owned_regular(&self) -> anyhow::Result<crate::secure_fs::OpenFileIdentity> {
         anyhow::bail!("inherited descriptor inspection is unavailable on this platform")
     }
@@ -2990,7 +3012,7 @@ pub(crate) fn configure_command_piped_stdio(command: &mut process::Command) {
     }
 }
 
-fn bind_inherited_channel_to_subprocess_request(
+pub(crate) fn bind_inherited_channel_to_subprocess_request(
     channel: &InheritedDescriptorAuthority,
     request: &mut SubprocessRequest,
     descriptor_env_name: Option<&str>,

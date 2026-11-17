@@ -251,6 +251,7 @@ fn route_handler_fixed_scope_executes_handler_end_to_end() {
     );
     let engine_ctx = EngineContext {
         isolation_target_channels: Vec::new(),
+        isolation_target_sealed_payloads: Vec::new(),
         app_root,
         isolation,
         isolation_project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,

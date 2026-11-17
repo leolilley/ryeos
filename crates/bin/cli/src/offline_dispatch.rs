@@ -790,6 +790,7 @@ fn exec_tool(
                 writable_runtime_view_mounts: &[],
                 producer_prepared_mounts: &[],
                 target_channels: &[],
+                target_sealed_payloads: &[],
                 item_ref: tool_ref_str,
                 thread_id: "offline-cli",
                 verbatim_env_names: &[],

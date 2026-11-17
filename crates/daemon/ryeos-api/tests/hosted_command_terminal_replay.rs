@@ -420,6 +420,7 @@ fn seed_pending_turn_fixture_with_schema(
     state
         .state_store
         .create_credential_profile(NewCredentialProfile {
+            activation: ryeos_app::runtime_db::CredentialActivation::Ceremony,
             profile_id: &profile_id,
             owner_principal: owner,
             home_id: &format!("home-{root}"),
@@ -1790,6 +1791,7 @@ async fn terminal_root_replays_only_exact_authoritatively_settled_command() {
     state
         .state_store
         .create_credential_profile(NewCredentialProfile {
+            activation: ryeos_app::runtime_db::CredentialActivation::Ceremony,
             profile_id: "P-terminal-hosted-replay",
             owner_principal: owner,
             home_id: "home-terminal-hosted-replay",

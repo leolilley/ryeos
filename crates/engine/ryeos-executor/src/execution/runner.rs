@@ -5502,11 +5502,20 @@ pub async fn run_and_wait(
         })?;
     }
     if let Some(parent_thread_id) = params.parent_thread_id.as_deref() {
-        let inherited_stop = match state.state_store.record_child_link(
-            parent_thread_id,
-            &created.thread_id,
-            "dispatch",
-        ) {
+        let linked = state
+            .state_store
+            .record_child_link(parent_thread_id, &created.thread_id, "dispatch")
+            .and_then(|inherited_stop| {
+                // A parent stopped during admission cannot author the
+                // lineage event; the child is stopped below instead.
+                if inherited_stop.is_none() {
+                    state
+                        .threads
+                        .require_dispatch_child_lineage(&created.thread_id)?;
+                }
+                Ok(inherited_stop)
+            });
+        let inherited_stop = match linked {
             Ok(inherited_stop) => inherited_stop,
             Err(error) => {
                 let cleanup = guard
@@ -6570,11 +6579,20 @@ pub async fn run_detached(
         })?;
     }
     if let Some(parent_thread_id) = params.parent_thread_id.as_deref() {
-        let inherited_stop = match state.state_store.record_child_link(
-            parent_thread_id,
-            &created.thread_id,
-            "dispatch",
-        ) {
+        let linked = state
+            .state_store
+            .record_child_link(parent_thread_id, &created.thread_id, "dispatch")
+            .and_then(|inherited_stop| {
+                // A parent stopped during admission cannot author the
+                // lineage event; the child is stopped below instead.
+                if inherited_stop.is_none() {
+                    state
+                        .threads
+                        .require_dispatch_child_lineage(&created.thread_id)?;
+                }
+                Ok(inherited_stop)
+            });
+        let inherited_stop = match linked {
             Ok(inherited_stop) => inherited_stop,
             Err(error) => {
                 let cleanup = guard

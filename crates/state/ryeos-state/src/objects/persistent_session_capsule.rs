@@ -46,7 +46,10 @@ pub const PERSISTENT_SESSION_CAPSULE_KIND: &str = "persistent_session_capsule";
 // runtime-content testimony retains the receiver's own activation join (its
 // receipt, binding and node) beside the origin's evidence. A v24 capsule's
 // acceptance stated a different contract and is not reinterpreted.
-pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 25;
+// v26 adds the `delivered_secret` process-environment kind: the capsule names
+// a secret the session owner's admitted environment authority delivers at
+// session start; the value is never retained.
+pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 26;
 pub const MAX_PERSISTENT_SESSION_CAPSULE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_EXECUTABLE_SEARCH_PATH_ENTRIES: usize = 32;
 pub const MAX_SESSION_PROCESS_ENVIRONMENT_ENTRIES: usize = 32;
@@ -456,7 +459,42 @@ pub enum SessionProcessEnvironmentValue {
     RuntimeViewDirectory {
         relative_path: String,
     },
+    /// A secret named here, delivered at session start under the session
+    /// owner's admitted environment authority. Only the name is retained; the
+    /// value reaches the bridge on a descriptor and never enters the capsule,
+    /// the plan or the prepared environment.
+    DeliveredSecret {
+        name: String,
+    },
 }
+
+impl SessionProcessEnvironmentValue {
+    pub fn delivered_secret_name(&self) -> Option<&str> {
+        match self {
+            Self::DeliveredSecret { name } => Some(name),
+            _ => None,
+        }
+    }
+}
+
+/// The secret names a retained environment asks to have delivered, sorted and
+/// distinct.
+pub fn session_process_environment_delivered_secret_names(
+    environment: &BTreeMap<String, SessionProcessEnvironmentValue>,
+) -> Vec<String> {
+    let names: std::collections::BTreeSet<String> = environment
+        .values()
+        .filter_map(SessionProcessEnvironmentValue::delivered_secret_name)
+        .map(str::to_owned)
+        .collect();
+    names.into_iter().collect()
+}
+
+/// Upper bound on the distinct delivered secrets one session may name.
+pub const MAX_SESSION_DELIVERED_SECRETS: usize = 8;
+/// Upper bound on one delivered secret value. A larger value is refused at
+/// delivery rather than truncated.
+pub const MAX_SESSION_DELIVERED_SECRET_VALUE_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -584,7 +622,21 @@ pub fn validate_session_process_environment(
             SessionProcessEnvironmentValue::RuntimeViewDirectory { relative_path } => {
                 validate_session_process_environment_relative_path(relative_path)?;
             }
+            SessionProcessEnvironmentValue::DeliveredSecret { name } => {
+                validate_session_process_environment_name(name).map_err(|_| {
+                    anyhow::anyhow!(
+                        "session process environment delivered secret name is protected or invalid"
+                    )
+                })?;
+            }
         }
+    }
+    if session_process_environment_delivered_secret_names(environment).len()
+        > MAX_SESSION_DELIVERED_SECRETS
+    {
+        anyhow::bail!(
+            "session process environment names more than {MAX_SESSION_DELIVERED_SECRETS} delivered secrets"
+        );
     }
     let encoded = serde_json::to_vec(environment)?;
     if encoded.len() > MAX_SESSION_PROCESS_ENVIRONMENT_ENCODED_BYTES {
@@ -1138,20 +1190,30 @@ impl AdmittedPersistentSessionCapsule {
         }
         validate_session_process_environment(&self.process_environment)?;
         for value in self.process_environment.values() {
-            let SessionProcessEnvironmentValue::RealizationPath { realization_id, .. } = value
+            let SessionProcessEnvironmentValue::RealizationPath {
+                realization_id,
+                relative_path,
+                path_kind,
+            } = value
             else {
                 continue;
             };
-            if realized
+            let Some(realization) = realized
                 .as_ref()
                 .and_then(|set| set.iter().find(|item| item.id == *realization_id))
-                .is_none_or(|realization| {
-                    realization.kind != super::ExternalContentKind::Tree
-                        || realization.mode != super::ExternalContentMode::Pinned
-                })
+                .filter(|realization| realization.mode == super::ExternalContentMode::Pinned)
+            else {
+                anyhow::bail!(
+                    "session process environment realization `{realization_id}` is absent or not pinned"
+                );
+            };
+            // A file realization has no interior: its only addressable path
+            // is the file itself.
+            if realization.kind == super::ExternalContentKind::File
+                && (relative_path != "." || *path_kind != SessionProcessEnvironmentPathKind::File)
             {
                 anyhow::bail!(
-                    "session process environment realization `{realization_id}` is absent or not a pinned tree"
+                    "session process environment realization `{realization_id}` is a file and can be addressed only as the file itself"
                 );
             }
         }

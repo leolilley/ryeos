@@ -1121,6 +1121,76 @@ pub fn path_pin_open_regular_file(file: &File) -> Result<File> {
     }
 }
 
+/// Register a readable duplicate of an already-open regular file as inherited
+/// child authority. The duplicate names the same inode as `file`; the
+/// original is left untouched, so a lease that owns `file` keeps its own
+/// lifetime.
+pub fn inherited_readable_duplicate_of_open_regular_file(
+    file: &File,
+) -> Result<crate::exec::InheritedDescriptorAuthority> {
+    #[cfg(not(unix))]
+    {
+        let _ = file;
+        anyhow::bail!("inherited descriptor authority is unavailable on this platform");
+    }
+    #[cfg(unix)]
+    {
+        ensure!(
+            file.metadata()?.is_file(),
+            "inherited duplicate source is not a regular file"
+        );
+        let lease = crate::exec::try_retain_fork_sensitive_descriptors()?;
+        let duplicate = file
+            .try_clone()
+            .context("duplicate open regular file for inheritance")?;
+        crate::exec::InheritedDescriptorAuthority::from_owned_file(duplicate, &lease)
+            .map_err(anyhow::Error::msg)
+    }
+}
+
+/// Register a path-only (`O_PATH`) pin of the inode behind an already-open
+/// regular file as inherited authority, for use as a read-only mount source.
+/// The pin names the same inode as `file`, grants no read or write access
+/// and leaves the original descriptor untouched.
+pub fn inherited_path_pin_of_open_regular_file(
+    file: &File,
+) -> Result<crate::exec::InheritedDescriptorAuthority> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = file;
+        anyhow::bail!("path-only descriptor pins are available only on Linux");
+    }
+    #[cfg(target_os = "linux")]
+    {
+        ensure!(
+            file.metadata()?.is_file(),
+            "path pin source is not a regular file"
+        );
+        let expected = observe_open_file_identity(file)?;
+        let source = std::ffi::CString::new(format!("/proc/self/fd/{}", file.as_raw_fd()))
+            .context("descriptor pin path")?;
+        // The registration lease precedes the open: a descriptor created
+        // before its lease would be inheritable by a concurrent fork.
+        let lease = crate::exec::try_retain_fork_sensitive_descriptors()?;
+        // SAFETY: a valid NUL-terminated path; the returned descriptor is
+        // owned exactly once below.
+        let descriptor = unsafe { libc::open(source.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+        if descriptor < 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("pin open regular file as path-only");
+        }
+        // SAFETY: `descriptor` is a newly opened descriptor owned by nobody else.
+        let pin = unsafe { File::from_raw_fd(descriptor) };
+        let actual = observe_open_file_identity(&pin)?;
+        ensure!(
+            actual.device == expected.device && actual.inode == expected.inode,
+            "path pin names another inode"
+        );
+        crate::exec::InheritedDescriptorAuthority::from_owned_file(pin, &lease)
+            .map_err(anyhow::Error::msg)
+    }
+}
+
 /// Classify an already-open descriptor admitted as a mount source.
 pub fn open_mount_entry_kind(file: &File) -> Result<OpenMountEntryKind> {
     let metadata = file.metadata()?;

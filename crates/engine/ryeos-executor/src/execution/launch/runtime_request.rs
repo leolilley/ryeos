@@ -409,6 +409,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         writable_runtime_view_mounts: &[],
         producer_prepared_mounts: &[],
         target_channels: &[],
+        target_sealed_payloads: &[],
         item_ref: &isolation_item_ref,
         thread_id,
         verbatim_env_names: &verbatim_env_names,

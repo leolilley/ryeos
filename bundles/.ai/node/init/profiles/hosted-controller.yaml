@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-14T07:17:08Z:5c8a5ab33ce9e4c46822b422da3afcca1a2d4db6ec2aa0f2ed255ed72c84862a:Yh/UscdecP7Eyj6pdxYe8iCmyH9qjUiRV6542fdrt83bFiASIzd92otezSKIk95ur8ko/QnmoXp+247OiGHVBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T13:27:47Z:fa07d15e1105825e623a9e68a166eea8f39ba6907929f8059d379ca7a738e098:497aYEoInW3Drt310DA6dKit8I4djdvsyJrMByngVKuSFj+3iMY4NZ61mVG4xRU8PKbUQQYr9K+ZVSy+yZSWBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -422,7 +422,7 @@ policies:
       - "node_modules/"
       - "target/"
   external_content:
-    schema: 1
+    schema: 2
     roots: {}
     # A product root the operator stages guest products into. The profile
     # names where it is; init proves what it is (device and inode) and writes
