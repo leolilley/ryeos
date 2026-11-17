@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-17T11:27:00Z:c527c64eb6c1d60d2cbdfc9ccb98e420cd352b1d453ff8ce220834887567373b:FW7GnUNReq6OWy6bmc26Esb1l4yH0WvTX1lq2TDXBgDLEbbxSUet/hhQnFxtezc5LyyWyAeNMP9seV8mQYlFAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-17T17:25:45Z:6dd9bad33e0f9f0105d30ef8190e666e7f9ebf0d95eff8aba926c2413bf76f78:Doft3Me33s52SB8o5BUXbBq6fs0HHgnHv5pG8QM2zfHJcZd7uiz43tybHe1WIDCMSLHA05X/yN4Cpsv1BaNDCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [fundamentals, directives, workflows, prompts]
 version: "2.1.0"
@@ -175,6 +175,9 @@ reserve and `E` the execution's end:
 - hard stop, from `E - R`: any model call in flight is cut, no new turn or tool
   call starts, and the run settles `timed_out` with outcome `deadline`. The
   daemon's own kill at `E` is only the backstop.
+
+A directive's tools are bounded by the directive's end, not its hard stop, so a
+tool already running at the hard stop is not cut until the end.
 
 The model can ask for the clock with the built-in `time_left` tool, which is
 offered only when the run has a deadline. It returns `now_ms`,
