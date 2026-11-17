@@ -254,13 +254,15 @@ impl Driver for StubDriver {
             Some("read_only") => "read_only",
             Some(_) => return Err(RpcError::invalid("access is not admitted")),
         };
+        // `stub.resume` is optional: absent means an ordinary resumable
+        // session; `lost` plants one whose conversation cannot be resumed.
         let unresumable = match params
             .get("stub")
             .filter(|value| !value.is_null())
-            .map(|stub| stub.get("resume").and_then(Value::as_str))
+            .and_then(|stub| stub.get("resume"))
         {
             None => false,
-            Some(Some("lost")) => true,
+            Some(resume) if resume == "lost" => true,
             Some(_) => return Err(RpcError::invalid("stub.resume is not admitted")),
         };
         let mut state = lock(&self.state);
@@ -680,6 +682,12 @@ mod tests {
                 .session_start(&json!({"stub": {"resume": "elsewhere"}}))
                 .is_err()
         );
+        // A stub section without the knob is an ordinary session.
+        let plain = first.session_start(&json!({"stub": {}})).unwrap()["session_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(!plain.starts_with(UNRESUMABLE_ID_PREFIX));
     }
 
     #[test]
