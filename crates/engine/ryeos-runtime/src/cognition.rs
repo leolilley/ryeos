@@ -5,7 +5,8 @@
 //!
 //! - `cognition_in` input: `{origin, parts, kind?, ack?, pinned?}`, or a turn
 //!   marker `{turn, tools_offered?}`;
-//! - `cognition_out`: `{turn, parts, finish, usage?, provider_accounting?}`;
+//! - `cognition_out`: `{turn, parts, finish, usage?, provider_accounting?,
+//!   malformed_calls?}`;
 //! - `tool_call_result`: `{operation_id, call_id, tool, status, parts, guard}`.
 //!
 //! Writers build these types and serialise them; readers parse payloads into
@@ -156,6 +157,20 @@ pub struct CognitionUsage {
     pub output_tokens: u64,
 }
 
+/// A tool call whose streamed argument text did not parse as JSON. The call
+/// part carries a recovered empty object; this record is the fact that the
+/// call must not be dispatched, so a recovery rebuilds the same decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MalformedCall {
+    /// Ordinal of the call among the `tool_call` parts of the turn.
+    pub call_index: u32,
+    /// Byte length of the unparsable argument text.
+    pub raw_len: u64,
+    /// SHA-256 (lowercase hex) of the unparsable argument text.
+    pub sha256: String,
+}
+
 /// A completed or interrupted turn: the assistant message the model produced.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -168,9 +183,20 @@ pub struct CognitionOutPayload {
     pub usage: Option<CognitionUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_accounting: Option<Value>,
+    /// Calls of this turn whose arguments were not valid JSON. Recorded in the
+    /// same event as the turn, so a crash cannot separate them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub malformed_calls: Vec<MalformedCall>,
 }
 
 impl CognitionOutPayload {
+    /// The malformed-argument record for the call at `call_index`, if any.
+    pub fn malformed_call(&self, call_index: usize) -> Option<&MalformedCall> {
+        self.malformed_calls
+            .iter()
+            .find(|call| usize::try_from(call.call_index).ok() == Some(call_index))
+    }
+
     pub fn is_interrupted(&self) -> bool {
         self.finish == FINISH_INTERRUPTED
     }
@@ -188,6 +214,28 @@ impl CognitionOutPayload {
         message.validate()?;
         if self.is_interrupted() && message.tool_calls().next().is_some() {
             bail!("an interrupted cognition_out cannot carry tool calls");
+        }
+        let call_count = message.tool_calls().count();
+        let mut previous: Option<u32> = None;
+        for malformed in &self.malformed_calls {
+            if usize::try_from(malformed.call_index).map_or(true, |index| index >= call_count) {
+                bail!(
+                    "cognition_out malformed call index {} does not name a tool_call part",
+                    malformed.call_index
+                );
+            }
+            if previous.is_some_and(|prior| prior >= malformed.call_index) {
+                bail!("cognition_out malformed calls must be sorted by unique call index");
+            }
+            previous = Some(malformed.call_index);
+            if malformed.sha256.len() != 64
+                || !malformed
+                    .sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                bail!("cognition_out malformed call sha256 must be 64 lowercase hex digits");
+            }
         }
         Ok(())
     }
@@ -417,6 +465,7 @@ mod tests {
             finish: FINISH_INTERRUPTED.to_string(),
             usage: None,
             provider_accounting: None,
+            malformed_calls: Vec::new(),
         };
         assert!(payload.validate().is_err());
     }
@@ -486,6 +535,7 @@ mod tests {
             finish: "tool_calls".to_string(),
             usage: None,
             provider_accounting: None,
+            malformed_calls: Vec::new(),
         };
         assert!(payload.validate().is_err());
     }

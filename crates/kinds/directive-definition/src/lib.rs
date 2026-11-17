@@ -23,8 +23,9 @@ mod effective;
 
 pub use effective::{
     ContinuationConfig, ContinuationEnabled, DIRECTIVE_EFFECTIVE_HEADER_KEYS, DeadlineSpec,
-    DirectiveEffectClass, DirectiveHeader, LimitsSpec, OutputSpec, ReturnNudge,
-    parse_effective_header, resolve_external_effect_authority,
+    DirectiveEffectClass, DirectiveHeader, LimitsSpec, OutputSpec, ProviderContact, ReturnNudge,
+    UnknownOutcomeClass, UnknownOutcomeRetryPolicy, parse_effective_header,
+    resolve_external_effect_authority, unknown_outcome_retry_ceiling,
 };
 
 pub const MODEL_BINDING: &str = "model";
@@ -2006,6 +2007,38 @@ fn resolve_output_ceiling(
             )
         }),
     }
+}
+
+/// Extract the unknown-outcome retry policy from the verified execution
+/// config item. An absent item or block means such outcomes are never retried;
+/// a present block that does not decode strictly or validate is a
+/// configuration error.
+pub fn resolve_unknown_outcome_policy(
+    execution: Option<&VerifiedConfigItem>,
+) -> std::result::Result<Option<UnknownOutcomeRetryPolicy>, DirectivePreparationError> {
+    let Some(item) = execution else {
+        return Ok(None);
+    };
+    let Some(object) = item.value.as_object() else {
+        return Err(DirectivePreparationError::configuration(
+            "execution_config_invalid",
+            "the execution config input must be a mapping",
+        ));
+    };
+    let Some(value) = object.get("unknown_outcome_retry") else {
+        return Ok(None);
+    };
+    let policy: UnknownOutcomeRetryPolicy =
+        serde_json::from_value(value.clone()).map_err(|error| {
+            DirectivePreparationError::configuration(
+                "execution_config_invalid",
+                format!("execution.unknown_outcome_retry is invalid: {error}"),
+            )
+        })?;
+    policy.validate().map_err(|error| {
+        DirectivePreparationError::configuration("execution_config_invalid", format!("{error:#}"))
+    })?;
+    Ok(Some(policy))
 }
 
 fn resolve_target(

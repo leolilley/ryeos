@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T06:46:00Z:ef0da4e9b3f2e5d7e9f9f88a8301d5187d8057cc2cee18ed4434d5e11ffe0ba0:cErDHbUYjgciBE5cLgqroLv8ulN4TGVKNpemuMGBdLjspvKv0RIDyZuEHTeBVrA9NI7cYZTbWtIvPOJl/cEJDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-17T11:18:31Z:8fe1338f53f125bee3fbeb4704c6af9d3e3fec3e9dc199e44ef6d7d53c5a74dd:Tqw23F65gHD4AnKRa9FnnfwrXJo5dpRabrCBhZ/gHcKMTt9PodyGryvvSex7r5C3lHdDaOA9yTGTm6VZQosFAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/state
@@ -92,7 +92,9 @@ policy, and the policy must name each of them exactly once. Every lifecycle,
 audit, launch, terminal and transcript event is always durable; a policy that
 names one is refused. A `cognition_out` streaming fragment (`delta`,
 `tool_use_partial`, mid-stream `tool_use`) is always ephemeral, because the
-turn-complete `cognition_out` is its durable record.
+turn-complete `cognition_out` is its durable record. A durable `provider_retry`
+for the same turn voids the fragments published before it (its `supersedes`
+names how many); a reader that has drawn them must discard them.
 
 Every shipped init profile carries this mapping:
 

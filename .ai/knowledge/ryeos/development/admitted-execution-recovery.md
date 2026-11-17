@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-16T23:12:59Z:80f6a9452756255fdef347ad1d693cba6c6c663f7e5fb6f7eb8017a2a299f0f7:cTTZPVmK3EMZbuUyg0A6o61Cqs3XwZ/XoDCOJHvPeChqdu0O+SjciKiRI5JGeKo7vSi2hbkGExfC/4O0L9P2Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-17T11:14:08Z:0b879d58604c9653b6ed23de39216d6068754ef92568db6db7b3d759d40bdd4c:2MalG6sS4iX4ALOyVaD8N6kWsknZ8ZZsf+NqE9PGUZ6ufuRkc3F+l3pvSq8kGMnYG2T9D5vzKVHGF/hyESbWDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "admitted-execution-recovery"
@@ -178,8 +178,13 @@ consumer must be requalified under the final installed generation; the A/B
 static-input qualifications remain evidence of their earlier verifier runs,
 not current four-slot `native-build` or `core-seed-build` permission.
 
-Dispatch-effect replay moves to operational epoch 17 for the schema-38
-contract. Capsule 38 records the request's live-project intent (`default` or
+Dispatch-effect replay moves to operational epoch 18 for the schema-39
+contract. Capsule 39 seals an unknown-outcome retry ceiling in every
+external-effect authority: the number of leading retries a runtime may issue
+after a provider failure that leaves it unknown whether the provider acted
+(zero unless the directive declares repeatable provider contact on a remote
+transport). Threads admitted under capsule 38 cannot be admitted or resumed
+afterwards, so drain a node before the cut. Capsule 38 records the request's live-project intent (`default` or
 `live`) in every live project authority; an explicit live demand is refused
 where the resolved root is not live. Capsule 37 seals the admitted recipient principal and its own
 scopes into every vault-reading environment authority (project overlay and

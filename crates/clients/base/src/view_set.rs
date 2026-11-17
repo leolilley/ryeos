@@ -144,10 +144,18 @@ pub enum ViewLocalState {
     GenericList {
         cursor: usize,
         scroll: usize,
-        /// Feed sections (turns) the operator has folded shut, by section
-        /// index. Only the timeline lens uses this; row lists leave it empty.
+        /// Sections the operator has folded shut, by section index. Only the
+        /// sections widget uses this; a timeline keys its folds by item id in
+        /// `timeline_folds`.
         #[serde(default)]
         collapsed: BTreeSet<usize>,
+        /// Timeline groups whose fold the operator changed from its default,
+        /// keyed by the group's stable item id so live upserts that insert
+        /// items above it cannot move the choice onto another group. The value
+        /// is the chosen state (true = folded). Only departures from a
+        /// section's default are stored.
+        #[serde(default)]
+        timeline_folds: BTreeMap<String, bool>,
         /// Rows expanded in place, keyed by stable record identity. Tables and
         /// rows widgets use this; feeds ignore it.
         #[serde(default)]
@@ -194,6 +202,7 @@ impl ViewSpec {
             cursor: 0,
             scroll: 0,
             collapsed: BTreeSet::new(),
+            timeline_folds: BTreeMap::new(),
             expanded_rows: BTreeSet::new(),
             collapsed_tree_rows: BTreeSet::new(),
             changed_rows: BTreeMap::new(),

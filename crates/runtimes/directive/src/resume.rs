@@ -43,6 +43,9 @@ pub struct ResumeState {
     /// Exact retry decisions already represented in the current thread braid.
     /// Used only to make testimony append lost-reply recovery idempotent.
     pub provider_retry_testimony_digests: std::collections::BTreeSet<String>,
+    /// Final turns in a row, ending at the latest recorded turn of this exact
+    /// native thread, that ended at the provider's output limit.
+    pub trailing_length_turns: u32,
     /// The latest frame recorded on the path: what the model was given besides
     /// the conversation. `None` when the path recorded none.
     pub frame: Option<CognitionFramePayload>,
@@ -202,6 +205,7 @@ pub async fn load_resume_state(
     // recorded. A predecessor thread's part of the path is what a successor
     // started from, so it is carried the way the successor's start carried it:
     // pinned inputs, then the most recent turns.
+    let trailing_length_turns = trailing_length_turns(&events[own_start..])?;
     let frame = latest_frame(&events)?;
     let predecessor = fold_messages(&events[..own_start])?;
     let own = fold_messages(&events[own_start..])?;
@@ -219,6 +223,7 @@ pub async fn load_resume_state(
         thread_usage,
         result_guard,
         provider_retry_testimony_digests,
+        trailing_length_turns,
         frame,
         deadline_wrap_up_delivered: recover_wrap_up_delivered(&events)?,
     })
@@ -239,6 +244,23 @@ fn recover_wrap_up_delivered(events: &[ReplayedEventRecord]) -> Result<bool> {
         }
     }
     Ok(false)
+}
+
+/// Count the final turns, newest first, that ended at the output limit,
+/// stopping at the first final turn that did not. Derived from the record so
+/// resume needs no separate counter.
+fn trailing_length_turns(events: &[ReplayedEventRecord]) -> Result<u32> {
+    let mut count = 0u32;
+    for event in events.iter().rev() {
+        if final_cognition_turn(event)?.is_none() {
+            continue;
+        }
+        if event.payload.get("finish").and_then(Value::as_str) != Some("length") {
+            break;
+        }
+        count = count.saturating_add(1);
+    }
+    Ok(count)
 }
 
 /// Parse a replayed `tool_call_result` into its typed payload. A payload in
@@ -386,7 +408,8 @@ fn recover_tool_state(
                     );
                 }
                 current_batch = None;
-                let tool_calls = replayed_cognition_out(event)?.message().calls();
+                let cognition = replayed_cognition_out(event)?;
+                let tool_calls = cognition.message().calls();
                 if tool_calls.is_empty() {
                     open.clear();
                     continue;
@@ -421,6 +444,7 @@ fn recover_tool_state(
                             start_recorded: false,
                             counted: false,
                             spawn_counted: false,
+                            malformed: cognition.malformed_call(call_index).cloned(),
                         },
                         source_thread_id: source_thread_id.clone(),
                         settled: false,
@@ -911,6 +935,11 @@ fn recover_provider_retry_testimonies(
             if event.payload.get(field).and_then(Value::as_u64) != Some(expected) {
                 anyhow::bail!("resume: provider_retry {field} contradicts its exact advancement");
             }
+        }
+        if event.payload.get("supersedes")
+            != Some(&crate::runner::retry_supersedes(&advance.decision))
+        {
+            anyhow::bail!("resume: provider_retry supersedes contradicts its exact advancement");
         }
         match by_coordinate.get(&coordinate) {
             Some(prior) if prior != &digest => {
@@ -2685,6 +2714,7 @@ mod tests {
                 "max_retries": 3,
                 "backoff_ms": advance.decision.backoff_ms,
                 "decision_digest": advance.decision_digest,
+                "supersedes": crate::runner::retry_supersedes(&advance.decision),
                 "retry_advance": advance,
             }),
         }
@@ -2777,6 +2807,106 @@ mod tests {
             error
                 .to_string()
                 .contains("outside its active provider turn")
+        );
+    }
+
+    #[test]
+    fn trailing_length_turns_are_derived_from_the_newest_finals() {
+        let event = |event_type: &str, payload: Value| ReplayedEventRecord {
+            event_type: event_type.to_string(),
+            payload,
+        };
+        let length = |turn: u32| {
+            event(
+                "cognition_out",
+                json!({"turn": turn, "parts": text_parts("cut"), "finish": "length"}),
+            )
+        };
+        let stop = |turn: u32| event("cognition_out", out(turn, "done"));
+        let harness_input = event(
+            "cognition_in",
+            json!({"origin": "harness", "kind": "output_limit", "parts": text_parts("continue")}),
+        );
+        let fragment = event("cognition_out", json!({"turn": 3, "delta": "partial"}));
+
+        assert_eq!(trailing_length_turns(&[]).unwrap(), 0);
+        assert_eq!(trailing_length_turns(&[stop(1)]).unwrap(), 0);
+        assert_eq!(
+            trailing_length_turns(&[stop(1), length(2), harness_input.clone()]).unwrap(),
+            1
+        );
+        assert_eq!(
+            trailing_length_turns(&[
+                stop(1),
+                length(2),
+                harness_input.clone(),
+                fragment,
+                length(3)
+            ])
+            .unwrap(),
+            2
+        );
+        // A clean turn after the cuts ends the run of them.
+        assert_eq!(
+            trailing_length_turns(&[length(1), harness_input, stop(2)]).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn retry_supersedes_counts_live_fragments_and_recovery_checks_it() {
+        let mut advance = retry_advance(1, 1, "cut");
+        advance.decision.reason = ryeos_accounting::ProviderRetryReason::MidStream {
+            live_output_events_emitted: 7,
+        };
+        assert_eq!(
+            crate::runner::retry_supersedes(&advance.decision),
+            json!({"turn": 1, "attempt": 1, "output_events": 7})
+        );
+        let status = retry_advance(1, 1, "status");
+        assert_eq!(
+            crate::runner::retry_supersedes(&status.decision)["output_events"],
+            json!(0)
+        );
+
+        let prelude = ReplayedEventRecord {
+            event_type: "cognition_in".to_string(),
+            payload: json!({"turn": 1}),
+        };
+        let sources = vec!["T-current".to_string(); 2];
+        let mut event = retry_event(&status);
+        let accepted = recover_provider_retry_testimonies(
+            &[prelude.clone(), event.clone()],
+            &sources,
+            "T-current",
+            ResumeMode::NativeSameThread,
+        );
+        assert!(accepted.is_ok());
+
+        event.payload["supersedes"]["output_events"] = json!(3);
+        let error = recover_provider_retry_testimonies(
+            &[prelude.clone(), event],
+            &sources,
+            "T-current",
+            ResumeMode::NativeSameThread,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("supersedes contradicts"));
+
+        let mut missing = retry_event(&status);
+        missing
+            .payload
+            .as_object_mut()
+            .unwrap()
+            .remove("supersedes");
+        assert!(
+            recover_provider_retry_testimonies(
+                &[prelude, missing],
+                &sources,
+                "T-current",
+                ResumeMode::NativeSameThread,
+            )
+            .is_err()
         );
     }
 

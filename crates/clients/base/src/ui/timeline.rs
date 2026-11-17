@@ -16,7 +16,7 @@
 //!   streamed text accumulates locally; anything else means the durable
 //!   timeline changed, so the timeline source is refetched.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -69,6 +69,10 @@ pub enum RyeOsTimelineEntryVm {
         /// reports. Most lines carry none.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         secondary_intent: Option<RyeOsUiIntent>,
+        /// The item's state in plain words (underscores as spaces), for the
+        /// accessible label. Lines with no state carry none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<String>,
     },
     Pair {
         summary: String,
@@ -76,6 +80,10 @@ pub enum RyeOsTimelineEntryVm {
         meta: Option<String>,
         tone: RyeOsTone,
         pending: bool,
+        /// The item's state in plain words (underscores as spaces), for the
+        /// accessible label.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<String>,
     },
     Separator {
         label: String,
@@ -85,6 +93,25 @@ pub enum RyeOsTimelineEntryVm {
 /// Decorations the renderers draw around an entry's text; they are not part
 /// of what a screen reader announces or a copy carries.
 const DECORATIONS: [char; 4] = ['✻', '↘', '▍', '▸'];
+
+/// The state word followed by the entry's own detail, so a label reads
+/// "fetch, failed: 404".
+fn with_state(state: Option<&str>, meta: Option<&str>) -> Option<String> {
+    match (state, meta) {
+        (Some(state), Some(meta)) => Some(format!("{state}: {meta}")),
+        (Some(state), None) => Some(state.to_string()),
+        (None, meta) => meta.map(str::to_string),
+    }
+}
+
+/// An item's `state` value as plain words: underscores become spaces.
+fn state_words(entry: &Value) -> Option<String> {
+    entry
+        .get("state")
+        .and_then(Value::as_str)
+        .map(|state| state.replace('_', " "))
+        .filter(|state| !state.trim().is_empty())
+}
 
 impl RyeOsTimelineEntryVm {
     /// The entry's text as a screen reader or a copy receives it: the visible
@@ -103,22 +130,26 @@ impl RyeOsTimelineEntryVm {
         };
         let (text, fallback) = match self {
             Self::Block { text, .. } => (join(&[Some(text.as_str())]), "text"),
-            Self::Line { primary, meta, .. } => {
-                (join(&[Some(primary.as_str()), meta.as_deref()]), "line")
+            Self::Line {
+                primary,
+                meta,
+                state,
+                ..
+            } => {
+                let detail = with_state(state.as_deref(), meta.as_deref());
+                (join(&[Some(primary.as_str()), detail.as_deref()]), "line")
             }
             Self::Pair {
                 summary,
                 meta,
                 pending,
+                state,
                 ..
-            } => (
-                join(&[
-                    Some(summary.as_str()),
-                    meta.as_deref(),
-                    pending.then_some("running"),
-                ]),
-                "step",
-            ),
+            } => {
+                let state = state.as_deref().or(pending.then_some("running"));
+                let detail = with_state(state, meta.as_deref());
+                (join(&[Some(summary.as_str()), detail.as_deref()]), "step")
+            }
             Self::Separator { label } => (join(&[Some(label.as_str())]), "message"),
         };
         if text.is_empty() {
@@ -195,6 +226,34 @@ pub(crate) struct TimelineLayout {
     pub section_parent: Vec<Option<usize>>,
     /// Sections that can be folded (they have a header entry).
     pub collapsible: BTreeSet<usize>,
+    /// Stable fold key per section id: the item id of a cluster or recap, the
+    /// exchange id of a turn. Section ids shift when items are inserted above;
+    /// these keys do not, so an operator's fold choice is stored by key.
+    pub section_keys: Vec<Option<String>>,
+    /// Sections that are folded until the operator opens them: clusters and
+    /// recaps. Exchange sections (the conversation turns) start open.
+    pub starts_collapsed: BTreeSet<usize>,
+}
+
+impl TimelineLayout {
+    /// Whether a section is folded given the operator's departures from the
+    /// defaults (`overrides`: section key to folded).
+    pub(crate) fn section_folded(
+        &self,
+        section: usize,
+        overrides: &BTreeMap<String, bool>,
+    ) -> bool {
+        if !self.collapsible.contains(&section) {
+            return false;
+        }
+        let default = self.starts_collapsed.contains(&section);
+        self.section_keys
+            .get(section)
+            .and_then(Option::as_ref)
+            .and_then(|key| overrides.get(key))
+            .copied()
+            .unwrap_or(default)
+    }
 }
 
 const SUMMARY_MAX: usize = 120;
@@ -276,6 +335,7 @@ fn entry_vm(entry: &Value) -> RyeOsTimelineEntryVm {
                 meta: join_meta(&[tool_meta, detail, badge]),
                 tone,
                 pending: matches!(state, Some("running" | "retrying")),
+                state: state_words(entry),
             }
         }
         "link" => RyeOsTimelineEntryVm::Line {
@@ -288,6 +348,7 @@ fn entry_vm(entry: &Value) -> RyeOsTimelineEntryVm {
                 label: headline.map(str::to_string),
             }),
             secondary_intent: None,
+            state: state_words(entry),
         },
         "outcome" => {
             let label = state.or(headline).unwrap_or("outcome");
@@ -305,6 +366,8 @@ fn entry_vm(entry: &Value) -> RyeOsTimelineEntryVm {
                 tone,
                 intent,
                 secondary_intent: None,
+                // The outcome's own primary text is its state.
+                state: None,
             }
         }
         "marker" => RyeOsTimelineEntryVm::Line {
@@ -316,6 +379,7 @@ fn entry_vm(entry: &Value) -> RyeOsTimelineEntryVm {
             tone,
             intent: None,
             secondary_intent: None,
+            state: state_words(entry),
         },
         "ask" => RyeOsTimelineEntryVm::Line {
             primary: clip(
@@ -330,6 +394,7 @@ fn entry_vm(entry: &Value) -> RyeOsTimelineEntryVm {
             },
             intent: None,
             secondary_intent: None,
+            state: state_words(entry),
         },
         other => RyeOsTimelineEntryVm::Line {
             primary: if other.is_empty() { "item" } else { other }.to_string(),
@@ -337,6 +402,7 @@ fn entry_vm(entry: &Value) -> RyeOsTimelineEntryVm {
             tone,
             intent: None,
             secondary_intent: None,
+            state: state_words(entry),
         },
     }
 }
@@ -391,6 +457,7 @@ fn summary_entry(response: &Value) -> Option<RyeOsTimelineEntryVm> {
         tone: status_tone(status),
         intent: None,
         secondary_intent: None,
+        state: None,
     })
 }
 
@@ -403,6 +470,7 @@ fn older_entry(older: u64, intent: Option<RyeOsUiIntent>) -> RyeOsTimelineEntryV
         tone: RyeOsTone::Neutral,
         intent,
         secondary_intent: None,
+        state: None,
     }
 }
 
@@ -435,6 +503,7 @@ impl LayoutBuilder {
         Self {
             layout: TimelineLayout {
                 section_parent: vec![None],
+                section_keys: vec![None],
                 ..TimelineLayout::default()
             },
             foldable: vec![false],
@@ -446,10 +515,24 @@ impl LayoutBuilder {
         }
     }
 
-    fn new_section(&mut self, parent: Option<usize>, foldable: bool) -> usize {
+    fn new_section(
+        &mut self,
+        parent: Option<usize>,
+        foldable: bool,
+        key: Option<String>,
+        starts_collapsed: bool,
+    ) -> usize {
         self.layout.section_parent.push(parent);
         self.foldable.push(foldable);
-        self.layout.section_parent.len() - 1
+        let section = self.layout.section_parent.len() - 1;
+        // A section whose item has no id still folds, by position.
+        self.layout
+            .section_keys
+            .push(key.or_else(|| foldable.then(|| format!("section:{section}"))));
+        if starts_collapsed {
+            self.layout.starts_collapsed.insert(section);
+        }
+        section
     }
 
     fn push(
@@ -477,7 +560,8 @@ impl LayoutBuilder {
             return;
         }
         self.exchange = exchange.map(str::to_string);
-        self.current = self.new_section(None, exchange.is_some());
+        let key = exchange.map(|id| format!("exchange:{id}"));
+        self.current = self.new_section(None, exchange.is_some(), key, false);
         self.header_pending = true;
     }
 
@@ -518,7 +602,13 @@ impl LayoutBuilder {
     /// A foldable group: a header line, then its members one level deeper. A
     /// recap's members may themselves be clusters, which nest as sub-groups.
     fn group(&mut self, item: &Value, parent: usize, indent: u8) {
-        let section = self.new_section(Some(parent), true);
+        let id = item.get("id").and_then(Value::as_str).unwrap_or("");
+        let section = self.new_section(
+            Some(parent),
+            true,
+            (!id.is_empty()).then(|| format!("item:{id}")),
+            true,
+        );
         let (primary, meta) = match item.get("item").and_then(Value::as_str) {
             Some("recap") => {
                 let work = item.get("work").and_then(Value::as_u64).unwrap_or(0);
@@ -544,6 +634,7 @@ impl LayoutBuilder {
                 tone: RyeOsTone::Neutral,
                 intent: None,
                 secondary_intent: None,
+                state: None,
             },
             indent,
             Some(TimelineEntrySource {
@@ -728,12 +819,14 @@ fn folded_header(entry: &RyeOsTimelineEntryVm) -> RyeOsTimelineEntryVm {
             tone,
             intent,
             secondary_intent,
+            state,
         } => RyeOsTimelineEntryVm::Line {
             primary: format!("{primary} ▸"),
             meta: meta.clone(),
             tone: *tone,
             intent: intent.clone(),
             secondary_intent: secondary_intent.clone(),
+            state: state.clone(),
         },
         other => other.clone(),
     }
@@ -743,13 +836,16 @@ fn folded_header(entry: &RyeOsTimelineEntryVm) -> RyeOsTimelineEntryVm {
 /// entries the renderer can plausibly draw. This keeps transcript render cost
 /// bounded while preserving the cursor's distance-from-bottom semantics.
 ///
+/// `overrides` holds the operator's departures from each section's default
+/// fold, by section key: clusters and recaps start folded, exchanges start open.
+///
 /// An entry is hidden when its own section is folded and it is not that
 /// section's header, or when any ancestor section is folded. The optional
 /// `tail_entry` (the live cognition block) extends the last section.
 pub(crate) fn fold_timeline_window(
     layout: &TimelineLayout,
     tail_entry: Option<RyeOsTimelineEntryVm>,
-    collapsed: &BTreeSet<usize>,
+    overrides: &BTreeMap<String, bool>,
     cursor_from_bottom: usize,
     window: usize,
 ) -> FoldedTimelineWindow {
@@ -764,7 +860,7 @@ pub(crate) fn fold_timeline_window(
             tail_section
         }
     };
-    let is_folded = |section: usize| collapsed.contains(&section) && collapsible.contains(&section);
+    let is_folded = |section: usize| layout.section_folded(section, overrides);
     let is_header_at = |i: usize| i < full.len() && layout.headers[i];
     let is_visible_at = |i: usize| {
         let own = section_at(i);
@@ -929,6 +1025,7 @@ pub(crate) fn live_delta_entry(core: &RyeOsCore) -> Option<RyeOsTimelineEntryVm>
             tone: RyeOsTone::Accent,
             intent: None,
             secondary_intent: None,
+            state: None,
         });
     }
     None
@@ -1067,13 +1164,18 @@ impl RyeOsCore {
                     )),
                 }
             });
-        let fold = fold_section.map(|section| {
-            let folded = matches!(
-                self.mounted_local_state(&instance),
-                Some(crate::view_set::ViewLocalState::GenericList { collapsed, .. })
-                    if collapsed.contains(&section)
-            );
-            (section, folded)
+        let fold = fold_section.and_then(|section| {
+            let (key, default_collapsed) = self.timeline_section_fold(&instance, section)?;
+            let folded = match self.mounted_local_state(&instance) {
+                Some(crate::view_set::ViewLocalState::GenericList { timeline_folds, .. }) => {
+                    timeline_folds
+                        .get(&key)
+                        .copied()
+                        .unwrap_or(default_collapsed)
+                }
+                _ => default_collapsed,
+            };
+            Some((section, folded))
         });
         Some(TimelineFocus {
             instance,
@@ -1082,6 +1184,37 @@ impl RyeOsCore {
             item,
             fold,
         })
+    }
+
+    /// The stable fold key of a timeline section in a mounted view and whether
+    /// that section starts folded. `None` when the view is not a timeline or
+    /// the section is not foldable.
+    pub(crate) fn timeline_section_fold(
+        &self,
+        instance: &crate::ids::RyeOsViewInstanceKey,
+        section: usize,
+    ) -> Option<(String, bool)> {
+        let view_ref = self.mounted_view_ref(instance)?.to_string();
+        let binding = self.binding_for_instance(instance, &view_ref)?;
+        if binding.widget != "timeline" {
+            return None;
+        }
+        let channel = binding.primary_source()?.0;
+        let source_key =
+            super::source_key::RyeOsSourceInstanceKey::named(instance.clone(), channel).encode();
+        let fold_of = |layout: &TimelineLayout| {
+            let key = layout.section_keys.get(section)?.clone()?;
+            Some((key, layout.starts_collapsed.contains(&section)))
+        };
+        match self.data.timeline_sources.get(&source_key) {
+            Some(cache) => fold_of(&cache.layout),
+            None => fold_of(&timeline_layout_for(
+                binding,
+                self.data.sources.get(&source_key)?,
+                instance,
+                &view_ref,
+            )),
+        }
     }
 
     pub(crate) fn focused_timeline_key_state(&self) -> TimelineKeyState {
@@ -1255,6 +1388,53 @@ mod tests {
         timeline_layout(&items, "R-1", lead)
     }
 
+    /// A call the tool presented draws its headline (the page address) with
+    /// the tool's name and detail beside it; one it did not present draws the
+    /// tool's name as the headline, as before. The body is reached by
+    /// expanding the entry.
+    #[test]
+    fn a_presented_call_draws_its_headline_and_keeps_the_tool_beside_it() {
+        let presented = layout(
+            vec![with(
+                entry(
+                    "a",
+                    "activity",
+                    json!({"headline": "https://example.com/a", "tool": "web_fetch",
+                           "detail": "text", "body": "Example Domain", "badge": "80 B"}),
+                ),
+                "state",
+                json!("done"),
+            )],
+            0,
+        );
+        match &presented.entries[0] {
+            RyeOsTimelineEntryVm::Pair { summary, meta, .. } => {
+                assert_eq!(summary, "https://example.com/a");
+                assert_eq!(meta.as_deref(), Some("web_fetch · text · 80 B"));
+            }
+            other => panic!("expected a pair, got {other:?}"),
+        }
+        let plain = layout(
+            vec![with(
+                entry(
+                    "a",
+                    "activity",
+                    json!({"headline": "web_fetch", "detail": "{\"url\":\"u\"}"}),
+                ),
+                "state",
+                json!("done"),
+            )],
+            0,
+        );
+        match &plain.entries[0] {
+            RyeOsTimelineEntryVm::Pair { summary, meta, .. } => {
+                assert_eq!(summary, "web_fetch");
+                assert_eq!(meta.as_deref(), Some("{\"url\":\"u\"}"));
+            }
+            other => panic!("expected a pair, got {other:?}"),
+        }
+    }
+
     fn instance() -> crate::ids::RyeOsViewInstanceKey {
         timeline_core()
             .mounted_instances()
@@ -1332,6 +1512,7 @@ mod tests {
                 meta: Some("42 B".into()),
                 tone: RyeOsTone::Neutral,
                 pending: false,
+                state: Some("done".into()),
             }
         );
         assert!(matches!(
@@ -1414,6 +1595,7 @@ mod tests {
                     label: Some("study".into()),
                 }),
                 secondary_intent: None,
+                state: None,
             }
         );
     }
@@ -1472,16 +1654,25 @@ mod tests {
         assert_eq!(built.section_parent[2], Some(1));
         assert!(built.collapsible.contains(&1) && built.collapsible.contains(&2));
 
-        // Folding the cluster keeps its headline, hides the members, and
-        // marks the headline.
-        let folded = fold_timeline_window(&built, None, &BTreeSet::from([2]), 0, 50).folded;
+        // A cluster starts folded: its headline stays, marked, and its
+        // members are hidden.
+        let folded = fold_timeline_window(&built, None, &BTreeMap::new(), 0, 50).folded;
         assert_eq!(folded.entries.len(), 3);
         assert!(matches!(
             &folded.entries[1],
             RyeOsTimelineEntryVm::Line { primary, .. } if primary == "3 operations ▸"
         ));
+        // Opening the cluster shows its members.
+        let opened = BTreeMap::from([("item:c1".to_string(), false)]);
+        let folded = fold_timeline_window(&built, None, &opened, 0, 50).folded;
+        assert_eq!(folded.entries.len(), 5);
+        assert!(matches!(
+            &folded.entries[1],
+            RyeOsTimelineEntryVm::Line { primary, .. } if primary == "3 operations"
+        ));
         // Folding the exchange hides everything but its header, cluster too.
-        let folded = fold_timeline_window(&built, None, &BTreeSet::from([1]), 0, 50).folded;
+        let shut = BTreeMap::from([("exchange:x1".to_string(), true)]);
+        let folded = fold_timeline_window(&built, None, &shut, 0, 50).folded;
         assert_eq!(folded.entries.len(), 1);
         assert!(matches!(
             &folded.entries[0],
@@ -1525,7 +1716,7 @@ mod tests {
         assert_eq!(built.section_parent[3], Some(2));
         // Folding the recap hides its work, the cluster included, and keeps
         // the message and the answer.
-        let folded = fold_timeline_window(&built, None, &BTreeSet::from([2]), 0, 50).folded;
+        let folded = fold_timeline_window(&built, None, &BTreeMap::new(), 0, 50).folded;
         assert_eq!(folded.entries.len(), 3);
     }
 
@@ -1855,8 +2046,9 @@ mod tests {
             meta: Some("3.2 KiB".into()),
             tone: RyeOsTone::Neutral,
             pending: true,
+            state: None,
         };
-        assert_eq!(pair.label(), "tool fetch, 3.2 KiB, running");
+        assert_eq!(pair.label(), "tool fetch, running: 3.2 KiB");
         let link = layout(
             vec![entry(
                 "l",
@@ -1868,6 +2060,137 @@ mod tests {
         assert_eq!(link.entries[0].label(), "study, T-child");
         let thought = layout(vec![entry("t", "thought", json!({"body": "hmm"}))], 0);
         assert_eq!(thought.entries[0].label(), "hmm");
+    }
+
+    #[test]
+    fn groups_start_collapsed_and_exchanges_stay_open() {
+        let items = vec![
+            with(
+                entry("m", "message", json!({"body": "go"})),
+                "exchange",
+                json!("x1"),
+            ),
+            json!({
+                "item": "cluster", "id": "c1", "headline": "2 operations",
+                "members": [
+                    with(entry("a", "activity", json!({"headline": "one"})), "exchange", json!("x1")),
+                    with(entry("b", "activity", json!({"headline": "two"})), "exchange", json!("x1")),
+                ]
+            }),
+            json!({
+                "item": "recap", "id": "r1", "exchange": "x1", "work": 2, "duration_s": 9,
+                "members": [
+                    with(entry("c", "activity", json!({"headline": "three"})), "exchange", json!("x1")),
+                ]
+            }),
+            with(
+                entry("p", "prose", json!({"body": "done"})),
+                "exchange",
+                json!("x1"),
+            ),
+        ];
+        let built = layout(items, 0);
+        let none = BTreeMap::new();
+        // Section 1 is the exchange, 2 the cluster, 3 the recap.
+        assert!(!built.section_folded(1, &none), "the exchange stays open");
+        assert!(built.section_folded(2, &none), "a cluster starts folded");
+        assert!(built.section_folded(3, &none), "a recap starts folded");
+        let visible = fold_timeline_window(&built, None, &none, 0, 50).folded;
+        let texts: Vec<String> = visible.entries.iter().map(|entry| entry.label()).collect();
+        assert_eq!(
+            texts,
+            vec!["go", "2 operations", "Worked for 9s, 2 steps", "done"]
+        );
+        // An escaped entry sits in the exchange itself and stays visible.
+        assert!(visible.entries.iter().any(|entry| entry.label() == "done"));
+    }
+
+    #[test]
+    fn an_operator_fold_choice_follows_the_item_id_across_a_relayout() {
+        let cluster = json!({
+            "item": "cluster", "id": "c1", "headline": "2 operations",
+            "members": [
+                with(entry("a", "activity", json!({"headline": "one"})), "exchange", json!("x1")),
+                with(entry("b", "activity", json!({"headline": "two"})), "exchange", json!("x1")),
+            ]
+        });
+        let message = with(
+            entry("m", "message", json!({"body": "go"})),
+            "exchange",
+            json!("x1"),
+        );
+        let before = layout(vec![message.clone(), cluster.clone()], 0);
+        let key = before.section_keys[2].clone().expect("a cluster has a key");
+        assert_eq!(key, "item:c1");
+        // The operator opens the cluster; only the departure is stored.
+        let opened = BTreeMap::from([(key, false)]);
+        assert!(!before.section_folded(2, &opened));
+
+        // A live upsert inserts another group above it, shifting section ids.
+        let earlier = json!({
+            "item": "cluster", "id": "c0", "headline": "1 operation",
+            "members": [
+                with(entry("z", "activity", json!({"headline": "zero"})), "exchange", json!("x1")),
+            ]
+        });
+        let after = layout(vec![message, earlier, cluster], 0);
+        let shifted = after
+            .section_keys
+            .iter()
+            .position(|key| key.as_deref() == Some("item:c1"))
+            .expect("the cluster is still laid out");
+        assert_ne!(shifted, 2, "the section id moved");
+        assert!(!after.section_folded(shifted, &opened), "still open");
+        let inserted = after
+            .section_keys
+            .iter()
+            .position(|key| key.as_deref() == Some("item:c0"))
+            .expect("the new group is laid out");
+        assert!(
+            after.section_folded(inserted, &opened),
+            "the new group is folded"
+        );
+    }
+
+    #[test]
+    fn labels_carry_the_state_in_plain_words() {
+        let failed = layout(
+            vec![with(
+                with(
+                    entry(
+                        "a",
+                        "activity",
+                        json!({"headline": "fetch", "detail": "404"}),
+                    ),
+                    "state",
+                    json!("failed"),
+                ),
+                "tone",
+                json!("danger"),
+            )],
+            0,
+        );
+        assert_eq!(failed.entries[0].label(), "fetch, failed: 404");
+        let timed_out = layout(
+            vec![with(
+                entry("a", "activity", json!({"headline": "build"})),
+                "state",
+                json!("timed_out"),
+            )],
+            0,
+        );
+        assert_eq!(timed_out.entries[0].label(), "build, timed out");
+        let marker = layout(
+            vec![with(
+                entry("k", "marker", json!({"headline": "gate"})),
+                "state",
+                json!("waiting"),
+            )],
+            0,
+        );
+        assert_eq!(marker.entries[0].label(), "gate, waiting");
+        let plain = layout(vec![entry("k", "marker", json!({"headline": "gate"}))], 0);
+        assert_eq!(plain.entries[0].label(), "gate");
     }
 
     #[test]

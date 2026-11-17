@@ -51,6 +51,42 @@ pub fn trunc(text: &str, max: usize) -> String {
 }
 
 pub fn plant_provider(root: &Path, base_url: &str, signer: &SigningKey) -> anyhow::Result<()> {
+    plant_provider_priced(root, base_url, signer, false)
+}
+
+/// The stub provider with explicit-free pricing, or (`paid`) with a signed
+/// tariff spend authority so a finite `limits.spend_usd` reserves and charges
+/// money. At the default context window the reserved maximum per attempt is
+/// $0.72768 (727_680_000 nanos).
+pub fn plant_provider_priced(
+    root: &Path,
+    base_url: &str,
+    signer: &SigningKey,
+    paid: bool,
+) -> anyhow::Result<()> {
+    let pricing = if paid {
+        r#"pricing:
+  input_per_million: "2"
+  output_per_million: "10"
+spend_authority:
+  billing_principal: e2e-stub
+  credential_authority_generation: gen-1
+  pricing_contract_subject: e2e-stub-2026-11
+  tariff:
+    schema_version: 1
+    currency: usd
+    pricing_generation: e2e-2026-11
+    input_per_million: "2"
+    output_per_million: "10"
+    covered_dimensions: [input_tokens, output_tokens]
+"#
+    } else {
+        r#"pricing:
+  explicitly_free: true
+  input_per_million: "0"
+  output_per_million: "0"
+"#
+    };
     let dir = root.join(".ai/config/ryeos-runtime/model-providers");
     std::fs::create_dir_all(&dir)?;
     let body = format!(
@@ -69,11 +105,7 @@ schemas:
   streaming:
     mode: delta_merge
   output_limit: {{path: max_tokens, semantics: provider_native_output_tokens}}
-pricing:
-  explicitly_free: true
-  input_per_million: "0"
-  output_per_million: "0"
-"#
+{pricing}"#
     );
     let signed = lillux::signature::sign_content(&body, signer, "#", None);
     std::fs::write(dir.join("stub.yaml"), signed)?;
@@ -115,8 +147,6 @@ accounting:
   failure_policy: auto
   budget_mode: settled
 tool_preload: false
-retry_on_timeout: false
-retry_mid_stream: false
 "#
     )
 }
@@ -192,6 +222,8 @@ pub struct RigOptions {
     pub limits: Option<(u64, u64)>,
     pub nap_seconds: f64,
     pub marker_sleep_seconds: u64,
+    /// Plant the provider with a signed tariff so spend limits reserve money.
+    pub paid_provider: bool,
 }
 
 impl Default for RigOptions {
@@ -203,6 +235,7 @@ impl Default for RigOptions {
             limits: None,
             nap_seconds: 1.0,
             marker_sleep_seconds: 25,
+            paid_provider: false,
         }
     }
 }
@@ -241,6 +274,7 @@ impl Rig {
 pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Rig> {
     let stub = StubServer::start(Script::from_yaml_str(script_yaml)?).await;
     let url = stub.base_url.clone();
+    let paid_provider = opts.paid_provider;
     let spawn_cell: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
     let spawn_cell_tweak = spawn_cell.clone();
     let started_at = Instant::now();
@@ -251,7 +285,9 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
                 state_path,
                 "fixture-stub-model-config",
                 fixture,
-                |bundle_root| plant_provider(bundle_root, &url, &fixture.publisher),
+                |bundle_root| {
+                    plant_provider_priced(bundle_root, &url, &fixture.publisher, paid_provider)
+                },
             )
         };
     let (h, fixture) = DaemonHarness::start_fast_with(plant, move |cmd| {

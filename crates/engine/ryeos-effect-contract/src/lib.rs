@@ -38,6 +38,11 @@ pub struct AdmittedExternalEffectAuthority {
     /// `None` is live execution. Durable classes are explicit and never
     /// inferred from a route name, endpoint, or accounting configuration.
     pub admitted_effect_class: Option<EffectClass>,
+    /// Number of leading retries of one operation the performing runtime may
+    /// issue after an outcome that leaves it unknown whether the external
+    /// system acted. Zero refuses every such retry. The value is mechanical;
+    /// the kind that sealed it owns its meaning.
+    pub unknown_outcome_retry_ceiling: u32,
 }
 
 impl AdmittedExternalEffectAuthority {

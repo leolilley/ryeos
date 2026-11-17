@@ -6637,7 +6637,10 @@ impl AccountingDb {
         // - every other state either remains live or has crossed the durable
         //   Issued boundary. Without a provider-call replay (checked by the
         //   caller before entering the ledger), its external outcome is
-        //   unknown and a second contact is forbidden.
+        //   unknown and a second contact is forbidden unless a stored retry
+        //   advancement exists. The advancement is the only authority; the
+        //   settlement handler decides whether an unknown-outcome failure may
+        //   store one, from the sealed launch authority.
         for predecessor in self.load_reservations_by_coordinate(
             conn,
             args.thread_id,
@@ -15755,6 +15758,110 @@ mod tests {
             ReserveOutcome::Reserved { .. }
         ));
         assert_healthy_verify(&db);
+    }
+
+    #[test]
+    fn unknown_outcome_retry_charges_the_reserved_maximum_and_admits_the_successor() {
+        for (index, reason) in [
+            ryeos_accounting::ProviderRetryReason::MidStream {
+                live_output_events_emitted: 4,
+            },
+            ryeos_accounting::ProviderRetryReason::Timeout,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (_dir, db) = setup();
+            birth(&db, EXEC, None, Some("10"));
+            open_gate(&db, THREAD, GENERATION, EXEC);
+            let authority = reported_authority("a", "0.5", 9, false);
+            let request_hash = lillux::sha256_hex(format!("first-{index}").as_bytes());
+            let attempt_id = reserved_id(
+                &reserve(
+                    &db,
+                    THREAD,
+                    GENERATION,
+                    1,
+                    1,
+                    &request_hash,
+                    &authority,
+                    EXEC,
+                    None,
+                )
+                .unwrap(),
+            );
+            issue(&db, &attempt_id, &request_hash).unwrap();
+            let mut decision = retry_decision(1, 1);
+            decision.reason = reason;
+
+            let settled = db
+                .settle_provider_attempt(
+                    THREAD,
+                    GENERATION,
+                    &attempt_id,
+                    &request_hash,
+                    PROVIDER_COORDINATE_KEY,
+                    &SpendAccounting::Unavailable {
+                        diagnostic: "the response was cut".to_string(),
+                    },
+                    &TokenAccounting::Unavailable,
+                    Some(&decision),
+                    authority.authority_digest.as_str(),
+                    NOW + 10,
+                )
+                .unwrap();
+            let advance = settled
+                .retry_advance
+                .clone()
+                .expect("an unknown-outcome terminal stores its advancement");
+            assert_eq!(advance.decision, decision);
+            let record = db
+                .get_provider_attempt(THREAD, &attempt_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(record.state, AttemptBudgetState::ChargedReservedMaximum);
+            assert_amounts(&db, EXEC, "execution", "0.5", "0");
+
+            let successor_hash = lillux::sha256_hex(format!("second-{index}").as_bytes());
+            assert!(matches!(
+                reserve_with_provider_coordinate_at(
+                    &db,
+                    THREAD,
+                    GENERATION,
+                    1,
+                    2,
+                    &successor_hash,
+                    PROVIDER_COORDINATE_KEY,
+                    &authority,
+                    EXEC,
+                    None,
+                    advance.not_before_ms,
+                )
+                .unwrap(),
+                ReserveOutcome::Reserved { .. }
+            ));
+            // The successor holds a fresh reservation; the abandoned attempt's
+            // charge is not refunded.
+            assert_amounts(&db, EXEC, "execution", "0.5", "0.5");
+
+            open_gate(&db, THREAD, "G-resumed", EXEC);
+            assert_eq!(
+                reserve(
+                    &db,
+                    THREAD,
+                    "G-resumed",
+                    1,
+                    1,
+                    &request_hash,
+                    &authority,
+                    EXEC,
+                    None,
+                )
+                .unwrap(),
+                ReserveOutcome::RetryAdvanced { advance }
+            );
+            assert_healthy_verify(&db);
+        }
     }
 
     #[test]

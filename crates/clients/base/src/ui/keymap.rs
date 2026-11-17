@@ -1023,6 +1023,7 @@ fn initial_list_local_state() -> crate::view_set::ViewLocalState {
         cursor: 0,
         scroll: 0,
         collapsed: std::collections::BTreeSet::new(),
+        timeline_folds: std::collections::BTreeMap::new(),
         expanded_rows: std::collections::BTreeSet::new(),
         collapsed_tree_rows: std::collections::BTreeSet::new(),
         changed_rows: std::collections::BTreeMap::new(),

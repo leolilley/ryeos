@@ -3048,7 +3048,7 @@ impl RyeOsCore {
                     }
                 };
                 let collapsed = match &tile.local {
-                    ViewLocalState::GenericList { collapsed, .. } => collapsed,
+                    ViewLocalState::GenericList { timeline_folds, .. } => timeline_folds,
                     ViewLocalState::None | ViewLocalState::Field(_) => return None,
                 };
                 // A one-entry window around the point: the selected entry's

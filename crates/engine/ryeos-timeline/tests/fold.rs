@@ -974,3 +974,108 @@ fn chunks_image_first_inputs_and_retry_read_only_the_latest_input() {
         "an image-only latest input offers no retry, not an older text"
     );
 }
+
+#[test]
+fn a_provider_retry_marker_names_the_reason_and_any_superseded_output() {
+    let def = definition();
+    let retry = |seq: i64, output_events: u64| {
+        ev(
+            seq,
+            "2026-11-18T00:00:00Z",
+            "T-1",
+            "provider_retry",
+            json!({
+                "turn": 1,
+                "attempt": 1,
+                "backoff_ms": 1000,
+                "supersedes": {"turn": 1, "attempt": 1, "output_events": output_events},
+                "retry_advance": {"decision": {"reason": {"kind": "mid_stream"}}},
+            }),
+        )
+    };
+    let headlines = |evs: &[Value]| -> Vec<String> {
+        let timeline = fold(evs, &def).unwrap();
+        let text = serde_json::to_string(&timeline).unwrap();
+        let mut found = Vec::new();
+        for needle in [
+            "provider retry, attempt 1 · partial output superseded, live events: 4",
+            "provider retry, attempt 1",
+        ] {
+            if text.contains(needle) {
+                found.push(needle.to_string());
+            }
+        }
+        assert!(text.contains("mid_stream"), "{text}");
+        found
+    };
+    let cut = headlines(&[retry(1, 4)]);
+    assert!(cut.contains(
+        &"provider retry, attempt 1 · partial output superseded, live events: 4".to_string()
+    ));
+    let clean = headlines(&[retry(1, 0)]);
+    assert_eq!(clean, vec!["provider retry, attempt 1".to_string()]);
+}
+
+#[test]
+fn a_turn_cut_at_the_output_limit_draws_a_marker() {
+    let def = definition();
+    let cut = ev(
+        1,
+        "2026-11-18T00:00:00Z",
+        "T-1",
+        "cognition_out",
+        json!({
+            "turn": 4,
+            "finish": "length",
+            "parts": [{"type": "text", "text": "partial answer"}],
+        }),
+    );
+    let text = serde_json::to_string(&fold(&[cut], &def).unwrap()).unwrap();
+    assert!(text.contains("turn cut at the output limit · 4"), "{text}");
+    assert!(text.contains("partial answer"), "{text}");
+}
+
+/// A followed child's settlement updates its link: the outcome kind sets the
+/// state and tone, and the result summary becomes the body. A failed child
+/// escapes the run it sits in.
+#[test]
+fn a_settled_child_gives_its_link_the_outcome_and_summary() {
+    let def = definition();
+    let settle = |kind: &str, status: &str| {
+        let b = format!("{:064x}", 2);
+        let evs = vec![
+            ask(&mut 1, T0, "go"),
+            synthetic(
+                2,
+                T1,
+                "child_thread_spawned",
+                json!({"child_thread_id": "T-9", "item_id": "worker", "operation_id": b}),
+            ),
+            synthetic(
+                3,
+                T5,
+                "child_thread_settled",
+                json!({"child_thread_id": "T-9", "follow_key": "f", "status": status,
+                       "outcome_kind": kind, "result_summary": "all done",
+                       "truncated": false, "cost": {"total_usd": 0.25}}),
+            ),
+        ];
+        fold(&evs, &def).unwrap()
+    };
+    let done = settle("completed", "completed");
+    let link = find(&done, "lnk:T-9").expect("link");
+    assert_eq!(link.state.as_deref(), Some("done"));
+    assert_eq!(link.tone.as_deref(), Some("good"));
+    assert_eq!(link.slots["body"], "all done");
+    assert_eq!(link.slots["headline"], "worker");
+    for (kind, status, state, tone) in [
+        ("cancelled", "cancelled", "stopped", "warn"),
+        ("deadline", "timed_out", "timed_out", "danger"),
+        ("worker_failure", "failed", "failed", "danger"),
+    ] {
+        let timeline = settle(kind, status);
+        let link = find(&timeline, "lnk:T-9").expect("link");
+        assert_eq!(link.state.as_deref(), Some(state), "{kind}");
+        assert_eq!(link.tone.as_deref(), Some(tone), "{kind}");
+    }
+}

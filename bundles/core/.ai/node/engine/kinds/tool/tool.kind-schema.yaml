@@ -1,6 +1,6 @@
-# ryeos:signed:2026-11-14T12:59:02Z:d63f09d1cc09b6b21c8b40e8f77e3fca5c3a3aead18d1f63edd28b88bd888d10:jxJ8nsM471tWtIwGr8skI+DDOgF1EXjDINZ6jq6MZ2nN3WD1RsibQ11w+/uxjCrc8mLWRsk17XtUir+srAK9Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T12:51:39Z:13e754d067c91c1a7749b8ae696af3a72dfd2d2d114da0e4308e8ca9b3f25ad2:fIj9Af0RWGO9eEVFcnzQFOVLPVXCt2nhB1mogavkUlePmgW+Lz+aHipiPa3hctk635RwVF+gg5zGx1XQuGtlDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/tool"
-version: "1.5.0"
+version: "1.6.0"
 location:
   directory: tools
   excluded_directories: [lib]
@@ -239,6 +239,13 @@ composed_value_contract:
     host_authority:
       type: single
       prim: string
+    # How the timeline draws a call of this tool: ordered paths over the call's
+    # arguments and result for the headline, detail and body, and a count key.
+    # It is a hint for display, never authority; the timeline service reads it
+    # from the composed value pinned in the call's launch capsule.
+    presentation:
+      type: single
+      prim: mapping
 runtime:
   # Tool invocation selectors remain ordinary schema-validated input. The
   # shared runtime template may project one scalar `params` value into one
@@ -332,6 +339,9 @@ runtime:
     # resolver, not by a runtime handler; ignored here so terminal tools carrying
     # it don't trip UnknownRuntimeBlock during plan compilation.
     - terminal_executor
+    # Display hint read from the pinned composed value by the timeline
+    # service; it is not a runtime-handler block.
+    - presentation
 metadata:
   # Tool YAML files use plain keys (`category`, `version`, etc.). Tool
   # Python files use a comment-YAML `# ryeos-tool:` header that parses
