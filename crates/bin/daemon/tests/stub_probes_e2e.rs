@@ -1042,12 +1042,49 @@ fn full_call_dump(name: &str, log: &str) {
     }
     let (a, b) = (marks[18], marks[24]);
     let t0 = stamp_ms(lines[a]).unwrap_or(0.0);
-    let mut prev = t0;
+    let t_end = stamp_ms(lines[b]).unwrap_or(t0);
+    let mut entries: Vec<(f64, String)> = Vec::new();
+    let mut last = t0;
     for l in &lines[a..b] {
-        let t = stamp_ms(l).unwrap_or(prev);
-        println!("DUMP +{:.0} d{:.0} {}", t - t0, t - prev, trunc(l.splitn(2, "Z ").nth(1).unwrap_or(l), 230));
+        let t = stamp_ms(l).unwrap_or(last);
+        last = t;
+        entries.push((t, trunc(l.splitn(2, "Z ").nth(1).unwrap_or(l), 230)));
+    }
+    if let Ok(times) = STUB_TIMES.lock() {
+        for ms in times.iter() {
+            let t = (*ms % 86_400_000) as f64;
+            if t >= t0 && t <= t_end {
+                entries.push((t, "STUB request arrived".to_string()));
+            }
+        }
+    }
+    entries.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let mut prev = t0;
+    for (t, text) in entries {
+        println!("DUMP +{:.0} d{:.0} {}", t - t0, t - prev, text);
         prev = t;
     }
+}
+
+static STUB_TIMES: std::sync::Mutex<Vec<u128>> = std::sync::Mutex::new(Vec::new());
+
+/// Mean wall time of a bare command, to price spawn and interpreter start
+/// without any daemon in the way.
+fn bare_spawn_ms(name: &str, label: &str, program: &str, args: &[&str]) {
+    let runs = 20u32;
+    let started = Instant::now();
+    let mut ok = true;
+    for _ in 0..runs {
+        ok &= std::process::Command::new(program)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+    }
+    let mean = started.elapsed().as_secs_f64() * 1000.0 / f64::from(runs);
+    say(name, &format!("bare_spawn {label}: mean_ms={mean:.1} ok={ok}"));
 }
 
 fn contention_report(name: &str, raw_log: &str) {
@@ -1171,6 +1208,15 @@ async fn noop_tool_calls_on(n: u64, limits: Option<(u64, u64)>, tmpfs: bool) {
     say(&name, &format!("daemon_exit={daemon_exit:?}"));
     say(&name, &format!("capacity_before={before}"));
     say(&name, &format!("capacity_after={after}"));
+    if let Ok(mut times) = STUB_TIMES.lock() {
+        *times = requests.iter().map(|r| r.received_ms).collect();
+    }
+    if std::env::var("PROBE_RUST_LOG").is_ok() {
+        bare_spawn_ms(&name, "true", "/bin/true", &[]);
+        bare_spawn_ms(&name, "python3 -c pass", "python3", &["-c", "pass"]);
+        bare_spawn_ms(&name, "python3 -c import json,os", "python3", &["-c", "import json,os,sys"]);
+        bare_spawn_ms(&name, "unshare -Urm true", "unshare", &["-Urm", "/bin/true"]);
+    }
     let log = rig.h.stderr_so_far();
     contention_report(&name, &log);
     {
@@ -1226,7 +1272,7 @@ async fn probe_noop_tool_calls_30_trace() {
     unsafe {
         std::env::set_var(
             "PROBE_RUST_LOG",
-            "info,ryeosd=debug,ryeos_executor=debug,ryeos_app=debug,ryeos_api=debug,ryeos_directive_runtime=debug,ryeos_engine=debug,ryeos_state=debug",
+            "info,ryeosd=debug,ryeos_executor=trace,ryeos_app=debug,ryeos_api=debug,ryeos_directive_runtime=debug,ryeos_engine=debug,ryeos_state=debug",
         )
     };
     noop_tool_calls_on(30, None, true).await;
