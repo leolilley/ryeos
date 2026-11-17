@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-17T08:54:07Z:3df19d5717060d34c010d9919a20e97b8633e50bec486dac0a99790eb2434edc:qXO5EG/vSMlgROcZF0ZKLVLjLjrFslBUP5LoIUoteXeQ8XllSQQTWBpsyMkvz7AXvtJqKuS1Sv1cPr6vj4jMAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T12:51:39Z:076df69313cc5ebf89a6132edb1b077849e17fea12c3047fb9b2728f94d9a626:gYcRAZqvMTOHgQmuI+asVHoGf095am/wBMAJmshPy37RmRClsT1KNUW18hcuEmjP7bbgn3pE2URhtIfNvJnLDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Thread timeline definition: how a chain's events fold into timeline items.
 # Declarative data read by the timeline service; the fold engine names no event type itself.
 category: ryeos/ui/timeline
@@ -6,6 +6,7 @@ version: "1.0.0"
 description: How a chain's events fold into timeline items.
 
 vocabulary:
+  - {key: fetch, one: page, many: pages}
   - {key: other, one: operation, many: operations}
   - {key: system_event, one: system event, many: system events}
 
@@ -250,6 +251,9 @@ events:
           project:
             headline: payload.tool
             detail: {lookup: {event: cognition_out, array: payload.parts, find: [call_id, payload.call_id], get: arguments}}
+          # The call's arguments, for the tool's own presentation paths.
+          inputs:
+            arguments: {lookup: {event: cognition_out, array: payload.parts, find: [call_id, payload.call_id], get: arguments}}
 
   tool_call_result:
     - when: {has: payload.graph_run_id}
@@ -276,9 +280,17 @@ events:
           key: [payload.operation_id]
           when: {eq: [payload.status, ok], has: payload.guard.truncated_reason}
           tone: [{default: warn}]
+        # The result text the model saw, for the tool's own presentation paths.
+        # A cut result is not valid data, so it offers none.
+        - type: activity
+          key: [payload.operation_id]
+          when: {eq: [payload.status, ok], lacks: payload.guard.truncated_reason}
+          inputs: {result: payload.parts.0.text}
 
   # Work in another thread. The child's outcome is not in this chain, so the
-  # link's state is unknown from here.
+  # link's state is unknown from here. The child's own presentation (a tool's
+  # display hints, pinned at its launch) may fill the headline, detail and body
+  # of the activity it runs under; the displaced headline stays as the tool.
   child_thread_spawned:
     - when: {has: payload.node}
       emit:
@@ -286,14 +298,24 @@ events:
           key: [payload.child_thread_id]
           state: unknown
           parent: {type: activity, key: [payload.node, payload.step]}
-          adopt: {thread: payload.child_thread_id, under: {type: activity, key: [payload.node, payload.step]}}
+          adopt:
+            thread: payload.child_thread_id
+            under: {type: activity, key: [payload.node, payload.step]}
+            present:
+              slots: {headline: 300, detail: 300, body: 4000}
+              displace: {headline: tool}
           project: {headline: payload.item_id, target: payload.child_thread_id}
     - emit:
         - type: link
           key: [payload.child_thread_id]
           state: unknown
           parent: {type: activity, key: [payload.operation_id]}
-          adopt: {thread: payload.child_thread_id, under: {type: activity, key: [payload.operation_id]}}
+          adopt:
+            thread: payload.child_thread_id
+            under: {type: activity, key: [payload.operation_id]}
+            present:
+              slots: {headline: 300, detail: 300, body: 4000}
+              displace: {headline: tool}
           project: {headline: payload.item_id, target: payload.child_thread_id}
 
   artifact_published:

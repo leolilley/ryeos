@@ -19,6 +19,7 @@ use ryeos_ui_presentation_contract::seat_control::{UiSeatControlPredecessor, UiS
 const FIELD_PROJECTION_CACHE_MAX_ENTRIES: usize = 128;
 const COMPOSITION_CHECKPOINT_CACHE_MAX_ENTRIES: usize = 32;
 const TIMELINE_CACHE_MAX_ENTRIES: usize = 64;
+const PRESENTATION_CACHE_MAX_ENTRIES: usize = 256;
 
 /// Identity of one original presentation history, not a grant of authority.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -184,6 +185,11 @@ pub(crate) struct ChainFold {
 /// Chain folds, one per chain and definition.
 pub(crate) type TimelineCache = BoundedLru<TimelineCacheKey, Arc<Mutex<ChainFold>>>;
 
+/// A tool's `presentation` block by admitted-launch-capsule hash. A capsule is
+/// content-addressed and immutable, so an entry never goes stale; `None`
+/// records a capsule that carries no block.
+pub(crate) type PresentationCache = BoundedLru<String, Option<serde_json::Value>>;
+
 struct FieldProjectionCache {
     lru: BoundedLru<String, EffectiveProgramProjection>,
 }
@@ -215,6 +221,7 @@ pub struct UiState {
     field_projection_cache: Arc<FieldProjectionCache>,
     composition_checkpoints: Arc<CompositionCheckpointCache>,
     timeline_cache: Arc<TimelineCache>,
+    presentation_cache: Arc<PresentationCache>,
 }
 
 impl Default for UiState {
@@ -233,6 +240,9 @@ impl UiState {
             field_projection_cache: Arc::new(FieldProjectionCache::default()),
             composition_checkpoints: Arc::new(CompositionCheckpointCache::default()),
             timeline_cache: Arc::new(TimelineCache::with_capacity(TIMELINE_CACHE_MAX_ENTRIES)),
+            presentation_cache: Arc::new(PresentationCache::with_capacity(
+                PRESENTATION_CACHE_MAX_ENTRIES,
+            )),
         }
     }
 
@@ -267,6 +277,10 @@ impl UiState {
 
     pub(crate) fn timeline_cache(&self) -> &TimelineCache {
         self.timeline_cache.as_ref()
+    }
+
+    pub(crate) fn presentation_cache(&self) -> &PresentationCache {
+        self.presentation_cache.as_ref()
     }
 
     pub(crate) fn composition_checkpoint_get(

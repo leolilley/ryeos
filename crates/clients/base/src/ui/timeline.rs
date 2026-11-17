@@ -1255,6 +1255,53 @@ mod tests {
         timeline_layout(&items, "R-1", lead)
     }
 
+    /// A call the tool presented draws its headline (the page address) with
+    /// the tool's name and detail beside it; one it did not present draws the
+    /// tool's name as the headline, as before. The body is reached by
+    /// expanding the entry.
+    #[test]
+    fn a_presented_call_draws_its_headline_and_keeps_the_tool_beside_it() {
+        let presented = layout(
+            vec![with(
+                entry(
+                    "a",
+                    "activity",
+                    json!({"headline": "https://example.com/a", "tool": "web_fetch",
+                           "detail": "text", "body": "Example Domain", "badge": "80 B"}),
+                ),
+                "state",
+                json!("done"),
+            )],
+            0,
+        );
+        match &presented.entries[0] {
+            RyeOsTimelineEntryVm::Pair { summary, meta, .. } => {
+                assert_eq!(summary, "https://example.com/a");
+                assert_eq!(meta.as_deref(), Some("web_fetch · text · 80 B"));
+            }
+            other => panic!("expected a pair, got {other:?}"),
+        }
+        let plain = layout(
+            vec![with(
+                entry(
+                    "a",
+                    "activity",
+                    json!({"headline": "web_fetch", "detail": "{\"url\":\"u\"}"}),
+                ),
+                "state",
+                json!("done"),
+            )],
+            0,
+        );
+        match &plain.entries[0] {
+            RyeOsTimelineEntryVm::Pair { summary, meta, .. } => {
+                assert_eq!(summary, "web_fetch");
+                assert_eq!(meta.as_deref(), Some("{\"url\":\"u\"}"));
+            }
+            other => panic!("expected a pair, got {other:?}"),
+        }
+    }
+
     fn instance() -> crate::ids::RyeOsViewInstanceKey {
         timeline_core()
             .mounted_instances()
