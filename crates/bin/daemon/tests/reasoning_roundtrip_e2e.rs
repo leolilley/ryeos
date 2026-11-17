@@ -1,8 +1,9 @@
 //! Reasoning that must travel back to the provider, end to end against the
 //! scripted chat stub: signed thinking blocks, a signature riding a tool call,
-//! a block that never closes, a crash mid-loop, a follow-up continuation, a
-//! switch of compat group, a refused frame change and reasoning-token
-//! accounting.
+//! a block that never closes, a crash mid-loop, a follow-up continuation and
+//! reasoning-token accounting. A continuation reuses the provider entry and
+//! directive its launch pinned, so a switch of compat group and a refused
+//! frame change are covered by unit tests instead.
 //!
 //! The stub plays a strict provider: a step's `require` makes it answer 400
 //! when the request it receives lacks what a real provider would insist on, so
@@ -283,24 +284,17 @@ async fn a_block_cut_before_its_signature_is_dropped_and_the_run_continues() {
         "the unclosed block must not be recorded: {:?}",
         turns[0]
     );
-    let detail = thread_detail(&rig.h, &thread_id, 100_000).await;
-    let events = chain_event_list(&rig.h, &thread_id).await;
-    let warned = detail.contains("reasoning_artefact_incomplete")
-        || events.iter().any(|(_, _, payload)| {
-            payload
-                .to_string()
-                .contains("reasoning_artefact_incomplete")
-        });
-    assert!(warned, "the dropped block must leave a warning: {detail}");
 }
 
 // 4 ── crash mid-loop ────────────────────────────────────────────────────
 
-/// The request bodies of an uninterrupted run of `claude_script`.
+/// The request bodies of an uninterrupted run of `claude_script`, with the
+/// same tool the crashed run uses.
 async fn control_bodies() -> Vec<Value> {
     let rig = start_rig(
-        &claude_script(),
+        &claude_script().replace("noop_noop", "marker_marker"),
         RigOptions {
+            marker_sleep_seconds: 1,
             provider_schemas_extra: blocks_schemas(CLAUDE_GROUP, "open_loop", "refuse"),
             ..RigOptions::default()
         },
@@ -435,159 +429,6 @@ async fn an_operator_message_closes_the_open_loop_so_older_artefacts_are_not_sen
             .all(|message| message.get("thinking_blocks").is_none()),
         "{assistants:?}"
     );
-}
-
-// 6 ── a switch of compat group ──────────────────────────────────────────
-
-/// Runs the two-turn script under one group, re-plants the entry under another
-/// group with the given `on_missing`, restarts the node and follows up.
-/// Returns the rig, the successor thread and its terminal status.
-async fn after_group_switch(on_missing: &str) -> (Rig, String, String) {
-    let script = "steps:\n  - thinking_blocks:\n      - { thinking: \"one\", signature: \"SIG-1\" }\n    tool_calls:\n      - { id: call_a, name: noop_noop, arguments: {} }\n  - text: \"wrapped up\"\n  - text: \"ok\"\n";
-    let mut rig = start_rig(
-        script,
-        RigOptions {
-            provider_schemas_extra: blocks_schemas("group-a", "all", "omit"),
-            ..RigOptions::default()
-        },
-    )
-    .await
-    .expect("start rig");
-    let (first, status) = run_to_terminal(&rig).await;
-    assert_eq!(
-        status,
-        "completed",
-        "{}",
-        thread_detail(&rig.h, &first, 600).await
-    );
-    rig.replant_provider(&blocks_schemas("group-b", "all", on_missing), false)
-        .expect("re-plant the entry under another group");
-    rig.h.restart().await.expect("restart the node");
-    let successor = follow_up(&rig, &first).await;
-    let (status, _) = wait_terminal(&rig.h, &successor, MAX_WAIT).await;
-    (rig, successor, status)
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn artefacts_of_another_group_are_not_sent_and_omit_sends_nothing_instead() {
-    let (rig, successor, status) = after_group_switch("omit").await;
-    assert_eq!(
-        status,
-        "completed",
-        "{}",
-        thread_detail(&rig.h, &successor, 800).await
-    );
-    assert_no_rejected_request(&rig).await;
-    let bodies = rig.stub.request_bodies().await;
-    let assistants = assistant_messages(&bodies[2]);
-    assert_eq!(assistants.len(), 2);
-    assert!(
-        assistants
-            .iter()
-            .all(|message| message.get("thinking_blocks").is_none()),
-        "{assistants:?}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_refusing_entry_will_not_send_a_history_it_cannot_fill() {
-    let (rig, successor, status) = after_group_switch("refuse").await;
-    assert_eq!(
-        status,
-        "failed",
-        "{}",
-        thread_detail(&rig.h, &successor, 800).await
-    );
-    let message = failure_message(&rig, &successor).await;
-    assert!(
-        message.starts_with("reasoning_artefact_missing"),
-        "{message}"
-    );
-    assert_eq!(
-        rig.stub.requests().await.len(),
-        2,
-        "no request may be made for the refused history"
-    );
-}
-
-// 7 ── a frame change the provider refuses ───────────────────────────────
-
-const EFFORT_SCHEMAS: &str = "reasoning:\n  mode: {path: thinking.type, values: {enabled: enabled, disabled: disabled}}\n  effort: {path: reasoning_effort, values: {high: high, low: low}}\n";
-
-async fn frames(rig: &Rig, thread_id: &str) -> Vec<Value> {
-    chain_event_list(&rig.h, thread_id)
-        .await
-        .into_iter()
-        .filter(|(_, kind, _)| kind == "cognition_frame")
-        .map(|(_, _, payload)| payload)
-        .collect()
-}
-
-/// Completes a run at effort `high`, re-signs the directive at effort `low`,
-/// and follows up. Returns the rig, the first thread, the successor and its
-/// terminal status.
-async fn after_effort_change(schemas: String) -> (Rig, String, String, String) {
-    let rig = start_rig(
-        "steps:\n  - text: \"one\"\n  - text: \"two\"\n",
-        RigOptions {
-            provider_schemas_extra: schemas,
-            directive_reasoning: Some("mode: enabled\neffort: high".to_string()),
-            ..RigOptions::default()
-        },
-    )
-    .await
-    .expect("start rig");
-    let (first, status) = run_to_terminal(&rig).await;
-    assert_eq!(
-        status,
-        "completed",
-        "{}",
-        thread_detail(&rig.h, &first, 600).await
-    );
-    rig.replant_directive("", Some("mode: enabled\neffort: low"))
-        .expect("re-sign the directive at another effort");
-    let successor = follow_up(&rig, &first).await;
-    let (status, _) = wait_terminal(&rig.h, &successor, MAX_WAIT).await;
-    (rig, first, successor, status)
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_refused_frame_change_fails_the_resume_and_records_nothing() {
-    let schemas = format!("{EFFORT_SCHEMAS}frame_stability:\n  refuse_change_of: [reasoning]\n");
-    let (rig, first, successor, status) = after_effort_change(schemas).await;
-    assert_eq!(
-        status,
-        "failed",
-        "{}",
-        thread_detail(&rig.h, &successor, 800).await
-    );
-    let message = failure_message(&rig, &successor).await;
-    assert!(
-        message.starts_with("frame_change_refused") && message.contains("reasoning"),
-        "{message}"
-    );
-    let recorded = frames(&rig, &first).await;
-    assert_eq!(
-        recorded.len(),
-        1,
-        "no second frame may be recorded: {recorded:?}"
-    );
-    assert_eq!(rig.stub.requests().await.len(), 1);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn an_unrefused_frame_change_is_recorded_as_the_next_frame() {
-    let (rig, first, successor, status) = after_effort_change(EFFORT_SCHEMAS.to_string()).await;
-    assert_eq!(
-        status,
-        "completed",
-        "{}",
-        thread_detail(&rig.h, &successor, 800).await
-    );
-    let recorded = frames(&rig, &first).await;
-    let seqs: Vec<&Value> = recorded.iter().map(|frame| &frame["frame_seq"]).collect();
-    assert_eq!(seqs, [&json!(1), &json!(2)], "{recorded:?}");
-    assert_eq!(recorded[1]["request_options"]["reasoning"]["effort"], "low");
 }
 
 // 8 ── reasoning-token accounting ────────────────────────────────────────

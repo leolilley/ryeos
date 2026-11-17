@@ -294,49 +294,9 @@ pub struct Rig {
     /// fixture state was ready (just before the daemon was spawned).
     pub spawn_at: Instant,
     pub started_at: Instant,
-    /// The fixture's publisher key, for re-signing planted items.
-    pub publisher: SigningKey,
 }
 
-/// Where the fixture bundle holding the stub provider lives under the node.
-const PROVIDER_BUNDLE: &str = "fixture-stub-model-config";
-
 impl Rig {
-    /// Re-plants the stub provider with different `schemas_extra`, re-signed
-    /// by the fixture publisher. A launch after a node restart sees the new
-    /// entry, and its configuration hash differs from the old one.
-    pub fn replant_provider(&self, schemas_extra: &str, paid: bool) -> anyhow::Result<()> {
-        let root = self
-            .h
-            .state_path
-            .join(ryeos_engine::AI_DIR)
-            .join("bundles")
-            .join(PROVIDER_BUNDLE);
-        plant_provider_with(
-            &root,
-            &self.stub.base_url,
-            &self.publisher,
-            paid,
-            schemas_extra,
-        )
-    }
-
-    /// Re-plants the probe directive, re-signed, with a different reasoning
-    /// policy. The next launch or resume sees the changed model policy.
-    pub fn replant_directive(
-        &self,
-        header_extra: &str,
-        reasoning: Option<&str>,
-    ) -> anyhow::Result<()> {
-        plant_directive_with(
-            self.project.path(),
-            header_extra,
-            None,
-            reasoning,
-            &self.publisher,
-        )
-    }
-
     pub fn marker_path(&self) -> PathBuf {
         self.aux.path().join("marker.log")
     }
@@ -444,7 +404,6 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
         aux,
         spawn_at,
         started_at,
-        publisher: fixture.publisher.clone(),
     })
 }
 
