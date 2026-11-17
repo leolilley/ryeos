@@ -1,10 +1,12 @@
 //! A tool on a runtime that declares `source_scope` runs from a private
-//! admitted-input root and never sees the live project. A schedule fire that
-//! grants live project authority to one is refused with a typed code instead
-//! of exiting 0 with its project writes discarded; a pinned (copy-on-write)
-//! launch of the
-//! same tool runs, and an `@subprocess` tool without `source_scope` still
-//! gets the live project.
+//! admitted-input root and never sees the live project. A request that merely
+//! defaulted to the live project (`project_access: default`) runs it there
+//! and records that it asked for nothing more; a request that explicitly
+//! demanded the live project (`project.intent: live`, CLI `--live-project`,
+//! or a schedule's `live_direct` policy) is refused with a typed code instead
+//! of exiting 0 with its project writes discarded. A pinned (copy-on-write)
+//! launch of the same tool runs, and an `@subprocess` tool without
+//! `source_scope` gets the live project under either request.
 
 use ryeosd::test_support as common;
 
@@ -212,5 +214,138 @@ async fn the_same_tool_runs_pinned_and_a_subprocess_tool_still_writes_live() {
     assert!(
         project.path().join("written-by-subprocess.txt").is_file(),
         "an @subprocess tool without source_scope must write the live project: {body:#}"
+    );
+}
+
+fn explicit_live_policy_json() -> Value {
+    // The body the CLI sends for `ryeos execute --live-project`.
+    let mut policy = serde_json::to_value(ExecutionPolicy::local_live(ExecutionResponse::Wait))
+        .expect("policy json");
+    policy["project"]["intent"] = json!("live");
+    policy
+}
+
+fn intent_of(thread: &Value) -> Option<&str> {
+    thread
+        .pointer("/thread/project_authority/live_access/intent")
+        .and_then(Value::as_str)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_defaulted_live_request_runs_a_sourced_tool_in_its_private_root_and_records_default() {
+    let (h, fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant(project.path(), "py", "py", PYTHON_TOOL, &fixture.user);
+
+    let (status, body) = run(
+        &h,
+        "tool:livecheck/py",
+        project.path(),
+        ExecutionPolicy::local_live(ExecutionResponse::Wait),
+    )
+    .await;
+    assert!(status.is_success(), "defaulted launch: {status}: {body:#}");
+    assert_eq!(
+        body.pointer("/thread/status"),
+        Some(&json!("completed")),
+        "{body:#}"
+    );
+    assert_eq!(
+        intent_of(&body),
+        Some("default"),
+        "the thread records that the request did not ask for the live project: {body:#}"
+    );
+    assert!(
+        !project.path().join("written-by-tool.txt").exists(),
+        "a sourced tool's project writes land in its private root, not the live project"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_explicit_live_policy_is_refused_for_a_sourced_runtime() {
+    let (h, fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant(project.path(), "py", "py", PYTHON_TOOL, &fixture.user);
+
+    let (status, body) = run(
+        &h,
+        "tool:livecheck/py",
+        project.path(),
+        ExecutionPolicy::local_live(ExecutionResponse::Wait)
+            .demand_live_project()
+            .expect("live demand"),
+    )
+    .await;
+    assert!(
+        body.to_string().contains(CODE) || h.stderr_so_far().contains(CODE),
+        "an explicit live demand on a sourced runtime must name {CODE}: {status}: {body:#}"
+    );
+    assert!(
+        body.pointer("/thread/status") != Some(&json!("completed")),
+        "the refused tool must not complete: {status}: {body:#}"
+    );
+    assert!(
+        !project.path().join("written-by-tool.txt").exists(),
+        "the refused tool must not have run"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_cli_live_project_policy_is_refused_for_a_sourced_runtime_and_allowed_for_subprocess() {
+    let (h, fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant(project.path(), "py", "py", PYTHON_TOOL, &fixture.user);
+    plant(
+        project.path(),
+        "sub",
+        "yaml",
+        SUBPROCESS_TOOL,
+        &fixture.user,
+    );
+
+    let (status, body) = h
+        .post_json(
+            "/execute",
+            json!({
+                "item_ref": "tool:livecheck/py",
+                "ref_bindings": {},
+                "project_path": project.path(),
+                "parameters": {},
+                "execution_policy": explicit_live_policy_json(),
+            }),
+        )
+        .await
+        .expect("post /execute");
+    assert!(
+        body.to_string().contains(CODE) || h.stderr_so_far().contains(CODE),
+        "--live-project on a sourced runtime must name {CODE}: {status}: {body:#}"
+    );
+    assert!(!project.path().join("written-by-tool.txt").exists());
+
+    let (status, body) = h
+        .post_json(
+            "/execute",
+            json!({
+                "item_ref": "tool:livecheck/sub",
+                "ref_bindings": {},
+                "project_path": project.path(),
+                "parameters": {},
+                "execution_policy": explicit_live_policy_json(),
+            }),
+        )
+        .await
+        .expect("post /execute");
+    assert!(
+        status.is_success(),
+        "explicit live subprocess: {status}: {body:#}"
+    );
+    assert_eq!(
+        intent_of(&body),
+        Some("live"),
+        "the thread records the explicit demand: {body:#}"
+    );
+    assert!(
+        project.path().join("written-by-subprocess.txt").is_file(),
+        "an @subprocess tool must write the live project under an explicit demand: {body:#}"
     );
 }

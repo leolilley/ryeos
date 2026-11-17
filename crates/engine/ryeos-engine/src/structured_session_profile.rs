@@ -712,6 +712,7 @@ pub fn compile(
         }
     }
     let mut notification_methods = BTreeSet::new();
+    let mut result_notifications = 0usize;
     for item in bounded_array(object, "notifications", 0, 256)? {
         let item = item
             .as_object()
@@ -726,6 +727,9 @@ pub fn compile(
                 "payload",
                 "observations",
                 "ceremony_clear",
+                "result",
+                "result_cost",
+                "result_status",
             ],
             &["upstream_session_pointer"],
         )?;
@@ -740,9 +744,19 @@ pub fn compile(
                 .get("ceremony_clear")
                 .and_then(Value::as_bool)
                 .is_none()
+            || item.get("result").and_then(Value::as_bool).is_none()
         {
             bail!("structured-session notification flags are invalid");
         }
+        if item["result"] == true {
+            result_notifications += 1;
+            if result_notifications > 1 {
+                bail!("structured-session profile marks more than one result notification");
+            }
+            validate_result_notification(item)?;
+        }
+        validate_result_cost(item)?;
+        validate_result_status(item)?;
         validate_template(item.get("payload"), 0, &mut 0)?;
         if let Some(pointer) = item.get("upstream_session_pointer") {
             validate_pointer(
@@ -1907,6 +1921,134 @@ fn validate_predicates(value: Option<&Value>, maximum: usize) -> Result<()> {
     Ok(())
 }
 
+/// A result notification is the execution's result: it must be retained
+/// (durable), its evaluated payload is the result so every pointer in it must
+/// be byte-bounded, and it must carry the `turn_running -> idle` observation
+/// so the result is bound to the turn it completes.
+fn validate_result_notification(item: &serde_json::Map<String, Value>) -> Result<()> {
+    if item["durable"] != true {
+        bail!("structured-session result notification must be durable");
+    }
+    if !template_pointers_are_bounded(&item["payload"]) {
+        bail!("structured-session result notification payload has an unbounded pointer");
+    }
+    let carries_completion =
+        item["observations"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|observation| {
+                let literal = |field: &str, expected: &str| {
+                    observation
+                        .pointer(&format!("/value/fields/{field}"))
+                        .is_some_and(|value| {
+                            *value == serde_json::json!({"op":"literal","value":expected})
+                        })
+                };
+                literal("kind", "state")
+                    && literal("expected", "turn_running")
+                    && literal("next", "idle")
+            });
+    if !carries_completion {
+        bail!(
+            "structured-session result notification must carry the turn_running to idle observation"
+        );
+    }
+    Ok(())
+}
+
+/// `result_cost` is required on every notification and nullable. It declares
+/// where the result payload reports its usage: three JSON pointers (each
+/// nullable) applied to the notification's evaluated durable payload. Only the
+/// result-marked notification may declare it.
+fn validate_result_cost(item: &serde_json::Map<String, Value>) -> Result<()> {
+    let declared = &item["result_cost"];
+    if declared.is_null() {
+        return Ok(());
+    }
+    if item["result"] != true {
+        bail!("structured-session result_cost is only valid on the result notification");
+    }
+    let declared = declared
+        .as_object()
+        .ok_or_else(|| anyhow!("structured-session result_cost must be an object or null"))?;
+    require_keys(
+        declared,
+        &["input_tokens", "output_tokens", "cost_micro_usd"],
+        &[],
+    )?;
+    for pointer in declared.values() {
+        if pointer.is_null() {
+            continue;
+        }
+        validate_pointer(
+            pointer
+                .as_str()
+                .ok_or_else(|| anyhow!("structured-session result_cost pointer is invalid"))?,
+        )?;
+    }
+    Ok(())
+}
+
+/// `result_status` is required on every notification and nullable. It declares
+/// which value of the result payload reports the turn's outcome: a JSON
+/// pointer into the evaluated durable payload and the values that mean the
+/// workload failed (non-empty strings, sorted, distinct, at most 16). Only the
+/// result-marked notification may declare it.
+fn validate_result_status(item: &serde_json::Map<String, Value>) -> Result<()> {
+    let declared = &item["result_status"];
+    if declared.is_null() {
+        return Ok(());
+    }
+    if item["result"] != true {
+        bail!("structured-session result_status is only valid on the result notification");
+    }
+    let declared = declared
+        .as_object()
+        .ok_or_else(|| anyhow!("structured-session result_status must be an object or null"))?;
+    require_keys(declared, &["pointer", "failure_values"], &[])?;
+    validate_pointer(
+        declared["pointer"]
+            .as_str()
+            .ok_or_else(|| anyhow!("structured-session result_status pointer is invalid"))?,
+    )?;
+    let values = declared["failure_values"]
+        .as_array()
+        .filter(|values| !values.is_empty() && values.len() <= 16)
+        .ok_or_else(|| {
+            anyhow!("structured-session result_status failure_values must hold 1 to 16 entries")
+        })?;
+    let mut previous: Option<&str> = None;
+    for value in values {
+        let value = value
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                anyhow!("structured-session result_status failure value must be a non-empty string")
+            })?;
+        if previous.is_some_and(|previous| previous >= value) {
+            bail!("structured-session result_status failure_values must be sorted and distinct");
+        }
+        previous = Some(value);
+    }
+    Ok(())
+}
+
+fn template_pointers_are_bounded(template: &Value) -> bool {
+    match template.get("op").and_then(Value::as_str) {
+        Some("pointer") => template.get("max_string_bytes").is_some(),
+        Some("object") => template
+            .get("fields")
+            .and_then(Value::as_object)
+            .is_some_and(|fields| fields.values().all(template_pointers_are_bounded)),
+        Some("array") => template
+            .get("values")
+            .and_then(Value::as_array)
+            .is_some_and(|values| values.iter().all(template_pointers_are_bounded)),
+        _ => true,
+    }
+}
+
 fn validate_observations(value: Option<&Value>, maximum: usize) -> Result<()> {
     let observations = value
         .and_then(Value::as_array)
@@ -1919,6 +2061,38 @@ fn validate_observations(value: Option<&Value>, maximum: usize) -> Result<()> {
         require_keys(observation, &["when", "value"], &[])?;
         validate_predicates(observation.get("when"), 16)?;
         validate_template(observation.get("value"), 0, &mut 0)?;
+        validate_observation_kind(observation.get("value"))?;
+    }
+    Ok(())
+}
+
+/// The observation kinds the dedicated-session runtime records. An
+/// observation is an object template whose `kind` is one of these literals,
+/// so a misnamed kind is refused when the profile is validated rather than
+/// when a session first reports it.
+const WORKER_OBSERVATION_KINDS: &[&str] = &[
+    "approval_expired",
+    "credential_enrollment_cancelled",
+    "credential_enrollment_observed",
+    "credential_enrollment_started",
+    "remote_thread",
+    "remote_thread_recovered",
+    "remote_thread_recovery_status",
+    "state",
+];
+
+fn validate_observation_kind(template: Option<&Value>) -> Result<()> {
+    let kind = template
+        .filter(|template| template.get("op").and_then(Value::as_str) == Some("object"))
+        .and_then(|template| template.pointer("/fields/kind"))
+        .filter(|kind| kind.get("op").and_then(Value::as_str) == Some("literal"))
+        .and_then(|kind| kind.get("value"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            anyhow!("structured-session observation must be an object with a literal kind")
+        })?;
+    if !WORKER_OBSERVATION_KINDS.contains(&kind) {
+        bail!("structured-session observation kind `{kind}` is not a worker observation kind");
     }
     Ok(())
 }
@@ -2478,6 +2652,293 @@ mod tests {
         );
     }
 
+    /// Every file under one bundle's `lib/hosted` source directory, keyed by
+    /// its path relative to that directory, exactly as admission captures it.
+    fn bundle_source_set(relative: &str) -> BTreeMap<String, Vec<u8>> {
+        fn collect(root: &Path, dir: &Path, files: &mut BTreeMap<String, Vec<u8>>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if entry.file_type().unwrap().is_dir() {
+                    collect(root, &path, files);
+                } else {
+                    assert!(entry.file_type().unwrap().is_file());
+                    files.insert(
+                        path.strip_prefix(root)
+                            .unwrap()
+                            .to_str()
+                            .unwrap()
+                            .to_owned(),
+                        std::fs::read(path).unwrap(),
+                    );
+                }
+            }
+        }
+        let root = crate::test_support::workspace_root().join(relative);
+        let mut files = BTreeMap::new();
+        collect(&root, &root, &mut files);
+        files
+    }
+
+    #[test]
+    fn claude_code_stdio_profile_compiles_from_the_exact_local_source_set() {
+        let files = bundle_source_set("bundles/claude-code/.ai/workers/claude-code/lib/hosted");
+        let admitted = compile(&files["structured-session.profile.json"], &files)
+            .expect("the authored claude-code profile must compile from its local source set");
+        let contract = &admitted.contract;
+        assert_eq!(
+            contract.get("transport").and_then(Value::as_str),
+            Some("stdio_jsonrpc")
+        );
+        assert_eq!(admitted.baseline_destination, "settings.json");
+        assert!(contract["credential_subject"].is_null());
+        assert!(contract["portable_state"].is_null());
+        // Every route set carries the recovery pair (the continuation set
+        // carries nothing else that starts a session), and the bounded turn's
+        // lifecycle is observed from the route and from its notifications.
+        assert_eq!(
+            contract["recovery"]["route_sets"],
+            json!(["continue", "read_only", "session"])
+        );
+        assert!(
+            !contract["route_sets"]["continue"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|route| route.as_str().unwrap().starts_with("session.start"))
+        );
+        let completed = contract["notifications"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|rule| rule["method"] == "turn/completed")
+            .unwrap();
+        assert_eq!(completed["durable"], true);
+        assert_eq!(completed["result"], true);
+        assert_eq!(
+            completed["observations"][0]["value"]["fields"]["completed_turn_id"]["pointer"],
+            "/message/params/completed_turn_id"
+        );
+    }
+
+    fn claude_code_profile_with(mutate: impl FnOnce(&mut Value)) -> Result<()> {
+        let mut files = bundle_source_set("bundles/claude-code/.ai/workers/claude-code/lib/hosted");
+        let mut profile: Value =
+            serde_json::from_slice(&files["structured-session.profile.json"]).unwrap();
+        mutate(&mut profile);
+        let bytes = serde_json::to_vec(&profile).unwrap();
+        files.insert("structured-session.profile.json".to_owned(), bytes.clone());
+        compile(&bytes, &files).map(drop)
+    }
+
+    #[test]
+    fn result_marker_is_a_required_boolean_on_every_notification() {
+        claude_code_profile_with(|_| {}).unwrap();
+        for bad in [json!(null), json!("true"), json!(1)] {
+            let error = claude_code_profile_with(|profile| {
+                profile["notifications"][1]["result"] = bad.clone();
+            })
+            .unwrap_err();
+            assert!(error.to_string().contains("notification flags are invalid"));
+        }
+        let error = claude_code_profile_with(|profile| {
+            profile["notifications"][1]
+                .as_object_mut()
+                .unwrap()
+                .remove("result");
+        })
+        .unwrap_err();
+        assert!(!error.to_string().is_empty());
+    }
+
+    #[test]
+    fn result_cost_is_required_nullable_and_only_on_the_result_notification() {
+        claude_code_profile_with(|_| {}).unwrap();
+        let error = claude_code_profile_with(|profile| {
+            profile["notifications"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("result_cost");
+        })
+        .unwrap_err();
+        assert!(!error.to_string().is_empty());
+        let error = claude_code_profile_with(|profile| {
+            profile["notifications"][1]["result_cost"] = json!({
+                "input_tokens": "/a", "output_tokens": null, "cost_micro_usd": null
+            });
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("only valid on the result"));
+        for bad in [
+            json!("/a"),
+            json!({"input_tokens": "/a"}),
+            json!({"input_tokens": "a", "output_tokens": null, "cost_micro_usd": null}),
+            json!({"input_tokens": 1, "output_tokens": null, "cost_micro_usd": null}),
+            json!({"input_tokens": null, "output_tokens": null, "cost_micro_usd": null,
+                   "extra": null}),
+        ] {
+            claude_code_profile_with(|profile| {
+                let index = profile["notifications"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .position(|n| n["result"] == true)
+                    .unwrap();
+                profile["notifications"][index]["result_cost"] = bad.clone();
+            })
+            .unwrap_err();
+        }
+        claude_code_profile_with(|profile| {
+            let index = profile["notifications"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .position(|n| n["result"] == true)
+                .unwrap();
+            profile["notifications"][index]["result_cost"] = json!(null);
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn result_status_is_required_nullable_and_validated() {
+        let error = claude_code_profile_with(|profile| {
+            profile["notifications"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("result_status");
+        })
+        .unwrap_err();
+        assert!(!error.to_string().is_empty());
+        let error = claude_code_profile_with(|profile| {
+            profile["notifications"][1]["result_status"] =
+                json!({"pointer": "/status", "failure_values": ["failed"]});
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("only valid on the result"));
+        let seventeen: Vec<Value> = (0..17).map(|i| json!(format!("v{i:02}"))).collect();
+        for bad in [
+            json!("/status"),
+            json!({"pointer": "/status"}),
+            json!({"pointer": "status", "failure_values": ["failed"]}),
+            json!({"pointer": "/status", "failure_values": []}),
+            json!({"pointer": "/status", "failure_values": [""]}),
+            json!({"pointer": "/status", "failure_values": [1]}),
+            json!({"pointer": "/status", "failure_values": ["b", "a"]}),
+            json!({"pointer": "/status", "failure_values": ["a", "a"]}),
+            json!({"pointer": "/status", "failure_values": seventeen}),
+            json!({"pointer": "/status", "failure_values": ["a"], "extra": 1}),
+        ] {
+            claude_code_profile_with(|profile| {
+                let index = profile["notifications"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .position(|n| n["result"] == true)
+                    .unwrap();
+                profile["notifications"][index]["result_status"] = bad.clone();
+            })
+            .unwrap_err();
+        }
+        claude_code_profile_with(|profile| {
+            let index = profile["notifications"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .position(|n| n["result"] == true)
+                .unwrap();
+            profile["notifications"][index]["result_status"] =
+                json!({"pointer": "/status", "failure_values": ["crashed", "failed"]});
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn at_most_one_notification_carries_the_result_marker() {
+        let error = claude_code_profile_with(|profile| {
+            profile["notifications"][1]["result"] = json!(true);
+        })
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("more than one result notification")
+        );
+        // No result notification at all is a valid profile.
+        claude_code_profile_with(|profile| {
+            profile["notifications"][0]["result"] = json!(false);
+            profile["notifications"][0]["result_cost"] = json!(null);
+            profile["notifications"][0]["result_status"] = json!(null);
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn the_result_notification_carries_the_turn_completion_observation() {
+        // The turn-start notification carries the idle to turn_running edge,
+        // not the completion edge.
+        let error = claude_code_profile_with(|profile| {
+            profile["notifications"][0]["result"] = json!(false);
+            profile["notifications"][0]["result_cost"] = json!(null);
+            profile["notifications"][0]["result_status"] = json!(null);
+            profile["notifications"][1]["result"] = json!(true);
+        })
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("turn_running to idle observation")
+        );
+        let error = claude_code_profile_with(|profile| {
+            profile["notifications"][0]["observations"] = json!([]);
+        })
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("turn_running to idle observation")
+        );
+    }
+
+    #[test]
+    fn an_observation_kind_outside_the_worker_set_is_refused() {
+        let error = claude_code_profile_with(|profile| {
+            profile["routes"][0]["observations"][0]["value"]["fields"]["kind"]["value"] =
+                json!("remote_session");
+        })
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("`remote_session` is not a worker observation kind"),
+            "{error:#}"
+        );
+        let error = claude_code_profile_with(|profile| {
+            profile["routes"][0]["observations"][0]["value"]["fields"]["kind"] =
+                json!({"op": "pointer", "pointer": "/response/result/kind", "max_string_bytes": 64});
+        })
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("an object with a literal kind"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn the_result_notification_is_durable_and_its_pointers_are_bounded() {
+        let error = claude_code_profile_with(|profile| {
+            profile["notifications"][0]["durable"] = json!(false);
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("must be durable"));
+        let error = claude_code_profile_with(|profile| {
+            profile["notifications"][0]["payload"]["fields"]["result"]
+                .as_object_mut()
+                .unwrap()
+                .remove("max_string_bytes");
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("unbounded pointer"));
+    }
+
     #[test]
     fn invocation_mapping_refuses_missing_paths_and_incompatible_shapes_at_admission() {
         let mut profile: Value =
@@ -2690,7 +3151,10 @@ mod tests {
                         "durable":false,
                         "payload":{"op":"literal","value":null},
                         "observations":[],
-                        "ceremony_clear":false
+                        "ceremony_clear":false,
+                        "result":false,
+                        "result_cost":null,
+                        "result_status":null
                     })
                 })
                 .collect(),

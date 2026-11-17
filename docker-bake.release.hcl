@@ -18,6 +18,10 @@ variable "ARTIFACT_DIR" {
   default = "./release-artifacts"
 }
 
+variable "NODE_BINARIES_ARTIFACT_DIR" {
+  default = "./node-binaries-release-artifacts"
+}
+
 variable "WORKLOAD_CLIENT_ARTIFACT_DIR" {
   default = "./workload-client-release-artifacts"
 }
@@ -75,6 +79,12 @@ target "workload-client-artifact" {
   inherits = ["_release"]
   target   = "workload-client-artifact"
   output   = ["type=local,dest=${WORKLOAD_CLIENT_ARTIFACT_DIR}"]
+}
+
+target "node-binaries-artifact" {
+  inherits = ["_release"]
+  target   = "node-binaries-artifact"
+  output   = ["type=local,dest=${NODE_BINARIES_ARTIFACT_DIR}"]
 }
 
 # Qualification-only until installed host evidence has passed. This target is

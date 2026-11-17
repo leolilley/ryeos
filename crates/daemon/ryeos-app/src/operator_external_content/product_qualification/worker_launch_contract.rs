@@ -136,7 +136,9 @@ impl QualificationWorkerLaunchContract {
         let max_lifetime_seconds = execution
             .get("max_lifetime_seconds")
             .and_then(Value::as_u64)
-            .filter(|seconds| (1..=603_600).contains(seconds))
+            // The upper bound is the worker kind's signed lifetime ceiling,
+            // judged where the admitted session capsule is available.
+            .filter(|seconds| *seconds > 0)
             .context("Q WorkerExecution lifetime is invalid")?;
         let mode = execution
             .get("mode")
@@ -428,7 +430,6 @@ mod tests {
             ),
             ("/workspace_env", json!("not-an-env")),
             ("/max_lifetime_seconds", json!(0)),
-            ("/max_lifetime_seconds", json!(603601)),
             ("/mode/kind", json!("session")),
             ("/mode/turn_start_route", json!("other.start")),
         ] {

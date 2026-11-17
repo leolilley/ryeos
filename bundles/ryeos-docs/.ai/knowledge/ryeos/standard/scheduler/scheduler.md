@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T05:54:19Z:5c960b1c4f28e72a8d45ea2eb2dc5ccc4514745ca8ec8e0e8b332f0b761adbb0:0vgkCVwak01dO3hKUEMR4lOiTmZ1QhXP8/wFWMKI2ZMrcb3FghUparX+0AYP6vZ/W9nOmCUjh9HzsJBPLD3/Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T23:12:59Z:7726b1fa26362821ddcc7309b7adaecc5a3a076755449403e1fee8686d007b11:x2kpkOqf1P7rBurbx70erJSvROOoWsxTLDX4DFGXRBE9Dj7/T7q+vloHkvAvrIZ913vAWMESatwm9qCboHjoCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [reference, scheduler, cron, scheduling]
 version: "1.0.0"
@@ -145,6 +145,13 @@ each fire is intentionally meant to see the then-current live tree. Use
 immutable project authority must survive admission and restart recovery.
 Scheduled execution rejects `capture_live`, because capture is an interactive
 admission operation rather than a recurring policy.
+
+A schedule that sets `live_direct` demands the live project explicitly (the
+daemon seals `project.intent: live` into the fire's authority whatever the
+policy spelled, so a signed schedule needs no new field). A tool that cannot be
+given the live project, such as a python or bash runtime tool, refuses the fire
+with `live_project_unavailable_to_sourced_runtime` instead of running against a
+private copy; use `pinned` for those tools.
 
 `live_direct` is never snapshotted implicitly: every fire, including recovery
 of an interrupted fire, resolves the live filesystem again. A pinned fire does

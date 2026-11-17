@@ -2478,3 +2478,57 @@ fn workspace_binding_reaped_settlement_refuses_replacement_claim_and_unattached_
         Some(unknown_binding)
     );
 }
+
+#[test]
+fn settled_thread_fact_is_appended_once_and_refuses_contradictory_replays() {
+    let store = test_store();
+    let thread_id = "T-settled-parent";
+    store
+        .create_thread_for_test(&thread_record(thread_id, thread_id))
+        .unwrap();
+    let event_type = ryeos_state::event_types::CHILD_THREAD_SETTLED;
+    let payload = json!({"child_thread_id": "T-child", "outcome_kind": "completed"});
+    let first = crate::authoritative_root_fact::append_once_to_settled_thread(
+        &store,
+        thread_id,
+        event_type,
+        "settled-op",
+        payload.clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        first,
+        crate::authoritative_root_fact::AppendOnceOutcome::Appended
+    );
+    let second = crate::authoritative_root_fact::append_once_to_settled_thread(
+        &store,
+        thread_id,
+        event_type,
+        "settled-op",
+        payload,
+    )
+    .unwrap();
+    assert_eq!(
+        second,
+        crate::authoritative_root_fact::AppendOnceOutcome::AlreadyPresent
+    );
+    let settled = replayed_event_types(&store, thread_id)
+        .into_iter()
+        .filter(|name| name == event_type)
+        .count();
+    assert_eq!(
+        settled, 1,
+        "a second append of the same fact writes nothing"
+    );
+    assert!(
+        crate::authoritative_root_fact::append_once_to_settled_thread(
+            &store,
+            thread_id,
+            event_type,
+            "settled-op",
+            json!({"child_thread_id": "T-child", "outcome_kind": "failed"}),
+        )
+        .is_err(),
+        "the same key with different testimony is refused"
+    );
+}
