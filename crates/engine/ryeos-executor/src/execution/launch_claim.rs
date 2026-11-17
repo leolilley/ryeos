@@ -21,6 +21,7 @@ pub(crate) enum RuntimeRecoveryClaimRotation {
         attempts: u32,
     },
     LostOwner,
+    AdmissionClosed,
 }
 
 /// Owned authorization to launch one existing thread row.
@@ -38,6 +39,14 @@ pub(crate) struct ThreadLaunchClaim {
     /// Recovery handoff can install its failure owner without a new fallible
     /// serialization gap after claim rotation.
     canonical_owner: String,
+}
+
+/// True when `error` is the expected refusal of a launch claim after shutdown
+/// closed launch admission.
+pub(crate) fn is_launch_admission_closed(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<ryeos_app::state_store::LaunchAdmissionClosed>()
+        .is_some()
 }
 
 impl ThreadLaunchClaim {
@@ -129,6 +138,9 @@ impl ThreadLaunchClaim {
             }
             ryeos_app::runtime_db::RuntimeRecoveryClaimRotation::LostOwner => {
                 RuntimeRecoveryClaimRotation::LostOwner
+            }
+            ryeos_app::runtime_db::RuntimeRecoveryClaimRotation::AdmissionClosed => {
+                RuntimeRecoveryClaimRotation::AdmissionClosed
             }
         })
     }

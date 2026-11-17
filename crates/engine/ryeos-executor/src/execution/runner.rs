@@ -9183,11 +9183,16 @@ async fn run_existing_recovered_thread(
     // Claim before any fallible pre-spawn work. The claim is moved into the
     // detached background task below, making a successful return a durable
     // claimed-and-enqueued boundary rather than an in-memory scheduling hint.
-    let resume_claim = match ThreadLaunchClaim::acquire(&state, &thread_id)? {
-        ThreadLaunchClaimOutcome::Claimed(claim) => *claim,
-        ThreadLaunchClaimOutcome::AlreadyClaimed => {
+    let resume_claim = match ThreadLaunchClaim::acquire(&state, &thread_id) {
+        Ok(ThreadLaunchClaimOutcome::Claimed(claim)) => *claim,
+        Ok(ThreadLaunchClaimOutcome::AlreadyClaimed) => {
             return Ok(RecoveryLaunchOutcome::Skipped("already_claimed"));
         }
+        Err(error) if super::launch_claim::is_launch_admission_closed(&error) => {
+            tracing::info!(%thread_id, "resume skipped: daemon is shutting down");
+            return Ok(RecoveryLaunchOutcome::Skipped("admission_closed"));
+        }
+        Err(error) => return Err(error.into()),
     };
     let thread = state.threads.get_thread(&thread_id)?.ok_or_else(|| {
         ResumeError::Other(anyhow::anyhow!(

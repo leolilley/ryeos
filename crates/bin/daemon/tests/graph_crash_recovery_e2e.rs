@@ -405,3 +405,192 @@ async fn graph_resumes_from_checkpoint_after_daemon_crash() {
         "thread must reach thread_completed after resume; events={final_events:#?}"
     );
 }
+
+/// Rewrite the fixture's signed native-capacity policy to a 300 s window with
+/// the minimum 60 s cleanup occupancy and drain margin, so the planned
+/// rollover begins 180 s after the daemon starts.
+fn plant_planned_rollover_window(state_path: &Path, node: &SigningKey) -> anyhow::Result<()> {
+    let path = state_path.join(".ai/node/policies/native_capacity.yaml");
+    let raw = std::fs::read_to_string(&path)?;
+    let body = lillux::signature::strip_signature_lines(&raw);
+    let mut policy: serde_yaml::Value = serde_yaml::from_str(&body)?;
+    let incarnation = policy["incarnation"]
+        .as_mapping_mut()
+        .ok_or_else(|| anyhow::anyhow!("incarnation envelope"))?;
+    incarnation.insert("maximum_occupancy_ms".into(), 300_000u64.into());
+    incarnation.insert("cleanup_occupancy_ms".into(), 60_000u64.into());
+    incarnation.insert("rollover_drain_margin_ms".into(), 60_000u64.into());
+    let body = serde_yaml::to_string(&policy)?;
+    let signed = lillux::signature::sign_content_at(
+        &body,
+        node,
+        "#",
+        None,
+        common::fast_fixture::FAST_FIXTURE_TIME,
+    );
+    std::fs::write(&path, signed)?;
+    Ok(())
+}
+
+/// An orderly end of the daemon (planned rollover: exit 75; orderly stop:
+/// exit 0) while a graph is parked mid-run must leave restart uninhibited and
+/// let the next start resume the same thread from its checkpoint without
+/// re-running a completed node.
+async fn run_graph_midflight_stop(rollover: bool) {
+    let plant =
+        move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+            register_workflow_bundles(state_path, fixture)?;
+            plant_vault_with_zen_key(state_path)?;
+            if rollover {
+                plant_planned_rollover_window(state_path, &fixture.node)?;
+            }
+            Ok(())
+        };
+    let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
+        cmd.env("RYEOS_GRAPH_TEST_BLOCK_AFTER_CHECKPOINT", "b");
+        cmd.env("RUST_LOG", "info,ryeosd=debug,ryeos_graph_runtime=debug");
+    })
+    .await
+    .expect("start daemon with the workflow bundles");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant_chain_graph(project.path(), &fixture.publisher).expect("plant chain graph");
+
+    let url = format!("http://{}/execute", h.bind);
+    let body = json!({
+        "item_ref": "graph:chain",
+        "ref_bindings": {},
+        "project_path": project.path().to_str().unwrap(),
+        "parameters": {},
+        "execution_policy": {
+            "schema_version": 2,
+            "ownership": "daemon_owned",
+            "recovery": "restart_recoverable",
+            "response": "wait",
+            "target": { "kind": "here" },
+            "environment": {
+                "kind": "project_overlay",
+                "include_operator_vault": true,
+                "name_policy": { "kind": "declared_required" }
+            },
+            "project": {
+                "kind": "pinned",
+                "source": { "kind": "capture_live", "scope": "full_project" },
+                "realization": { "kind": "read_only" },
+                "child_policy": { "kind": "inherit" }
+            }
+        }
+    });
+    let body_bytes = serde_json::to_vec(&body).expect("serialize body");
+    let headers = build_signed_headers_for_bytes(
+        h.user_key.as_ref().expect("user key"),
+        h.node_key.as_ref().expect("node key"),
+        "POST",
+        "/execute",
+        &body_bytes,
+    );
+    let mut exec_task = tokio::spawn(async move {
+        let mut req = reqwest::Client::new()
+            .post(url)
+            .header("content-type", "application/json")
+            .body(body_bytes);
+        for (k, v) in headers {
+            req = req.header(k, v);
+        }
+        let response = req.send().await.map_err(|error| error.to_string())?;
+        let status = response.status().as_u16();
+        let body = response.text().await.map_err(|error| error.to_string())?;
+        Ok((status, body))
+    });
+
+    let setup_deadline = Instant::now() + Duration::from_secs(60);
+    let thread_id = await_thread_id(&h.state_path, setup_deadline, &mut exec_task).await;
+    let checkpoints_dir = h
+        .state_path
+        .join("threads")
+        .join(&thread_id)
+        .join("checkpoints");
+    await_checkpoint_cursor(
+        &h,
+        &thread_id,
+        &checkpoints_dir,
+        "b",
+        setup_deadline,
+        &mut exec_task,
+    )
+    .await;
+
+    if rollover {
+        let status = tokio::time::timeout(Duration::from_secs(300), h.child.wait())
+            .await
+            .expect("the service window ends within its bound")
+            .expect("wait for daemon exit");
+        assert_eq!(
+            status.code(),
+            Some(75),
+            "a planned rollover with a graph in flight exits 75: {status:?}\n--- daemon stderr ---\n{}",
+            h.stderr_so_far()
+        );
+    } else {
+        h.stop_gracefully()
+            .await
+            .expect("orderly stop with a graph in flight exits 0");
+    }
+    exec_task.abort();
+    let stderr = h.stderr_so_far();
+    assert!(
+        !stderr.contains("runtime requested exact same-thread recovery"),
+        "shutdown must not launch a same-thread recovery successor\n--- daemon stderr ---\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("native custody remains held"),
+        "an orderly stop must not end in held custody\n--- daemon stderr ---\n{stderr}"
+    );
+    assert!(
+        ryeos_node::lifecycle_marker::read_restart_inhibition(&h.state_path)
+            .expect("read restart inhibition")
+            .is_none(),
+        "an orderly end must not inhibit restart"
+    );
+
+    h.respawn_with(|cmd| {
+        cmd.env("RUST_LOG", "info,ryeosd=debug,ryeos_graph_runtime=debug");
+    })
+    .await
+    .expect("restart after the orderly end");
+    let resume_deadline = Instant::now() + Duration::from_secs(60);
+    let final_events = loop {
+        let events = projection_events(&h, &thread_id).await;
+        if count_event(&events, "thread_completed") >= 1 {
+            break events;
+        }
+        if Instant::now() >= resume_deadline {
+            let stderr = h.drain_stderr_nonblocking().await;
+            panic!(
+                "graph thread {thread_id} never reached thread_completed after resume.\n\
+                 events={events:#?}\n--- daemon stderr ---\n{stderr}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(
+        count_event(&final_events, "thread_started"),
+        1,
+        "resume must not duplicate thread_started; events={final_events:#?}"
+    );
+    assert_eq!(
+        count_step_started_for_node(&final_events, "a"),
+        1,
+        "node `a` must not run again after resume; events={final_events:#?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn graph_planned_rollover_midflight_exits_75_and_resumes() {
+    run_graph_midflight_stop(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn graph_orderly_stop_midflight_exits_0_and_resumes() {
+    run_graph_midflight_stop(false).await;
+}

@@ -812,6 +812,87 @@ fn prepared_rotation_publishes_exact_replacement_under_same_store() {
 }
 
 #[test]
+fn closed_admission_refuses_new_claims_and_rotation_without_charging_an_attempt() {
+    let store = test_store();
+    let thread = "T-closed-admission";
+    store
+        .create_thread_for_test(&thread_record(thread, thread))
+        .unwrap();
+    let first = store
+        .claim_thread_launch_active(thread, "first", "daemon:test")
+        .unwrap()
+        .unwrap();
+    let other = "T-closed-admission-other";
+    store
+        .create_thread_for_test(&thread_record(other, other))
+        .unwrap();
+    store.close_process_attachment_admission().unwrap();
+    let outcome = store
+        .rotate_active_thread_launch_claim_after_runtime_recovery(
+            thread,
+            &first.claimed_by,
+            "next",
+            "daemon:test",
+            3,
+        )
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        runtime_db::RuntimeRecoveryClaimRotation::AdmissionClosed
+    ));
+    let g = store.lock().unwrap();
+    assert!(StateStore::is_launch_owner_active_locked(
+        &g,
+        &first.claimed_by
+    ));
+    assert_eq!(g.runtime_db.get_resume_attempts(thread).unwrap(), 0);
+    drop(g);
+
+    assert!(
+        store
+            .claim_thread_launch_active(other, "second", "daemon:test")
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn launch_owner_wait_returns_when_the_last_owner_releases_and_reports_stragglers() {
+    let store = test_store();
+    let thread = "T-owner-wait";
+    store
+        .create_thread_for_test(&thread_record(thread, thread))
+        .unwrap();
+    let claim = store
+        .claim_thread_launch_active(thread, "owner", "daemon:test")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store.active_launch_owner_threads().unwrap(),
+        vec![thread.to_owned()]
+    );
+    let timed_out = store
+        .wait_for_launch_owners_quiesced(
+            std::time::Instant::now() + std::time::Duration::from_millis(60),
+        )
+        .await;
+    assert_eq!(timed_out, Err(vec![thread.to_owned()]));
+
+    let owner = claim.claimed_by.clone();
+    let release = async {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        store
+            .release_active_thread_launch_claim(thread, "owner", &owner)
+            .unwrap()
+    };
+    let wait = store.wait_for_launch_owners_quiesced(
+        std::time::Instant::now() + std::time::Duration::from_secs(5),
+    );
+    let (waited, released) = tokio::join!(wait, release);
+    waited.unwrap();
+    assert!(released);
+}
+
+#[test]
 fn selected_fences_all_phases_and_refusal_before_claim_release_rotation_and_sweep() {
     use crate::selected_invocation_bookkeeping::SelectedFixturePhase::*;
     for phase in [Pending, Occupied, Borrowed, RestoredAwaitingBorrowAck] {
