@@ -1759,6 +1759,7 @@ pub mod test_support {
                 ready_timeout_ms: 10_000,
                 request_timeout_ms: 10_000,
                 idle_timeout_ms: 10_000,
+                max_lifetime_seconds_ceiling: 603_600,
             },
             wire: PersistentSessionWireContract {
                 channel_env: "RYEOS_SESSION_FD".into(),
@@ -3514,6 +3515,7 @@ mod tests {
                 ready_timeout_ms: 1,
                 request_timeout_ms: 1,
                 idle_timeout_ms: 1,
+                max_lifetime_seconds_ceiling: 603_600,
             },
             wire: PersistentSessionWireContract {
                 channel_env: "RYEOS_SESSION_FD".into(),

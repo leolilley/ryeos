@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-17T01:35:34Z:016663466f482dfd92cfffdaa0547d51eaf8915f8d2e5135ad2d2636c92bffae:Qoe2dr9vyqiAa+Q9Lb8dQjd+H4H1GMoIF7QWyiE3m9DeSBPzE2/qy6Gdwx/SgblwvWsrox4qDNBhT+nbYQAfCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T03:46:31Z:39cefb4af0f8ac99b2681daf0d75efe4a543440850352810928df17797de4883:gtVvSPeHqpmCAh952qY9nmMQqcp3FWDB8bi/uWTKmPEYYRv1gTao39t50kKeGH2ZQbvrZ74DEjiAZi232MvyBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Bundle-owned conformance tests for the pinned Codex integration data."""
 
 from __future__ import annotations
@@ -777,7 +777,7 @@ class CodexContractTests(unittest.TestCase):
         self.assertIn("workload_client: null", environment)
 
     def test_minimal_profile_has_no_workload_ingress_or_socket_allowance(self) -> None:
-        self.assertEqual(self.profile["schema_version"], 12)
+        self.assertEqual(self.profile["schema_version"], 13)
         self.assertIsNone(self.profile["external_candidate"])
         self.assertEqual(self.profile["auxiliary_configs"], [])
         self.assertEqual(self.profile["runtime_configs"], [])
@@ -1298,7 +1298,7 @@ class CodexContractTests(unittest.TestCase):
 
     def test_external_original_config_initialization_uses_pinned_rpc_shapes(self) -> None:
         profile = json.loads((SOURCE / "external-authoring.profile.json").read_text())
-        self.assertEqual(profile["schema_version"], 12)
+        self.assertEqual(profile["schema_version"], 13)
         self.assertEqual(profile["configuration_absence"], {
             "absolute_paths": ["/etc/codex/config.toml", "/etc/codex/managed_config.toml",
                                "/etc/codex/requirements.toml"],
@@ -1307,7 +1307,7 @@ class CodexContractTests(unittest.TestCase):
         })
         for name in ("structured-session.profile.json", "authoring.profile.json"):
             ordinary = json.loads((SOURCE / name).read_text())
-            self.assertEqual(ordinary["schema_version"], 12)
+            self.assertEqual(ordinary["schema_version"], 13)
             self.assertEqual(ordinary["configuration_absence"], {
                 "absolute_paths": [], "startup_ancestor_paths": [], "route_ancestor_paths": [],
             })

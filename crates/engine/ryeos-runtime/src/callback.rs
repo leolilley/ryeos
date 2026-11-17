@@ -654,6 +654,12 @@ pub struct DedicatedSessionStartRequest {
     /// worker restart. The daemon verifies this against the signed protocol
     /// profile before launching the worker.
     pub recover_upstream_session: bool,
+    /// The root thread of a completed predecessor whose upstream conversation
+    /// this execution continues. Present exactly when the admitted worker
+    /// mode is a continuation; the daemon judges the predecessor against the
+    /// admitted owner, profile and credential generation before admitting
+    /// the session with the predecessor's upstream session id.
+    pub continue_from: Option<String>,
 }
 
 /// One opaque command issued by the integration runtime that owns a dedicated

@@ -1282,6 +1282,9 @@ fn run_init_under_lock_on_storage(
     // complete host qualification before accepting scoped execution.
     let isolation = Arc::clone(&prospective_isolation);
 
+    // One parse cache for the source pass and every staging pass: a staged
+    // file whose bytes match a source file already parsed is not parsed again.
+    let parse_results = Arc::new(ryeos_engine::parsers::ParseResultCache::default());
     if !opts.skip_preflight {
         progress(
             InitPhase::VerifyingBundles,
@@ -1296,11 +1299,12 @@ fn run_init_under_lock_on_storage(
                 Some(plan.verification_jobs.len()),
                 Some(job.subject.clone()),
             )?;
-            ryeos_bundle::preflight::preflight_verify_bundle_in_context(
+            ryeos_bundle::preflight::preflight_verify_bundle_in_context_with_parse_results(
                 &job.subject_root,
                 &job.dependency_roots,
                 &opts.app_root,
                 Arc::clone(&isolation),
+                &parse_results,
             )
             .with_context(|| {
                 format!("verify {} source against pinned publisher key", job.subject)
@@ -1447,12 +1451,13 @@ fn run_init_under_lock_on_storage(
                     if opts.skip_preflight {
                         return Ok(());
                     }
-                    ryeos_bundle::preflight::preflight_verify_bundle_staging_in_context(
+                    ryeos_bundle::preflight::preflight_verify_bundle_staging_in_context_with_parse_results(
                         staging,
                         name,
                         &installed_dependency_roots,
                         &opts.app_root,
                         Arc::clone(&isolation),
+                        &parse_results,
                     )
                     .with_context(|| {
                         format!(
@@ -1491,12 +1496,13 @@ fn run_init_under_lock_on_storage(
                     if opts.skip_preflight {
                         return Ok(());
                     }
-                    ryeos_bundle::preflight::preflight_verify_bundle_staging_in_context(
+                    ryeos_bundle::preflight::preflight_verify_bundle_staging_in_context_with_parse_results(
                         staging,
                         name,
                         &installed_dependency_roots,
                         &opts.app_root,
                         Arc::clone(&isolation),
+                        &parse_results,
                     )
                     .with_context(|| {
                         format!(

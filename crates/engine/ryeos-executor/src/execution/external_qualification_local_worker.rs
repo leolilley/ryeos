@@ -714,6 +714,11 @@ pub(crate) fn start_external_qualification_local_worker_for_signed_request(
                     .consumer_content
                     .as_ref()
                     .context("Q local Worker has no accepted process environment")?;
+                ensure!(
+                    ready.root().worker_launch_contract().max_lifetime_seconds
+                        <= session.lifecycle.max_lifetime_seconds_ceiling,
+                    "Q WorkerExecution lifetime exceeds its worker kind's signed ceiling"
+                );
                 let reservation = state.persistent_sessions.reserve_exclusive(
                     &placement,
                     &session.lifecycle,

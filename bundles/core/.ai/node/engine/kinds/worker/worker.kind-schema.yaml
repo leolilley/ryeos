@@ -1,6 +1,6 @@
-# ryeos:signed:2026-11-14T12:59:02Z:024474f9ee6af7d39c46e0a5edec4b11ed7126b9435bfdbf382103c72ef3528e:l2UGBgKFaFk/fG9Tb0zsQcAqp0JFDZIHkZQfu7Auxo4YknzHMWW/KGXJk3bb5uwhtNd6R40WfcIMrPyOGSc1AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T03:46:31Z:c39adee6cc572f4773f33c2ad1768b9034772162e5ff2560e3f127c7e8024356:pdt9FN7MdRrDopK9Izqfl8HZ5mahKtr2NGutOAQwuobY+nhZ8Fyypu6Tg6XFF2dT9CKbWqHXrKUDsMU5hirXBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/worker"
-version: "1.4.0"
+version: "1.6.0"
 location:
   directory: workers
   excluded_directories: [lib]
@@ -56,12 +56,20 @@ execution:
     real_uid_process_limit: 512
     resource_overrides_path: [session_resources]
     max_real_uid_process_limit: 4096
+    # Signed upper bounds for the matching worker `session_resources`
+    # overrides; each is at least its default above.
+    max_address_space_bytes_ceiling: 68719476736
+    max_cpu_seconds_ceiling: 604800
+    request_timeout_ms_ceiling: 86400000
+    idle_timeout_ms_ceiling: 86400000
+    # Upper bound, in seconds, for the lifetime a worker execution states.
+    max_lifetime_seconds_ceiling: 603600
     ready_timeout_ms: 600000
     request_timeout_ms: 3600000
     idle_timeout_ms: 1800000
   external_content:
     realization_derived: effective_external_realizations
-    allowed_roots: ["bundle:own"]
+    allowed_roots: ["bundle:own", "bundle_binary:own"]
     allowed_mount_roots: [project, execution_runtime]
     max_declarations: 8
     large_content:

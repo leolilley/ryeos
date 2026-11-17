@@ -4035,8 +4035,8 @@ mod process_input_selection_tests {
             assert!(text.contains("@subprocess"), "{text}");
             assert!(text.contains("--pin-project"), "{text}");
         }
-        // Only a scheduled fire is refused; every other launch keeps its
-        // sparse private root.
+        // Only an explicit live demand is refused; a defaulted launch keeps
+        // its sparse private root.
         assert!(live_project_refusal_applies(
             ProcessInputRootSelection::SparsePrivate,
             true
@@ -4187,10 +4187,10 @@ pub(crate) struct LiveProjectUnavailableToSourcedRuntime {
     pub(crate) message: String,
 }
 
-/// The guard fires only where a live authority would be dropped on the floor
-/// by a sparse private root and the launch is a schedule's explicit policy.
-fn live_project_refusal_applies(root: ProcessInputRootSelection, scheduled_fire: bool) -> bool {
-    scheduled_fire && root == ProcessInputRootSelection::SparsePrivate
+/// The guard fires wherever the request explicitly demanded the live project
+/// and the resolved root is not the existing (live) root.
+fn live_project_refusal_applies(root: ProcessInputRootSelection, demands_live: bool) -> bool {
+    demands_live && root != ProcessInputRootSelection::Existing
 }
 
 fn live_project_unavailable_error(
@@ -4227,7 +4227,7 @@ fn live_project_unavailable_error(
     LiveProjectUnavailableToSourcedRuntime {
         message: format!(
             "{LIVE_PROJECT_UNAVAILABLE_CODE}: `{tool}` (runtime `{runtime}`) was launched with \
-             live project authority ({access}), but {reason}; the live project is never mounted \
+             an explicit live project demand ({access}), but {reason}; the live project is never mounted \
              and project writes would be silently discarded. Use an `@subprocess` tool without \
              source_scope for live project access, or run with `--pin-project` / a pinned project \
              policy for a copy-on-write generation, or return structured results instead of writing \
@@ -4255,7 +4255,6 @@ pub(crate) fn prepare_process_inputs(
     base_path: &Path,
     source_placement: super::source_closure::SourceMountPlacement,
     private_runtime_view_realizations: bool,
-    scheduled_fire: bool,
 ) -> Result<PreparedProcessInputs> {
     // `retained_resolution` is the execution being spawned. For a borrowed
     // child this already materializes/mounts the child's finalized source and
@@ -4326,14 +4325,16 @@ pub(crate) fn prepare_process_inputs(
         restore_outputs,
     );
     let live_private_root = root_selection == ProcessInputRootSelection::SparsePrivate;
-    // A scheduled fire (and every child that inherits it) that was granted
-    // live project authority, read_only included, can never reach it from a
-    // sparse private root: refuse rather than run with the project silently
-    // absent. Interactive and route launches also resolve to live authority by
-    // default (handler routes run sourced tools in their scratch root by
-    // design), so only a schedule's explicit `live_direct` policy is refused.
-    if live_project_refusal_applies(root_selection, scheduled_fire)
-        && let Some(live) = provenance.project_authority().live_access()
+    // A request that explicitly demanded the live project (`--live-project`,
+    // execution policy `project.intent: live`, or a schedule's `live_direct`
+    // policy; every child inherits it) can never reach it from a private
+    // admitted-input root: refuse rather than run with the project silently
+    // absent. A request that only defaulted to a live project keeps whatever
+    // root the tool shape gets (see the root table in execution-isolation.md).
+    if live_project_refusal_applies(
+        root_selection,
+        provenance.project_authority().demands_live_project(),
+    ) && let Some(live) = provenance.project_authority().live_access()
     {
         return Err(anyhow::Error::new(live_project_unavailable_error(
             retained_resolution,
@@ -5608,7 +5609,6 @@ pub async fn run_and_wait(
             &protocol.descriptor,
             wait_launch_isolation.as_ref(),
         ),
-        params.resolved.plan_context.scheduled_fire.is_some(),
     )
     .map_err(|error| guard.fail_before_spawn(classify_prepared_input_error(error)))?;
     let wait_bound_external = wait_bound_external.map(Arc::new);
@@ -6685,7 +6685,6 @@ pub async fn run_detached(
             &protocol.descriptor,
             bg_launch_isolation.as_ref(),
         ),
-        params.resolved.plan_context.scheduled_fire.is_some(),
     )
     .map_err(|error| guard.fail_before_spawn(classify_prepared_input_error(error)))?;
     effective_path = process_path;
@@ -9439,7 +9438,6 @@ async fn run_existing_recovered_thread(
             state.isolation.is_enforced(),
         ),
         recovered_private_view_realizations,
-        params.resolved.plan_context.scheduled_fire.is_some(),
     )
     .map_err(|error| {
         guard.fail_before_spawn(

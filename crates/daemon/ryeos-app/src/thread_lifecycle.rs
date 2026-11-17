@@ -5811,19 +5811,62 @@ impl ThreadLifecycleService {
             }
             return;
         }
-        if let Err(e) = self.state_store.mark_follow_child_terminal(
+        match self.state_store.mark_follow_child_terminal(
             chain_root_id,
             thread_id,
             terminal_status,
             &envelope,
         ) {
-            tracing::warn!(
+            Ok(_) => self.record_child_thread_settled(chain_root_id),
+            Err(e) => tracing::warn!(
                 thread_id,
                 chain_root_id,
                 error = %e,
                 "failed to record follow child terminal result",
+            ),
+        }
+    }
+
+    /// Best-effort: tell the following parent that one of its children
+    /// settled. The follow settlement itself is already durable; a failure
+    /// here is logged and never changes follow semantics.
+    fn record_child_thread_settled(&self, child_chain_root_id: &str) {
+        if let Err(error) = self.try_record_child_thread_settled(child_chain_root_id) {
+            tracing::warn!(
+                child_chain_root_id,
+                error = %error,
+                "failed to record child_thread_settled on the following parent",
             );
         }
+    }
+
+    fn try_record_child_thread_settled(&self, child_chain_root_id: &str) -> Result<()> {
+        let Some(waiter) = self
+            .state_store
+            .get_follow_waiter_by_child_chain(child_chain_root_id)?
+        else {
+            return Ok(());
+        };
+        let Some(child) = waiter
+            .children
+            .iter()
+            .find(|child| child.child_chain_root_id == child_chain_root_id)
+        else {
+            return Ok(());
+        };
+        let Some(envelope) = child.terminal_envelope.as_ref() else {
+            return Ok(());
+        };
+        let payload = child_thread_settled_payload(&waiter, child, envelope)?;
+        let operation_id = child_thread_settled_operation_id(&waiter.follow_key, child)?;
+        crate::authoritative_root_fact::append_once_to_settled_thread(
+            &self.state_store,
+            &waiter.parent_thread_id,
+            ryeos_state::event_types::CHILD_THREAD_SETTLED,
+            &operation_id,
+            payload,
+        )?;
+        Ok(())
     }
 
     /// Whether `thread_id` lies on the chain's continuation lineage: the chain
@@ -5947,6 +5990,7 @@ impl ThreadLifecycleService {
             &terminal.status,
             &envelope,
         )?;
+        self.record_child_thread_settled(child_chain_root_id);
         Ok(flipped.then_some(waiter.follow_key))
     }
 
@@ -6957,6 +7001,82 @@ pub fn managed_runtime_envelope(
         "warnings": warnings,
         "cost": raw_cost.cloned(),
     })
+}
+
+/// Longest result text a `child_thread_settled` event carries.
+const CHILD_THREAD_SETTLED_SUMMARY_BYTES: usize = 2 * 1024;
+
+/// The idempotence key of one child's settlement event: the follow and the
+/// child thread the parent's `child_thread_spawned` named.
+fn child_thread_settled_operation_id(
+    follow_key: &str,
+    child: &crate::runtime_db::FollowWaiterChild,
+) -> Result<String> {
+    ryeos_state::objects::canonical_value_digest(&json!({
+        "schema": "ryeos.child_thread_settled.v1",
+        "follow_key": follow_key,
+        "child_thread_id": child.child_thread_id,
+    }))
+}
+
+/// Cut `text` to at most `limit` bytes on a UTF-8 boundary, reporting whether
+/// anything was removed.
+fn cut_on_char_boundary(text: &str, limit: usize) -> (&str, bool) {
+    if text.len() <= limit {
+        return (text, false);
+    }
+    let mut end = limit;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (&text[..end], true)
+}
+
+/// The `child_thread_settled` payload for one followed child, built from the
+/// compact terminal envelope stored on its follow waiter. `child_thread_id` is
+/// the id the follow's `child_thread_spawned` named. `outcome_kind` is always
+/// present: a worker child reports its own closed kind, any other child the
+/// kind its terminal status implies. `result_summary` is the leading part of
+/// the worker's result text, bounded at 2 KiB; `truncated` is set when the
+/// worker already truncated its text or this summary cut it.
+fn child_thread_settled_payload(
+    waiter: &crate::runtime_db::FollowWaiter,
+    child: &crate::runtime_db::FollowWaiterChild,
+    envelope: &Value,
+) -> Result<Value> {
+    let decoded = ryeos_runtime::envelope::decode_follow_terminal_envelope(envelope)
+        .map_err(anyhow::Error::msg)?;
+    let outcome_kind = decoded
+        .result
+        .get("outcome_kind")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| ryeos_runtime::envelope::status_outcome_kind(decoded.status));
+    let worker_result = decoded.result.get("result");
+    let text = worker_result
+        .and_then(|result| result.pointer("/result/text"))
+        .and_then(Value::as_str);
+    let worker_truncated = worker_result
+        .and_then(|result| result.pointer("/result/truncated"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let (summary, cut) = match text {
+        Some(text) => {
+            let (summary, cut) = cut_on_char_boundary(text, CHILD_THREAD_SETTLED_SUMMARY_BYTES);
+            (Value::String(summary.to_owned()), cut)
+        }
+        None => (Value::Null, false),
+    };
+    Ok(json!({
+        "child_thread_id": child.child_thread_id,
+        "follow_key": waiter.follow_key,
+        "node": waiter.follow_node,
+        "cohort_index": child.item_index,
+        "status": decoded.status.as_str(),
+        "outcome_kind": outcome_kind,
+        "result_summary": summary,
+        "truncated": worker_truncated || cut,
+        "cost": decoded.cost,
+    }))
 }
 
 /// Marker code stored in a degraded follow envelope's result + warnings so the
@@ -9384,6 +9504,135 @@ mod tests {
             created_at_ms: 0,
             updated_at_ms: 0,
         }
+    }
+
+    fn settled_envelope(
+        status: ryeos_runtime::envelope::RuntimeResultStatus,
+        result: Value,
+        cost: Option<&ryeos_runtime::envelope::RuntimeCost>,
+    ) -> Value {
+        ryeos_runtime::envelope::encode_follow_terminal_envelope(
+            "T-child-tail",
+            status,
+            result,
+            cost,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn child_thread_settled_payload_carries_a_worker_result_and_cost() {
+        use ryeos_runtime::envelope::{RuntimeCost, RuntimeResultStatus, UsdNanos};
+        let waiter = waiter(crate::runtime_db::follow_phase::READY, Some("completed"));
+        let cost = RuntimeCost {
+            input_tokens: 7,
+            output_tokens: 9,
+            total_usd: UsdNanos::from_nanos(1_000).unwrap(),
+            basis: None,
+        };
+        let envelope = settled_envelope(
+            RuntimeResultStatus::Completed,
+            json!({
+                "child_thread_id": "T-child-tail", "status": "completed",
+                "outcome_kind": "completed",
+                "result": {"turn_id": "t1", "result": {"text": "all done", "truncated": false}},
+                "cost": null,
+            }),
+            Some(&cost),
+        );
+        let payload =
+            child_thread_settled_payload(&waiter, &waiter.children[0], &envelope).unwrap();
+        // `child_thread_id` is the id the follow's `child_thread_spawned` names.
+        assert_eq!(payload["child_thread_id"], json!("child-1"));
+        assert_eq!(payload["follow_key"], json!("parent-1/gr-1/n_follow/3"));
+        assert_eq!(payload["node"], json!("n_follow"));
+        assert_eq!(payload["cohort_index"], json!(0));
+        assert_eq!(payload["status"], json!("completed"));
+        assert_eq!(payload["outcome_kind"], json!("completed"));
+        assert_eq!(payload["result_summary"], json!("all done"));
+        assert_eq!(payload["truncated"], json!(false));
+        assert_eq!(
+            payload["cost"],
+            json!({"input_tokens": 7, "output_tokens": 9, "total_usd": "0.000001"})
+        );
+    }
+
+    #[test]
+    fn child_thread_settled_payload_always_names_an_outcome_kind() {
+        use ryeos_runtime::envelope::RuntimeResultStatus;
+        let waiter = waiter(crate::runtime_db::follow_phase::READY, Some("cancelled"));
+        let worker_failure = settled_envelope(
+            RuntimeResultStatus::Cancelled,
+            json!({
+                "child_thread_id": "T-child-tail", "status": "cancelled",
+                "outcome_kind": "approval_required", "result": null, "cost": null,
+            }),
+            None,
+        );
+        let payload =
+            child_thread_settled_payload(&waiter, &waiter.children[0], &worker_failure).unwrap();
+        assert_eq!(payload["outcome_kind"], json!("approval_required"));
+        assert_eq!(payload["status"], json!("cancelled"));
+        assert_eq!(payload["result_summary"], json!(null));
+        assert_eq!(payload["cost"], json!(null));
+
+        // A child that reports no classification falls back to its status.
+        for (status, kind) in [
+            (RuntimeResultStatus::Completed, "completed"),
+            (RuntimeResultStatus::Failed, "failed"),
+            (RuntimeResultStatus::Cancelled, "cancelled"),
+        ] {
+            let envelope = settled_envelope(status, json!({"answer": 1}), None);
+            let payload =
+                child_thread_settled_payload(&waiter, &waiter.children[0], &envelope).unwrap();
+            assert_eq!(payload["outcome_kind"], json!(kind));
+            assert_eq!(payload["result_summary"], json!(null));
+        }
+    }
+
+    #[test]
+    fn child_thread_settled_summary_is_bounded_on_a_utf8_boundary() {
+        use ryeos_runtime::envelope::RuntimeResultStatus;
+        let waiter = waiter(crate::runtime_db::follow_phase::READY, Some("completed"));
+        // Each `é` is two bytes, so the 2 KiB cut lands between two of them
+        // only if the cut respects the boundary.
+        let text = format!("a{}", "é".repeat(2000));
+        let envelope = settled_envelope(
+            RuntimeResultStatus::Completed,
+            json!({
+                "child_thread_id": "T-child-tail", "status": "completed",
+                "outcome_kind": "completed",
+                "result": {"result": {"text": text, "truncated": false}}, "cost": null,
+            }),
+            None,
+        );
+        let payload =
+            child_thread_settled_payload(&waiter, &waiter.children[0], &envelope).unwrap();
+        let summary = payload["result_summary"].as_str().unwrap();
+        assert!(summary.len() <= CHILD_THREAD_SETTLED_SUMMARY_BYTES);
+        assert_eq!(summary.len(), CHILD_THREAD_SETTLED_SUMMARY_BYTES - 1);
+        assert!(text.starts_with(summary));
+        assert_eq!(payload["truncated"], json!(true));
+
+        let (whole, cut) = cut_on_char_boundary("short", 2048);
+        assert_eq!((whole, cut), ("short", false));
+    }
+
+    #[test]
+    fn child_thread_settled_operation_id_is_keyed_by_the_child() {
+        let waiter = waiter(crate::runtime_db::follow_phase::READY, None);
+        let child = &waiter.children[0];
+        let first = child_thread_settled_operation_id(&waiter.follow_key, child).unwrap();
+        assert_eq!(
+            first,
+            child_thread_settled_operation_id(&waiter.follow_key, child).unwrap()
+        );
+        let mut other = child.clone();
+        other.child_thread_id = "child-2".to_string();
+        assert_ne!(
+            first,
+            child_thread_settled_operation_id(&waiter.follow_key, &other).unwrap()
+        );
     }
 
     #[test]

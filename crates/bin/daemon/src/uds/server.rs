@@ -2187,6 +2187,7 @@ mod tests {
             canonical_root: project_path.clone(),
             live_access: ryeos_state::objects::LiveAccessAuthority {
                 access: ryeos_state::objects::LiveProjectAccess::ReadWrite,
+                intent: ryeos_state::objects::LiveProjectIntent::Default,
                 authorized_write_namespaces: vec!["project".to_string()],
                 confinement:
                     ryeos_state::objects::LiveFilesystemConfinement::standard_fixed_parents(),

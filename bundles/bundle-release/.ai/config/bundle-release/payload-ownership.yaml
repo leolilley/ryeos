@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-15T02:27:40Z:dfc220877120dd67f33a38e084ae46f19c9d50e11bc1613ae244a4808044f622:UUdxmW3Dm94KcOExG52qZiZsyDiCtO/DiTeKGrKR9vqgqpKAmIktkfFDPQ4PmrIQJLp84GAL0OEtXbCcHuZ7AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T09:38:06Z:fbbc33b27e87fb7c18d8a854f1e0bdc9b60e32191c98b6d8e4393fc1fdde376c:1eW23fYun4mkT6YHB4K38rD223CrZC1LsktZWgjG2SV6cK/JNQWkwOqZWKzG097UpMUquaLsHln7+FlwEIF3AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: bundle-release
 version: "2.0.0"
 description: Exact publisher-authored ownership of native payloads, Cargo feature compositions and daemon-linked host features by RyeOS bundle.
@@ -31,6 +31,14 @@ payload_ownership:
         - binary: ryeos-browser-tools
           cargo_package: ryeos-browser-tools
           build_class: release
+          cargo_features: []
+    - bundle_name: claude-code
+      bundle_sets: [development, release-artifacts]
+      host_features: []
+      payloads:
+        - binary: claude-code-adapter
+          cargo_package: ryeos-claude-code-adapter
+          build_class: static
           cargo_features: []
     - bundle_name: codex
       bundle_sets: [development, hosted-controller, hosted-workflow, release-artifacts, standard]

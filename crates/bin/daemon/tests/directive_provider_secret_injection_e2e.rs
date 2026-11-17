@@ -751,6 +751,79 @@ async fn validate_only_directive(
     body
 }
 
+/// A node-space provider file layered over the bundle entry replaces the
+/// endpoint, and the validate preview reports the resulting request URL (and
+/// both contributing spaces) without calling the provider.
+#[tokio::test(flavor = "multi_thread")]
+async fn validate_only_preview_reports_node_overridden_endpoint() {
+    let env_var = "OPENROUTER_API_KEY";
+    let mock = MockProvider::start(vec![MockResponse::Text("ok".into())]).await;
+    let mock_url = mock.base_url.clone();
+
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_workflow_bundles(state_path, fixture)?;
+        register_mock_provider_bundle(state_path, &mock_url, env_var, None, None, fixture)?;
+        // Operator-signed node-space override carrying only the changed keys.
+        let dir = state_path.join(".ai/config/ryeos-runtime/model-providers");
+        std::fs::create_dir_all(&dir)?;
+        let body = "category: \"ryeos-runtime/model-providers\"\n\
+                    transport:\n  kind: remote_http\n  base_url: \"https://override.example.test/v9/\"\n";
+        let signed = lillux::signature::sign_content(body, &fixture.user, "#", None);
+        std::fs::write(dir.join("mock.yaml"), signed)?;
+        Ok(())
+    };
+
+    let (h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
+        cmd.env_remove(env_var);
+    })
+    .await
+    .expect("start daemon with a node-space provider override");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
+    plant_directive_with_secrets(
+        project.path(),
+        "test/preview_endpoint",
+        "Hello {{ name }}.",
+        &[],
+        &fixture.publisher,
+    )
+    .expect("plant directive");
+
+    let body = validate_only_directive(&h, "directive:test/preview_endpoint", project.path()).await;
+    assert_eq!(
+        body.pointer("/runtime_preparation/runtime_facts/request_url"),
+        Some(&serde_json::json!(
+            "https://override.example.test/v9/chat/completions"
+        )),
+        "body={body:#}"
+    );
+    assert_eq!(
+        body.pointer("/runtime_preparation/runtime_facts/provider_id"),
+        Some(&serde_json::json!("mock")),
+        "body={body:#}"
+    );
+    let sources = body
+        .pointer("/runtime_preparation/runtime_facts/config_sources")
+        .and_then(|v| v.as_array())
+        .expect("config_sources fact");
+    assert!(
+        sources
+            .iter()
+            .any(|s| s.as_str().is_some_and(|s| s.starts_with("node"))),
+        "node-space contributor must be reported; body={body:#}"
+    );
+    assert!(
+        !body.to_string().contains(&mock_url),
+        "the overridden bundle URL must not be reported; body={body:#}"
+    );
+    assert_eq!(
+        mock.captured_headers().await.len(),
+        0,
+        "validation must not call the provider"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn validate_only_preview_sees_vault_secret() {
     // The preview asks the vault for the declared names only. A secret sealed
