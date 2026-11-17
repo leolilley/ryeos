@@ -496,15 +496,26 @@ impl RyeOsCore {
         {
             return false;
         }
+        let timeline_section = self.timeline_section_fold(instance_key, section);
         let Some(local) = self.mounted_local_state_mut(instance_key) else {
             return false;
         };
         let ViewLocalState::GenericList {
-            collapsed: folds, ..
+            collapsed: folds,
+            timeline_folds,
+            ..
         } = local
         else {
             return false;
         };
+        if let Some((key, default_collapsed)) = timeline_section {
+            // Only a departure from the section's default is stored.
+            return if collapsed == default_collapsed {
+                timeline_folds.remove(&key).is_some()
+            } else {
+                timeline_folds.insert(key, collapsed) != Some(collapsed)
+            };
+        }
         if collapsed {
             folds.insert(section)
         } else {
