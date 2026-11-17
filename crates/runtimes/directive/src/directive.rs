@@ -411,6 +411,84 @@ impl ProviderMessage {
     pub fn reasoning_text(&self) -> Option<&str> {
         self.reasoning_content.as_deref()
     }
+
+    /// The message as a recorded provider answer: parts in the order
+    /// reasoning, text, tool calls. Only an assistant message without a
+    /// tool-call id can be recorded, and every tool call needs an id.
+    pub fn to_recorded(&self) -> anyhow::Result<ryeos_provider_contract::RecordedMessage> {
+        use ryeos_provider_contract::{Part, ReasoningPart, Role};
+        if self.role != "assistant" || self.tool_call_id.is_some() {
+            anyhow::bail!("provider message is not record-safe: not an assistant answer");
+        }
+        let mut parts = Vec::new();
+        if let Some(reasoning) = &self.reasoning_content {
+            parts.push(Part::Reasoning(ReasoningPart {
+                text: Some(reasoning.clone()),
+                artefact: None,
+            }));
+        }
+        match &self.content {
+            None | Some(Value::Null) => {}
+            Some(Value::String(text)) => parts.push(Part::text(text.clone())),
+            Some(_) => anyhow::bail!("provider message is not record-safe: content is not text"),
+        }
+        for call in self.tool_calls.iter().flatten() {
+            let id = call.id.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "provider message is not record-safe: tool call {:?} has no id",
+                    call.name
+                )
+            })?;
+            parts.push(Part::tool_call(
+                id,
+                call.name.clone(),
+                call.arguments.clone(),
+            ));
+        }
+        Ok(ryeos_provider_contract::RecordedMessage::new(
+            Role::Assistant,
+            parts,
+        ))
+    }
+
+    /// The message a recorded provider answer stands for. Text parts join
+    /// into the content, reasoning text parts into the reasoning, and tool
+    /// call parts become the tool calls; parts a provider answer cannot
+    /// hold are refused.
+    pub fn from_recorded(
+        recorded: &ryeos_provider_contract::RecordedMessage,
+    ) -> anyhow::Result<Self> {
+        use ryeos_provider_contract::Part;
+        let mut content: Option<String> = None;
+        let mut reasoning: Option<String> = None;
+        let mut tool_calls = Vec::new();
+        for part in &recorded.parts {
+            match part {
+                Part::Text(text) => content.get_or_insert_with(String::new).push_str(&text.text),
+                Part::Reasoning(part) => {
+                    if let Some(text) = &part.text {
+                        reasoning.get_or_insert_with(String::new).push_str(text);
+                    }
+                }
+                Part::ToolCall(call) => tool_calls.push(ToolCall {
+                    id: Some(call.call_id.clone()),
+                    name: call.name.clone(),
+                    arguments: call.arguments.clone(),
+                }),
+                other => anyhow::bail!(
+                    "recorded provider answer holds a {} part",
+                    other.type_name()
+                ),
+            }
+        }
+        Ok(Self {
+            role: recorded.role.as_str().to_string(),
+            content: content.map(Value::String),
+            tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
+            tool_call_id: None,
+            reasoning_content: reasoning,
+        })
+    }
 }
 
 /// Construct the one durable semantic answer for a completed provider turn.
@@ -420,10 +498,8 @@ pub fn normalize_provider_call_answer(
     message: &ProviderMessage,
     finish_reason: Option<&str>,
 ) -> anyhow::Result<ryeos_provider_contract::ProviderCallAnswer> {
-    let recorded_message = serde_json::from_value(serde_json::to_value(message)?)
-        .map_err(|error| anyhow::anyhow!("provider message is not record-safe: {error}"))?;
     let answer = ryeos_provider_contract::ProviderCallAnswer {
-        message: recorded_message,
+        message: message.to_recorded()?,
         finish_reason: finish_reason.map(str::to_string),
     };
     answer.validate()?;
@@ -550,6 +626,60 @@ pub fn normalize_finish_reason(raw: Option<&str>) -> FinishReason {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_message_round_trips_through_its_recorded_parts() {
+        let message = ProviderMessage::assistant(
+            Some(serde_json::json!("checking")),
+            Some(vec![ToolCall {
+                id: Some("call_1".to_string()),
+                name: "inspect".to_string(),
+                arguments: serde_json::json!({"a": 1}),
+            }]),
+            Some("thinking".to_string()),
+        );
+        let recorded = message.to_recorded().unwrap();
+        let kinds: Vec<_> = recorded.parts.iter().map(|part| part.type_name()).collect();
+        assert_eq!(kinds, ["reasoning", "text", "tool_call"]);
+        let back = ProviderMessage::from_recorded(&recorded).unwrap();
+        assert_eq!(back.text(), Some("checking"));
+        assert_eq!(back.reasoning_text(), Some("thinking"));
+        assert_eq!(back.tool_calls().len(), 1);
+        assert_eq!(back.tool_calls()[0].id.as_deref(), Some("call_1"));
+
+        let empty = ProviderMessage::assistant(None, None, None);
+        let recorded = empty.to_recorded().unwrap();
+        assert!(recorded.parts.is_empty());
+        let back = ProviderMessage::from_recorded(&recorded).unwrap();
+        assert!(back.text().is_none() && !back.has_tool_calls());
+    }
+
+    #[test]
+    fn a_message_without_a_tool_call_id_is_not_recorded() {
+        let message = ProviderMessage::assistant(
+            None,
+            Some(vec![ToolCall {
+                id: None,
+                name: "inspect".to_string(),
+                arguments: serde_json::json!({}),
+            }]),
+            None,
+        );
+        assert!(message.to_recorded().is_err());
+    }
+
+    #[test]
+    fn a_recorded_answer_holds_no_image_or_tool_result_part() {
+        let image = ryeos_provider_contract::RecordedMessage::new(
+            ryeos_provider_contract::Role::Assistant,
+            vec![ryeos_provider_contract::Part::tool_result(
+                "c",
+                vec![],
+                ryeos_provider_contract::ToolResultStatus::Ok,
+            )],
+        );
+        assert!(ProviderMessage::from_recorded(&image).is_err());
+    }
 
     #[test]
     fn provider_effect_answer_excludes_observation_texture() {

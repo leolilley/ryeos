@@ -1455,36 +1455,23 @@ fn completed_from_retained_local_observation(
     requested_output_tokens: Option<u64>,
 ) -> Result<StreamOutcome> {
     terminal.validate()?;
+    let message = ProviderMessage::from_recorded(&terminal.answer.message)?;
     let mut meter = StreamOutputMeter::default();
-    if let Some(text) = terminal
-        .answer
-        .message
-        .content
-        .as_ref()
-        .and_then(Value::as_str)
-    {
+    if let Some(text) = message.text() {
         meter.accept(
             &StreamEvent::Delta(text.to_owned()),
             input.execution.max_stream_output_bytes_per_turn,
             0,
         )?;
     }
-    if let Some(reasoning) = terminal.answer.message.reasoning_content.as_deref() {
+    if let Some(reasoning) = message.reasoning_text() {
         meter.accept(
             &StreamEvent::ReasoningDelta(reasoning.to_owned()),
             input.execution.max_stream_output_bytes_per_turn,
             0,
         )?;
     }
-    for (index, call) in terminal
-        .answer
-        .message
-        .tool_calls
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
-        .enumerate()
-    {
+    for (index, call) in message.tool_calls().iter().enumerate() {
         meter.accept(
             &StreamEvent::ToolUse {
                 id: call.id.clone(),
@@ -1498,8 +1485,6 @@ fn completed_from_retained_local_observation(
             0,
         )?;
     }
-    let message: ProviderMessage =
-        serde_json::from_value(serde_json::to_value(&terminal.answer.message)?)?;
     let usage = TokenUsage {
         input_tokens: Some(terminal.usage.input_tokens),
         output_tokens: Some(terminal.usage.output_tokens),
@@ -1848,27 +1833,13 @@ pub async fn send_prepared_local_streaming(
         &final_value.expect("final value checked above"),
     )
     .context("decode admitted local-worker final result")?;
-    let message: ProviderMessage =
-        serde_json::from_value(serde_json::to_value(&final_result.answer.message)?)?;
-    if message.role != "assistant"
-        || message.tool_call_id.is_some()
-        || final_result
-            .answer
-            .message
-            .content
-            .as_ref()
-            .and_then(Value::as_str)
-            != (!accumulated_text.is_empty()).then_some(accumulated_text.as_str())
-        || final_result.answer.message.reasoning_content.as_deref()
+    let message = ProviderMessage::from_recorded(&final_result.answer.message)?;
+    if message.role() != "assistant"
+        || message.tool_call_id().is_some()
+        || message.text() != (!accumulated_text.is_empty()).then_some(accumulated_text.as_str())
+        || message.reasoning_text()
             != (!accumulated_reasoning.is_empty()).then_some(accumulated_reasoning.as_str())
-        || serde_json::to_value(
-            final_result
-                .answer
-                .message
-                .tool_calls
-                .as_deref()
-                .unwrap_or_default(),
-        )? != serde_json::to_value(&accumulated_tools)?
+        || serde_json::to_value(message.tool_calls())? != serde_json::to_value(&accumulated_tools)?
     {
         bail!("local worker final answer contradicts its streamed semantic events");
     }
@@ -5654,17 +5625,23 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
         };
         let terminal = ryeos_provider_contract::AdmittedLocalWorkerFinal {
             answer: ryeos_provider_contract::ProviderCallAnswer {
-                message: ryeos_provider_contract::RecordedMessage {
-                    role: "assistant".to_owned(),
-                    content: Some(json!("done")),
-                    tool_calls: Some(vec![ryeos_provider_contract::RecordedToolCall {
-                        id: Some("call-1".to_owned()),
-                        name: "inspect".to_owned(),
-                        arguments: json!({"value": 1}),
-                    }]),
-                    tool_call_id: None,
-                    reasoning_content: Some("checked".to_owned()),
-                },
+                message: ryeos_provider_contract::RecordedMessage::new(
+                    ryeos_provider_contract::Role::Assistant,
+                    vec![
+                        ryeos_provider_contract::Part::Reasoning(
+                            ryeos_provider_contract::ReasoningPart {
+                                text: Some("checked".to_owned()),
+                                artefact: None,
+                            },
+                        ),
+                        ryeos_provider_contract::Part::text("done"),
+                        ryeos_provider_contract::Part::tool_call(
+                            "call-1",
+                            "inspect",
+                            json!({"value": 1}),
+                        ),
+                    ],
+                ),
                 finish_reason: Some("tool_calls".to_owned()),
             },
             usage: ryeos_provider_contract::AdmittedLocalWorkerUsage {

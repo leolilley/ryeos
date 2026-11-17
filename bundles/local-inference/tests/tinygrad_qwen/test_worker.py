@@ -33,6 +33,8 @@ from session import (  # noqa: E402
     WORKER_ROOT,
     OutputRouter,
     Worker,
+    _answer_message,
+    _append_text_part,
     _parse_tools,
     _read_frame,
     _validate_tinygrad_device,
@@ -195,6 +197,34 @@ class WorkerContractTests(unittest.TestCase):
                 ],
                 [],
             )
+
+    def test_answer_message_keeps_generation_order_and_puts_calls_last(self) -> None:
+        parts: list[dict] = []
+        _append_text_part(parts, "reasoning", "think ")
+        _append_text_part(parts, "reasoning", "more")
+        _append_text_part(parts, "text", "answer")
+        _append_text_part(parts, "reasoning", "again")
+        message = _answer_message(
+            parts, [{"id": "call_1", "name": "probe", "arguments": {"x": 1}}]
+        )
+        self.assertEqual(
+            message,
+            {
+                "role": "assistant",
+                "parts": [
+                    {"type": "reasoning", "text": "think more"},
+                    {"type": "text", "text": "answer"},
+                    {"type": "reasoning", "text": "again"},
+                    {
+                        "type": "tool_call",
+                        "call_id": "call_1",
+                        "name": "probe",
+                        "arguments": {"x": 1},
+                    },
+                ],
+            },
+        )
+        self.assertEqual(_answer_message([], []), {"role": "assistant", "parts": []})
 
     def test_generated_tool_json_is_strict(self) -> None:
         for raw in (
@@ -529,7 +559,10 @@ class WorkerContractTests(unittest.TestCase):
         result = supervisor.execute(
             "non-thinking", request(False, 6), threading.Event(), lambda _delta: None
         )
-        self.assertEqual(result["answer"]["message"]["content"], "OK")
+        self.assertEqual(
+            result["answer"]["message"],
+            {"role": "assistant", "parts": [{"type": "text", "text": "OK"}]},
+        )
         self.assertEqual(result["answer"]["finish_reason"], "stop")
 
     @unittest.skipUnless(

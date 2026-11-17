@@ -3976,8 +3976,7 @@ impl Runner {
                     record_hash,
                     answer,
                 } => {
-                    let message: ProviderMessage =
-                        serde_json::from_value(serde_json::to_value(answer.message)?)?;
+                    let message = ProviderMessage::from_recorded(&answer.message)?;
                     return Ok(LedgerAdmission::Replayed {
                         record_hash,
                         response: crate::provider_adapter::http::AdapterResponse {

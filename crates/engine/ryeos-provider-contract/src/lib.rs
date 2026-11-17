@@ -18,69 +18,21 @@ pub use parts::{
     ToolCallPart, ToolResultPart, ToolResultStatus,
 };
 
-pub const PROVIDER_CALL_RECORD_SCHEMA_VERSION: u32 = 2;
-pub const PROVIDER_CALL_KEY_SCHEMA: &str = "ryeos.provider_call_effect.key.v2";
+pub const PROVIDER_CALL_RECORD_SCHEMA_VERSION: u32 = 3;
+pub const PROVIDER_CALL_KEY_SCHEMA: &str = "ryeos.provider_call_effect.key.v3";
 pub const PROVIDER_CALL_RECORD_KIND: &str = "provider_call_effect_record";
 pub const PROVIDER_CALL_REPLAY_NAMESPACE: &str = "provider.call";
-pub const LOCAL_WORKER_OBSERVATION_SCHEMA_VERSION: u32 = 1;
+pub const LOCAL_WORKER_OBSERVATION_SCHEMA_VERSION: u32 = 2;
 pub const LOCAL_WORKER_OBSERVATION_KIND: &str = "provider_local_worker_observation";
 pub const LOCAL_WORKER_OBSERVATION_KEY_SCHEMA: &str =
-    "ryeos.provider_local_worker_observation.key.v1";
+    "ryeos.provider_local_worker_observation.key.v2";
 pub const LOCAL_WORKER_OBSERVATION_REPLAY_NAMESPACE: &str = "provider.local_worker_observation";
 const MAX_ANSWER_BYTES: usize = 4 * 1024 * 1024;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RecordedToolCall {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
-    pub name: String,
-    pub arguments: Value,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RecordedMessage {
-    pub role: String,
-    #[serde(default)]
-    pub content: Option<Value>,
-    #[serde(default)]
-    pub tool_calls: Option<Vec<RecordedToolCall>>,
-    #[serde(default)]
-    pub tool_call_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_content: Option<String>,
-}
-
-impl RecordedMessage {
-    fn validate(&self) -> anyhow::Result<()> {
-        if self.role != "assistant" {
-            bail!("recorded provider answer role must be assistant");
-        }
-        if self.tool_call_id.is_some() {
-            bail!("recorded assistant provider answer cannot carry tool_call_id");
-        }
-        if let Some(calls) = &self.tool_calls {
-            if calls.len() > 4_096 {
-                bail!("recorded provider answer has too many tool calls");
-            }
-            for call in calls {
-                validate_identifier("recorded provider tool name", &call.name)?;
-                if let Some(id) = &call.id {
-                    validate_identifier("recorded provider tool id", id)?;
-                }
-            }
-        }
-        if self
-            .reasoning_content
-            .as_ref()
-            .is_some_and(|reasoning| reasoning.len() > MAX_ANSWER_BYTES)
-        {
-            bail!("recorded provider reasoning exceeds the answer bound");
-        }
-        Ok(())
-    }
-}
+/// The assistant message a provider call recorded: the neutral turn, role
+/// and ordered parts. [`ProviderCallAnswer::validate`] additionally requires
+/// the assistant role.
+pub type RecordedMessage = Message;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -92,6 +44,9 @@ pub struct ProviderCallAnswer {
 
 impl ProviderCallAnswer {
     pub fn validate(&self) -> anyhow::Result<()> {
+        if self.message.role != Role::Assistant {
+            bail!("recorded provider answer role must be assistant");
+        }
         self.message.validate()?;
         if let Some(reason) = &self.finish_reason {
             validate_identifier("recorded provider finish reason", reason)?;
@@ -945,13 +900,7 @@ mod tests {
     fn local_terminal() -> AdmittedLocalWorkerFinal {
         AdmittedLocalWorkerFinal {
             answer: ProviderCallAnswer {
-                message: RecordedMessage {
-                    role: "assistant".to_owned(),
-                    content: Some(Value::String("done".to_owned())),
-                    tool_calls: None,
-                    tool_call_id: None,
-                    reasoning_content: None,
-                },
+                message: Message::text(Role::Assistant, "done"),
                 finish_reason: Some("stop".to_owned()),
             },
             usage: AdmittedLocalWorkerUsage {
@@ -1092,5 +1041,49 @@ mod tests {
                 .to_string()
                 .contains("output ceiling")
         );
+    }
+
+    #[test]
+    fn an_answer_is_an_assistant_message_of_parts() {
+        let answer = ProviderCallAnswer {
+            message: RecordedMessage::new(
+                Role::Assistant,
+                vec![
+                    Part::text("checking"),
+                    Part::tool_call("call_1", "inspect", serde_json::json!({"a": 1})),
+                ],
+            ),
+            finish_reason: Some("tool_calls".to_owned()),
+        };
+        answer.validate().unwrap();
+        let value = serde_json::to_value(&answer).unwrap();
+        assert_eq!(value["message"]["parts"][1]["type"], "tool_call");
+        assert_eq!(
+            serde_json::from_value::<ProviderCallAnswer>(value).unwrap(),
+            answer
+        );
+
+        let user = ProviderCallAnswer {
+            message: RecordedMessage::text(Role::User, "hello"),
+            finish_reason: None,
+        };
+        assert!(user.validate().is_err());
+        let result = ProviderCallAnswer {
+            message: RecordedMessage::new(
+                Role::Tool,
+                vec![Part::tool_result("c", vec![], ToolResultStatus::Ok)],
+            ),
+            finish_reason: None,
+        };
+        assert!(result.validate().is_err());
+    }
+
+    #[test]
+    fn an_answer_with_the_flat_message_fields_is_refused() {
+        let flat = serde_json::json!({
+            "message": {"role": "assistant", "content": "done", "tool_calls": null},
+            "finish_reason": "stop",
+        });
+        assert!(serde_json::from_value::<ProviderCallAnswer>(flat).is_err());
     }
 }
