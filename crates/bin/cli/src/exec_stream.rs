@@ -143,7 +143,16 @@ fn human_text(payload: &Value) -> Option<String> {
             return Some(s.to_string());
         }
     }
-    None
+    // A recorded turn or input carries its text as parts.
+    let joined: String = payload
+        .get("parts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect();
+    (!joined.is_empty()).then_some(joined)
 }
 
 /// A generic one-line summary of a payload's scalar fields: `key=value` pairs,
@@ -282,6 +291,16 @@ mod tests {
             Some("yo".into())
         );
         assert_eq!(human_text(&serde_json::json!({"delta": ""})), None);
+        assert_eq!(
+            human_text(&serde_json::json!({
+                "parts": [
+                    {"type": "text", "text": "a"},
+                    {"type": "tool_call", "call_id": "c", "name": "t", "arguments": {}},
+                    {"type": "text", "text": "b"}
+                ]
+            })),
+            Some("ab".to_string())
+        );
         assert_eq!(human_text(&serde_json::json!({"other": 1})), None);
     }
 

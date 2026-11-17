@@ -62,7 +62,7 @@ fn append_fixture_event(
             &[NewEventRecord {
                 event_type: "cognition_in".to_string(),
                 storage_class: "indexed".to_string(),
-                payload: serde_json::json!({"content": "fixture"}),
+                payload: serde_json::json!({"origin": "operator", "parts": [{"type": "text", "text": "fixture"}]}),
             }],
         )
         .unwrap()

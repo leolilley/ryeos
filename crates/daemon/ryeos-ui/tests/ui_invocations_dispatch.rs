@@ -471,6 +471,7 @@ async fn read_only_thread_sources_replay_without_recording_service_threads() {
             chain_root_id: Some(owned_chain.to_string()),
             after_chain_seq: None,
             limit: 100,
+            event_types: None,
         })
         .expect("replay the owned chain directly")
         .events;

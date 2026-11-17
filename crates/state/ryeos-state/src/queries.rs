@@ -1238,6 +1238,29 @@ pub fn replay_events_bounded(
     limit: usize,
     max_serialized_bytes: usize,
 ) -> anyhow::Result<ReplayEventRowsPage> {
+    replay_events_of_types_bounded(
+        db,
+        chain_root_id,
+        thread_id,
+        after_seq,
+        limit,
+        max_serialized_bytes,
+        None,
+    )
+}
+
+/// [`replay_events_bounded`] limited to events whose type is one of
+/// `event_types` (`None` keeps every type). The limit and the byte budget
+/// count only the matching events, and the page's `has_more` refers to them.
+pub fn replay_events_of_types_bounded(
+    db: &ProjectionDb,
+    chain_root_id: &str,
+    thread_id: Option<&str>,
+    after_seq: Option<i64>,
+    limit: usize,
+    max_serialized_bytes: usize,
+    event_types: Option<&[String]>,
+) -> anyhow::Result<ReplayEventRowsPage> {
     replay_events_range_bounded(
         db,
         chain_root_id,
@@ -1247,6 +1270,7 @@ pub fn replay_events_bounded(
         limit,
         max_serialized_bytes,
         false,
+        event_types,
     )
 }
 
@@ -1272,6 +1296,7 @@ pub fn replay_events_through_bounded(
         limit,
         max_serialized_bytes,
         false,
+        None,
     )
 }
 
@@ -1296,6 +1321,7 @@ pub fn recent_thread_events_bounded(
         limit,
         max_serialized_bytes,
         true,
+        None,
     )
 }
 
@@ -1308,6 +1334,7 @@ fn replay_events_range_bounded(
     limit: usize,
     max_serialized_bytes: usize,
     newest_first: bool,
+    event_types: Option<&[String]>,
 ) -> anyhow::Result<ReplayEventRowsPage> {
     db.with_sql(|connection| {
         if limit == 0 {
@@ -1347,6 +1374,17 @@ fn replay_events_range_bounded(
         if let Some(seq) = through_seq {
             sql.push_str(" AND chain_seq <= ?");
             params.push(Box::new(seq));
+        }
+        if let Some(event_types) = event_types {
+            if event_types.is_empty() {
+                anyhow::bail!("replay_events_bounded event type filter must not be empty");
+            }
+            sql.push_str(" AND event_type IN (");
+            for (index, event_type) in event_types.iter().enumerate() {
+                sql.push_str(if index == 0 { "?" } else { ", ?" });
+                params.push(Box::new(event_type.clone()));
+            }
+            sql.push(')');
         }
 
         sql.push_str(if newest_first {

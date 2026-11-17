@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-17T07:25:43Z:9e1b03ca521fd36c3b853daeb67196e6915e583c0a2f6049d391a264d871663c:UNo/BHi0amS1L5zog/W0X7BFyZG+timhxhudNGRo9fHHbeV7f23AdiTyfCK8iRPrLfHyis3w5gzmB5r6WCG8DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T08:54:07Z:3df19d5717060d34c010d9919a20e97b8633e50bec486dac0a99790eb2434edc:qXO5EG/vSMlgROcZF0ZKLVLjLjrFslBUP5LoIUoteXeQ8XllSQQTWBpsyMkvz7AXvtJqKuS1Sv1cPr6vj4jMAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Thread timeline definition: how a chain's events fold into timeline items.
 # Declarative data read by the timeline service; the fold engine names no event type itself.
 category: ryeos/ui/timeline
@@ -33,25 +33,90 @@ events:
   stream_opened: [{drop: true}]
   thread_usage: [{drop: true}]
 
+  # Input the model is given. An operator or launch input opens an exchange with
+  # its first text part; later text parts continue it and images draw a line.
+  # Harness input is a notice, a compaction input a divider; context and the
+  # turn marker add nothing to draw.
   cognition_in:
-    - when: {has: payload.content}
+    # A large text input arrives in chunks: the first draws the message.
+    - when: {has: payload.content_chunk}
       emit:
-        - {type: message, starts_exchange: true, project: {body: payload.content}}
+        - type: message
+          when: {eq: [payload.chunk_index, 0], one_of: [payload.origin, [operator, launch]]}
+          starts_exchange: true
+          project:
+            body: payload.content_chunk
+            detail: {join: [{path: payload.chunk_count, prefix: "chunks: "}]}
+    - when: {one_of: [payload.origin, [operator, launch]]}
+      over: payload.parts
+      emit:
+        - type: message
+          when: {eq: [item_index, 0], has: item.text}
+          starts_exchange: true
+          project: {body: item.text}
+        # An input that opens with an image still opens the exchange.
+        - type: marker
+          when: {eq: [item_index, 0], lacks: item.text}
+          starts_exchange: true
+          project:
+            headline:
+              join:
+                - {path: item.media_type, prefix: "image · "}
+                - {path: item.byte_length, format: bytes}
+                - {path: item.width, prefix: "w "}
+                - {path: item.height, prefix: "h "}
+        - type: prose
+          when: {eq: [item.type, text], ne: [item_index, 0]}
+          project: {body: item.text}
+        - type: marker
+          when: {eq: [item.type, image], ne: [item_index, 0]}
+          project:
+            headline:
+              join:
+                - {path: item.media_type, prefix: "image · "}
+                - {path: item.byte_length, format: bytes}
+                - {path: item.width, prefix: "w "}
+                - {path: item.height, prefix: "h "}
+    - when: {eq: [payload.origin, context]}
+      drop: true
     - when: {has: payload.turn}
       drop: true
+    - when: {eq: [payload.origin, compaction]}
+      emit:
+        - type: marker
+          project: {headline: {join: [{path: payload.origin, prefix: "context "}]}}
+    - when: {has: payload.origin}
+      emit:
+        - type: marker
+          project: {headline: {join: [payload.origin, payload.kind]}}
 
-  # One event may carry reasoning, text and tool calls: it emits an entry per part.
+  # One event may carry reasoning, text and tool calls: it emits an entry per
+  # part. A tool call part draws nothing here; its tool_call_start does. A turn
+  # an interrupt cut short ends with a marker.
   cognition_out:
-    - emit:
+    - over: payload.parts
+      emit:
         - type: thought
-          when: {has: payload.reasoning_content}
-          project: {body: payload.reasoning_content}
+          when: {eq: [item.type, reasoning], has: item.text}
+          project: {body: item.text}
         - type: prose
           flow: true
-          when: {has: payload.content}
-          project: {body: payload.content}
+          when: {eq: [item.type, text]}
+          project: {body: item.text}
+        - type: marker
+          key: [thread_id, payload.turn]
+          when: {eq: [item_last, true], one_of: [payload.finish, [interrupted]]}
+          tone: [{default: warn}]
+          project: {headline: {join: [{path: payload.turn, prefix: "turn interrupted · "}]}}
 
+  # The stable frame of a conversation is written once at launch.
+  cognition_frame: [{drop: true}]
 
+  # Reserved: compaction of the conversation, drawn as a divider.
+  cognition_compaction:
+    - emit:
+        - type: marker
+          project: {headline: {join: [{path: payload.reason, prefix: "context compacted · "}]}}
 
   # A continuation: the predecessor names its successor and why; the
   # successor's own record of the link adds nothing to draw.
@@ -75,8 +140,15 @@ events:
           project:
             headline: {first: [payload.outcome_code, payload.message]}
             reason: {first: [payload.message, payload.error.reason, payload.error.error, payload.error.summary, payload.error]}
-            # What a retry would resend: this thread's latest operator input.
-            retry_input: {lookup: {event: cognition_in, get: payload.content}}
+            # What a retry would resend: the text of this thread's latest operator or
+            # launch input.
+            retry_input:
+              lookup:
+                event: cognition_in
+                when: {one_of: [payload.origin, [operator, launch]]}
+                array: payload.parts
+                find: {field: type, equals: text}
+                get: text
 
   thread_completed:
     - when: {on_spine: true}
@@ -177,7 +249,7 @@ events:
           counts_as: other
           project:
             headline: payload.tool
-            detail: {lookup: {event: cognition_out, array: payload.tool_calls, find: [id, payload.call_id], get: arguments}}
+            detail: {lookup: {event: cognition_out, array: payload.parts, find: [call_id, payload.call_id], get: arguments}}
 
   tool_call_result:
     - when: {has: payload.graph_run_id}
@@ -185,15 +257,25 @@ events:
         - type: activity
           key: [payload.node, payload.step]
           state: {from: payload.status, map: {ok: done}, default: failed}
+    # The guard records what was done to the result; an error status or a
+    # truncation raises the tone, and a repeat of an earlier result is named.
     - emit:
         - type: activity
           key: [payload.operation_id]
-          state: {from: payload.truncated_reason, map: {error_envelope: failed}, default: done}
+          state: {from: payload.status, map: {ok: done, error: failed}, default: failed}
           tone:
-            - {field: payload.truncated_reason, map: {error_envelope: danger, result_guard: warn}}
+            - {field: payload.status, map: {error: danger}}
             - {default: good}
           project:
-            badge: {join: [{path: payload.result_size_bytes, format: bytes}, payload.truncated_reason]}
+            badge:
+              join:
+                - {path: payload.guard.result_size_bytes, format: bytes}
+                - payload.guard.truncated_reason
+                - {path: payload.guard.duplicate_of, format: short_hash, prefix: "same as earlier "}
+        - type: activity
+          key: [payload.operation_id]
+          when: {eq: [payload.status, ok], has: payload.guard.truncated_reason}
+          tone: [{default: warn}]
 
   # Work in another thread. The child's outcome is not in this chain, so the
   # link's state is unknown from here.

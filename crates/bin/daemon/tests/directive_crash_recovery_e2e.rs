@@ -369,7 +369,10 @@ fn transcript_cognition_out_count(events: &[(String, Value)]) -> usize {
         .iter()
         .filter(|(kind, payload)| {
             kind == "cognition_out"
-                && (payload.get("content").is_some() || payload.get("tool_calls").is_some())
+                && payload
+                    .get("parts")
+                    .and_then(Value::as_array)
+                    .is_some_and(|parts| !parts.is_empty())
         })
         .count()
 }
@@ -775,7 +778,7 @@ async fn run_crash_cut(cut: CrashCut) {
         assert!(events.iter().any(|(kind, payload)| {
             kind == "tool_call_result"
                 && payload.get("call_id").and_then(Value::as_str) == Some("refused-marker-call")
-                && payload.get("truncated_reason").and_then(Value::as_str) == Some("error_envelope")
+                && payload.get("status").and_then(Value::as_str) == Some("error")
         }));
     }
 

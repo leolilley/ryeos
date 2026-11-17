@@ -9,9 +9,11 @@ mod budget;
 mod continuation;
 mod directive;
 mod dispatcher;
+mod estimate;
 #[cfg(test)]
 mod expression_inventory_tests;
 mod harness;
+mod launch_records;
 mod provider_adapter;
 mod provider_transport_timing;
 mod result_guard;
@@ -476,19 +478,54 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
     } else {
         envelope.request.previous_thread_id.clone()
     };
-    let mut runner_inst = if let Some(ref resume_id) = resume_id {
-        let carry_turns = bootstrap_output
-            .config
-            .continuation_runtime
-            .resolve_carry_turns(bootstrap_output.config.continuation.declared_carry_turns());
-        let resume_mode = if same_thread_resume {
-            resume::ResumeMode::NativeSameThread
-        } else {
-            resume::ResumeMode::Continuation
-        };
-        let mut resume_state =
-            resume::load_resume_state(&callback, resume_id, carry_turns, resume_mode).await?;
 
+    // The frame this launch gives the model: system text, tool inventory,
+    // request options and provider configuration. A fresh launch records it;
+    // a resume records it only when it differs from the frame on the chain.
+    let launch_inventory = runner::launch_inventory(
+        &bootstrap_output.config.tools,
+        harness.effective_caps(),
+        bootstrap_output.config.outputs.as_deref(),
+    );
+    let mut launch_frame = launch_records::build_frame(
+        1,
+        &launch_records::FrameSource {
+            system_prompt: bootstrap_output.config.system_prompt.as_deref(),
+            inventory: &launch_inventory,
+            model: &model_name,
+            reasoning: reasoning.as_ref(),
+            sampling: sampling.as_ref(),
+            max_output_tokens: execution.max_provider_output_tokens_per_turn,
+            provider_config_hash: &config_hash,
+        },
+    )?;
+    drop(launch_inventory);
+    let launch_key = format!("launch:{}", envelope.thread_id);
+
+    // What a recovery rebuilds. A thread that lost its process before it
+    // wrote any launch record has nothing to rebuild and launches fresh.
+    let resume_state = match &resume_id {
+        Some(resume_id) => {
+            let carry_turns = bootstrap_output
+                .config
+                .continuation_runtime
+                .resolve_carry_turns(bootstrap_output.config.continuation.declared_carry_turns());
+            let resume_mode = if same_thread_resume {
+                resume::ResumeMode::NativeSameThread
+            } else {
+                resume::ResumeMode::Continuation
+            };
+            let loaded =
+                resume::load_resume_state(&callback, resume_id, carry_turns, resume_mode).await?;
+            (!(same_thread_resume && loaded.has_no_launch_records())).then_some(loaded)
+        }
+        None => None,
+    };
+
+    let mut runner_inst = if let Some(mut resume_state) = resume_state {
+        let resume_id = resume_id
+            .as_deref()
+            .expect("a resume has a thread to resume");
         if !same_thread_resume
             && let Err(e) = callback
                 .append_runtime_event(
@@ -504,33 +541,65 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
             );
         }
 
-        // Operator follow-up: emit the new stimulus as a `cognition_in` AFTER
-        // folding the chain (so the replay does not double-count it), then seed
-        // it as the live provider message this run answers. `role` here is the
+        // The frame in force: the one the chain recorded, unless this launch
+        // gives the model something different, which is recorded as the next
+        // frame. A provider entry that refuses a mid-conversation change would
+        // refuse here; none declares that yet.
+        let frame_to_record = match &resume_state.frame {
+            Some(recorded) if recorded.same_as(&launch_frame.payload) => None,
+            Some(recorded) => {
+                launch_frame.payload.frame_seq = recorded.frame_seq + 1;
+                Some(launch_frame.clone())
+            }
+            None => Some(launch_frame.clone()),
+        };
+        let system_prompt = match &frame_to_record {
+            Some(frame) => frame.payload.system_text(),
+            None => resume_state
+                .frame
+                .as_ref()
+                .and_then(|recorded| recorded.system_text()),
+        };
+
+        // Operator follow-up: record the new stimulus as a `cognition_in`
+        // AFTER folding the chain (so the replay does not double-count it),
+        // in one batch with the frame when there is one, then seed it as the
+        // live provider message this run answers. `role` here is the
         // provider-wire mapping, not a substrate concept.
         //
         // A MACHINE continuation (limit cut-off) suppresses this: it folds the
         // chain and resumes the cut-off task with nothing new asked — `inputs`
         // are the source's originals, already present in the folded chain, so
         // re-injecting them would double the opening stimulus.
+        let mut inputs = Vec::new();
         if !same_thread_resume && !envelope.request.suppress_stimulus {
             let rendered_prompt = operator_follow_up_stimulus(&envelope.request.inputs)?;
-            callback.emit_stimulus(&rendered_prompt).await?;
-            resume_state.messages.push(directive::ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!(rendered_prompt)),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            });
+            inputs.push(ryeos_runtime::CognitionInput::text(
+                "operator",
+                rendered_prompt.as_str(),
+            ));
         }
+        if frame_to_record.is_some() || !inputs.is_empty() {
+            let key = match (&frame_to_record, inputs.is_empty()) {
+                (Some(frame), true) => {
+                    format!("frame:{}:{}", envelope.thread_id, frame.payload.frame_seq)
+                }
+                _ => launch_key.clone(),
+            };
+            callback
+                .emit_launch_records(frame_to_record.as_ref(), &inputs, &key)
+                .await?;
+        }
+        resume_state
+            .messages
+            .extend(launch_records::messages_of(&inputs));
 
         runner::Runner::from_resume(
             resume_state,
             runner::RunnerConfig {
                 messages: vec![], // overridden by from_resume with resume.messages
                 tools: bootstrap_output.config.tools,
-                system_prompt: bootstrap_output.config.system_prompt,
+                system_prompt,
                 harness,
                 budget,
                 callback,
@@ -561,60 +630,24 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
             },
         )?
     } else {
-        // Fresh launch: render and emit the opening stimulus as a `cognition_in`
-        // so a later turn can fold it from the chain.
+        // Fresh launch: render the opening stimulus and record the launch as
+        // one batch (frame, context, stimulus, context) so a later turn can
+        // fold it from the chain and the record reads in the order the model
+        // was given it.
         let rendered_prompt = render_stimulus(
             &bootstrap_output.config.user_prompt,
             &envelope.request.inputs,
             envelope.request.scheduled_fire.as_ref(),
         )?;
-        callback.emit_stimulus(&rendered_prompt).await?;
-
-        let mut messages = Vec::new();
-
-        // Context before: injected before user prompt
-        if let Some(ref before) = bootstrap_output.config.context_before {
-            messages.push(directive::ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!(before)),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            });
-            messages.push(directive::ProviderMessage {
-                role: "assistant".to_string(),
-                content: Some(json!("Understood. I will use this context.")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            });
-        }
-
-        messages.push(directive::ProviderMessage {
-            role: "user".to_string(),
-            content: Some(json!(rendered_prompt)),
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-        });
-
-        // Context after: injected after user prompt
-        if let Some(ref after) = bootstrap_output.config.context_after {
-            messages.push(directive::ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!(after)),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            });
-            messages.push(directive::ProviderMessage {
-                role: "assistant".to_string(),
-                content: Some(json!("Noted. I will apply this guidance.")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            });
-        }
+        let inputs = launch_records::launch_inputs(
+            bootstrap_output.config.context_before.as_deref(),
+            &rendered_prompt,
+            bootstrap_output.config.context_after.as_deref(),
+        );
+        callback
+            .emit_launch_records(Some(&launch_frame), &inputs, &launch_key)
+            .await?;
+        let messages = launch_records::messages_of(&inputs);
 
         runner::Runner::new(runner::RunnerConfig {
             messages,

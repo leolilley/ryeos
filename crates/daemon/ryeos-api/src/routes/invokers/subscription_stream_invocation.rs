@@ -95,6 +95,7 @@ impl CompiledRouteInvocation for CompiledSubscriptionStreamInvocation {
                     thread_id: Some(thread_id.clone()),
                     after_chain_seq: last_seen,
                     limit: replay_batch_size,
+                    event_types: None,
                 })
                 .map_err(|e| RouteDispatchError::Internal(format!("{e:#}")));
 
@@ -125,6 +126,7 @@ impl CompiledRouteInvocation for CompiledSubscriptionStreamInvocation {
                                 thread_id: Some(thread_id.clone()),
                                 after_chain_seq: Some(max_seq),
                                 limit: replay_batch_size,
+                                event_types: None,
                             });
 
                         match page {
@@ -189,6 +191,7 @@ impl CompiledRouteInvocation for CompiledSubscriptionStreamInvocation {
                                                 Some(lag_cursor)
                                             },
                                             limit: replay_batch_size,
+                                            event_types: None,
                                         });
 
                                     match page_result {

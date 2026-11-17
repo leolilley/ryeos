@@ -56,6 +56,10 @@ pub async fn handle(
         .node_policy
         .require::<ryeos_node_runtime::node_policy::sections::event_storage::EventStoragePolicy>()
         .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
+    let attachments = state
+        .node_policy
+        .require::<ryeos_node_runtime::node_policy::sections::thread_attachments::ThreadAttachmentsPolicy>()
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
     let record = state
         .events
         .append(
@@ -67,6 +71,7 @@ pub async fn handle(
                 },
             },
             storage,
+            attachments,
         )
         .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
 
