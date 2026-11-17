@@ -1645,16 +1645,29 @@ fn handle_poll_input(params: &serde_json::Value, state: &AppState) -> Result<ser
         );
     }
 
-    // A `cognition_in` carries only `content` — the intent is a delivery concern,
-    // not part of the braid. Indexed (durable) so resume folds it in order.
-    let events: Vec<ryeos_app::state_store::NewEventRecord> = pending
+    // A steer is a `cognition_in` with origin `operator` and one text part.
+    // The intent is a delivery concern, not part of the braid. Indexed
+    // (durable) so resume folds it in order.
+    let encoded: Result<Vec<ryeos_app::state_store::NewEventRecord>> = pending
         .iter()
-        .map(|s| ryeos_app::state_store::NewEventRecord {
-            event_type: "cognition_in".to_string(),
-            storage_class: "indexed".to_string(),
-            payload: json!({ "content": s.content }),
+        .map(|input| {
+            let operator_input =
+                ryeos_runtime::cognition::CognitionInput::text("operator", input.content.clone());
+            operator_input.validate()?;
+            Ok(ryeos_app::state_store::NewEventRecord {
+                event_type: "cognition_in".to_string(),
+                storage_class: "indexed".to_string(),
+                payload: ryeos_runtime::cognition::to_payload(&operator_input)?,
+            })
         })
         .collect();
+    let events = match encoded {
+        Ok(events) => events,
+        Err(error) => {
+            state.live_input.restore_front(thread_id, pending);
+            return Err(error.context("failed to encode operator input as cognition_in"));
+        }
+    };
 
     match state
         .threads
@@ -2630,6 +2643,7 @@ mod tests {
         state.threads.mark_running(thread_id).unwrap();
     }
 
+    /// The text of every recorded input, checking each is an operator input.
     fn cognition_inputs(state: &AppState, thread_id: &str) -> Vec<String> {
         state
             .state_store
@@ -2638,9 +2652,10 @@ mod tests {
             .into_iter()
             .filter(|event| event.event_type == "cognition_in")
             .map(|event| {
-                event.payload["content"]
+                assert_eq!(event.payload["origin"], "operator");
+                event.payload["parts"][0]["text"]
                     .as_str()
-                    .expect("cognition_in content")
+                    .expect("cognition_in text part")
                     .to_string()
             })
             .collect()

@@ -8,6 +8,7 @@ pub mod callback_client;
 pub mod callback_contract;
 pub mod callback_uds;
 pub mod checkpoint;
+pub mod cognition;
 pub mod command;
 pub mod compiled_template;
 pub mod daemon_rpc;
@@ -42,6 +43,10 @@ pub use callback::{
     client_from_env, parse_hook_action, validate_runtime_thread_id,
 };
 pub use checkpoint::CheckpointWriter;
+pub use cognition::{
+    CognitionInput, CognitionOutPayload, CognitionUsage, FINISH_INTERRUPTED, ToolResultGuard,
+    ToolResultPayload, TurnMarker,
+};
 pub use command::{
     CommandAliasDef, CommandArgumentArity, CommandArgumentDef, CommandArgumentForm,
     CommandArgumentKind, CommandArgumentSlot, CommandAvailability, CommandControlFlag, CommandDef,

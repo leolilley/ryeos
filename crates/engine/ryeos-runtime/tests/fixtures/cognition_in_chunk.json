@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "origin": "launch",
+  "pinned": true,
+  "content_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "chunk_index": 0,
+  "chunk_count": 2,
+  "content_chunk": "first half of a long input"
+}

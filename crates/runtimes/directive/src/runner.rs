@@ -25,6 +25,7 @@ use ryeos_directive_definition::{
 };
 #[cfg(test)]
 use ryeos_directive_definition::{PricingConfig, ProtocolFamily, ProviderTransportConfig};
+use ryeos_provider_contract::{Part, ToolResultStatus};
 use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::envelope::{
     EnvelopeAccountingScope, RuntimeCost, RuntimeResult, RuntimeResultStatus,
@@ -66,6 +67,17 @@ async fn block_at_directive_recovery_test_cut(callback: &CallbackClient, stage: 
     }
 }
 
+/// The recorded `finish` token for a normalised finish reason.
+fn finish_label(reason: FinishReason) -> &'static str {
+    match reason {
+        FinishReason::Stop => "stop",
+        FinishReason::ToolCalls => "tool_calls",
+        FinishReason::Length => "length",
+        FinishReason::ContentFilter => "content_filter",
+        FinishReason::Other => "other",
+    }
+}
+
 /// Rendered model-visible tool result plus SSE emission metadata. Shared by
 /// the serial and batch dispatch paths so their emitted shapes cannot diverge.
 #[derive(Debug)]
@@ -76,6 +88,26 @@ struct RenderedToolResult {
     truncated: bool,
     duplicate_of: Option<String>,
     truncated_reason: Option<&'static str>,
+    status: ToolResultStatus,
+}
+
+impl RenderedToolResult {
+    /// The recorded `tool_call_result` for this rendering.
+    fn payload(&self, operation_id: &str, call_id: &str) -> ryeos_runtime::ToolResultPayload {
+        ryeos_runtime::ToolResultPayload {
+            operation_id: operation_id.to_string(),
+            call_id: call_id.to_string(),
+            tool: self.tool.clone(),
+            status: self.status,
+            parts: vec![Part::text(self.content.clone())],
+            guard: ryeos_runtime::ToolResultGuard {
+                result_size_bytes: self.raw_size,
+                truncated: self.truncated,
+                truncated_reason: self.truncated_reason.map(str::to_string),
+                duplicate_of: self.duplicate_of.clone(),
+            },
+        }
+    }
 }
 
 /// One model-proposed call paired with its RyeOS logical occurrence.
@@ -2169,23 +2201,17 @@ impl Runner {
                                 };
                                 continue;
                             }
-                            let cognition = resp.message.cognition_fields();
-                            let cognition_tool_calls = match cognition
-                                .tool_calls
-                                .as_ref()
-                                .map(serde_json::to_value)
-                                .transpose()
+                            if let Err(error) =
+                                crate::directive::ensure_distinct_call_ids(&resp.message)
                             {
-                                Ok(value) => value,
-                                Err(e) => {
-                                    state = State::Errored {
-                                        error: format!(
-                                            "serialize cognition tool calls for turn completion: {e}"
-                                        ),
-                                    };
-                                    continue;
-                                }
-                            };
+                                state = State::Errored {
+                                    error: format!("{error}"),
+                                };
+                                continue;
+                            }
+                            let finish = finish_label(crate::directive::normalize_finish_reason(
+                                resp.finish_reason.as_deref(),
+                            ));
                             let provider_accounting = Some(json!({
                                 "attempt_id": format!("{}:{turn}:{}", self.thread_id, attempt + 1),
                                 "attempt_number": attempt + 1,
@@ -2214,10 +2240,9 @@ impl Runner {
                                 .callback
                                 .emit_turn_complete(
                                     turn,
+                                    finish,
                                     token_counts,
-                                    cognition.content,
-                                    cognition_tool_calls,
-                                    cognition.reasoning_content,
+                                    resp.message.parts.clone(),
                                     provider_accounting,
                                 )
                                 .await
@@ -2336,18 +2361,15 @@ impl Runner {
                             }
 
                             // Seal the partial as a transcript-bearing
-                            // cognition_out{interrupted:true} (content/reasoning
-                            // only, no tool_calls) so the braid holds an honest,
-                            // foldable consequence. Only after that RyeOS
-                            // boundary do we render it as the provider-wire
-                            // assistant message needed by the redirected call.
+                            // cognition_out with finish "interrupted" (the
+                            // complete text and reasoning parts, no tool
+                            // calls) so the braid holds an honest, foldable
+                            // consequence. The recorded parts are the message
+                            // the redirected call sees.
+                            let interrupted_message = partial_cognition.into_provider_message();
                             if let Err(e) = self
                                 .callback
-                                .emit_turn_interrupted(
-                                    turn,
-                                    partial_cognition.content.clone().map(Value::String),
-                                    partial_cognition.reasoning_content.clone(),
-                                )
+                                .emit_turn_interrupted(turn, interrupted_message.parts.clone())
                                 .await
                             {
                                 state = State::RecoveryRequired {
@@ -2357,8 +2379,7 @@ impl Runner {
                                 };
                                 continue;
                             }
-                            self.messages
-                                .push(partial_cognition.into_provider_message());
+                            self.messages.push(interrupted_message);
 
                             // Back to the between-turns boundary: CheckingLimits
                             // folds the queued input (DECISION 2: if the poll is
@@ -2793,7 +2814,7 @@ impl Runner {
                                     &ryeos_runtime::callback_client::ToolDispatchEvent {
                                         operation_id: &occurrence.operation_id,
                                         tool: &tc.name,
-                                        call_id: tc.id.as_deref(),
+                                        call_id: tc.id.as_deref().unwrap_or_default(),
                                         item_ref: self.dispatcher.item_ref(&tc.name).as_deref(),
                                         turn: occurrence.turn,
                                         call_index: occurrence.call_index,
@@ -2963,7 +2984,7 @@ impl Runner {
                                     &ryeos_runtime::callback_client::ToolDispatchEvent {
                                         operation_id: &occurrence.operation_id,
                                         tool: &tc.name,
-                                        call_id: tc.id.as_deref(),
+                                        call_id: tc.id.as_deref().unwrap_or_default(),
                                         item_ref: self.dispatcher.item_ref(&tc.name).as_deref(),
                                         turn: occurrence.turn,
                                         call_index: occurrence.call_index,
@@ -3215,17 +3236,19 @@ impl Runner {
                                 // Fire tool_call_result for chain visibility
                                 let outputs_json = serde_json::to_string(&args).unwrap_or_default();
                                 let outputs_size = outputs_json.len() as u64;
+                                let outputs_result = RenderedToolResult {
+                                    tool: DIRECTIVE_RETURN_TOOL.to_string(),
+                                    content: outputs_json,
+                                    raw_size: outputs_size,
+                                    truncated: false,
+                                    duplicate_of: None,
+                                    truncated_reason: None,
+                                    status: ToolResultStatus::Ok,
+                                };
                                 if let Err(e) = self
                                     .callback
                                     .emit_tool_result(
-                                        &operation_id,
-                                        &call_id,
-                                        DIRECTIVE_RETURN_TOOL,
-                                        &outputs_json,
-                                        false,
-                                        None,
-                                        outputs_size,
-                                        None,
+                                        &outputs_result.payload(&operation_id, &call_id),
                                     )
                                     .await
                                 {
@@ -3253,18 +3276,18 @@ impl Runner {
                     // push error as tool message, and let the LLM retry.
                     // (Non-fatal — the LLM can correct its outputs.)
                     let failure_size = tool_result_content.len() as u64;
+                    let failure_result = RenderedToolResult {
+                        tool: DIRECTIVE_RETURN_TOOL.to_string(),
+                        content: tool_result_content.clone(),
+                        raw_size: failure_size,
+                        truncated: false,
+                        duplicate_of: None,
+                        truncated_reason: None,
+                        status: ToolResultStatus::Error,
+                    };
                     if let Err(e) = self
                         .callback
-                        .emit_tool_result(
-                            &operation_id,
-                            &call_id,
-                            DIRECTIVE_RETURN_TOOL,
-                            &tool_result_content,
-                            false,
-                            Some("error_envelope"),
-                            failure_size,
-                            None,
-                        )
+                        .emit_tool_result(&failure_result.payload(&operation_id, &call_id))
                         .await
                     {
                         state = State::RecoveryRequired {
@@ -3272,8 +3295,11 @@ impl Runner {
                         };
                         continue;
                     }
-                    self.messages
-                        .push(ProviderMessage::tool_result(call_id, tool_result_content));
+                    self.messages.push(ProviderMessage::tool_result_with_status(
+                        call_id,
+                        tool_result_content,
+                        ToolResultStatus::Error,
+                    ));
                     State::CheckingContinuation
                 }
 
@@ -3479,7 +3505,10 @@ impl Runner {
                             let nudge = self.return_nudge.message(&declared_outputs);
                             // Durable stimulus so the corrective turn is
                             // braid-visible and exactly reconstructable.
-                            if let Err(e) = self.callback.emit_stimulus(&nudge).await {
+                            let nudge_input =
+                                ryeos_runtime::CognitionInput::text("harness", &nudge)
+                                    .with_kind("nudge");
+                            if let Err(e) = self.callback.emit_cognition_input(&nudge_input).await {
                                 state = State::RecoveryRequired {
                                     error: format!(
                                         "resume-critical return_nudge stimulus append failed: {e}"
@@ -3777,6 +3806,7 @@ impl Runner {
             truncated: guarded.truncated,
             duplicate_of: guarded.duplicate_of,
             truncated_reason: guarded.truncated.then_some("result_guard"),
+            status: ToolResultStatus::Ok,
         }
     }
 
@@ -3806,7 +3836,8 @@ impl Runner {
             content,
             truncated,
             duplicate_of: None,
-            truncated_reason: Some("error_envelope"),
+            truncated_reason: truncated.then_some("oversized_error"),
+            status: ToolResultStatus::Error,
         }
     }
 
@@ -3821,21 +3852,15 @@ impl Runner {
         rendered: RenderedToolResult,
     ) -> Result<(), String> {
         self.callback
-            .emit_tool_result(
-                &operation_id,
-                &call_id,
-                &rendered.tool,
-                &rendered.content,
-                rendered.truncated,
-                rendered.truncated_reason,
-                rendered.raw_size,
-                rendered.duplicate_of.as_deref(),
-            )
+            .emit_tool_result(&rendered.payload(&operation_id, &call_id))
             .await
             .map_err(|e| format!("resume-critical callback emit_tool_result failed: {e}"))?;
         block_at_directive_recovery_test_cut(&self.callback, "tool_observation_recorded").await;
-        self.messages
-            .push(ProviderMessage::tool_result(call_id, rendered.content));
+        self.messages.push(ProviderMessage::tool_result_with_status(
+            call_id,
+            rendered.content,
+            rendered.status,
+        ));
         Ok(())
     }
 
@@ -4910,13 +4935,21 @@ mod tests {
     fn error_envelopes_are_bounded_and_retain_honest_metadata() {
         let small = Runner::rendered_error_envelope("t", "{\"error\":\"no\"}".to_string());
         assert!(!small.truncated);
-        assert_eq!(small.truncated_reason, Some("error_envelope"));
+        assert_eq!(small.status, ToolResultStatus::Error);
+        assert_eq!(small.truncated_reason, None);
         assert_eq!(small.raw_size, small.content.len() as u64);
 
         let oversized_body = "secret".repeat(MAX_ERROR_ENVELOPE_BYTES);
         let oversized = Runner::rendered_error_envelope("t", oversized_body.clone());
         assert!(oversized.truncated);
-        assert_eq!(oversized.truncated_reason, Some("error_envelope"));
+        assert_eq!(oversized.status, ToolResultStatus::Error);
+        assert_eq!(oversized.truncated_reason, Some("oversized_error"));
+        let recorded = oversized.payload(&"a".repeat(64), "call-1");
+        recorded.validate().unwrap();
+        assert_eq!(
+            recorded.guard.result_size_bytes,
+            oversized_body.len() as u64
+        );
         assert_eq!(oversized.raw_size, oversized_body.len() as u64);
         assert!(oversized.content.len() < MAX_ERROR_ENVELOPE_BYTES);
         assert!(!oversized.content.contains("secretsecret"));

@@ -516,7 +516,12 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
         // re-injecting them would double the opening stimulus.
         if !same_thread_resume && !envelope.request.suppress_stimulus {
             let rendered_prompt = operator_follow_up_stimulus(&envelope.request.inputs)?;
-            callback.emit_stimulus(&rendered_prompt).await?;
+            callback
+                .emit_cognition_input(&ryeos_runtime::CognitionInput::text(
+                    "operator",
+                    rendered_prompt.as_str(),
+                ))
+                .await?;
             resume_state
                 .messages
                 .push(directive::ProviderMessage::user(rendered_prompt));
@@ -565,7 +570,11 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
             &envelope.request.inputs,
             envelope.request.scheduled_fire.as_ref(),
         )?;
-        callback.emit_stimulus(&rendered_prompt).await?;
+        callback
+            .emit_cognition_input(
+                &ryeos_runtime::CognitionInput::text("launch", rendered_prompt.as_str()).pinned(),
+            )
+            .await?;
 
         let mut messages = Vec::new();
 

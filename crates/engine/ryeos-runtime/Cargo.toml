@@ -21,6 +21,7 @@ ryeos-accounting = { workspace = true }
 ryeos-effect-contract = { workspace = true }
 ryeos-engine = { workspace = true }
 ryeos-expression = { workspace = true }
+ryeos-provider-contract = { workspace = true }
 ryeos-state = { workspace = true }
 regex = { workspace = true }
 rmp-serde = { workspace = true }

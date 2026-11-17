@@ -329,7 +329,15 @@ pub trait ProviderMessageExt: Sized {
         reasoning: Option<String>,
     ) -> Self;
     /// A tool message holding the result text of the call named `call_id`.
+    #[cfg(test)]
     fn tool_result(call_id: impl Into<String>, text: impl Into<String>) -> Self;
+    /// A tool message holding the result text of the call named `call_id`,
+    /// with the status the result guard recorded for it.
+    fn tool_result_with_status(
+        call_id: impl Into<String>,
+        text: impl Into<String>,
+        status: ToolResultStatus,
+    ) -> Self;
     /// The wire role name: `system`, `user`, `assistant` or `tool`.
     fn role(&self) -> &str;
     /// Joined text of the message; for a tool message, of its result. `None`
@@ -344,44 +352,6 @@ pub trait ProviderMessageExt: Sized {
     fn tool_call_id(&self) -> Option<&str>;
     /// Joined text of the reasoning parts.
     fn reasoning_text(&self) -> Option<String>;
-    /// The old event payload fields of this message, for the emit boundary.
-    fn cognition_fields(&self) -> CognitionFields;
-}
-
-/// The recorded `cognition_out` content, tool calls and reasoning of one
-/// message.
-#[derive(Debug, Clone, Default)]
-pub struct CognitionFields {
-    pub content: Option<Value>,
-    pub tool_calls: Option<Vec<ToolCall>>,
-    pub reasoning_content: Option<String>,
-}
-
-/// The fold boundary: an assistant message from the recorded `cognition_out`
-/// fields. A call with no id gets the one the live run synthesised from the
-/// turn and its position.
-pub fn assistant_from_cognition_fields(
-    content: Option<&Value>,
-    tool_calls: Option<Vec<ToolCall>>,
-    reasoning_content: Option<String>,
-    turn: u32,
-) -> anyhow::Result<ProviderMessage> {
-    let text = match content {
-        None | Some(Value::Null) => None,
-        Some(Value::String(text)) => Some(text.clone()),
-        Some(_) => anyhow::bail!("recorded cognition content is not text"),
-    };
-    let calls = tool_calls
-        .unwrap_or_default()
-        .into_iter()
-        .enumerate()
-        .map(|(index, mut call)| {
-            call.id
-                .get_or_insert_with(|| synthesised_call_id(turn, index));
-            call
-        })
-        .collect();
-    Ok(ProviderMessage::assistant(text, calls, reasoning_content))
 }
 
 impl ProviderMessageExt for ProviderMessage {
@@ -422,14 +392,19 @@ impl ProviderMessageExt for ProviderMessage {
         Self::new(Role::Assistant, parts)
     }
 
+    #[cfg(test)]
     fn tool_result(call_id: impl Into<String>, text: impl Into<String>) -> Self {
+        Self::tool_result_with_status(call_id, text, ToolResultStatus::Ok)
+    }
+
+    fn tool_result_with_status(
+        call_id: impl Into<String>,
+        text: impl Into<String>,
+        status: ToolResultStatus,
+    ) -> Self {
         Self::new(
             Role::Tool,
-            vec![Part::tool_result(
-                call_id,
-                vec![Part::text(text)],
-                ToolResultStatus::Ok,
-            )],
+            vec![Part::tool_result(call_id, vec![Part::text(text)], status)],
         )
     }
 
@@ -491,15 +466,23 @@ impl ProviderMessageExt for ProviderMessage {
         }
         out
     }
+}
 
-    fn cognition_fields(&self) -> CognitionFields {
-        let calls = self.calls();
-        CognitionFields {
-            content: self.content_value(),
-            tool_calls: (!calls.is_empty()).then_some(calls),
-            reasoning_content: self.reasoning_text(),
+/// A provider answer may not issue one tool call id twice. The turn fails
+/// instead of the second use being given a synthesised id, because a result
+/// is matched to its call by id and the provider's own id is evidence the
+/// runtime does not rewrite.
+pub fn ensure_distinct_call_ids(message: &ProviderMessage) -> anyhow::Result<()> {
+    let mut seen = std::collections::BTreeSet::new();
+    for call in message.tool_calls() {
+        if !seen.insert(call.call_id.as_str()) {
+            anyhow::bail!(
+                "provider_duplicate_call_id: the provider issued tool call id {:?} more than once                  in one answer; the turn fails and no id is synthesised for the second use",
+                call.call_id
+            );
         }
     }
+    Ok(())
 }
 
 /// Construct the one durable semantic answer for a completed provider turn.
@@ -509,6 +492,7 @@ pub fn normalize_provider_call_answer(
     message: &ProviderMessage,
     finish_reason: Option<&str>,
 ) -> anyhow::Result<ryeos_provider_contract::ProviderCallAnswer> {
+    ensure_distinct_call_ids(message)?;
     let answer = ryeos_provider_contract::ProviderCallAnswer {
         message: message.clone(),
         finish_reason: finish_reason.map(str::to_string),
@@ -654,9 +638,7 @@ mod tests {
         assert_eq!(message.text().as_deref(), Some("checking"));
         assert_eq!(message.reasoning_text().as_deref(), Some("thinking"));
         assert_eq!(message.calls()[0].id.as_deref(), Some("call_1"));
-        let fields = message.cognition_fields();
-        assert_eq!(fields.content, Some(serde_json::json!("checking")));
-        assert_eq!(fields.tool_calls.unwrap().len(), 1);
+        assert_eq!(message.calls().len(), 1);
         message.validate().unwrap();
     }
 
@@ -670,41 +652,23 @@ mod tests {
     }
 
     #[test]
-    fn the_fold_boundary_synthesises_a_missing_call_id_from_turn_and_position() {
-        let calls = vec![
-            ToolCall {
-                id: None,
-                name: "a".to_string(),
-                arguments: serde_json::json!({}),
-            },
-            ToolCall {
-                id: Some("kept".to_string()),
-                name: "b".to_string(),
-                arguments: serde_json::json!({}),
-            },
-            ToolCall {
-                id: None,
-                name: "c".to_string(),
-                arguments: serde_json::json!({}),
-            },
-        ];
-        let message = assistant_from_cognition_fields(None, Some(calls), None, 4).unwrap();
-        let ids: Vec<_> = message
-            .calls()
-            .into_iter()
-            .map(|call| call.id.unwrap())
-            .collect();
-        assert_eq!(
-            ids,
-            [
-                synthesised_call_id(4, 0),
-                "kept".to_string(),
-                synthesised_call_id(4, 2)
-            ]
-        );
-        assert!(
-            assistant_from_cognition_fields(Some(&serde_json::json!(5)), None, None, 1).is_err()
-        );
+    fn a_duplicate_provider_call_id_fails_with_a_clear_message() {
+        let call = |name: &str| ToolCall {
+            id: Some("dup".to_string()),
+            name: name.to_string(),
+            arguments: serde_json::json!({}),
+        };
+        let message = ProviderMessage::assistant(None, vec![call("a"), call("b")], None);
+        let error = ensure_distinct_call_ids(&message).unwrap_err().to_string();
+        assert!(error.contains("provider_duplicate_call_id"), "{error}");
+        assert!(error.contains("no id is synthesised"), "{error}");
+        assert!(normalize_provider_call_answer(&message, Some("tool_calls")).is_err());
+    }
+
+    #[test]
+    fn a_synthesised_call_id_is_a_function_of_turn_and_position() {
+        assert_eq!(synthesised_call_id(4, 0), "call_t4_0");
+        assert_eq!(synthesised_call_id(4, 2), "call_t4_2");
     }
 
     #[test]

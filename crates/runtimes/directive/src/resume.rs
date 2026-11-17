@@ -8,6 +8,8 @@ use ryeos_state::ThreadUsage;
 use crate::directive::{DIRECTIVE_RETURN_TOOL, ProviderMessage, ProviderMessageExt};
 use crate::result_guard::ResultGuard;
 use crate::runner::ToolOccurrence;
+use ryeos_provider_contract::ToolResultStatus;
+use ryeos_runtime::{CognitionOutPayload, FINISH_INTERRUPTED, ToolResultPayload};
 
 #[derive(Debug)]
 pub struct ResumeState {
@@ -202,37 +204,34 @@ pub async fn load_resume_state(
     })
 }
 
-fn replayed_result_text(event: &ReplayedEventRecord) -> Result<&str> {
-    let text = event
-        .payload
-        .get("result_text")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            anyhow::anyhow!("resume: tool_call_result has no exact string result_text")
-        })?;
-    if text.len() > ryeos_runtime::callback_client::TOOL_RESULT_INLINE_MAX_BYTES {
-        anyhow::bail!("resume: tool_call_result result_text exceeds the runtime event bound");
+/// Parse a replayed `tool_call_result` into its typed payload. A payload in
+/// any other shape is refused; there is no reader for an earlier shape.
+fn replayed_tool_result(event: &ReplayedEventRecord) -> Result<ToolResultPayload> {
+    let result: ToolResultPayload = serde_json::from_value(event.payload.clone())
+        .context("resume: tool_call_result is not a recorded tool result")?;
+    result
+        .validate()
+        .context("resume: invalid tool_call_result")?;
+    let text_bytes: usize = result.text().len();
+    if text_bytes > ryeos_runtime::callback_client::TOOL_RESULT_INLINE_MAX_BYTES {
+        anyhow::bail!("resume: tool_call_result text exceeds the runtime event bound");
     }
-    if event.payload.get("result").is_some() {
-        anyhow::bail!("resume: tool_call_result carries obsolete parsed result authority");
-    }
-    Ok(text)
+    Ok(result)
 }
 
-fn optional_replay_string<'a>(payload: &'a Value, field: &str) -> Result<Option<&'a str>> {
-    match payload.get(field) {
-        None => Ok(None),
-        Some(Value::String(value)) => Ok(Some(value)),
-        Some(_) => anyhow::bail!("resume: replay field {field:?} is not a string"),
-    }
+/// Parse a replayed final `cognition_out` into its typed payload.
+fn replayed_cognition_out(event: &ReplayedEventRecord) -> Result<CognitionOutPayload> {
+    let payload: CognitionOutPayload = serde_json::from_value(event.payload.clone())
+        .context("resume: cognition_out is not a recorded turn")?;
+    payload
+        .validate()
+        .context("resume: invalid cognition_out")?;
+    Ok(payload)
 }
 
-fn optional_replay_bool(payload: &Value, field: &str) -> Result<Option<bool>> {
-    match payload.get(field) {
-        None => Ok(None),
-        Some(Value::Bool(value)) => Ok(Some(*value)),
-        Some(_) => anyhow::bail!("resume: replay field {field:?} is not a boolean"),
-    }
+/// Whether a final `cognition_out` records a turn cut short by an interrupt.
+fn is_interrupted_turn(event: &ReplayedEventRecord) -> bool {
+    event.payload.get("finish").and_then(Value::as_str) == Some(FINISH_INTERRUPTED)
 }
 
 /// Rebuild only the current process generation's duplicate guard. Upstream
@@ -252,34 +251,15 @@ fn recover_result_guard(
         if source_thread_id != current_thread_id || event.event_type != "tool_call_result" {
             continue;
         }
-        let text = replayed_result_text(event)?;
-        let tool = event
-            .payload
-            .get("tool")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow::anyhow!("resume: tool_call_result has no tool identity"))?;
-        let duplicate_of = event
-            .payload
-            .get("duplicate_of")
-            .map(|value| {
-                value.as_str().ok_or_else(|| {
-                    anyhow::anyhow!("resume: tool_call_result duplicate_of is not a string")
-                })
-            })
-            .transpose()?;
-        let deduplicated = optional_replay_bool(&event.payload, "deduplicated")?;
-        if duplicate_of.is_some() != (deduplicated == Some(true)) {
-            anyhow::bail!("resume: tool_call_result duplicate metadata is contradictory");
-        }
-        let truncated_reason = optional_replay_string(&event.payload, "truncated_reason")?;
-        if tool == DIRECTIVE_RETURN_TOOL || truncated_reason == Some("error_envelope") {
-            if duplicate_of.is_some() {
+        let result = replayed_tool_result(event)?;
+        if result.tool == DIRECTIVE_RETURN_TOOL || result.status == ToolResultStatus::Error {
+            if result.guard.duplicate_of.is_some() {
                 anyhow::bail!("resume: unguarded tool result claims duplicate metadata");
             }
             continue;
         }
         guard
-            .restore_result(text, duplicate_of)
+            .restore_result(&result.text(), result.guard.duplicate_of.as_deref())
             .map_err(|error| anyhow::anyhow!("resume: invalid result-guard evidence: {error}"))?;
     }
     Ok(guard)
@@ -369,10 +349,7 @@ fn recover_tool_state(
                     );
                 }
                 current_batch = None;
-                let Some(tool_calls) = replayed_tool_calls(&event.payload)? else {
-                    open.clear();
-                    continue;
-                };
+                let tool_calls = replayed_cognition_out(event)?.message().calls();
                 if tool_calls.is_empty() {
                     open.clear();
                     continue;
@@ -463,11 +440,7 @@ fn recover_tool_state(
                         );
                     }
                 }
-                validate_replayed_tool_event(
-                    event,
-                    &open[occurrence_index].occurrence.call,
-                    false,
-                )?;
+                validate_replayed_tool_event(event, &open[occurrence_index].occurrence.call)?;
                 open[occurrence_index].occurrence.start_recorded = true;
                 if open[occurrence_index].occurrence.call.name != DIRECTIVE_RETURN_TOOL {
                     started.push(StartedToolOccurrence {
@@ -507,7 +480,7 @@ fn recover_tool_state(
                         "resume: tool_call_result appeared outside the proposal-order result prefix"
                     );
                 }
-                validate_replayed_tool_event(event, &open[occurrence_index].occurrence.call, true)?;
+                validate_replayed_tool_event(event, &open[occurrence_index].occurrence.call)?;
                 if open[occurrence_index].occurrence.call.name == DIRECTIVE_RETURN_TOOL {
                     if open[..occurrence_index].iter().any(|entry| !entry.settled) {
                         anyhow::bail!(
@@ -561,18 +534,15 @@ fn recover_lifecycle_settlement(
     call: &crate::directive::ToolCall,
     event_index: usize,
 ) -> Result<RecoveredLifecycleSettlement> {
-    match optional_replay_string(&event.payload, "truncated_reason")? {
-        Some("error_envelope") => Ok(RecoveredLifecycleSettlement::Failed { event_index }),
-        Some(reason) => anyhow::bail!(
-            "resume: directive_return result has impossible truncation reason {reason:?}"
-        ),
-        None => {
-            if event.payload.get("truncated").and_then(Value::as_bool) != Some(false) {
+    let result = replayed_tool_result(event)?;
+    match result.status {
+        ToolResultStatus::Error => Ok(RecoveredLifecycleSettlement::Failed { event_index }),
+        ToolResultStatus::Ok => {
+            if result.guard.truncated {
                 anyhow::bail!("resume: successful directive_return result is truncated");
             }
-            let result_text = replayed_result_text(event)?;
-            let outputs: Value = serde_json::from_str(result_text).context(
-                "resume: successful directive_return result_text is not exact JSON outputs",
+            let outputs: Value = serde_json::from_str(&result.text()).context(
+                "resume: successful directive_return result text is not exact JSON outputs",
             )?;
             let proposed = crate::adapter::parse_tool_arguments(&call.arguments.to_string())
                 .map_err(|error| {
@@ -625,7 +595,6 @@ fn find_open_occurrence_index(
 fn validate_replayed_tool_event(
     event: &ReplayedEventRecord,
     call: &crate::directive::ToolCall,
-    result_phase: bool,
 ) -> Result<()> {
     let observed_tool = event.payload.get("tool").and_then(Value::as_str);
     if observed_tool != Some(call.name.as_str()) {
@@ -634,11 +603,7 @@ fn validate_replayed_tool_event(
             event.event_type
         );
     }
-    let expected_call_id = if result_phase {
-        Some(call.id.as_deref().unwrap_or(""))
-    } else {
-        call.id.as_deref()
-    };
+    let expected_call_id = call.id.as_deref();
     if event.payload.get("call_id").and_then(Value::as_str) != expected_call_id {
         anyhow::bail!(
             "resume: {} call_id does not match its cognition proposal",
@@ -692,15 +657,7 @@ fn validate_replayed_cognition_out(event: &ReplayedEventRecord) -> Result<()> {
         return Ok(());
     }
     if is_stream_fragment(event) {
-        for final_key in [
-            "content",
-            "tool_calls",
-            "reasoning_content",
-            "interrupted",
-            "provider_accounting",
-            "input_tokens",
-            "output_tokens",
-        ] {
+        for final_key in ["parts", "finish", "usage", "provider_accounting"] {
             if event.payload.get(final_key).is_some() {
                 anyhow::bail!(
                     "resume: streaming cognition_out also carries final field {final_key:?}"
@@ -709,16 +666,7 @@ fn validate_replayed_cognition_out(event: &ReplayedEventRecord) -> Result<()> {
         }
         return Ok(());
     }
-    if let Some(interrupted) = event.payload.get("interrupted") {
-        if interrupted.as_bool() != Some(true) {
-            anyhow::bail!("resume: cognition_out interrupted marker is not true");
-        }
-        if event.payload.get("tool_calls").is_some() {
-            anyhow::bail!(
-                "resume: interrupted cognition_out cannot authorize completed tool calls"
-            );
-        }
-    }
+    replayed_cognition_out(event)?;
     Ok(())
 }
 
@@ -768,12 +716,7 @@ fn recover_turn_progress(events: &[ReplayedEventRecord]) -> Result<RecoveredTurn
             );
         }
         progress.last_coordinate = turn;
-        if event
-            .payload
-            .get("interrupted")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
+        if is_interrupted_turn(event) {
             continue;
         }
         progress.completed = progress
@@ -1027,12 +970,7 @@ fn recover_resume_disposition(
     if later_cognition_input {
         return Ok(ResumeDisposition::ContinueProvider);
     }
-    if last_cognition
-        .payload
-        .get("interrupted")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
+    if is_interrupted_turn(last_cognition) {
         return Ok(ResumeDisposition::ContinueProvider);
     }
     if let Some(batch) = tools.current_batch.as_ref() {
@@ -1101,12 +1039,7 @@ fn recover_thread_usage(
         let Some(turn) = final_cognition_turn(event)? else {
             continue;
         };
-        if event
-            .payload
-            .get("interrupted")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
+        if is_interrupted_turn(event) {
             if unconsumed_settlement_turn == Some(u64::from(turn)) {
                 unconsumed_settlement_turn = None;
             }
@@ -1141,48 +1074,6 @@ fn recover_thread_usage(
     Ok(latest)
 }
 
-fn replayed_tool_calls(payload: &Value) -> Result<Option<Vec<crate::directive::ToolCall>>> {
-    let items = match payload.get("tool_calls") {
-        None | Some(Value::Null) => return Ok(None),
-        Some(Value::Array(items)) => items,
-        Some(_) => {
-            anyhow::bail!("malformed cognition_out replay: 'tool_calls' is not an array or null")
-        }
-    };
-    items
-        .iter()
-        .map(|item| {
-            let id = match item.get("id") {
-                None | Some(Value::Null) => None,
-                Some(Value::String(id)) => Some(id.clone()),
-                Some(_) => {
-                    anyhow::bail!("malformed tool_call in replay: 'id' is not a string or null")
-                }
-            };
-            let name = item
-                .get("name")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "malformed tool_call in replay: missing or non-string 'name' field"
-                    )
-                })?
-                .to_string();
-            let arguments = item.get("arguments").cloned().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "malformed tool_call in replay: missing 'arguments' field on tool '{name}'"
-                )
-            })?;
-            Ok(crate::directive::ToolCall {
-                id,
-                name,
-                arguments,
-            })
-        })
-        .collect::<Result<Vec<_>>>()
-        .map(Some)
-}
-
 /// Fold the chain's transcript-bearing events into provider messages. The
 /// substrate vocabulary is the cognition transcript — there is no "user":
 ///
@@ -1209,57 +1100,27 @@ fn reconstruct_messages(events: &[ReplayedEventRecord]) -> Result<Vec<ProviderMe
         }
         match event.event_type.as_str() {
             // An inline or completely reassembled cognition_in is exactly one
-            // stimulus. Marker-only payloads and intermediate chunks add no
-            // provider turn.
+            // input. Turn markers and intermediate chunks add no message.
             "cognition_in" => {
-                if let ryeos_runtime::CognitionInAssembly::Complete(content) =
+                if let ryeos_runtime::CognitionInAssembly::Complete(input) =
                     cognition_in.push(&event.payload)?
                 {
-                    messages.push(ProviderMessage::user(content));
+                    messages.push(input.message());
                 }
             }
-            "cognition_out"
-                if event.payload.get("delta").is_some()
-                    || event.payload.get("tool_use").is_some()
-                    || event.payload.get("tool_use_partial").is_some() =>
-            {
-                // Streaming fragments are UI/event-log data, not replayable
-                // provider history. The final transcript-bearing
-                // cognition_out emitted at turn completion is folded below.
-            }
+            // Streaming fragments are UI/event-log data, not replayable
+            // provider history. The final transcript-bearing cognition_out
+            // emitted at turn completion is folded below.
+            "cognition_out" if is_stream_fragment(event) => {}
             "cognition_out" => {
-                let tool_calls = replayed_tool_calls(&event.payload)?;
-
-                let turn = event
-                    .payload
-                    .get("turn")
-                    .and_then(Value::as_u64)
-                    .and_then(|turn| u32::try_from(turn).ok())
-                    .unwrap_or(0);
-                messages.push(crate::directive::assistant_from_cognition_fields(
-                    event.payload.get("content"),
-                    tool_calls,
-                    event
-                        .payload
-                        .get("reasoning_content")
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
-                    turn,
-                )?);
+                messages.push(replayed_cognition_out(event)?.message());
             }
             "tool_call_result" => {
-                let call_id = event
-                    .payload
-                    .get("call_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("resume: tool_call_result has no call_id"))?;
-                // The retained string is exactly what the live runner put in
-                // the provider message. Never parse JSON-looking content:
-                // doing so changes both OpenAI-style wire content and custom
-                // schema template rendering after a crash.
-                let content = replayed_result_text(event)?;
-
-                messages.push(ProviderMessage::tool_result(call_id, content));
+                // The retained text is exactly what the live runner put in the
+                // provider message. Never parse JSON-looking content: doing so
+                // changes both OpenAI-style wire content and custom schema
+                // template rendering after a crash.
+                messages.push(replayed_tool_result(event)?.message());
             }
             // Non-conversational chain events carry no message — skip.
             _ => {}
@@ -1495,6 +1356,74 @@ mod tests {
         }
     }
 
+    fn text_parts(text: &str) -> Value {
+        json!([{"type": "text", "text": text}])
+    }
+
+    /// A recorded operator input.
+    fn input(text: &str) -> Value {
+        json!({"origin": "operator", "parts": text_parts(text)})
+    }
+
+    /// A completed text-only turn.
+    fn out(turn: u32, text: &str) -> Value {
+        json!({"turn": turn, "parts": text_parts(text), "finish": "stop"})
+    }
+
+    /// A turn cut short by an interrupt.
+    fn out_interrupted(turn: u32, text: &str) -> Value {
+        json!({"turn": turn, "parts": text_parts(text), "finish": "interrupted"})
+    }
+
+    /// A turn that proposes tool calls, given as `{id, name, arguments}`
+    /// objects.
+    fn out_calls(turn: u32, calls: Value) -> Value {
+        let parts: Vec<Value> = calls
+            .as_array()
+            .expect("calls are an array")
+            .iter()
+            .map(|call| {
+                json!({
+                    "type": "tool_call",
+                    "call_id": call["id"],
+                    "name": call["name"],
+                    "arguments": call["arguments"],
+                })
+            })
+            .collect();
+        json!({"turn": turn, "parts": parts, "finish": "tool_calls"})
+    }
+
+    fn result_with(
+        operation_id: &str,
+        call_id: &str,
+        tool: &str,
+        text: &str,
+        status: &str,
+        duplicate_of: Option<&str>,
+    ) -> Value {
+        let mut guard = json!({"result_size_bytes": text.len(), "truncated": false});
+        if let Some(hash) = duplicate_of {
+            guard["duplicate_of"] = json!(hash);
+        }
+        json!({
+            "operation_id": operation_id,
+            "call_id": call_id,
+            "tool": tool,
+            "status": status,
+            "parts": text_parts(text),
+            "guard": guard,
+        })
+    }
+
+    fn result(operation_id: &str, call_id: &str, tool: &str, text: &str) -> Value {
+        result_with(operation_id, call_id, tool, text, "ok", None)
+    }
+
+    fn error_result(operation_id: &str, call_id: &str, tool: &str, text: &str) -> Value {
+        result_with(operation_id, call_id, tool, text, "error", None)
+    }
+
     fn make_callback(events: Vec<ReplayedEventRecord>) -> CallbackClient {
         let inner: Arc<dyn RuntimeCallbackAPI> = Arc::new(MockCallback { events });
         CallbackClient::from_inner(inner, "T-test", "/tmp/test", "tat-test")
@@ -1534,13 +1463,12 @@ mod tests {
     async fn continuation_refuses_an_unresolved_predecessor_tool_batch() {
         let callback = make_callback(vec![ReplayedEventRecord {
             event_type: "cognition_out".to_string(),
-            payload: json!({
-                "turn": 1,
-                "content": null,
-                "tool_calls": [
+            payload: out_calls(
+                1,
+                json!([
                     {"id":"call-a", "name":"tool:a", "arguments":{"a":1}}
-                ]
-            }),
+                ]),
+            ),
         }]);
         let error = load_resume_state(&callback, "T-predecessor", 8, ResumeMode::Continuation)
             .await
@@ -1558,14 +1486,13 @@ mod tests {
         let second = directive_tool_operation_id(&source, 3, 1);
         let events = vec![ReplayedEventRecord {
             event_type: "cognition_out".to_string(),
-            payload: json!({
-                "turn": 3,
-                "content": null,
-                "tool_calls": [
+            payload: out_calls(
+                3,
+                json!([
                     {"id":"call-a", "name":"tool:a", "arguments":{"a":1}},
                     {"id":"call-b", "name":"tool:b", "arguments":{"b":2}}
-                ]
-            }),
+                ]),
+            ),
         }];
         (events, vec![source], first, second)
     }
@@ -1674,12 +1601,7 @@ mod tests {
             ),
             (
                 "tool_call_result",
-                json!({
-                    "operation_id":first,
-                    "call_id":"call-a",
-                    "tool":"tool:a",
-                    "result_text":"{\"ok\":true}"
-                }),
+                result(&first, "call-a", "tool:a", "{\"ok\":true}"),
             ),
         ] {
             events.push(ReplayedEventRecord {
@@ -1712,7 +1634,7 @@ mod tests {
         };
         let mut events = vec![ReplayedEventRecord {
             event_type: "cognition_out".to_string(),
-            payload: json!({"turn":1, "content":null, "tool_calls":selected}),
+            payload: out_calls(1, json!(selected)),
         }];
         let mut sources = vec![source.clone()];
         if return_index == 1 {
@@ -1724,7 +1646,7 @@ mod tests {
                 },
                 ReplayedEventRecord {
                     event_type: "tool_call_result".to_string(),
-                    payload: json!({"operation_id":first,"call_id":"call-a","tool":"tool:a","truncated":false,"result_text":"{}"}),
+                    payload: result(&first, "call-a", "tool:a", "{}"),
                 },
             ]);
             sources.extend([source.clone(), source.clone()]);
@@ -1737,9 +1659,19 @@ mod tests {
         events.push(ReplayedEventRecord {
             event_type: "tool_call_result".to_string(),
             payload: if succeeded {
-                json!({"operation_id":return_operation,"call_id":"call-return","tool":DIRECTIVE_RETURN_TOOL,"truncated":false,"result_text":"{\"answer\":\"done\"}"})
+                result(
+                    &return_operation,
+                    "call-return",
+                    DIRECTIVE_RETURN_TOOL,
+                    "{\"answer\":\"done\"}",
+                )
             } else {
-                json!({"operation_id":return_operation,"call_id":"call-return","tool":DIRECTIVE_RETURN_TOOL,"truncated":false,"truncated_reason":"error_envelope","result_text":"{\"error\":\"invalid\"}"})
+                error_result(
+                    &return_operation,
+                    "call-return",
+                    DIRECTIVE_RETURN_TOOL,
+                    "{\"error\":\"invalid\"}",
+                )
             },
         });
         sources.extend([source.clone(), source]);
@@ -1795,11 +1727,7 @@ mod tests {
         let (mut events, mut sources) = lifecycle_batch_events(0, true);
         events.push(ReplayedEventRecord {
             event_type: "cognition_out".to_string(),
-            payload: json!({
-                "turn": 2,
-                "content": "a later process must not reopen a terminal directive",
-                "interrupted": true
-            }),
+            payload: out_interrupted(2, "a later process must not reopen a terminal directive"),
         });
         sources.push("T-lifecycle".to_string());
 
@@ -1825,7 +1753,7 @@ mod tests {
         for (operation_id, call_id, tool) in calls {
             events.push(ReplayedEventRecord {
                 event_type: "tool_call_result".to_string(),
-                payload: json!({"operation_id":operation_id,"call_id":call_id,"tool":tool,"truncated":false,"result_text":"{}"}),
+                payload: result(&operation_id, call_id, tool, "{}"),
             });
             sources.push("T-source".to_string());
         }
@@ -1846,7 +1774,7 @@ mod tests {
             },
             ReplayedEventRecord {
                 event_type: "cognition_in".to_string(),
-                payload: json!({"content":"cannot interleave"}),
+                payload: input("cannot interleave"),
             },
         ]);
         sources.extend(["T-source".to_string(), "T-source".to_string()]);
@@ -1919,7 +1847,7 @@ mod tests {
         let (mut events, mut sources, _, _) = proposed_tool_batch();
         events.push(ReplayedEventRecord {
             event_type: "cognition_out".to_string(),
-            payload: json!({"turn": 4, "content": "skipped unresolved tools"}),
+            payload: out(4, "skipped unresolved tools"),
         });
         sources.push("T-source".to_string());
         assert!(
@@ -1953,12 +1881,7 @@ mod tests {
             },
             ReplayedEventRecord {
                 event_type: "tool_call_result".to_string(),
-                payload: json!({
-                    "operation_id":first,
-                    "call_id":"call-a",
-                    "tool":"tool:a",
-                    "result_text":"{}"
-                }),
+                payload: result(&first, "call-a", "tool:a", "{}"),
             },
         ]);
         sources.extend(["T-source".to_string(), "T-successor".to_string()]);
@@ -1974,11 +1897,11 @@ mod tests {
     fn replay_only_turn_needs_no_fabricated_usage_settlement() {
         let events = vec![ReplayedEventRecord {
             event_type: "cognition_out".to_string(),
-            payload: json!({
-                "turn": 1,
-                "content": "replayed",
-                "provider_accounting": {"replayed_from": "ab".repeat(32)}
-            }),
+            payload: {
+                let mut payload = out(1, "replayed");
+                payload["provider_accounting"] = json!({"replayed_from": "ab".repeat(32)});
+                payload
+            },
         }];
         let progress = recover_turn_progress(&events).unwrap();
         assert_eq!(progress.completed, 1);
@@ -1989,7 +1912,7 @@ mod tests {
     fn live_turn_without_exact_usage_settlement_fails_closed() {
         let events = vec![ReplayedEventRecord {
             event_type: "cognition_out".to_string(),
-            payload: json!({"turn": 1, "content": "live"}),
+            payload: out(1, "live"),
         }];
         let progress = recover_turn_progress(&events).unwrap();
         assert!(
@@ -2006,11 +1929,11 @@ mod tests {
             usage_event(0, 1),
             ReplayedEventRecord {
                 event_type: "cognition_out".to_string(),
-                payload: json!({"turn": 1, "content": "partial", "interrupted": true}),
+                payload: out_interrupted(1, "partial"),
             },
             ReplayedEventRecord {
                 event_type: "cognition_out".to_string(),
-                payload: json!({"turn": 2, "content": "retry"}),
+                payload: out(2, "retry"),
             },
         ];
         let progress = recover_turn_progress(&events).unwrap();
@@ -2039,15 +1962,15 @@ mod tests {
         let events = vec![
             ReplayedEventRecord {
                 event_type: "cognition_out".to_string(),
-                payload: json!({"turn": 1, "content": "partial", "interrupted": true}),
+                payload: out_interrupted(1, "partial"),
             },
             ReplayedEventRecord {
                 event_type: "cognition_out".to_string(),
-                payload: json!({
-                    "turn": 2,
-                    "content": "completed replay",
-                    "provider_accounting": {"replayed_from": "cd".repeat(32)}
-                }),
+                payload: {
+                    let mut payload = out(2, "completed replay");
+                    payload["provider_accounting"] = json!({"replayed_from": "cd".repeat(32)});
+                    payload
+                },
             },
         ];
         assert_eq!(
@@ -2063,17 +1986,18 @@ mod tests {
     fn interrupted_or_mixed_stream_cognition_cannot_authorize_tool_calls() {
         let interrupted = vec![ReplayedEventRecord {
             event_type: "cognition_out".to_string(),
-            payload: json!({
-                "turn": 1,
-                "interrupted": true,
-                "tool_calls": [{"id":"c1","name":"tool:a","arguments":{}}]
-            }),
+            payload: {
+                let mut payload = out_calls(1, json!([{"id":"c1","name":"tool:a","arguments":{}}]));
+                payload["finish"] = json!("interrupted");
+                payload
+            },
         }];
         assert!(
-            recover_tool_state(&interrupted, &["T-source".to_string()])
-                .unwrap_err()
-                .to_string()
-                .contains("cannot authorize completed tool calls")
+            format!(
+                "{:#}",
+                recover_tool_state(&interrupted, &["T-source".to_string()]).unwrap_err()
+            )
+            .contains("cannot carry tool calls")
         );
 
         let mixed = vec![ReplayedEventRecord {
@@ -2081,7 +2005,7 @@ mod tests {
             payload: json!({
                 "turn": 1,
                 "delta": "live",
-                "tool_calls": [{"id":"c1","name":"tool:a","arguments":{}}]
+                "parts": [{"type": "tool_call", "call_id": "c1", "name": "tool:a", "arguments": {}}]
             }),
         }];
         assert!(
@@ -2096,30 +2020,35 @@ mod tests {
     fn malformed_retained_tool_calls_cannot_disappear_during_replay() {
         let event = ReplayedEventRecord {
             event_type: "cognition_out".to_string(),
-            payload: json!({"turn": 1, "content": "contradictory", "tool_calls": {}}),
+            payload: json!({
+                "turn": 1,
+                "parts": {"type": "tool_call"},
+                "finish": "tool_calls"
+            }),
         };
         let error = recover_tool_state(&[event], &["T-source".to_string()]).unwrap_err();
-        assert!(error.to_string().contains("not an array or null"));
+        assert!(error.to_string().contains("not a recorded turn"));
     }
 
     #[test]
-    fn malformed_optional_tool_call_id_cannot_be_downgraded_to_absent() {
+    fn a_tool_call_part_without_a_string_id_is_refused() {
         let event = ReplayedEventRecord {
             event_type: "cognition_out".to_string(),
             payload: json!({
                 "turn": 1,
-                "tool_calls": [{"id": {}, "name": "tool:a", "arguments": {}}]
+                "parts": [{"type": "tool_call", "call_id": {}, "name": "tool:a", "arguments": {}}],
+                "finish": "tool_calls"
             }),
         };
         let error = recover_tool_state(&[event], &["T-source".to_string()]).unwrap_err();
-        assert!(error.to_string().contains("'id' is not a string or null"));
+        assert!(error.to_string().contains("not a recorded turn"));
     }
 
     #[test]
     fn retained_terminal_cognition_is_parsed_without_another_provider_call() {
         let events = vec![ReplayedEventRecord {
             event_type: "cognition_out".to_string(),
-            payload: json!({"turn":1,"content":"done"}),
+            payload: out(1, "done"),
         }];
         let recovered = recover_tool_state(&events, &["T-source".to_string()]).unwrap();
         assert_eq!(
@@ -2130,7 +2059,7 @@ mod tests {
         let mut redirected = events.clone();
         redirected.push(ReplayedEventRecord {
             event_type: "cognition_in".to_string(),
-            payload: json!({"content":"steer"}),
+            payload: input("steer"),
         });
         let recovered = recover_tool_state(
             &redirected,
@@ -2147,16 +2076,18 @@ mod tests {
     async fn oversized_pending_proposal_fails_closed_before_dispatch() {
         let callback = make_callback(vec![ReplayedEventRecord {
             event_type: "cognition_out".to_string(),
-            payload: json!({
-                "turn":1,
-                "content":null,
-                "tool_calls":[{
-                    "id":"large-call",
-                    "name":"tool:large",
-                    "arguments":{"payload":"x".repeat(70_000)}
-                }],
-                "provider_accounting":{"replayed_from":"ef".repeat(32)}
-            }),
+            payload: {
+                let mut payload = out_calls(
+                    1,
+                    json!([{
+                        "id":"large-call",
+                        "name":"tool:large",
+                        "arguments":{"payload":"x".repeat(70_000)}
+                    }]),
+                );
+                payload["provider_accounting"] = json!({"replayed_from":"ef".repeat(32)});
+                payload
+            },
         }]);
         let error = load_resume_state(&callback, "nonexistent", 0, ResumeMode::NativeSameThread)
             .await
@@ -2178,27 +2109,26 @@ mod tests {
             },
             ReplayedEventRecord {
                 event_type: "cognition_in".to_string(),
-                payload: json!({"content": "Hello"}),
+                payload: input("Hello"),
             },
             ReplayedEventRecord {
                 event_type: "cognition_out".to_string(),
-                payload: json!({"turn": 1, "content": "Hi there!"}),
+                payload: out(1, "Hi there!"),
             },
             ReplayedEventRecord {
                 event_type: "cognition_in".to_string(),
-                payload: json!({"content": "Do something"}),
+                payload: input("Do something"),
             },
             ReplayedEventRecord {
                 event_type: "cognition_out".to_string(),
-                payload: json!({
-                    "turn": 2,
-                    "content": null,
-                    "tool_calls": [{"id": "c1", "name": "read_file", "arguments": {"path": "/tmp"}}]
-                }),
+                payload: out_calls(
+                    2,
+                    json!([{"id": "c1", "name": "read_file", "arguments": {"path": "/tmp"}}]),
+                ),
             },
             ReplayedEventRecord {
                 event_type: "tool_call_result".to_string(),
-                payload: json!({"call_id": "c1", "tool": "read_file", "result_text": "file contents"}),
+                payload: result(&"1".repeat(64), "c1", "read_file", "file contents"),
             },
         ];
 
@@ -2217,12 +2147,7 @@ mod tests {
         let exact = r#"{"ok":true,"nested":{"value":7}}"#;
         let events = vec![ReplayedEventRecord {
             event_type: "tool_call_result".to_string(),
-            payload: json!({
-                "call_id": "call-exact",
-                "tool": "tool:exact",
-                "result_text": exact,
-                "truncated": false,
-            }),
+            payload: result(&"2".repeat(64), "call-exact", "tool:exact", exact),
         }];
 
         let messages = reconstruct_messages(&events).unwrap();
@@ -2234,23 +2159,26 @@ mod tests {
     }
 
     #[test]
-    fn replay_rejects_tool_results_without_exact_string_content() {
+    fn replay_rejects_tool_results_in_any_other_shape() {
+        let operation_id = "3".repeat(64);
+        let mut missing_status = result(&operation_id, "c", "tool:t", "{}");
+        missing_status.as_object_mut().unwrap().remove("status");
+        let mut old_text_field = result(&operation_id, "c", "tool:t", "{}");
+        old_text_field["result_text"] = json!("{}");
+        let mut no_call_id = result(&operation_id, "c", "tool:t", "{}");
+        no_call_id["call_id"] = json!("");
         for payload in [
-            json!({"call_id":"c","tool":"tool:t"}),
-            json!({"call_id":"c","tool":"tool:t","result_text":{"ok":true}}),
-            json!({"call_id":"c","tool":"tool:t","result_text":"{}","result":{}}),
+            json!({"call_id":"c","tool":"tool:t","result_text":"{}","truncated":false}),
+            missing_status,
+            old_text_field,
+            no_call_id,
         ] {
             let error = reconstruct_messages(&[ReplayedEventRecord {
                 event_type: "tool_call_result".to_string(),
                 payload,
             }])
             .unwrap_err();
-            assert!(
-                error.to_string().contains("result_text")
-                    || error
-                        .to_string()
-                        .contains("obsolete parsed result authority")
-            );
+            assert!(error.to_string().contains("tool_call_result"), "{error:#}");
         }
     }
 
@@ -2262,21 +2190,18 @@ mod tests {
         let events = vec![
             ReplayedEventRecord {
                 event_type: "tool_call_result".to_string(),
-                payload: json!({
-                    "tool":"tool:t",
-                    "result_text":content,
-                    "truncated":false,
-                }),
+                payload: result(&"4".repeat(64), "c1", "tool:t", &content),
             },
             ReplayedEventRecord {
                 event_type: "tool_call_result".to_string(),
-                payload: json!({
-                    "tool":"tool:t",
-                    "result_text":marker,
-                    "truncated":false,
-                    "deduplicated":true,
-                    "duplicate_of":hash,
-                }),
+                payload: result_with(
+                    &"5".repeat(64),
+                    "c2",
+                    "tool:t",
+                    &marker,
+                    "ok",
+                    Some(hash.as_str()),
+                ),
             },
         ];
         let sources = vec!["T-current".to_string(), "T-current".to_string()];
@@ -2287,41 +2212,41 @@ mod tests {
     }
 
     #[test]
-    fn malformed_optional_result_metadata_cannot_be_downgraded_to_absent() {
-        for (field, value, expected) in [
-            ("deduplicated", json!({}), "not a boolean"),
-            ("truncated_reason", json!(false), "not a string"),
-        ] {
-            let mut payload = json!({
-                "tool":"tool:t",
-                "result_text":"{}",
-                "truncated":false,
-            });
-            payload[field] = value;
-            let error = recover_result_guard(
-                &[ReplayedEventRecord {
-                    event_type: "tool_call_result".to_string(),
-                    payload,
-                }],
-                &["T-current".to_string()],
-                "T-current",
-            )
-            .unwrap_err();
-            assert!(error.to_string().contains(expected), "{error:#}");
-        }
+    fn error_results_never_enter_the_result_guard() {
+        let content = "x".repeat(1024);
+        let events = vec![ReplayedEventRecord {
+            event_type: "tool_call_result".to_string(),
+            payload: error_result(&"6".repeat(64), "c1", "tool:t", &content),
+        }];
+        let mut guard =
+            recover_result_guard(&events, &["T-current".to_string()], "T-current").unwrap();
+        // The error text was never seen by the guard, so the same bytes from
+        // a successful call are not a duplicate.
+        assert!(guard.process(&content).duplicate_of.is_none());
+
+        let mut duplicate = events.clone();
+        duplicate[0].payload["guard"]["duplicate_of"] = json!("a".repeat(64));
+        let error =
+            recover_result_guard(&duplicate, &["T-current".to_string()], "T-current").unwrap_err();
+        assert!(
+            format!("{error:#}").contains("cannot be a duplicate"),
+            "{error:#}"
+        );
     }
 
     #[test]
     fn reconstruct_messages_folds_chunked_cognition_input_once() {
         let content = "large ARC evidence\n".repeat(20_000);
-        let events = ryeos_runtime::encode_cognition_in_payloads(&content)
-            .unwrap()
-            .into_iter()
-            .map(|payload| ReplayedEventRecord {
-                event_type: "cognition_in".to_string(),
-                payload,
-            })
-            .collect::<Vec<_>>();
+        let events = ryeos_runtime::encode_cognition_in_payloads(
+            &ryeos_runtime::CognitionInput::text("launch", content.as_str()),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|payload| ReplayedEventRecord {
+            event_type: "cognition_in".to_string(),
+            payload,
+        })
+        .collect::<Vec<_>>();
 
         let messages = reconstruct_messages(&events).unwrap();
         assert_eq!(messages.len(), 1);
@@ -2334,7 +2259,7 @@ mod tests {
         let events = vec![
             ReplayedEventRecord {
                 event_type: "cognition_in".to_string(),
-                payload: json!({"content": "Hello"}),
+                payload: input("Hello"),
             },
             ReplayedEventRecord {
                 event_type: "cognition_out".to_string(),
@@ -2350,7 +2275,7 @@ mod tests {
             },
             ReplayedEventRecord {
                 event_type: "cognition_out".to_string(),
-                payload: json!({"turn": 1, "content": "Hi there!"}),
+                payload: out(1, "Hi there!"),
             },
         ];
 
@@ -2369,28 +2294,28 @@ mod tests {
     #[test]
     fn interrupted_seal_folds_as_assistant_then_redirect() {
         // A live-interrupt seal is a content-bearing cognition_out (with
-        // interrupted:true, no tool_calls). Resume must fold it as an assistant
+        // finish "interrupted", no tool calls). Resume must fold it as an assistant
         // message in order — the redirect input follows as the next user turn,
         // and the fresh cognition's output after that. The `interrupted` marker is
         // ignored by the fold (only content/tool_calls/reasoning are read).
         let events = vec![
             ReplayedEventRecord {
                 event_type: "cognition_in".to_string(),
-                payload: json!({"content": "start the long task"}),
+                payload: input("start the long task"),
             },
             ReplayedEventRecord {
                 event_type: "cognition_out".to_string(),
-                payload: json!({"turn": 1, "content": "working on it, step on", "interrupted": true}),
+                payload: out_interrupted(1, "working on it, step on"),
             },
             // The operator's redirect, folded as a durable cognition_in by the
             // daemon's poll-and-persist.
             ReplayedEventRecord {
                 event_type: "cognition_in".to_string(),
-                payload: json!({"content": "stop — do X instead"}),
+                payload: input("stop — do X instead"),
             },
             ReplayedEventRecord {
                 event_type: "cognition_out".to_string(),
-                payload: json!({"turn": 2, "content": "doing X"}),
+                payload: out(2, "doing X"),
             },
         ];
         let messages = reconstruct_messages(&events).unwrap();
@@ -2426,7 +2351,7 @@ mod tests {
             },
             ReplayedEventRecord {
                 event_type: "cognition_in".to_string(),
-                payload: json!({"content": "Hello"}),
+                payload: input("Hello"),
             },
             ReplayedEventRecord {
                 event_type: "thread_usage".to_string(),
@@ -2460,14 +2385,14 @@ mod tests {
         let events = vec![
             ReplayedEventRecord {
                 event_type: "cognition_out".to_string(),
-                payload: json!({
-                    "turn": 1,
-                    "tool_calls": [{
+                payload: out_calls(
+                    1,
+                    json!([{
                         "id": "call-return",
                         "name": DIRECTIVE_RETURN_TOOL,
                         "arguments": {"answer": "done"}
-                    }]
-                }),
+                    }]),
+                ),
             },
             ReplayedEventRecord {
                 event_type: "tool_call_start".to_string(),
@@ -2576,7 +2501,7 @@ mod tests {
 
         events.push(ReplayedEventRecord {
             event_type: "cognition_out".to_string(),
-            payload: json!({"turn": 1, "content": "settled"}),
+            payload: out(1, "settled"),
         });
         sources.push("T-current".to_string());
         assert_eq!(
@@ -2637,15 +2562,15 @@ mod tests {
         let events = vec![
             ReplayedEventRecord {
                 event_type: "cognition_in".to_string(),
-                payload: json!({"content": "Do task"}),
+                payload: input("Do task"),
             },
             ReplayedEventRecord {
                 event_type: "cognition_out".to_string(),
-                payload: json!({
-                    "turn": 1,
-                    "content": "Done!",
-                    "provider_accounting": {"replayed_from": "ab".repeat(32)}
-                }),
+                payload: {
+                    let mut payload = out(1, "Done!");
+                    payload["provider_accounting"] = json!({"replayed_from": "ab".repeat(32)});
+                    payload
+                },
             },
         ];
         let callback = make_callback(events);
@@ -2731,17 +2656,17 @@ mod tests {
             };
             let events = match tid {
                 "T1" => vec![
-                    ev("cognition_in", json!({"content": "turn1 in"})),
+                    ev("cognition_in", input("turn1 in")),
                     ev("thread_usage", usage(1)),
-                    ev("cognition_out", json!({"turn": 1, "content": "turn1 out"})),
+                    ev("cognition_out", out(1, "turn1 out")),
                 ],
                 "T2" => vec![
-                    ev("cognition_in", json!({"content": "turn2 in"})),
+                    ev("cognition_in", input("turn2 in")),
                     ev("thread_usage", usage(2)),
-                    ev("cognition_out", json!({"turn": 2, "content": "turn2 out"})),
+                    ev("cognition_out", out(2, "turn2 out")),
                 ],
                 // Non-continuation child sharing the chain root — must NOT fold.
-                "T1-child" => vec![ev("cognition_out", json!({"content": "POLLUTION"}))],
+                "T1-child" => vec![ev("cognition_out", out(1, "POLLUTION"))],
                 _ => vec![],
             };
             Ok(serde_json::to_value(ReplayResponse {
@@ -2803,11 +2728,7 @@ mod tests {
             .await
             .unwrap();
 
-        let contents: Vec<String> = state
-            .messages
-            .iter()
-            .filter_map(|m| m.text().map(String::from))
-            .collect();
+        let contents: Vec<String> = state.messages.iter().filter_map(|m| m.text()).collect();
         // Both turns, root-first, in order; the chain-sharing child is excluded.
         assert_eq!(
             contents,
@@ -2845,7 +2766,10 @@ mod tests {
         ];
 
         let trimmed = trim_to_recent_turns(messages, 2);
-        let contents: Vec<_> = trimmed.iter().filter_map(|m| m.text()).collect::<Vec<String>>();
+        let contents: Vec<_> = trimmed
+            .iter()
+            .filter_map(|m| m.text())
+            .collect::<Vec<String>>();
         assert_eq!(contents, vec!["u2", "a2", "tool2", "u3", "a3"]);
     }
 
@@ -2860,7 +2784,10 @@ mod tests {
         ];
 
         let trimmed = trim_to_recent_turns(messages, 1);
-        let contents: Vec<_> = trimmed.iter().filter_map(|m| m.text()).collect::<Vec<String>>();
+        let contents: Vec<_> = trimmed
+            .iter()
+            .filter_map(|m| m.text())
+            .collect::<Vec<String>>();
         assert_eq!(contents, vec!["u2", "a2"]);
     }
 }

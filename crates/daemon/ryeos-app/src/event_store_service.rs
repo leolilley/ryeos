@@ -855,7 +855,10 @@ mod tests {
     #[test]
     fn runtime_batch_requires_a_complete_atomic_cognition_input() {
         let content = "ARC evidence\n".repeat(24_000);
-        let payloads = ryeos_runtime::encode_cognition_in_payloads(&content).unwrap();
+        let payloads = ryeos_runtime::encode_cognition_in_payloads(
+            &ryeos_runtime::CognitionInput::text("launch", content).pinned(),
+        )
+        .unwrap();
         assert!(payloads.len() > 1);
         let events = payloads
             .iter()
