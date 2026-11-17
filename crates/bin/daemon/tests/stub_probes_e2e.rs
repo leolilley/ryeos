@@ -579,7 +579,7 @@ fn call_timeline(name: &str, log: &str) {
         if let Some(t) = stamp_ms(l) {
             gaps.push((t - prev, i));
             prev = t;
-            let body = l.split_once("Z ").map_or(l, |x| x.1);
+            let body = l.split_once("Z ").map_or(*l, |x| x.1);
             rendered.push(format!("+{:.0}ms {}", t - t0, trunc(body, 150)));
         }
     }
