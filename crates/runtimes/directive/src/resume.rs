@@ -134,7 +134,15 @@ pub async fn load_resume_state(
         events.extend(page.events);
     }
 
-    let messages = reconstruct_messages(&events)?;
+    let own_start = match mode {
+        // The current thread's events are the suffix of its own path.
+        ResumeMode::NativeSameThread => source_thread_ids
+            .iter()
+            .position(|source| source == previous_thread_id)
+            .unwrap_or(events.len()),
+        // Every thread of a successor's path is a predecessor.
+        ResumeMode::Continuation => events.len(),
+    };
     let recovered_tools = recover_tool_state(&events, &source_thread_ids)?;
     if !recovered_tools.pending.is_empty() {
         let pending_source = recovered_tools
@@ -171,27 +179,18 @@ pub async fn load_resume_state(
     } else {
         ResumeDisposition::ContinueProvider
     };
-    // An unresolved tool result must retain its owning assistant message on
-    // the provider wire even when a continuation requested zero carried
-    // turns. Otherwise the recovered result would be an orphan tool message.
-    let must_retain_active_turn = mode == ResumeMode::NativeSameThread
-        && (!recovered_tools.pending.is_empty()
-            || !matches!(disposition, ResumeDisposition::ContinueProvider)
-            || events
-                .iter()
-                .any(|event| final_cognition_turn(event).is_ok_and(|v| v.is_some())));
-    let retained_turns = if must_retain_active_turn {
-        carry_turns.max(1)
-    } else {
-        carry_turns
-    };
-    let messages = trim_to_recent_turns(messages, retained_turns);
-    let pin_last_assistant = mode == ResumeMode::NativeSameThread
-        && (must_retain_active_turn || !recovered_tools.pending.is_empty());
-    let trimmed = trim_to_token_budget(messages, 16_000, pin_last_assistant)?;
+    // The conversation a recovery rebuilds. Same-thread recovery never trims
+    // the current thread's own events: it rebuilds everything the thread
+    // recorded. A predecessor thread's part of the path is what a successor
+    // started from, so it is carried the way the successor's start carried it:
+    // pinned inputs, then the most recent turns.
+    let predecessor = fold_messages(&events[..own_start])?;
+    let own = fold_messages(&events[own_start..])?;
+    let mut messages = carry_into_successor(predecessor, carry_turns)?;
+    messages.extend(own.into_iter().map(|folded| folded.message));
 
     Ok(ResumeState {
-        messages: trimmed,
+        messages,
         pending_tools: recovered_tools.pending,
         disposition,
         last_turn_coordinate: turn_progress.last_coordinate,
@@ -1086,9 +1085,20 @@ fn recover_thread_usage(
 /// tool-dispatch starts, graph milestones) carries no message and is skipped —
 /// folding a chain is lossy by design, not an error. `role` is the provider-wire
 /// mapping applied here, not a substrate concept.
-fn reconstruct_messages(events: &[ReplayedEventRecord]) -> Result<Vec<ProviderMessage>> {
+/// One message of a fold, with whether the input that produced it is pinned.
+#[derive(Debug, Clone)]
+struct FoldedMessage {
+    message: ProviderMessage,
+    pinned: bool,
+}
+
+fn fold_messages(events: &[ReplayedEventRecord]) -> Result<Vec<FoldedMessage>> {
     let mut messages = Vec::new();
     let mut cognition_in = ryeos_runtime::CognitionInAssembler::default();
+    let unpinned = |message: ProviderMessage| FoldedMessage {
+        message,
+        pinned: false,
+    };
 
     for event in events {
         validate_replayed_cognition_out(event)?;
@@ -1105,7 +1115,10 @@ fn reconstruct_messages(events: &[ReplayedEventRecord]) -> Result<Vec<ProviderMe
                 if let ryeos_runtime::CognitionInAssembly::Complete(input) =
                     cognition_in.push(&event.payload)?
                 {
-                    messages.push(input.message());
+                    messages.push(FoldedMessage {
+                        message: input.message(),
+                        pinned: input.pinned,
+                    });
                 }
             }
             // Streaming fragments are UI/event-log data, not replayable
@@ -1113,14 +1126,14 @@ fn reconstruct_messages(events: &[ReplayedEventRecord]) -> Result<Vec<ProviderMe
             // emitted at turn completion is folded below.
             "cognition_out" if is_stream_fragment(event) => {}
             "cognition_out" => {
-                messages.push(replayed_cognition_out(event)?.message());
+                messages.push(unpinned(replayed_cognition_out(event)?.message()));
             }
             "tool_call_result" => {
                 // The retained text is exactly what the live runner put in the
                 // provider message. Never parse JSON-looking content: doing so
                 // changes both OpenAI-style wire content and custom schema
                 // template rendering after a crash.
-                messages.push(replayed_tool_result(event)?.message());
+                messages.push(unpinned(replayed_tool_result(event)?.message()));
             }
             // Non-conversational chain events carry no message — skip.
             _ => {}
@@ -1131,6 +1144,147 @@ fn reconstruct_messages(events: &[ReplayedEventRecord]) -> Result<Vec<ProviderMe
         .context("resume: incomplete chunked cognition_in")?;
 
     Ok(messages)
+}
+
+#[cfg(test)]
+fn reconstruct_messages(events: &[ReplayedEventRecord]) -> Result<Vec<ProviderMessage>> {
+    Ok(fold_messages(events)?
+        .into_iter()
+        .map(|folded| folded.message)
+        .collect())
+}
+
+/// Token budget of the conversation a successor starts from.
+const SUCCESSOR_START_TOKEN_BUDGET: u64 = 16_000;
+
+/// A rebuilt starting conversation that a provider would reject.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResumeFoldError {
+    /// The conversation does not begin with a user message.
+    DoesNotStartWithUser { role: String },
+    /// An assistant tool call has no result before the conversation moves on.
+    UnansweredToolCall { call_id: String },
+    /// A tool result names a call that is not in the conversation.
+    OrphanToolResult { call_id: String },
+    /// The pinned inputs alone are larger than the starting budget.
+    PinnedInputsExceedBudget { budget: u64 },
+}
+
+impl std::fmt::Display for ResumeFoldError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DoesNotStartWithUser { role } => write!(
+                f,
+                "resume: the successor's starting conversation begins with a {role} message, not a user message"
+            ),
+            Self::UnansweredToolCall { call_id } => write!(
+                f,
+                "resume: tool call {call_id:?} in the successor's starting conversation has no result"
+            ),
+            Self::OrphanToolResult { call_id } => write!(
+                f,
+                "resume: tool result {call_id:?} in the successor's starting conversation has no call"
+            ),
+            Self::PinnedInputsExceedBudget { budget } => write!(
+                f,
+                "resume: pinned inputs alone exceed the {budget}-token starting budget"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ResumeFoldError {}
+
+/// The conversation a successor starts from, taken from its predecessors'
+/// part of the path: the pinned inputs in their original order, then the most
+/// recent `carry_turns` turns and as many of them as fit the token budget.
+/// When nothing needs dropping the conversation keeps its original order.
+/// The result begins with a user message and every tool call in it has its
+/// result, or the rebuild fails with a [`ResumeFoldError`].
+fn carry_into_successor(
+    folded: Vec<FoldedMessage>,
+    carry_turns: u32,
+) -> Result<Vec<ProviderMessage>> {
+    if folded.is_empty() {
+        return Ok(Vec::new());
+    }
+    let whole: Vec<ProviderMessage> = folded.iter().map(|f| f.message.clone()).collect();
+    let (pinned, rest): (Vec<_>, Vec<_>) = folded.into_iter().partition(|f| f.pinned);
+    let pinned: Vec<ProviderMessage> = pinned.into_iter().map(|f| f.message).collect();
+    let rest: Vec<ProviderMessage> = rest.into_iter().map(|f| f.message).collect();
+    let rest_len = rest.len();
+
+    let recent = trim_to_recent_turns(rest, carry_turns);
+    let pinned_tokens = crate::estimate::estimate_tokens(&pinned);
+    if pinned_tokens > SUCCESSOR_START_TOKEN_BUDGET {
+        return Err(ResumeFoldError::PinnedInputsExceedBudget {
+            budget: SUCCESSOR_START_TOKEN_BUDGET,
+        }
+        .into());
+    }
+    let recent = trim_to_token_budget(recent, SUCCESSOR_START_TOKEN_BUDGET - pinned_tokens)?;
+
+    let mut messages = if recent.len() == rest_len {
+        whole
+    } else {
+        let mut messages = pinned;
+        messages.extend(recent);
+        messages
+    };
+    // A conversation with no pinned input can still begin on an assistant or
+    // tool message after a trim: drop those until a user message leads.
+    while messages
+        .first()
+        .is_some_and(|message| message.role() != "user")
+    {
+        messages.remove(0);
+    }
+    check_well_formed(&messages)?;
+    Ok(messages)
+}
+
+/// Checks that a starting conversation begins with a user message and that
+/// every tool call is answered by a result and every result has its call.
+fn check_well_formed(messages: &[ProviderMessage]) -> Result<(), ResumeFoldError> {
+    if let Some(first) = messages.first()
+        && first.role() != "user"
+    {
+        return Err(ResumeFoldError::DoesNotStartWithUser {
+            role: first.role().to_string(),
+        });
+    }
+    let mut open: Vec<String> = Vec::new();
+    for message in messages {
+        if message.role() == "tool" {
+            for part in &message.parts {
+                if let ryeos_provider_contract::Part::ToolResult(result) = part {
+                    match open.iter().position(|id| *id == result.call_id) {
+                        Some(index) => {
+                            open.remove(index);
+                        }
+                        None => {
+                            return Err(ResumeFoldError::OrphanToolResult {
+                                call_id: result.call_id.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        if let Some(call_id) = open.first() {
+            return Err(ResumeFoldError::UnansweredToolCall {
+                call_id: call_id.clone(),
+            });
+        }
+        open.extend(message.tool_calls().map(|call| call.call_id.clone()));
+    }
+    if let Some(call_id) = open.first() {
+        return Err(ResumeFoldError::UnansweredToolCall {
+            call_id: call_id.clone(),
+        });
+    }
+    Ok(())
 }
 
 fn count_turns(messages: &[ProviderMessage]) -> u32 {
@@ -1178,7 +1332,6 @@ fn trim_to_recent_turns(
 fn trim_to_token_budget(
     mut messages: Vec<ProviderMessage>,
     max_tokens: u64,
-    pin_last_assistant: bool,
 ) -> Result<Vec<ProviderMessage>> {
     if messages.is_empty() {
         return Ok(messages);
@@ -1194,7 +1347,7 @@ fn trim_to_token_budget(
             .iter()
             .filter(|message| message.role() == "assistant")
             .count();
-        if assistant_count == 0 || (pin_last_assistant && assistant_count == 1) {
+        if assistant_count == 0 {
             anyhow::bail!(
                 "resume: required provider transcript suffix exceeds the {max_tokens}-token recovery budget"
             );
@@ -2048,7 +2201,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oversized_pending_proposal_fails_closed_before_dispatch() {
+    async fn a_large_pending_proposal_is_kept_whole_by_same_thread_recovery() {
         let callback = make_callback(vec![ReplayedEventRecord {
             event_type: "cognition_out".to_string(),
             payload: {
@@ -2064,14 +2217,15 @@ mod tests {
                 payload
             },
         }]);
-        let error = load_resume_state(&callback, "nonexistent", 0, ResumeMode::NativeSameThread)
+        // The thread's own turns are never trimmed, so the proposal that the
+        // old recovery budget would have refused is rebuilt with its call
+        // still pending.
+        let state = load_resume_state(&callback, "nonexistent", 0, ResumeMode::NativeSameThread)
             .await
-            .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("required provider transcript suffix exceeds")
-        );
+            .unwrap();
+        assert_eq!(state.messages.len(), 1);
+        assert!(state.messages[0].has_tool_calls());
+        assert_eq!(state.pending_tools.len(), 1);
     }
 
     #[test]
@@ -2394,7 +2548,7 @@ mod tests {
                 "answer {i} with some content here"
             )));
         }
-        let trimmed = trim_to_token_budget(messages, 200, true).unwrap();
+        let trimmed = trim_to_token_budget(messages, 200).unwrap();
         assert!(trimmed.len() < 200);
         assert!(!trimmed.is_empty());
     }
@@ -2715,6 +2869,128 @@ mod tests {
         );
         assert_eq!(state.turns_completed, 2);
         assert_eq!(state.thread_usage.unwrap().completed_turns, 2);
+    }
+
+    #[tokio::test]
+    async fn same_thread_recovery_keeps_every_event_of_the_current_thread() {
+        // T2 crashed and is resumed in place. Its own conversation is rebuilt
+        // whole even with a carry of zero turns; only the predecessor's part
+        // of the path is carried the way T2's start carried it.
+        let inner: Arc<dyn RuntimeCallbackAPI> = Arc::new(PathMock);
+        let callback = CallbackClient::from_inner(inner, "T2", "/tmp/test", "tat-test");
+        for carry in [0, 1, 8] {
+            let state = load_resume_state(&callback, "T2", carry, ResumeMode::NativeSameThread)
+                .await
+                .unwrap();
+            let texts: Vec<String> = state.messages.iter().filter_map(|m| m.text()).collect();
+            let own = ["turn2 in".to_string(), "turn2 out".to_string()];
+            assert!(texts.ends_with(&own), "carry {carry}: {texts:?}");
+        }
+        let all = load_resume_state(&callback, "T2", 8, ResumeMode::NativeSameThread)
+            .await
+            .unwrap();
+        assert_eq!(all.messages.len(), 4);
+        let own_only = load_resume_state(&callback, "T2", 0, ResumeMode::NativeSameThread)
+            .await
+            .unwrap();
+        assert_eq!(own_only.messages.len(), 2);
+    }
+
+    fn folded(message: ProviderMessage, pinned: bool) -> FoldedMessage {
+        FoldedMessage { message, pinned }
+    }
+
+    #[test]
+    fn a_successor_start_keeps_pinned_inputs_and_the_recent_turns() {
+        let conversation = vec![
+            folded(ProviderMessage::user("launch"), true),
+            folded(ProviderMessage::assistant_text("a1"), false),
+            folded(ProviderMessage::user("u2"), false),
+            folded(ProviderMessage::assistant_text("a2"), false),
+            folded(ProviderMessage::user("u3"), false),
+            folded(ProviderMessage::assistant_text("a3"), false),
+        ];
+        let carried = carry_into_successor(conversation, 1).unwrap();
+        let texts: Vec<String> = carried.iter().filter_map(|m| m.text()).collect();
+        assert_eq!(texts, ["launch", "u3", "a3"]);
+        assert_eq!(carried[0].role(), "user");
+    }
+
+    #[test]
+    fn a_zero_carry_still_keeps_pinned_inputs() {
+        let conversation = vec![
+            folded(ProviderMessage::user("launch"), true),
+            folded(ProviderMessage::assistant_text("a1"), false),
+        ];
+        let carried = carry_into_successor(conversation, 0).unwrap();
+        let texts: Vec<String> = carried.iter().filter_map(|m| m.text()).collect();
+        assert_eq!(texts, ["launch"]);
+    }
+
+    #[test]
+    fn nothing_dropped_means_nothing_reordered() {
+        let conversation = vec![
+            folded(ProviderMessage::user("u1"), false),
+            folded(ProviderMessage::assistant_text("a1"), false),
+            folded(ProviderMessage::user("pinned later"), true),
+            folded(ProviderMessage::assistant_text("a2"), false),
+        ];
+        let carried = carry_into_successor(conversation, 8).unwrap();
+        let texts: Vec<String> = carried.iter().filter_map(|m| m.text()).collect();
+        assert_eq!(texts, ["u1", "a1", "pinned later", "a2"]);
+    }
+
+    #[test]
+    fn without_a_pinned_input_the_start_is_cut_to_a_user_message() {
+        let conversation = vec![
+            folded(ProviderMessage::user("u1"), false),
+            folded(ProviderMessage::assistant_text("a1"), false),
+            folded(ProviderMessage::user("u2"), false),
+            folded(ProviderMessage::assistant_text("a2"), false),
+        ];
+        let carried = carry_into_successor(conversation, 1).unwrap();
+        let texts: Vec<String> = carried.iter().filter_map(|m| m.text()).collect();
+        assert_eq!(texts, ["u2", "a2"]);
+    }
+
+    #[test]
+    fn a_start_with_a_broken_tool_pairing_fails_with_a_typed_error() {
+        let call = crate::directive::ToolCall {
+            id: Some("c1".to_string()),
+            name: "tool:a".to_string(),
+            arguments: json!({}),
+        };
+        let unanswered = vec![
+            ProviderMessage::user("go"),
+            ProviderMessage::assistant(None, vec![call], None),
+            ProviderMessage::user("and then"),
+        ];
+        assert_eq!(
+            check_well_formed(&unanswered),
+            Err(ResumeFoldError::UnansweredToolCall {
+                call_id: "c1".to_string()
+            })
+        );
+        let orphan = vec![
+            ProviderMessage::user("go"),
+            ProviderMessage::tool_result("c9", "result"),
+        ];
+        assert_eq!(
+            check_well_formed(&orphan),
+            Err(ResumeFoldError::OrphanToolResult {
+                call_id: "c9".to_string()
+            })
+        );
+        let assistant_first = vec![ProviderMessage::assistant_text("hi")];
+        assert_eq!(
+            check_well_formed(&assistant_first),
+            Err(ResumeFoldError::DoesNotStartWithUser {
+                role: "assistant".to_string()
+            })
+        );
+        // A typed error survives the anyhow boundary.
+        let error: anyhow::Error = ResumeFoldError::PinnedInputsExceedBudget { budget: 1 }.into();
+        assert!(error.downcast_ref::<ResumeFoldError>().is_some());
     }
 
     #[tokio::test]
