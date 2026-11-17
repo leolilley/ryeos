@@ -664,7 +664,7 @@ async fn probe_node_start() {
     say(
         "node_start",
         &format!(
-            "bundles=core+knowledge+directive+graph+ryeos-docs+scheduling-fixture-state fixture_and_bundle_registration_s={} t0_to_ready_s={} {host}",
+            "bundles=standard-profile(core,knowledge,directive,graph,ryeos-docs,scheduling,browser,codex,opencode,ryeos-ui,web) fixture_and_bundle_registration_s={} t0_to_ready_s={} {host}",
             secs(total),
             secs(t0.elapsed()),
         ),
@@ -822,7 +822,7 @@ async fn noop_tool_calls(n: u64, limits: Option<(u64, u64)>) {
     let sampler = Sampler::start(rig.h.child.id().unwrap_or(0));
     let t = Instant::now();
     let id = launch_on(&rig).await.expect("launch");
-    let (status, _) = wait_terminal(&rig.h, &id, Duration::from_secs(3300)).await;
+    let (status, _) = wait_terminal(&rig.h, &id, Duration::from_secs(4500)).await;
     let wall = t.elapsed();
     let peaks = sampler.finish().await;
 
