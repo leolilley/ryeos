@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 const VIEW_BEHAVIOR_GOLDENS: &[(&str, &str)] = &[
     (
         "view:ryeos/attention/panel",
-        "0000000000000000000000000000000000000000000000000000000000000000",
+        "18524a50abcbbfab5c826e5f7e20d8a8ca2e93c20f3bdcf03b45f971e1273cde",
     ),
     (
         "view:ryeos/chain/timeline",

@@ -71,6 +71,7 @@ fn authored_shared_configs_offer_discovery_without_changing_their_surface_seeds(
                 "ryeos.execute.service.projects/list",
                 "ryeos.execute.service.ui/ryeos-ui/config/get",
                 "ryeos.execute.service.ui/ryeos-ui/items/list",
+                "ryeos.execute.service.ui/ryeos-ui/work/attention",
             ]),
             "{file}"
         );
