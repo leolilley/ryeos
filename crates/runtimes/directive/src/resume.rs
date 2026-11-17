@@ -365,7 +365,8 @@ fn recover_tool_state(
                     );
                 }
                 current_batch = None;
-                let tool_calls = replayed_cognition_out(event)?.message().calls();
+                let cognition = replayed_cognition_out(event)?;
+                let tool_calls = cognition.message().calls();
                 if tool_calls.is_empty() {
                     open.clear();
                     continue;
@@ -400,6 +401,7 @@ fn recover_tool_state(
                             start_recorded: false,
                             counted: false,
                             spawn_counted: false,
+                            malformed: cognition.malformed_call(call_index).cloned(),
                         },
                         source_thread_id: source_thread_id.clone(),
                         settled: false,

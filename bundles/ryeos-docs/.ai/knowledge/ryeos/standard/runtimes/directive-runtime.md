@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-17T11:18:31Z:d84cde6a89b8b2aff619893ba71a58d593906766d30465f9ab7c7fda71b8014e:YMqGOyURPAgVa6lOrmLD5uFIjLeJQmDU9af4Uc9hfLcuIxhUKffGVEzHV2z20ke5r2Cc3Dq40r+ifeKNFR5EAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-17T11:20:51Z:f7d706dd7c84ef54e23b6b296e2ef115d53cf880eae502a76a6d794f33b6cb0f:z22grEXhsvVjDsrb0k/mXQwBYDJs8DdeaSNfD+oK9ixbB3ykYCWqS2AHhKgbZHv9xHowyktOPWeJwsILof1KAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/runtimes
 tags: [runtime, directive, llm, callbacks]
@@ -25,7 +25,7 @@ The events carry them:
 |---|---|
 | `cognition_frame` | What the model is given beside the conversation: `frame_seq`, `system` (text parts), `tool_inventory` (the hash of the attachment holding the inventory, repeated in `attachment_refs`), `request_options` (`model`, optional `reasoning`, `sampling`, `max_output_tokens`) and `provider_config` (the hash of the provider configuration in force). A changed frame on resume is recorded as the next `frame_seq`. |
 | `cognition_in` | One input: `origin`, `parts`, and optionally `kind`, `ack` and `pinned`; or a turn marker `{ turn, tools_offered? }`. An input too large for one event is split into hash-bound chunks that fold back into one input. |
-| `cognition_out` | One assistant turn: `turn`, `parts` in stream order, `finish` (the normalised finish reason, or `interrupted`), optional `usage` and `provider_accounting`. An interrupted turn carries no tool calls. Streaming fragments (`delta`, `tool_use_partial`) stay ephemeral. |
+| `cognition_out` | One assistant turn: `turn`, `parts` in stream order, `finish` (the normalised finish reason, or `interrupted`), optional `usage`, `provider_accounting` and `malformed_calls` (`{call_index, raw_len, sha256}` for each tool call whose streamed arguments were not valid JSON; `call_index` counts `tool_call` parts). An interrupted turn carries no tool calls. Streaming fragments (`delta`, `tool_use_partial`) stay ephemeral. |
 | `tool_call_start` | `operation_id`, `call_id`, `tool`, `turn`, `call_index`, `effective_caps`, and `item_ref` when the call resolves to an item. |
 | `tool_call_result` | `operation_id`, `call_id`, `tool`, `status`, `parts` (the exact model-visible result) and `guard` (`result_size_bytes`, `truncated`, optional `truncated_reason`, optional `duplicate_of`). |
 
@@ -47,6 +47,16 @@ since that turn's start or the previous `provider_retry`. The fragments are
 ephemeral and the retry resends the same messages, so nothing durable records
 the abandoned text; only the turn-complete `cognition_out` counts, and resume
 folds only that one.
+
+## Malformed tool calls
+
+A tool call whose streamed arguments are not valid JSON is recorded in the
+turn's `malformed_calls` and never dispatched. The runtime records the call's
+`tool_call_start` and an error `tool_call_result` that tells the model the
+arguments were not valid JSON (byte length and hash) and to resend the call.
+The call counts against `limits.tool_calls`. A malformed `directive_return`
+gets the same error result and the run continues. Resume rebuilds the decision
+from the recorded turn.
 
 ## Durable tool loop
 

@@ -141,6 +141,49 @@ pub(crate) struct ToolOccurrence {
     /// A recovered child-bearing start already charged the spawn-attempt
     /// counter reconstructed from the signed tool catalog.
     pub spawn_counted: bool,
+    /// The call's streamed arguments were not valid JSON. It is never
+    /// dispatched; the model gets an error result instead.
+    pub malformed: Option<ryeos_runtime::MalformedCall>,
+}
+
+/// The model-visible error for a call whose arguments did not parse.
+fn malformed_call_error(malformed: &ryeos_runtime::MalformedCall) -> String {
+    format!(
+        "arguments were not valid JSON: {} bytes, sha256 {}; resend the call with complete arguments",
+        malformed.raw_len, malformed.sha256
+    )
+}
+
+/// Malformed-argument facts for one completed turn, by call ordinal. The
+/// stream yields one `ToolUse` event per tool-call part in part order; a count
+/// that disagrees with the assembled message is a defect, not a guess.
+fn malformed_calls_of_turn(
+    events: &[StreamEvent],
+    message: &ProviderMessage,
+) -> anyhow::Result<Vec<ryeos_runtime::MalformedCall>> {
+    let mut malformed = Vec::new();
+    let mut tool_use_count = 0usize;
+    for event in events {
+        let StreamEvent::ToolUse { malformed_args, .. } = event else {
+            continue;
+        };
+        if let Some(args) = malformed_args {
+            malformed.push(ryeos_runtime::MalformedCall {
+                call_index: u32::try_from(tool_use_count)
+                    .map_err(|_| anyhow::anyhow!("tool call ordinal exceeds u32"))?,
+                raw_len: u64::try_from(args.raw_len).unwrap_or(u64::MAX),
+                sha256: args.sha256.clone(),
+            });
+        }
+        tool_use_count += 1;
+    }
+    if !malformed.is_empty() && tool_use_count != message.calls().len() {
+        anyhow::bail!(
+            "provider stream carried {tool_use_count} tool_use events but the assembled turn has {} tool calls; cannot attribute malformed arguments",
+            message.calls().len()
+        );
+    }
+    Ok(malformed)
 }
 
 /// Whether one assistant message's tool-call batch carries the
@@ -305,6 +348,7 @@ pub enum State {
         tool_name: String,
         operation_id: String,
         raw_args: String,
+        malformed: Option<ryeos_runtime::MalformedCall>,
         pending: Vec<ToolOccurrence>,
         index: usize,
         spawn_counted: bool,
@@ -319,6 +363,7 @@ pub enum State {
         call_id: String,
         operation_id: String,
         raw_args: String,
+        malformed: Option<ryeos_runtime::MalformedCall>,
     },
     FiringHooks {
         occurrence: ryeos_runtime::callback::HookDispatchOccurrence,
@@ -412,6 +457,9 @@ pub struct Runner {
     /// Connection pooling keeps TCP/TLS handshakes to a minimum.
     http_client: reqwest::Client,
     resume_pending_tools: Vec<ToolOccurrence>,
+    /// Malformed-argument facts of the turn just recorded, read when its
+    /// tool calls become occurrences.
+    turn_malformed_calls: Vec<ryeos_runtime::MalformedCall>,
     resume_disposition: ResumeDisposition,
     resume_active_provider_turn: Option<u32>,
     provider_retry_testimony_digests: std::collections::BTreeSet<String>,
@@ -1094,6 +1142,7 @@ impl Runner {
                 .build()
                 .expect("reqwest client builder"),
             resume_pending_tools: Vec::new(),
+            turn_malformed_calls: Vec::new(),
             resume_disposition: ResumeDisposition::ContinueProvider,
             resume_active_provider_turn: None,
             provider_retry_testimony_digests: std::collections::BTreeSet::new(),
@@ -2314,6 +2363,16 @@ impl Runner {
                                 "response_id": &resp.response_id,
                                 "replayed_from": &turn_replayed_from,
                             }));
+                            let malformed_calls =
+                                match malformed_calls_of_turn(&events, &resp.message) {
+                                    Ok(calls) => calls,
+                                    Err(error) => {
+                                        state = State::Errored {
+                                            error: format!("{error:#}"),
+                                        };
+                                        continue;
+                                    }
+                                };
                             if let Err(e) = self
                                 .callback
                                 .emit_turn_complete(
@@ -2322,6 +2381,7 @@ impl Runner {
                                     token_counts,
                                     resp.message.parts.clone(),
                                     provider_accounting,
+                                    malformed_calls.clone(),
                                 )
                                 .await
                             {
@@ -2332,6 +2392,7 @@ impl Runner {
                                 };
                                 continue;
                             }
+                            self.turn_malformed_calls = malformed_calls;
                             self.messages.push(resp.message.clone());
                             if resp.message.has_tool_calls() {
                                 block_at_directive_recovery_test_cut(
@@ -2825,6 +2886,15 @@ impl Runner {
                                         start_recorded: false,
                                         counted: false,
                                         spawn_counted: false,
+                                        malformed: self
+                                            .turn_malformed_calls
+                                            .iter()
+                                            .find(|malformed| {
+                                                usize::try_from(malformed.call_index)
+                                                    .ok()
+                                                    == Some(call_index)
+                                            })
+                                            .cloned(),
                                     })
                                     .collect::<Vec<_>>();
                                 // Lifecycle-bearing batches keep the
@@ -2928,6 +2998,7 @@ impl Runner {
                                 call_id: tc.id.clone().unwrap_or_default(),
                                 operation_id: occurrence.operation_id,
                                 raw_args: tc.arguments.to_string(),
+                                malformed: occurrence.malformed,
                             }
                         } else if !occurrence.counted && !self.harness.try_record_tool_call() {
                             let call_id = tc.id.clone().unwrap_or_default();
@@ -2958,6 +3029,7 @@ impl Runner {
                                 tool_name: tc.name.clone(),
                                 operation_id: occurrence.operation_id,
                                 raw_args: tc.arguments.to_string(),
+                                malformed: occurrence.malformed,
                                 pending,
                                 index,
                                 spawn_counted: occurrence.spawn_counted,
@@ -2971,6 +3043,7 @@ impl Runner {
                     tool_name,
                     operation_id,
                     raw_args,
+                    malformed,
                     pending,
                     index,
                     spawn_counted,
@@ -2982,6 +3055,7 @@ impl Runner {
                             &raw_args,
                             &call_id,
                             spawn_counted,
+                            malformed.as_ref(),
                         )
                         .await
                     {
@@ -3096,6 +3170,7 @@ impl Runner {
                                     &raw_args,
                                     &call_id,
                                     occurrence.spawn_counted,
+                                    occurrence.malformed.as_ref(),
                                 )
                                 .await
                             {
@@ -3276,6 +3351,7 @@ impl Runner {
                     call_id,
                     operation_id,
                     raw_args,
+                    malformed,
                 } => {
                     // directive_return is a lifecycle signal, not a
                     // dispatchable tool. The LLM calls it using the
@@ -3286,8 +3362,11 @@ impl Runner {
                     //   3. Fire tool_call_result for chain visibility
                     //   4. Publish directive_outputs artifact
                     //   5. Finalize thread
-                    let tool_result_content = match crate::adapter::parse_tool_arguments(&raw_args)
-                    {
+                    let parsed_arguments = match &malformed {
+                        Some(malformed) => Err(malformed_call_error(malformed)),
+                        None => crate::adapter::parse_tool_arguments(&raw_args),
+                    };
+                    let tool_result_content = match parsed_arguments {
                         Ok(args) => {
                             let validation_error = directive_output_validation_error(
                                 self.directive_outputs.as_deref(),
@@ -3801,7 +3880,14 @@ impl Runner {
         raw_args: &str,
         call_id: &str,
         spawn_already_counted: bool,
+        malformed: Option<&ryeos_runtime::MalformedCall>,
     ) -> Result<Box<ryeos_runtime::callback::DispatchActionRequest>, String> {
+        if let Some(malformed) = malformed {
+            return Err(
+                serde_json::to_string(&json!({ "error": malformed_call_error(malformed) }))
+                    .unwrap_or_else(|_| "{\"error\":\"malformed arguments\"}".to_string()),
+            );
+        }
         match self
             .dispatcher
             .resolve(tool_name, raw_args, Some(call_id.to_string()))
@@ -4977,6 +5063,79 @@ mod tests {
         ryeos_accounting::UsdNanos::parse_canonical(canonical).unwrap()
     }
 
+    fn tool_use_event(name: &str, malformed: Option<(usize, &str)>) -> StreamEvent {
+        StreamEvent::ToolUse {
+            id: Some(format!("call-{name}")),
+            name: name.to_string(),
+            arguments: json!({}),
+            stream_key: format!("k-{name}"),
+            argument_bytes: 0,
+            malformed_args: malformed.map(|(raw_len, sha256)| crate::directive::MalformedArgs {
+                sha256: sha256.to_string(),
+                raw_len,
+            }),
+        }
+    }
+
+    fn assistant_calls(names: &[&str]) -> ProviderMessage {
+        ProviderMessage::assistant(
+            Some("working".to_string()),
+            names
+                .iter()
+                .map(|name| crate::directive::ToolCall {
+                    id: Some(format!("call-{name}")),
+                    name: (*name).to_string(),
+                    arguments: json!({}),
+                })
+                .collect(),
+            None,
+        )
+    }
+
+    #[test]
+    fn malformed_calls_are_attributed_by_tool_call_ordinal_in_stream_order() {
+        let sha = "ab".repeat(32);
+        let events = vec![
+            StreamEvent::Delta("working".to_string()),
+            tool_use_event("first", None),
+            tool_use_event("second", Some((17, &sha))),
+            tool_use_event("third", None),
+        ];
+        let message = assistant_calls(&["first", "second", "third"]);
+        let malformed = malformed_calls_of_turn(&events, &message).unwrap();
+        assert_eq!(malformed.len(), 1);
+        assert_eq!(malformed[0].call_index, 1);
+        assert_eq!(malformed[0].raw_len, 17);
+        assert_eq!(malformed[0].sha256, sha);
+        assert_eq!(
+            malformed_call_error(&malformed[0]),
+            format!(
+                "arguments were not valid JSON: 17 bytes, sha256 {sha}; resend the call with complete arguments"
+            )
+        );
+
+        // A clean turn, and a replayed turn with no stream events, record nothing.
+        assert!(
+            malformed_calls_of_turn(&events[..2], &assistant_calls(&["first"]))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            malformed_calls_of_turn(&[], &message)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn malformed_attribution_refuses_a_stream_that_disagrees_with_the_message() {
+        let sha = "cd".repeat(32);
+        let events = vec![tool_use_event("only", Some((3, &sha)))];
+        let error = malformed_calls_of_turn(&events, &assistant_calls(&["only", "extra"]))
+            .unwrap_err();
+        assert!(error.to_string().contains("cannot attribute"));
+    }
+
     fn tool_call(name: &str) -> ToolOccurrence {
         ToolOccurrence {
             call: crate::directive::ToolCall {
@@ -4990,6 +5149,7 @@ mod tests {
             start_recorded: false,
             counted: false,
             spawn_counted: false,
+            malformed: None,
         }
     }
 
