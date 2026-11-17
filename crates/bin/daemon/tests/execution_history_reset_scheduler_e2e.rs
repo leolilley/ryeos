@@ -1075,14 +1075,41 @@ async fn scheduling_node_follows_the_remedy_to_a_ready_core_node() -> Result<()>
     Ok(())
 }
 
+/// Where a SQLite database header holds `PRAGMA user_version`.
+const SQLITE_HEADER_USER_VERSION: u64 = 60;
+/// Where a SQLite database header holds `PRAGMA application_id`.
+const SQLITE_HEADER_APPLICATION_ID: u64 = 68;
+
 /// Step a SQLite store back to its predecessor stamp, as a node issued before
 /// a cut holds it: `edit` maps the current value to the predecessor one.
-fn stamp_predecessor(path: &Path, pragma: &str, edit: impl Fn(i64) -> i64) -> Result<i64> {
-    let connection = rusqlite::Connection::open(path)
+///
+/// The test process links the guarded native SQLite host, which refuses an
+/// unissued open, so the stamp is written straight into the database header
+/// (a 4-byte big-endian field). That is exact only while no WAL frame can
+/// shadow the header page, which a gracefully stopped node guarantees by
+/// checkpointing and removing its WAL on the last close.
+fn stamp_predecessor(path: &Path, offset: u64, edit: impl Fn(u32) -> u32) -> Result<u32> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let mut wal = path.as_os_str().to_owned();
+    wal.push("-wal");
+    let wal_len = std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0);
+    anyhow::ensure!(
+        wal_len == 0,
+        "{} still holds {wal_len} WAL bytes; a stopped node must have checkpointed it",
+        path.display()
+    );
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
         .with_context(|| format!("open {} to stamp it", path.display()))?;
-    let current: i64 = connection.query_row(&format!("PRAGMA {pragma}"), [], |row| row.get(0))?;
-    let predecessor = edit(current);
-    connection.execute_batch(&format!("PRAGMA {pragma} = {predecessor};"))?;
+    let mut field = [0u8; 4];
+    file.seek(SeekFrom::Start(offset))?;
+    file.read_exact(&mut field)?;
+    let predecessor = edit(u32::from_be_bytes(field));
+    file.seek(SeekFrom::Start(offset))?;
+    file.write_all(&predecessor.to_be_bytes())?;
+    file.sync_all()?;
     Ok(predecessor)
 }
 
@@ -1101,17 +1128,19 @@ async fn a_node_crosses_a_runtime_epoch_cut_and_an_operational_schema_cut_togeth
 
     // The runtime epoch is the low byte of the runtime store's application id.
     let current_epoch = ryeos_app::runtime_db::RuntimeDb::current_operator_schema_epoch();
-    let predecessor_epoch = i64::from(
-        current_epoch
-            .checked_sub(1)
-            .context("the current runtime epoch has a predecessor")?,
-    );
-    stamp_predecessor(&runtime.join("runtime.sqlite3"), "application_id", |id| {
-        (id & !0xff) | predecessor_epoch
-    })?;
-    stamp_predecessor(&runtime.join(operational), "user_version", |version| {
-        version - 1
-    })?;
+    let predecessor_epoch = current_epoch
+        .checked_sub(1)
+        .context("the current runtime epoch has a predecessor")?;
+    stamp_predecessor(
+        &runtime.join("runtime.sqlite3"),
+        SQLITE_HEADER_APPLICATION_ID,
+        |id| (id & !0xff) | predecessor_epoch,
+    )?;
+    stamp_predecessor(
+        &runtime.join(operational),
+        SQLITE_HEADER_USER_VERSION,
+        |version| version - 1,
+    )?;
 
     // 1. The reset cannot carry a store this binary has no migration for.
     let refused = reset_command(&h)
