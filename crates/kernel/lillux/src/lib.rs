@@ -1,6 +1,7 @@
 pub mod atomic_fs;
 pub mod cas;
 pub mod character_device;
+pub mod child_group;
 pub mod crypto;
 pub mod custody;
 pub mod environment;
