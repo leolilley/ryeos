@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T06:02:00Z:d7423beedffd535db84268a92444238a330a97dbc26ff967bdcdd57f83a2ca30:9VwppGvEbr9Bml6zEGY5AWreZjW4DU4RHBg4/F96i7yrWtHuE4SJzBELnMiCP+FLl2xqH9sR2AeqjD+1zbhIDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-17T11:27:00Z:721c029ba4ebe56812bfb716b39a718f667ce68b19bc7b96c81e6227af1a042c:plWoK4qxHgxdq/rYzkQOOJIrQbEu0/vPOwMbzFywpI1QSmzBtwDNn8gShsECTcukWbFzoVL2g9tHy39zpTfUAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/directives
 tags: [directive, authoring, frontmatter]
@@ -53,6 +53,8 @@ Instructions for the runtime.
   serialized provider request. `0` is unlimited. A bounded request is prepared
   once and refused before ledger admission or provider contact if it exceeds
   the signed value; RyeOS does not truncate or rewrite the transcript to fit.
+  `wrap_up_seconds` and `deadline.reserve_seconds` shape the run deadline a
+  caller sets with `run_timeout`; see the directives reference.
   Directive-specific numeric dimensions are declared by the signed directive
   runtime descriptor. The engine/executor transport and clamp them as opaque
   keys and do not assign directive semantics to their names.
