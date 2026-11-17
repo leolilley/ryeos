@@ -1,0 +1,24 @@
+# One of each reply shape the substrate probes need. Each step serves one
+# request, in order; the last step is repeated 100 times.
+steps:
+  - text: "plain text reply"
+  - tool_calls:
+      - { name: noop, arguments: {} }
+      - { name: noop, arguments: { path: "a.txt" } }
+    stream: { tool_call_index: false, tool_call_ids: false, argument_chunk_bytes: 4 }
+  - text: "truncated by the output limit"
+    finish_reason: length
+    usage: { prompt_tokens: 900, completion_tokens: 4096 }
+  - fail: { status: 504, body: "gateway timeout" }
+  - fail: { status: 529, body: "overloaded" }
+  - fail: { status: 429, body: "slow down" }
+  - text: "cut mid-stream"
+    cut_after_chunks: 1
+    stream: { text_chunk_bytes: 5 }
+  - text: "stalled then resumed"
+    stall: { after_chunks: 0, ms: 5000 }
+  - text: "slow first byte (25 minutes)"
+    delay_ms: 1500000
+  - repeat: 100
+    tool_calls:
+      - { id: "call_{n}", name: noop, arguments: {} }

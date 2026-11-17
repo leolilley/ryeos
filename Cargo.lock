@@ -4432,6 +4432,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-chat-stub"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "axum",
+ "bytes",
+ "clap",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
+]
+
+[[package]]
 name = "ryeos-claude-code-adapter"
 version = "0.1.0"
 dependencies = [
@@ -5542,6 +5557,7 @@ dependencies = [
  "ryeos-accounting",
  "ryeos-api",
  "ryeos-app",
+ "ryeos-chat-stub",
  "ryeos-client-base",
  "ryeos-codex-runtime-verifier",
  "ryeos-core-tools",
