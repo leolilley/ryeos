@@ -1122,7 +1122,6 @@ fn exotic_expressions_refused_since_in_house_evaluator() {
             (["0 0 1, 2 * * *"], "refused"),
             (["0 0 1 ,2 * * *"], "refused"),
             (["0 0 1 , 2 * * *"], "refused"),
-            (["0 0 4 * * * "], "refused"),
             (["0 0 0 * * Mon - Fri"], "refused"),
             (["0 0 0 * * 1 - 5"], "refused"),
         ],

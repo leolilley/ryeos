@@ -59,11 +59,16 @@ pub struct ScheduleZone(TimeZone);
 
 impl ScheduleZone {
     /// Look up an IANA zone name. Names are case-sensitive, as they were
-    /// under `chrono-tz`; `Etc/Unknown` is not a real zone and is refused.
+    /// under `chrono-tz`. `Etc/Unknown` and `Factory` are placeholders, not
+    /// real zones, and are refused.
     pub fn parse(name: &str) -> Result<Self> {
         let found = TimeZone::get(name).ok();
         match found {
-            Some(tz) if tz.iana_name() == Some(name) && name != "Etc/Unknown" => Ok(Self(tz)),
+            Some(tz)
+                if tz.iana_name() == Some(name) && !matches!(name, "Etc/Unknown" | "Factory") =>
+            {
+                Ok(Self(tz))
+            }
             _ => bail!("invalid IANA timezone: {name}"),
         }
     }
