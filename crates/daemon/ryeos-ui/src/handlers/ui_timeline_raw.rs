@@ -68,6 +68,7 @@ fn events_in_range(
         chain_root_id: Some(chain_root_id.to_string()),
         after_chain_seq: Some(from - 1),
         limit: MAX_EVENTS,
+        event_types: None,
     })?;
     let mut events = Vec::new();
     for record in &page.events {
