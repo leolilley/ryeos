@@ -6653,6 +6653,27 @@ impl ThreadLifecycleService {
         Ok(())
     }
 
+    /// Persist and publish which root kind this claimed launch attempt's
+    /// process inputs were laid out in (`process_input_root_selected`). Same
+    /// fence as [`Self::append_launch_attempt_audit`]; names no path.
+    pub fn record_process_input_root_selected(
+        &self,
+        thread_id: &str,
+        root: ryeos_engine::execution_contract::ProcessInputRootKind,
+    ) -> Result<()> {
+        let thread = self
+            .state_store
+            .get_thread(thread_id)?
+            .ok_or_else(|| anyhow!("process input root thread not found: {thread_id}"))?;
+        let persisted = self.state_store.append_process_input_root_selected(
+            &thread.chain_root_id,
+            thread_id,
+            root,
+        )?;
+        self.publish_records(&persisted);
+        Ok(())
+    }
+
     /// Record one portable cross-chain parent→child edge exactly once and
     /// publish it only after the signed authoritative append succeeds.
     pub fn append_child_thread_spawned_once(
