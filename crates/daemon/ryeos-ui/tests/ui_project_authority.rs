@@ -182,7 +182,9 @@ async fn dispatch_project_threads(
 
 #[tokio::test]
 async fn compiled_project_sources_query_only_the_canonical_session_project() {
-    let (_state_dir, _state_owner, state) = test_state::build_test_state();
+    // The work source reads the signed attention config, so the engine needs
+    // the installed bundles.
+    let (_state_dir, _state_owner, state) = test_state::build_test_state_with_live_bundles();
     let projects = tempfile::tempdir().expect("projects tempdir");
     let first = projects.path().join("first");
     let second = projects.path().join("second");
