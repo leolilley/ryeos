@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-16T12:48:09Z:abf49f26309154440805ce14abab31d541cd994db1ad02d20c68900c3a6ee0f7:1xzHbvBgLx3QJAvU+pkVllA3aNPhtZYdq6p5EjEfjs501SLDBAoxlvUswlqpu6/RT48bPt82woLEXXEeOgMVDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T22:20:51Z:2ecd5d4afb255d32eacfdd7fc58d9b1aa5fe45f09450c5af512972bebbeb5b7c:F9fIAHtlTDCc9OCEIfqKqX8U1aeacEEf1C+Fk5yxUDlW8YARtHp7bOnyJwuGqs7R8Hg6yPjoidUe7BxWX5qbAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Bundle-owned conformance checks for the claude-code provider data.
 
 These checks pin the authored shape the Rust validators judge: the profile
