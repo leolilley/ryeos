@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-16T09:38:06Z:ef9493b6bf17ac65f324cc2ae60b4869133b1a0a2d821a9cc7021b37759bc8c8:lfduS/zeGRqD9CcvNVLgyw0g6wOwWiq5bKN5G7LBEHl2AeICh9Mozhlqn/EQS/QDsMaJOdx9p6J6g914apDwBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T01:34:29Z:6f8d01074ca940aac6f33285ff471fdcc2e1e64d7e3f1ccab167fedb8fa780ae:PeP04bMyZB82+xYha4E7W4eyrMiHl7a9ZNnaLCf4wYETSYxfxgFsMYO2Ft4l2lUW6OHm3sHz8Q8iJMczfr8CCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: claude-code
 description: "Run one completion-fenced read-write Claude Code turn, require a recovered worker epoch, and retain its private candidate for owner review."
@@ -24,6 +24,12 @@ config:
     max_uncontacted_attempts: 3
     require_post_completion_recovery: true
   candidate_disposition: retained_for_review
+  # Signed ceilings a goal payload cannot set or widen. The session-start
+  # route refuses a goal payload that names a pinned field.
+  route_fixed_params:
+    session.start:
+      effort: high
+      tools: [Read, Grep, Glob, Edit, Write, Bash]
   # The worker never calls back into RyeOS tools.
   workload_client_delegation_caps: []
 limits:
