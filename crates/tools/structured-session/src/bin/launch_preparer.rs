@@ -260,7 +260,8 @@ fn prepare(request: ryeos_handler_protocol::LaunchPrepareRequest) -> LaunchPrepa
             external_effect_authority: ExternalEffectAuthorityResultWire::External {
                 authority: serde_json::json!({
                     "authority_family":"worker_hosted_execution",
-                    "admitted_effect_class":null
+                    "admitted_effect_class":null,
+                    "unknown_outcome_retry_ceiling":0
                 }),
             },
         })
