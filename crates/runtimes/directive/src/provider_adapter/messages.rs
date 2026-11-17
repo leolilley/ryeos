@@ -5,6 +5,7 @@ use ryeos_directive_definition::{
     AssistantToolCallsPlacement, MessageSchemas, SystemMessageMode, TextPlacement,
     ToolResultWrapMode,
 };
+use ryeos_provider_contract::Part;
 
 #[tracing::instrument(level = "debug", name = "provider:build_messages", skip(messages, schemas), fields(count = messages.len()))]
 pub fn convert_messages(
@@ -257,16 +258,31 @@ fn convert_with_schemas(
 
             match tc_placement {
                 AssistantToolCallsPlacement::InlineBlocks => {
-                    // Append rendered tool_call blocks into the message's
-                    // existing content/parts array.
-                    let existing = obj.get(content_key).cloned().unwrap_or(json!([]));
-                    let mut merged = match existing {
-                        Value::Array(arr) => arr,
-                        Value::Null => Vec::new(),
-                        other => vec![other],
-                    };
-                    merged.extend(rendered);
-                    obj[content_key] = json!(merged);
+                    // Text and tool-call blocks sit in one array, in the
+                    // order the parts have in the message.
+                    let mut blocks: Vec<Value> = Vec::new();
+                    let mut rendered_calls = rendered.into_iter();
+                    for part in &msg.parts {
+                        match part {
+                            Part::Text(text) => match schemas.text_placement {
+                                Some(TextPlacement::PartsArray)
+                                | Some(TextPlacement::BlocksArray) => {
+                                    let wrapped = wrap_content(
+                                        Value::String(text.text.clone()),
+                                        content_key,
+                                        schemas.text_block_template.as_ref(),
+                                    );
+                                    if let Value::Array(items) = wrapped {
+                                        blocks.extend(items);
+                                    }
+                                }
+                                _ => blocks.push(Value::String(text.text.clone())),
+                            },
+                            Part::ToolCall(_) => blocks.extend(rendered_calls.next()),
+                            _ => {}
+                        }
+                    }
+                    obj[content_key] = json!(blocks);
                 }
                 AssistantToolCallsPlacement::TopLevelField => {
                     // OpenAI-style: tool_calls is a top-level array field.
@@ -683,6 +699,44 @@ mod tests {
         assert_eq!(converted[0]["role"], "tool");
         assert_eq!(converted[0]["tool_call_id"], "tc_xyz");
         assert_eq!(converted[0]["content"], "calc result");
+    }
+
+    #[test]
+    fn inline_blocks_follow_the_order_of_the_parts() {
+        // A provider that sent a tool call ahead of its text: the blocks go
+        // out in the order the message holds them.
+        let message = ProviderMessage::new(
+            ryeos_provider_contract::Role::Assistant,
+            vec![
+                Part::tool_call("call_1", "search", json!({"q": "rust"})),
+                Part::text("then some words"),
+                Part::tool_call("call_2", "open", json!({})),
+            ],
+        );
+        let schemas = MessageSchemas {
+            role_map: None,
+            content_key: Some("content".to_string()),
+            text_placement: Some(TextPlacement::BlocksArray),
+            assistant_tool_calls_placement: Some(AssistantToolCallsPlacement::InlineBlocks),
+            text_block_template: Some(json!({"type": "text", "text": "{text}"})),
+            tool_call_block_template: Some(json!({
+                "type": "tool_use",
+                "id": "{id}",
+                "name": "{name}",
+                "input": "{input}",
+            })),
+            system_message: None,
+            tool_result: None,
+        };
+        let (converted, _) = convert_messages(&[message], &Some(schemas));
+        let blocks = converted[0]["content"].as_array().unwrap();
+        let kinds: Vec<_> = blocks
+            .iter()
+            .map(|block| block["type"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, ["tool_use", "text", "tool_use"]);
+        assert_eq!(blocks[0]["id"], "call_1");
+        assert_eq!(blocks[2]["id"], "call_2");
     }
 
     #[test]

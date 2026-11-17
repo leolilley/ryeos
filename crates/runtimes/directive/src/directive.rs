@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use ryeos_directive_definition::{ContinuationConfig, OutputSpec, ReturnNudge};
-use ryeos_provider_contract::{Part, ReasoningPart, Role, ToolResultStatus};
+use ryeos_provider_contract::{Part, Role, ToolResultStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -323,6 +323,7 @@ pub trait ProviderMessageExt: Sized {
     fn assistant_text(text: impl Into<String>) -> Self;
     /// An assistant message: reasoning, text, then the tool calls, in that
     /// order. Every call must carry an id by the time it is recorded.
+    #[cfg(test)]
     fn assistant(
         text: Option<String>,
         tool_calls: Vec<ToolCall>,
@@ -367,6 +368,7 @@ impl ProviderMessageExt for ProviderMessage {
         Self::text(Role::Assistant, text)
     }
 
+    #[cfg(test)]
     fn assistant(
         text: Option<String>,
         tool_calls: Vec<ToolCall>,
@@ -374,7 +376,7 @@ impl ProviderMessageExt for ProviderMessage {
     ) -> Self {
         let mut parts = Vec::new();
         if let Some(reasoning) = reasoning {
-            parts.push(Part::Reasoning(ReasoningPart {
+            parts.push(Part::Reasoning(ryeos_provider_contract::ReasoningPart {
                 text: Some(reasoning),
                 artefact: None,
             }));

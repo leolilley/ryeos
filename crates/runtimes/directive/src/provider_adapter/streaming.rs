@@ -463,14 +463,14 @@ pub struct CutAttemptState {
 /// role required by a later request.
 #[derive(Debug, Clone, Default)]
 pub struct InterruptedCognition {
-    pub content: Option<String>,
-    pub reasoning_content: Option<String>,
+    /// The complete text and reasoning parts, in the order the stream gave
+    /// them. Never a tool call.
+    pub parts: Vec<ryeos_provider_contract::Part>,
 }
 
 impl InterruptedCognition {
     pub fn into_provider_message(self) -> ProviderMessage {
-        // Explicit provider-wire rendering of a RyeOS cognition output.
-        ProviderMessage::assistant(self.content, Vec::new(), self.reasoning_content)
+        ProviderMessage::new(ryeos_provider_contract::Role::Assistant, self.parts)
     }
 }
 
@@ -1606,9 +1606,7 @@ pub async fn send_prepared_local_streaming(
     let mut after_sequence = 0u64;
     let mut output_meter = StreamOutputMeter::default();
     let mut live_output_events_emitted = 0usize;
-    let mut accumulated_text = String::new();
-    let mut accumulated_reasoning = String::new();
-    let mut accumulated_tools = Vec::new();
+    let mut answer_parts = crate::provider_adapter::parts_builder::PartsBuilder::default();
     let mut all_events = Vec::new();
     let mut final_value: Option<Value> = None;
 
@@ -1626,9 +1624,7 @@ pub async fn send_prepared_local_streaming(
             return if interrupted {
                 Ok(StreamOutcome::Interrupted {
                     partial_cognition: InterruptedCognition {
-                        content: (!accumulated_text.is_empty()).then(|| accumulated_text.clone()),
-                        reasoning_content: (!accumulated_reasoning.is_empty())
-                            .then_some(accumulated_reasoning),
+                        parts: answer_parts.interrupted_parts(),
                     },
                     events: all_events,
                     attempt,
@@ -1713,7 +1709,7 @@ pub async fn send_prepared_local_streaming(
                     )?;
                     match &semantic {
                         StreamEvent::Delta(text) => {
-                            accumulated_text.push_str(text);
+                            answer_parts.push_text(text);
                             input
                                 .callback
                                 .append_runtime_event(
@@ -1736,7 +1732,7 @@ pub async fn send_prepared_local_streaming(
                                 live_output_events_emitted.saturating_add(1);
                         }
                         StreamEvent::ReasoningDelta(text) => {
-                            accumulated_reasoning.push_str(text);
+                            answer_parts.push_reasoning(text);
                         }
                         StreamEvent::ToolUse {
                             id,
@@ -1745,7 +1741,7 @@ pub async fn send_prepared_local_streaming(
                             malformed_args,
                             ..
                         } => {
-                            accumulated_tools.push(ToolCall {
+                            answer_parts.push_call(ToolCall {
                                 id: id.clone(),
                                 name: name.clone(),
                                 arguments: arguments.clone(),
@@ -1836,10 +1832,9 @@ pub async fn send_prepared_local_streaming(
     let message = final_result.answer.message.clone();
     if message.role() != "assistant"
         || message.tool_call_id().is_some()
-        || message.text() != (!accumulated_text.is_empty()).then(|| accumulated_text.clone())
-        || message.reasoning_text()
-            != (!accumulated_reasoning.is_empty()).then(|| accumulated_reasoning.clone())
-        || serde_json::to_value(message.calls())? != serde_json::to_value(&accumulated_tools)?
+        || message.text() != answer_parts.text()
+        || message.reasoning_text() != answer_parts.reasoning_text()
+        || serde_json::to_value(message.calls())? != serde_json::to_value(answer_parts.calls())?
     {
         bail!("local worker final answer contradicts its streamed semantic events");
     }
@@ -2172,9 +2167,7 @@ async fn send_prepared_streaming_inner(
     // with `non-utf8 SSE chunk`.
     let mut utf8_carry: Vec<u8> = Vec::new();
     let mut all_events: Vec<StreamEvent> = Vec::new();
-    let mut accumulated_text = String::new();
-    let mut accumulated_reasoning = String::new();
-    let mut accumulated_tools: Vec<ToolCall> = Vec::new();
+    let mut answer_parts = crate::provider_adapter::parts_builder::PartsBuilder::default();
     let mut output_meter = StreamOutputMeter::default();
     #[cfg(feature = "latency-profiling")]
     let mut provider_stream_started_published = false;
@@ -2465,7 +2458,7 @@ async fn send_prepared_streaming_inner(
                     })?;
                 match &ev {
                     StreamEvent::Delta(text) => {
-                        accumulated_text.push_str(text);
+                        answer_parts.push_text(text);
                         progressive_events.push_text(turn, text);
                         if (!text.trim().is_empty() && !first_non_whitespace_text_published)
                             || progressive_events.is_full()
@@ -2482,7 +2475,7 @@ async fn send_prepared_streaming_inner(
                         malformed_args,
                         ..
                     } => {
-                        accumulated_tools.push(ToolCall {
+                        answer_parts.push_call(ToolCall {
                             id: id.clone(),
                             name: name.clone(),
                             arguments: arguments.clone(),
@@ -2544,7 +2537,7 @@ async fn send_prepared_streaming_inner(
                                 tracing::warn!(%error, "provider reasoning-start milestone publication failed");
                             }
                         }
-                        accumulated_reasoning.push_str(text);
+                        answer_parts.push_reasoning(text);
                     }
                 }
                 all_events.push(ev);
@@ -2683,7 +2676,7 @@ async fn send_prepared_streaming_inner(
                 })?;
             match &ev {
                 StreamEvent::Delta(text) => {
-                    accumulated_text.push_str(text);
+                    answer_parts.push_text(text);
                     progressive_events.push_text(turn, text);
                     if (!text.trim().is_empty() && !first_non_whitespace_text_published)
                         || progressive_events.is_full()
@@ -2700,7 +2693,7 @@ async fn send_prepared_streaming_inner(
                     malformed_args,
                     ..
                 } => {
-                    accumulated_tools.push(ToolCall {
+                    answer_parts.push_call(ToolCall {
                         id: id.clone(),
                         name: name.clone(),
                         arguments: arguments.clone(),
@@ -2760,7 +2753,7 @@ async fn send_prepared_streaming_inner(
                             tracing::warn!(%error, "provider reasoning-start milestone publication failed");
                         }
                     }
-                    accumulated_reasoning.push_str(text);
+                    answer_parts.push_reasoning(text);
                 }
             }
             all_events.push(ev);
@@ -2801,41 +2794,25 @@ async fn send_prepared_streaming_inner(
         }));
     }
 
-    let content = if accumulated_text.is_empty() {
-        None
-    } else {
-        Some(accumulated_text.clone())
-    };
-    let reasoning_content = if accumulated_reasoning.is_empty() {
-        None
-    } else {
-        Some(accumulated_reasoning)
-    };
-
-    // Interrupt cut: seal the partial cognition with content + reasoning only.
-    // NO tool_calls — an interrupted cognition didn't complete
-    // its tool call, so the folded wire history has no unpaired tool_call → the
-    // runner records `cognition_out{interrupted:true}` from this.
+    // Interrupt cut: seal the partial cognition with its complete text and
+    // reasoning parts only. NO tool call: an interrupted cognition didn't
+    // complete its tool call, so the folded wire history has no unpaired
+    // tool call. The runner records a `cognition_out` with finish
+    // "interrupted" from this.
     if exit == LoopExit::Interrupted {
         return Ok(StreamOutcome::Interrupted {
             partial_cognition: InterruptedCognition {
-                content,
-                reasoning_content,
+                parts: answer_parts.interrupted_parts(),
             },
             events: all_events,
             attempt: CutAttemptState { usage: last_usage },
         });
     }
 
-    // A call the provider issued without an id gets one derived from the
-    // turn and the call's position, so a replay and a recovery see the id
-    // the live run used.
-    for (index, call) in accumulated_tools.iter_mut().enumerate() {
-        if call.id.is_none() {
-            call.id = Some(crate::directive::synthesised_call_id(input.turn, index));
-        }
-    }
-    let message = ProviderMessage::assistant(content, accumulated_tools, reasoning_content);
+    // The parts are in the order the stream gave them. A call the provider
+    // issued without an id gets one derived from the turn and the call's
+    // position, so a replay and a recovery see the id the live run used.
+    let message = answer_parts.finish(input.turn);
 
     Ok(StreamOutcome::Completed {
         response: AdapterResponse {
