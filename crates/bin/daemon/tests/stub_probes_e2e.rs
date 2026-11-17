@@ -801,6 +801,72 @@ async fn probe_node_start() {
     }
 }
 
+
+/// Leaf values of `value` whose key path mentions capacity, window or
+/// incarnation accounting, as `path=value` pairs.
+fn capacity_fields(value: &Value, path: &str, out: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            for (key, inner) in map {
+                capacity_fields(inner, &format!("{path}/{key}"), out);
+            }
+        }
+        Value::Array(items) => {
+            for (i, inner) in items.iter().enumerate() {
+                capacity_fields(inner, &format!("{path}/{i}"), out);
+            }
+        }
+        leaf => {
+            let lower = path.to_lowercase();
+            if ["incarnation", "occupancy", "window", "allocator", "remaining", "epoch", "ticket", "capacity"]
+                .iter()
+                .any(|k| lower.contains(k))
+            {
+                out.push(format!("{path}={leaf}"));
+            }
+        }
+    }
+}
+
+async fn capacity_line(h: &DaemonHarness) -> String {
+    match h.post_execute("service:node/status", ".", json!({})).await {
+        Ok((_, body)) => {
+            let mut out = Vec::new();
+            capacity_fields(&body, "", &mut out);
+            trunc(&out.join(" "), 2500)
+        }
+        Err(e) => format!("error({e:#})"),
+    }
+}
+
+/// Wait for a thread to settle, giving up early once the daemon process has
+/// exited. Returns the status, the elapsed time and the daemon exit status
+/// when it died.
+async fn wait_terminal_or_daemon_exit(
+    h: &mut DaemonHarness,
+    thread_id: &str,
+    max: Duration,
+) -> (String, Duration, Option<String>) {
+    let start = Instant::now();
+    loop {
+        if let Ok(Some(exit)) = h.child.try_wait() {
+            return (
+                "daemon-exited".to_string(),
+                start.elapsed(),
+                Some(format!("{exit:?}")),
+            );
+        }
+        let status = status_of(h, thread_id).await;
+        if TERMINAL.contains(&status.as_str()) {
+            return (status, start.elapsed(), None);
+        }
+        if start.elapsed() >= max {
+            return (format!("timeout(last={status})"), start.elapsed(), None);
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
 // ── probe 2: sequential no-op tool calls ────────────────────────────────
 
 async fn noop_tool_calls(n: u64, limits: Option<(u64, u64)>) {
@@ -818,11 +884,12 @@ async fn noop_tool_calls(n: u64, limits: Option<(u64, u64)>) {
     .await
     .expect("start rig");
     say(&name, &format!("limits={limits:?} {}", host_line()));
-    let before = node_status_compact(&rig.h, 1500).await;
+    let before = capacity_line(&rig.h).await;
     let sampler = Sampler::start(rig.h.child.id().unwrap_or(0));
     let t = Instant::now();
     let id = launch_on(&rig).await.expect("launch");
-    let (status, _) = wait_terminal(&rig.h, &id, Duration::from_secs(4500)).await;
+    let (status, _, daemon_exit) =
+        wait_terminal_or_daemon_exit(&mut rig.h, &id, Duration::from_secs(4500)).await;
     let wall = t.elapsed();
     let peaks = sampler.finish().await;
 
@@ -856,9 +923,22 @@ async fn noop_tool_calls(n: u64, limits: Option<(u64, u64)>) {
             body_sizes.last().copied().unwrap_or(0) / 1024,
         ),
     );
-    let after = node_status_compact(&rig.h, 1500).await;
-    say(&name, &format!("node_status_before={before}"));
-    say(&name, &format!("node_status_after={after}"));
+    let after = if daemon_exit.is_some() {
+        "daemon exited".to_string()
+    } else {
+        capacity_line(&rig.h).await
+    };
+    say(&name, &format!("daemon_exit={daemon_exit:?}"));
+    say(&name, &format!("capacity_before={before}"));
+    say(&name, &format!("capacity_after={after}"));
+    let log = rig.h.stderr_so_far();
+    let tail: Vec<String> = log
+        .lines()
+        .rev()
+        .take(25)
+        .map(|l| trunc(l, 260))
+        .collect();
+    say(&name, &format!("daemon_stderr_tail_newest_first={tail:#?}"));
     say(
         &name,
         &format!("thread_detail={}", thread_detail(&rig.h, &id, 600).await),
