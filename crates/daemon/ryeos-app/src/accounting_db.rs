@@ -13739,6 +13739,34 @@ mod tests {
     }
 
     #[test]
+    fn stored_aggregate_limits_are_readable_and_reproduce_the_ledger_identity() {
+        let (_dir, db) = setup();
+        assert_eq!(db.execution_resource_budget_limits(EXEC).unwrap(), None);
+        db.create_execution_account_prepared(EXEC, THREAD, None)
+            .unwrap();
+        let limits = AggregateExecutionLimits {
+            duration_seconds: 7_200,
+            worker_executions: 3,
+            provider_contacts: 0,
+        };
+        db.ensure_execution_resource_budget(EXEC, &limits).unwrap();
+        let stored = db
+            .execution_resource_budget_limits(EXEC)
+            .unwrap()
+            .expect("limits were stored");
+        assert_eq!(stored.duration_seconds, 7_200);
+        assert_eq!(stored.worker_executions, 3);
+        // A later segment that presents the stored limits is admitted again
+        // with the same deadline instead of being refused as a different set.
+        let first = db
+            .execution_resource_budget_snapshot(EXEC)
+            .unwrap()
+            .unwrap();
+        let again = db.ensure_execution_resource_budget(EXEC, &stored).unwrap();
+        assert_eq!(again.deadline_at_ms, first.deadline_at_ms);
+    }
+
+    #[test]
     fn handoff_conserves_only_settled_remaining_allowance() {
         let (_source_dir, source) = setup();
         source
