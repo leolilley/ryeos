@@ -55,6 +55,11 @@
 # RYEOS_HOST_RUNTIME_BINDING and refuses there.
 
 #
+# RYEOS_PRESTART_BUNDLE_SET_REQUEST, when set to the absolute path of a stopped
+# bundle-set update request, runs `ryeos node bundle-set update` once before
+# each ryeosd start (after first-boot init, before the operator hold). A failed
+# update refuses the start; an already-current node proceeds.
+#
 # Every ryeos command here runs as the image's node account, ryeos
 # (uid 10000, gid 10000), never as root: lillux refuses root as the recorded
 # actor of `ryeos node allow-restart` and `ryeos node capacity reissue`, so a
@@ -564,6 +569,30 @@ hold_for_operator() {
   rm -f -- "$marker"
 }
 
+# One-shot pre-start bundle update. When RYEOS_PRESTART_BUNDLE_SET_REQUEST
+# names a request file (an absolute path to a regular file), run the stopped
+# `ryeos node bundle-set update` against this node before ryeosd starts. The
+# command pins its remote, verifies the catalog and exits zero both when it
+# installs a set and when the node already holds it, so success of either kind
+# proceeds. Any failure refuses the start: the daemon never starts on a node
+# whose update did not complete. Unset or empty does nothing.
+prestart_bundle_set_update() {
+  local app_root="$1"
+  local request="${RYEOS_PRESTART_BUNDLE_SET_REQUEST:-}"
+
+  [[ -n "$request" ]] || return 0
+  if [[ "$request" != /* || -L "$request" || ! -f "$request" ]]; then
+    echo "[entrypoint] refusing to start: RYEOS_PRESTART_BUNDLE_SET_REQUEST must be an absolute path to a regular file: $request" >&2
+    return 1
+  fi
+  echo "[entrypoint] pre-start bundle-set update from $request"
+  if ! ryeos node bundle-set update "$request" --app-root "$app_root" --json; then
+    echo "[entrypoint] refusing to start: the pre-start bundle-set update from $request failed; ryeosd was not started" >&2
+    return 1
+  fi
+  echo "[entrypoint] pre-start bundle-set update complete"
+}
+
 main() {
   local effective_bind
   local hold_status=0
@@ -583,6 +612,10 @@ main() {
       echo "[entrypoint] RYEOS_OPERATOR_HOLD is not supported with RYEOS_HOST_RUNTIME_BINDING" >&2
       return 1
     fi
+    if [[ -n "${RYEOS_PRESTART_BUNDLE_SET_REQUEST:-}" ]]; then
+      echo "[entrypoint] RYEOS_PRESTART_BUNDLE_SET_REQUEST is not supported with RYEOS_HOST_RUNTIME_BINDING" >&2
+      return 1
+    fi
     hold_while_restart_inhibited /data/app
     echo "[entrypoint] starting the root host-runtime bootstrap; the daemon itself runs as the binding's account"
     exec ryeosd "${DAEMON_ARGS[@]}"
@@ -600,6 +633,7 @@ main() {
     echo "[entrypoint] preserving installed bundle generation; image seed is first-boot only"
   fi
 
+  prestart_bundle_set_update /data/app || return 1
   hold_for_operator /data/app
   hold_while_restart_inhibited /data/app
 
