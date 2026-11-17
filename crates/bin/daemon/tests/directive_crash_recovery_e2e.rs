@@ -138,8 +138,6 @@ accounting:
   failure_policy: auto
   budget_mode: settled
 tool_preload: false
-retry_on_timeout: false
-retry_mid_stream: false
 "#
     );
     let signed = lillux::signature::sign_content(&body, signer, "#", None);

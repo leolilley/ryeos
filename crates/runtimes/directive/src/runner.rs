@@ -22,6 +22,7 @@ use ryeos_accounting::{
 };
 use ryeos_directive_definition::{
     ContinuationConfig, OutputSpec, ProviderConfig, ReasoningConfig, ReturnNudge, SamplingConfig,
+    UnknownOutcomeClass,
 };
 #[cfg(test)]
 use ryeos_directive_definition::{PricingConfig, ProtocolFamily, ProviderTransportConfig};
@@ -606,20 +607,20 @@ struct CostBreakdown {
 }
 
 /// Decide whether a failed provider call should be retried, and if so, how long
-/// to back off first (§1). Returns `None` when the error is not retryable or the
+/// to back off first. Returns `None` when the error is not retryable or the
 /// retry budget (`execution.retries`) is spent.
 ///
 /// Only a [`ProviderStreamError`](crate::provider_adapter::ProviderStreamError)
-/// is retryable — the adapter classifies exactly the transient transport/
-/// provider classes with an outcome-safe retry contract (an explicit retryable
-/// status or a failure that never established a connection). Everything else —
-/// including timeout, non-connect send failure, and a stream that dies mid-read —
-/// has a potentially accepted external effect and stays fail-fast. Invalid
-/// model, auth, context overflow, and a
-/// live callback publication failure — stays fail-fast. `never_retry` (status
+/// is retryable. A configured status response and a connection-establishment
+/// failure are always admissible. A timeout, a post-connect send failure and a
+/// stream that dies mid-read leave it unknown whether the provider acted; they
+/// are admissible only when `execution.unknown_outcome_retry` (already reduced
+/// to the launch-sealed ceiling) names the class and the failed attempt is
+/// within its first `max_retries`. Invalid model, auth, context overflow, and a
+/// live callback publication failure stay fail-fast. `never_retry` (status
 /// codes as strings) is an absolute denylist that overrides
 /// `retry_status_codes`. Backoff is exponential from `backoff_base_ms`
-/// (`base * 2^attempt`).
+/// (`base * 2^attempt`), capped at `backoff_max_ms`.
 #[cfg(test)]
 fn retry_backoff(
     err: &anyhow::Error,
@@ -640,18 +641,19 @@ fn retry_classification(
         Some(ProviderStreamError::Status { code, .. }) => {
             ProviderRetryReason::Status { code: *code }
         }
-        Some(ProviderStreamError::Timeout { .. }) => return None,
+        Some(ProviderStreamError::Timeout { .. }) => ProviderRetryReason::Timeout,
         // A reqwest connect-phase failure did not establish the provider
         // connection. Other `.send()` failures can occur after request bytes
-        // crossed the boundary and therefore have an uncertain outcome.
-        Some(ProviderStreamError::Send { connect: true, .. }) => ProviderRetryReason::Send {
-            connect_phase: true,
+        // crossed the boundary and therefore have an unknown outcome.
+        Some(ProviderStreamError::Send { connect, .. }) => ProviderRetryReason::Send {
+            connect_phase: *connect,
         },
-        Some(ProviderStreamError::Send { connect: false, .. }) => return None,
-        // Once a stream opened, the provider accepted the request. Identical
-        // message bytes are not a provider deduplication key and retrying may
-        // duplicate spend or consequences.
-        Some(ProviderStreamError::MidStream(_)) => return None,
+        // Once a stream opened, the provider may have acted on the request;
+        // the outcome is unknown.
+        Some(ProviderStreamError::MidStream(mid_stream)) => ProviderRetryReason::MidStream {
+            live_output_events_emitted: u64::try_from(mid_stream.live_output_events_emitted)
+                .unwrap_or(u64::MAX),
+        },
         None => return None,
     };
     retry_delay_for_reason(&reason, attempt.checked_add(1)?, execution).map(|delay| (delay, reason))
@@ -680,33 +682,56 @@ fn retry_delay_for_reason(
             !execution.never_retry.contains(&code.to_string())
                 && execution.retry_status_codes.contains(code)
         }
-        // Current production classification never creates these reasons. Keep
-        // their decoder behavior closed for retained historical testimony.
-        ProviderRetryReason::Timeout | ProviderRetryReason::MidStream { .. } => false,
         ProviderRetryReason::Send {
             connect_phase: true,
         } => true,
+        ProviderRetryReason::Timeout => {
+            unknown_outcome_admitted(UnknownOutcomeClass::Timeout, failed_attempt_number, execution)
+        }
         ProviderRetryReason::Send {
             connect_phase: false,
-        } => false,
+        } => unknown_outcome_admitted(UnknownOutcomeClass::Send, failed_attempt_number, execution),
+        ProviderRetryReason::MidStream { .. } => unknown_outcome_admitted(
+            UnknownOutcomeClass::MidStream,
+            failed_attempt_number,
+            execution,
+        ),
     };
     if !admitted {
         return None;
     }
     let factor = 1u64 << attempt.min(16);
-    let delay_ms = execution.backoff_base_ms.saturating_mul(factor);
+    let delay_ms = execution
+        .backoff_base_ms
+        .saturating_mul(factor)
+        .min(execution.backoff_max_ms);
     Some(lillux::time::Duration::from_millis(delay_ms))
+}
+
+/// Whether a retry after an unknown provider outcome is within policy: the
+/// class is named and the failed attempt is among the first `max_retries`.
+fn unknown_outcome_admitted(
+    class: UnknownOutcomeClass,
+    failed_attempt_number: u32,
+    execution: &ExecutionConfig,
+) -> bool {
+    execution
+        .unknown_outcome_retry
+        .as_ref()
+        .is_some_and(|policy| {
+            failed_attempt_number <= policy.max_retries && policy.on.contains(&class)
+        })
 }
 
 fn retry_policy_digest(execution: &ExecutionConfig) -> anyhow::Result<HexDigest> {
     let value = json!({
-        "schema": "ryeos.directive.provider-retry-policy.v1",
+        "schema": "ryeos.directive.provider-retry-policy.v2",
         "retries": execution.retries,
         "retry_status_codes": execution.retry_status_codes,
         "never_retry": execution.never_retry,
         "backoff_base_ms": execution.backoff_base_ms,
-        "retry_on_timeout": execution.retry_on_timeout,
-        "retry_mid_stream": execution.retry_mid_stream,
+        "backoff_max_ms": execution.backoff_max_ms,
+        "unknown_outcome_retry": execution.unknown_outcome_retry,
         "accounting": execution.accounting,
     });
     let canonical = lillux::canonical_json(&value)?;
@@ -1406,9 +1431,11 @@ impl Runner {
                     // §1 retry loop. A provider failure with an outcome-safe
                     // classification — a configured status response or a
                     // connection-establishment failure — is re-attempted with
-                    // exponential backoff. Timeout, post-connect send failure,
-                    // and mid-stream cut remain explicit uncertain outcomes;
-                    // identical message bytes are not an idempotency key.
+                    // capped exponential backoff. Timeout, post-connect send
+                    // failure, and mid-stream cut have unknown outcomes and are
+                    // re-attempted only within the sealed unknown-outcome
+                    // ceiling; identical message bytes are not an idempotency
+                    // key, so that ceiling needs an explicit author declaration.
                     // Anything not
                     // classified as a `ProviderStreamError` (invalid bytes, a
                     // live callback publication failure) routes to
@@ -1862,7 +1889,11 @@ impl Runner {
                                 let Some(decision) = prepared_retry else {
                                     if provider_outcome_is_uncertain(&e) {
                                         break Err(anyhow::anyhow!(
-                                            "provider_outcome_uncertain: the provider may have accepted the issued request; automatic retry is forbidden without admitted deduplication or outcome lookup; original error: {e:#}"
+                                            "provider_outcome_uncertain: the provider may have accepted the issued request and this failure was not retried; a retry after an unknown outcome needs the directive to declare `provider_contact: repeatable` on a remote provider route and `execution.unknown_outcome_retry` to name this failure class within its first max_retries attempts (sealed ceiling {}); original error: {e:#}",
+                                            self.execution
+                                                .unknown_outcome_retry
+                                                .as_ref()
+                                                .map_or(0, |policy| policy.max_retries)
                                         ));
                                     }
                                     break Err(e);
@@ -5816,7 +5847,6 @@ mod tests {
             retry_status_codes: vec![429, 500, 502, 503],
             never_retry: vec!["401".into(), "403".into(), "404".into()],
             backoff_base_ms: 1000,
-            retry_on_timeout: false,
             ..ExecutionConfig::default()
         }
     }
@@ -5891,17 +5921,160 @@ mod tests {
         assert_eq!(retry_backoff(&send_err(true), 2, &cfg), None);
     }
 
+    fn timeout_err() -> anyhow::Error {
+        anyhow::Error::new(crate::provider_adapter::ProviderStreamError::Timeout {
+            detail: "timed out".into(),
+        })
+    }
+
+    fn post_connect_send_err() -> anyhow::Error {
+        anyhow::Error::new(crate::provider_adapter::ProviderStreamError::Send {
+            connect: false,
+            detail: "send failed after connection".into(),
+        })
+    }
+
+    fn mid_stream_err() -> anyhow::Error {
+        anyhow::Error::new(crate::provider_adapter::ProviderStreamError::MidStream(
+            Box::new(crate::provider_adapter::streaming::ProviderMidStreamError {
+                live_output_events_emitted: 42,
+                accepted_bytes: 128,
+                accepted_output_events: 3,
+                usage: None,
+                generation_header_id: None,
+                response_id: None,
+                requested_output_tokens: Some(32_768),
+                detail: "stream chunk error: operation timed out".into(),
+            }),
+        ))
+    }
+
+    fn unknown_policy_cfg(
+        retries: u32,
+        max_retries: u32,
+        on: Vec<UnknownOutcomeClass>,
+    ) -> ExecutionConfig {
+        ExecutionConfig {
+            retries,
+            unknown_outcome_retry: Some(ryeos_directive_definition::UnknownOutcomeRetryPolicy {
+                max_retries,
+                on,
+            }),
+            ..retry_cfg()
+        }
+    }
+
     #[test]
-    fn retry_backoff_never_retries_outcome_uncertain_timeout() {
-        let timeout = || {
-            anyhow::Error::new(crate::provider_adapter::ProviderStreamError::Timeout {
-                detail: "timed out".into(),
-            })
+    fn unknown_outcomes_are_never_retried_without_a_policy() {
+        let cfg = retry_cfg();
+        for attempt in 0..3 {
+            assert_eq!(retry_backoff(&timeout_err(), attempt, &cfg), None);
+            assert_eq!(retry_backoff(&post_connect_send_err(), attempt, &cfg), None);
+            assert_eq!(retry_backoff(&mid_stream_err(), attempt, &cfg), None);
+        }
+    }
+
+    #[test]
+    fn unknown_outcomes_retry_only_for_named_classes_in_the_first_n_attempts() {
+        use std::time::Duration;
+        let all = vec![
+            UnknownOutcomeClass::Timeout,
+            UnknownOutcomeClass::Send,
+            UnknownOutcomeClass::MidStream,
+        ];
+        let cfg = unknown_policy_cfg(5, 2, all);
+        for err in [timeout_err(), post_connect_send_err(), mid_stream_err()] {
+            assert_eq!(retry_backoff(&err, 0, &cfg), Some(Duration::from_millis(1000)));
+            assert_eq!(retry_backoff(&err, 1, &cfg), Some(Duration::from_millis(2000)));
+            // The third failed attempt is past max_retries.
+            assert_eq!(retry_backoff(&err, 2, &cfg), None);
+        }
+
+        let only_mid = unknown_policy_cfg(5, 2, vec![UnknownOutcomeClass::MidStream]);
+        assert_eq!(retry_backoff(&timeout_err(), 0, &only_mid), None);
+        assert_eq!(retry_backoff(&post_connect_send_err(), 0, &only_mid), None);
+        assert!(retry_backoff(&mid_stream_err(), 0, &only_mid).is_some());
+
+        // `retries` caps first even when max_retries is not validated here.
+        let capped = unknown_policy_cfg(1, 5, vec![UnknownOutcomeClass::Timeout]);
+        assert!(retry_backoff(&timeout_err(), 0, &capped).is_some());
+        assert_eq!(retry_backoff(&timeout_err(), 1, &capped), None);
+    }
+
+    #[test]
+    fn unknown_outcome_classification_carries_the_closed_reason() {
+        let cfg = unknown_policy_cfg(
+            3,
+            3,
+            vec![
+                UnknownOutcomeClass::Timeout,
+                UnknownOutcomeClass::Send,
+                UnknownOutcomeClass::MidStream,
+            ],
+        );
+        assert!(matches!(
+            retry_classification(&timeout_err(), 0, &cfg),
+            Some((_, ProviderRetryReason::Timeout))
+        ));
+        assert!(matches!(
+            retry_classification(&post_connect_send_err(), 0, &cfg),
+            Some((
+                _,
+                ProviderRetryReason::Send {
+                    connect_phase: false
+                }
+            ))
+        ));
+        assert!(matches!(
+            retry_classification(&mid_stream_err(), 0, &cfg),
+            Some((
+                _,
+                ProviderRetryReason::MidStream {
+                    live_output_events_emitted: 42
+                }
+            ))
+        ));
+    }
+
+    #[test]
+    fn stored_unknown_outcome_decision_revalidates_only_under_the_same_policy() {
+        let cfg = unknown_policy_cfg(3, 2, vec![UnknownOutcomeClass::MidStream]);
+        let reason = ProviderRetryReason::MidStream {
+            live_output_events_emitted: 1,
         };
-        let mut cfg = retry_cfg();
-        assert_eq!(retry_backoff(&timeout(), 0, &cfg), None);
-        cfg.retry_on_timeout = false;
-        assert_eq!(retry_backoff(&timeout(), 0, &cfg), None);
+        assert!(retry_delay_for_reason(&reason, 2, &cfg).is_some());
+        assert!(retry_delay_for_reason(&reason, 3, &cfg).is_none());
+        let narrowed = unknown_policy_cfg(3, 2, vec![UnknownOutcomeClass::Timeout]);
+        assert!(retry_delay_for_reason(&reason, 1, &narrowed).is_none());
+        assert_ne!(
+            retry_policy_digest(&cfg).unwrap(),
+            retry_policy_digest(&narrowed).unwrap()
+        );
+    }
+
+    #[test]
+    fn backoff_is_capped_by_backoff_max_ms() {
+        use std::time::Duration;
+        let cfg = ExecutionConfig {
+            retries: 10,
+            backoff_base_ms: 1000,
+            backoff_max_ms: 5000,
+            ..retry_cfg()
+        };
+        let delays: Vec<_> = (0..6)
+            .map(|attempt| retry_backoff(&status_err(503), attempt, &cfg).unwrap())
+            .collect();
+        assert_eq!(
+            delays,
+            [1000, 2000, 4000, 5000, 5000, 5000].map(Duration::from_millis)
+        );
+    }
+
+    #[test]
+    fn statuses_504_and_529_are_retryable_by_default() {
+        let cfg = ExecutionConfig::default();
+        assert!(retry_backoff(&status_err(504), 0, &cfg).is_some());
+        assert!(retry_backoff(&status_err(529), 0, &cfg).is_some());
     }
 
     #[test]
@@ -5913,31 +6086,6 @@ mod tests {
         let cfg = retry_cfg();
         let e = anyhow::anyhow!("non-utf8 SSE chunk: invalid byte sequence");
         assert_eq!(retry_backoff(&e, 0, &cfg), None);
-    }
-
-    #[test]
-    fn retry_backoff_never_retries_outcome_uncertain_mid_stream() {
-        // A stream cut mid-read proves provider contact. Identical request bytes
-        // do not make a second provider effect safe.
-        let mid_stream = || {
-            anyhow::Error::new(crate::provider_adapter::ProviderStreamError::MidStream(
-                Box::new(crate::provider_adapter::streaming::ProviderMidStreamError {
-                    live_output_events_emitted: 42,
-                    accepted_bytes: 128,
-                    accepted_output_events: 3,
-                    usage: None,
-                    generation_header_id: None,
-                    response_id: None,
-                    requested_output_tokens: Some(32_768),
-                    detail: "stream chunk error: operation timed out".into(),
-                }),
-            ))
-        };
-        let mut cfg = retry_cfg();
-        assert_eq!(retry_backoff(&mid_stream(), 0, &cfg), None);
-        assert_eq!(retry_backoff(&mid_stream(), 1, &cfg), None);
-        cfg.retry_mid_stream = false;
-        assert_eq!(retry_backoff(&mid_stream(), 0, &cfg), None);
     }
 
     #[test]

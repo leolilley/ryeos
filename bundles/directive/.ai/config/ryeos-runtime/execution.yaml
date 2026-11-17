@@ -1,9 +1,10 @@
-# ryeos:signed:2026-11-14T05:59:40Z:39c39dd3f4d2f6cefd1e913859cdb2bb7da414e59275f128d7817a60c9cdda3d:yGBQ1qvjXUq7d4inHjvTWsUyNrybdcNa03DfJsRPkV7SeQmzTWRHswDBDuqdMYcpX0nsutS5OYfSgmz8mj+oCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T11:17:14Z:16d2fb4c4d2a02a90377a25fd6442c4d769203a37582496ab0a04d0f0924dc61:5P/QEKlCpddkggcLCfIMUc4PwHkMYu7eFOwjkviJsnM9Kvrze+m7lXTee652IA8FccMaKllpfRKs9QTUhgJkBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime"
 retries: 2
-retry_status_codes: [429, 500, 502, 503]
+retry_status_codes: [429, 500, 502, 503, 504, 529]
 never_retry: ["401", "403", "404"]
 backoff_base_ms: 1000
+backoff_max_ms: 60000
 timeout_seconds: 300
 max_provider_output_tokens_per_turn: 32768
 max_stream_output_bytes_per_turn: 131072
@@ -12,5 +13,3 @@ accounting:
   failure_policy: auto
   budget_mode: settled
 tool_preload: false
-retry_on_timeout: false
-retry_mid_stream: false

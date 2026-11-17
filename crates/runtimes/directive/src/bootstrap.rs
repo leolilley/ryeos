@@ -56,13 +56,30 @@ pub fn bootstrap(
         "directive runtime: typed header surface"
     );
 
-    let execution = loader
+    let mut execution = loader
         .load_config_strict::<ExecutionConfig>("ryeos-runtime/execution")
         .map_err(|e| anyhow!("loading config `ryeos-runtime/execution`: {e}"))?
         .unwrap_or_default();
     execution
         .validate()
         .context("invalid config `ryeos-runtime/execution`")?;
+    // Reduce the unknown-outcome policy to the ceiling the launch sealed. The
+    // launch preparer derives the same number with the same function, so the
+    // runner reads one value and the daemon's check agrees with it.
+    let unknown_outcome_ceiling = ryeos_directive_definition::unknown_outcome_retry_ceiling(
+        &header,
+        &provider_snapshot.provider,
+        execution.unknown_outcome_retry.as_ref(),
+    );
+    execution.unknown_outcome_retry = match execution.unknown_outcome_retry.take() {
+        Some(policy) if unknown_outcome_ceiling > 0 => {
+            Some(ryeos_directive_definition::UnknownOutcomeRetryPolicy {
+                max_retries: unknown_outcome_ceiling,
+                on: policy.on,
+            })
+        }
+        _ => None,
+    };
 
     // Continuation behavior config (context-threshold ratio, carry bounds) —
     // loaded the same way as execution config, defaults if absent. Directive-

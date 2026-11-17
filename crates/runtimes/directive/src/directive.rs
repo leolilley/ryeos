@@ -130,19 +130,20 @@ pub struct ExecutionConfig {
     /// budget and the fleet's concurrent directive count in mind.
     #[serde(default = "default_tool_concurrency")]
     pub tool_concurrency: u32,
-    /// Historical compatibility field. A timeout after submission has an
-    /// uncertain provider outcome. Current validation requires this to remain
-    /// false until the admitted provider route supplies deduplication or
-    /// outcome lookup.
+    /// Upper bound, in milliseconds, on the delay before any provider retry.
+    /// The delay is `backoff_base_ms * 2^attempt`, capped here.
+    #[serde(default = "default_backoff_max_ms")]
+    pub backoff_max_ms: u64,
+    /// Retry policy for provider failures that leave it unknown whether the
+    /// provider acted (timeout, send failure after the connection, a stream
+    /// cut after content began). Absent means such outcomes are never retried.
+    /// Even when present, a retry also needs the directive's
+    /// `provider_contact: repeatable` declaration on a remote provider route;
+    /// launch preparation seals the resulting ceiling and the daemon enforces
+    /// it. `max_retries` counts the first retries of a turn that may follow an
+    /// unknown outcome and shares the early attempts with `retries`.
     #[serde(default)]
-    pub retry_on_timeout: bool,
-    /// Historical compatibility field. A stream that dies after provider
-    /// contact has an uncertain external outcome and cannot be retried merely
-    /// because the request bytes are identical. Current validation requires
-    /// this to remain false until an admitted provider route supplies a real
-    /// deduplication or outcome-query contract.
-    #[serde(default = "default_retry_mid_stream")]
-    pub retry_mid_stream: bool,
+    pub unknown_outcome_retry: Option<ryeos_directive_definition::UnknownOutcomeRetryPolicy>,
     /// Execution-owned provider-attempt accounting policy. Wire parsing stays
     /// in the signed provider schema; budget/failure behavior belongs here.
     #[serde(default)]
@@ -197,7 +198,11 @@ fn default_retries() -> u32 {
 }
 
 fn default_retry_status_codes() -> Vec<u16> {
-    vec![429, 500, 502, 503]
+    vec![429, 500, 502, 503, 504, 529]
+}
+
+fn default_backoff_max_ms() -> u64 {
+    60_000
 }
 
 fn default_backoff_base_ms() -> u64 {
@@ -220,10 +225,6 @@ fn default_max_provider_stream_frame_bytes() -> u64 {
     1_048_576
 }
 
-fn default_retry_mid_stream() -> bool {
-    false
-}
-
 impl Default for ExecutionConfig {
     fn default() -> Self {
         Self {
@@ -238,8 +239,8 @@ impl Default for ExecutionConfig {
             max_provider_stream_frame_bytes: default_max_provider_stream_frame_bytes(),
             tool_preload: false,
             tool_concurrency: default_tool_concurrency(),
-            retry_on_timeout: false,
-            retry_mid_stream: default_retry_mid_stream(),
+            backoff_max_ms: default_backoff_max_ms(),
+            unknown_outcome_retry: None,
             accounting: AttemptAccountingConfig::default(),
         }
     }
@@ -253,10 +254,22 @@ impl ExecutionConfig {
                 self.tool_concurrency
             );
         }
-        if self.retry_on_timeout || self.retry_mid_stream {
+        if self.backoff_max_ms < self.backoff_base_ms {
             anyhow::bail!(
-                "execution cannot retry an outcome-uncertain provider request without an admitted provider deduplication or outcome-query contract"
+                "execution.backoff_max_ms ({}) must not be below execution.backoff_base_ms ({})",
+                self.backoff_max_ms,
+                self.backoff_base_ms
             );
+        }
+        if let Some(policy) = &self.unknown_outcome_retry {
+            policy.validate()?;
+            if policy.max_retries > self.retries {
+                anyhow::bail!(
+                    "execution.unknown_outcome_retry.max_retries ({}) must not exceed execution.retries ({})",
+                    policy.max_retries,
+                    self.retries
+                );
+            }
         }
         // `budget_mode: hard` is structurally valid configuration; whether the
         // route is ledger-eligible (Paid/ExplicitlyFree sealed authority) is a
@@ -709,7 +722,7 @@ mod tests {
         assert_eq!(cfg.retries, 5, "explicit value is honored");
         assert_eq!(
             cfg.retry_status_codes,
-            vec![429, 500, 502, 503],
+            vec![429, 500, 502, 503, 504, 529],
             "omitted status codes default to the retryable set, not empty"
         );
         assert_eq!(
@@ -717,9 +730,10 @@ mod tests {
             "omitted backoff defaults to 1s, not a 0ms hot loop"
         );
         assert!(
-            !cfg.retry_mid_stream,
-            "omitted retry_mid_stream fails closed because a dropped stream has an uncertain provider outcome"
+            cfg.unknown_outcome_retry.is_none(),
+            "an omitted unknown-outcome policy refuses such retries because a dropped stream has an uncertain provider outcome"
         );
+        assert_eq!(cfg.backoff_max_ms, 60_000);
         assert_eq!(
             cfg.max_provider_output_tokens_per_turn,
             default_max_provider_output_tokens_per_turn(),
@@ -754,7 +768,8 @@ mod tests {
             parsed.max_provider_stream_frame_bytes,
             default.max_provider_stream_frame_bytes
         );
-        assert_eq!(parsed.retry_mid_stream, default.retry_mid_stream);
+        assert_eq!(parsed.unknown_outcome_retry, default.unknown_outcome_retry);
+        assert_eq!(parsed.backoff_max_ms, default.backoff_max_ms);
         assert_eq!(parsed.retries, 2);
     }
 
@@ -781,15 +796,47 @@ mod tests {
     }
 
     #[test]
-    fn outcome_uncertain_retry_knobs_fail_closed() {
+    fn removed_outcome_uncertain_retry_booleans_are_rejected() {
         for field in ["retry_on_timeout", "retry_mid_stream"] {
-            let config: ExecutionConfig =
-                serde_yaml::from_str(&format!("{field}: true\n")).unwrap();
-            let error = config
-                .validate()
-                .expect_err("outcome-uncertain provider retries require a provider contract");
-            assert!(error.to_string().contains("deduplication or outcome-query"));
+            let error = serde_yaml::from_str::<ExecutionConfig>(&format!("{field}: false\n"))
+                .expect_err("removed key must not deserialize");
+            assert!(error.to_string().contains("unknown field"));
         }
+    }
+
+    #[test]
+    fn unknown_outcome_retry_block_parses_and_validates() {
+        let cfg: ExecutionConfig = serde_yaml::from_str(
+            "retries: 4\nunknown_outcome_retry:\n  max_retries: 2\n  on: [timeout, mid_stream]\n",
+        )
+        .unwrap();
+        cfg.validate().unwrap();
+        let policy = cfg.unknown_outcome_retry.as_ref().unwrap();
+        assert_eq!(policy.max_retries, 2);
+        assert_eq!(policy.on.len(), 2);
+
+        let empty: ExecutionConfig =
+            serde_yaml::from_str("unknown_outcome_retry:\n  max_retries: 1\n  on: []\n").unwrap();
+        assert!(empty.validate().is_err());
+
+        let unknown_class = serde_yaml::from_str::<ExecutionConfig>(
+            "unknown_outcome_retry:\n  max_retries: 1\n  on: [reset]\n",
+        );
+        assert!(unknown_class.is_err());
+
+        let over: ExecutionConfig = serde_yaml::from_str(
+            "retries: 1\nunknown_outcome_retry:\n  max_retries: 2\n  on: [timeout]\n",
+        )
+        .unwrap();
+        let error = over.validate().unwrap_err();
+        assert!(error.to_string().contains("must not exceed"));
+    }
+
+    #[test]
+    fn backoff_cap_below_base_is_rejected() {
+        let cfg: ExecutionConfig =
+            serde_yaml::from_str("backoff_base_ms: 2000\nbackoff_max_ms: 1000\n").unwrap();
+        assert!(cfg.validate().is_err());
     }
 }
 
