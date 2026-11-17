@@ -1358,6 +1358,101 @@ impl RyeOsCore {
     }
 }
 
+/// One timeline line drawn as plain text: the entry's accessible label, its
+/// nesting depth and its tone. A terminal, a screen reader and a copy all read
+/// the same text because they all read [`RyeOsTimelineEntryVm::label`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimelineTextLine {
+    /// Stable identity of the line across responses: the item id behind it.
+    pub id: String,
+    /// Nesting depth; a cluster's or recap's members sit one level below it.
+    pub indent: u8,
+    pub text: String,
+    pub tone: RyeOsTone,
+    /// What the line is: its entry type, or `cluster` / `recap` for the line
+    /// that heads a group (the lead lines are `summary` and `older`).
+    pub role: String,
+}
+
+/// A timeline response drawn as plain text.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TimelineText {
+    /// The chain header (status, usage) and the "N older" line, when present.
+    pub lead: Vec<TimelineTextLine>,
+    /// One line per entry; clusters and recaps head their members.
+    pub lines: Vec<TimelineTextLine>,
+}
+
+impl RyeOsTimelineEntryVm {
+    /// The entry's tone; a separator is neutral.
+    pub fn tone(&self) -> RyeOsTone {
+        match self {
+            Self::Block { tone, .. } | Self::Line { tone, .. } | Self::Pair { tone, .. } => *tone,
+            Self::Separator { .. } => RyeOsTone::Neutral,
+        }
+    }
+}
+
+/// Draw a service response (a whole window, or one merged with
+/// [`merge_timeline_window`]) as plain text lines.
+pub fn timeline_text(response: &Value) -> TimelineText {
+    let line =
+        |id: &str, entry: &RyeOsTimelineEntryVm, indent: u8, role: String| TimelineTextLine {
+            id: id.to_string(),
+            indent,
+            text: entry.label(),
+            tone: entry.tone(),
+            role,
+        };
+    let mut lead = Vec::new();
+    if let Some(entry) = summary_entry(response) {
+        lead.push(line("summary", &entry, 0, "summary".to_string()));
+    }
+    let older = response.get("older").and_then(Value::as_u64).unwrap_or(0);
+    if older > 0 {
+        lead.push(line(
+            "older",
+            &older_entry(older, None),
+            0,
+            "older".to_string(),
+        ));
+    }
+    let items = response
+        .get("items")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    let chain_root_id = response
+        .get("chain_root_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let layout = timeline_layout(items, chain_root_id, Vec::new());
+    let mut lines = Vec::with_capacity(layout.entries.len());
+    for (index, entry) in layout.entries.iter().enumerate() {
+        let key = layout.sources[index]
+            .as_ref()
+            .map_or_else(|| format!("line:{index}"), |source| source.key.clone());
+        // An item without an id still needs a distinct identity.
+        let id = if key == "item:" {
+            format!("item:#{index}")
+        } else {
+            key
+        };
+        let role = layout.sources[index]
+            .as_ref()
+            .map_or_else(|| "entry".to_string(), |source| item_role(&source.raw));
+        lines.push(line(&id, entry, layout.indents[index], role));
+    }
+    TimelineText { lead, lines }
+}
+
+/// Bring a held window current from a service response. A response carrying
+/// `order` is an incremental update upserted into `stored`; `None` means the
+/// update cannot be applied and the whole window must be refetched. A response
+/// without `order` is itself a whole window.
+pub fn merge_timeline_window(stored: Option<&Value>, update: Value) -> Option<Value> {
+    merge_window(stored, update)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1678,6 +1773,87 @@ mod tests {
             &folded.entries[0],
             RyeOsTimelineEntryVm::Separator { label } if label == "go ▸"
         ));
+    }
+
+    fn text_response(items: Vec<Value>) -> Value {
+        json!({
+            "chain_root_id": "T-1", "older": 0,
+            "summary": {"status": "running", "input_tokens": 1, "output_tokens": 2,
+                        "spend_usd": 0.5, "turns": 3},
+            "items": items,
+        })
+    }
+
+    #[test]
+    fn text_lines_carry_the_entry_label_indent_and_tone() {
+        let failed = with(
+            with(
+                entry(
+                    "f",
+                    "activity",
+                    json!({"headline": "fetch", "detail": "404"}),
+                ),
+                "state",
+                json!("failed"),
+            ),
+            "tone",
+            json!("danger"),
+        );
+        let text = timeline_text(&text_response(vec![failed]));
+        assert_eq!(text.lead.len(), 1, "the chain header leads");
+        assert_eq!(text.lines.len(), 1);
+        let line = &text.lines[0];
+        assert_eq!(line.id, "item:f");
+        assert_eq!(line.role, "activity");
+        assert_eq!(line.indent, 0);
+        assert_eq!(line.tone, RyeOsTone::Danger);
+        // The same string the accessible label gives.
+        assert_eq!(line.text, "fetch, failed: 404");
+    }
+
+    #[test]
+    fn text_lines_for_a_cluster_and_a_recap_head_their_members() {
+        let at = |id: &str, headline: &str| {
+            with(
+                entry(id, "activity", json!({"headline": headline})),
+                "exchange",
+                json!("x1"),
+            )
+        };
+        let items = vec![
+            json!({"item": "cluster", "id": "c1", "headline": "2 operations",
+                   "members": [at("a", "one"), at("b", "two")]}),
+            json!({"item": "recap", "id": "r1", "exchange": "x1", "work": 2, "duration_s": 12,
+                   "members": [at("c", "three")]}),
+        ];
+        let text = timeline_text(&text_response(items));
+        let shape: Vec<(u8, &str)> = text
+            .lines
+            .iter()
+            .map(|line| (line.indent, line.text.as_str()))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                (0, "2 operations"),
+                (1, "one"),
+                (1, "two"),
+                (0, "Worked for 12s, 2 steps"),
+                (1, "three"),
+            ]
+        );
+        assert_eq!(text.lines[0].id, "item:c1");
+        assert_eq!(text.lines[0].role, "cluster");
+        assert_eq!(text.lines[3].role, "recap");
+        assert_eq!(text.lines[1].id, "item:a");
+    }
+
+    #[test]
+    fn an_older_window_adds_a_lead_line() {
+        let mut response = text_response(Vec::new());
+        response["older"] = json!(7);
+        let text = timeline_text(&response);
+        assert_eq!(text.lead.last().map(|l| l.text.as_str()), Some("7 older"));
     }
 
     #[test]
