@@ -5425,6 +5425,7 @@ dependencies = [
 name = "ryeos-timeline"
 version = "0.1.0"
 dependencies = [
+ "ryeos-state",
  "serde",
  "serde_json",
  "serde_yaml",
