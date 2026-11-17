@@ -423,6 +423,7 @@ fn daemon_execute_body(resolved: &CliResolvedExecute) -> Result<Value, CliError>
             resolved.project_snapshot.clone(),
             resolved.retain_child_results,
             resolved.exclude_operator_vault,
+            resolved.live_project,
         ),
     });
     insert_source_observation_scope(&mut body, resolved.validation_scope);
@@ -675,6 +676,7 @@ fn execution_policy_value(
         None,
         retain_child_results,
         exclude_operator_vault,
+        false,
     )
 }
 
@@ -686,6 +688,7 @@ fn execution_policy_value_with_snapshot(
     project_snapshot: Option<String>,
     retain_child_results: bool,
     exclude_operator_vault: bool,
+    live_project: bool,
 ) -> Value {
     let controls = ryeos_app::command_invocation::CommandInvocationControls {
         async_launch: accepted,
@@ -694,6 +697,7 @@ fn execution_policy_value_with_snapshot(
         project_snapshot,
         retain_child_results,
         exclude_operator_vault,
+        live_project,
         ..Default::default()
     };
     serde_json::to_value(
@@ -943,6 +947,8 @@ struct CliResolvedExecute {
     retain_child_results: bool,
     /// Exclude the operator vault from project-environment resolution.
     exclude_operator_vault: bool,
+    /// `--live-project`: demand the live project (`project.intent: live`).
+    live_project: bool,
     /// Typed command-dispatch intent. Validation uses the existing no-spawn
     /// execution boundary and is never inferred from item parameters.
     validate_only: bool,
@@ -1032,6 +1038,7 @@ fn resolve_command_for_daemon_with_commands(
         project_snapshot: control.project_snapshot,
         retain_child_results: control.retain_child_results,
         exclude_operator_vault: control.exclude_operator_vault,
+        live_project: control.live_project,
         validate_only: compiled.validate_only,
         validation_scope: control.validation_scope,
         direct_execute: compiled.direct_execute,
@@ -1279,7 +1286,7 @@ pub(crate) async fn execute_service(
         "parameter_encoding": "command",
         "validate_only": false,
         "execution_policy": execution_policy_value_with_snapshot(
-            false, false, false, false, None, false, false,
+            false, false, false, false, None, false, false, false,
         ),
     });
     let payload = post_to_daemon(app_root, "/execute", &body, |_| Ok(())).await?;
@@ -2129,6 +2136,13 @@ mod tests {
                 aliases: vec![],
             },
             F {
+                flag: "live-project".into(),
+                help: "Demand the live project; refuse a tool that cannot get it".into(),
+                binding: B::LiveProject,
+                ref_binding_name: None,
+                aliases: vec![],
+            },
+            F {
                 flag: "retain-child-results".into(),
                 help: "Retain independent private COW results for project-backed child roots"
                     .into(),
@@ -2384,6 +2398,17 @@ mod tests {
         assert_eq!(wait["response"], "wait");
         assert_eq!(accepted["response"], "accepted");
         assert_eq!(wait["project"], accepted["project"]);
+    }
+
+    #[test]
+    fn live_project_flag_demands_live_intent_and_default_does_not() {
+        let default = execution_policy_value(true, false, false, false, false, false);
+        assert!(default["project"].get("intent").is_none(), "{default}");
+        let demanded = execution_policy_value_with_snapshot(
+            true, false, false, false, None, false, false, true,
+        );
+        assert_eq!(demanded["project"]["kind"], "live_direct");
+        assert_eq!(demanded["project"]["intent"], "live");
     }
 
     #[test]
@@ -2761,6 +2786,7 @@ mod tests {
             false,
             false,
             resolved.project_snapshot,
+            false,
             false,
             false,
         );

@@ -93,6 +93,11 @@ pub struct ActionFailure {
     /// with `on_error`, because doing so could settle after losing accounting.
     pub integrity: bool,
     pub dispatch: Option<ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
+    /// The structured terminal outcome a followed worker child reported, when
+    /// its settled value carries one: the whole follow value, including its
+    /// `outcome_kind` and any partial `result`. `None` for every failure whose
+    /// child reported no outcome classification.
+    pub outcome: Option<Value>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -366,6 +371,7 @@ pub async fn dispatch_action(
                     child_thread_id: None,
                     integrity: true,
                     dispatch: Some(daemon_dispatch),
+                    outcome: None,
                 }));
             }
             success.dispatch = Some(daemon_dispatch);
@@ -377,6 +383,7 @@ pub async fn dispatch_action(
                     child_thread_id: None,
                     integrity: true,
                     dispatch: success.dispatch,
+                    outcome: None,
                 }));
             }
             success.child_thread_id = child_thread_id;
@@ -406,6 +413,7 @@ pub async fn dispatch_action(
                     child_thread_id: success.child_thread_id,
                     integrity: false,
                     dispatch: success.dispatch,
+                    outcome: None,
                 }));
             }
             Ok(ActionOutcome::Success(success))
@@ -641,6 +649,17 @@ struct FollowResultEnvelope {
     cost: Value,
 }
 
+/// A followed worker child's settled value is its own outcome record: an
+/// object naming its `outcome_kind` beside the child thread, status, partial
+/// result and cost. A failure value of that shape is surfaced whole so the
+/// graph can branch on the kind and read the partial result.
+fn worker_outcome(result: &Value) -> Option<Value> {
+    let object = result.as_object()?;
+    (object.get("outcome_kind").is_some_and(Value::is_string)
+        && object.get("child_thread_id").is_some_and(Value::is_string))
+    .then(|| result.clone())
+}
+
 /// Exact cohort wrapper written by the daemon's follow join. Every field is
 /// required and unknown fields are rejected before graph execution resumes.
 #[derive(Debug, Deserialize)]
@@ -733,6 +752,7 @@ fn classify_follow_envelope_value(value: Value) -> Result<ClassifiedFollowEnvelo
             dispatch: None,
         })
     } else {
+        let failure_outcome = worker_outcome(&result);
         let structured_failure = parse_runtime_failure(&result);
         let mut runtime_failure_contract_error = runtime_failure_contract_error(&result);
         if let Some(failure) = structured_failure.as_ref()
@@ -776,6 +796,7 @@ fn classify_follow_envelope_value(value: Value) -> Result<ClassifiedFollowEnvelo
             child_thread_id,
             integrity: runtime_failure_contract_error.is_some(),
             dispatch: None,
+            outcome: failure_outcome,
         })
     };
 
@@ -898,6 +919,7 @@ fn classify_native_runtime_envelope(
                 child_thread_id: None,
                 integrity: true,
                 dispatch: None,
+                outcome: None,
             });
         }
     };
@@ -942,6 +964,7 @@ fn classify_native_runtime_envelope(
             child_thread_id: structured_failure.map(|failure| failure.diagnostic_locator.thread_id),
             integrity: runtime_failure_contract_error.is_some(),
             dispatch: None,
+            outcome: None,
         })
     }
 }
@@ -957,6 +980,7 @@ fn malformed_native_runtime_failure(
         child_thread_id: None,
         integrity: true,
         dispatch: None,
+        outcome: None,
     })
 }
 
@@ -971,6 +995,7 @@ fn classify_subprocess_envelope(value: Value) -> ActionOutcome {
                 child_thread_id: None,
                 integrity: true,
                 dispatch: None,
+                outcome: None,
             });
         }
     };
@@ -997,6 +1022,7 @@ fn classify_subprocess_envelope(value: Value) -> ActionOutcome {
             child_thread_id: None,
             integrity: false,
             dispatch: None,
+            outcome: None,
         })
     }
 }
@@ -2512,6 +2538,74 @@ mod tests {
         .expect("canonical follow envelope");
         assert_eq!(classified.fanout_status(), FanoutItemStatus::Completed);
         assert_eq!(expect_success(classified.outcome), json!({"answer": 42}));
+    }
+
+    fn worker_follow_value(status: &str, outcome_kind: &str, result: Value) -> Value {
+        json!({
+            "child_thread_id": "T-follow-child",
+            "status": status,
+            "outcome_kind": outcome_kind,
+            "result": result,
+            "cost": null,
+        })
+    }
+
+    #[test]
+    fn a_failed_worker_follow_exposes_its_structured_outcome() {
+        for kind in [
+            "deadline",
+            "budget",
+            "approval_required",
+            "outcome_unknown",
+            "worker_failure",
+            "cancelled",
+            "failed",
+        ] {
+            let value = worker_follow_value("cancelled", kind, json!({"turn_id": "t1"}));
+            let classified = classify_follow_envelope(canonical_follow_envelope(
+                false,
+                RuntimeResultStatus::Cancelled,
+                value.clone(),
+            ))
+            .expect("canonical failed worker follow envelope");
+            assert_eq!(classified.fanout_status(), FanoutItemStatus::Failed);
+            let failure = expect_action_failure(classified.outcome);
+            assert_eq!(failure.outcome, Some(value), "{kind}");
+            assert_eq!(failure.child_thread_id.as_deref(), Some("T-follow-child"));
+        }
+    }
+
+    #[test]
+    fn a_failure_without_an_outcome_classification_reports_no_outcome() {
+        for result in [
+            json!("unstructured child failure"),
+            json!({"outcome_kind": 3, "child_thread_id": "T-follow-child"}),
+            json!({"outcome_kind": "failed"}),
+        ] {
+            let classified = classify_follow_envelope(canonical_follow_envelope(
+                false,
+                RuntimeResultStatus::Failed,
+                result,
+            ))
+            .expect("canonical failed follow envelope");
+            assert!(expect_action_failure(classified.outcome).outcome.is_none());
+        }
+    }
+
+    #[test]
+    fn a_completed_worker_follow_assigns_its_whole_value() {
+        let value = worker_follow_value(
+            "completed",
+            "completed",
+            json!({"result": {"text": "done", "truncated": false}}),
+        );
+        let classified = classify_follow_envelope(canonical_follow_envelope(
+            true,
+            RuntimeResultStatus::Completed,
+            value.clone(),
+        ))
+        .expect("canonical completed worker follow envelope");
+        assert_eq!(expect_success(classified.outcome), value);
     }
 
     #[test]

@@ -2584,6 +2584,7 @@ fn step_outcome_leaf_soft_error_captures_error() {
         elapsed_ms: 10,
         cost: None,
         observation: None,
+        outcome: None,
     });
     match outcome {
         StepOutcome::LeafSoftError(outcome) => {

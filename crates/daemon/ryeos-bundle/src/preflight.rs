@@ -9,7 +9,7 @@ use ryeos_engine::contracts::{InstanceViolationCode, SignatureEnvelope};
 use ryeos_engine::handlers::HandlerRegistry;
 use ryeos_engine::item_resolution::parse_signature_header;
 use ryeos_engine::kind_registry::KindRegistry;
-use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
+use ryeos_engine::parsers::{ParseResultCache, ParserDispatcher, ParserRegistry};
 use ryeos_engine::trust::TrustStore;
 
 use crate::manifest::{
@@ -190,6 +190,7 @@ pub fn preflight_verify_named_bundle_report_in_context(
         app_root,
         Some(expected_bundle_name),
         isolation,
+        None,
     )
 }
 
@@ -211,6 +212,52 @@ pub fn preflight_verify_bundle_staging_in_context(
         app_root,
         Some(expected_bundle_name),
         isolation,
+        None,
+    )?;
+    Ok(())
+}
+
+/// [`preflight_verify_bundle_in_context`] reading and filling `parse_results`.
+///
+/// One cache shared by the source pass and the later staging pass means a
+/// staged file whose bytes match a file already parsed under the same parser
+/// set is not parsed again. Trust, anchoring and contract checks still run on
+/// every file; only the parse is skipped, and a changed file is parsed.
+pub fn preflight_verify_bundle_in_context_with_parse_results(
+    source_path: &Path,
+    dependency_bundle_roots: &[PathBuf],
+    app_root: &Path,
+    isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
+    parse_results: &Arc<ParseResultCache>,
+) -> Result<()> {
+    preflight_verify_bundle_in_context_inner(
+        source_path,
+        dependency_bundle_roots,
+        app_root,
+        None,
+        isolation,
+        Some(parse_results),
+    )?;
+    Ok(())
+}
+
+/// [`preflight_verify_bundle_staging_in_context`] reading and filling
+/// `parse_results`; see [`preflight_verify_bundle_in_context_with_parse_results`].
+pub fn preflight_verify_bundle_staging_in_context_with_parse_results(
+    staging_path: &Path,
+    expected_bundle_name: &str,
+    dependency_bundle_roots: &[PathBuf],
+    app_root: &Path,
+    isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
+    parse_results: &Arc<ParseResultCache>,
+) -> Result<()> {
+    preflight_verify_bundle_in_context_inner(
+        staging_path,
+        dependency_bundle_roots,
+        app_root,
+        Some(expected_bundle_name),
+        isolation,
+        Some(parse_results),
     )?;
     Ok(())
 }
@@ -235,6 +282,7 @@ pub fn preflight_verify_bundle_report_in_context(
         app_root,
         None,
         isolation,
+        None,
     )
 }
 
@@ -245,6 +293,7 @@ fn preflight_verify_bundle_in_context_inner(
     app_root: &Path,
     expected_bundle_name: Option<&str>,
     isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
+    parse_results: Option<&Arc<ParseResultCache>>,
 ) -> Result<PreflightReport> {
     let ai_dir = source_path.join(ryeos_engine::AI_DIR);
     validate_regular_tree(&ai_dir).with_context(|| {
@@ -359,7 +408,10 @@ fn preflight_verify_bundle_in_context_inner(
     let handler_registry =
         HandlerRegistry::load_base(&parser_search_roots, &trust_store, isolation)
             .context("preflight: load handler descriptors")?;
-    let parser_dispatcher = ParserDispatcher::new(parser_tools, Arc::new(handler_registry));
+    let mut parser_dispatcher = ParserDispatcher::new(parser_tools, Arc::new(handler_registry));
+    if let Some(results) = parse_results {
+        parser_dispatcher = parser_dispatcher.with_parse_results(Arc::clone(results));
+    }
 
     let mut failures: Vec<String> = Vec::new();
     let mut warnings: Vec<PreflightIssue> = Vec::new();
@@ -1537,6 +1589,7 @@ mod tests {
                 "pin-project",
                 "current-head",
                 "project-snapshot",
+                "live-project",
                 "retain-child-results",
                 "no-operator-vault",
                 "method",

@@ -633,8 +633,8 @@ fn validate_contract(request: &ValidateLaunchPreparerConfigRequest) -> Result<()
         &[PROVIDER_SNAPSHOT_KEY],
     )?;
 
-    if request.runtime_facts.len() != 11 {
-        return Err("runtime_facts must declare the eleven directive fact fields".into());
+    if request.runtime_facts.len() != 12 {
+        return Err("runtime_facts must declare the twelve directive fact fields".into());
     }
     fact(
         request,
@@ -659,6 +659,13 @@ fn validate_contract(request: &ValidateLaunchPreparerConfigRequest) -> Result<()
     )?;
     fact(request, "sampling", true, RuntimeFactKindWire::Json, 4096)?;
     fact(request, "reasoning", true, RuntimeFactKindWire::Json, 4096)?;
+    fact(
+        request,
+        "request_url",
+        false,
+        RuntimeFactKindWire::String,
+        2048,
+    )?;
     fact(
         request,
         "matched_profile",

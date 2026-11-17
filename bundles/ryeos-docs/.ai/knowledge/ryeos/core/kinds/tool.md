@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-16T03:56:03Z:1c623ef57c29b39aa292ed286c23e77406bd7ef83e5b1bed10c6d16239eb8bad:ultF/+B/PJrHp3PkC0A9WLaU4+qOg1G2lZLtBeZiFUu1HA5V8BadczuBvTu8dDQqWAzfzhI7+Ev/lAWZGItUBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T23:12:59Z:80c36ac998e7e65883ad42a4801b5fb45be775eac4b3004088534aefd434ed6d:kCrlENPlbyV5BPCc2YQMCnyns89aBQGRfkqZF9bQ77hAGL/c2T8a14VhLTyifK9sxko060JqnMAiMGjJA4epDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/kinds
 tags: [kind, tool, subprocess]
@@ -44,18 +44,33 @@ Tools on a runtime that declares `source_scope` (the python script and function
 runtimes and the bash script runtime) never see the live project, whatever the
 launch's project authority says. Their working directory and `${project_path}`
 are the private input root, which holds only the verified source, and any file
-they write there is discarded when the process ends. A schedule fire whose
-`execution_policy` grants live project authority (`live_direct`, read-only or
-read-write) is refused before the tool starts with
-`live_project_unavailable_to_sourced_runtime`, so it cannot exit 0 with its
-project writes silently lost. Other live launches (a project-backed
-`ryeos execute`, handler routes, children of those) resolve to live authority by
-default and are not refused; they run from the private root and the same rule
-applies. To give a tool the live project, write it as an `@subprocess` tool
-without `source_scope` (`executor_id: "@subprocess"` with its own `command`).
-To run a python or bash runtime tool on a project, launch it pinned
-(`--pin-project` or a pinned project policy), which gives a copy-on-write
-generation, or return structured results.
+they write there is discarded when the process ends.
+
+A project-backed request says what it asks of the live project, and the thread
+records it as `project_authority.live_access.intent`:
+
+- `default` (a plain project-backed `ryeos execute`, handler routes, the
+  default execution policy). The request did not ask for the live project; the
+  daemon picks the root for the tool's shape. It is not refused.
+- `live` (`ryeos execute --live-project`, an execution policy whose project
+  leg carries `"intent": "live"`, and every schedule that sets `live_direct`).
+  The request demands the live project. A launch whose resolved root is not the
+  live project is refused before the tool starts with
+  `live_project_unavailable_to_sourced_runtime` (403), so it cannot exit 0 with
+  its project writes silently lost. Children inherit the intent.
+
+| Tool shape | `default` request | `live` request (`--live-project`, `project.intent: live`, schedule `live_direct`) | `--pin-project` / pinned policy |
+| --- | --- | --- | --- |
+| `@subprocess` tool, no `source_scope`, no external content | live project (writes land in the project) | live project | copy-on-write generation |
+| Tool on a `source_scope` runtime (python script/function, bash script) | sparse private input root; writes discarded | refused: `live_project_unavailable_to_sourced_runtime` | copy-on-write generation |
+| `@subprocess` tool that retains external content | sparse private input root; writes discarded | refused: `live_project_unavailable_to_sourced_runtime` | copy-on-write generation |
+| Handler-route tool (scratch-root semantics) | its scratch root, as before; the route does not demand the live project | not offered by routes | not offered by routes |
+
+To give a tool the live project, write it as an `@subprocess` tool without
+`source_scope` (`executor_id: "@subprocess"` with its own `command`). To run a
+python or bash runtime tool on a project, launch it pinned (`--pin-project` or
+a pinned project policy), which gives a copy-on-write generation, or return
+structured results.
 
 The protocol treats stdin and terminal stdout as opaque while explicitly
 declaring callback socket, callback token, thread-auth, thread, and project env

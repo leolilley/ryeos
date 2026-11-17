@@ -254,6 +254,7 @@ impl Walker {
             elapsed_ms,
             cost,
             observation,
+            outcome: worker_outcome,
         } = outcome;
         let item_id = &item_id;
         let error = &error;
@@ -336,6 +337,18 @@ impl Walker {
             ),
         )
         .await;
+
+        if let Some(worker_outcome) = worker_outcome
+            && !matches!(next_on_error, NextOnError::PolicyFail)
+        {
+            if !state.is_object() {
+                *state = Value::Object(serde_json::Map::new());
+            }
+            state
+                .as_object_mut()
+                .expect("state was just made an object")
+                .insert(FAILED_NODE_OUTCOME_KEY.to_owned(), worker_outcome);
+        }
 
         match next_on_error {
             NextOnError::Redirect(target) => {

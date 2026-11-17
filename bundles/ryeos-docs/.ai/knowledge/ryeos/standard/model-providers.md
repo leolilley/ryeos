@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T00:34:16Z:c94e8dde307fbc06262d1c0f672a5dbb04b3b592f1a9796cd5e9e78cfaaa0ed5:GDoLI8zllSxOjfWdzskYRO9bRRP5Ab3Y02wrzQjdOsy60E2PZBLiTvgXQ/+ClIMM8TobLhowZIFAfAHtI9jSBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T23:09:12Z:36fa5163ae9e51a44f75612a87bc8357db7620c01b6bfa8ba446bd4222069654:p18DYFBeb/jA6KAVHSbXquSztDA7lULSRtMYvlyqYcb9h01dVj3x7gbz46XoA70Oz8y+Pxc9wEueNTZ4hjqdDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/standard
@@ -80,7 +80,50 @@ runtime HTTP calls.
 
 Provider configs control outbound URLs and auth env vars, so project-root
 provider contributions are excluded by the signed launch contract. The
-`model_providers` catalog accepts trusted bundle entries only.
+`model_providers` catalog (`allowed_spaces: [bundle, node]`, trust
+`trusted_bundle`/`trusted_node`) deep-merges the trusted bundle entry with any
+node-space entry of the same id.
+
+### Changing a provider's endpoint
+
+Put an operator-signed file at
+`<app-root>/.ai/config/ryeos-runtime/model-providers/<id>.yaml` and sign it with
+`ryeos sign .ai/config/ryeos-runtime/model-providers/<id>.yaml` from the app
+root (the operator key is scoped to the project and node spaces). The merge is
+deep, so the file carries only the changed keys plus the merge keys, for example:
+
+```yaml
+category: ryeos-runtime/model-providers
+transport:
+  kind: remote_http
+  base_url: https://llm.internal.example/v1
+```
+
+The next run picks it up; no restart. Project-space files are not an option
+because the signed launch contract refuses them: a project could otherwise
+redirect the provider credential to an arbitrary host.
+
+`base_url` is not interpreted the same way for every family:
+
+- `anthropic_messages`: the full request URL (`https://api.anthropic.com/v1/messages`).
+  The shipped config sets `extra.stream_url: ""`, which means "use `base_url` as is".
+- `chat_completions` families: a base. `/chat/completions` is appended unless
+  `extra.stream_url` is set; a non-empty `stream_url` is appended instead (one
+  `/` between them) and an empty one appends nothing.
+- In every family `{model}` in `base_url` is replaced by the model name first
+  (Gemini-style `.../models/{model}:streamGenerateContent`).
+
+The credential check URL is separate: `extra.setup.validation.url` (for example
+`https://api.anthropic.com/v1/models`) must share the `base_url` origin and
+use HTTPS when it sends a credential, so moving the endpoint to another host
+requires overriding `extra.setup.validation.url` in the same file. Keys not
+named in the node file keep their bundle values.
+
+`ryeos validate` on a directive reports the result without running it:
+`runtime_preparation.runtime_facts` carries `provider_id`, `model_name`,
+`request_url` (the URL after the joining and `{model}` rules above; absent for
+admitted local workers) and `config_sources` (the root label of each merged
+bundle and node entry).
 
 An admitted-local-worker provider contributes its exact signed worker as an
 opaque prepared execution dependency. Provider selection remains wholly in the
@@ -97,7 +140,7 @@ cached admission path used by execution. Its read-only projection reports the
 selected runtime, path-free ref-binding records, opaque execution dependencies
 keyed by their preparer-owned names, canonical refs and as-launched resolution
 digests, source readiness, exact current external-content consumer/publisher
-bindings, and node session-policy eligibility. Missing or released content is
+bindings, node session-policy eligibility, and the preparer's safe runtime facts (provider, model, effective request URL). Missing or released content is
 reported as not ready; corrupt authority fails closed. Validation never
 serializes opaque runtime data or secrets and never starts the selected
 workload, creates a session or lease, reserves capacity, publishes CAS state,

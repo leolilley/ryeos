@@ -1,0 +1,65 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SessionStartParams",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "cwd": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "access": {
+      "type": "string",
+      "enum": [
+        "read_only",
+        "read_write"
+      ]
+    },
+    "system_prompt": {
+      "type": "string",
+      "maxLength": 100000
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "effort": {
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    "tools": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9_*-]+$"
+      }
+    },
+    "stub": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "resume": {
+          "type": "string",
+          "enum": [
+            "lost"
+          ]
+        }
+      }
+    }
+  },
+  "required": [
+    "access",
+    "cwd"
+  ]
+}
