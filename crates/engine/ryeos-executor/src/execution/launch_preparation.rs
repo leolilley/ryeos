@@ -3066,6 +3066,7 @@ mod ref_binding_projection_tests {
             allowed_kinds: vec!["config".to_owned()],
             allowed_spaces: vec![LaunchItemSpace::Bundle, LaunchItemSpace::Project],
             allowed_trust: vec![TrustClass::TrustedBundle, TrustClass::TrustedProject],
+            continuation_rebind: ryeos_engine::runtime_registry::ContinuationRebind::Never,
         }
     }
 

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-16T23:09:12Z:0121296d55f0d8802b8e533703b0cdc52accce66773fcda051921378b2923c99:JYXqBWN+Zbbew3xOWzG4fKFCKw3+m5aB9sejApp+pG21rf0uxgsduisT+tynDD8FAgvA58Y0yGbgggizvAv+AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T22:06:51Z:34539d80f4be3437c24cb68f1bd54453f4b643342fec0c6552e26c34e97f314a:6sBGVy9kmRlFXgnEio5/Fol7cfNkTsBikXMOVkjKLv5Oms+U23SJteuS0pFaGojARqq6FYPd6qYr47ri5O1NDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: runtime
 serves: directive
 default: true
@@ -24,6 +24,9 @@ launch_contract:
       # An explicit caller binding wins; otherwise the directive models itself.
       source:
         kind: caller_or_primary_ref
+      # An operator continuation may bind a different model directive; every
+      # other continuation inherits the binding sealed in its predecessor.
+      continuation_rebind: operator
       allowed_kinds:
         - directive
       allowed_spaces:
