@@ -58,7 +58,7 @@ fn development_source_policy_keeps_source_and_excludes_generated_payloads() {
         ".ai/tools/ryeos/development/check.yaml",
         "tests/e2e/execute-stream-latency/run-latency-matrix.mjs",
         "tests/e2e/manual-directives/.ai/directives/test/context/base_context.md",
-        "tests/e2e/manual-directives/.ai/knowledge/test-findings.md",
+        "tests/e2e/manual-directives/.ai/tools/mcp/servers/context7.yaml",
         "tests/e2e/development-cargo/qualification.json",
         "bundles/central-auth/.ai/manifest.source.yaml",
         "bundles/central-auth/.ai/tools/central-auth/login.yaml",
