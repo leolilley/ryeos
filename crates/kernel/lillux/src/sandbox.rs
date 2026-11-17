@@ -2769,33 +2769,18 @@ mod imp {
             .any(|mount| !sources.contains_key(&mount.source_fd))
             .then(SealedSourceStaging::create)
             .transpose()?;
-        for mount in &request.mounts {
-            if let std::collections::btree_map::Entry::Vacant(entry) =
-                sources.entry(mount.source_fd)
-            {
-                if mount.access != LinuxSandboxMountAccess::ReadOnly {
-                    return Err("sealed mount source cannot grant writable access".to_string());
-                }
-                let staging = sealed_staging
-                    .as_ref()
-                    .ok_or_else(|| "sealed source lacks private staging authority".to_string())?;
-                entry.insert(materialize_sealed_mount_source(
-                    raw_fd(mount.source_fd)?,
-                    &staging.content,
-                )?);
-            }
-        }
-        // Map each original descriptor to its retained source. Pins are held
-        // only until the last mount using them is bound and verified, so
-        // descriptor use does not scale with the number of mounts.
+        // Sealed sources are copied and pinned just before their first mount
+        // and released after their last, so descriptor use stays bounded by
+        // the sources in flight, not by the number of mounts. Reanchored
+        // sources were opened above, before the private root hid their paths.
         let mut remaining_uses = BTreeMap::<u32, usize>::new();
-        let mut retained_key = BTreeMap::<u32, u32>::new();
-        for mount in &mut request.mounts {
-            let original = mount.source_fd;
-            let retained = sources[&original].inherited_descriptor()?;
-            retained_key.insert(retained, original);
-            *remaining_uses.entry(retained).or_default() += 1;
-            mount.source_fd = retained;
+        for mount in &request.mounts {
+            *remaining_uses.entry(mount.source_fd).or_default() += 1;
+            if !sources.contains_key(&mount.source_fd)
+                && mount.access != LinuxSandboxMountAccess::ReadOnly
+            {
+                return Err("sealed mount source cannot grant writable access".to_string());
+            }
         }
         // The detached template is NOT an ordinary mount source: reanchoring
         // it would replace the admitted filesystem with unrelated path bytes.
@@ -2812,32 +2797,61 @@ mod imp {
             create_directory_target(&rooted(&overlay.destination)?)?;
             mount_overlay(overlay)?;
         }
-        let mut mounts = request.mounts.clone();
+        // The flag marks mounts whose source_fd is still the request's
+        // original descriptor; descendants carry their own retained source.
+        let mut mounts = request
+            .mounts
+            .iter()
+            .cloned()
+            .map(|mount| (mount, true))
+            .collect::<Vec<_>>();
         let mut overlay_descendant_sources = Vec::new();
         if let Some(overlay) = &request.overlay {
             for descendant in &overlay.writable_descendant_mounts {
                 let source = reanchor_overlay_descendant_source(&overlay.destination, descendant)?;
-                mounts.push(LinuxSandboxMount {
-                    source_fd: source.inherited_descriptor()?,
-                    destination: descendant.destination.clone(),
-                    access: LinuxSandboxMountAccess::Writable,
-                    layer: 10,
-                });
+                mounts.push((
+                    LinuxSandboxMount {
+                        source_fd: source.inherited_descriptor()?,
+                        destination: descendant.destination.clone(),
+                        access: LinuxSandboxMountAccess::Writable,
+                        layer: 10,
+                    },
+                    false,
+                ));
                 overlay_descendant_sources.push(source);
             }
         }
-        mounts.sort_by(|left, right| {
+        mounts.sort_by(|(left, _), (right, _)| {
             left.layer
                 .cmp(&right.layer)
                 .then_with(|| left.destination.cmp(&right.destination))
         });
+        let ordered = mounts
+            .iter()
+            .map(|(mount, _)| mount.clone())
+            .collect::<Vec<_>>();
         let mut final_identities = BTreeMap::<PathBuf, FinalMountIdentity>::new();
-        for (index, mount) in mounts.iter().enumerate() {
+        for (index, (admitted, from_request)) in mounts.iter().enumerate() {
+            let original = admitted.source_fd;
+            let mut mount = admitted.clone();
+            if *from_request {
+                if !sources.contains_key(&original) {
+                    let staging = sealed_staging.as_ref().ok_or_else(|| {
+                        "sealed source lacks private staging authority".to_string()
+                    })?;
+                    sources.insert(
+                        original,
+                        materialize_sealed_mount_source(raw_fd(original)?, &staging.content)?,
+                    );
+                }
+                mount.source_fd = sources[&original].inherited_descriptor()?;
+            }
+            let mount = &mount;
             prepare_descriptor_mount_target(
                 &mount.destination,
                 descriptor_kind(mount.source_fd)?,
                 request.overlay.as_ref().map(|overlay| &overlay.destination),
-                &mounts[..index],
+                &ordered[..index],
             )
             .map_err(|error| format!("prepare mount {}: {error}", mount.destination.display()))?;
             bind_descriptor_mount(mount)
@@ -2858,12 +2872,13 @@ mod imp {
                 mount.destination.clone(),
                 final_mount_identity(mount.source_fd)?,
             );
-            if let Some(uses) = remaining_uses.get_mut(&mount.source_fd) {
+            if *from_request {
+                let uses = remaining_uses
+                    .get_mut(&original)
+                    .ok_or("mount source use count is missing")?;
                 *uses -= 1;
                 if *uses == 0 {
-                    if let Some(original) = retained_key.get(&mount.source_fd) {
-                        sources.remove(original);
-                    }
+                    sources.remove(&original);
                 }
             }
         }
