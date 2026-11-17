@@ -2737,3 +2737,205 @@ mod shipped_provider_config_tests {
         assert!(error.to_string().contains("qualification evidence"));
     }
 }
+
+#[cfg(test)]
+mod shipped_model_binding_tests {
+    use super::*;
+
+    /// Every shipped model binding, by the routing tier its file is named for.
+    const BINDINGS: &[(&str, &str)] = &[
+        (
+            "general",
+            include_str!("../../../../bundles/directive/.ai/directives/ryeos/models/general.md"),
+        ),
+        (
+            "fast",
+            include_str!("../../../../bundles/directive/.ai/directives/ryeos/models/fast.md"),
+        ),
+        (
+            "high",
+            include_str!("../../../../bundles/directive/.ai/directives/ryeos/models/high.md"),
+        ),
+        (
+            "orchestrator",
+            include_str!(
+                "../../../../bundles/directive/.ai/directives/ryeos/models/orchestrator.md"
+            ),
+        ),
+        (
+            "max",
+            include_str!("../../../../bundles/directive/.ai/directives/ryeos/models/max.md"),
+        ),
+        (
+            "code",
+            include_str!("../../../../bundles/directive/.ai/directives/ryeos/models/code.md"),
+        ),
+        (
+            "code_max",
+            include_str!("../../../../bundles/directive/.ai/directives/ryeos/models/code_max.md"),
+        ),
+        (
+            "cheap",
+            include_str!("../../../../bundles/directive/.ai/directives/ryeos/models/cheap.md"),
+        ),
+        (
+            "free",
+            include_str!("../../../../bundles/directive/.ai/directives/ryeos/models/free.md"),
+        ),
+        (
+            "vision",
+            include_str!("../../../../bundles/directive/.ai/directives/ryeos/models/vision.md"),
+        ),
+        (
+            "vision_fast",
+            include_str!(
+                "../../../../bundles/directive/.ai/directives/ryeos/models/vision_fast.md"
+            ),
+        ),
+    ];
+    const OPS_BASE: &str =
+        include_str!("../../../../bundles/directive/.ai/directives/ryeos/ops/base.md");
+    const ROUTING: &str =
+        include_str!("../../../../bundles/directive/.ai/config/ryeos-runtime/model_routing.yaml");
+    const DEFAULT_TIER: &str = "general";
+
+    /// The frontmatter mapping of a signed directive document.
+    fn frontmatter(document: &str) -> Value {
+        let mut parts = document.splitn(3, "\n---\n");
+        let signature = parts.next().expect("signature envelope");
+        assert!(signature.starts_with("<!-- ryeos:signed:"), "{signature}");
+        assert!(!signature.contains('\n'), "{signature}");
+        let yaml = parts.next().expect("directive frontmatter");
+        assert!(parts.next().is_some(), "directive body");
+        serde_yaml::from_str(yaml).expect("directive frontmatter YAML")
+    }
+
+    fn config_item(canonical_id: &str, yaml: &str) -> VerifiedConfigItem {
+        VerifiedConfigItem {
+            value: serde_yaml::from_str(yaml).expect("shipped config YAML"),
+            value_digest: "0".repeat(64),
+            contributors: vec![ProviderConfigSource {
+                space: SnapshotItemSpace::Bundle,
+                root_label: "bundle:directive".to_string(),
+                canonical_id: canonical_id.to_string(),
+                content_digest: "1".repeat(64),
+                trust_class: SnapshotTrustClass::TrustedBundle,
+            }],
+        }
+    }
+
+    fn routing() -> VerifiedConfigItem {
+        config_item("ryeos-runtime/model_routing", ROUTING)
+    }
+
+    #[test]
+    fn every_shipped_binding_holds_only_a_model_block_that_resolves_its_tier() {
+        let routing = routing();
+        let tiers: ModelRoutingConfig =
+            serde_json::from_value(routing.value.clone()).expect("shipped routing");
+        for (tier, document) in BINDINGS {
+            let composed = frontmatter(document);
+            let keys: std::collections::BTreeSet<&str> = composed
+                .as_object()
+                .expect("binding frontmatter mapping")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(
+                keys,
+                std::collections::BTreeSet::from(["description", "model", "version"]),
+                "binding {tier}"
+            );
+            assert_eq!(
+                composed[MODEL_BINDING],
+                serde_json::json!({ "tier": tier }),
+                "binding {tier}"
+            );
+            let model: ModelSpec = serde_json::from_value(composed[MODEL_BINDING].clone())
+                .unwrap_or_else(|error| panic!("binding {tier}: {error}"));
+            let target = resolve_target(&model, Some(&routing))
+                .unwrap_or_else(|error| panic!("binding {tier}: {error}"));
+            let routed = &tiers.tiers[*tier];
+            assert_eq!(target.provider_id, routed.provider, "binding {tier}");
+            assert_eq!(target.model_name, routed.model, "binding {tier}");
+            assert_eq!(
+                target.context_window, routed.context_window,
+                "binding {tier}"
+            );
+        }
+    }
+
+    #[test]
+    fn operator_base_directive_takes_its_model_from_the_default_binding() {
+        let routing = routing();
+        let tiers: ModelRoutingConfig =
+            serde_json::from_value(routing.value.clone()).expect("shipped routing");
+        let provider_id = tiers.tiers[DEFAULT_TIER].provider.clone();
+        // The one provider the shipped routing names for every tier.
+        assert_eq!(provider_id, "zen");
+        let config_id = format!("{PROVIDER_CONFIG_PREFIX}/{provider_id}");
+        let provider_catalog = BTreeMap::from([(
+            config_id.clone(),
+            config_item(
+                &config_id,
+                include_str!(
+                    "../../../../bundles/directive/.ai/config/ryeos-runtime/model-providers/zen.yaml"
+                ),
+            ),
+        )]);
+
+        let primary = frontmatter(OPS_BASE);
+        assert!(primary.get(MODEL_BINDING).is_none());
+        let (_, default_binding) = BINDINGS
+            .iter()
+            .find(|(tier, _)| *tier == DEFAULT_TIER)
+            .expect("default binding");
+        let binding = frontmatter(default_binding);
+
+        let prepare = |primary: &Value, model_ref: &str, model: &Value| {
+            prepare_directive_launch(DirectiveLaunchPreparationInput {
+                primary_ref: "directive:ryeos/ops/base",
+                primary_composed: primary,
+                model_ref,
+                model_composed: model,
+                model_routing: Some(&routing),
+                provider_catalog: &provider_catalog,
+                execution: None,
+            })
+        };
+
+        let bound = prepare(&primary, "directive:ryeos/models/general", &binding)
+            .expect("operator base launch under the default binding");
+        assert_eq!(bound.snapshot.provider_id, provider_id);
+        assert_eq!(bound.snapshot.model_name, tiers.tiers[DEFAULT_TIER].model);
+        assert_eq!(
+            bound.snapshot.context_window,
+            tiers.tiers[DEFAULT_TIER].context_window
+        );
+
+        // The same directive carrying the default tier as its own model block,
+        // bound to itself, seals the identical provider snapshot and facts.
+        let mut self_modeled = primary.clone();
+        self_modeled[MODEL_BINDING] = serde_json::json!({ "tier": DEFAULT_TIER });
+        let own = prepare(&self_modeled, "directive:ryeos/ops/base", &self_modeled)
+            .expect("self-modeled launch");
+        assert_eq!(
+            serde_json::to_value(&bound.snapshot).expect("snapshot"),
+            serde_json::to_value(&own.snapshot).expect("snapshot")
+        );
+        assert_eq!(bound.runtime_facts, own.runtime_facts);
+        assert_eq!(bound.accounting_authority, own.accounting_authority);
+
+        // Without a binding the directive would model itself, and it no
+        // longer carries a model block to do so.
+        let unbound = prepare(&primary, "directive:ryeos/ops/base", &primary)
+            .expect_err("operator base has no model of its own");
+        assert_eq!(unbound.code, "model_target_missing");
+
+        // A behavior directive that keeps its own model block refuses a
+        // distinct binding.
+        let conflict = prepare(&self_modeled, "directive:ryeos/models/general", &binding)
+            .expect_err("a distinct binding over a self-modeled primary");
+        assert_eq!(conflict.code, "primary_model_conflict");
+    }
+}
