@@ -2,13 +2,13 @@
   "items": [
     {
       "item": "entry",
-      "id": "msg:6",
+      "id": "msg:6/0",
       "type": "message",
       "state": null,
       "tone": null,
       "thread": "T-0001",
       "parent": null,
-      "exchange": "msg:6",
+      "exchange": "msg:6/0",
       "counts_as": null,
       "slots": {
         "body": "<scrubbed content 2444 chars>"
@@ -24,20 +24,20 @@
     },
     {
       "item": "recap",
-      "id": "rc:tho:11",
-      "exchange": "msg:6",
+      "id": "rc:tho:11/0",
+      "exchange": "msg:6/0",
       "work": 1,
       "duration_s": 1,
       "members": [
         {
           "item": "entry",
-          "id": "tho:11",
+          "id": "tho:11/0",
           "type": "thought",
           "state": null,
           "tone": null,
           "thread": "T-0001",
           "parent": null,
-          "exchange": "msg:6",
+          "exchange": "msg:6/0",
           "counts_as": null,
           "slots": {
             "body": "<scrubbed reasoning_content 641 chars>"
@@ -59,7 +59,7 @@
           "tone": "good",
           "thread": "T-0001",
           "parent": null,
-          "exchange": "msg:6",
+          "exchange": "msg:6/0",
           "counts_as": "other",
           "slots": {
             "badge": "291 B",
@@ -86,7 +86,7 @@
       "tone": null,
       "thread": "T-0001",
       "parent": null,
-      "exchange": "msg:6",
+      "exchange": "msg:6/0",
       "counts_as": null,
       "slots": {
         "headline": "continued: context_window",
@@ -103,13 +103,13 @@
     },
     {
       "item": "entry",
-      "id": "pro:25",
+      "id": "pro:25/0",
       "type": "prose",
       "state": null,
       "tone": null,
       "thread": "T-0002",
       "parent": null,
-      "exchange": "msg:6",
+      "exchange": "msg:6/0",
       "counts_as": null,
       "slots": {
         "body": "<scrubbed content 24 chars>"
@@ -131,7 +131,7 @@
       "tone": "good",
       "thread": "T-0002",
       "parent": null,
-      "exchange": "msg:6",
+      "exchange": "msg:6/0",
       "counts_as": null,
       "slots": {
         "headline": "success"

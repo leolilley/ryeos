@@ -511,13 +511,14 @@ mod tests {
         doc["events"].as_array().unwrap().clone()
     }
 
-    const FIXTURES: [&str; 6] = [
+    const FIXTURES: [&str; 7] = [
         "tool_run_completed",
         "tool_run_failed",
         "directive_provider_failure",
         "directive_tool_then_handoff_failure",
         "graph_foreach_failure_recovery",
         "directive_continuation_with_successor",
+        "directive_turn_record",
     ];
 
     /// A store holding the first `count` events, served in pages of three.

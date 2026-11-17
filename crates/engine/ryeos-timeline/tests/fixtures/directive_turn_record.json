@@ -1,0 +1,462 @@
+{
+ "events": [
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 1,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000001",
+   "event_id": 101,
+   "event_type": "thread_created",
+   "payload": {
+    "executor_ref": "native:ryeos-directive-runtime",
+    "item_ref": "directive:test/turn_record",
+    "kind": "directive_run",
+    "launch_mode": "wait"
+   },
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 1,
+   "ts": "2026-11-17T01:00:00Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 2,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000002",
+   "event_id": 102,
+   "event_type": "thread_started",
+   "payload": {},
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 2,
+   "ts": "2026-11-17T01:00:01Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 3,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000003",
+   "event_id": 103,
+   "event_type": "cognition_frame",
+   "payload": {
+    "attachment_refs": [
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ],
+    "frame_seq": 1,
+    "provider_config": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "request_options": {
+     "model": "test-model"
+    },
+    "system": [
+     {
+      "text": "<scrubbed system 120 chars>",
+      "type": "text"
+     }
+    ],
+    "tool_inventory": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 3,
+   "ts": "2026-11-17T01:00:01Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 4,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000004",
+   "event_id": 104,
+   "event_type": "cognition_in",
+   "payload": {
+    "origin": "launch",
+    "parts": [
+     {
+      "text": "<scrubbed launch stimulus 300 chars>",
+      "type": "text"
+     }
+    ],
+    "pinned": true
+   },
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 4,
+   "ts": "2026-11-17T01:00:02Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 5,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000005",
+   "event_id": 105,
+   "event_type": "cognition_in",
+   "payload": {
+    "ack": "<scrubbed ack 12 chars>",
+    "origin": "context",
+    "parts": [
+     {
+      "text": "<scrubbed context 80 chars>",
+      "type": "text"
+     }
+    ]
+   },
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 5,
+   "ts": "2026-11-17T01:00:02Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 6,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000006",
+   "event_id": 106,
+   "event_type": "cognition_in",
+   "payload": {
+    "turn": 1
+   },
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 6,
+   "ts": "2026-11-17T01:00:03Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 7,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000007",
+   "event_id": 107,
+   "event_type": "cognition_out",
+   "payload": {
+    "finish": "tool_calls",
+    "parts": [
+     {
+      "text": "<scrubbed reasoning 200 chars>",
+      "type": "reasoning"
+     },
+     {
+      "text": "<scrubbed text 40 chars>",
+      "type": "text"
+     },
+     {
+      "arguments": {
+       "path": "a.txt"
+      },
+      "call_id": "call_1",
+      "name": "test_read",
+      "type": "tool_call"
+     },
+     {
+      "arguments": {
+       "path": "b.txt"
+      },
+      "call_id": "call_2",
+      "name": "test_write",
+      "type": "tool_call"
+     },
+     {
+      "arguments": {
+       "path": "a.txt"
+      },
+      "call_id": "call_3",
+      "name": "test_read",
+      "type": "tool_call"
+     }
+    ],
+    "turn": 1,
+    "usage": {
+     "input_tokens": 900,
+     "output_tokens": 120
+    }
+   },
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 7,
+   "ts": "2026-11-17T01:00:05Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 8,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000008",
+   "event_id": 108,
+   "event_type": "tool_call_start",
+   "payload": {
+    "call_id": "call_1",
+    "call_index": 0,
+    "effective_caps": [
+     "ryeos.execute.tool.test/x"
+    ],
+    "operation_id": "0000000000000000000000000000000000000000000000000000000000000001",
+    "tool": "test_read",
+    "turn": 1
+   },
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 8,
+   "ts": "2026-11-17T01:00:06Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 9,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000009",
+   "event_id": 109,
+   "event_type": "tool_call_start",
+   "payload": {
+    "call_id": "call_2",
+    "call_index": 1,
+    "effective_caps": [
+     "ryeos.execute.tool.test/x"
+    ],
+    "operation_id": "0000000000000000000000000000000000000000000000000000000000000002",
+    "tool": "test_write",
+    "turn": 1
+   },
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 9,
+   "ts": "2026-11-17T01:00:06Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 10,
+   "event_hash": "000000000000000000000000000000000000000000000000000000000000000a",
+   "event_id": 110,
+   "event_type": "tool_call_start",
+   "payload": {
+    "call_id": "call_3",
+    "call_index": 2,
+    "effective_caps": [
+     "ryeos.execute.tool.test/x"
+    ],
+    "operation_id": "0000000000000000000000000000000000000000000000000000000000000003",
+    "tool": "test_read",
+    "turn": 1
+   },
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 10,
+   "ts": "2026-11-17T01:00:06Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 11,
+   "event_hash": "000000000000000000000000000000000000000000000000000000000000000b",
+   "event_id": 111,
+   "event_type": "tool_call_result",
+   "payload": {
+    "call_id": "call_1",
+    "guard": {
+     "result_size_bytes": 90000,
+     "truncated": true,
+     "truncated_reason": "result_guard"
+    },
+    "operation_id": "0000000000000000000000000000000000000000000000000000000000000001",
+    "parts": [
+     {
+      "text": "<scrubbed result 5000 chars>",
+      "type": "text"
+     }
+    ],
+    "status": "ok",
+    "tool": "test_read"
+   },
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 11,
+   "ts": "2026-11-17T01:00:07Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 12,
+   "event_hash": "000000000000000000000000000000000000000000000000000000000000000c",
+   "event_id": 112,
+   "event_type": "tool_call_result",
+   "payload": {
+    "call_id": "call_2",
+    "guard": {
+     "result_size_bytes": 60,
+     "truncated": false
+    },
+    "operation_id": "0000000000000000000000000000000000000000000000000000000000000002",
+    "parts": [
+     {
+      "text": "<scrubbed error 60 chars>",
+      "type": "text"
+     }
+    ],
+    "status": "error",
+    "tool": "test_write"
+   },
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 12,
+   "ts": "2026-11-17T01:00:08Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 13,
+   "event_hash": "000000000000000000000000000000000000000000000000000000000000000d",
+   "event_id": 113,
+   "event_type": "tool_call_result",
+   "payload": {
+    "call_id": "call_3",
+    "guard": {
+     "duplicate_of": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "result_size_bytes": 5000,
+     "truncated": false
+    },
+    "operation_id": "0000000000000000000000000000000000000000000000000000000000000003",
+    "parts": [
+     {
+      "text": "<scrubbed result 5000 chars>",
+      "type": "text"
+     }
+    ],
+    "status": "ok",
+    "tool": "test_read"
+   },
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 13,
+   "ts": "2026-11-17T01:00:09Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 14,
+   "event_hash": "000000000000000000000000000000000000000000000000000000000000000e",
+   "event_id": 114,
+   "event_type": "cognition_in",
+   "payload": {
+    "kind": "nudge",
+    "origin": "harness",
+    "parts": [
+     {
+      "text": "<scrubbed nudge 70 chars>",
+      "type": "text"
+     }
+    ]
+   },
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 14,
+   "ts": "2026-11-17T01:00:10Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 15,
+   "event_hash": "000000000000000000000000000000000000000000000000000000000000000f",
+   "event_id": 115,
+   "event_type": "cognition_in",
+   "payload": {
+    "turn": 2
+   },
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 15,
+   "ts": "2026-11-17T01:00:11Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 16,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000010",
+   "event_id": 116,
+   "event_type": "cognition_out",
+   "payload": {
+    "finish": "stop",
+    "parts": [
+     {
+      "text": "<scrubbed answer 30 chars>",
+      "type": "text"
+     }
+    ],
+    "turn": 2,
+    "usage": {
+     "input_tokens": 1500,
+     "output_tokens": 20
+    }
+   },
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 16,
+   "ts": "2026-11-17T01:00:12Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 17,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000011",
+   "event_id": 117,
+   "event_type": "cognition_in",
+   "payload": {
+    "origin": "operator",
+    "parts": [
+     {
+      "text": "<scrubbed steer 50 chars>",
+      "type": "text"
+     },
+     {
+      "attachment": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "byte_length": 20480,
+      "height": 600,
+      "media_type": "image/png",
+      "type": "image",
+      "width": 800
+     },
+     {
+      "text": "<scrubbed steer addendum 25 chars>",
+      "type": "text"
+     }
+    ]
+   },
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 17,
+   "ts": "2026-11-17T01:00:20Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 18,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000012",
+   "event_id": 118,
+   "event_type": "cognition_in",
+   "payload": {
+    "turn": 3
+   },
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 18,
+   "ts": "2026-11-17T01:00:21Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 19,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000013",
+   "event_id": 119,
+   "event_type": "cognition_out",
+   "payload": {
+    "finish": "interrupted",
+    "parts": [
+     {
+      "text": "<scrubbed partial reasoning 90 chars>",
+      "type": "reasoning"
+     },
+     {
+      "text": "<scrubbed partial text 15 chars>",
+      "type": "text"
+     }
+    ],
+    "turn": 3
+   },
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 19,
+   "ts": "2026-11-17T01:00:24Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 20,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000014",
+   "event_id": 120,
+   "event_type": "thread_failed",
+   "payload": {
+    "message": "<scrubbed message 40 chars>",
+    "outcome_code": "interrupted"
+   },
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 20,
+   "ts": "2026-11-17T01:00:25Z"
+  }
+ ]
+}

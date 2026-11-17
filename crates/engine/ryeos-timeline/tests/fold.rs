@@ -23,13 +23,14 @@ fn events(name: &str) -> Vec<Value> {
     doc["events"].as_array().unwrap().clone()
 }
 
-const FIXTURES: [&str; 6] = [
+const FIXTURES: [&str; 7] = [
     "tool_run_completed",
     "tool_run_failed",
     "directive_provider_failure",
     "directive_tool_then_handoff_failure",
     "graph_foreach_failure_recovery",
     "directive_continuation_with_successor",
+    "directive_turn_record",
 ];
 
 fn golden(name: &str, timeline: &Timeline) {
@@ -119,19 +120,21 @@ fn synthetic(seq: i64, ts: &str, event_type: &str, payload: Value) -> Value {
 }
 
 /// One finished operation as a start and a result event; `failed` makes the
-/// result an error envelope.
+/// result an error.
 fn op(seq: &mut i64, n: usize, start: &str, end: &str, failed: bool) -> Vec<Value> {
     let id = format!("{n:064x}");
-    let mut result = json!({"operation_id": id, "result_size_bytes": 10, "tool": "t"});
-    if failed {
-        result["truncated_reason"] = json!("error_envelope");
-    }
+    let result = json!({
+        "operation_id": id, "call_id": "c", "tool": "t",
+        "status": if failed { "error" } else { "ok" },
+        "parts": [{"type": "text", "text": "r"}],
+        "guard": {"result_size_bytes": 10, "truncated": false}
+    });
     let out = vec![
         synthetic(
             *seq,
             start,
             "tool_call_start",
-            json!({"operation_id": id, "tool": "t"}),
+            json!({"operation_id": id, "call_id": "c", "tool": "t", "turn": 1, "call_index": 0}),
         ),
         synthetic(*seq + 1, end, "tool_call_result", result),
     ];
@@ -141,12 +144,22 @@ fn op(seq: &mut i64, n: usize, start: &str, end: &str, failed: bool) -> Vec<Valu
 
 fn say(seq: &mut i64, ts: &str, text: &str) -> Value {
     *seq += 1;
-    synthetic(*seq - 1, ts, "cognition_out", json!({"content": text}))
+    synthetic(
+        *seq - 1,
+        ts,
+        "cognition_out",
+        json!({"turn": 1, "parts": [{"type": "text", "text": text}], "finish": "stop"}),
+    )
 }
 
 fn ask(seq: &mut i64, ts: &str, text: &str) -> Value {
     *seq += 1;
-    synthetic(*seq - 1, ts, "cognition_in", json!({"content": text}))
+    synthetic(
+        *seq - 1,
+        ts,
+        "cognition_in",
+        json!({"origin": "operator", "parts": [{"type": "text", "text": text}]}),
+    )
 }
 
 fn shape_of(items: &[Item]) -> Vec<String> {
@@ -387,7 +400,7 @@ fn an_adopted_in_chain_child_nests_and_draws_no_outcome() {
             "2026-11-16T00:00:00Z",
             "T-1",
             "cognition_in",
-            json!({"content": "go"}),
+            json!({"origin": "launch", "parts": [{"type": "text", "text": "go"}]}),
         ),
         ev(
             2,
@@ -415,7 +428,8 @@ fn an_adopted_in_chain_child_nests_and_draws_no_outcome() {
             "2026-11-16T00:00:03Z",
             "T-1",
             "tool_call_result",
-            json!({"operation_id": op, "result_size_bytes": 3}),
+            json!({"operation_id": op, "call_id": "c", "tool": "t", "status": "ok",
+                   "parts": [], "guard": {"result_size_bytes": 3, "truncated": false}}),
         ),
         ev(
             6,
@@ -448,7 +462,7 @@ fn a_continuation_successor_is_on_the_spine() {
             "2026-11-16T00:00:00Z",
             "T-1",
             "cognition_in",
-            json!({"content": "go"}),
+            json!({"origin": "launch", "parts": [{"type": "text", "text": "go"}]}),
         ),
         ev(
             2,
@@ -671,7 +685,7 @@ fn only_a_failed_thread_projects_retry_input() {
                 "2026-11-16T00:00:00Z",
                 "T-1",
                 "cognition_in",
-                json!({"content": "go"}),
+                json!({"origin": "launch", "parts": [{"type": "text", "text": "go"}]}),
             ),
             ev(
                 2,
@@ -737,4 +751,151 @@ fn a_push_out_of_order_is_refused_and_appends_nothing() {
     assert_eq!(folder.timeline(), before);
     folder.push(&all[2..]).unwrap();
     assert_eq!(folder.timeline(), fold(&all, &def).unwrap());
+}
+
+/// A lookup's `when` filters the earlier events it considers, and `find` may
+/// match an element against a literal: the text of the first text part of the
+/// latest earlier operator or launch input.
+#[test]
+fn a_lookup_filters_by_when_and_finds_an_element_by_literal() {
+    let def = Definition::from_yaml(
+        r#"
+events:
+  thread_failed:
+    - emit:
+        - type: outcome
+          key: [thread_id]
+          project:
+            retry_input:
+              lookup:
+                event: cognition_in
+                when: {one_of: [payload.origin, [operator, launch]]}
+                array: payload.parts
+                find: {field: type, equals: text}
+                get: text
+"#,
+    )
+    .unwrap();
+    let input = |seq, thread, origin: &str, parts: Value| {
+        ev(
+            seq,
+            "2026-11-16T00:00:00Z",
+            thread,
+            "cognition_in",
+            json!({"origin": origin, "parts": parts}),
+        )
+    };
+    let image = json!({"type": "image", "media_type": "image/png"});
+    let evs = vec![
+        input(
+            1,
+            "T-1",
+            "launch",
+            json!([{"type": "text", "text": "first"}]),
+        ),
+        input(
+            2,
+            "T-1",
+            "operator",
+            json!([image, {"type": "text", "text": "second"}, {"type": "text", "text": "tail"}]),
+        ),
+        input(
+            3,
+            "T-1",
+            "harness",
+            json!([{"type": "text", "text": "nudge"}]),
+        ),
+        input(
+            4,
+            "T-1",
+            "context",
+            json!([{"type": "text", "text": "ctx"}]),
+        ),
+        input(
+            5,
+            "T-2",
+            "operator",
+            json!([{"type": "text", "text": "other thread"}]),
+        ),
+        ev(6, "2026-11-16T00:00:01Z", "T-1", "thread_failed", json!({})),
+        ev(7, "2026-11-16T00:00:01Z", "T-3", "thread_failed", json!({})),
+    ];
+    let timeline = fold(&evs, &def).unwrap();
+    assert_eq!(
+        find(&timeline, "out:T-1").unwrap().slots["retry_input"],
+        "second"
+    );
+    assert!(
+        !find(&timeline, "out:T-3")
+            .unwrap()
+            .slots
+            .contains_key("retry_input")
+    );
+}
+
+/// A lookup with a literal `find` and no `array` is not a lookup.
+#[test]
+fn a_find_without_an_array_yields_nothing() {
+    let def = Definition::from_yaml(
+        r#"
+events:
+  thread_failed:
+    - emit:
+        - type: outcome
+          key: [thread_id]
+          project:
+            x: {lookup: {event: cognition_in, find: {field: type, equals: text}, get: text}}
+"#,
+    )
+    .unwrap();
+    let evs = vec![
+        ev(
+            1,
+            "2026-11-16T00:00:00Z",
+            "T-1",
+            "cognition_in",
+            json!({"text": "a"}),
+        ),
+        ev(2, "2026-11-16T00:00:01Z", "T-1", "thread_failed", json!({})),
+    ];
+    let timeline = fold(&evs, &def).unwrap();
+    assert!(!find(&timeline, "out:T-1").unwrap().slots.contains_key("x"));
+}
+
+/// `ne` holds when the path is absent or different; `one_of` when the value
+/// is any listed literal; `item_last` marks the final element of an `over`.
+#[test]
+fn ne_one_of_and_item_last_conditions() {
+    let def = Definition::from_yaml(
+        r#"
+events:
+  cognition_out:
+    - over: payload.parts
+      emit:
+        - type: prose
+          when: {ne: [item_index, 0]}
+          project: {body: item.text}
+        - type: marker
+          when: {eq: [item_last, true], one_of: [payload.finish, [interrupted, length]]}
+          project: {headline: payload.finish}
+"#,
+    )
+    .unwrap();
+    let out = |seq, finish: &str| {
+        ev(
+            seq,
+            "2026-11-16T00:00:00Z",
+            "T-1",
+            "cognition_out",
+            json!({"finish": finish, "parts": [{"text": "a"}, {"text": "b"}, {"text": "c"}]}),
+        )
+    };
+    let timeline = fold(&[out(1, "interrupted"), out(2, "stop")], &def).unwrap();
+    assert_eq!(
+        entry_ids(&timeline)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>(),
+        ["pro:1/1", "pro:1/2", "mrk:1/2", "pro:2/1", "pro:2/2"]
+    );
 }
