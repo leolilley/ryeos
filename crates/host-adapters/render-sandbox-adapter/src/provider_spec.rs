@@ -215,6 +215,11 @@ struct NetworkPolicyTypeLiteral {
 enum EgressFieldSource {
     #[serde(rename = "lease.guest_network_allow")]
     LeaseGuestNetworkAllow,
+    /// The egress hosts of the launch shape a qualification occurrence is
+    /// created under, derived through the same `egress_policy()` a lease
+    /// create uses.
+    #[serde(rename = "qualification.guest_network_allow")]
+    QualificationGuestNetworkAllow,
 }
 
 /// A create body's `networkPolicy`: a fixed type, or the admitted lease's
@@ -1008,6 +1013,7 @@ impl ProviderSpec {
         settings_region: &str,
         bound_snapshot_id: &str,
         maximum_lifetime_seconds: u32,
+        qualification_egress: &BTreeSet<String>,
     ) -> Result<CreateProjection> {
         let mapping = self
             .operations
@@ -1024,10 +1030,8 @@ impl ProviderSpec {
                 && mapping.timeout_seconds.source == LifetimeFieldSource::Qualification
                 && mapping.network_policy
                     == NetworkPolicyMapping {
-                        literal: Some(NetworkPolicyTypeLiteral {
-                            policy_type: NetworkPolicyType::DenyAll,
-                        }),
-                        source: None,
+                        literal: None,
+                        source: Some(EgressFieldSource::QualificationGuestNetworkAllow),
                     },
             "qualification create mapping differs from its reviewed field sources"
         );
@@ -1045,7 +1049,7 @@ impl ProviderSpec {
             plan: settings_plan,
             region: settings_region.to_owned(),
             timeout_seconds: maximum_lifetime_seconds,
-            network_policy: EgressPolicy::deny_all(),
+            network_policy: self.egress_policy(qualification_egress)?,
             snapshot_id: bound_snapshot_id.to_owned(),
         })
     }
@@ -1212,10 +1216,8 @@ fn expected_qualification_create_body_mapping() -> CreateBodyMapping {
             source: LifetimeFieldSource::Qualification,
         },
         network_policy: NetworkPolicyMapping {
-            literal: Some(NetworkPolicyTypeLiteral {
-                policy_type: NetworkPolicyType::DenyAll,
-            }),
-            source: None,
+            literal: None,
+            source: Some(EgressFieldSource::QualificationGuestNetworkAllow),
         },
         snapshot_id: Some(StringSource {
             source: StringFieldSource::QualificationLocatorSnapshotId,
@@ -1688,11 +1690,57 @@ mod tests {
                 "oregon",
                 "snp-bound-1",
                 900,
+                &BTreeSet::new(),
             )
             .unwrap();
         assert_eq!(projection.snapshot_id, "snp-bound-1");
         assert_eq!(projection.timeout_seconds, 900);
         assert_eq!(projection.network_policy, EgressPolicy::deny_all());
+        // The qualification create takes its network policy from the launch
+        // shape's hosts through the lease's own derivation.
+        let hosts: BTreeSet<String> = ["controller.invalid".to_owned()].into();
+        let authored = ProviderSpec::parse(bundle_spec_bytes(), SETTINGS_SCHEMA_DIGEST).unwrap();
+        let allowed = authored
+            .qualification_create_projection(
+                "owner-1",
+                PlanValue::Starter,
+                "oregon",
+                "snp-bound-1",
+                900,
+                &hosts,
+            )
+            .unwrap();
+        assert_eq!(
+            allowed.network_policy,
+            authored.egress_policy(&hosts).unwrap()
+        );
+        assert_ne!(allowed.network_policy, EgressPolicy::deny_all());
+        // A shape the signed spec cannot create creates nothing: a deny-all
+        // only spec refuses the allow-list, and a malformed host is refused.
+        assert!(
+            spec.qualification_create_projection(
+                "owner-1",
+                PlanValue::Starter,
+                "oregon",
+                "snp-bound-1",
+                900,
+                &hosts,
+            )
+            .is_err()
+        );
+        let unsupported: BTreeSet<String> = ["Not A Host".to_owned()].into();
+        assert!(
+            authored
+                .qualification_create_projection(
+                    "owner-1",
+                    PlanValue::Starter,
+                    "oregon",
+                    "snp-bound-1",
+                    900,
+                    &unsupported,
+                )
+                .is_err()
+        );
         assert!(
             spec.qualification_create_projection(
                 "owner-1",
@@ -1700,6 +1748,7 @@ mod tests {
                 "oregon",
                 "../ambient",
                 900,
+                &BTreeSet::new(),
             )
             .is_err()
         );
@@ -2024,6 +2073,20 @@ mod tests {
         assert!(!parses(&|value| {
             value["operations"]["qualification_create"]["body"]["networkPolicy"] =
                 serde_json::json!({"literal": {"type": "allow-list"}});
+        }));
+        // The reviewed qualification mapping is the launch-shape source: the
+        // former deny-all literal and the lease's source are both refused.
+        assert!(!parses(&|value| {
+            value["operations"]["qualification_create"]["body"]["networkPolicy"] =
+                serde_json::json!({"literal": {"type": "deny-all"}});
+        }));
+        assert!(!parses(&|value| {
+            value["operations"]["qualification_create"]["body"]["networkPolicy"] =
+                serde_json::json!({"source": "lease.guest_network_allow"});
+        }));
+        assert!(!parses(&|value| {
+            value["operations"]["allocate"]["body"]["networkPolicy"] =
+                serde_json::json!({"source": "qualification.guest_network_allow"});
         }));
         assert!(!parses(&|value| {
             value["operations"]["bootstrap_create"]["body"]["networkPolicy"] =

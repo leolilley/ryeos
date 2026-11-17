@@ -339,6 +339,22 @@ impl PreparedBundleStructuredWorkerProfile {
     }
 }
 
+/// The readiness budget the signed Worker kind declares for its sessions.
+/// A program's placement is fixed from it where the program is admitted.
+pub fn worker_ready_timeout_ms(engine: &ryeos_engine::engine::Engine) -> anyhow::Result<u64> {
+    Ok(engine
+        .kinds
+        .get("worker")
+        .context("worker kind is absent")?
+        .execution
+        .as_ref()
+        .context("worker kind is not executable")?
+        .persistent_session
+        .as_ref()
+        .context("worker kind declares no persistent session")?
+        .ready_timeout_ms)
+}
+
 pub fn admit_bundle_structured_worker_profile(
     state: &AppState,
     worker_ref: &str,

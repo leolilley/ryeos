@@ -5,7 +5,6 @@
 //! historical publisher keys here cannot grant fresh work.
 
 use anyhow::{Context as _, Result, ensure};
-use base64::Engine as _;
 use ryeos_external_execution::guest_runtime_product::{
     GuestOwnerRuntimeManifestIdentity, derive_guest_owner_runtime_manifest_identity,
 };
@@ -119,12 +118,7 @@ pub(super) fn verify_testimony(
     let source = evidence.source;
     let node_fingerprint = lillux::crypto::fingerprint(node_key);
     ensure!(
-        source.node_site_id == format!("site:{node_fingerprint}")
-            && source.controller_public_root
-                == format!(
-                    "ed25519:{}",
-                    base64::engine::general_purpose::STANDARD.encode(node_key.to_bytes())
-                ),
+        source.node_site_id == format!("site:{node_fingerprint}"),
         "materialization node testimony differs from controller identity"
     );
     let subject_value =
@@ -286,21 +280,10 @@ pub(super) fn verify_output_closure(
         &source.runtime_manifest_hash,
         MAX_OUTPUT_MANIFEST_BYTES,
     )?;
-    let root_bytes = base64::engine::general_purpose::STANDARD.decode(
-        source
-            .controller_public_root
-            .strip_prefix("ed25519:")
-            .context("retained controller root is not Ed25519")?,
-    )?;
-    let root_bytes: [u8; 32] = root_bytes
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("retained controller root has wrong length"))?;
-    let root_key = lillux::crypto::VerifyingKey::from_bytes(&root_bytes)?;
-    let identity = derive_guest_owner_runtime_manifest_identity(&manifest_value, &root_key)?;
+    let identity = derive_guest_owner_runtime_manifest_identity(&manifest_value)?;
     ensure!(
         identity.manifest_hash == source.runtime_manifest_hash
-            && identity.owner_executable_sha256 == source.owner_executable_sha256
-            && identity.controller_public_root == source.controller_public_root,
+            && identity.owner_executable_sha256 == source.owner_executable_sha256,
         "retained product identity differs from materialization source"
     );
     let manifest = ExternalContentManifestObject::from_value(&manifest_value)?;
@@ -341,7 +324,6 @@ pub(super) fn verify_output_closure(
         "retained product owner bytes differ from source payload"
     );
     load_blob_bounded(cas, &source.profile_digest, MAX_PROFILE_BYTES)?;
-    load_blob_bounded(cas, &identity.controller_root_blob_sha256, 64)?;
     Ok(identity)
 }
 

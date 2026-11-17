@@ -125,7 +125,7 @@
         "plan": { "source": "settings.plan" },
         "region": { "source": "settings.region" },
         "timeoutSeconds": { "source": "qualification.maximum_lifetime_seconds" },
-        "networkPolicy": { "literal": { "type": "deny-all" } },
+        "networkPolicy": { "source": "qualification.guest_network_allow" },
         "snapshotId": { "source": "qualification.locator.snapshot_id" }
       },
       "bind_proof_profile": "render_sandbox_create_201_v1",

@@ -3332,6 +3332,7 @@ mod tests {
                     boot_id: boot_id.into(),
                     verified_input_digests: vec!["7".repeat(64)],
                     ready_at_ms: lillux::time::timestamp_millis(),
+                    network_inputs: Vec::new(),
                 }),
             },
         );
@@ -3463,6 +3464,7 @@ mod tests {
                         boot_id: BOOT.into(),
                         verified_input_digests: vec!["7".repeat(64)],
                         ready_at_ms: lillux::time::timestamp_millis(),
+                        network_inputs: Vec::new(),
                     }),
                 },
             )

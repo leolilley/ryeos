@@ -83,7 +83,7 @@ mod tests {
     fn fixture() -> (RestoredVerifierAttemptIntent, serde_json::Value) {
         let hash = "a".repeat(64);
         let mut attempt = RestoredVerifierAttemptIntent {
-            schema: 2,
+            schema: ryeos_external_execution_contract::restored_runtime_measurement::RESTORED_VERIFIER_ATTEMPT_SCHEMA,
             operation_id: String::new(),
             qualification_operation_id: hash.clone(),
             restored_occurrence_id: "sbx-consumer".into(),
@@ -105,8 +105,7 @@ mod tests {
                     prerequisite_measurement_observation_digest: hash.clone(),
                 },
                 nonce_hex: hash.clone(),
-                guest_runtime_manifest_hash: hash.clone(),
-            },
+                guest_runtime_manifest_hash: hash.clone(), launch_shape: ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(), },
         };
         attempt.operation_id = attempt.derived_operation_id().unwrap();
         let mut intent = RuntimeSnapshotQualificationTerminationIntent {

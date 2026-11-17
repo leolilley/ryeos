@@ -981,6 +981,51 @@ impl RetainedExternalExecutionBinding {
         settings: Value,
         qualification: &PlacementQualificationSelection,
     ) -> Result<Self> {
+        Self::composed_test_fixture_with_settings_and_timeout(
+            program,
+            controller_transport,
+            controller_tls_root_certificates_der_base64,
+            backend,
+            backend_artifact_hash,
+            backend_artifact_bytes,
+            settings_schema_digest,
+            supervisor_artifact_hash,
+            supervisor_artifact_bytes,
+            launcher_artifact_hash,
+            launcher_artifact_bytes,
+            configuration_adapter_artifact_hash,
+            configuration_adapter_artifact_bytes,
+            connector_artifact_hash,
+            connector_artifact_bytes,
+            settings,
+            qualification,
+            60,
+        )
+    }
+
+    /// The same fixture with the binding's execution timeout (which is also
+    /// the lease lifetime of a leased session) stated.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn composed_test_fixture_with_settings_and_timeout(
+        program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
+        controller_transport: impl Into<ComposedTestTransport>,
+        controller_tls_root_certificates_der_base64: Vec<String>,
+        backend: String,
+        backend_artifact_hash: String,
+        backend_artifact_bytes: u64,
+        settings_schema_digest: String,
+        supervisor_artifact_hash: String,
+        supervisor_artifact_bytes: u64,
+        launcher_artifact_hash: String,
+        launcher_artifact_bytes: u64,
+        configuration_adapter_artifact_hash: String,
+        configuration_adapter_artifact_bytes: u64,
+        connector_artifact_hash: String,
+        connector_artifact_bytes: u64,
+        settings: Value,
+        qualification: &PlacementQualificationSelection,
+        timeout_seconds: u32,
+    ) -> Result<Self> {
         let transport: ComposedTestTransport = controller_transport.into();
         let document = compose::compose_binding_document(compose::ComposeInputs {
             program,
@@ -1031,7 +1076,7 @@ impl RetainedExternalExecutionBinding {
             },
             limits: compose::ComposeLimits {
                 max_active: 1,
-                timeout_seconds: 60,
+                timeout_seconds,
                 // The composed native fixture transfers the exact guest
                 // runtime through descriptor authority during the one
                 // bounded activation contact. Use the contract's maximum
@@ -1195,6 +1240,7 @@ pub fn provision_installed_test_placement_credential(
 
 impl InstalledExternalExecutionBinding {
     #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)]
     pub(crate) fn composed_test_fixture_with_settings(
         program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
         controller_transport: impl Into<ComposedTestTransport>,
@@ -1214,7 +1260,7 @@ impl InstalledExternalExecutionBinding {
         settings: Value,
         qualification: &PlacementQualificationSelection,
     ) -> Result<Self> {
-        let retained = RetainedExternalExecutionBinding::composed_test_fixture_with_settings(
+        Self::composed_test_fixture_with_settings_and_timeout(
             program,
             controller_transport,
             controller_tls_root_certificates_der_base64,
@@ -1232,7 +1278,52 @@ impl InstalledExternalExecutionBinding {
             connector_artifact_bytes,
             settings,
             qualification,
-        )?;
+            60,
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn composed_test_fixture_with_settings_and_timeout(
+        program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
+        controller_transport: impl Into<ComposedTestTransport>,
+        controller_tls_root_certificates_der_base64: Vec<String>,
+        backend: String,
+        backend_artifact_hash: String,
+        backend_artifact_bytes: u64,
+        settings_schema_digest: String,
+        supervisor_artifact_hash: String,
+        supervisor_artifact_bytes: u64,
+        launcher_artifact_hash: String,
+        launcher_artifact_bytes: u64,
+        configuration_adapter_artifact_hash: String,
+        configuration_adapter_artifact_bytes: u64,
+        connector_artifact_hash: String,
+        connector_artifact_bytes: u64,
+        settings: Value,
+        qualification: &PlacementQualificationSelection,
+        timeout_seconds: u32,
+    ) -> Result<Self> {
+        let retained =
+            RetainedExternalExecutionBinding::composed_test_fixture_with_settings_and_timeout(
+                program,
+                controller_transport,
+                controller_tls_root_certificates_der_base64,
+                backend,
+                backend_artifact_hash,
+                backend_artifact_bytes,
+                settings_schema_digest,
+                supervisor_artifact_hash,
+                supervisor_artifact_bytes,
+                launcher_artifact_hash,
+                launcher_artifact_bytes,
+                configuration_adapter_artifact_hash,
+                configuration_adapter_artifact_bytes,
+                connector_artifact_hash,
+                connector_artifact_bytes,
+                settings,
+                qualification,
+                timeout_seconds,
+            )?;
         Ok(Self {
             id: retained.id,
             document: retained.document,
@@ -2141,6 +2232,80 @@ mod workload_binding_tests {
         }
         session.max_export_bytes = 0;
         assert!(session.validate().is_err());
+    }
+
+    /// The runtime selection identity is derived through the real admission
+    /// path from installed-bundle selections. A bundle-owned relationship
+    /// whose content changes under the same publisher changes that identity,
+    /// and the installed binding then refuses the program.
+    #[test]
+    fn check_program_refuses_a_changed_bundle_owned_relationship() {
+        use ryeos_state::external_content::products::composition::ResolvedProductConsumerSource;
+        use ryeos_state::external_execution::admission::{
+            fixture_placement,
+            test_support::{
+                fixture_qualification_use, fixture_requirement,
+                qualified_external_candidate_selections,
+            },
+        };
+        let requirement = fixture_requirement();
+        let qualification_use = fixture_qualification_use(&requirement).unwrap();
+        let runtime_manifest_hash = "b".repeat(64);
+        let derive = |relationship_digest: &str| {
+            let selections = qualified_external_candidate_selections(
+                &runtime_manifest_hash,
+                &requirement,
+                &qualification_use,
+            )
+            .unwrap();
+            let mut map = selections.into_inner();
+            let runtime = map
+                .get_mut(&requirement.runtime_product_declaration_id)
+                .unwrap();
+            runtime.relationship_raw_content_digest = relationship_digest.to_owned();
+            runtime.relationship_project_dependent = false;
+            runtime.consumer_source = ResolvedProductConsumerSource::InstalledBundle {
+                consumer_ref: runtime.consumer_source.consumer_ref().to_owned(),
+                publisher_fingerprint: runtime.consumer_source.publisher_fingerprint().to_owned(),
+            };
+            let selections =
+                ryeos_state::external_content::products::composition::ResolvedExternalProductSelections::new(map)
+                    .unwrap();
+            requirement
+                .resolve_for_use(Some(&selections), &qualification_use, fixture_placement())
+                .unwrap()
+        };
+        let original = derive(&"1".repeat(64));
+        let mut binding = document();
+        match &mut binding.workload {
+            ExternalWorkloadBinding::StructuredSession(session) => {
+                session.provider_declaration_id =
+                    original.requirement.provider_declaration_id.clone();
+                session.provider_configuration_destination = original
+                    .requirement
+                    .provider_configuration_destination
+                    .clone();
+                session.runtime_manifest_hash = original.runtime_manifest_hash.clone();
+                session.runtime_selection_identity = original.selection_identity_digest.clone();
+            }
+            _ => panic!("fixture is a structured session"),
+        }
+        check_program(&binding, &original).unwrap();
+        let changed = derive(&"2".repeat(64));
+        assert_ne!(
+            changed.selection_identity_digest,
+            original.selection_identity_digest
+        );
+        assert_eq!(
+            changed.runtime_manifest_hash,
+            original.runtime_manifest_hash
+        );
+        assert!(
+            check_program(&binding, &changed)
+                .unwrap_err()
+                .to_string()
+                .contains("contradicts installed placement binding")
+        );
     }
 
     #[test]

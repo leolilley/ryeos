@@ -272,7 +272,8 @@ impl NodeCapabilityReport {
                 .pid_namespace,
         );
         // What a workload may declare it needs of this node's isolation and
-        // node policy; qualification variants are selected against these names.
+        // node policy; a protocol's required guarantees are matched against
+        // these names when the node selects the one it launches under.
         inputs.isolation.add_policy_guarantees(
             inputs.isolation.mode == ryeos_engine::isolation::IsolationMode::Enforce,
             &ryeos_engine::isolation::GuaranteeHost {
@@ -809,6 +810,52 @@ fn refusal_text(
         }
     ));
     text
+}
+
+/// The node's current capability view as launch admission judges it: the
+/// recorded report re-read, its digest and this node's signature verified, and
+/// refused unless it still describes the running node (the host generation and
+/// the policy generation), with `credential:private_home` re-observed. The
+/// daemon's report reader and the tests that stand a node up both read the
+/// report through this one function.
+pub fn current_node_capability_view(
+    app_root: &std::path::Path,
+    policy_generation: &str,
+) -> Result<lillux::process_control::HostCapabilities> {
+    use ryeos_app::node_requirement_admission::{NodeReportUnreadable, NodeRequirementRefused};
+    let signed = SignedNodeCapabilityReport::read_verified(app_root)?.ok_or_else(|| {
+        NodeRequirementRefused(
+            "launch refused: no verified node capability report is recorded".to_owned(),
+        )
+    })?;
+    let staleness = signed.staleness(Some(policy_generation)).map_err(|error| {
+        NodeReportUnreadable(format!("observe this host's generation: {error:#}"))
+    })?;
+    if let Some(reason) = staleness {
+        anyhow::bail!(NodeRequirementRefused(format!(
+            "launch refused: the recorded node capability report is stale: {reason}"
+        )));
+    }
+    let mut view = lillux::process_control::HostCapabilities {
+        provided: signed.report.provided,
+        missing: signed.report.missing,
+    };
+    let credential_home = CREDENTIAL_PRIVATE_HOME;
+    if view.provided.contains_key(credential_home) {
+        let state_dir = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).state();
+        let observed = lillux::process_control::PrivateDirectoryFacts::observe(
+            app_root,
+            &ryeos_app::private_artifact_home::root(&state_dir),
+        );
+        if let Err(reason) = lillux::process_control::decide_private_directory(&observed) {
+            view.provided.remove(credential_home);
+            view.refuse(
+                credential_home,
+                format!("credential home root is no longer private at admission: {reason}"),
+            );
+        }
+    }
+    Ok(view)
 }
 
 #[cfg(test)]

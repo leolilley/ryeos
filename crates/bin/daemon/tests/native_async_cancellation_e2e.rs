@@ -192,6 +192,7 @@ fn build_and_extract_spec(
             &ctx.execution_hints,
             None,
             ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+            None,
         )
         .map_err(|e| e.to_string())?;
 

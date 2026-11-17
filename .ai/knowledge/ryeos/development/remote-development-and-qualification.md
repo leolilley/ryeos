@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T18:26:28Z:3a4c22e9a75a7830b2f1c3030b691ceafeafde8cbfefd5cdba7dd6f4568efd99:eEfBWbRa7oGbSAFyWlzyzrIQIAj6EMaaSMyHG7bm30CtikmVPQIwez7+NL2iCji6dv+kPPEmNCi6Ndejbo9aDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T14:13:43Z:22e92ab0d52bb531a794a686346e0e6bad9f45c2002e5e3bc4ef9a9d3037df17:6q3aJa/dALMxwta4Fi+JCUZxHPOAHBmsdI1QYyJBHAAUHQxn6MDGRbiU8TF+r88djou1caQjUdcG6HuxAiCbDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "remote-development-and-qualification"
@@ -489,9 +489,12 @@ Product qualification uses the existing signed policy Config to select its
 trusted-bundle verifier, subject declaration, allowed claims, static
 `verifier_parameters`, and minimum process-settlement authority. The current
 reader accepts only `ryeos.product_qualification_policy.v3` and requires an
-explicit `minimum_verifier_process_settlement`; predecessor v1 and v2 policies
-or an omitted field are refused. A missing settlement decision never acquires
-a compatibility default.
+explicit `minimum_verifier_process_settlement` for a policy without a consumer
+execution context; predecessor v1 and v2 policies or an omitted field are
+refused. A missing settlement decision never acquires a compatibility default.
+A policy with a consumer execution context names no minimum: it takes the
+settlement requirement from the holding of the protocol the node selects for
+the verifier, and carries no required node guarantees.
 
 A v3 producer scenario may select an independent remote verifier by signed
 Bundle binary ref and guest target triple. An absent selection authorizes no

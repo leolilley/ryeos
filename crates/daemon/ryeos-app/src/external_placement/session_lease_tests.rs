@@ -20,6 +20,23 @@ fn remote_profile() -> serde_json::Value {
     })
 }
 
+fn placement(
+    profile: &serde_json::Value,
+    ready_timeout_ms: u64,
+) -> ryeos_state::external_execution::admission::ExternalProgramPlacement {
+    ryeos_engine::structured_session_profile::external_program_placement(profile, ready_timeout_ms)
+        .unwrap()
+}
+
+fn program_for(
+    profile: &serde_json::Value,
+    ready_timeout_ms: u64,
+) -> ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram {
+    let mut program = super::tests::program();
+    program.placement = placement(profile, ready_timeout_ms);
+    program
+}
+
 fn budget() -> ExternalLeaseBudget {
     ExternalLeaseBudget {
         max_concurrent_leases: 2,
@@ -35,10 +52,13 @@ fn contract() -> ExternalPlacementBackendContract {
 
 #[test]
 fn a_remote_session_asks_for_one_lease_built_from_signed_data() {
-    let (inputs, charge) =
-        session_lease_request(&remote_profile(), 120_500, &contract(), Some(&budget()))
-            .unwrap()
-            .unwrap();
+    let (inputs, charge) = session_lease_request(
+        &placement(&remote_profile(), 120_500),
+        &contract(),
+        Some(&budget()),
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(inputs.workload, "codex.authoring.remote");
     assert_eq!(
         inputs
@@ -67,22 +87,27 @@ fn a_session_without_lease_requirements_needs_no_lease_or_budget() {
     requires.remove("lease");
     requires.remove("guest");
     assert!(
-        session_lease_request(&profile, 1_000, &contract(), None)
+        session_lease_request(&placement(&profile, 1_000), &contract(), None)
             .unwrap()
             .is_none()
     );
+    // A profile that declares no `requires` has no placement: there is no
+    // default for a program to fall back on.
     assert!(
-        session_lease_request(&serde_json::json!({}), 1_000, &contract(), None)
-            .unwrap()
-            .is_none()
+        ryeos_engine::structured_session_profile::external_program_placement(
+            &serde_json::json!({}),
+            1_000
+        )
+        .is_err()
     );
 }
 
 #[test]
 fn a_lease_is_refused_plainly_without_a_budget_that_allows_it() {
     let text = |error: anyhow::Error| format!("{error:#}");
-    let missing =
-        text(session_lease_request(&remote_profile(), 1_000, &contract(), None).unwrap_err());
+    let missing = text(
+        session_lease_request(&placement(&remote_profile(), 1_000), &contract(), None).unwrap_err(),
+    );
     assert!(
         missing.contains("workload `codex.authoring.remote` needs a remote lease")
             && missing.contains("declares no external lease budget"),
@@ -94,7 +119,12 @@ fn a_lease_is_refused_plainly_without_a_budget_that_allows_it() {
         ..budget()
     };
     let too_long = text(
-        session_lease_request(&remote_profile(), 1_000, &contract(), Some(&short)).unwrap_err(),
+        session_lease_request(
+            &placement(&remote_profile(), 1_000),
+            &contract(),
+            Some(&short),
+        )
+        .unwrap_err(),
     );
     assert!(
         too_long.contains("60s lifetime exceeds the node's 59s lease lifetime ceiling"),
@@ -112,7 +142,12 @@ fn a_lease_is_refused_when_the_controller_has_no_dns_host_for_the_guest() {
         .https_origin = "https://192.0.2.1".into();
     let refusal = format!(
         "{:#}",
-        session_lease_request(&remote_profile(), 1_000, &contract, Some(&budget())).unwrap_err()
+        session_lease_request(
+            &placement(&remote_profile(), 1_000),
+            &contract,
+            Some(&budget())
+        )
+        .unwrap_err()
     );
     assert!(refusal.contains("names no HTTPS DNS host"), "{refusal}");
 }
@@ -154,10 +189,33 @@ fn with_budget_and_counting_vault(
             external_lease_budget: budget,
             external_wall_clock_requirement: None,
         };
+    // The placement judgment also checks the node's supervisor journal
+    // window, which the fixture binding's occurrence fits.
+    let envelope = crate::external_supervisor_native::test_supervisor_journal_envelope();
+    let maintenance = ryeos_scheduler_contract::NodeMaintenancePolicy {
+        schema: 1,
+        schedules: Vec::new(),
+        offline_reset: None,
+        offline_native: [(
+            crate::external_supervisor_native::EXTERNAL_SUPERVISOR_JOURNAL_CLASS.to_owned(),
+            ryeos_scheduler_contract::OfflineNativeQuota {
+                max_native_storage_bytes: envelope.storage_bytes,
+                max_native_allocator_steps: envelope.allocator_steps,
+                max_native_connections: envelope.connections,
+                max_operation_millis: envelope.operation_millis,
+                max_cleanup_millis: envelope.cleanup_millis,
+                max_cleanup_steps: envelope.cleanup_steps,
+            },
+        )]
+        .into_iter()
+        .collect(),
+        remote_offline_operations: Vec::new(),
+    };
     state.node_policy = Arc::new(
-        ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
-            policy,
-        )]),
+        ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
+            Arc::new(policy),
+            Arc::new(maintenance),
+        ]),
     );
     vault
 }
@@ -195,8 +253,7 @@ fn a_refused_lease_never_reads_the_vault() {
     let vault = with_budget_and_counting_vault(&mut state, Some(budget()));
     let refusal = refusal_of(admit_fresh_lease_then_read_credential(
         &state,
-        Some(&profile),
-        1_000,
+        &program_for(&profile, 1_000),
         fitting_deadline,
         &contract,
         &access,
@@ -208,8 +265,7 @@ fn a_refused_lease_never_reads_the_vault() {
     let vault = with_budget_and_counting_vault(&mut state, None);
     let refusal = refusal_of(admit_fresh_lease_then_read_credential(
         &state,
-        Some(&profile),
-        1_000,
+        &program_for(&profile, 1_000),
         fitting_deadline,
         &contract,
         &access,
@@ -228,8 +284,7 @@ fn a_refused_lease_never_reads_the_vault() {
     requires.remove("guest");
     let refusal = refusal_of(admit_fresh_lease_then_read_credential(
         &state,
-        Some(&no_lease),
-        1_000,
+        &program_for(&no_lease, 1_000),
         || -> Result<Option<i64>> {
             panic!("a session that needs no lease was measured against one")
         },
@@ -260,8 +315,7 @@ fn a_session_its_lease_cannot_cover_is_refused_before_the_adapter_or_the_vault()
     for deadline in [Some(now_ms() + 31_000), None] {
         let refusal = refusal_of(admit_fresh_lease_then_read_credential(
             &state,
-            Some(&profile),
-            1_000,
+            &program_for(&profile, 1_000),
             || Ok(deadline),
             &contract,
             &access,
@@ -276,8 +330,7 @@ fn a_session_its_lease_cannot_cover_is_refused_before_the_adapter_or_the_vault()
     // A session past its deadline is refused by the deadline itself.
     let refusal = refusal_of(admit_fresh_lease_then_read_credential(
         &state,
-        Some(&profile),
-        1_000,
+        &program_for(&profile, 1_000),
         || anyhow::bail!("budget_exhausted: bounded worker absolute lifetime expired"),
         &contract,
         &access,
@@ -288,8 +341,7 @@ fn a_session_its_lease_cannot_cover_is_refused_before_the_adapter_or_the_vault()
     // A session that fits goes on to the adapter.
     let refusal = refusal_of(admit_fresh_lease_then_read_credential(
         &state,
-        Some(&profile),
-        1_000,
+        &program_for(&profile, 1_000),
         fitting_deadline,
         &contract,
         &access,

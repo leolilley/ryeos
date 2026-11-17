@@ -135,6 +135,18 @@ impl ProtocolRegistry {
         }
     }
 
+    /// Build a registry from already-verified entries (for testing).
+    #[cfg(test)]
+    pub(crate) fn from_verified(protocols: Vec<VerifiedProtocol>) -> Self {
+        Self {
+            entries: protocols
+                .into_iter()
+                .map(|protocol| (protocol.canonical_ref.clone(), protocol))
+                .collect(),
+            fingerprint: "test".to_owned(),
+        }
+    }
+
     /// Look up a protocol by canonical ref.
     pub fn get(&self, canonical_ref: &str) -> Option<&VerifiedProtocol> {
         self.entries.get(canonical_ref)
@@ -393,6 +405,13 @@ fn validate_protocol_descriptor(
         )?;
     }
 
+    crate::protocols::descriptor::validate_protocol_holding(desc).map_err(|detail| {
+        ProtocolError::MalformedYaml {
+            path: path.to_owned(),
+            detail,
+        }
+    })?;
+
     if let Some(projector) = &desc.execution_evidence {
         crate::execution_evidence::validate_execution_evidence_projector_declaration(projector)
             .map_err(|detail| ProtocolError::MalformedYaml {
@@ -478,6 +497,25 @@ mod tests {
             "kind: protocol\nname: test\ncategory: ryeos/core\nabi_version: v1\nstdin:\n  shape: opaque\nstdout:\n  shape: opaque_bytes\n  mode: terminal\nenv_injections:\n{env_injections}capabilities:\n  allows_pushed_head: false\n  allows_target_site: false\n  allows_detached: true\nlifecycle:\n  mode: detached_ok\ncallback_channel: {callback_channel}\n"
         ))
         .unwrap()
+    }
+
+    #[test]
+    fn load_validation_refuses_an_empty_holding_guarantee_list() {
+        let mut descriptor = descriptor("none", "  - { name: TEST_VAR, source: thread_id }\n");
+        descriptor.holding = Some(
+            serde_json::from_value(serde_json::json!({
+                "requires_guarantees": [],
+                "filesystem_authority": "node_policy",
+                "root_settlement": "trusted_process_group_absent",
+            }))
+            .unwrap(),
+        );
+        let error = validate_protocol_descriptor(Path::new("test.yaml"), &descriptor)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("holding"), "{error}");
+        descriptor.holding = None;
+        validate_protocol_descriptor(Path::new("test.yaml"), &descriptor).unwrap();
     }
 
     #[test]

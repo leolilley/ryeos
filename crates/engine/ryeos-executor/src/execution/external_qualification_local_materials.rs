@@ -25,6 +25,10 @@ pub(crate) struct PreparedExternalQualificationLocalSession {
     pub(crate) lifecycle: PersistentSessionLifecycleContract,
     pub(crate) wire: PersistentSessionWireContract,
     pub(crate) protocol: PersistentSessionProtocol,
+    /// The protocol the node selected for this Worker and its holding's
+    /// filesystem authority, retained with the process row at attachment.
+    pub(crate) selected_holding:
+        ryeos_app::external_qualification_local::QualificationWorkerSelectedHolding,
 }
 
 /// The plan, privately copied inputs, and exact source/cache/workspace lifelines stay
@@ -150,7 +154,7 @@ pub(crate) fn prepare_external_qualification_local_materials(
     ryeos_app::thread_lifecycle::with_prepared_external_qualification_local_worker_plan(
         state,
         root,
-        |mut plan, declaration, signed_protocol, composed| {
+        |mut plan, declaration, signed_protocol, composed, selected_holding| {
             let mut declaration = declaration.clone();
             super::persistent_session::apply_resource_overrides(&mut declaration, composed)?;
             let session = PreparedExternalQualificationLocalSession {
@@ -161,6 +165,7 @@ pub(crate) fn prepare_external_qualification_local_materials(
                 )
                 .map_err(anyhow::Error::msg)?
                 .clone(),
+                selected_holding,
             };
             if enforced {
                 require_contained_worker_launch(state, &session.protocol)?;
@@ -382,19 +387,34 @@ mod tests {
     }
 
     #[test]
-    fn both_launch_checks_agree_on_each_lane() {
-        use ryeos_app::thread_lifecycle::qualification_worker_protocol_lane_admits as plan_lane;
-        let contained = protocol(Cleanup::DescendantContainment, Workspace::EphemeralScratch);
-        let trusted = protocol(Cleanup::TrustedProcessGroup, Workspace::RuntimeWorkspace);
+    fn both_launch_checks_agree_on_each_posture() {
+        use ryeos_app::thread_lifecycle::qualification_worker_selection_admits_posture as plan_posture;
+        let shipped = |source: &str| -> ryeos_engine::protocols::descriptor::ProtocolDescriptor {
+            serde_yaml::from_str(source).unwrap()
+        };
+        let contained = shipped(include_str!(
+            "../../../../../bundles/core/.ai/protocols/ryeos/core/contained_structured_session.yaml"
+        ));
+        let trusted = shipped(include_str!(
+            "../../../../../bundles/core/.ai/protocols/ryeos/core/trusted_structured_session.yaml"
+        ));
+        let session = |descriptor: &ryeos_engine::protocols::descriptor::ProtocolDescriptor| {
+            ryeos_engine::protocols::validate_persistent_session_protocol(descriptor)
+                .unwrap()
+                .clone()
+        };
         let qualified = readiness(true);
         // Enforced: the contained Worker passes the plan check AND the launch
-        // check; the trusted triple passes neither.
-        assert!(plan_lane(&contained, true));
-        contained_worker_launch_admission(&contained, &qualified).unwrap();
-        assert!(!plan_lane(&trusted, true));
-        assert!(contained_worker_launch_admission(&trusted, &qualified).is_err());
-        // Disabled: the existing trusted triple, never the contained one.
-        assert!(plan_lane(&trusted, false));
-        assert!(!plan_lane(&contained, false));
+        // check; the trusted one passes neither.
+        plan_posture(&contained, true).unwrap();
+        contained_worker_launch_admission(&session(&contained), &qualified).unwrap();
+        assert!(plan_posture(&trusted, true).is_err());
+        assert!(contained_worker_launch_admission(&session(&trusted), &qualified).is_err());
+        // Disabled: the trusted holding, never the contained one.
+        plan_posture(&trusted, false).unwrap();
+        assert!(plan_posture(&contained, false).is_err());
+        // A holding that contradicts the node's posture is a named refusal.
+        let error = plan_posture(&contained, false).unwrap_err().to_string();
+        assert!(error.contains("physical posture"), "{error}");
     }
 }

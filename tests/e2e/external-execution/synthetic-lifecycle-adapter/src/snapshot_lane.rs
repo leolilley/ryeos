@@ -1316,7 +1316,6 @@ mod tests {
             b"owner",
             0o755,
         );
-        append_file(&mut builder, "controller-root.hex", &[b'a'; 64], 0o644);
         append_file(&mut builder, "guest-owner-profile.json", b"{}", 0o644);
         builder.into_inner().unwrap()
     }
@@ -1358,10 +1357,6 @@ mod tests {
             },
             guest_runtime_manifest_hash: "7".repeat(64),
             owner_executable_sha256: "8".repeat(64),
-            controller_public_root: format!(
-                "ed25519:{}",
-                base64::engine::general_purpose::STANDARD.encode([9u8; 32])
-            ),
             upload_sha256: lillux::sha256_hex(archive),
             upload_bytes: archive.len() as u64,
             attempt_deadline_ms: lillux::time::timestamp_millis() + 600_000,
@@ -1453,6 +1448,8 @@ mod tests {
             verifier_artifact_hash: verifier_sha256.into(),
             maximum_lifetime_seconds: 900,
             attempt_deadline_ms: source.attempt_deadline_ms - 100,
+            launch_shape:
+                ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(),
         };
         qualification.operation_id = qualification.derived_operation_id().unwrap();
         let bound = qualify_create_core(
@@ -1482,7 +1479,7 @@ mod tests {
 
     fn owner_request(staged: &Staged, archive: &[u8]) -> RestoredVerifierAdapterRequest {
         let mut intent = RestoredVerifierAttemptIntent {
-            schema: 2,
+            schema: ryeos_external_execution_contract::restored_runtime_measurement::RESTORED_VERIFIER_ATTEMPT_SCHEMA,
             operation_id: String::new(),
             qualification_operation_id: staged.qualification.operation_id.clone(),
             restored_occurrence_id: staged.occurrence.occurrence_id.clone(),
@@ -1528,7 +1525,7 @@ mod tests {
             archive_budget: ConsumerArchiveBudget::new(16, 4096, 8192).unwrap(),
         };
         let mut intent = RestoredVerifierAttemptIntent {
-            schema: 2,
+            schema: ryeos_external_execution_contract::restored_runtime_measurement::RESTORED_VERIFIER_ATTEMPT_SCHEMA,
             operation_id: String::new(),
             qualification_operation_id: staged.qualification.operation_id.clone(),
             restored_occurrence_id: staged.occurrence.occurrence_id.clone(),
@@ -1538,8 +1535,7 @@ mod tests {
             purpose: RemoteVerificationPurpose::ConsumerRuntime {
                 coordinate,
                 nonce_hex: "9".repeat(64),
-                guest_runtime_manifest_hash: staged.source.guest_runtime_manifest_hash.clone(),
-            },
+                guest_runtime_manifest_hash: staged.source.guest_runtime_manifest_hash.clone(), launch_shape: ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(), },
             attempt_deadline_ms: staged.source.attempt_deadline_ms - 200,
         };
         intent.operation_id = intent.derived_operation_id().unwrap();
@@ -1665,7 +1661,6 @@ mod tests {
             challenge_digest: challenge.digest().unwrap(),
             manifest_hash: staged.source.guest_runtime_manifest_hash.clone(),
             owner_executable_sha256: staged.source.owner_executable_sha256.clone(),
-            controller_public_root: staged.source.controller_public_root.clone(),
         };
         let stdout = format!(
             "{}\n",
@@ -1709,7 +1704,6 @@ mod tests {
             challenge_digest: challenge.digest().unwrap(),
             manifest_hash: "0".repeat(64),
             owner_executable_sha256: staged.source.owner_executable_sha256.clone(),
-            controller_public_root: staged.source.controller_public_root.clone(),
         };
         let stdout = format!(
             "{}\n",

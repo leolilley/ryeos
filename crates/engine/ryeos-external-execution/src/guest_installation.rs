@@ -10,7 +10,9 @@ use std::ffi::OsStr;
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, ensure};
-use ryeos_external_execution_contract::guest_owner_report::{GuestOwnerStep, RefusedAt as _};
+use ryeos_external_execution_contract::guest_owner_report::{
+    GuestOwnerSite, GuestOwnerStep, RefusedAt as _,
+};
 use ryeos_external_execution_contract::guest_supervisor_descriptors::{
     GuestSupervisorDescriptorPlan, SUPERVISOR_BOOTSTRAP_FD, SUPERVISOR_CANDIDATE_RUNTIME_FD,
     SUPERVISOR_EXECUTABLE_FD, SUPERVISOR_LAUNCHER_FD, SUPERVISOR_MOUNTED_CONTROL_DESCRIPTORS,
@@ -551,7 +553,11 @@ pub fn prepare_authorized_held_guest_supervisor_once(
     on_phase(Step::HeldPrepare);
     committed
         .prepare_mounted_sandbox_request(&context, inputs)
-        .and_then(|request| request.prepare_held_in_dedicated_owner(supervisor_stderr))
+        .and_then(|request| {
+            request
+                .prepare_held_in_dedicated_owner(supervisor_stderr)
+                .at_site(GuestOwnerSite::HeldNamespace)
+        })
         .refused_at(Step::HeldPrepare)
 }
 
@@ -854,7 +860,9 @@ fn capture_supervisor_network_mounts(
     let (resolver, resolver_path, resolver_bytes) =
         capture(&policy.resolver, c"ryeos-guest-resolver")?;
     let (hosts, hosts_path, hosts_bytes) = capture(&policy.hosts, c"ryeos-guest-hosts")?;
-    lillux::network::NetworkContext::from_config_bytes(&resolver_bytes, &hosts_bytes)?;
+    lillux::network::NetworkContext::from_config_bytes(&resolver_bytes, &hosts_bytes)
+        .map_err(anyhow::Error::from)
+        .at_site(GuestOwnerSite::NetworkInputParse)?;
     Ok(([resolver, hosts], [resolver_path, hosts_path]))
 }
 
@@ -956,98 +964,119 @@ impl CommittedGuestSupervisorLaunchIntent {
     ) -> Result<PreparedGuestMountedSandbox> {
         let artifacts = &self._prepared._artifacts;
         let installed = &artifacts.private.content._installed;
-        installed.owner.recheck(context, inputs)?;
-        installed.recheck_for_adoption(context, inputs)?;
-        ensure!(
-            self._source_mount.stage() == &installed.imported.stage_identity()?,
-            "mounted supervisor source differs from committed stage"
-        );
-        let bootstrap = artifacts.seal_supervisor_bootstrap(context, inputs)?;
-        let bootstrap_bytes = lillux::read_sealed_inherited_descriptor(
-            bootstrap
-                .inherited_descriptor()
-                .map_err(anyhow::Error::msg)?,
-            ryeos_state::external_execution::transport::MAX_EXTERNAL_SUPERVISOR_BOOTSTRAP_BYTES,
-        )
-        .map_err(anyhow::Error::msg)?;
-        let parsed_bootstrap: ryeos_state::external_execution::transport::ExternalSupervisorBootstrap =
-            serde_json::from_slice(&bootstrap_bytes)?;
-        ensure!(
-            parsed_bootstrap.canonical_bytes()? == bootstrap_bytes,
-            "sealed supervisor bootstrap changed before network-input capture"
-        );
+        (|| -> Result<()> {
+            installed.owner.recheck(context, inputs)?;
+            installed.recheck_for_adoption(context, inputs)?;
+            ensure!(
+                self._source_mount.stage() == &installed.imported.stage_identity()?,
+                "mounted supervisor source differs from committed stage"
+            );
+            Ok(())
+        })()
+        .at_site(GuestOwnerSite::InstalledRecheck)?;
+        let (bootstrap, parsed_bootstrap) = (|| -> Result<_> {
+            let bootstrap = artifacts.seal_supervisor_bootstrap(context, inputs)?;
+            let bootstrap_bytes = lillux::read_sealed_inherited_descriptor(
+                bootstrap
+                    .inherited_descriptor()
+                    .map_err(anyhow::Error::msg)?,
+                ryeos_state::external_execution::transport::MAX_EXTERNAL_SUPERVISOR_BOOTSTRAP_BYTES,
+            )
+            .map_err(anyhow::Error::msg)?;
+            let parsed_bootstrap: ryeos_state::external_execution::transport::ExternalSupervisorBootstrap =
+                serde_json::from_slice(&bootstrap_bytes)?;
+            ensure!(
+                parsed_bootstrap.canonical_bytes()? == bootstrap_bytes,
+                "sealed supervisor bootstrap changed before network-input capture"
+            );
+            Ok((bootstrap, parsed_bootstrap))
+        })()
+        .at_site(GuestOwnerSite::BootstrapSeal)?;
         let (network_inputs, network_destinations) = if let Ok(http) =
             parsed_bootstrap.controller.http()
         {
-            let (inputs, destinations) = capture_supervisor_network_mounts(&http.network_inputs)?;
+            let (inputs, destinations) = capture_supervisor_network_mounts(&http.network_inputs)
+                .at_site(GuestOwnerSite::NetworkInputCapture)?;
             (Vec::from(inputs), Vec::from(destinations))
         } else {
             parsed_bootstrap.controller.relay()?;
             (Vec::new(), Vec::new())
         };
-        let state = artifacts.state_root.inherited_descriptor_authority()?;
-        let runtime = installed.runtime.inherited_descriptor_authority()?;
-        let private = artifacts
-            .private
-            .private_parent
-            .inherited_descriptor_authority()?;
-        let launch_record = self.seal_record_for_supervisor()?;
-        let mut original_controls = vec![bootstrap, state, runtime, private, launch_record];
-        let relay_mailbox = artifacts.relay_mailbox.as_ref();
-        ensure!(
-            relay_mailbox.is_some() == parsed_bootstrap.controller.relay().is_ok(),
-            "relay mailbox custody differs from sealed transport"
-        );
-        if let Some(mailbox) = relay_mailbox {
-            ensure!(
-                Some(mailbox.identity()?) == artifacts.observation.relay_mailbox,
-                "relay mailbox changed since launch artifact preparation"
-            );
-            original_controls.push(mailbox.inherited_descriptor_authority()?);
-        }
-        let controls: Vec<lillux::InheritedDescriptorAuthority> = original_controls
-            .into_iter()
-            .map(|authority| {
-                authority
+        let (relay_mailbox, controls, channels, source_copy, source_fd, private_mount) =
+            (|| -> Result<_> {
+                let state = artifacts.state_root.inherited_descriptor_authority()?;
+                let runtime = installed.runtime.inherited_descriptor_authority()?;
+                let private = artifacts
+                    .private
+                    .private_parent
+                    .inherited_descriptor_authority()?;
+                let launch_record = self.seal_record_for_supervisor()?;
+                let mut original_controls = vec![bootstrap, state, runtime, private, launch_record];
+                let relay_mailbox = artifacts.relay_mailbox.as_ref();
+                ensure!(
+                    relay_mailbox.is_some() == parsed_bootstrap.controller.relay().is_ok(),
+                    "relay mailbox custody differs from sealed transport"
+                );
+                if let Some(mailbox) = relay_mailbox {
+                    ensure!(
+                        Some(mailbox.identity()?) == artifacts.observation.relay_mailbox,
+                        "relay mailbox changed since launch artifact preparation"
+                    );
+                    original_controls.push(mailbox.inherited_descriptor_authority()?);
+                }
+                let controls: Vec<lillux::InheritedDescriptorAuthority> = original_controls
+                    .into_iter()
+                    .map(|authority| {
+                        authority
+                            .duplicate_at_or_above(60)
+                            .map_err(anyhow::Error::msg)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let control_descriptors = if relay_mailbox.is_some() {
+                    SUPERVISOR_MOUNTED_RELAY_CONTROL_DESCRIPTORS.as_slice()
+                } else {
+                    SUPERVISOR_MOUNTED_CONTROL_DESCRIPTORS.as_slice()
+                };
+                let channels = controls
+                    .iter()
+                    .zip(control_descriptors.iter().copied())
+                    .map(|(authority, target)| {
+                        Ok::<_, anyhow::Error>((
+                            authority
+                                .inherited_descriptor()
+                                .map_err(anyhow::Error::msg)?,
+                            target,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let source_copy = self
+                    ._source_mount
+                    .mount_authority()
                     .duplicate_at_or_above(60)
-                    .map_err(anyhow::Error::msg)
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let control_descriptors = if relay_mailbox.is_some() {
-            SUPERVISOR_MOUNTED_RELAY_CONTROL_DESCRIPTORS.as_slice()
-        } else {
-            SUPERVISOR_MOUNTED_CONTROL_DESCRIPTORS.as_slice()
-        };
-        let channels = controls
-            .iter()
-            .zip(control_descriptors.iter().copied())
-            .map(|(authority, target)| {
-                Ok::<_, anyhow::Error>((
-                    authority
-                        .inherited_descriptor()
-                        .map_err(anyhow::Error::msg)?,
-                    target,
+                    .map_err(anyhow::Error::msg)?;
+                let source_fd = source_copy
+                    .inherited_descriptor()
+                    .map_err(anyhow::Error::msg)?;
+                ensure!(
+                    channels.iter().all(|(fd, _)| *fd != source_fd),
+                    "sealed source descriptor entered supervisor control channels"
+                );
+                let private_mount = artifacts
+                    .private
+                    .private_parent
+                    .inherited_descriptor_authority()?
+                    .duplicate_at_or_above(60)
+                    .map_err(anyhow::Error::msg)?;
+                Ok((
+                    relay_mailbox,
+                    controls,
+                    channels,
+                    source_copy,
+                    source_fd,
+                    private_mount,
                 ))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let source_copy = self
-            ._source_mount
-            .mount_authority()
-            .duplicate_at_or_above(60)
-            .map_err(anyhow::Error::msg)?;
-        let source_fd = source_copy
-            .inherited_descriptor()
-            .map_err(anyhow::Error::msg)?;
-        ensure!(
-            channels.iter().all(|(fd, _)| *fd != source_fd),
-            "sealed source descriptor entered supervisor control channels"
-        );
-        let private_mount = artifacts
-            .private
-            .private_parent
-            .inherited_descriptor_authority()?
-            .duplicate_at_or_above(60)
-            .map_err(anyhow::Error::msg)?;
+            })()
+            .at_site(GuestOwnerSite::ControlDescriptors)?;
         let mut mounts = vec![
             lillux::LinuxSandboxMount {
                 source_fd,
@@ -1097,7 +1126,7 @@ impl CommittedGuestSupervisorLaunchIntent {
             aggregate_limits: None,
             target_limits: None,
         };
-        require_held_supervisor_mounts(&request.mounts)?;
+        require_held_supervisor_mounts(&request.mounts).at_site(GuestOwnerSite::MountSet)?;
         let report_sink = relay_mailbox
             .map(|mailbox| -> Result<_> {
                 Ok(GuestOwnerReportSink {

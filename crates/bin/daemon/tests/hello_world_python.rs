@@ -270,6 +270,7 @@ fn daemon_executes_python_hello_world_end_to_end() {
             &plan_ctx.execution_hints,
             None,
             ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+            None,
         )
         .expect("build_plan walks executor chain to subprocess terminal");
 
@@ -411,6 +412,7 @@ fn python_script_runtime_supports_bundle_local_imports_without_pythonpath() {
             &plan_ctx.execution_hints,
             None,
             ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+            None,
         )
         .expect("build_plan walks executor chain to subprocess terminal");
 
@@ -544,6 +546,7 @@ fn python_function_runtime_supports_bundle_local_imports_without_pythonpath() {
             &plan_ctx.execution_hints,
             None,
             ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+            None,
         )
         .expect("build_plan walks executor chain to subprocess terminal");
 
@@ -678,6 +681,7 @@ fn engine_pipeline_emits_resolve_verify_build_plan_span_tree() {
                 &plan_ctx.execution_hints,
                 None,
                 ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+                None,
             )
             .expect("build_plan");
     });

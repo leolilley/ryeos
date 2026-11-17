@@ -1199,7 +1199,7 @@ mod tests {
             RestoredVerifierAttemptIntent,
         };
         let mut intent = RestoredVerifierAttemptIntent {
-            schema: 2,
+            schema: ryeos_external_execution_contract::restored_runtime_measurement::RESTORED_VERIFIER_ATTEMPT_SCHEMA,
             operation_id: String::new(),
             qualification_operation_id: "a".repeat(64),
             restored_occurrence_id: "fixture-occurrence".into(),
@@ -1221,12 +1221,11 @@ mod tests {
                     prerequisite_measurement_observation_digest: "3".repeat(64),
                 },
                 nonce_hex: "4".repeat(64),
-                guest_runtime_manifest_hash: "5".repeat(64),
-            },
+                guest_runtime_manifest_hash: "5".repeat(64), launch_shape: ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(), },
         };
         intent.operation_id = intent.derived_operation_id().unwrap();
         let challenge = ConsumerRuntimeChallenge {
-            schema: 1,
+            schema: ryeos_external_execution_contract::restored_runtime_measurement::CONSUMER_RUNTIME_CHALLENGE_SCHEMA,
             intent,
             selection: ConsumerRuntimeVerifierSelection {
                 scenario_source_digest: "e".repeat(64),

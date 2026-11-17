@@ -10,6 +10,7 @@ use anyhow::{Context as _, Result, bail, ensure};
 use lillux::crypto::SigningKey;
 use ryeos_external_execution::launcher::ExternalCandidateLauncherSpec;
 use ryeos_external_execution_contract::EXTERNAL_CANDIDATE_LAUNCHER_SPEC_SCHEMA;
+use ryeos_external_execution_contract::runtime_snapshot::LaunchNetworkInputs;
 use ryeos_state::external_execution::transport::{
     EXTERNAL_CHANNEL_ATTACH_PATH, EXTERNAL_CHANNEL_EXCHANGE_PATH,
     EXTERNAL_CHANNEL_TRANSPORT_SCHEMA, ExternalChannelAttachRequest, ExternalChannelAttachResponse,
@@ -18,10 +19,84 @@ use ryeos_state::external_execution::transport::{
 };
 use ryeos_state::external_execution::{
     ChannelDirection, EXECUTION_CHANNEL_BINDING_SCHEMA, ExecutionChannelBinding,
-    ExecutionChannelPayload, ExecutionFrame, ExecutionFrameApplication, SignedExecutionFrame,
+    ExecutionChannelPayload, ExecutionFrame, ExecutionFrameApplication, ObservedNetworkInput,
+    SignedExecutionFrame,
 };
 
 use crate::loopback_tls::{HttpReply, HttpsRequest};
+
+/// One network-input file of the provider sandbox, as the guest half read it
+/// before entering its overlay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderNetworkInput {
+    pub source: String,
+    pub sha256: String,
+}
+
+/// Read the provider sandbox's real files at the declared sources, each
+/// within its byte bound. A file that cannot be read is an error; nothing
+/// stands in for it.
+pub fn read_provider_network_inputs(
+    declared: &LaunchNetworkInputs,
+) -> Result<Vec<ProviderNetworkInput>> {
+    use std::io::Read as _;
+    [&declared.resolver, &declared.hosts]
+        .into_iter()
+        .map(|input| {
+            let (source, max_bytes) = (input.source.as_str(), input.max_bytes);
+            let mut bytes = Vec::new();
+            std::fs::File::open(source)
+                .and_then(|file| file.take(max_bytes + 1).read_to_end(&mut bytes))
+                .with_context(|| format!("provider network input {source} cannot be read"))?;
+            ensure!(
+                bytes.len() as u64 <= max_bytes,
+                "provider network input {source} exceeds its {max_bytes}-byte bound"
+            );
+            Ok(ProviderNetworkInput {
+                source: source.to_owned(),
+                sha256: lillux::sha256_hex(&bytes),
+            })
+        })
+        .collect()
+}
+
+/// Refuse unless the supervisor's observed network inputs are exactly the
+/// sources the declared launch shape names and each digest equals what the
+/// guest half read from the provider's real file at that source.
+fn check_ready_network_inputs(
+    declared: &LaunchNetworkInputs,
+    observed: &[ObservedNetworkInput],
+    provider: &[ProviderNetworkInput],
+) -> Result<()> {
+    let expected = [
+        declared.resolver.source.as_str(),
+        declared.hosts.source.as_str(),
+    ];
+    let observed_sources: Vec<&str> = observed.iter().map(|input| input.source.as_str()).collect();
+    ensure!(
+        observed_sources == expected,
+        "Ready network-input sources differ from the declared launch shape's: expected {expected:?}, observed {observed_sources:?}"
+    );
+    for input in observed {
+        let read = provider
+            .iter()
+            .find(|read| read.source == input.source)
+            .with_context(|| {
+                format!(
+                    "the guest half read no provider file at network-input source {}",
+                    input.source
+                )
+            })?;
+        ensure!(
+            input.sha256 == read.sha256,
+            "Ready network input {} has sha256 {} but the provider's file has sha256 {}",
+            input.source,
+            input.sha256,
+            read.sha256
+        );
+    }
+    Ok(())
+}
 
 /// What the controller observed, in the form the evidence reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,14 +110,23 @@ pub struct ExchangeOutcome {
     pub command_terminated: bool,
 }
 
+/// The most owner frames one answer carries, as the node bounds its response.
+const MAX_RESPONSE_OWNER_FRAMES: usize = 16;
+
 pub struct Controller {
     bootstrap: ExternalSupervisorBootstrap,
     key: SigningKey,
     expected_ready_inputs: Vec<String>,
+    declared_network_inputs: LaunchNetworkInputs,
+    provider_network_inputs: Vec<ProviderNetworkInput>,
     attach: Option<(String, ExecutionChannelBinding)>,
     transcript: Vec<serde_json::Value>,
     supervisor_frames: BTreeMap<u64, (String, Vec<u8>)>,
     responses: BTreeMap<u64, Vec<u8>>,
+    /// Every owner frame authored, by sequence: the outbox each answer draws
+    /// from, as the node returns the owner frames a guest has not yet
+    /// acknowledged on any exchange.
+    owner_frames: BTreeMap<u64, (String, Vec<u8>)>,
     last_supervisor_digest: Option<String>,
     last_owner_digest: Option<String>,
     owner_sequence: u64,
@@ -66,6 +150,8 @@ impl Controller {
         bootstrap_bytes: &[u8],
         key: SigningKey,
         expected_ready_inputs: Vec<String>,
+        declared_network_inputs: LaunchNetworkInputs,
+        provider_network_inputs: Vec<ProviderNetworkInput>,
     ) -> Result<Self> {
         let bootstrap: ExternalSupervisorBootstrap = serde_json::from_slice(bootstrap_bytes)?;
         bootstrap.validate()?;
@@ -80,10 +166,13 @@ impl Controller {
             bootstrap,
             key,
             expected_ready_inputs,
+            declared_network_inputs,
+            provider_network_inputs,
             attach: None,
             transcript: Vec::new(),
             supervisor_frames: BTreeMap::new(),
             responses: BTreeMap::new(),
+            owner_frames: BTreeMap::new(),
             last_supervisor_digest: None,
             last_owner_digest: None,
             owner_sequence: 0,
@@ -222,6 +311,10 @@ impl Controller {
                 .context("replayed frame has no retained response")?;
             let mut replay: ExternalChannelExchangeResponse = serde_json::from_slice(cached)?;
             replay.incoming_new = false;
+            // A replay (the guest's poll) collects whatever the owner has
+            // authored since, not only what answered this frame the first time.
+            replay.outbound_frames = self.pending_owner_frames(frame.acknowledged_peer_sequence)?;
+            replay.validate_shape()?;
             return json_reply(200, &replay);
         }
         let expected_sequence = self.supervisor_frames.len() as u64 + 1;
@@ -239,22 +332,30 @@ impl Controller {
             "sequence": frame.sequence,
             "digest": digest,
         }));
-        let mut outbound = Vec::new();
         let mut acknowledgement = None;
+        // A leased guest's Ready is held, as the node's readiness gate holds
+        // it until the guest is admitted: the reply carries no acknowledgement
+        // and no owner frame, which the guest reads as idle.
+        let held = matches!(frame.payload, ExecutionChannelPayload::Ready { .. });
         // The supervisor suppresses acknowledgement of acknowledgements, so a
         // peer acknowledgement ends its chain here.
-        if !matches!(frame.payload, ExecutionChannelPayload::Acknowledge { .. }) {
+        if !held && !matches!(frame.payload, ExecutionChannelPayload::Acknowledge { .. }) {
             let owner = self.acknowledge(&frame, &digest, &binding)?;
-            acknowledgement = Some(owner.digest.clone());
-            outbound.push(ExternalChannelResponseFrame::new(
-                owner.sequence,
-                owner.digest,
-                &owner.wire,
-            )?);
+            acknowledgement = Some(owner);
         }
+        // The capability report completes the leased guest's handshake; the
+        // owner then releases the candidate, which the guest launches only on
+        // Release.
+        if matches!(
+            frame.payload,
+            ExecutionChannelPayload::CapabilityReport { .. }
+        ) {
+            self.author(ExecutionChannelPayload::Release, frame.sequence, &binding)?;
+        }
+        let outbound = self.pending_owner_frames(frame.acknowledged_peer_sequence)?;
         let response = ExternalChannelExchangeResponse {
             schema: EXTERNAL_CHANNEL_TRANSPORT_SCHEMA,
-            incoming_new: true,
+            incoming_new: !held,
             incoming_sequence: frame.sequence,
             incoming_frame_digest: self.last_supervisor_digest.clone().context("digest")?,
             acknowledgement_frame_digest: acknowledgement,
@@ -289,6 +390,11 @@ impl Controller {
                     boot.verified_input_digests == self.expected_ready_inputs,
                     "Ready names different verified inputs than the controller delivered"
                 );
+                check_ready_network_inputs(
+                    &self.declared_network_inputs,
+                    &boot.network_inputs,
+                    &self.provider_network_inputs,
+                )?;
                 self.saw_ready = true;
             }
             ExecutionChannelPayload::CapabilityReport { .. } => {
@@ -348,7 +454,37 @@ impl Controller {
         frame: &ExecutionFrame,
         digest: &str,
         binding: &ExecutionChannelBinding,
-    ) -> Result<OwnerFrame> {
+    ) -> Result<String> {
+        self.author(
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: frame.sequence,
+                peer_frame_digest: digest.to_owned(),
+                application: ExecutionFrameApplication::Applied,
+            },
+            frame.sequence,
+            binding,
+        )
+    }
+
+    /// The owner frames after the guest's cumulative acknowledgement, oldest
+    /// first, bounded like the node's response.
+    fn pending_owner_frames(&self, acknowledged: u64) -> Result<Vec<ExternalChannelResponseFrame>> {
+        self.owner_frames
+            .range(acknowledged + 1..)
+            .take(MAX_RESPONSE_OWNER_FRAMES)
+            .map(|(sequence, (digest, wire))| {
+                ExternalChannelResponseFrame::new(*sequence, digest.clone(), wire)
+            })
+            .collect()
+    }
+
+    /// Sign the next owner frame carrying `payload`.
+    fn author(
+        &mut self,
+        payload: ExecutionChannelPayload,
+        acknowledged_peer_sequence: u64,
+        binding: &ExecutionChannelBinding,
+    ) -> Result<String> {
         let sequence = self.owner_sequence + 1;
         let owner = ExecutionFrame {
             schema: 1,
@@ -356,35 +492,23 @@ impl Controller {
             direction: ChannelDirection::OwnerToSupervisor,
             sequence,
             previous_frame_digest: self.last_owner_digest.clone(),
-            acknowledged_peer_sequence: frame.sequence,
-            payload: ExecutionChannelPayload::Acknowledge {
-                peer_frame_sequence: frame.sequence,
-                peer_frame_digest: digest.to_owned(),
-                application: ExecutionFrameApplication::Applied,
-            },
+            acknowledged_peer_sequence,
+            payload,
         };
         let signed = SignedExecutionFrame::sign(owner, binding, &self.key)?;
         let wire = lillux::canonical_json(&serde_json::to_value(&signed)?)?.into_bytes();
         let owner_digest = lillux::sha256_hex(&wire);
         self.owner_sequence = sequence;
         self.last_owner_digest = Some(owner_digest.clone());
+        self.owner_frames
+            .insert(sequence, (owner_digest.clone(), wire));
         self.transcript.push(serde_json::json!({
             "direction": "owner_to_supervisor",
             "sequence": sequence,
             "digest": owner_digest,
         }));
-        Ok(OwnerFrame {
-            sequence,
-            digest: owner_digest,
-            wire,
-        })
+        Ok(owner_digest)
     }
-}
-
-struct OwnerFrame {
-    sequence: u64,
-    digest: String,
-    wire: Vec<u8>,
 }
 
 #[cfg(test)]
@@ -412,6 +536,93 @@ mod tests {
         ExternalNetworkInputPolicy, ExternalNetworkInputSelection,
         ExternalSupervisorNativeEnvelope, external_tls_root_bundle_digest,
     };
+
+    fn declared() -> LaunchNetworkInputs {
+        LaunchNetworkInputs::operator()
+    }
+
+    fn provider_inputs() -> Vec<ProviderNetworkInput> {
+        let sources = declared();
+        vec![
+            ProviderNetworkInput {
+                source: sources.resolver.source,
+                sha256: lillux::sha256_hex(b"provider resolver"),
+            },
+            ProviderNetworkInput {
+                source: sources.hosts.source,
+                sha256: lillux::sha256_hex(b"provider hosts"),
+            },
+        ]
+    }
+
+    fn observed_from(provider: &[ProviderNetworkInput]) -> Vec<ObservedNetworkInput> {
+        provider
+            .iter()
+            .map(|read| ObservedNetworkInput {
+                source: read.source.clone(),
+                bytes: 1,
+                sha256: read.sha256.clone(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_unreadable_provider_network_file_is_refused_naming_its_source() {
+        let mut sources = declared();
+        sources.hosts.source = "/nonexistent-provider-network-file".into();
+        let error = format!("{:#}", read_provider_network_inputs(&sources).unwrap_err());
+        assert!(
+            error.contains("/nonexistent-provider-network-file")
+                && error.contains("cannot be read"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn ready_accepts_network_inputs_that_match_the_binding_and_the_provider_files() {
+        let provider = provider_inputs();
+        check_ready_network_inputs(&declared(), &observed_from(&provider), &provider).unwrap();
+    }
+
+    #[test]
+    fn ready_refuses_network_input_sources_that_differ_from_the_binding() {
+        let provider = provider_inputs();
+        let mut observed = observed_from(&provider);
+        observed[0].source = "/ryeos/activation/network-resolver".into();
+        let error = check_ready_network_inputs(&declared(), &observed, &provider)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("/ryeos/activation/network-resolver"),
+            "{error}"
+        );
+        assert!(error.contains("/etc/resolv.conf"), "{error}");
+        // A missing source is a different source list too.
+        let error =
+            check_ready_network_inputs(&declared(), &observed_from(&provider)[..1], &provider)
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("/etc/hosts"), "{error}");
+    }
+
+    #[test]
+    fn ready_refuses_a_network_input_digest_that_differs_from_the_provider_file() {
+        let provider = provider_inputs();
+        let mut observed = observed_from(&provider);
+        observed[1].sha256 = lillux::sha256_hex(b"a substituted hosts file");
+        let error = check_ready_network_inputs(&declared(), &observed, &provider)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("/etc/hosts"), "{error}");
+        assert!(error.contains(&observed[1].sha256), "{error}");
+        assert!(error.contains(&provider[1].sha256), "{error}");
+        // A provider file the guest half never read cannot be matched.
+        let error =
+            check_ready_network_inputs(&declared(), &observed_from(&provider), &provider[..1])
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("/etc/hosts"), "{error}");
+    }
 
     fn bootstrap(port: u16, root_der: &[u8], owner: &SigningKey) -> ExternalSupervisorBootstrap {
         let roots = vec![STANDARD.encode(root_der)];
@@ -523,6 +734,12 @@ mod tests {
                 qualification_attestation_hash: "2".repeat(64),
                 selection_identity_digest: "3".repeat(64),
                 runtime_recipe_digest,
+                placement: ryeos_state::external_execution::admission::ExternalProgramPlacement {
+                    workload_class: "fixture.workload".into(),
+                    lease: Vec::new(),
+                    guest: Vec::new(),
+                    ready_timeout_ms: 60_000,
+                },
             }
             .into(),
             guest_input_identity,
@@ -550,7 +767,7 @@ mod tests {
     }
 
     #[test]
-    fn loopback_controller_attaches_the_workspace_client_and_acknowledges_ready() {
+    fn loopback_controller_holds_ready_and_releases_after_the_capability_report() {
         let pki = EphemeralPki::generate().unwrap();
         let server = LoopbackHttpsServer::bind(&pki).unwrap();
         let owner = lillux::crypto::generate_signing_key();
@@ -558,7 +775,9 @@ mod tests {
         let bootstrap = bootstrap(server.port(), pki.root_der(), &owner);
         let bytes = bootstrap.canonical_bytes().unwrap();
         let inputs = vec!["1".repeat(64), "2".repeat(64), "3".repeat(64)];
-        let mut controller = Controller::new(&bytes, owner, inputs.clone()).unwrap();
+        let provider = provider_inputs();
+        let mut controller =
+            Controller::new(&bytes, owner, inputs.clone(), declared(), provider.clone()).unwrap();
         let stop = std::sync::atomic::AtomicBool::new(false);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let captured = ExternalCapturedNetworkInputs::from_bytes(
@@ -589,6 +808,7 @@ mod tests {
                         boot_id: "123e4567-e89b-12d3-a456-426614174000".into(),
                         verified_input_digests: inputs.clone(),
                         ready_at_ms: binding.issued_at_ms,
+                        network_inputs: observed_from(&provider),
                     }),
                 },
             };
@@ -596,33 +816,72 @@ mod tests {
             let wire = lillux::canonical_json(&serde_json::to_value(&signed).unwrap())
                 .unwrap()
                 .into_bytes();
-            let first = channel.exchange(&wire).unwrap();
-            assert!(first.incoming_new);
-            assert_eq!(first.outbound_frames.len(), 1);
-            let owner_frame = SignedExecutionFrame::decode_and_verify(
-                &first.outbound_frames[0].canonical_wire,
+            // The supervisor's own leased-guest handshake: Ready must be held
+            // (no acknowledgement, no owner frame) and the report answered.
+            let report = ExecutionFrame {
+                schema: 1,
+                binding_digest: binding.digest().unwrap(),
+                direction: ChannelDirection::SupervisorToOwner,
+                sequence: 2,
+                previous_frame_digest: Some(lillux::sha256_hex(&wire)),
+                acknowledged_peer_sequence: 0,
+                payload: ExecutionChannelPayload::CapabilityReport {
+                    boot_id: "123e4567-e89b-12d3-a456-426614174000".into(),
+                    provided: Default::default(),
+                    missing: Default::default(),
+                },
+            };
+            let report = SignedExecutionFrame::sign(report, &binding, &supervisor_key).unwrap();
+            let report_wire = lillux::canonical_json(&serde_json::to_value(&report).unwrap())
+                .unwrap()
+                .into_bytes();
+            ryeos_external_candidate_supervisor::runtime::lease_handshake_for_test(
+                &mut channel,
                 &binding,
-                lillux::time::timestamp_millis(),
+                &wire,
+                &report_wire,
+                lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(20)),
             )
             .unwrap();
-            assert!(matches!(
-                owner_frame.frame().payload,
-                ExecutionChannelPayload::Acknowledge {
-                    application: ExecutionFrameApplication::Applied,
-                    ..
-                }
-            ));
-            // An exact replay is answered from the retained response.
+            // After the handshake the supervisor's control loop re-sends
+            // Ready, its first queued frame, and polls with it: that exchange
+            // must collect the owner's acknowledgement of the report and the
+            // Release, as the node's outbox returns them on any exchange.
             let replay = channel.exchange(&wire).unwrap();
             assert!(!replay.incoming_new);
-            assert_eq!(replay.outbound_frames, first.outbound_frames);
+            let payloads = replay
+                .outbound_frames
+                .iter()
+                .map(|frame| {
+                    SignedExecutionFrame::decode_and_verify(
+                        &frame.canonical_wire,
+                        &binding,
+                        lillux::time::timestamp_millis(),
+                    )
+                    .unwrap()
+                    .frame()
+                    .payload
+                    .clone()
+                })
+                .collect::<Vec<_>>();
+            assert!(matches!(
+                payloads.as_slice(),
+                [
+                    ExecutionChannelPayload::Acknowledge {
+                        peer_frame_sequence: 2,
+                        application: ExecutionFrameApplication::Applied,
+                        ..
+                    },
+                    ExecutionChannelPayload::Release,
+                ]
+            ));
             stop.store(true, std::sync::atomic::Ordering::Release);
             served.join().unwrap().unwrap();
             true
         });
         assert!(outcome);
         let observed = controller.outcome().unwrap();
-        assert_eq!(observed.frame_count, 2);
+        assert_eq!(observed.frame_count, 4);
         assert!(observed.applied_launch_receipt_digest.is_none());
         assert!(!observed.command_terminated);
         assert!(observed.launcher_spec_digest.is_some());
@@ -636,8 +895,15 @@ mod tests {
         let bootstrap = bootstrap(1, pki.root_der(), &owner);
         let bytes = bootstrap.canonical_bytes().unwrap();
         let wrong_key = lillux::crypto::generate_signing_key();
-        assert!(Controller::new(&bytes, wrong_key, Vec::new()).is_err());
-        let mut controller = Controller::new(&bytes, owner, vec!["1".repeat(64)]).unwrap();
+        assert!(Controller::new(&bytes, wrong_key, Vec::new(), declared(), Vec::new()).is_err());
+        let mut controller = Controller::new(
+            &bytes,
+            owner,
+            vec!["1".repeat(64)],
+            declared(),
+            provider_inputs(),
+        )
+        .unwrap();
         let get = crate::loopback_tls::HttpsRequest {
             method: "GET".into(),
             path: EXTERNAL_CHANNEL_ATTACH_PATH.into(),

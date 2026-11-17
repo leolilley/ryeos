@@ -419,6 +419,31 @@ jobs:
           mkdir -p "$RUNNER_TEMP/test-archive"
           ./scripts/gate.sh --nextest-archive "$RUNNER_TEMP/test-archive/workspace.tar.zst"
 
+      - name: Build the static guest executables and carry them with the archive
+        # The remote-lease scenario runs the real guest owner in an enclosure
+        # that holds no host libraries, so its guests must be statically
+        # linked. They are built into the same target directory the tests read
+        # them from and appended to the archive's companion tarball, which each
+        # shard unpacks beside the test binaries.
+        run: |
+          RUSTFLAGS='-C target-feature=+crt-static' cargo build \
+            --target x86_64-unknown-linux-gnu \
+            -p ryeos-synthetic-external-lifecycle-adapter \
+            --bin ryeos-synthetic-mounted-candidate-supervisor \
+            --bin ryeos-synthetic-external-candidate-launcher \
+            --bin ryeos-synthetic-external-candidate-connector
+          target_dir="${CARGO_TARGET_DIR:-$PWD/target}"
+          (
+            cd "$target_dir"
+            for guest in \
+              ryeos-synthetic-mounted-candidate-supervisor \
+              ryeos-synthetic-external-candidate-launcher \
+              ryeos-synthetic-external-candidate-connector; do
+              test -f "x86_64-unknown-linux-gnu/debug/$guest"
+              printf '%s\0' "x86_64-unknown-linux-gnu/debug/$guest"
+            done | tar --null --files-from=- -rf "$RUNNER_TEMP/test-archive/workspace.tar.zst.extras.tar"
+          )
+
       - name: Upload the workspace test archive
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:

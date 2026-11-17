@@ -1108,11 +1108,12 @@ fn stamp_predecessor(path: &Path, offset: u64, edit: impl Fn(u32) -> u32) -> Res
 
 /// Checkpoint the WAL of a store whose node has stopped, as SQLite would on
 /// its last close: copy every frame up to the last valid commit frame into
-/// the database file, truncate the file to that commit's size, then remove
-/// the WAL and its shared-memory index. A frame is valid while its salts
-/// match the WAL header and its cumulative checksum holds.
+/// the database file, truncate the file to that commit's size, then empty the
+/// WAL and its shared-memory index. A frame is valid while its salts match
+/// the WAL header and its cumulative checksum holds. A WAL with no committed
+/// frame is left untouched.
 fn checkpoint_stopped_wal(path: &Path) -> Result<()> {
-    use std::io::{Seek, SeekFrom, Write};
+    use std::io::{Read, Seek, SeekFrom, Write};
     let sibling = |suffix: &str| {
         let mut name = path.as_os_str().to_owned();
         name.push(suffix);
@@ -1188,16 +1189,35 @@ fn checkpoint_stopped_wal(path: &Path) -> Result<()> {
             }
             file.set_len(u64::from(pages) * page_size as u64)?;
             file.sync_all()?;
+            // The sidecars stay in place: a strict read-only inspection opens
+            // the store without creating them. An empty WAL holds no frames,
+            // and a zeroed index carries no header, so the next open rebuilds
+            // it from that empty WAL.
+            truncate_in_place(&wal_path, |file| file.set_len(0))?;
+            truncate_in_place(&shm_path, |file| {
+                let len = file.metadata()?.len();
+                file.seek(SeekFrom::Start(0))?;
+                std::io::copy(&mut std::io::repeat(0).take(len), file)?;
+                Ok(())
+            })?;
         }
     }
-    for leftover in [wal_path, shm_path] {
-        match std::fs::remove_file(&leftover) {
-            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-                return Err(error).context(format!("remove {}", leftover.display()));
-            }
-            _ => {}
-        }
-    }
+    Ok(())
+}
+
+/// Rewrite an existing sidecar in place and sync it; an absent one is left
+/// absent.
+fn truncate_in_place(
+    path: &Path,
+    rewrite: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+) -> Result<()> {
+    let mut file = match std::fs::OpenOptions::new().write(true).open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).context(format!("open {}", path.display())),
+    };
+    rewrite(&mut file).with_context(|| format!("rewrite {}", path.display()))?;
+    file.sync_all()?;
     Ok(())
 }
 

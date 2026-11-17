@@ -788,6 +788,27 @@ impl ImportedConsumerInputs {
         Ok(Some(bytes))
     }
 
+    /// Point-read the native guest's own failure reason, when it left one.
+    /// A reason is a diagnosis for the account, never evidence: its presence
+    /// ends the wait for an observation that will not arrive.
+    pub fn read_native_failure(&self, control: &lillux::PinnedDirectory) -> Result<Option<String>> {
+        self.require_control_root(control)?;
+        let Some(file) = control.open_pinned_regular(
+            std::ffi::OsStr::new(crate::native_guest::GUEST_FAILURE_NAME),
+            false,
+        )?
+        else {
+            return Ok(None);
+        };
+        let bytes = file.read_stable_bounded(
+            &file.observation()?,
+            crate::native_guest::MAX_GUEST_FAILURE_BYTES as u64,
+        )?;
+        Ok(Some(crate::native_guest::bounded_failure_reason(
+            &String::from_utf8_lossy(&bytes),
+        )))
+    }
+
     pub(crate) fn require_record_challenge(
         &self,
         record: &ConsumerInputRecord,

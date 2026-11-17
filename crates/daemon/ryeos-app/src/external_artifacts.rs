@@ -400,10 +400,14 @@ pub(crate) fn publish_retained_lifecycle_artifacts(
                 == retained.signed_manifest_ref_blob_hash,
             "signed executor-ref escrow digest changed"
         );
-        let manifest = proof.manifest_object.clone();
+        // The retained record names the executor manifest by BLOB hash and every reader (closure collection, recovery,
+        // the qualification verifier) fetches it as a blob of canonical JSON, so it is stored as one; only the
+        // ItemSource is a typed object.
+        let manifest_bytes = lillux::canonical_json(&proof.manifest_object)?;
         let item_source = proof.item_source_object.clone();
         ensure!(
-            stage.store_object(&guard, &cas, &manifest)? == retained.manifest_object_blob_hash
+            stage.store_blob(&guard, &cas, manifest_bytes.as_bytes())?
+                == retained.manifest_object_blob_hash
                 && stage.store_object(&guard, &cas, &item_source)?
                     == retained.item_source_object_hash
                 && stage.store_blob(&guard, &cas, &proof.signed_sidecar)?

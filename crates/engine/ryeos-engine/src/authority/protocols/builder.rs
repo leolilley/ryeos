@@ -374,6 +374,7 @@ mod tests {
             captured_compatible_callback: None,
             session: None,
             execution_evidence: None,
+            holding: None,
         }
     }
 
@@ -410,6 +411,7 @@ mod tests {
             captured_compatible_callback: None,
             session: None,
             execution_evidence: None,
+            holding: None,
         }
     }
 

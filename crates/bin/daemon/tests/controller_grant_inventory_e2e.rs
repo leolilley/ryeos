@@ -49,11 +49,10 @@ use serde_json::{Value, json};
 
 const TURN_ITEM: &str = "worker_execution:codex/bounded-turn";
 const LOGIN_ITEM: &str = "worker_execution:codex/trusted-login";
-const TRUSTED_LANE_ENVIRONMENT: &str = "config:codex/environments/external-authoring-trusted-lane";
+const TURN_ENVIRONMENT: &str = "config:codex/environments/external-authoring";
 
 const TURN_EXECUTE_CAP: &str = "ryeos.execute.worker_execution.codex/bounded-turn";
-const TURN_ENVIRONMENT_CAP: &str =
-    "ryeos.execute.config.codex/environments/external-authoring-trusted-lane";
+const TURN_ENVIRONMENT_CAP: &str = "ryeos.execute.config.codex/environments/external-authoring";
 const LOGIN_EXECUTE_CAP: &str = "ryeos.execute.worker_execution.codex/trusted-login";
 
 /// The dedicated-session operations the worker-execution runtime and both
@@ -108,7 +107,7 @@ const SINGLE_SERVICES: [&str; 2] = [
 /// whenever the request's execution policy overlays the operator vault. The
 /// operator's launches carry `include_operator_vault: false`, so the capability
 /// is outside the operator grant; it is a property of the execution policy's
-/// environment, not of the trusted-lane environment config.
+/// environment, not of the authoring environment config.
 const OPERATOR_VAULT_CAP: &str = "ryeos.use.vault.operator";
 const OPERATOR_VAULT_REFUSAL: &str = "operator_vault_capability_required";
 
@@ -597,7 +596,7 @@ impl Controller {
 }
 
 fn turn_bindings() -> Value {
-    json!({ "environment": TRUSTED_LANE_ENVIRONMENT })
+    json!({ "environment": TURN_ENVIRONMENT })
 }
 
 async fn the_hosted_turn_needs_exactly_its_execute_environment_and_session_caps(lane: Lane) {
