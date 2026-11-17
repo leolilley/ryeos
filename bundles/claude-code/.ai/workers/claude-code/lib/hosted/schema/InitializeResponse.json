@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "InitializeResponse",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "adapter": {
+      "type": "string",
+      "maxLength": 128
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "stub",
+        "live"
+      ]
+    },
+    "protocol": {
+      "type": "integer",
+      "minimum": 1
+    }
+  },
+  "required": [
+    "adapter",
+    "mode",
+    "protocol"
+  ]
+}

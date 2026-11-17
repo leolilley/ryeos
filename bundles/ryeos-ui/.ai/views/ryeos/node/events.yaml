@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-19T22:29:40Z:464e98f8922d898ce8aa56df4a1a8f2e6d0301bf46557b0879311ee35dc223f5:otH6QbUAV4Ah7DZS2U9NaWI/tgKM8t2wjpnU81+i915Tp2RVWtkMe5HIgj6+ASG1J44bzhbDT61uFG2JeU55DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T12:02:07Z:304bba8c283b5a9a8a0493bbc01a9f2e72f48d3ed5e0078ea41dc8253d03ba03:yImjFlX7f7dItb8AhFVvdDGP+nXUYsBUfBMLYhDIx9MmDmd7JMGS3/gFs7TDjE6ogMwpqtQuDBYqe7hTC847AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: node-events
 title: Events
 version: "1.0.0"
@@ -64,6 +64,8 @@ sections:
           artifact_published: good
           thread_created: accent
           child_thread_spawned: accent
+          child_thread_settled: accent
+          worker_continuation_admitted: accent
         default: neutral
     activate: watch-thread
   - title: Recent event coverage

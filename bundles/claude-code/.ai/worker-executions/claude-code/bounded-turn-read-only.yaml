@@ -1,0 +1,36 @@
+# ryeos:signed:2026-11-16T09:38:06Z:1c4f8648b65bb434bb1a5ffe004d6e840faf30040aaf808c58379e33bc449e25:JV4LVo7elucSqdZ9o1RQxwkm9T8LsSouzR3Cm58cBiElHoOsscU6StEUU/Q+U79rA5HH5ezkUXYtGDpQNmbnAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "0.1.0"
+category: claude-code
+description: "Run one completion-fenced read-only Claude Code turn and retain its private candidate for owner review."
+config:
+  worker_ref: null
+  environment_binding: environment
+  required_credential_state: active
+  route_set: read_only
+  allowed_effect_classes:
+    - external_effect
+    - pure_read
+    - session_mutation
+  credential_home_env: RYEOS_WORKLOAD_HOME
+  workspace_env: RYEOS_WORKSPACE
+  require_pinned_cow: true
+  required_terminal_publication: retain_result
+  max_lifetime_seconds: 14400
+  recover_upstream_session: true
+  mode:
+    kind: bounded_turn
+    session_start_route: session.start_read_only
+    turn_start_route: turn.start
+    max_uncontacted_attempts: 3
+  candidate_disposition: retained_for_review
+  # The worker never calls back into RyeOS tools.
+  workload_client_delegation_caps: []
+limits:
+  turns: 1
+  duration_seconds: 15000
+requires:
+  capabilities:
+    declared:
+      - ryeos.runtime.dedicated_session.start
+      - ryeos.runtime.dedicated_session.command
+      - ryeos.runtime.dedicated_session.terminate
