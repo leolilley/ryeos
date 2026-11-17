@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-17T08:54:07Z:3df19d5717060d34c010d9919a20e97b8633e50bec486dac0a99790eb2434edc:qXO5EG/vSMlgROcZF0ZKLVLjLjrFslBUP5LoIUoteXeQ8XllSQQTWBpsyMkvz7AXvtJqKuS1Sv1cPr6vj4jMAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T12:45:45Z:73c7e13d08add06d06d7de0b67da2beecb3e2d1bd5f6240dadcb16988f12f14f:P8UrZJDm1b5eu80uzMEXVjn/BAGeIoji2N8e247esnXa+/6S3pmI3exAHVK6Ht2WxMA5hNbH+mpFVV/CFocDAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Thread timeline definition: how a chain's events fold into timeline items.
 # Declarative data read by the timeline service; the fold engine names no event type itself.
 category: ryeos/ui/timeline
@@ -295,6 +295,20 @@ events:
           parent: {type: activity, key: [payload.operation_id]}
           adopt: {thread: payload.child_thread_id, under: {type: activity, key: [payload.operation_id]}}
           project: {headline: payload.item_id, target: payload.child_thread_id}
+
+  # A followed child settled: its link takes the child's outcome and the
+  # leading part of its result.
+  child_thread_settled:
+    - emit:
+        - type: link
+          key: [payload.child_thread_id]
+          state: {from: payload.outcome_kind, map: {completed: done, cancelled: stopped, deadline: timed_out}, default: failed}
+          tone:
+            - {field: payload.outcome_kind, map: {completed: good, cancelled: warn}}
+            - {default: danger}
+          project:
+            body: payload.result_summary
+            badge: {join: [{path: payload.cost.total_usd, prefix: "$"}]}
 
   artifact_published:
     - when: {eq: [payload.artifact_type, graph_node_receipt]}
