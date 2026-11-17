@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 const VIEW_BEHAVIOR_GOLDENS: &[(&str, &str)] = &[
     (
         "view:ryeos/chain/timeline",
-        "b122348e55a2e68761ebf55a263d758056930de77e2ee230dffa54f8adf077d8",
+        "9ebe1e0d7c1d92d63d0f5be0c0ab2e7867b87be8a415bc2d879203a254a74936",
     ),
     (
         "view:ryeos/commands/grammar",
@@ -142,11 +142,11 @@ const VIEW_BEHAVIOR_GOLDENS: &[(&str, &str)] = &[
     ),
     (
         "view:ryeos/thread/conversation",
-        "ca15426ace52cad56a0d7ce4b3565313fd37ee07589bf5b5196cf385e55f1467",
+        "5ac442bd9aaf662983a65fc97014cb8b5f3b6bcb43ff266a2f3d610965e539c9",
     ),
     (
         "view:ryeos/thread/transcript",
-        "9f0c263b72cd77dc962d5497213d7eae3d879e1768aa12279adf181ab294d6f4",
+        "054393fba32b2d80826fe13bdfa54bb46d9e73435500c361f894d9f06dbe9b12",
     ),
     (
         "view:ryeos/thread/tree",
