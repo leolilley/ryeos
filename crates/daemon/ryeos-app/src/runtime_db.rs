@@ -6767,7 +6767,8 @@ const PROJECT_AUTHORITY_ENVELOPE_KIND: &str = "execution_project_authority";
 // retained-current-HEAD publication. There is deliberately no compatibility
 // reader: a predecessor authority cannot be upgraded into publication rights.
 // Epoch 4 records fixed-parent rather than path-mask live confinement.
-const PROJECT_AUTHORITY_SCHEMA_EPOCH: u32 = 5;
+// Epoch 6 records the request's live-project intent in every live authority.
+const PROJECT_AUTHORITY_SCHEMA_EPOCH: u32 = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct IncompatibleRuntimeExecutionSchema {

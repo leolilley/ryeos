@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-16T03:56:03Z:0e8eecf6beab4724e9aef43d63d83d80467bbc593117f2d353dd9638c7e37a44:gXDiQQjx68z3RNHRBZjsb7HALzSseax6WzvQVCgwkmafH3OEZAh8WHXprTx6P/UkhSgkb5iTF60HfF0MjAlxDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T23:12:59Z:3a3d08ad29b466541e69cbcfc189cc1ed029e56d3ba0b8a01c2a7c06e387cd03:lRRA8fAYGQRqpegoEmQeDeTWQoUN54BIgLq/MfanK23tzKCS/W8+qzQMPA9wDMfFEm3rP0X99oVatPVGJJNVDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, security, subprocess, node-policy]
@@ -225,9 +225,13 @@ The policy has two modes:
   retained filesystem bindings keeps the ordinary live project path; a live
   launch of a program that does retain bindings (every tool on a runtime that
   declares `source_scope`) gets the sparse private root instead, so the live
-  project never reaches the process; a schedule fire that granted such a
-  launch live project authority is refused with
-  `live_project_unavailable_to_sourced_runtime`. This input
+  project never reaches the process; a request that explicitly demanded the
+  live project (`--live-project`, `project.intent: live`, or a schedule's
+  `live_direct` policy) is refused for such a launch with
+  `live_project_unavailable_to_sourced_runtime`, while a request that only
+  defaulted to a live project (`project.intent` absent or `default`) runs from
+  that root and records `intent: default`. The root each tool shape gets is
+  tabulated in the `tool` kind guide. This input
   delivery is not a substitute for OS isolation: disabled mode still provides no
   confinement from other host paths visible to the process.
   A signed captured-filesystem or isolated-network requirement refuses in
