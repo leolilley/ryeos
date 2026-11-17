@@ -539,8 +539,24 @@ RUN test -n "$VERSION" && \
       | gzip -n -9 > "/node-out/${name}.tar.gz" && \
     (cd /node-out && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256")
 
+# The archive is published for plain hosts, so prove it on the oldest base it
+# claims: a stock bookworm image with none of the build's development
+# libraries. The packaged binaries must start there (glibc 2.36 and the
+# runtime shared libraries a fresh host has), or the release fails here
+# instead of shipping an archive that cannot run.
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS node-binaries-verify
+ARG VERSION
+ARG VCS_REF=unknown
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+COPY --from=node-binaries-package /node-out/ /node-out/
+RUN name="ryeos-node-${VERSION}-x86_64-unknown-linux-gnu" && \
+    (cd /node-out && sha256sum --check "${name}.tar.gz.sha256") && \
+    mkdir /verify && tar -C /verify -xzf "/node-out/${name}.tar.gz" && \
+    test "$("/verify/$name/bin/ryeosd" build-info --revision)" = "$VCS_REF" && \
+    "/verify/$name/bin/ryeos" --version >/dev/null
+
 FROM scratch AS node-binaries-artifact
-COPY --from=node-binaries-package /node-out/ /
+COPY --from=node-binaries-verify /node-out/ /
 
 FROM scratch AS contained-oci-hook-artifact
 COPY --from=contained-publication /contained-hook-out/ /

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-16T21:45:18Z:b5458751a4be7d74eaf7caa21c847149c504df143cde7b44853d074e638563a2:3Si3FrMNAwnnlOtwlk3JSHwDYJTfbNqNWoDhWvxZC/pyvNqNe3fEqXcHMf84Tv9We+Uri8kOuwvHGl+7mDE1Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-17T01:54:47Z:b3d4dd7638e90e436263b8d944d4b7e39775b0d1bc31eb3de09267cdfa89299b:DbqMWlvi00Vh4YtJ7EkD7Ob1SB7VEbuH9rBJtFVrY6I84Ls3GqPH7/tIvPkITG+qhlCzG3360HizCYr9AQr8Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "release-process"
@@ -562,7 +562,9 @@ the same compiled stage. `ryeos-core-tools` is not in the node archive: it is
 a bundle payload and arrives in the bundles archive under
 `core/.ai/bin/x86_64-unknown-linux-gnu/`. All compile stages use the
 `rust:1.95-slim-bookworm` toolchain, so the dynamically linked pair needs glibc
-2.36 or newer and runs on `debian:bookworm` and later.
+2.36 or newer and runs on `debian:bookworm` and later. The release build proves this before
+publishing: its `node-binaries-verify` stage unpacks the archive into a stock
+`debian:bookworm-slim` (no build libraries) and runs both binaries there.
 
 ```sh
 V=0.6.0   # the release version, no leading v
