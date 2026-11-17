@@ -888,3 +888,202 @@ async fn resumes_once_across_every_durable_directive_cut() {
         run_crash_cut(cut).await;
     }
 }
+
+/// How the first daemon incarnation ends while a tool child is in flight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MidflightStop {
+    /// The signed service window reaches its drain margin: planned rollover.
+    PlannedRollover,
+    /// An operator-requested orderly stop (the same path a service stop takes).
+    OrderlyStop,
+}
+
+/// Rewrite the fixture's signed native-capacity policy to a 300 s window with
+/// the minimum 60 s cleanup occupancy and drain margin, so the planned
+/// rollover begins 180 s after the daemon starts. The window must exceed the
+/// margin plus the cleanup occupancy the reservation requires.
+fn lengthen_short_service_window(state_path: &Path, node: &SigningKey) -> anyhow::Result<()> {
+    let path = state_path.join(".ai/node/policies/native_capacity.yaml");
+    let raw = std::fs::read_to_string(&path)?;
+    let body = lillux::signature::strip_signature_lines(&raw);
+    let mut policy: serde_yaml::Value = serde_yaml::from_str(&body)?;
+    let incarnation = policy["incarnation"]
+        .as_mapping_mut()
+        .context("incarnation envelope")?;
+    incarnation.insert("maximum_occupancy_ms".into(), 300_000u64.into());
+    incarnation.insert("cleanup_occupancy_ms".into(), 60_000u64.into());
+    incarnation.insert("rollover_drain_margin_ms".into(), 60_000u64.into());
+    let body = serde_yaml::to_string(&policy)?;
+    let signed = lillux::signature::sign_content_at(
+        &body,
+        node,
+        "#",
+        None,
+        common::fast_fixture::FAST_FIXTURE_TIME,
+    );
+    std::fs::write(&path, signed)?;
+    Ok(())
+}
+
+/// A daemon that ends in an orderly way while a directive's tool child is in
+/// flight must end cleanly (75 on a planned rollover, 0 on an orderly stop),
+/// leave restart uninhibited, and let the next start resume the same thread
+/// to completion without running the tool again.
+async fn run_midflight_stop(stop: MidflightStop) {
+    let mock = MockProvider::start(vec![
+        MockResponse::ToolCall {
+            id: "marker-call".to_string(),
+            name: TOOL_NAME.to_string(),
+            arguments: "{}".to_string(),
+        },
+        MockResponse::Text("recovery complete".to_string()),
+    ])
+    .await;
+    let mock_url = mock.base_url.clone();
+    let rollover = stop == MidflightStop::PlannedRollover;
+    let plant =
+        move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+            register_workflow_bundles(state_path, fixture)?;
+            register_recorded_mock_provider_bundle(state_path, &mock_url, fixture)?;
+            if rollover {
+                lengthen_short_service_window(state_path, &fixture.node)?;
+            }
+            Ok(())
+        };
+    let log_env = |command: &mut tokio::process::Command| {
+        command.env(
+            "RUST_LOG",
+            "info,ryeos_directive_runtime=debug,ryeosd=debug",
+        );
+    };
+    let (mut harness, fixture) = DaemonHarness::start_fast_with(plant, log_env)
+        .await
+        .expect("start directive daemon");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    let marker_dir = tempfile::tempdir().expect("marker tempdir");
+    let marker_path = marker_dir.path().join("executions.log");
+    plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
+    plant_recovery_directive(project.path(), &fixture.publisher, 2, false)
+        .expect("plant directive");
+    // The tool outlives the stop in both variants: it sleeps well past the
+    // planned rollover point (180 s) so it is in flight when the stop begins.
+    plant_marker_tool(
+        project.path(),
+        &marker_path,
+        Duration::from_secs(400),
+        &fixture.publisher,
+    )
+    .expect("plant marker tool");
+
+    let mut execute_request = start_execute_request(&harness, project.path()).await;
+    let root_thread_id = await_root_thread(&mut harness, &mut execute_request).await;
+    await_child_born_marker(&mut harness, &marker_path, &mut execute_request).await;
+
+    match stop {
+        MidflightStop::PlannedRollover => {
+            let status = tokio::time::timeout(Duration::from_secs(300), harness.child.wait())
+                .await
+                .expect("the service window ends within its bound")
+                .expect("wait for daemon exit");
+            assert_eq!(
+                status.code(),
+                Some(75),
+                "a planned rollover with a tool in flight exits 75: {status:?}\n--- daemon stderr ---\n{}",
+                harness.stderr_so_far()
+            );
+        }
+        MidflightStop::OrderlyStop => {
+            harness
+                .stop_gracefully()
+                .await
+                .expect("orderly stop with a tool in flight exits 0");
+        }
+    }
+    execute_request.abort();
+    let stderr = harness.stderr_so_far();
+    assert!(
+        !stderr.contains("runtime requested exact same-thread recovery"),
+        "shutdown must not launch a same-thread recovery successor\n--- daemon stderr ---\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("native custody remains held"),
+        "an orderly stop must not end in held custody\n--- daemon stderr ---\n{stderr}"
+    );
+    assert!(
+        ryeos_node::lifecycle_marker::read_restart_inhibition(&harness.state_path)
+            .expect("read restart inhibition")
+            .is_none(),
+        "an orderly end must not inhibit restart"
+    );
+    if rollover {
+        let summary = ryeos_node::native_capacity::inspect_capacity_account(&harness.state_path)
+            .expect("inspect capacity account")
+            .expect("issued account");
+        assert!(
+            !summary.outstanding_incarnation,
+            "the rolled-over incarnation settled"
+        );
+        assert_eq!(summary.last_operation, "rollover_renewal");
+        assert_eq!(summary.recovery_attempts_used, 0);
+    }
+    assert_eq!(
+        marker_execution_count(&marker_path),
+        1,
+        "the tool ran before the stop"
+    );
+
+    harness
+        .respawn_with(|command| {
+            command.env(
+                "RUST_LOG",
+                "info,ryeos_directive_runtime=debug,ryeosd=debug",
+            );
+        })
+        .await
+        .expect("restart after the orderly end");
+    await_completed(&mut harness, &root_thread_id).await;
+    let events = projection_events(&harness, &root_thread_id)
+        .await
+        .expect("read the resumed directive's events");
+    harness
+        .kill_daemon()
+        .await
+        .expect("stop resumed daemon before evidence inspection");
+
+    assert_eq!(
+        event_count(&events, "thread_started"),
+        1,
+        "resume must not duplicate thread_started; events={events:#?}"
+    );
+    assert_eq!(
+        event_count(&events, "tool_call_start"),
+        1,
+        "one proposal has one start; events={events:#?}"
+    );
+    assert_eq!(
+        event_count(&events, "tool_call_result"),
+        1,
+        "one proposal has one result; events={events:#?}"
+    );
+    assert_eq!(
+        marker_execution_count(&marker_path),
+        1,
+        "the resumed thread must not run the tool again"
+    );
+    assert_eq!(
+        runtime_action_intents(&harness.state_path, &root_thread_id).len(),
+        1,
+        "one logical tool occurrence owns one child"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn planned_rollover_midflight_exits_75_and_the_thread_resumes() {
+    run_midflight_stop(MidflightStop::PlannedRollover).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn orderly_stop_midflight_exits_0_and_the_thread_resumes() {
+    run_midflight_stop(MidflightStop::OrderlyStop).await;
+}
