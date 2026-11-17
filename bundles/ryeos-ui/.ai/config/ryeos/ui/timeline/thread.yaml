@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-17T19:59:00Z:b74034e96208f5e4f85b5502af7ab0d6859ea1a23cbd2baa532797b36ef6a402:9Br6LtIKDU1VTXQHd+vJsNkY8A+3ULqgXCpz7kayyPsgS2cN58Ec3ksp8YECuGOYNUVcc/41aYCCCCvFkVKIBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T20:40:48Z:ec8b50a192b399fee2a9755756d7d38958b153561cf05b3ba657e4bef58b7916:3F5m2u/ghC74Y6k5YOQ6mLPu1NMyRCF49/U9x3PPHLDb7XHuJujdcsjF1HDFZQJcafmhVnZbzh07jFnsNEFiDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Thread timeline definition: how a chain's events fold into timeline items.
 # Declarative data read by the timeline service; the fold engine names no event type itself.
 category: ryeos/ui/timeline
@@ -21,6 +21,13 @@ folds:
 spine:
   - {event: thread_continued, from: thread_id, to: payload.successor_thread_id}
   - {event: thread_created, from: payload.continuation_from, to: thread_id}
+
+# The status lane: what the thread is doing now, read from entries' latest
+# states. The first row matching any current entry wins; no match means idle.
+lane:
+  - {type: ask, state: pending, label: Waiting for approval}
+  - {type: activity, state: retrying, label: Retrying}
+  - {type: activity, state: running, label: Working}
 
 events:
   # Bookkeeping that contributes no entry, declared deliberately.

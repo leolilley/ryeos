@@ -172,6 +172,24 @@ pub enum RyeOsTimelineEntryAction {
     InspectRaw,
 }
 
+/// The status lane under the transcript: what the thread is doing now, in the
+/// words the definition's lane table gives. A renderer reserves its height
+/// whether or not a lane is present, so the transcript does not jump.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RyeOsTimelineLaneVm {
+    pub label: String,
+    pub tone: RyeOsTone,
+}
+
+/// A pending ask docked at the tail of the thread tile, directly above the
+/// composer. The ask also keeps its summary row in the flow.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RyeOsTimelineDockVm {
+    /// The ask entry's id.
+    pub id: String,
+    pub entry: RyeOsTimelineEntryVm,
+}
+
 /// The role of one service item: its entry type, or `cluster` / `recap`.
 pub(crate) fn item_role(item: &Value) -> String {
     match item.get("item").and_then(Value::as_str) {
@@ -474,6 +492,106 @@ fn older_entry(older: u64, intent: Option<RyeOsUiIntent>) -> RyeOsTimelineEntryV
     }
 }
 
+/// Every entry in a response window, in order, including those a cluster or a
+/// turn fold holds.
+fn window_entries<'a>(items: &'a [Value], out: &mut Vec<&'a Value>) {
+    for item in items {
+        match item.get("item").and_then(Value::as_str) {
+            Some("entry") => out.push(item),
+            Some("cluster" | "recap") => window_entries(item_members(item), out),
+            _ => {}
+        }
+    }
+}
+
+/// The status lane a response names, with the tone of the entry it matched
+/// when that entry is in the window.
+pub(crate) fn timeline_lane(response: &Value, items: &[Value]) -> Option<RyeOsTimelineLaneVm> {
+    let lane = response.get("lane").filter(|lane| lane.is_object())?;
+    let label = lane
+        .get("label")
+        .and_then(Value::as_str)
+        .filter(|label| !label.is_empty())?;
+    let mut entries = Vec::new();
+    window_entries(items, &mut entries);
+    let id = lane.get("entry").and_then(Value::as_str);
+    let tone = entries
+        .into_iter()
+        .find(|entry| id.is_some() && entry.get("id").and_then(Value::as_str) == id)
+        .map_or(RyeOsTone::Accent, entry_tone);
+    Some(RyeOsTimelineLaneVm {
+        label: label.to_string(),
+        tone,
+    })
+}
+
+/// The asks whose latest state is pending, in window order.
+pub(crate) fn pending_asks(items: &[Value]) -> Vec<RyeOsTimelineDockVm> {
+    let mut entries = Vec::new();
+    window_entries(items, &mut entries);
+    entries
+        .into_iter()
+        .filter(|entry| {
+            entry.get("type").and_then(Value::as_str) == Some("ask")
+                && entry.get("state").and_then(Value::as_str) == Some("pending")
+        })
+        .map(|entry| RyeOsTimelineDockVm {
+            id: entry
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            entry: entry_vm(entry),
+        })
+        .collect()
+}
+
+/// Events the definition has no rule for: how many, and the noun the
+/// definition counts them under.
+pub(crate) struct SystemEvents {
+    noun_one: String,
+    noun_many: String,
+    /// Event type and count, in the response's order.
+    counts: Vec<(String, u64)>,
+}
+
+/// The response's undeclared events. `None` when there are none, or when the
+/// response carries no noun to count them under (the wording is the
+/// definition's, never the client's).
+fn system_events(response: &Value) -> Option<SystemEvents> {
+    let counts: Vec<(String, u64)> = response
+        .get("undeclared")?
+        .as_object()?
+        .iter()
+        .filter_map(|(event_type, count)| Some((event_type.clone(), count.as_u64()?)))
+        .filter(|(_, count)| *count > 0)
+        .collect();
+    if counts.is_empty() {
+        return None;
+    }
+    let noun = response.get("notice_noun")?;
+    Some(SystemEvents {
+        noun_one: noun.get("one")?.as_str()?.to_string(),
+        noun_many: noun.get("many")?.as_str()?.to_string(),
+        counts,
+    })
+}
+
+impl SystemEvents {
+    fn headline(&self) -> String {
+        let total: u64 = self.counts.iter().map(|(_, count)| count).sum();
+        let noun = if total == 1 {
+            &self.noun_one
+        } else {
+            &self.noun_many
+        };
+        format!("{total} {noun}")
+    }
+}
+
+/// Fold key of the system events notice.
+const SYSTEM_EVENTS_KEY: &str = "notice:system_events";
+
 fn duration_text(seconds: i64) -> String {
     if seconds >= 3600 {
         format!("{}h{:02}m", seconds / 3600, (seconds % 3600) / 60)
@@ -653,6 +771,30 @@ impl LayoutBuilder {
         }
     }
 
+    /// The system events notice: a folded group whose header counts the events
+    /// and whose members list each event type with its count.
+    fn notice(&mut self, notice: &SystemEvents) {
+        let section = self.new_section(None, true, Some(SYSTEM_EVENTS_KEY.to_string()), true);
+        let line = |primary: String, meta: Option<String>| RyeOsTimelineEntryVm::Line {
+            primary,
+            meta,
+            tone: RyeOsTone::Neutral,
+            intent: None,
+            secondary_intent: None,
+            state: None,
+        };
+        self.push(line(notice.headline(), None), 0, None, section, true);
+        for (event_type, count) in &notice.counts {
+            self.push(
+                line(event_type.clone(), Some(count.to_string())),
+                1,
+                None,
+                section,
+                false,
+            );
+        }
+    }
+
     fn item(&mut self, item: &Value) {
         match item.get("item").and_then(Value::as_str) {
             Some("entry") => {
@@ -693,9 +835,25 @@ pub(crate) fn timeline_layout(
     chain_root_id: &str,
     lead: Vec<RyeOsTimelineEntryVm>,
 ) -> TimelineLayout {
+    build_layout(items, chain_root_id, lead, None)
+}
+
+/// [`timeline_layout`] with the system events notice, a folded group after the
+/// lead lines.
+fn build_layout(
+    items: &[Value],
+    chain_root_id: &str,
+    lead: Vec<RyeOsTimelineEntryVm>,
+    notice: Option<&SystemEvents>,
+) -> TimelineLayout {
     let mut builder = LayoutBuilder::new(chain_root_id);
     for entry in lead {
         builder.push(entry, 0, None, 0, false);
+    }
+    if let Some(notice) = notice {
+        builder.notice(notice);
+        // The items that follow sit outside the notice's section.
+        builder.current = 0;
     }
     for item in items {
         builder.item(item);
@@ -747,13 +905,14 @@ pub(crate) fn timeline_layout_for(
             older_intent(binding, response, older, instance_key, view_ref),
         ));
     }
-    timeline_layout(
+    build_layout(
         super::content::source_collection(binding, response),
         response
             .get("chain_root_id")
             .and_then(Value::as_str)
             .unwrap_or(""),
         lead,
+        system_events(response).as_ref(),
     )
 }
 
@@ -2032,6 +2191,146 @@ mod tests {
                 .entries
                 .is_empty()
         );
+    }
+
+    fn ask_entry(id: &str, state: &str) -> Value {
+        with(
+            with(
+                entry(id, "ask", json!({"headline": "approval requested: write"})),
+                "state",
+                json!(state),
+            ),
+            "tone",
+            json!("warn"),
+        )
+    }
+
+    #[test]
+    fn asks_whose_latest_state_is_pending_are_docked_and_keep_their_row() {
+        let binding = window_binding(None);
+        let cluster = json!({
+            "item": "cluster", "id": "cl", "headline": "2 pages",
+            "members": [ask_entry("ask:in-cluster", "pending")]
+        });
+        let items = vec![
+            ask_entry("ask:1", "pending"),
+            ask_entry("ask:2", "approved"),
+            entry("p", "prose", json!({"body": "x"})),
+            cluster,
+        ];
+        let docked = pending_asks(&items);
+        assert_eq!(
+            docked.iter().map(|ask| ask.id.as_str()).collect::<Vec<_>>(),
+            ["ask:1", "ask:in-cluster"]
+        );
+        assert!(matches!(
+            &docked[0].entry,
+            RyeOsTimelineEntryVm::Line { primary, tone: RyeOsTone::Warn, .. }
+                if primary == "approval requested: write"
+        ));
+        // The ask also keeps its summary row in the flow.
+        let response = json!({ "items": items });
+        let built = timeline_layout_for(&binding, &response, &instance(), "view:t");
+        assert!(
+            built
+                .sources
+                .iter()
+                .flatten()
+                .any(|source| source.key == "item:ask:1")
+        );
+        assert!(pending_asks(&[ask_entry("ask:2", "denied")]).is_empty());
+    }
+
+    #[test]
+    fn the_lane_takes_its_label_from_the_response_and_its_tone_from_the_entry() {
+        let items = vec![with(
+            entry("act:1", "activity", json!({})),
+            "state",
+            json!("retrying"),
+        )];
+        let response = json!({"lane": {"label": "Retrying", "entry": "act:1"}});
+        let lane = timeline_lane(&response, &items).expect("a lane");
+        assert_eq!(lane.label, "Retrying");
+        assert_eq!(lane.tone, RyeOsTone::Warn);
+        // An entry outside the window still names the lane; it is drawn
+        // accented.
+        let lane = timeline_lane(&json!({"lane": {"label": "Working", "entry": "gone"}}), &[]);
+        assert_eq!(lane.map(|lane| lane.tone), Some(RyeOsTone::Accent));
+        assert_eq!(timeline_lane(&json!({"lane": null}), &items), None);
+        assert_eq!(timeline_lane(&json!({}), &items), None);
+    }
+
+    fn undeclared_response(undeclared: Value) -> Value {
+        json!({
+            "undeclared": undeclared,
+            "notice_noun": {"key": "system_event", "one": "system event", "many": "system events"},
+            "items": [entry("p", "prose", json!({"body": "x"}))]
+        })
+    }
+
+    #[test]
+    fn undeclared_events_draw_one_folded_notice_listing_each_type_and_count() {
+        let binding = window_binding(None);
+        let response = undeclared_response(json!({"vendor.alpha": 2, "vendor.beta": 1}));
+        let built = timeline_layout_for(&binding, &response, &instance(), "view:t");
+        // The notice, its two types, then the transcript.
+        assert_eq!(built.entries.len(), 4);
+        assert!(matches!(
+            &built.entries[0],
+            RyeOsTimelineEntryVm::Line { primary, .. } if primary == "3 system events"
+        ));
+        assert!(matches!(
+            &built.entries[1],
+            RyeOsTimelineEntryVm::Line { primary, meta, .. }
+                if primary == "vendor.alpha" && meta.as_deref() == Some("2")
+        ));
+        assert!(matches!(
+            &built.entries[2],
+            RyeOsTimelineEntryVm::Line { primary, meta, .. }
+                if primary == "vendor.beta" && meta.as_deref() == Some("1")
+        ));
+        assert_eq!(built.indents, vec![0, 1, 1, 0]);
+        // It starts folded: the header shows, the list does not, and the
+        // transcript after it is untouched.
+        let notice = built.sections[0];
+        assert!(built.collapsible.contains(&notice));
+        assert!(built.section_folded(notice, &BTreeMap::new()));
+        let folded = fold_timeline_window(&built, None, &BTreeMap::new(), 0, 50).folded;
+        assert_eq!(folded.entries.len(), 2);
+        // Opening it by its key shows the list.
+        let open = BTreeMap::from([(SYSTEM_EVENTS_KEY.to_string(), false)]);
+        let opened = fold_timeline_window(&built, None, &open, 0, 50).folded;
+        assert_eq!(opened.entries.len(), 4);
+    }
+
+    #[test]
+    fn a_single_undeclared_event_uses_the_singular_noun() {
+        let built = timeline_layout_for(
+            &window_binding(None),
+            &undeclared_response(json!({"vendor.alpha": 1})),
+            &instance(),
+            "view:t",
+        );
+        assert!(matches!(
+            &built.entries[0],
+            RyeOsTimelineEntryVm::Line { primary, .. } if primary == "1 system event"
+        ));
+    }
+
+    #[test]
+    fn no_undeclared_events_or_no_noun_draws_no_notice() {
+        let binding = window_binding(None);
+        for response in [
+            undeclared_response(json!({})),
+            undeclared_response(json!({"vendor.alpha": 0})),
+            json!({
+                "undeclared": {"vendor.alpha": 2},
+                "items": [entry("p", "prose", json!({"body": "x"}))]
+            }),
+        ] {
+            let built = timeline_layout_for(&binding, &response, &instance(), "view:t");
+            assert_eq!(built.entries.len(), 1, "{response}");
+        }
     }
 
     #[test]

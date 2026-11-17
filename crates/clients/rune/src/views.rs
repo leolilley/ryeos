@@ -10,8 +10,8 @@ use ryeos_client_base::ui::timeline::RyeOsTimelineEntryVm;
 use ryeos_client_base::ui::view_model::{
     RyeOsInputVm, RyeOsRowDetailVm, RyeOsRowVm, RyeOsSectionVm, RyeOsSourceStatusVm,
     RyeOsTableCoverageVm, RyeOsTableHierarchyVm, RyeOsTableRowVm, RyeOsTextLineVm,
-    RyeOsTileIntentVm, RyeOsTone, RyeOsViewHeadingVm, RyeOsViewSupplementVm, RyeOsViewTabVm,
-    RyeOsViewVm,
+    RyeOsTileIntentVm, RyeOsTimelineDockVm, RyeOsTimelineLaneVm, RyeOsTone, RyeOsViewHeadingVm,
+    RyeOsViewSupplementVm, RyeOsViewTabVm, RyeOsViewVm,
 };
 use ryeos_client_base::ui::{
     RyeOsKey, RyeOsKeyEvent, RyeOsKeyModifiers, RyeOsUiEvent, RyeOsUiIntent,
@@ -142,6 +142,11 @@ pub fn frame(spec: FrameSpec<'_>, local: &crate::Local) -> El {
         spec.instance,
         local,
     )));
+    // The status lane and the pending asks close the feed, directly above the
+    // composer in the same tile.
+    if let RyeOsViewVm::Timeline { lane, dock, .. } = spec.view {
+        frame = frame.child(timeline_foot(spec.instance, lane.as_ref(), dock));
+    }
     if let Some(supplement) = spec.supplement {
         frame = supplement_footer(frame, supplement);
     }
@@ -1348,6 +1353,69 @@ fn timeline_view(
         body = body.child(timeline_entry(instance, &timeline, index));
     }
     body
+}
+
+/// Height reserved for the status lane whether or not it has text, so the
+/// transcript does not move when the lane appears or clears.
+const LANE_HEIGHT: f32 = 28.0;
+
+/// The status lane, then each pending ask docked below it. The ask keeps its
+/// own summary row in the flow above.
+fn timeline_foot(
+    instance: &RyeOsViewInstanceKey,
+    lane: Option<&RyeOsTimelineLaneVm>,
+    dock: &[RyeOsTimelineDockVm],
+) -> El {
+    let p = Palette::get();
+    let mut lane_row = row()
+        .key(format!("lane:{instance:?}"))
+        .w_full()
+        .min_w(0.0)
+        .min_h(LANE_HEIGHT)
+        .px(16.0)
+        .center_y();
+    if let Some(lane) = lane {
+        lane_row = lane_row.role("status").label(lane.label.clone()).child(
+            text(theme::drawable(&lane.label, theme::Face::Ui).into_owned())
+                .font(theme::ui(12.0))
+                .color(p.tone(lane.tone, p.text))
+                .truncate()
+                .grow(1.0)
+                .min_w(0.0),
+        );
+    }
+    let mut foot = col().w_full().min_w(0.0).child(lane_row);
+    for ask in dock {
+        let (primary, meta, tone) = match &ask.entry {
+            RyeOsTimelineEntryVm::Line {
+                primary,
+                meta,
+                tone,
+                ..
+            } => (primary.clone(), meta.clone(), *tone),
+            other => (other.label(), None, RyeOsTone::Warn),
+        };
+        foot = foot.child(
+            row()
+                .key(format!("dock:{instance:?}:{}", ask.id))
+                .w_full()
+                .min_w(0.0)
+                .px(16.0)
+                .py(10.0)
+                .center_y()
+                .fill(p.plane_raised)
+                .border_sides([1.0, 0.0, 0.0, 0.0], p.line)
+                .role("status")
+                .label(ask.entry.label())
+                .child(entry_line(
+                    &primary,
+                    meta.as_deref(),
+                    p.tone(tone, p.text),
+                    500.0,
+                )),
+        );
+    }
+    foot
 }
 
 /// Estimated height of a timeline entry not yet measured.

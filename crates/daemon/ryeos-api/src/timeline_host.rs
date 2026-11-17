@@ -327,6 +327,8 @@ fn timeline_for(
                 timeline: Arc::new(Timeline {
                     items: Vec::new(),
                     undeclared: Default::default(),
+                    notice_noun: None,
+                    lane: None,
                 }),
             }));
             cache.insert(key.clone(), entry.clone());
@@ -395,6 +397,8 @@ fn window_response(
         "next_limit": next_limit(older, limit),
         "summary": summary,
         "undeclared": serde_json::to_value(&timeline.undeclared)?,
+        "notice_noun": serde_json::to_value(&timeline.notice_noun)?,
+        "lane": serde_json::to_value(&timeline.lane)?,
     });
     let Some(since) = since else {
         response["items"] = serde_json::to_value(window)?;
@@ -480,6 +484,8 @@ mod tests {
         Timeline {
             items,
             undeclared: BTreeMap::new(),
+            notice_noun: None,
+            lane: None,
         }
     }
 
@@ -517,6 +523,31 @@ mod tests {
                 "turns": 3,
             })
         );
+    }
+
+    #[test]
+    fn the_response_carries_the_lane_and_the_notice_noun_beside_the_window() {
+        let mut state = folded(1, 9);
+        let mut timeline = timeline(1);
+        timeline.lane = Some(ryeos_timeline::Lane {
+            label: "Working".to_string(),
+            entry: "act:1".to_string(),
+        });
+        timeline.notice_noun = Some(ryeos_timeline::Noun {
+            key: "system_event".to_string(),
+            one: "system event".to_string(),
+            many: "system events".to_string(),
+        });
+        state.timeline = Arc::new(timeline);
+        let value = window_response("c", "config:x", "d", &state, summary(), 200, None).unwrap();
+        assert_eq!(value["lane"], json!({"label": "Working", "entry": "act:1"}));
+        assert_eq!(
+            value["notice_noun"],
+            json!({"key": "system_event", "one": "system event", "many": "system events"})
+        );
+        let idle =
+            window_response("c", "config:x", "d", &folded(1, 9), summary(), 200, None).unwrap();
+        assert_eq!(idle["lane"], Value::Null);
     }
 
     #[test]

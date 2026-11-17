@@ -14,6 +14,7 @@ use crate::view_set::{TileState, ViewLocalState};
 mod dialogs;
 mod execution;
 mod session;
+pub use super::timeline::{RyeOsTimelineDockVm, RyeOsTimelineLaneVm};
 pub use dialogs::{RyeOsCommandChoice, RyeOsDialogVm, RyeOsShortcutEntryVm, RyeOsTileIntentVm};
 pub use execution::RyeOsTimelineEntryVm;
 use execution::{facet_backed_response, focused_timeline_entry, retry_intent_for_focused_row};
@@ -501,6 +502,13 @@ pub enum RyeOsViewVm {
         #[serde(default)]
         affordance_hints: Vec<String>,
         entries: Vec<RyeOsTimelineEntryVm>,
+        /// The status lane below the transcript. Renderers reserve its height
+        /// whether or not it is present.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lane: Option<RyeOsTimelineLaneVm>,
+        /// Pending asks docked below the lane, directly above the composer.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        dock: Vec<RyeOsTimelineDockVm>,
         /// Stable semantic identity per visible entry. Source-backed entries
         /// use their source event key; presentation-only entries use a digest
         /// of their semantic content.
@@ -1376,6 +1384,8 @@ fn bound_view_vm_keyed(
             provenance: Some(view_ref.to_string()),
             affordance_hints: affordance_hints(binding),
             entries: Vec::new(),
+            lane: None,
+            dock: Vec::new(),
             entry_ids: Vec::new(),
             entry_roles: Vec::new(),
             entry_cursors: Vec::new(),
@@ -1610,12 +1620,15 @@ fn bound_view_vm_keyed(
                     )
                 })
                 .collect();
+            let window_items = super::content::source_collection(binding, response);
             RyeOsViewVm::Timeline {
                 title,
                 source_status,
                 provenance: Some(view_ref.to_string()),
                 affordance_hints: affordance_hints(binding),
                 entries: folded.entries,
+                lane: super::timeline::timeline_lane(response, window_items),
+                dock: super::timeline::pending_asks(window_items),
                 entry_ids,
                 entry_roles,
                 entry_cursors,

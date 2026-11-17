@@ -3,10 +3,29 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use crate::{Cluster, Definition, Entry, EntryKind, Item, Recap};
+use crate::{Cluster, Definition, Entry, EntryKind, Item, Lane, LaneRow, Recap};
 
 pub(crate) fn run(entries: Vec<Entry>, definition: &Definition) -> Vec<Item> {
     turn_fold(cluster(entries, definition), definition)
+}
+
+/// The status lane: the first table row that matches some entry's type and
+/// latest state. Entries are entities, so each holds its latest state. When
+/// several entries match a row, the most recent one is named. `None` when no
+/// row matches.
+pub(crate) fn lane(entries: &[Entry], table: &[LaneRow]) -> Option<Lane> {
+    table.iter().find_map(|row| {
+        entries
+            .iter()
+            .filter(|entry| {
+                entry.kind == row.kind && entry.state.as_deref() == Some(row.state.as_str())
+            })
+            .max_by_key(|entry| entry.seq.1)
+            .map(|entry| Lane {
+                label: row.label.clone(),
+                entry: entry.id.clone(),
+            })
+    })
 }
 
 /// A failed or alarming entry never hides inside a group: its state or tone is

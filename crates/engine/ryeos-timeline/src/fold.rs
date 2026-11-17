@@ -154,9 +154,19 @@ impl Folder {
                 overlay::present(entry, present, subject, inputs, &self.definition.vocabulary);
             }
         }
+        let lane = passes::lane(&entries, &self.definition.lane);
+        let notice_noun = self.definition.folds.notice.as_ref().and_then(|key| {
+            self.definition
+                .vocabulary
+                .iter()
+                .find(|noun| &noun.key == key)
+                .cloned()
+        });
         Timeline {
             items: passes::run(entries, &self.definition),
             undeclared: self.state.undeclared.clone(),
+            notice_noun,
+            lane,
         }
     }
 

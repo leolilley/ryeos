@@ -146,5 +146,11 @@
       ]
     }
   ],
-  "undeclared": {}
+  "undeclared": {},
+  "notice_noun": {
+    "key": "system_event",
+    "one": "system event",
+    "many": "system events"
+  },
+  "lane": null
 }

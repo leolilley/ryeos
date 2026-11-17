@@ -39,6 +39,10 @@ pub struct Definition {
     /// Which events link threads into the viewed thread's story.
     #[serde(default)]
     pub spine: Vec<SpineEdge>,
+    /// The status lane table, in priority order: the first row that matches
+    /// some entry's type and latest state names what the thread is doing now.
+    #[serde(default)]
+    pub lane: Vec<LaneRow>,
     /// Rules per event type. The first rule whose `when` holds applies.
     pub events: BTreeMap<String, Vec<Rule>>,
 }
@@ -90,7 +94,18 @@ impl Definition {
     }
 }
 
+/// One row of the status lane table: an entry of `kind` whose latest state is
+/// `state` is drawn as `label`.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaneRow {
+    #[serde(rename = "type")]
+    pub kind: EntryKind,
+    pub state: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Noun {
     pub key: String,
@@ -424,9 +439,23 @@ impl Item {
     }
 }
 
+/// What the thread is doing now, derived from the entries' latest states.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Lane {
+    /// The matching [`LaneRow`]'s label.
+    pub label: String,
+    /// Id of the entry the row matched.
+    pub entry: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Timeline {
     pub items: Vec<Item>,
     /// Event types with no rule, and how often they occurred.
     pub undeclared: BTreeMap<String, u32>,
+    /// The noun a client counts undeclared events under, from the
+    /// definition's notice noun; absent when the definition names none.
+    pub notice_noun: Option<Noun>,
+    /// The status lane; absent when nothing matches the table (idle).
+    pub lane: Option<Lane>,
 }
