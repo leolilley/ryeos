@@ -1079,3 +1079,38 @@ fn a_settled_child_gives_its_link_the_outcome_and_summary() {
         assert_eq!(link.tone.as_deref(), Some(tone), "{kind}");
     }
 }
+
+/// A reasoning part that holds only an opaque artefact draws nothing; the
+/// visible reasoning text beside it still does.
+#[test]
+fn an_artefact_only_reasoning_part_draws_no_entry() {
+    let turn = |parts: Value| {
+        vec![
+            ask(&mut 1, T0, "go"),
+            synthetic(
+                2,
+                T1,
+                "cognition_out",
+                json!({"turn": 1, "parts": parts, "finish": "tool_calls"}),
+            ),
+        ]
+    };
+    let artefact =
+        json!({"capture": "blocks", "group": "g", "value": {"thinking": "x".repeat(4096)}});
+    let with_artefact = shape(&turn(json!([
+        {"type": "reasoning", "artefact": artefact},
+        {"type": "reasoning", "artefact": artefact},
+    ])));
+    let without = shape(&turn(json!([])));
+    assert_eq!(with_artefact, without);
+
+    let with_text = shape(&turn(json!([
+        {"type": "reasoning", "text": "shown"},
+        {"type": "reasoning", "artefact": artefact},
+    ])));
+    assert_eq!(with_text.len(), without.len() + 1, "{with_text:?}");
+    assert!(
+        with_text.iter().any(|kind| kind == "Thought"),
+        "{with_text:?}"
+    );
+}

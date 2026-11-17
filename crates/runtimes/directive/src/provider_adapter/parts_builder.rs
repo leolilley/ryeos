@@ -4,16 +4,38 @@
 //! one reasoning part, and a tool call is a part of its own at the point it
 //! completed.
 
-use ryeos_provider_contract::{Part, ReasoningPart, Role};
+use ryeos_provider_contract::{Artefact, Part, ReasoningPart, Role};
+use serde_json::Value;
 
-use crate::directive::{ProviderMessage, ToolCall, synthesised_call_id};
+use super::reasoning_capture::envelope;
+use crate::directive::{ProviderMessage, ToolCall, ToolCallArtefact, synthesised_call_id};
 
 #[derive(Debug, Default)]
 pub struct PartsBuilder {
     parts: Vec<Part>,
+    /// The compat group stamped on every artefact this builder records.
+    group: Option<String>,
 }
 
 impl PartsBuilder {
+    /// A builder whose artefacts carry `group`, the compat group the provider
+    /// entry declares.
+    pub fn new(group: Option<&str>) -> Self {
+        Self {
+            parts: Vec::new(),
+            group: group.map(str::to_string),
+        }
+    }
+
+    /// A completed opaque reasoning block, as a part of its own. Reasoning
+    /// text stays in adjacent text-only parts, so the two never fuse.
+    pub fn push_reasoning_artefact(&mut self, capture_id: &str, value: Value) {
+        self.parts.push(Part::Reasoning(ReasoningPart {
+            text: None,
+            artefact: Some(Artefact(envelope(capture_id, self.group.as_deref(), value))),
+        }));
+    }
+
     pub fn push_text(&mut self, text: &str) {
         if text.is_empty() {
             return;
@@ -41,12 +63,22 @@ impl PartsBuilder {
 
     /// A completed tool call. A call the provider issued without an id keeps
     /// an empty id until [`Self::finish`] gives it one.
+    #[cfg(test)]
     pub fn push_call(&mut self, call: ToolCall) {
-        self.parts.push(Part::tool_call(
-            call.id.unwrap_or_default(),
-            call.name,
-            call.arguments,
-        ));
+        self.push_call_with_artefact(call, None);
+    }
+
+    /// A completed tool call with the value a capture rule collected for it.
+    pub fn push_call_with_artefact(&mut self, call: ToolCall, artefact: Option<ToolCallArtefact>) {
+        let mut part = Part::tool_call(call.id.unwrap_or_default(), call.name, call.arguments);
+        if let (Part::ToolCall(call_part), Some(artefact)) = (&mut part, artefact) {
+            call_part.artefact = Some(Artefact(envelope(
+                &artefact.capture_id,
+                self.group.as_deref(),
+                artefact.value,
+            )));
+        }
+        self.parts.push(part);
     }
 
     /// Joined text of every text part.
@@ -182,5 +214,51 @@ mod tests {
         let parts = builder.interrupted_parts();
         let kinds: Vec<_> = parts.iter().map(|part| part.type_name()).collect();
         assert_eq!(kinds, ["reasoning", "text"]);
+    }
+
+    #[test]
+    fn artefacts_are_parts_of_their_own_stamped_with_the_group() {
+        let mut builder = PartsBuilder::new(Some("g1"));
+        builder.push_reasoning("shown");
+        builder.push_reasoning_artefact("blocks", json!({"n": 1}));
+        builder.push_reasoning("more");
+        builder.push_call_with_artefact(
+            call(Some("a"), "tool"),
+            Some(ToolCallArtefact {
+                capture_id: "sig".to_string(),
+                value: json!({"s": 1}),
+            }),
+        );
+        let message = builder.finish(1);
+        let envelope = |capture: &str, value: Value| json!({"capture": capture, "group": "g1", "value": value});
+        let parts = serde_json::to_value(&message.parts).unwrap();
+        assert_eq!(
+            parts,
+            json!([
+                {"type": "reasoning", "text": "shown"},
+                {"type": "reasoning", "artefact": envelope("blocks", json!({"n": 1}))},
+                {"type": "reasoning", "text": "more"},
+                {"type": "tool_call", "call_id": "a", "name": "tool", "arguments": {},
+                 "artefact": envelope("sig", json!({"s": 1}))},
+            ])
+        );
+    }
+
+    #[test]
+    fn a_builder_without_a_group_stamps_none() {
+        let mut builder = PartsBuilder::default();
+        builder.push_reasoning_artefact("blocks", json!(1));
+        let parts = serde_json::to_value(&builder.finish(1).parts).unwrap();
+        assert!(parts[0]["artefact"].get("group").is_none());
+    }
+
+    #[test]
+    fn an_interrupted_turn_keeps_complete_artefact_parts() {
+        let mut builder = PartsBuilder::new(Some("g"));
+        builder.push_reasoning_artefact("blocks", json!(1));
+        builder.push_call(call(Some("a"), "tool"));
+        let kept = builder.interrupted_parts();
+        assert_eq!(kept.len(), 1);
+        assert!(matches!(&kept[0], Part::Reasoning(_)));
     }
 }

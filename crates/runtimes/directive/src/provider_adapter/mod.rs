@@ -2,6 +2,8 @@ pub mod http;
 pub mod messages;
 pub mod parts_builder;
 pub mod prepared;
+pub mod reasoning_capture;
+pub mod reasoning_replay;
 pub mod streaming;
 pub mod tools;
 
