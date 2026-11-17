@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use std::collections::HashSet;
 
-use crate::{Format, Part, Slot, When};
+use crate::{Find, Format, Part, Slot, When};
 
 /// The value at `path`, or `None` when any segment is missing or null.
 pub(crate) fn get<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
@@ -45,6 +45,14 @@ pub(crate) fn when_holds(when: &Option<When>, event: &Value, cx: &Context) -> bo
             .eq
             .as_ref()
             .is_none_or(|(p, literal)| get(event, p) == Some(literal))
+        && when
+            .ne
+            .as_ref()
+            .is_none_or(|(p, literal)| get(event, p) != Some(literal))
+        && when
+            .one_of
+            .as_ref()
+            .is_none_or(|(p, literals)| get(event, p).is_some_and(|value| literals.contains(value)))
         && when.on_spine.is_none_or(|want| on_spine() == want)
 }
 
@@ -108,13 +116,20 @@ fn lookup_value(lookup: &crate::Lookup, event: &Value, cx: &Context) -> Option<S
     let thread = event.get("thread_id")?;
     // `array` and `find` select an element together; neither alone is a lookup.
     let element_match = match (&lookup.array, &lookup.find) {
-        (Some(array), Some((field, source))) => Some((array, field, get(event, source)?)),
+        (Some(array), Some(find)) => {
+            let (field, wanted) = match find {
+                Find::Source((field, source)) => (field, get(event, source)?),
+                Find::Literal { field, equals } => (field, equals),
+            };
+            Some((array, field, wanted))
+        }
         (None, None) => None,
         _ => return None,
     };
     cx.history.iter().rev().find_map(|previous| {
         if previous.get("event_type").and_then(Value::as_str) != Some(lookup.event.as_str())
             || previous.get("thread_id") != Some(thread)
+            || !when_holds(&lookup.when, previous, cx)
         {
             return None;
         }
