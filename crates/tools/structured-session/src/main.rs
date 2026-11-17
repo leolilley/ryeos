@@ -532,6 +532,21 @@ struct NotificationRule {
     observations: Vec<ObservationRule>,
     #[serde(default)]
     ceremony_clear: bool,
+    /// Marks the notification whose durable payload is the execution's
+    /// result. The pushed event carries the marker so the daemon can read the
+    /// result back from the retained observation batch.
+    #[serde(default)]
+    result: bool,
+    /// Where the result payload reports usage. The daemon applies it when
+    /// settling the execution; the bridge only accepts the field.
+    #[serde(default)]
+    #[allow(dead_code)]
+    result_cost: Option<serde_json::Value>,
+    /// Which result value marks a failed turn. The daemon applies it when
+    /// settling the execution; the bridge only accepts the field.
+    #[serde(default)]
+    #[allow(dead_code)]
+    result_status: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1951,12 +1966,21 @@ fn resolve_pinned_executable_with_delivery(
     if matches.next().is_some() {
         bail!("workload realization id is ambiguous");
     }
-    if realization.mode != ryeos_state::objects::ExternalContentMode::Pinned
+    // A pinned closure (file or tree) is always admissible. The one other
+    // shape is a captured bundle binary: a single regular file whose
+    // manifest carries exactly one entry. A captured tree is never a
+    // workload executable.
+    let captured_single_file = realization.mode
+        == ryeos_state::objects::ExternalContentMode::Captured
+        && realization.kind == ryeos_state::objects::ExternalContentKind::File
+        && realization.entry_count == 1;
+    if (realization.mode != ryeos_state::objects::ExternalContentMode::Pinned
+        && !captured_single_file)
         || !lillux::valid_hash(&realization.manifest_hash)
         || realization.entry_count == 0
         || realization.total_bytes == 0
     {
-        bail!("workload realization is not a non-empty pinned closure");
+        bail!("workload realization is not a non-empty pinned closure or a captured single file");
     }
     let mount = std::path::Path::new(&realization.mount);
     if mount.as_os_str().is_empty()
@@ -3736,7 +3760,7 @@ impl StructuredWorkload {
                     self.emit_command_progress(&observations)?;
                     // The notification's lifecycle authority is request-correlated,
                     // not duplicated in the independent pushed-observation stream.
-                    return self.push_event(json!({"event_type":rule.event_type,"payload":payload,"session_observations":[]}));
+                    return self.push_event(notification_event(&rule, payload, Vec::new()));
                 }
                 if self.profile.routes.iter().any(|route| {
                     route
@@ -3751,11 +3775,7 @@ impl StructuredWorkload {
                 if rule.ceremony_clear {
                     self.ceremony_active = false;
                 }
-                self.push_event(json!({
-                    "event_type":rule.event_type,
-                    "payload":payload,
-                    "session_observations":observations
-                }))
+                self.push_event(notification_event(&rule, payload, observations))
             }
             (None, None) => bail!("structured workload message has neither id nor method"),
         }
@@ -3983,6 +4003,21 @@ impl StructuredWorkload {
             .map_err(|_| anyhow!("structured-session event queue is poisoned"))?
             .push(event)
     }
+}
+
+/// The pushed event for one durable notification. Only a result-marked
+/// notification carries the `result` flag, so every other event keeps its
+/// exact prior shape.
+fn notification_event(rule: &NotificationRule, payload: Value, observations: Vec<Value>) -> Value {
+    let mut event = json!({
+        "event_type":rule.event_type,
+        "payload":payload,
+        "session_observations":observations
+    });
+    if rule.result {
+        event["result"] = Value::Bool(true);
+    }
+    event
 }
 
 fn render_workload_invocation_result(
@@ -5043,6 +5078,28 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
     use std::os::unix::net::UnixStream;
     use std::os::unix::process::CommandExt as _;
+
+    #[test]
+    fn only_the_result_notification_event_carries_the_result_marker() {
+        let profile: Value = serde_json::from_str(include_str!(
+            "../../../../bundles/claude-code/.ai/workers/claude-code/lib/hosted/structured-session.profile.json"
+        ))
+        .unwrap();
+        let rules: Vec<NotificationRule> =
+            serde_json::from_value(profile["notifications"].clone()).unwrap();
+        for rule in rules {
+            let event = notification_event(&rule, json!({"turn_id":"t1"}), Vec::new());
+            if rule.method == "turn/completed" {
+                assert!(rule.result);
+                assert_eq!(event["result"], json!(true));
+            } else {
+                assert!(!rule.result);
+                assert!(event.get("result").is_none(), "{}", rule.method);
+            }
+            assert_eq!(event["payload"], json!({"turn_id":"t1"}));
+            assert_eq!(event["event_type"], json!(rule.event_type));
+        }
+    }
 
     fn external_request_contract(route_id: &str) -> (RouteRule, HashMap<String, Value>) {
         let profile: Value = serde_json::from_str(include_str!(
@@ -6959,6 +7016,54 @@ server.serve_forever()
             .is_err(),
             "a file realization must not discard an executable-member prefix"
         );
+    }
+
+    #[test]
+    fn captured_single_file_is_a_workload_executable_and_nothing_else_captured_is() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("fixture-worker");
+        std::fs::write(&executable, b"fixture").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let sealed = |kind: &str, mode: &str, entries: u64| {
+            serde_json::to_string(&json!([{
+                "id":"fixture",
+                "kind":kind,
+                "mode":mode,
+                "manifest_hash":"a".repeat(64),
+                "entry_count":entries,
+                "total_bytes":7,
+                "mount_root":"project",
+                "mount":"fixture-worker"
+            }]))
+            .unwrap()
+        };
+        let resolve = |sealed: &str| {
+            resolve_pinned_executable(
+                root.path(),
+                sealed,
+                "fixture",
+                std::path::Path::new("fixture-worker"),
+            )
+        };
+        let (descriptor, argv0, authorities) = resolve(&sealed("file", "captured", 1)).unwrap();
+        assert_eq!(std::fs::read(descriptor).unwrap(), b"fixture");
+        assert_eq!(argv0.file_name().unwrap(), "fixture-worker");
+        assert_eq!(authorities.len(), 2);
+        assert!(
+            resolve(&sealed("file", "captured", 2)).is_err(),
+            "a captured file manifest holds exactly one entry"
+        );
+        assert!(
+            resolve(&sealed("file", "captured", 0)).is_err(),
+            "an empty captured manifest is not an executable"
+        );
+        assert!(
+            resolve(&sealed("tree", "captured", 1)).is_err(),
+            "a captured tree is never a workload executable"
+        );
+        assert!(resolve(&sealed("file", "pinned", 1)).is_ok());
     }
 
     #[test]

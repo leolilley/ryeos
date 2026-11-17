@@ -324,6 +324,15 @@ fn replay_exact(
     root_thread_id: &str,
     requested: &FactKey,
 ) -> Result<RootFactLookup> {
+    replay_exact_in_store(&state.state_store, chain_root_id, root_thread_id, requested)
+}
+
+fn replay_exact_in_store(
+    store: &StateStore,
+    chain_root_id: &str,
+    root_thread_id: &str,
+    requested: &FactKey,
+) -> Result<RootFactLookup> {
     let mut after = None;
     let mut lookup = RootFactLookup {
         count: 0,
@@ -334,7 +343,7 @@ fn replay_exact(
         first_event_ts: None,
     };
     loop {
-        let page = state.state_store.replay_events(
+        let page = store.replay_events(
             chain_root_id,
             Some(root_thread_id),
             after,
@@ -569,6 +578,64 @@ pub fn append_once_to_created_thread(
         bail!("recovery fact target is not an unstarted successor");
     }
     state.state_store.append_events(
+        &thread.chain_root_id,
+        &thread.thread_id,
+        &[NewEventRecord {
+            event_type: event_type.to_owned(),
+            storage_class: "indexed".to_owned(),
+            payload,
+        }],
+    )?;
+    Ok(AppendOnceOutcome::Appended)
+}
+
+/// Append one exact fact to a thread that is no longer running, such as a
+/// follow parent suspended behind its children. Exactly-once by operation id
+/// under the same per-thread lock: a retry carrying identical canonical
+/// testimony is a no-op, a retry carrying different testimony is refused.
+/// Unlike [`append_once`] this needs only the state store, so a lifecycle hook
+/// without the full application state can record settlement facts.
+pub fn append_once_to_settled_thread(
+    store: &StateStore,
+    thread_id: &str,
+    event_type: &str,
+    operation_id: &str,
+    mut payload: Value,
+) -> Result<AppendOnceOutcome> {
+    let lock = operation_lock(thread_id);
+    let _guard = lock
+        .lock()
+        .map_err(|_| anyhow!("authoritative root fact lock poisoned"))?;
+    let thread = store
+        .get_thread(thread_id)?
+        .ok_or_else(|| anyhow!("settlement fact thread disappeared"))?;
+    payload
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("settlement fact payload is not an object"))?
+        .insert(
+            "operation_id".to_owned(),
+            Value::String(operation_id.to_owned()),
+        );
+    let fact = replay_exact_in_store(
+        store,
+        &thread.chain_root_id,
+        &thread.thread_id,
+        &FactKey {
+            event_type: event_type.to_owned(),
+            operation_id: operation_id.to_owned(),
+        },
+    )?;
+    if fact.count > 1 {
+        bail!("settlement fact operation is duplicated in the authoritative chain");
+    }
+    let expected_digest = ryeos_state::objects::canonical_value_digest(&payload)?;
+    if let Some(existing_digest) = fact.payload_digest {
+        if existing_digest != expected_digest {
+            bail!("settlement fact operation id is bound to contradictory canonical testimony");
+        }
+        return Ok(AppendOnceOutcome::AlreadyPresent);
+    }
+    store.append_events(
         &thread.chain_root_id,
         &thread.thread_id,
         &[NewEventRecord {

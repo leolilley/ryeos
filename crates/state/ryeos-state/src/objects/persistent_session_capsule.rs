@@ -49,7 +49,9 @@ pub const PERSISTENT_SESSION_CAPSULE_KIND: &str = "persistent_session_capsule";
 // v26 adds the `delivered_secret` process-environment kind: the capsule names
 // a secret the session owner's admitted environment authority delivers at
 // session start; the value is never retained.
-pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 26;
+// v27 freezes the worker kind's signed `max_lifetime_seconds_ceiling` in the
+// lifecycle contract; a v26 capsule has no ceiling and is not reinterpreted.
+pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 27;
 pub const MAX_PERSISTENT_SESSION_CAPSULE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_EXECUTABLE_SEARCH_PATH_ENTRIES: usize = 32;
 pub const MAX_SESSION_PROCESS_ENVIRONMENT_ENTRIES: usize = 32;
@@ -324,6 +326,11 @@ fn validate_portable_state_pattern(pattern: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Sanity bound (seven days) on the signed request, idle and lifetime values a
+/// lifecycle contract may freeze. The kind's signed ceilings govern; this only
+/// rejects values no node could honour.
+const SESSION_TIME_SANITY_SECONDS: u64 = 7 * 24 * 60 * 60;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PersistentSessionLifecycleContract {
@@ -336,6 +343,10 @@ pub struct PersistentSessionLifecycleContract {
     pub ready_timeout_ms: u64,
     pub request_timeout_ms: u64,
     pub idle_timeout_ms: u64,
+    /// The worker kind's signed ceiling on the lifetime a launch may state
+    /// for this session, in seconds. Frozen here so every later reader judges
+    /// the launch's stated lifetime against the same signed value.
+    pub max_lifetime_seconds_ceiling: u64,
 }
 
 impl PersistentSessionLifecycleContract {
@@ -352,9 +363,11 @@ impl PersistentSessionLifecycleContract {
             || self.ready_timeout_ms == 0
             || self.ready_timeout_ms > 10 * 60 * 1000
             || self.request_timeout_ms == 0
-            || self.request_timeout_ms > 60 * 60 * 1000
+            || self.request_timeout_ms > SESSION_TIME_SANITY_SECONDS * 1000
             || self.idle_timeout_ms == 0
-            || self.idle_timeout_ms > 24 * 60 * 60 * 1000
+            || self.idle_timeout_ms > SESSION_TIME_SANITY_SECONDS * 1000
+            || self.max_lifetime_seconds_ceiling == 0
+            || self.max_lifetime_seconds_ceiling > SESSION_TIME_SANITY_SECONDS
         {
             anyhow::bail!("persistent-session lifecycle contract is outside substrate bounds");
         }
@@ -1278,9 +1291,10 @@ pub const MAX_SESSION_CONFIGURATION_FILE_BYTES: usize = 64 * 1024;
 /// without accepting an unbounded document before parsing.
 pub const MAX_STRUCTURED_SESSION_PROFILE_BYTES: usize = 192 * 1024;
 /// Current signed source and retained compiled profile vocabulary.
-/// v12 removes the approval `cancel` response template: RyeOS records only
-/// `accept` and `decline`, so no decision can render it.
-pub const STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION: u32 = 12;
+/// v13 makes the `result` flag a required boolean on every notification: at
+/// most one notification is the execution's result, carrying the
+/// turn-completion observation, and its durable payload is that result.
+pub const STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION: u32 = 13;
 
 /// A signed structured-session profile whose `schema_version` is not the
 /// current one. There is no compatibility reader: an older profile is refused
@@ -1299,8 +1313,8 @@ impl std::fmt::Display for StructuredSessionProfileSchemaRefusal {
             formatter,
             "structured-session profile schema_version {found} is not admitted; current is \
              {STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION}. Cure: migrate the profile to \
-             schema_version {STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION} (v12 removes every \
-             server request's `cancel` response template), then update its Worker's source \
+             schema_version {STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION} (v13 requires a \
+             boolean `result` flag on every notification), then update its Worker's source \
              digest and re-sign the Worker"
         )
     }
@@ -2086,8 +2100,31 @@ mod tests {
             ready_timeout_ms: 1,
             request_timeout_ms: 1,
             idle_timeout_ms: 1,
+            max_lifetime_seconds_ceiling: 603_600,
         };
         assert!(contract.validate().is_err());
+    }
+
+    #[test]
+    fn lifecycle_bounds_the_frozen_lifetime_ceiling_and_long_request_timeouts() {
+        let valid = PersistentSessionLifecycleContract {
+            max_processes: 1,
+            max_inflight_per_process: 1,
+            max_address_space_bytes: 64 * 1024 * 1024,
+            max_cpu_seconds: 1,
+            real_uid_process_limit: 1,
+            ready_timeout_ms: 1,
+            request_timeout_ms: 6 * 60 * 60 * 1000,
+            idle_timeout_ms: 1,
+            max_lifetime_seconds_ceiling: 603_600,
+        };
+        valid.validate().unwrap();
+        let mut zero = valid.clone();
+        zero.max_lifetime_seconds_ceiling = 0;
+        assert!(zero.validate().is_err());
+        let mut above = valid;
+        above.max_lifetime_seconds_ceiling = SESSION_TIME_SANITY_SECONDS + 1;
+        assert!(above.validate().is_err());
     }
 
     #[test]

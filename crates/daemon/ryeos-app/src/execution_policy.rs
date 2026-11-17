@@ -47,6 +47,7 @@ impl ExecutionPolicyResolution for ExecutionPolicy {
         let ProjectExecutionPolicy::LiveDirect {
             access,
             child_policy,
+            intent,
         } = &self.project
         else {
             anyhow::bail!("live project authority requires a live-direct execution policy");
@@ -137,7 +138,8 @@ impl ExecutionPolicyResolution for ExecutionPolicy {
             environment,
             capability_ceiling,
         )?
-        .with_child_policy(child_policy)
+        .with_child_policy(child_policy)?
+        .with_live_intent((*intent).into())
     }
 }
 
@@ -254,6 +256,7 @@ pub fn resolve_offline_local_live_project_authority(
         project: ProjectExecutionPolicy::LiveDirect {
             access: LiveAccess::ReadWrite,
             child_policy: ChildProjectPolicy::Inherit,
+            intent: LiveIntent::Default,
         },
     };
     policy.validate()?;
@@ -366,7 +369,7 @@ pub(crate) fn synthetic_test_live_project_authority(
     use ryeos_state::objects::{
         ChildProjectAuthorityPolicy, EnvironmentAuthority, EnvironmentNameAuthority,
         ExecutionProjectAuthority, LiveAccessAuthority, LiveFilesystemConfinement,
-        LiveProjectAccess,
+        LiveProjectAccess, LiveProjectIntent,
     };
 
     let authored_project_identity = format!("test:{}", project_path.display());
@@ -384,6 +387,7 @@ pub(crate) fn synthetic_test_live_project_authority(
         canonical_root: project_path.to_path_buf(),
         live_access: LiveAccessAuthority {
             access: LiveProjectAccess::ReadWrite,
+            intent: LiveProjectIntent::Default,
             authorized_write_namespaces: vec!["project".to_string()],
             confinement: LiveFilesystemConfinement::standard_fixed_parents(),
         },
@@ -480,6 +484,7 @@ mod policy_tests {
             project: ProjectExecutionPolicy::LiveDirect {
                 access,
                 child_policy: ChildProjectPolicy::Inherit,
+                intent: LiveIntent::Default,
             },
         }
     }
@@ -804,6 +809,7 @@ mod policy_tests {
                     access: ryeos_state::objects::LiveProjectAccess::ReadWrite,
                     authorized_write_namespaces,
                     confinement: ryeos_state::objects::LiveFilesystemConfinement::UnconfinedHost,
+                    ..
                 },
                 environment: ryeos_state::objects::EnvironmentAuthority::None,
                 capability_ceiling,

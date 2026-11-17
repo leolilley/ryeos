@@ -107,7 +107,7 @@ pub use execution_project_authority::{
     ChildProjectAuthorityPolicy, EnvironmentAuthority, EnvironmentNameAuthority,
     ExecutionLaunchDriver, ExecutionLifecycleAuthority, ExecutionOwnershipAuthority,
     ExecutionProjectAuthority, ExecutionRecoveryAuthority, LiveAccessAuthority,
-    LiveFilesystemConfinement, LiveProjectAccess, LiveSymlinkPolicy,
+    LiveFilesystemConfinement, LiveProjectAccess, LiveProjectIntent, LiveSymlinkPolicy,
     OperationalProjectAuthorityTransition, PinnedChildProjectRealization, PinnedProjectRealization,
     PinnedTerminalPublication,
 };
