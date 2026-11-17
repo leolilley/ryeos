@@ -350,6 +350,7 @@ impl StateStore {
         placement_thread_id: &str,
         command_sequence: u64,
         worker_boot_epoch: u64,
+        succeeded: bool,
         result: &Value,
     ) -> Result<()> {
         let g = self.lock()?;
@@ -357,6 +358,7 @@ impl StateStore {
             placement_thread_id,
             command_sequence,
             worker_boot_epoch,
+            succeeded,
             result,
         )
     }
@@ -366,6 +368,7 @@ impl StateStore {
         placement_thread_id: &str,
         command_sequence: u64,
         worker_boot_epoch: u64,
+        succeeded: bool,
         result: &Value,
     ) -> Result<()> {
         let g = self.lock()?;
@@ -373,6 +376,7 @@ impl StateStore {
             placement_thread_id,
             command_sequence,
             worker_boot_epoch,
+            succeeded,
             result,
         )
     }
