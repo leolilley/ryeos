@@ -354,14 +354,19 @@ mod tests {
     }
 
     fn gemini(on_missing: Value) -> ReasoningSchemaConfig {
+        let mut placement = json!({
+            "from": "sig", "into": {"tool_call_field": "extra_content"},
+            "scope": "open_loop"
+        });
+        match on_missing.get("fill") {
+            Some(fill) => {
+                placement["on_missing"] = json!("fill");
+                placement["fill"] = fill.clone();
+            }
+            None => placement["on_missing"] = on_missing,
+        }
         config(
-            json!({
-                "compat_group": "g2",
-                "placements": [{
-                    "from": "sig", "into": {"tool_call_field": "extra_content"},
-                    "scope": "open_loop", "on_missing": on_missing
-                }]
-            }),
+            json!({"compat_group": "g2", "placements": [placement]}),
             json!([{"id": "sig", "kind": "tool_call_field", "field": "extra_content",
                     "merge": "last"}]),
         )

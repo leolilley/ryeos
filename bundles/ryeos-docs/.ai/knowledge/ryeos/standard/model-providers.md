@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-17T17:48:41Z:a49dcf0c7c29ed9e65e605bc5e6f4f3cdb578dfdec060fc31ad70d5c66a32602:Ej02md7cJWpjIwbTpY4bJsui84YYxEaq2/qCd1NrcLBchk/PcwJJlU9wSfc+00Qlrb6Mfqp3eWOKwH+NKZoXCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-17T18:15:21Z:e50187839c8780d26bc6caa119daab64b3f9d585f5ae87dd0bcfbe528d197023:dNjYRYN+zbnMNF6Fe9BiMALZgtn0gNYHd1Efz341+PgceNFC3uzYeXjjYQWQb8w4SnD7O8XvL8iBi7h5Y7z5Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/standard
@@ -201,8 +201,8 @@ value set on the rendered call), a `scope` and an `on_missing`:
   `on_missing` is then `omit` (send nothing), `refuse` (fail the turn with
   `reasoning_artefact_missing`, checked when the turn completes, before any tool
   it proposed is dispatched, and again when a request is built from history) or
-  `{fill: <json>}` (send the literal; on a tool-call field it goes on the first
-  call). Text placements are never owed.
+  `fill` (send the literal in the placement's sibling `fill` key; on a
+  tool-call field it goes on the first call). Text placements are never owed.
 
 Documented shapes. Entries for specific models must be confirmed against the
 live gateway before they ship; the Claude, Gemini and gpt-oss rows are

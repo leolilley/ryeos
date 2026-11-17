@@ -418,19 +418,111 @@ pub struct ReasoningReplayConfig {
     pub placements: Vec<ReplayPlacement>,
 }
 
+/// One placement. Authored as `from`, `into: {message_field: key}` or
+/// `into: {tool_call_field: key}`, `scope`, and `on_missing` (`omit`,
+/// `refuse` or `fill` with a sibling `fill` literal).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "RawReplayPlacement", into = "RawReplayPlacement")]
 pub struct ReplayPlacement {
     /// The capture rule id whose output is replayed.
     pub from: String,
     pub into: ReplayTarget,
     pub scope: ReplayScope,
-    #[serde(default)]
     pub on_missing: OnMissing,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawReplayPlacement {
+    from: String,
+    into: RawReplayTarget,
+    scope: ReplayScope,
+    #[serde(default)]
+    on_missing: RawOnMissing,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fill: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawReplayTarget {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    message_field: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_call_field: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RawOnMissing {
+    #[default]
+    Omit,
+    Refuse,
+    Fill,
+}
+
+impl TryFrom<RawReplayPlacement> for ReplayPlacement {
+    type Error = String;
+
+    fn try_from(raw: RawReplayPlacement) -> Result<Self, String> {
+        let into = match (raw.into.message_field, raw.into.tool_call_field) {
+            (Some(key), None) => ReplayTarget::MessageField(key),
+            (None, Some(key)) => ReplayTarget::ToolCallField(key),
+            _ => {
+                return Err(
+                    "replay placement `into` must name exactly one of message_field or tool_call_field"
+                        .to_string(),
+                );
+            }
+        };
+        let on_missing = match (raw.on_missing, raw.fill) {
+            (RawOnMissing::Omit, None) => OnMissing::Omit,
+            (RawOnMissing::Refuse, None) => OnMissing::Refuse,
+            (RawOnMissing::Fill, Some(value)) => OnMissing::Fill(value),
+            (RawOnMissing::Fill, None) => {
+                return Err("replay placement on_missing fill needs a `fill` value".to_string());
+            }
+            (_, Some(_)) => {
+                return Err(
+                    "replay placement `fill` is only valid with on_missing fill".to_string()
+                );
+            }
+        };
+        Ok(Self {
+            from: raw.from,
+            into,
+            scope: raw.scope,
+            on_missing,
+        })
+    }
+}
+
+impl From<ReplayPlacement> for RawReplayPlacement {
+    fn from(placement: ReplayPlacement) -> Self {
+        let (message_field, tool_call_field) = match placement.into {
+            ReplayTarget::MessageField(key) => (Some(key), None),
+            ReplayTarget::ToolCallField(key) => (None, Some(key)),
+        };
+        let (on_missing, fill) = match placement.on_missing {
+            OnMissing::Omit => (RawOnMissing::Omit, None),
+            OnMissing::Refuse => (RawOnMissing::Refuse, None),
+            OnMissing::Fill(value) => (RawOnMissing::Fill, Some(value)),
+        };
+        Self {
+            from: placement.from,
+            into: RawReplayTarget {
+                message_field,
+                tool_call_field,
+            },
+            scope: placement.scope,
+            on_missing,
+            fill,
+        }
+    }
+}
+
+/// Where a replayed value is written.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ReplayTarget {
     /// A top-level key of the rendered assistant message.
     MessageField(String),
@@ -460,8 +552,7 @@ pub enum ReplayScope {
 
 /// What a message in scope that proposes a tool call but holds no matching
 /// artefact does.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub enum OnMissing {
     /// Send nothing.
     #[default]
@@ -3149,7 +3240,7 @@ mod reasoning_capture_config_tests {
                     "from": "sig",
                     "into": {"tool_call_field": "extra_content"},
                     "scope": "open_loop",
-                    "on_missing": {"fill": {"signature": "placeholder"}}
+                    "on_missing": "fill", "fill": {"signature": "placeholder"}
                 }]
             }
         })
@@ -3277,6 +3368,23 @@ mod reasoning_capture_config_tests {
             .unwrap()
             .push(placement);
         assert!(validate(shape).is_err());
+    }
+
+    #[test]
+    fn fill_goes_with_on_missing_fill_and_nothing_else() {
+        let mut shape = gemini_shape();
+        shape["replay"]["placements"][0]["fill"] = json!({"x": 1});
+        assert!(serde_json::from_value::<ReasoningSchemaConfig>(shape).is_err());
+        let mut shape = gemini_shape();
+        shape["replay"]["placements"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("fill");
+        assert!(serde_json::from_value::<ReasoningSchemaConfig>(shape).is_err());
+        let mut shape = text_shape();
+        shape["replay"]["placements"][0]["into"] =
+            json!({"message_field": "a", "tool_call_field": "b"});
+        assert!(serde_json::from_value::<ReasoningSchemaConfig>(shape).is_err());
     }
 
     #[test]
