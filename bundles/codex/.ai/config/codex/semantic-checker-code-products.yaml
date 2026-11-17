@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-04T04:58:11Z:0cf875687c84be905a4c4165f1dba7cee3d63d13ca4758042e6b038266d41485:0uwtKsY93KqsiT3UFbpy7CetWuZh6I7BlBVQXRaR/hw/XK8zc1EHAdVSG3vpJ8IImYocxircwlx10JW0aGGxBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T12:59:02Z:946a325b7f7a427c4d2866e162d85103ec7d2df0b0320bea3c86ca76b24db22d:fyogd0K5fzQOYniXqcRjoznBqu5GUG/DkjE6Do8eiBsuBc2TBOMX28MqJJDINSaP7vKx/w8a8E2nQKOXwUExDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
 version: "1.0.0"
 description: Retained authored Codex semantic checker source; capture is not checker execution or qualification.
@@ -18,7 +18,7 @@ build_products:
         maximum_depth: 4
         maximum_file_bytes: 1048576
         maximum_total_bytes: 2097152
-      expected_manifest_hash: 6119be7a7719fa37e34245542fa2d39ecc9e2ceec49021b8fc275eb544596690
+      expected_manifest_hash: 414b0becc1186dca9b5e02fe93a8ac3b176e8d8d324b828971f8e29f9c44bb7c
 product_relationships:
   schema: ryeos.product_relationships.v1
   relationships:
@@ -32,27 +32,6 @@ product_relationships:
         parameters: {}
       consumer:
         canonical_ref: tool:codex/qualification/consumer-runtime-verifier
-        declaration_id: checker-code
-      required_product:
-        shape: tree
-        storage: content
-        bounds:
-          maximum_entries: 16
-          maximum_depth: 4
-          maximum_file_bytes: 1048576
-          maximum_total_bytes: 2097152
-      qualification:
-        policy_ref: null
-        required_claims: []
-    # Trusted variant verifier's edge to the same retained checker source.
-    - name: checker_code_to_consumer_verifier_trusted_lane
-      producer:
-        canonical_ref: graph:codex/semantic-checker-code-capture
-        recipe_binding: product_recipe
-        product_name: semantic_checker_code
-        parameters: {}
-      consumer:
-        canonical_ref: tool:codex/qualification/consumer-runtime-verifier-trusted-lane
         declaration_id: checker-code
       required_product:
         shape: tree

@@ -117,16 +117,34 @@ fn require_program(
     config: &serde_json::Value,
     program: &ryeos_handler_protocol::ExecutionEvidenceProgramWire,
 ) -> Result<(), String> {
+    let remote = config == &serde_json::json!({"subordinate":"remote_consumer"});
     let expected_protocol = if config == &serde_json::json!({}) {
         "protocol:ryeos/core/qualification_scoped_callback"
-    } else if config == &serde_json::json!({"subordinate":"remote_consumer"}) {
+    } else if remote {
         "protocol:ryeos/core/qualification_consumer_callback"
     } else {
         return Err("qualification projector configuration is not exact".into());
     };
-    if program.composed.composed.get("execution_protocol")
-        != Some(&serde_json::json!(expected_protocol))
-    {
+    let scalar = program.composed.composed.get("execution_protocol");
+    let list = program.composed.composed.get("execution_protocols");
+    let exact = match (scalar, list) {
+        (Some(scalar), None) => scalar == &serde_json::json!(expected_protocol),
+        (None, Some(list)) if remote => {
+            let expected: std::collections::BTreeSet<&str> = [
+                "protocol:ryeos/core/qualification_consumer_callback_contained",
+                "protocol:ryeos/core/qualification_consumer_callback_trusted",
+            ]
+            .into_iter()
+            .collect();
+            list.as_array().is_some_and(|items| {
+                let actual: std::collections::BTreeSet<&str> =
+                    items.iter().filter_map(|item| item.as_str()).collect();
+                items.len() == expected.len() && actual == expected
+            })
+        }
+        _ => false,
+    };
+    if !exact {
         return Err(
             "scoped qualification projector requires its exact protocol and empty configuration"
                 .into(),
@@ -285,5 +303,69 @@ mod tests {
                 response: ExecutionEvidenceProjectResponse::Refused { .. }
             }
         ));
+    }
+
+    fn remote_with_protocols(composed: serde_json::Value) -> ExecutionEvidenceProjectRequest {
+        let mut remote = request();
+        remote.config = json!({"subordinate":"remote_consumer"});
+        remote.effective_program.composed.composed = composed;
+        remote.terminal.result["probe_evidence"] = json!({"remote_consumer_attempt":{
+            "operation_id":"a".repeat(64), "evidence_sha256":"b".repeat(64),
+            "termination_operation_id":"c".repeat(64), "terminal_observation_sha256":"d".repeat(64),
+        }});
+        remote
+    }
+
+    fn is_refused(request: ExecutionEvidenceProjectRequest) -> bool {
+        matches!(
+            project(request),
+            HandlerResponse::ExecutionEvidenceProject {
+                response: ExecutionEvidenceProjectResponse::Refused { .. }
+            }
+        )
+    }
+
+    #[test]
+    fn remote_projection_accepts_the_exact_protocol_list() {
+        let both = json!({"execution_protocols":[
+            "protocol:ryeos/core/qualification_consumer_callback_trusted",
+            "protocol:ryeos/core/qualification_consumer_callback_contained",
+        ]});
+        assert!(!is_refused(remote_with_protocols(both)));
+    }
+
+    #[test]
+    fn remote_projection_refuses_a_wrong_protocol_list() {
+        for list in [
+            json!(["protocol:ryeos/core/qualification_consumer_callback_contained"]),
+            json!([
+                "protocol:ryeos/core/qualification_consumer_callback_contained",
+                "protocol:ryeos/core/qualification_consumer_callback"
+            ]),
+            json!([
+                "protocol:ryeos/core/qualification_consumer_callback_contained",
+                "protocol:ryeos/core/qualification_consumer_callback_trusted",
+                "protocol:ryeos/core/qualification_scoped_callback"
+            ]),
+            json!([
+                "protocol:ryeos/core/qualification_consumer_callback_contained",
+                "protocol:ryeos/core/qualification_consumer_callback_contained"
+            ]),
+        ] {
+            assert!(is_refused(remote_with_protocols(
+                json!({"execution_protocols": list})
+            )));
+        }
+    }
+
+    #[test]
+    fn remote_projection_refuses_both_protocol_keys() {
+        assert!(is_refused(remote_with_protocols(json!({
+            "execution_protocol":"protocol:ryeos/core/qualification_consumer_callback",
+            "execution_protocols":[
+                "protocol:ryeos/core/qualification_consumer_callback_contained",
+                "protocol:ryeos/core/qualification_consumer_callback_trusted",
+            ],
+        }))));
     }
 }

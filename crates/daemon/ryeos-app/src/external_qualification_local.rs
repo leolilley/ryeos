@@ -26,6 +26,54 @@ use crate::temp_dir_guard::TempDirGuard;
 mod controller_canary;
 pub(crate) use controller_canary::PreparedQualificationControllerCanary;
 
+/// The protocol the node selected for a Q Worker at launch and the filesystem
+/// authority its holding grants. It is retained with the Worker's process row,
+/// so what the Worker ran under is a recorded fact and never re-derived.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QualificationWorkerSelectedHolding {
+    protocol_ref: String,
+    filesystem_authority: String,
+}
+
+impl QualificationWorkerSelectedHolding {
+    pub fn new(protocol_ref: &str, filesystem_authority: &str) -> Result<Self> {
+        let holding = Self {
+            protocol_ref: protocol_ref.to_owned(),
+            filesystem_authority: filesystem_authority.to_owned(),
+        };
+        holding.validate()?;
+        Ok(holding)
+    }
+
+    pub fn protocol_ref(&self) -> &str {
+        &self.protocol_ref
+    }
+
+    pub fn filesystem_authority(&self) -> &str {
+        &self.filesystem_authority
+    }
+
+    pub(crate) fn validate(&self) -> Result<()> {
+        ensure!(
+            self.protocol_ref.starts_with("protocol:")
+                && self.protocol_ref.len() <= 256
+                && self.protocol_ref.trim() == self.protocol_ref
+                && !self.protocol_ref.chars().any(char::is_control),
+            "qualification Worker selected protocol is not a bounded protocol ref"
+        );
+        ensure!(
+            !self.filesystem_authority.is_empty()
+                && self.filesystem_authority.len() <= 64
+                && self
+                    .filesystem_authority
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_'),
+            "qualification Worker selected filesystem authority is not a bounded name"
+        );
+        Ok(())
+    }
+}
+
 /// This borrowed token exists only while the existing qualification occurrence
 /// contact gate is held. Its methods still recheck the durable Q journal.
 pub struct QualificationLocalOwner<'a> {
@@ -711,12 +759,14 @@ impl QualificationLocalOwner<'_> {
         &self,
         identity: &crate::process::ExecutionProcessIdentity,
         configuration: &crate::external_connector::PreparedProviderConfigurationObservation,
+        selected_holding: &QualificationWorkerSelectedHolding,
     ) -> Result<()> {
         self.state.state_store.attach_qualification_worker_process(
             self.placement,
             identity,
             crate::runtime_db::daemon_generation_id(),
             configuration,
+            selected_holding,
         )?;
         Ok(())
     }

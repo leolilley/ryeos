@@ -84,13 +84,19 @@ pub struct SupervisorCaptureOutcome {
 /// differ.
 pub struct LeaseReadyPlan {
     verified_input_digests: Vec<String>,
+    network_inputs: Vec<ryeos_state::external_execution::ObservedNetworkInput>,
     host: lillux::process_control::HostFacts,
 }
 
 impl LeaseReadyPlan {
     /// Observe this host now. `verified_input_digests` are the activation
     /// inputs the supervisor verified, in the order the owner delivered them.
-    pub fn observe(verified_input_digests: Vec<String>) -> Result<Self> {
+    /// `network_inputs` are the network inputs the supervisor measured in its
+    /// own namespace at boot.
+    pub fn observe(
+        verified_input_digests: Vec<String>,
+        network_inputs: Vec<ryeos_state::external_execution::ObservedNetworkInput>,
+    ) -> Result<Self> {
         ensure!(
             !verified_input_digests.is_empty(),
             "a leased guest Ready names at least one verified activation input"
@@ -102,6 +108,7 @@ impl LeaseReadyPlan {
         );
         Ok(Self {
             verified_input_digests,
+            network_inputs,
             host,
         })
     }
@@ -203,6 +210,7 @@ impl<L: ExternalCandidateLauncherClient> SerializedExternalCandidateSupervisor<L
                 boot_id: plan.host.boot_id.clone(),
                 verified_input_digests: plan.verified_input_digests.clone(),
                 ready_at_ms: lillux::time::timestamp_millis(),
+                network_inputs: plan.network_inputs.clone(),
             }
         });
         self.journal.author_supervisor_frame(
@@ -1165,7 +1173,7 @@ mod tests {
         let journal_root = tempfile::tempdir().unwrap();
         let live = lease_fixture_live_journal(&state, &binding, journal_root.path());
         let inputs = vec!["5".repeat(64), "6".repeat(64), "7".repeat(64)];
-        let plan = LeaseReadyPlan::observe(inputs.clone()).unwrap();
+        let plan = LeaseReadyPlan::observe(inputs.clone(), Vec::new()).unwrap();
         let mut runtime =
             SerializedExternalCandidateSupervisor::new(live, RecordingLauncher::default())
                 .with_lease_ready(plan);

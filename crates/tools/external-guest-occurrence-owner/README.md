@@ -1,10 +1,12 @@
 # External guest occurrence owner
 
 This executable is the dedicated, one-shot process beneath RyeOS's existing
-external Worker. It takes only a bounded canonical base64url root-signed
-assignment on `--assignment-b64`; the signed import and package are separately
+external Worker. It takes only a bounded canonical base64url
+controller-signed assignment on `--assignment-b64`; the assignment names the
+controller key it verifies under, so the runtime product carries no trust root
+and serves any controller. The signed import and package are separately
 delivered to fixed `/ryeos/activation` files. It measures the installed
-`/ryeos/guest-runtime` tree (including `controller-root.hex` and canonical
+`/ryeos/guest-runtime` tree (the owner executable and canonical
 `guest-owner-profile.json`), verifies both signatures and the exact runtime
 manifest, creates one occurrence owner, and uses Lillux to stage, install,
 hold, and release the packaged supervisor. The owner retains the supervisor
@@ -14,7 +16,7 @@ stream is not cancellation; `SIGINT`/`SIGTERM` are.
 The runtime profile supplies the exact private-source limits and native owner
 timeout. It is content in the runtime tree, not an argument or mutable
 environment override. The qualified provider snapshot must independently
-bind its installed tree, controller root, filesystem immutability, process
+bind its installed tree, filesystem immutability, process
 survival, and capacity to the signed placement contract. Those qualifications
 are **not yet complete**, and the lifecycle adapter must still return
 `SupervisorPending`. This owner has no Kaggle, project signing, provider, or

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-19T00:12:54Z:b619c53c6b0de15e6526cb34d1efab6a7f35fc45591b5244e6179adcdb04caa9:GrKyg3SNgliPFBsLpHeMJmT6tt9qNxUUIgbEfUcU0jYF9qp1gwK+iOoO7kUq867Vbf8rZMu7aVD6q+pqyYWbAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T12:59:02Z:2d5bd7247f4a53b8d54ef40db03ca39c90bbb88833598f4dfd87ec3a1cd0eac7:qVebiHBdrrP1wIRj/16QDbTs7uBL8CzemXBa3ZKUKJ3NmRRf/O0z4nnjsaovfrDKwi3pYGR1Y9Wpo+2SSABPBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/kinds
 tags: [kind, worker, persistent-session, source]
@@ -16,7 +16,18 @@ adjacent-source ceiling; workloads remain ordinary authored data.
 - Composer: identity
 - Source declaration: required root-verbatim `{root, entry, digest}`
 - Source testimony: descriptor owner signs the aggregate source-manifest digest
-- Protocol: kind-declared persistent session
+- Protocol: kind-declared persistent session, stated as one `execution_protocol` or as an `execution_protocols` list (never both)
+
+A worker that lists `execution_protocols` runs unchanged on every node. Each
+listed session protocol declares the node holding it needs (required
+guarantees, filesystem authority and root settlement; see
+`knowledge:ryeos/core/protocols/protocols`). At every launch the node picks the
+one listed protocol whose guarantees it reports; none, or more than one, is a
+named refusal. A worker that lists protocols carries no `filesystem_authority`
+of its own, because the selected descriptor owns it. The selection is a launch
+fact recorded beside the worker's definition digest, which stays the digest of
+the one signed worker; a restarted session re-admits under the protocol it was
+admitted under or is refused, and never re-selects.
 
 Worker source is co-located under the worker owner's namespace. For an item
 `worker:<owner>/<name>`, a declaration such as `root: lib/<name>` addresses

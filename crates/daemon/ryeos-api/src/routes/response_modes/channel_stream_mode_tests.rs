@@ -1218,6 +1218,7 @@ fn lease_handshake_frames(fixture: &Fixture) -> (Vec<u8>, Vec<u8>) {
                 boot_id: boot_id.clone(),
                 verified_input_digests: vec!["1".repeat(64), "2".repeat(64), "3".repeat(64)],
                 ready_at_ms: lillux::time::timestamp_millis(),
+                network_inputs: Vec::new(),
             }),
         },
     );

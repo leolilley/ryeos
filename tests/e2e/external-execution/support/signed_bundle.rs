@@ -86,7 +86,7 @@ pub fn install_signed_test_bundle_with_guest_admission(
         .unwrap();
         item_source_hashes.insert(item_ref, serde_json::Value::String(item_source_hash));
     }
-    let provider_spec_bytes = br#"{"schema":1,"operations":[]}"#;
+    let provider_spec_bytes: &[u8] = include_bytes!("../fixtures/synthetic-provider-spec.json");
     let provider_spec_path = bundle.join("lifecycle/provider.json");
     std::fs::create_dir_all(provider_spec_path.parent().unwrap()).unwrap();
     std::fs::write(&provider_spec_path, provider_spec_bytes).unwrap();
@@ -121,7 +121,7 @@ requires_kinds: []
 uses_kinds: []
 external_lifecycle_adapters:
   - id: synthetic-local
-    protocol: ryeos.external-execution.lifecycle-adapter.v2
+    protocol: ryeos.external-execution.lifecycle-adapter.v3
     targets: [{target}]
     adapter: ryeos-synthetic-external-lifecycle-adapter
     supervisor: ryeos-synthetic-external-candidate-supervisor

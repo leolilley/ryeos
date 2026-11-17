@@ -4,7 +4,9 @@
 //! `{"guest_owner":"phase","step":"<word>"}` as the owner enters a startup
 //! step (and again while a long step runs), then exactly one terminal line:
 //! `{"guest_owner":"held"}` once the held supervisor is released, or
-//! `{"guest_owner":"refused","step":"<word>"}` when a step refused. Before
+//! `{"guest_owner":"refused","step":"<word>"}` when a step refused, optionally
+//! naming the closed site inside that step where it refused:
+//! `{"guest_owner":"refused","step":"<word>","site":"<word>"}`. Before
 //! the terminal line no error text is ever written. After `held` the owner
 //! keeps supervising the released supervisor and writes one more line when it
 //! exits: `{"guest_owner":"supervisor_exit","status":{"code":N},"stderr_tail":"..."}`
@@ -112,6 +114,77 @@ impl GuestOwnerStep {
     }
 }
 
+/// The closed site inside a startup step where a refusal happened, for the
+/// steps that fan out into several independent calls. A site is a position
+/// index, not a taxonomy of causes: it is attached where the failing call is,
+/// never derived from error text, and the controller reports it and never
+/// branches on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuestOwnerSite {
+    /// `held_prepare`: opening the supervisor stderr tail.
+    StderrTail,
+    /// `held_prepare`: rechecking the installed owner and adopted content.
+    InstalledRecheck,
+    /// `held_prepare`: sealing and re-reading the supervisor bootstrap.
+    BootstrapSeal,
+    /// `held_prepare`: resolving, opening and capturing the guest's
+    /// resolver and hosts files.
+    NetworkInputCapture,
+    /// `held_prepare`: parsing the captured resolver and hosts bytes.
+    NetworkInputParse,
+    /// `held_prepare`: duplicating the control descriptors, building the
+    /// target channels and taking the relay mailbox custody.
+    ControlDescriptors,
+    /// `held_prepare`: the held supervisor's mount set invariants.
+    MountSet,
+    /// `held_prepare`: the held namespace preparation in the dedicated owner.
+    HeldNamespace,
+}
+
+impl GuestOwnerSite {
+    pub const ALL: [Self; 8] = [
+        Self::StderrTail,
+        Self::InstalledRecheck,
+        Self::BootstrapSeal,
+        Self::NetworkInputCapture,
+        Self::NetworkInputParse,
+        Self::ControlDescriptors,
+        Self::MountSet,
+        Self::HeldNamespace,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::StderrTail => "stderr_tail",
+            Self::InstalledRecheck => "installed_recheck",
+            Self::BootstrapSeal => "bootstrap_seal",
+            Self::NetworkInputCapture => "network_input_capture",
+            Self::NetworkInputParse => "network_input_parse",
+            Self::ControlDescriptors => "control_descriptors",
+            Self::MountSet => "mount_set",
+            Self::HeldNamespace => "held_namespace",
+        }
+    }
+
+    pub fn from_word(word: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|site| site.as_str() == word)
+    }
+
+    /// The site attached to an error, if the failing call attached one.
+    pub fn of(error: &anyhow::Error) -> Option<Self> {
+        error.downcast_ref::<Self>().copied()
+    }
+}
+
+impl fmt::Display for GuestOwnerSite {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl std::error::Error for GuestOwnerSite {}
+
 impl fmt::Display for GuestOwnerStep {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
@@ -130,6 +203,10 @@ pub trait RefusedAt<T> {
     /// (bounded and sanitized) beside the closed step word. A site opts in:
     /// no other error text ever leaves the guest.
     fn refused_with_detail(self, step: GuestOwnerStep) -> Result<T>;
+
+    /// Name the site inside the step where this call refused. An error already
+    /// carrying a site keeps it: the innermost call that names one wins.
+    fn at_site(self, site: GuestOwnerSite) -> Result<T>;
 }
 
 impl<T> RefusedAt<T> for Result<T> {
@@ -139,6 +216,16 @@ impl<T> RefusedAt<T> for Result<T> {
                 error
             } else {
                 error.context(step)
+            }
+        })
+    }
+
+    fn at_site(self, site: GuestOwnerSite) -> Result<T> {
+        self.map_err(|error| {
+            if error.downcast_ref::<GuestOwnerSite>().is_some() {
+                error
+            } else {
+                error.context(site)
             }
         })
     }
@@ -415,6 +502,8 @@ pub enum GuestOwnerReport {
     Phase(GuestOwnerStep),
     Held,
     Refused(GuestOwnerStep),
+    /// A refusal that names the closed site inside the step where it refused.
+    RefusedAtSite(GuestOwnerStep, GuestOwnerSite),
     /// A refusal with the guest's own bounded, sanitized account of why. The
     /// detail is untrusted text for logs and error display only.
     RefusedWithDetail(GuestOwnerStep, String),
@@ -427,6 +516,7 @@ const REFUSED_PREFIX: &str = r#"{"guest_owner":"refused","step":""#;
 const EXIT_PREFIX: &str = r#"{"guest_owner":"supervisor_exit""#;
 const REFUSED_OPEN: &str = r#"{"guest_owner":"refused""#;
 const STEP_SUFFIX: &str = r#""}"#;
+const SITE_INFIX: &str = r#"","site":""#;
 
 /// The longest accepted report line other than a supervisor exit, excluding
 /// its newline.
@@ -462,9 +552,17 @@ impl GuestOwnerReport {
         }
     }
 
+    /// A refusal at `step`, naming the `site` inside it.
+    pub fn refused_at_site(step: GuestOwnerStep, site: GuestOwnerSite) -> Self {
+        Self::RefusedAtSite(step, site)
+    }
+
     /// The exact canonical line, newline included.
     pub fn line(&self) -> String {
         match self {
+            Self::RefusedAtSite(step, site) => {
+                format!("{REFUSED_PREFIX}{step}{SITE_INFIX}{site}{STEP_SUFFIX}\n")
+            }
             Self::RefusedWithDetail(step, detail) => format!(
                 "{}\n",
                 serde_json::to_string(&RefusedDetailLine {
@@ -502,9 +600,20 @@ impl GuestOwnerReport {
                 .and_then(|rest| rest.strip_suffix(STEP_SUFFIX))
                 .and_then(GuestOwnerStep::from_word)
         };
+        let at_site = || {
+            let rest = line
+                .strip_prefix(REFUSED_PREFIX)?
+                .strip_suffix(STEP_SUFFIX)?;
+            let (step, site) = rest.split_once(SITE_INFIX)?;
+            Some(Self::RefusedAtSite(
+                GuestOwnerStep::from_word(step)?,
+                GuestOwnerSite::from_word(site)?,
+            ))
+        };
         match step(PHASE_PREFIX)
             .map(Self::Phase)
             .or_else(|| step(REFUSED_PREFIX).map(Self::Refused))
+            .or_else(at_site)
         {
             Some(report) => Ok(report),
             None => Self::parse_refused_with_detail(line),
@@ -552,6 +661,7 @@ pub struct GuestOwnerStdout {
     lines: u32,
     last_phase: Option<GuestOwnerStep>,
     refusal_detail: Option<String>,
+    refusal_site: Option<GuestOwnerSite>,
 }
 
 impl GuestOwnerStdout {
@@ -568,6 +678,12 @@ impl GuestOwnerStdout {
     /// line carried one. Untrusted text for logs and error display only.
     pub fn refusal_detail(&self) -> Option<&str> {
         self.refusal_detail.as_deref()
+    }
+
+    /// The closed site inside the refusing step, when its terminal line named
+    /// one. Reported, never branched on.
+    pub fn refusal_site(&self) -> Option<GuestOwnerSite> {
+        self.refusal_site
     }
 
     /// The longest the line being accumulated may grow: only a refusal that
@@ -608,6 +724,10 @@ impl GuestOwnerStdout {
                 GuestOwnerReport::Phase(step) => self.last_phase = Some(step),
                 GuestOwnerReport::Held => return Ok(Some(GuestOwnerTerminal::Held)),
                 GuestOwnerReport::Refused(step) => {
+                    return Ok(Some(GuestOwnerTerminal::Refused(step)));
+                }
+                GuestOwnerReport::RefusedAtSite(step, site) => {
+                    self.refusal_site = Some(site);
                     return Ok(Some(GuestOwnerTerminal::Refused(step)));
                 }
                 GuestOwnerReport::RefusedWithDetail(step, detail) => {
@@ -721,6 +841,10 @@ pub enum GuestOwnerActivationReport {
         /// guest's text, for logs and error display, never authority.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
+        /// The closed site inside `step` where it refused, when the owner
+        /// named one. Reported and logged, never branched on.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        site: Option<GuestOwnerSite>,
     },
     /// The run stream carried the command's exit before any terminal line.
     ExitedBeforeReport { last_phase: Option<GuestOwnerStep> },
@@ -815,6 +939,11 @@ impl fmt::Display for GuestOwnerActivationReport {
                 detail: Some(detail),
                 ..
             } => write!(formatter, "guest owner refused at {step}: {detail}"),
+            Self::Refused {
+                step,
+                site: Some(site),
+                ..
+            } => write!(formatter, "guest owner refused at {step} (site {site})"),
             Self::Refused { step, .. } => write!(formatter, "guest owner refused at {step}"),
             Self::ExitedBeforeReport { .. } => {
                 write!(formatter, "guest owner {last}; exited before held")
@@ -844,6 +973,7 @@ mod tests {
             step: GuestOwnerStep::Stage,
             last_phase,
             detail: None,
+            site: None,
         }));
         assert!(ends(GuestOwnerActivationReport::ExitedBeforeReport {
             last_phase
@@ -1022,6 +1152,106 @@ mod tests {
     }
 
     #[test]
+    fn a_refusal_names_its_closed_site_in_the_canonical_line() {
+        for site in GuestOwnerSite::ALL {
+            let report = GuestOwnerReport::refused_at_site(GuestOwnerStep::HeldPrepare, site);
+            let line = report.line();
+            assert_eq!(
+                line,
+                format!(
+                    "{{\"guest_owner\":\"refused\",\"step\":\"held_prepare\",\"site\":\"{}\"}}\n",
+                    site.as_str()
+                )
+            );
+            assert!(line.trim_end().len() <= MAX_GUEST_OWNER_REPORT_LINE_BYTES);
+            assert_eq!(
+                GuestOwnerReport::parse_line(line.trim_end()).unwrap(),
+                report
+            );
+            assert_eq!(GuestOwnerSite::from_word(site.as_str()), Some(site));
+        }
+        // Only the exact canonical line is accepted: an unknown site word, a
+        // site on a phase line, and a reordered line are refused.
+        for line in [
+            r#"{"guest_owner":"refused","step":"held_prepare","site":"not_a_site"}"#,
+            r#"{"guest_owner":"phase","step":"held_prepare","site":"mount_set"}"#,
+            r#"{"guest_owner":"refused","site":"mount_set","step":"held_prepare"}"#,
+            r#"{"guest_owner":"refused","step":"not_a_step","site":"mount_set"}"#,
+        ] {
+            assert!(GuestOwnerReport::parse_line(line).is_err(), "{line}");
+        }
+    }
+
+    #[test]
+    fn the_stdout_accumulator_reports_the_refusal_site() {
+        let mut stdout = GuestOwnerStdout::new();
+        let line = GuestOwnerReport::refused_at_site(
+            GuestOwnerStep::HeldPrepare,
+            GuestOwnerSite::NetworkInputCapture,
+        )
+        .line();
+        assert_eq!(
+            stdout.push(&line).unwrap(),
+            Some(GuestOwnerTerminal::Refused(GuestOwnerStep::HeldPrepare))
+        );
+        assert_eq!(
+            stdout.refusal_site(),
+            Some(GuestOwnerSite::NetworkInputCapture)
+        );
+        assert_eq!(stdout.refusal_detail(), None);
+        // A refusal with no site reports none.
+        let mut plain = GuestOwnerStdout::new();
+        plain
+            .push(&GuestOwnerReport::Refused(GuestOwnerStep::Stage).line())
+            .unwrap();
+        assert_eq!(plain.refusal_site(), None);
+    }
+
+    #[test]
+    fn the_innermost_call_that_names_a_site_wins() {
+        let error: Result<()> = Err(anyhow::anyhow!("inner failure"));
+        let error = error
+            .at_site(GuestOwnerSite::NetworkInputParse)
+            .at_site(GuestOwnerSite::NetworkInputCapture)
+            .refused_at(GuestOwnerStep::HeldPrepare)
+            .unwrap_err();
+        assert_eq!(
+            GuestOwnerSite::of(&error),
+            Some(GuestOwnerSite::NetworkInputParse)
+        );
+        assert_eq!(GuestOwnerStep::of(&error), GuestOwnerStep::HeldPrepare);
+        assert_eq!(GuestOwnerSite::of(&anyhow::anyhow!("no site")), None);
+    }
+
+    #[test]
+    fn an_activation_report_carries_and_displays_the_site() {
+        let report = GuestOwnerActivationReport::Refused {
+            step: GuestOwnerStep::HeldPrepare,
+            last_phase: Some(GuestOwnerStep::HeldPrepare),
+            detail: None,
+            site: Some(GuestOwnerSite::MountSet),
+        };
+        assert_eq!(
+            report.to_string(),
+            "guest owner refused at held_prepare (site mount_set)"
+        );
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.contains(r#""site":"mount_set""#), "{json}");
+        assert_eq!(
+            serde_json::from_str::<GuestOwnerActivationReport>(&json).unwrap(),
+            report
+        );
+        // A report with no site omits the field, so earlier shapes still read.
+        let plain = GuestOwnerActivationReport::Refused {
+            step: GuestOwnerStep::Stage,
+            last_phase: None,
+            detail: None,
+            site: None,
+        };
+        assert!(!serde_json::to_string(&plain).unwrap().contains("site"));
+    }
+
+    #[test]
     fn a_refusal_detail_that_is_not_exact_bounded_text_is_refused() {
         let prefix = r#"{"guest_owner":"refused","step":"stage","detail":"#;
         for line in [
@@ -1099,6 +1329,7 @@ mod tests {
                 step: GuestOwnerStep::Install,
                 last_phase: Some(GuestOwnerStep::Install),
                 detail: None,
+                site: None,
             }
             .to_string(),
             "guest owner refused at install"
@@ -1108,6 +1339,7 @@ mod tests {
                 step: GuestOwnerStep::AdmissionExpired,
                 last_phase: None,
                 detail: Some("guest clock is 94 s past the deadline".into()),
+                site: None,
             }
             .to_string(),
             "guest owner refused at admission_expired: guest clock is 94 s past the deadline"

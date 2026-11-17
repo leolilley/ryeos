@@ -241,6 +241,40 @@ impl StateStore {
         events: &[NewEventRecord],
     ) -> Result<Vec<PersistedEventRecord>> {
         validate_launch_attempt_audit(events)?;
+        self.append_launch_attempt_events(chain_root_id, thread_id, events)
+    }
+
+    /// Record the root kind this claimed launch attempt's process inputs were
+    /// laid out in: one daemon-authored `process_input_root_selected` event,
+    /// under the same pre-attachment, claimed-attempt fence as the launch
+    /// audit. The payload is the strict one-field record; it names no path.
+    pub(crate) fn append_process_input_root_selected(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        root: ryeos_engine::execution_contract::ProcessInputRootKind,
+    ) -> Result<Vec<PersistedEventRecord>> {
+        let event_type = ryeos_runtime::RuntimeEventType::ProcessInputRootSelected;
+        let payload = serde_json::to_value(
+            ryeos_engine::execution_contract::ProcessInputRootSelectedPayload { root },
+        )?;
+        self.append_launch_attempt_events(
+            chain_root_id,
+            thread_id,
+            &[NewEventRecord {
+                event_type: event_type.as_str().to_owned(),
+                storage_class: event_type.storage_class().as_str().to_owned(),
+                payload,
+            }],
+        )
+    }
+
+    fn append_launch_attempt_events(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        events: &[NewEventRecord],
+    ) -> Result<Vec<PersistedEventRecord>> {
         let permit = self.acquire_write_permit()?;
         let g = self.lock()?;
         let thread = g

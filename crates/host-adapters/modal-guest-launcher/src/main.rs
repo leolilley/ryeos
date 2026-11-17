@@ -5,7 +5,8 @@
 //! assignment as this process's stdin. The launcher installs those inputs where
 //! the occurrence owner expects them and starts the owner with the fixed
 //! `--assignment-b64` argument. It adds no trust: the owner re-verifies every
-//! digest and signature against its installed controller root.
+//! digest and signature, starting from the controller key the signed
+//! assignment names, against its measured installed runtime.
 
 mod launch;
 

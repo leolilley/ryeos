@@ -5,7 +5,7 @@ requires_kinds: []
 uses_kinds: []
 external_lifecycle_adapters:
   - id: modal-sandbox-lease
-    protocol: ryeos.external-execution.lifecycle-adapter.v2
+    protocol: ryeos.external-execution.lifecycle-adapter.v3
     targets:
       - x86_64-unknown-linux-gnu
       - aarch64-unknown-linux-gnu

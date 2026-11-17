@@ -229,6 +229,11 @@ CREATE TABLE external_qualification_worker_process (
     provider_configuration_json TEXT NOT NULL CHECK (
         length(CAST(provider_configuration_json AS BLOB)) <= 4096
         AND json_valid(provider_configuration_json)),
+    selected_protocol_ref TEXT NOT NULL CHECK (
+        length(selected_protocol_ref) BETWEEN 1 AND 256
+        AND selected_protocol_ref LIKE 'protocol:%'),
+    selected_filesystem_authority TEXT NOT NULL CHECK (
+        length(selected_filesystem_authority) BETWEEN 1 AND 64),
     CHECK ((phase='attached' AND terminal_at_ms IS NULL)
         OR (phase='terminal' AND terminal_at_ms IS NOT NULL
             AND terminal_at_ms >= attached_at_ms))
@@ -236,6 +241,7 @@ CREATE TABLE external_qualification_worker_process (
 CREATE TRIGGER external_qualification_worker_process_insert_guard
 BEFORE INSERT ON external_qualification_worker_process
 WHEN NEW.phase!='attached'
+ OR NEW.selected_protocol_ref='' OR NEW.selected_filesystem_authority=''
  OR NOT EXISTS(SELECT 1 FROM external_execution_allocation a
     JOIN external_execution_channel c ON c.placement_thread_id=a.placement_thread_id
     JOIN external_execution_connector x ON x.placement_thread_id=a.placement_thread_id
@@ -259,6 +265,8 @@ WHEN OLD.phase!='attached' OR NEW.phase!='terminal'
  OR NEW.channel_binding_digest!=OLD.channel_binding_digest
  OR NEW.process_identity_json!=OLD.process_identity_json
  OR NEW.provider_configuration_json!=OLD.provider_configuration_json
+ OR NEW.selected_protocol_ref!=OLD.selected_protocol_ref
+ OR NEW.selected_filesystem_authority!=OLD.selected_filesystem_authority
  OR NEW.daemon_generation_id!=OLD.daemon_generation_id
  OR NEW.attached_at_ms!=OLD.attached_at_ms
 BEGIN SELECT RAISE(ABORT, 'qualification Worker process identity is immutable'); END;

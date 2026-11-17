@@ -18,6 +18,9 @@ paths = [
   # A test fixture PEM made of repeated A's, and a bake secret id.
   '''^crates/daemon/ryeos-app/src/node_config/sections/external_execution/compose\.rs$''',
   '''^docker-bake\.composition\.hcl$''',
+  # The lease-lane e2e TLS server key for the test-only name controller.test,
+  # signed by a CA that only the e2e tests trust (see lease-controller-README.md).
+  '''^tests/e2e/external-execution/fixtures/lease-controller-server\.key\.pem$''',
 ]
 regexes = [
   '''id=publisher-key,src=''',

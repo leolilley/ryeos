@@ -1,6 +1,6 @@
-# ryeos:signed:2026-11-13T12:11:14Z:6debb4c60511be07dcc4982e80d175984e8c8d99a2d7b2161f08442611af96b6:YfepOPhec29rEbkAYYZXsoPyKT0qO+noqirIP8Jdhxr/sCj2EIGNuNbZeMU4p/a9GbvmWvqKXkVPrlI86TYNBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T12:59:02Z:d63f09d1cc09b6b21c8b40e8f77e3fca5c3a3aead18d1f63edd28b88bd888d10:jxJ8nsM471tWtIwGr8skI+DDOgF1EXjDINZ6jq6MZ2nN3WD1RsibQ11w+/uxjCrc8mLWRsk17XtUir+srAK9Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/tool"
-version: "1.4.0"
+version: "1.5.0"
 location:
   directory: tools
   excluded_directories: [lib]
@@ -110,10 +110,13 @@ execution:
     # authority from a tool name, executable, or caller.
     protocol:
       from_composed: [execution_protocol]
+      from_composed_set: [execution_protocols]
       allowed:
         - protocol:ryeos/core/tool_callback
         - protocol:ryeos/core/qualification_scoped_callback
         - protocol:ryeos/core/qualification_consumer_callback
+        - protocol:ryeos/core/qualification_consumer_callback_contained
+        - protocol:ryeos/core/qualification_consumer_callback_trusted
         - protocol:ryeos/core/opaque
         - protocol:ryeos/core/tool_streaming
   thread_profile:
@@ -206,6 +209,11 @@ composed_value_contract:
     execution_protocol:
       type: single
       prim: string
+    # Alternative to `execution_protocol`: the admissible protocols, one of
+    # which the running node selects by the holding each declares.
+    execution_protocols:
+      type: single
+      prim: sequence
     source_scope:
       type: single
       prim: mapping
@@ -286,6 +294,7 @@ runtime:
     - host_authority
     # Mechanically selected through execution.terminator.protocol above.
     - execution_protocol
+    - execution_protocols
     # Signed executor-chain policy for adjacent source admission. The daemon
     # consumes this before plan compilation; it is not a runtime handler.
     - source_scope

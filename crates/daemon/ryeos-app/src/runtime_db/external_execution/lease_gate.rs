@@ -296,6 +296,7 @@ mod tests {
                     boot_id: "997aad14-f3e6-4990-9d40-d1068e5a38d5".into(),
                     verified_input_digests: vec!["1".repeat(64)],
                     ready_at_ms: now,
+                    network_inputs: Vec::new(),
                 }),
             },
         );

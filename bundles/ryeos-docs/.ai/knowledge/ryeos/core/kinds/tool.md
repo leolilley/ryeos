@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-16T23:12:59Z:80c36ac998e7e65883ad42a4801b5fb45be775eac4b3004088534aefd434ed6d:kCrlENPlbyV5BPCc2YQMCnyns89aBQGRfkqZF9bQ77hAGL/c2T8a14VhLTyifK9sxko060JqnMAiMGjJA4epDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-17T06:36:01Z:f4f6b6f03b17b49f392608d131ff95b7a29bce3ca35106dc792b1f3cb43af8b2:IclGRcKHCns88DzPSSaqSNyK2EU8/3kzDMAWycWlI6dYCjAZAK7dErHPZqyx8ZBMA6azGeDvmxaYE1mGytHoCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/kinds
 tags: [kind, tool, subprocess]
@@ -58,6 +58,8 @@ records it as `project_authority.live_access.intent`:
   live project is refused before the tool starts with
   `live_project_unavailable_to_sourced_runtime` (403), so it cannot exit 0 with
   its project writes silently lost. Children inherit the intent.
+  An offline CLI run (no daemon) carries and enforces the same demand with the
+  same refusal, and refuses it for anything that is not a tool.
 
 | Tool shape | `default` request | `live` request (`--live-project`, `project.intent: live`, schedule `live_direct`) | `--pin-project` / pinned policy |
 | --- | --- | --- | --- |
@@ -65,6 +67,16 @@ records it as `project_authority.live_access.intent`:
 | Tool on a `source_scope` runtime (python script/function, bash script) | sparse private input root; writes discarded | refused: `live_project_unavailable_to_sourced_runtime` | copy-on-write generation |
 | `@subprocess` tool that retains external content | sparse private input root; writes discarded | refused: `live_project_unavailable_to_sourced_runtime` | copy-on-write generation |
 | Handler-route tool (scratch-root semantics) | its scratch root, as before; the route does not demand the live project | not offered by routes | not offered by routes |
+
+The intent is what the request asked for; the root is what the tool got. The
+daemon records the root once per launch attempt, when it selects the process
+input root, as a `process_input_root_selected` thread event whose payload is
+`{"root": "<kind>"}` and names no path. `root` is `live` (the live project),
+`sparse_private` (the private input root of the table's sourced rows), `pinned`
+(a pinned generation), `candidate_integration` or `projectless`. Read it in the
+thread's events (`ryeos events replay`, the node events view)
+beside `project_authority.live_access.intent` on `ryeos thread get`; a
+recovered launch records one per attempt. The timeline drops it as bookkeeping.
 
 To give a tool the live project, write it as an `@subprocess` tool without
 `source_scope` (`executor_id: "@subprocess"` with its own `command`). To run a

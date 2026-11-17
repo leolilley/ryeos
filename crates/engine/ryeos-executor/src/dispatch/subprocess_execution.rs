@@ -296,12 +296,17 @@ pub(crate) async fn dispatch_subprocess(
                             .into(),
                 });
             }
-            let protocol_ref = protocol
-                .resolve(&effective.composed_value)
-                .map_err(|detail| DispatchError::SchemaMisconfigured {
-                    kind: current_ref.kind.clone(),
-                    detail,
-                })?;
+            let protocol_ref = crate::dispatch::node_selected_protocol_ref(
+                exec,
+                protocol,
+                &effective.composed_value,
+                &ctx.engine,
+                state.isolation.as_ref(),
+            )
+            .map_err(|detail| DispatchError::SchemaMisconfigured {
+                kind: current_ref.kind.clone(),
+                detail,
+            })?;
             (protocol_ref, effective.composed_value)
         }
         TerminatorDecl::InProcess { .. } => {
@@ -1130,9 +1135,14 @@ async fn dispatch_tool_subprocess(
         let validation_engine = engine.clone();
         let resolved_clone = resolved.clone();
         let workspace_lifeline = provenance.workspace_lifeline();
+        let validation_isolation = state.isolation.clone();
         let validated = tokio::task::spawn_blocking(move || {
             let _workspace_lifeline = workspace_lifeline;
-            ryeos_app::thread_lifecycle::validate_item(&validation_engine, &resolved_clone)
+            ryeos_app::thread_lifecycle::validate_item(
+                &validation_engine,
+                &resolved_clone,
+                validation_isolation.as_ref(),
+            )
         })
         .await
         .map_err(|e| DispatchError::SubprocessRunFailed {

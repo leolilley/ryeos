@@ -512,16 +512,19 @@ fn unmet_reason(
     }
 }
 
-#[cfg(test)]
-mod tests {
+/// Fixtures that state a test node's environment. Only tests and test support
+/// reference them; a production composition builds its reader from the node's
+/// signed report.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
     use super::*;
-
-    use lillux::process_control::{CapabilityRequirementSpec, HOST_PROVIDER, ProofSource};
-    use serde_json::json;
+    use lillux::process_control::{HOST_PROVIDER, ProofSource};
 
     use crate::extension_state::ExtensionState;
 
-    fn view(provided: &[(&str, ProofSource)], missing: &[(&str, &str)]) -> HostCapabilities {
+    /// A capability view providing `provided` at the given grade and refusing
+    /// `missing` with its reason.
+    pub fn view(provided: &[(&str, ProofSource)], missing: &[(&str, &str)]) -> HostCapabilities {
         let mut view = HostCapabilities::default();
         for (name, source) in provided {
             view.provide(name, source.clone(), HOST_PROVIDER, "fixture basis");
@@ -534,13 +537,25 @@ mod tests {
 
     /// The extension bag the daemon's application state carries, with the
     /// composition root's report reader registered over `report`.
-    fn node_reporting(report: HostCapabilities) -> ExtensionState {
+    pub fn node_reporting(report: HostCapabilities) -> ExtensionState {
         let extensions = ExtensionState::new();
         extensions.insert(Arc::new(NodeCapabilityReportReader::new(move || {
             Ok(report.clone())
         })));
         extensions
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use lillux::process_control::{CapabilityRequirementSpec, HOST_PROVIDER, ProofSource};
+    use serde_json::json;
+
+    use crate::extension_state::ExtensionState;
+
+    use super::test_support::{node_reporting, view};
 
     /// A node whose recorded report no longer describes it.
     fn node_with_stale_report() -> ExtensionState {
