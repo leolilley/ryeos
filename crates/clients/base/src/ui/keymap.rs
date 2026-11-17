@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::event::{FieldStepDirection, RyeOsStackMoveDirection, RyeOsUiEvent, RyeOsUiIntent};
+use super::timeline::RyeOsTimelineEntryAction;
 use crate::view_set::FocusDirection;
 
 /// Descriptive help for this module's semantic matcher, not another keyboard registry.
@@ -48,6 +49,14 @@ pub fn shortcut_entries() -> Vec<super::view_model::RyeOsShortcutEntryVm> {
             "Esc",
             "Close the focused dialog; otherwise end field query, blur input, cancel a running thread, or close the view",
         ),
+        entry(
+            "Feed",
+            "y / ⇧Y",
+            "Copy the entry under the point as text / as its raw events",
+        ),
+        entry("Feed", "v", "Inspect the raw events behind the entry"),
+        entry("Feed", "f", "Fold or unfold the cluster under the point"),
+        entry("Feed", "r", "Retry a failed fetch in the focused view"),
         entry("Views", "Alt+←", "Return from a drill-in view"),
         entry(
             "Input",
@@ -151,6 +160,12 @@ pub struct RyeOsKeyContext {
     pub focused_tree_collapsible: bool,
     /// The selected hierarchy row currently hides those descendants.
     pub focused_tree_collapsed: bool,
+    /// The focused timeline has an entry under the point.
+    pub focused_timeline_entry: bool,
+    /// The timeline point sits in a cluster that can be folded.
+    pub focused_timeline_foldable: bool,
+    /// The focused view's source fetch failed, so it can be retried.
+    pub focused_source_failed: bool,
     /// Capabilities of the focused semantic field, if the focused instance is
     /// one. The keymap consumes capabilities rather than widget names or
     /// project roles, so every renderer gets the same actions.
@@ -282,6 +297,45 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
                 && !context.input_focused =>
         {
             ui(RyeOsUiEvent::FocusInput)
+        }
+        // Timeline entry actions act on the point, never while typing.
+        RyeOsKey::Char(c)
+            if context.focused_timeline_entry
+                && !context.input_focused
+                && event.modifiers.none_or_shift()
+                && c.eq_ignore_ascii_case(&'y') =>
+        {
+            let raw = event.modifiers.shift || c.is_uppercase();
+            ui(RyeOsUiEvent::TimelineEntry {
+                action: if raw {
+                    RyeOsTimelineEntryAction::CopyRaw
+                } else {
+                    RyeOsTimelineEntryAction::CopyText
+                },
+            })
+        }
+        RyeOsKey::Char('v')
+            if context.focused_timeline_entry
+                && !context.input_focused
+                && event.modifiers.none() =>
+        {
+            ui(RyeOsUiEvent::TimelineEntry {
+                action: RyeOsTimelineEntryAction::InspectRaw,
+            })
+        }
+        RyeOsKey::Char('f')
+            if context.focused_timeline_foldable
+                && !context.input_focused
+                && event.modifiers.none() =>
+        {
+            ui(RyeOsUiEvent::ToggleTimelineFold)
+        }
+        RyeOsKey::Char('r')
+            if context.focused_source_failed
+                && !context.input_focused
+                && event.modifiers.none() =>
+        {
+            intent(RyeOsUiIntent::Refresh)
         }
         RyeOsKey::ArrowUp if event.modifiers.ctrl_only() => {
             move_focused_tile(RyeOsStackMoveDirection::Up)

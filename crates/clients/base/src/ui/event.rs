@@ -467,6 +467,13 @@ pub enum RyeOsUiEvent {
         collapsed: bool,
     },
     ActivateFocused,
+    /// Act on the timeline entry under the point in the focused feed: copy it
+    /// or look at the raw events behind it.
+    TimelineEntry {
+        action: super::timeline::RyeOsTimelineEntryAction,
+    },
+    /// Fold or unfold the cluster under the point in the focused feed.
+    ToggleTimelineFold,
     /// Step back up the execution-drill stack: restore the view a step-in left
     /// and the facet context it read. The "return" half of the debugger drill;
     /// no-op at the top of the tree.

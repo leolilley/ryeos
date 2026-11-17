@@ -1,6 +1,7 @@
-//! The effects only a host can perform. The terminal implements none of them:
-//! each is a definite failure naming the missing capability, never a success
-//! the core would record as done.
+//! The effects only a host can perform. The terminal implements the clipboard
+//! (through the terminal's own OSC 52 escape); every other one is a definite
+//! failure naming the missing capability, never a success the core would
+//! record as done.
 
 use std::rc::Rc;
 
@@ -15,17 +16,35 @@ fn missing_capability(kind: &RyeOsEffectKind) -> RuntimeError {
             "independent document hosting"
         }
         RyeOsEffectKind::SetLocationHash { .. } => "location hash navigation",
-        RyeOsEffectKind::CopyToClipboard { .. } => "clipboard copying",
         RyeOsEffectKind::OpenUrl { .. } => "external URL opening",
         _ => "this effect",
     };
     RuntimeError::BindingRequest(format!("Native terminal does not implement {capability}."))
 }
 
+/// Hand `text` to the terminal emulator's clipboard with the OSC 52 escape.
+/// The emulator decides whether to honour it; the write is all the terminal
+/// can know.
+fn copy_to_terminal_clipboard(text: String) -> Result<Option<serde_json::Value>, RuntimeError> {
+    crossterm::execute!(
+        std::io::stdout(),
+        crossterm::clipboard::CopyToClipboard::to_clipboard_from(text)
+    )
+    .map_err(|error| {
+        RuntimeError::BindingRequest(format!("Terminal clipboard write failed: {error}."))
+    })?;
+    Ok(None)
+}
+
 /// The terminal's handler for host-owned effects.
 pub fn terminal_adapter() -> AdapterHandler {
     Rc::new(|effect: RyeOsEffect| -> AdapterFuture {
-        Box::pin(async move { Err(missing_capability(&effect.kind)) })
+        Box::pin(async move {
+            match effect.kind {
+                RyeOsEffectKind::CopyToClipboard { text } => copy_to_terminal_clipboard(text),
+                other => Err(missing_capability(&other)),
+            }
+        })
     })
 }
 
@@ -56,16 +75,13 @@ mod tests {
             RyeOsEffectKind::SetLocationHash {
                 hash: "#fixture".into(),
             },
-            RyeOsEffectKind::CopyToClipboard {
-                text: "fixture".into(),
-            },
             RyeOsEffectKind::OpenUrl {
                 url: "https://example.invalid/".into(),
             },
         ] {
             let effect = RyeOsEffect { id: 42, kind };
             let outcome = runtime.block_on(handler(effect.clone()));
-            let error = outcome.expect_err("the terminal implements no host effect");
+            let error = outcome.expect_err("the terminal implements none of these host effects");
             let result = failure_result(&effect, &error);
             assert_eq!(result.id, effect.id);
             assert_eq!(result.kind, RyeOsEffectResultKind::BrowserOnly);
