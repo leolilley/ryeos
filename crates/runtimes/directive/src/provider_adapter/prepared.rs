@@ -329,7 +329,7 @@ pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<Prepar
         provider_tool_schema_sha256,
     };
     #[cfg(not(feature = "latency-profiling"))]
-    let request_metrics = PreparedRequestMetrics::default();
+    let request_metrics = PreparedRequestMetrics;
 
     Ok(PreparedProviderRequest {
         transport,
