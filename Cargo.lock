@@ -4431,15 +4431,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ryeos-claude-code-adapter"
-version = "0.1.0"
-dependencies = [
- "lillux",
- "serde_json",
- "uuid",
-]
-
-[[package]]
 name = "ryeos-chat-stub"
 version = "0.1.0"
 dependencies = [
@@ -4452,6 +4443,15 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "tokio",
+]
+
+[[package]]
+name = "ryeos-claude-code-adapter"
+version = "0.1.0"
+dependencies = [
+ "lillux",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]
