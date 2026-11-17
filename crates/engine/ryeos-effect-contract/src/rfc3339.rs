@@ -216,7 +216,7 @@ mod tests {
     #[test]
     fn parses_offsets_and_z_to_the_same_instant() {
         let z = parse_unix_nanos("2026-11-15T00:10:00Z").unwrap();
-        assert_eq!(z, 1794701400_000_000_000_i128);
+        assert_eq!(z, 1_794_701_400_000_000_000_i128);
         assert_eq!(parse_unix_nanos("2026-11-15T00:10:00+00:00").unwrap(), z);
         assert_eq!(parse_unix_nanos("2026-11-15T00:10:00-00:00").unwrap(), z);
         assert_eq!(parse_unix_nanos("2026-11-15T13:10:00+13:00").unwrap(), z);
