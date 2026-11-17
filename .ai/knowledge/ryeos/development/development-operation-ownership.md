@@ -141,7 +141,7 @@ the row says otherwise.
 | `lib/ryeos-terminal.sh`, `pkg/test-ryeos-terminal.sh` | sourced by the shell entries here | Shared external-shell presentation. |
 | `ci/install-static-linters.sh`, `ci/lint-workflows-and-shell.sh` | `ci.yml` | The lint script holds the ShellCheck file list. |
 | `ci/check-custody-tokens.sh`, `ci/strip-rust-comments.py` | `ci.yml`, `gate.sh` | The Python file is the check's helper. |
-| `ci/prepare-runner.sh`, `ci/pack-bundle-state.sh`, `ci/unpack-bundle-state.sh`, `ci/restore-next-bundle-state.sh` | `ci.yml`, `remote-cargo.yml` | Runner and bundle-state hand-off between jobs. |
+| `ci/prepare-runner.sh`, `ci/pack-bundle-state.sh`, `ci/unpack-bundle-state.sh` | `ci.yml` | Runner and bundle-state hand-off between jobs. |
 | `ci/test-daemon-image-init-policy.sh`, `ci/test-image-build-cache.sh`, `ci/test-publisher-trust-policy.sh` | `ci.yml` | Tests of Docker, init and publisher boundaries. |
 | `ci/check-test-support-feature-leak.sh` | `ci.yml` `rust-policy` job | Runs `cargo tree --locked` (no compile) so shipped `ryeosd`/`ryeos-cli` feature sets never resolve a test-support feature. |
 | `pkg/install-local-direct.sh`, `pkg/bundle-sets.sh`, `pkg/bundle-features.py`, `pkg/composition-features.sh`, `pkg/fixtures/payload-ownership.parsed.json` | `Dockerfile.release`, `ci.yml`, `gate.sh` | Host install entry and its bundle-set data helpers. |

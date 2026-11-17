@@ -20,7 +20,6 @@ PATH="$tool_dir:$PATH" "$actionlint" -color
     scripts/ci/lint-workflows-and-shell.sh \
     scripts/ci/pack-bundle-state.sh \
     scripts/ci/prepare-runner.sh \
-    scripts/ci/restore-next-bundle-state.sh \
     scripts/ci/unpack-bundle-state.sh \
     scripts/ci/test-daemon-image-init-policy.sh \
     scripts/ci/test-image-build-cache.sh \
