@@ -2712,7 +2712,7 @@ mod imp {
     }
 
     fn launch_with_stdio_and_loopback(
-        mut request: LinuxSandboxRequest,
+        request: LinuxSandboxRequest,
         stdio: Option<&[std::fs::File; 3]>,
         ingress: Option<std::net::SocketAddr>,
         private_source: Option<&LinuxSealedPrivateSourceFilesystem>,
@@ -7653,7 +7653,8 @@ mod imp {
                     })
                     .collect::<Vec<_>>();
                 let mut request = super::super::tests::minimal_request();
-                request.executable = "/bin/sh".into();
+                // Setup refuses symlinked executables, so name the resolved shell.
+                request.executable = std::fs::canonicalize("/bin/sh").unwrap();
                 request.argv0 = "sh".into();
                 request.cwd = "/".into();
                 request.arguments = vec!["-c".into(), "exit 0".into()];
