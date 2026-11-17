@@ -471,11 +471,10 @@ events:
         Some("second")
     );
     assert!(
-        find(&timeline, "out:T-3")
+        !find(&timeline, "out:T-3")
             .unwrap()
             .slots
-            .get("retry_input")
-            .is_none()
+            .contains_key("retry_input")
     );
 }
 
@@ -515,7 +514,7 @@ fn only_a_failed_thread_projects_retry_input() {
     for terminal in ["thread_killed", "thread_timed_out", "thread_completed"] {
         let timeline = run(terminal);
         if let Some(entry) = find(&timeline, "out:T-1") {
-            assert!(entry.slots.get("retry_input").is_none(), "{terminal}");
+            assert!(!entry.slots.contains_key("retry_input"), "{terminal}");
         }
     }
 }
