@@ -445,6 +445,35 @@ pub(crate) fn timeline_layout_for(
     )
 }
 
+/// The window to store after a source response arrives. A response carrying
+/// `order` is an incremental update: its `items` are upserted by id into the
+/// stored window, and the result holds the window's items in `order`. `None`
+/// means an id in `order` is in neither the update nor the stored window, so
+/// the stored window cannot be brought current from this update and the caller
+/// refetches the whole window. A response without `order` is a whole window.
+pub(crate) fn merge_window(stored: Option<&Value>, mut update: Value) -> Option<Value> {
+    let Some(order) = update.get("order").and_then(Value::as_array).cloned() else {
+        return Some(update);
+    };
+    let id_of = |item: &Value| item.get("id").and_then(Value::as_str).map(str::to_string);
+    let mut window: HashMap<String, Value> = HashMap::new();
+    let held = stored
+        .and_then(|response| response.get("items"))
+        .and_then(Value::as_array);
+    let sent = update.get("items").and_then(Value::as_array);
+    for item in held.into_iter().flatten().chain(sent.into_iter().flatten()) {
+        window.insert(id_of(item)?, item.clone());
+    }
+    let items = order
+        .iter()
+        .map(|id| window.remove(id.as_str()?))
+        .collect::<Option<Vec<Value>>>()?;
+    let fields = update.as_object_mut()?;
+    fields.remove("order");
+    fields.insert("items".to_string(), Value::Array(items));
+    Some(update)
+}
+
 /// A timeline with folds applied, as a bounded render window.
 pub(crate) struct FoldedTimeline {
     pub entries: Vec<RyeOsTimelineEntryVm>,
@@ -1045,6 +1074,33 @@ mod tests {
         let built = timeline_layout_for(&binding, &response);
         assert_eq!(built.entries.len(), 2);
         assert_eq!(built.sources[1].as_ref().unwrap().key, "item:p");
+    }
+
+    #[test]
+    fn merge_upserts_by_id_in_the_updates_order_and_drops_what_it_omits() {
+        let stored = json!({"highest_chain_seq": 3, "items": [
+            {"id": "a", "v": 1}, {"id": "b", "v": 1}, {"id": "c", "v": 1}
+        ]});
+        let update = json!({"highest_chain_seq": 6, "older": 1,
+            "order": ["b", "c", "d"],
+            "items": [{"id": "c", "v": 2}, {"id": "d", "v": 1}]});
+        let merged = merge_window(Some(&stored), update).unwrap();
+        assert_eq!(
+            merged,
+            json!({"highest_chain_seq": 6, "older": 1, "items": [
+                {"id": "b", "v": 1}, {"id": "c", "v": 2}, {"id": "d", "v": 1}
+            ]})
+        );
+    }
+
+    #[test]
+    fn merge_refuses_an_id_neither_side_holds_and_passes_a_whole_window_through() {
+        let stored = json!({"items": [{"id": "a"}]});
+        let update = json!({"order": ["a", "z"], "items": []});
+        assert!(merge_window(Some(&stored), update.clone()).is_none());
+        assert!(merge_window(None, update).is_none());
+        let whole = json!({"highest_chain_seq": 1, "items": [{"id": "q"}]});
+        assert_eq!(merge_window(Some(&stored), whole.clone()), Some(whole));
     }
 
     fn timeline_core() -> RyeOsCore {

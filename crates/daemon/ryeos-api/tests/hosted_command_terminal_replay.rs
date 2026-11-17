@@ -54,6 +54,7 @@ fn store_structured_session_capsule_with_schema(
             ready_timeout_ms: 1,
             request_timeout_ms: 1,
             idle_timeout_ms: 1,
+            max_lifetime_seconds_ceiling: 603_600,
         },
         wire: PersistentSessionWireContract {
             channel_env: "RYEOS_SESSION_FD".to_owned(),
@@ -587,6 +588,7 @@ fn append_final_turn_batch(
         root, "hosted_worker_command_observation_batch", sequence, request_digest, 1,
         json!({"schema":1,"origin":"daemon_observed_io",
             "response_digest":ryeos_state::objects::canonical_value_digest(result).unwrap(),
+            "succeeded":result["response"].get("error").is_none(),
             "canonical_batch":{"events":result["events"],"session_observations":result["session_observations"]}}),
     )]).unwrap();
 }
@@ -1412,6 +1414,52 @@ async fn fenced_worker_command_settles_from_testimony_without_replaying_observat
 }
 
 #[tokio::test]
+async fn workload_error_response_recovers_as_a_contacted_failed_command() {
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
+    let root = "T-route-error";
+    let pending = seed_pending_turn_fixture(&state, root, false);
+    // A workload that was contacted and answered with a JSON-RPC error
+    // refused the command: it is settled, but not successful.
+    let result = json!({
+        "response":{"error":{"code":-32000,"message":"refused"}},
+        "events":[],
+        "session_observations":[],
+    });
+    append_final_turn_batch(
+        &state,
+        root,
+        pending.sequence,
+        &pending.request_digest,
+        &result,
+    );
+    state
+        .state_store
+        .fence_abandoned_worker_process(&pending.worker_instance_id, root, 1, "reaped")
+        .unwrap();
+
+    ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).unwrap();
+
+    let command = state
+        .state_store
+        .dedicated_session_command(root, pending.sequence)
+        .unwrap()
+        .unwrap();
+    assert_eq!(command.state, "failed");
+    let observation =
+        ryeos_app::dedicated_session_service::command_observation(&state, root, pending.sequence)
+            .unwrap();
+    assert_eq!(observation["command_state"], "failed");
+    // The failed projection is idempotent across further recovery passes.
+    ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).unwrap();
+    let again = state
+        .state_store
+        .dedicated_session_command(root, pending.sequence)
+        .unwrap()
+        .unwrap();
+    assert_eq!(again.state, "failed");
+}
+
+#[tokio::test]
 async fn command_progress_recovery_refuses_a_conflicting_final_start() {
     let (_tmp, _state_owner, state) = test_state::build_test_state();
     let root = "T-progress-conflicting-final";
@@ -1681,6 +1729,7 @@ async fn completed_termination_requires_the_exact_immutable_turn_fence_and_front
             recovered_root,
             reattach.command_sequence,
             2,
+            true,
             &json!({"redacted":true}),
         )
         .unwrap();
@@ -1922,6 +1971,7 @@ async fn terminal_root_replays_only_exact_authoritatively_settled_command() {
                         "schema":1,
                         "origin":"daemon_observed_io",
                         "response_digest":response_digest,
+                        "succeeded":true,
                         "canonical_batch":{
                             "events":result["events"],
                             "session_observations":result["session_observations"],

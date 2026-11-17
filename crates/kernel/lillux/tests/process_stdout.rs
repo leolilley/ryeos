@@ -72,7 +72,11 @@ fn semantic_interrupt_terminates_reaps_and_closes_stdout_capture() {
 #[test]
 fn scoped_stdout_observer_failure_and_panic_interrupt_exact_wait() {
     for panic in [false, true] {
-        let process = lillux::spawn(shell("printf broken; /bin/sleep 30")).unwrap();
+        // The deadline must be far beyond any loaded-runner stall before the
+        // fixture's first byte: the test proves interruption, not expiry.
+        let mut request = shell("printf broken; /bin/sleep 30");
+        request.timeout = 60.0;
+        let process = lillux::spawn(request).unwrap();
         let (completion, observation) = process.wait_with_stdout(|mut reader| {
             reader.read_exact(&mut [0; 6]).unwrap();
             if panic {
@@ -122,7 +126,9 @@ fn fatal_observer_failure_interrupts_the_existing_wait_owner() {
         Arc,
         atomic::{AtomicBool, Ordering},
     };
-    let mut process = lillux::spawn(shell("printf broken; /bin/sleep 30")).unwrap();
+    let mut request = shell("printf broken; /bin/sleep 30");
+    request.timeout = 60.0;
+    let mut process = lillux::spawn(request).unwrap();
     let mut reader = process.take_stdout_reader().unwrap();
     let failed = Arc::new(AtomicBool::new(false));
     let observer_failed = Arc::clone(&failed);

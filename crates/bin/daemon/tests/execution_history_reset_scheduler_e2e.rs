@@ -1074,3 +1074,211 @@ async fn scheduling_node_follows_the_remedy_to_a_ready_core_node() -> Result<()>
     );
     Ok(())
 }
+
+/// Where a SQLite database header holds `PRAGMA user_version`.
+const SQLITE_HEADER_USER_VERSION: u64 = 60;
+/// Where a SQLite database header holds `PRAGMA application_id`.
+const SQLITE_HEADER_APPLICATION_ID: u64 = 68;
+
+/// Step a SQLite store back to its predecessor stamp, as a node issued before
+/// a cut holds it: `edit` maps the current value to the predecessor one.
+///
+/// The test process links the guarded native SQLite host, which refuses an
+/// unissued open, so the stamp is written straight into the database header
+/// (a 4-byte big-endian field). A stopped node may still hold committed WAL
+/// frames that would shadow the header page, so they are first checkpointed
+/// into the database file.
+fn stamp_predecessor(path: &Path, offset: u64, edit: impl Fn(u32) -> u32) -> Result<u32> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    checkpoint_stopped_wal(path)?;
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("open {} to stamp it", path.display()))?;
+    let mut field = [0u8; 4];
+    file.seek(SeekFrom::Start(offset))?;
+    file.read_exact(&mut field)?;
+    let predecessor = edit(u32::from_be_bytes(field));
+    file.seek(SeekFrom::Start(offset))?;
+    file.write_all(&predecessor.to_be_bytes())?;
+    file.sync_all()?;
+    Ok(predecessor)
+}
+
+/// Checkpoint the WAL of a store whose node has stopped, as SQLite would on
+/// its last close: copy every frame up to the last valid commit frame into
+/// the database file, truncate the file to that commit's size, then remove
+/// the WAL and its shared-memory index. A frame is valid while its salts
+/// match the WAL header and its cumulative checksum holds.
+fn checkpoint_stopped_wal(path: &Path) -> Result<()> {
+    use std::io::{Seek, SeekFrom, Write};
+    let sibling = |suffix: &str| {
+        let mut name = path.as_os_str().to_owned();
+        name.push(suffix);
+        PathBuf::from(name)
+    };
+    let (wal_path, shm_path) = (sibling("-wal"), sibling("-shm"));
+    let wal = match std::fs::read(&wal_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error).context(format!("read {}", wal_path.display())),
+    };
+    if wal.len() >= 32 {
+        let word = |at: usize| u32::from_be_bytes(wal[at..at + 4].try_into().unwrap());
+        let magic = word(0);
+        anyhow::ensure!(
+            magic & !1 == 0x377f_0682,
+            "{} is not a SQLite WAL",
+            wal_path.display()
+        );
+        let big_endian = magic & 1 == 1;
+        let checksum = |seed: (u32, u32), bytes: &[u8]| {
+            bytes.chunks_exact(8).fold(seed, |(s0, s1), pair| {
+                let read = |b: &[u8]| {
+                    let b: [u8; 4] = b.try_into().unwrap();
+                    if big_endian {
+                        u32::from_be_bytes(b)
+                    } else {
+                        u32::from_le_bytes(b)
+                    }
+                };
+                let s0 = s0.wrapping_add(read(&pair[..4])).wrapping_add(s1);
+                (s0, s1.wrapping_add(read(&pair[4..])).wrapping_add(s0))
+            })
+        };
+        let page_size = match word(8) {
+            1 => 65_536,
+            size => size as usize,
+        };
+        let salts = (word(16), word(20));
+        let mut running = checksum((0, 0), &wal[..24]);
+        anyhow::ensure!(
+            running == (word(24), word(28)),
+            "{} has a corrupt header",
+            wal_path.display()
+        );
+        let mut pending = Vec::new();
+        let mut committed: Option<(Vec<(u32, usize)>, u32)> = None;
+        let mut at = 32;
+        while at + 24 + page_size <= wal.len() {
+            let (page, commit) = (word(at), word(at + 4));
+            if (word(at + 8), word(at + 12)) != salts {
+                break;
+            }
+            running = checksum(running, &wal[at..at + 8]);
+            running = checksum(running, &wal[at + 24..at + 24 + page_size]);
+            if running != (word(at + 16), word(at + 20)) {
+                break;
+            }
+            pending.push((page, at + 24));
+            if commit != 0 {
+                committed = Some((pending.clone(), commit));
+            }
+            at += 24 + page_size;
+        }
+        if let Some((frames, pages)) = committed {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .with_context(|| format!("open {} to checkpoint it", path.display()))?;
+            for (page, data) in frames {
+                file.seek(SeekFrom::Start(u64::from(page - 1) * page_size as u64))?;
+                file.write_all(&wal[data..data + page_size])?;
+            }
+            file.set_len(u64::from(pages) * page_size as u64)?;
+            file.sync_all()?;
+        }
+    }
+    for leftover in [wal_path, shm_path] {
+        match std::fs::remove_file(&leftover) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                return Err(error).context(format!("remove {}", leftover.display()));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// A node issued before two clean cuts that ship together (a runtime schema
+/// epoch and an Operational schema version) crosses both through the real
+/// CLI. The reset refuses the predecessor Operational store and names the
+/// cure; once the operator sets that store aside as instructed, the reset
+/// completes carrying no Operational authority, and the next start creates a
+/// fresh current store.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_crosses_a_runtime_epoch_cut_and_an_operational_schema_cut_together() -> Result<()> {
+    let mut h = stopped_core_only_node().await?;
+    let runtime = runtime_dir(&h);
+    let operational = ryeos_state::operational::OPERATIONAL_DB_FILENAME;
+    let marker = ryeos_state::operational::OPERATIONAL_INITIALIZED_FILENAME;
+
+    // The runtime epoch is the low byte of the runtime store's application id.
+    let current_epoch = ryeos_app::runtime_db::RuntimeDb::current_operator_schema_epoch();
+    let predecessor_epoch = current_epoch
+        .checked_sub(1)
+        .context("the current runtime epoch has a predecessor")?;
+    stamp_predecessor(
+        &runtime.join("runtime.sqlite3"),
+        SQLITE_HEADER_APPLICATION_ID,
+        |id| (id & !0xff) | predecessor_epoch,
+    )?;
+    stamp_predecessor(
+        &runtime.join(operational),
+        SQLITE_HEADER_USER_VERSION,
+        |version| version - 1,
+    )?;
+
+    // 1. The reset cannot carry a store this binary has no migration for.
+    let refused = reset_command(&h)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .context("spawn the refused reset")?;
+    let refusal = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    anyhow::ensure!(
+        !refused.status.success() && refusal.contains("this binary has no migration"),
+        "the predecessor Operational store must be refused with its cure: {refusal}"
+    );
+
+    // 2. The operator sets the whole store aside, as the refusal instructs.
+    let aside = tempfile::tempdir()?;
+    for name in [
+        operational.to_owned(),
+        format!("{operational}-wal"),
+        format!("{operational}-shm"),
+        marker.to_owned(),
+    ] {
+        let source = runtime.join(&name);
+        if source.exists() {
+            std::fs::rename(&source, aside.path().join(&name))
+                .with_context(|| format!("set aside {name}"))?;
+        }
+    }
+
+    // 3. The reset now crosses the runtime epoch cut carrying nothing.
+    let report = reset_to_completion(&h).await?;
+    assert_eq!(report["performed"], true, "{report}");
+    assert_eq!(
+        report["replay_indexes"]["scope"], "absent_store",
+        "{report}"
+    );
+    assert!(
+        !runtime.join(marker).exists() && !runtime.join(operational).exists(),
+        "the reset must not invent an Operational store"
+    );
+
+    // 4. The next start creates a fresh current Operational store.
+    h.respawn_with(|_| {}).await?;
+    anyhow::ensure!(
+        runtime.join(marker).is_file() && runtime.join(operational).is_file(),
+        "the first start after the cut must create a fresh Operational store"
+    );
+    Ok(())
+}

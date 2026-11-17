@@ -16,6 +16,11 @@ on:
         required: true
         default: true
         type: boolean
+      merge_gates:
+        description: "Branch pre-merge mode: run only the five merge gates (lint/policy, static policy, test archive build, crash qualification build, scheduler compositions); skip bundle refresh, test shards and crash phases. Full tests run on next after merge."
+        required: true
+        default: false
+        type: boolean
       refresh_bundles:
         description: "Run the expensive bundle refresh/populate path"
         required: true
@@ -180,6 +185,9 @@ jobs:
       - name: Check Codex authored contract
         run: python3 bundles/codex/test_contract.py
 
+      - name: Check claude-code authored contract
+        run: python3 -B bundles/claude-code/test_contract.py
+
       - name: Check local-inference authored contract
         run: python3 bundles/local-inference/test_contract.py
 
@@ -316,7 +324,7 @@ jobs:
     name: Bundle refresh for tests
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tests }}
+    if: ${{ github.event_name != 'workflow_dispatch' || (inputs.run_tests && !inputs.merge_gates) }}
     steps:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -636,7 +644,7 @@ jobs:
     needs: [bundles, workspace-archive, test-shard, multicall-coreutils, scheduler-compositions]
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_tests) }}
+    if: ${{ always() && (github.event_name != 'workflow_dispatch' || (inputs.run_tests && !inputs.merge_gates)) }}
     steps:
       - name: Require every workspace-test job to succeed
         env:
@@ -791,7 +799,7 @@ jobs:
     needs: [bundles, crash-archive, crash-phase]
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_tests) }}
+    if: ${{ always() && (github.event_name != 'workflow_dispatch' || (inputs.run_tests && !inputs.merge_gates)) }}
     steps:
       - name: Require every crash qualification job to succeed
         env:

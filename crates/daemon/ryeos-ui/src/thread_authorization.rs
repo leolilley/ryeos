@@ -271,7 +271,8 @@ mod tests {
 
     use ryeos_state::objects::{
         ChildProjectAuthorityPolicy, EnvironmentAuthority, LiveAccessAuthority,
-        LiveFilesystemConfinement, LiveProjectAccess, PinnedProjectRealization, ThreadStatus,
+        LiveFilesystemConfinement, LiveProjectAccess, LiveProjectIntent, PinnedProjectRealization,
+        ThreadStatus,
     };
 
     use super::*;
@@ -311,6 +312,7 @@ mod tests {
             canonical_root: PathBuf::from(root),
             live_access: LiveAccessAuthority {
                 access: LiveProjectAccess::ReadOnly,
+                intent: LiveProjectIntent::Default,
                 authorized_write_namespaces: Vec::new(),
                 confinement: LiveFilesystemConfinement::UnconfinedHost,
             },

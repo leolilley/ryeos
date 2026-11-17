@@ -2588,6 +2588,10 @@ impl OriginalQuotaClaim {
         self.require_service_window()?;
         Ok(())
     }
+    /// Whether this operation admitted a wholly absent Operational store.
+    pub(super) fn operational_store_absent(&self) -> bool {
+        self.record.operational_source.is_absent()
+    }
     fn require_operational_marker(&self) -> Result<()> {
         self.record.operational_source.require_marker(
             &self.runtime,

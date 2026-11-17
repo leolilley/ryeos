@@ -31,9 +31,10 @@ ryeos_bundle_set_names() {
     # Codex and opencode workers, and the web and browser tools.
     standard)        printf '%s\n' core scheduling knowledge directive graph ryeos-docs ryeos-ui codex opencode web browser ;;
     # A developer's node: every application bundle (standard plus central-auth
-    # and environment-qualification) and the Render sandbox adapter, so a
-    # local-class origin can author snapshot bindings and measurements.
-    development)     printf '%s\n' core central-auth scheduling knowledge directive graph ryeos-docs environment-qualification web browser ryeos-ui codex opencode render-sandbox ;;
+    # and environment-qualification), the Render sandbox adapter, so a
+    # local-class origin can author snapshot bindings and measurements, and
+    # the claude-code worker bundle.
+    development)     printf '%s\n' core central-auth scheduling knowledge directive graph ryeos-docs environment-qualification web browser ryeos-ui codex opencode render-sandbox claude-code ;;
     central-host)    printf '%s\n' core central-auth scheduling knowledge directive graph ryeos-docs web ;;
     standard-central-auth) printf '%s\n' core scheduling knowledge directive graph ryeos-docs central-auth ;;
     local-inference) printf '%s\n' core scheduling knowledge directive graph ryeos-docs local-inference ;;
@@ -58,7 +59,7 @@ ryeos_bundle_set_names() {
     # bundle needed by the native archive and release images, whose final
     # stages still select one exact deployable set above.
     release-artifacts)
-      printf '%s\n' core central-auth scheduling knowledge directive graph ryeos-docs environment-qualification web browser ryeos-ui codex render-sandbox modal-sandbox opencode local-inference bundle-source bundle-release
+      printf '%s\n' core central-auth scheduling knowledge directive graph ryeos-docs environment-qualification web browser ryeos-ui codex render-sandbox modal-sandbox opencode claude-code local-inference bundle-source bundle-release
       ;;
     *) return 1 ;;
   esac

@@ -2372,6 +2372,7 @@ dependencies = [
  "serde_json",
  "serde_stacker",
  "sha2",
+ "signal-hook",
  "tempfile",
  "tokio",
  "windows-sys 0.59.0",
@@ -4430,6 +4431,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-claude-code-adapter"
+version = "0.1.0"
+dependencies = [
+ "lillux",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "ryeos-chat-stub"
 version = "0.1.0"
 dependencies = [
@@ -5366,6 +5376,7 @@ dependencies = [
  "ryeos-state",
  "serde",
  "serde_json",
+ "serde_yaml",
  "tempfile",
  "tokio",
  "zeroize",
@@ -5543,6 +5554,7 @@ dependencies = [
  "ryeos-accounting",
  "ryeos-api",
  "ryeos-app",
+ "ryeos-chat-stub",
  "ryeos-client-base",
  "ryeos-codex-runtime-verifier",
  "ryeos-core-tools",

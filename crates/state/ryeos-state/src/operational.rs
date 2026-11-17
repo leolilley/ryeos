@@ -53,15 +53,15 @@ pub(crate) const MAX_LIVE_OPERATIONAL_SCHEMA_REFERENCES: usize = 1;
 /// One main Operational source plus its current-schema reference source.
 pub const MAX_LIVE_OPERATIONAL_PACKET_SOURCES: usize = MAX_LIVE_OPERATIONAL_SCHEMA_REFERENCES + 1;
 // Dispatch-effect records retain complete launch and caller authority, so each
-// launch-capsule schema change needs its own replay-index epoch. Epoch 16 pairs
-// with launch-capsule schema 37. Rows of any earlier epoch cannot prove current
+// launch-capsule schema change needs its own replay-index epoch. Epoch 17 pairs
+// with launch-capsule schema 38. Rows of any earlier epoch cannot prove current
 // authority; the explicit replay-index reset discards every replay row.
 //
 // The epoch literal lives only in this macro so the fresh-schema marker in
 // `SCHEMA_SQL` and the Rust constant cannot drift apart.
 macro_rules! replay_index_epoch_literal {
     () => {
-        16
+        17
     };
 }
 const REPLAY_INDEX_EPOCH: i32 = replay_index_epoch_literal!();
@@ -1023,6 +1023,9 @@ impl std::error::Error for ReplayIndexActivationRequired {}
 pub enum ReplayIndexResetScope {
     Unchanged,
     AllReplayRecords,
+    /// No Operational store exists to reset: the operator set aside a store
+    /// this binary has no migration for. The next start creates a fresh one.
+    AbsentStore,
 }
 
 /// The same epoch-based retirement decision is used for preview and commit.
@@ -1032,6 +1035,18 @@ pub struct ReplayIndexResetReport {
     pub stored_epoch: i32,
     pub current_epoch: i32,
     pub scope: ReplayIndexResetScope,
+}
+
+impl ReplayIndexResetReport {
+    /// The report for a wholly absent store: nothing is stored, and the
+    /// fresh store the next start creates holds the current epoch.
+    pub fn absent_store() -> Self {
+        Self {
+            stored_epoch: REPLAY_INDEX_EPOCH,
+            current_epoch: REPLAY_INDEX_EPOCH,
+            scope: ReplayIndexResetScope::AbsentStore,
+        }
+    }
 }
 
 /// Offline reset preparation, deliberately not a usable replay database.
@@ -3777,7 +3792,7 @@ mod tests {
         // until the replay-index epoch is bumped and this pair re-reviewed.
         assert_eq!(
             (REPLAY_INDEX_EPOCH, DISPATCH_EFFECT_REPLAY_CAPSULE_SCHEMA),
-            (16, 37),
+            (17, 38),
             "a launch-capsule schema change requires an explicit replay-index epoch decision",
         );
     }

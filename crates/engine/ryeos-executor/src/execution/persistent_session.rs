@@ -2046,6 +2046,19 @@ pub(crate) fn session_contract(
 #[serde(deny_unknown_fields)]
 struct PersistentSessionResourceOverrides {
     real_uid_process_limit: Option<u64>,
+    max_cpu_seconds: Option<u64>,
+    max_address_space_bytes: Option<u64>,
+    request_timeout_ms: Option<u64>,
+    idle_timeout_ms: Option<u64>,
+}
+
+/// Judge one stated override against its signed kind ceiling. Zero and any
+/// value above the ceiling are refused; the accepted value is returned.
+fn bounded_override(label: &str, stated: u64, ceiling: u64) -> Result<u64> {
+    if stated == 0 || stated > ceiling {
+        bail!("persistent-session {label} {stated} exceeds its signed kind ceiling {ceiling}");
+    }
+    Ok(stated)
 }
 
 pub(crate) fn apply_resource_overrides(
@@ -2065,13 +2078,33 @@ pub(crate) fn apply_resource_overrides(
     let overrides: PersistentSessionResourceOverrides = serde_json::from_value(value.clone())
         .context("decode signed persistent-session resource overrides")?;
     if let Some(limit) = overrides.real_uid_process_limit {
-        if limit == 0 || limit > declaration.max_real_uid_process_limit {
-            bail!(
-                "persistent-session real-UID process limit {limit} exceeds its signed kind ceiling {}",
-                declaration.max_real_uid_process_limit
-            );
-        }
-        declaration.real_uid_process_limit = limit;
+        declaration.real_uid_process_limit = bounded_override(
+            "real-UID process limit",
+            limit,
+            declaration.max_real_uid_process_limit,
+        )?;
+    }
+    if let Some(seconds) = overrides.max_cpu_seconds {
+        declaration.max_cpu_seconds =
+            bounded_override("CPU seconds", seconds, declaration.max_cpu_seconds_ceiling)?;
+    }
+    if let Some(bytes) = overrides.max_address_space_bytes {
+        declaration.max_address_space_bytes = bounded_override(
+            "address-space bytes",
+            bytes,
+            declaration.max_address_space_bytes_ceiling,
+        )?;
+    }
+    if let Some(millis) = overrides.request_timeout_ms {
+        declaration.request_timeout_ms = bounded_override(
+            "request timeout",
+            millis,
+            declaration.request_timeout_ms_ceiling,
+        )?;
+    }
+    if let Some(millis) = overrides.idle_timeout_ms {
+        declaration.idle_timeout_ms =
+            bounded_override("idle timeout", millis, declaration.idle_timeout_ms_ceiling)?;
     }
     Ok(())
 }
@@ -5076,6 +5109,7 @@ pub(crate) fn lifecycle_contract(
         ready_timeout_ms: declaration.ready_timeout_ms,
         request_timeout_ms: declaration.request_timeout_ms,
         idle_timeout_ms: declaration.idle_timeout_ms,
+        max_lifetime_seconds_ceiling: declaration.max_lifetime_seconds_ceiling,
     };
     contract.validate()?;
     Ok(contract)
@@ -5786,6 +5820,11 @@ mod tests {
             real_uid_process_limit: 512,
             resource_overrides_path: Some(vec!["session_resources".to_owned()]),
             max_real_uid_process_limit: 4_096,
+            max_address_space_bytes_ceiling: 128 * 1024 * 1024,
+            max_cpu_seconds_ceiling: 100,
+            request_timeout_ms_ceiling: 10_000,
+            idle_timeout_ms_ceiling: 20_000,
+            max_lifetime_seconds_ceiling: 603_600,
             ready_timeout_ms: 1,
             request_timeout_ms: 1,
             idle_timeout_ms: 1,
@@ -5820,6 +5859,60 @@ mod tests {
             apply_resource_overrides(&mut unknown, &json!({"session_resources":{"unknown":1}}),)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn signed_worker_overrides_for_cpu_address_space_and_timeouts_are_capped() {
+        let mut declaration = resource_override_declaration();
+        apply_resource_overrides(
+            &mut declaration,
+            &json!({"session_resources":{
+                "max_cpu_seconds":100,
+                "max_address_space_bytes":128 * 1024 * 1024,
+                "request_timeout_ms":10_000,
+                "idle_timeout_ms":20_000
+            }}),
+        )
+        .unwrap();
+        assert_eq!(declaration.max_cpu_seconds, 100);
+        assert_eq!(declaration.max_address_space_bytes, 128 * 1024 * 1024);
+        assert_eq!(declaration.request_timeout_ms, 10_000);
+        assert_eq!(declaration.idle_timeout_ms, 20_000);
+
+        for (field, above) in [
+            ("max_cpu_seconds", json!(101)),
+            ("max_address_space_bytes", json!(128 * 1024 * 1024 + 1)),
+            ("request_timeout_ms", json!(10_001)),
+            ("idle_timeout_ms", json!(20_001)),
+        ] {
+            for refused in [above, json!(0)] {
+                let mut declaration = resource_override_declaration();
+                assert!(
+                    apply_resource_overrides(
+                        &mut declaration,
+                        &json!({"session_resources":{ field: refused }}),
+                    )
+                    .is_err(),
+                    "{field} must be refused outside (0, ceiling]"
+                );
+            }
+        }
+        let mut zero_uid = resource_override_declaration();
+        assert!(
+            apply_resource_overrides(
+                &mut zero_uid,
+                &json!({"session_resources":{"real_uid_process_limit":0}}),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn lifecycle_contract_freezes_the_signed_lifetime_ceiling() {
+        let mut declaration = resource_override_declaration();
+        declaration.max_lifetime_seconds_ceiling = 123_456;
+        let contract = lifecycle_contract(&declaration).unwrap();
+        assert_eq!(contract.max_lifetime_seconds_ceiling, 123_456);
     }
 
     fn retained_program_fixture(
@@ -5901,6 +5994,7 @@ mod tests {
                 ready_timeout_ms: 1,
                 request_timeout_ms: 1,
                 idle_timeout_ms: 1,
+                max_lifetime_seconds_ceiling: 603_600,
             },
             wire: PersistentSessionWireContract {
                 channel_env: "RYEOS_SESSION_FD".to_owned(),

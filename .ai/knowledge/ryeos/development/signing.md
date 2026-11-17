@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T16:31:52Z:a1e6a46b21ac74bae9a8090e4ee8387d0140304047c82097fec8eba43fab40b1:YC9P7BV0pz3gwXuDgwopGgr//d3yrG2ElLrinQymnGYMFAMsR7aqe9BM0InWMTjsTHh3ul3ZHfN2Wt37hrAQAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T23:14:24Z:32b3f7bd0488d44bb3114b20d7db33dc3dc7ac69becdf774831a132327adbe6e:jn0chPlxqlV6Xi/Ni/pml2K0gDK2NhcKp3hrkJzuLbBJ4TpMDismR7RLU8Kh7nRUepY0c2Kp+EzETUtiQBl+BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "signing"
@@ -33,6 +33,22 @@ Run it after:
 - changing Rust that affects bundled binaries;
 - a fresh checkout, because bundle bins/CAS are derived;
 - any `hash mismatch` or stale manifest failure.
+
+## Init profiles
+
+An init profile (`.ai/node/init/profiles/<name>.yaml` under an init source
+directory) is signed by the publisher whose key `ryeos init` pins, and init
+verifies it before it trusts anything the profile names. A consumer that ships
+its own bundle and profile signs the profile with its own publisher key:
+
+```bash
+ryeos bundle profile-sign <source>/.ai/node/init/profiles/<name>.yaml <publisher.pem>
+```
+
+The profile is parsed and validated first, so a malformed one is refused
+rather than signed. Without the key file argument the app root's operator signing key
+signs. An unchanged profile signed again by the same key is left untouched.
+The key path is read and never printed.
 
 ## Dev key
 
