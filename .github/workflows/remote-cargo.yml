@@ -8,8 +8,19 @@ name: Remote cargo
 #     -f command=test -f args="-p ryeos-ui --lib"
 #
 # The args are split on whitespace and passed to cargo as separate arguments;
-# they are never evaluated by a shell. No bundle refresh runs here, so tests that
-# load populated bundle bins (most daemon e2e) belong to the CI workflow instead.
+# they are never evaluated by a shell.
+#
+# Tests that load populated bundle bins (most daemon e2e) need -f bundles=next:
+#
+#   gh workflow run remote-cargo.yml --ref work/<branch> \
+#     -f command=test -f bundles=next -f args="-p ryeosd --test <name>"
+#
+# bundles=next restores the bundle state of the newest next CI run whose bundles
+# job succeeded and whose artifact is unexpired (1 day retention), and prints
+# the next sha and run id. It fails if none is available, and refuses if the
+# branch differs from that next sha on any path the state would overwrite or
+# delete (merge origin/next, or avoid those paths). No bundle refresh runs here.
+# bundles=none (default) runs cargo on the plain checkout.
 on:
   workflow_dispatch:
     inputs:
@@ -28,6 +39,14 @@ on:
         description: "Arguments after the subcommand, e.g. -p ryeos-ui --lib, or -p ryeosd --all-targets -- -D warnings"
         required: true
         type: string
+      bundles:
+        description: "none, or next to restore bundle state from a recent next CI run"
+        required: false
+        default: none
+        type: choice
+        options:
+          - none
+          - next
       label:
         description: "Optional short label shown in the run name"
         required: false
@@ -38,6 +57,7 @@ run-name: "remote cargo ${{ inputs.command }} ${{ inputs.label }} (${{ github.re
 
 permissions:
   contents: read
+  actions: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -83,6 +103,12 @@ jobs:
 
       - name: Prepare the runner
         run: ./scripts/ci/prepare-runner.sh
+
+      - name: Restore next's bundle state
+        if: ${{ inputs.bundles == 'next' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/ci/restore-next-bundle-state.sh
 
       - name: Run cargo
         env:
