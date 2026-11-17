@@ -1465,7 +1465,7 @@ mod tests {
                 meta: Some("42 B".into()),
                 tone: RyeOsTone::Neutral,
                 pending: false,
-                state: None,
+                state: Some("done".into()),
             }
         );
         assert!(matches!(
