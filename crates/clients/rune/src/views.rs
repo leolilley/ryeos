@@ -1265,6 +1265,7 @@ fn disclosure(
 struct Timeline<'a> {
     entries: &'a [RyeOsTimelineEntryVm],
     ids: &'a [String],
+    roles: &'a [String],
     indents: &'a [u8],
     selected: Option<usize>,
     expandable: &'a [bool],
@@ -1279,6 +1280,7 @@ impl<'a> Timeline<'a> {
             RyeOsViewVm::Timeline {
                 entries,
                 entry_ids,
+                entry_roles,
                 entry_indents,
                 selected,
                 entry_expandable,
@@ -1288,6 +1290,7 @@ impl<'a> Timeline<'a> {
             } => Some(Timeline {
                 entries,
                 ids: entry_ids,
+                roles: entry_roles,
                 indents: entry_indents,
                 selected: *selected,
                 expandable: entry_expandable,
@@ -1415,6 +1418,10 @@ fn timeline_entry(instance: &RyeOsViewInstanceKey, timeline: &Timeline<'_>, inde
             if selected { p.accent_bright } else { p.line },
         )
         .role("button")
+        .label(match timeline.roles.get(index) {
+            Some(role) => format!("{role}, {}", entry.label()),
+            None => entry.label(),
+        })
         .focus_selected(selected)
         .child(content);
     if selected {
@@ -1561,13 +1568,41 @@ fn source_status(status: &RyeOsSourceStatusVm) -> El {
     } else {
         ""
     };
-    text(format!("{stale}{}: {}", status.state, status.message))
+    let message = text(format!("{stale}{}: {}", status.state, status.message))
         .font(theme::data(11.0))
         .color(p.muted)
         .wrap_anywhere()
+        .grow(1.0)
+        .min_w(0.0)
+        .role("status");
+    if status.state != "failed" {
+        return message.px(9.0).py(6.0);
+    }
+    // A failed fetch offers its retry beside the error.
+    row()
+        .w_full()
+        .gap(8.0)
+        .center_y()
         .px(9.0)
         .py(6.0)
-        .role("status")
+        .child(message)
+        .child(
+            text("Retry")
+                .font(theme::ui(12.0))
+                .color(p.text)
+                .px(10.0)
+                .py(5.0)
+                .border(1.0, p.line_strong)
+                .fill(p.plane)
+                .hover(p.plane_selected)
+                .role("button")
+                .label("Retry the failed fetch")
+                .on_press(|app: &mut App| {
+                    app.ui(RyeOsUiEvent::Activate {
+                        intent: RyeOsUiIntent::Refresh,
+                    });
+                }),
+        )
 }
 
 /// A view waiting for a subject: what it needs, and the open selections that

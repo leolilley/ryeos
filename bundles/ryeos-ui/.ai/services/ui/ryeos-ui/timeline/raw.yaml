@@ -1,0 +1,10 @@
+# ryeos:signed:2026-11-16T21:15:18Z:b0ccf4ed90dc985efce98affe93afafc0c020459685c6863206256b001415aef:ItRuZJg0wXLgG+1Wbs8t/wxuJflR3dLf+kxLcmRAfVCpYNzr3sapsI4zjit8QYZiCC+7VFh0wheyYfzpIeLlCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: ryeos-ui/timeline/raw
+version: "1.0.0"
+description: The raw durable events of one chain_seq range of an authorized chain, capped per call, behind a timeline item.
+endpoint: ui.ryeos.timeline.raw
+ui_read_only: true
+state_access: read_only_existing
+record_thread: false
+availability: daemon_only
