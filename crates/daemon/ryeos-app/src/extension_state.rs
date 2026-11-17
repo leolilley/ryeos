@@ -69,6 +69,26 @@ impl ExtensionState {
             .and_then(|arc| arc.clone().downcast::<T>().ok())
     }
 
+    /// Retrieve the typed `Arc<T>`, creating it with `create` when absent. The
+    /// check and the insertion happen under one write lock, so concurrent
+    /// callers share exactly one instance.
+    pub fn get_or_insert_with<T: Any + Send + Sync + 'static>(
+        &self,
+        create: impl FnOnce() -> T,
+    ) -> Arc<T> {
+        let mut entries = self
+            .entries
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = entries
+            .entry(TypeId::of::<T>())
+            .or_insert_with(|| Arc::new(create()) as Arc<dyn Any + Send + Sync>);
+        entry
+            .clone()
+            .downcast::<T>()
+            .expect("an extension entry is keyed by its own type")
+    }
+
     /// Remove one typed owner after its users have drained. Composition roots
     /// use this to transfer a stopped extension into its finalization owner;
     /// the returned `Arc` keeps the exact registered allocation alive until
@@ -112,6 +132,16 @@ mod tests {
         ext.insert(Arc::new(TestExt { value: 2 }));
         let got: Arc<TestExt> = ext.get().unwrap();
         assert_eq!(got.value, 2);
+    }
+
+    #[test]
+    fn get_or_insert_with_creates_once_and_shares() {
+        let ext = ExtensionState::new();
+        let first = ext.get_or_insert_with(|| TestExt { value: 1 });
+        let second = ext.get_or_insert_with(|| TestExt { value: 2 });
+        assert_eq!(second.value, 1);
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(Arc::ptr_eq(&first, &ext.get::<TestExt>().unwrap()));
     }
 
     #[test]

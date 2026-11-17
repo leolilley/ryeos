@@ -37,6 +37,7 @@ uuid        = { workspace = true }
 zeroize     = { workspace = true }
 
 lillux         = { workspace = true }
+ryeos-client-base = { workspace = true }
 ryeos-client-transport = { workspace = true }
 ryeos-app      = { workspace = true }
 ryeos-api      = { workspace = true }

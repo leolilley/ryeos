@@ -348,6 +348,66 @@ async fn service_events_chain_replay_returns_events_for_recorded_service_chain()
     );
 }
 
+// ── threads/timeline — the chain folded by the installed definition ─────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn service_threads_timeline_folds_an_owned_chain_with_the_installed_definition() {
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    // Recorded service threads are their own chain roots, owned by the caller.
+    let tid = recorded_service_thread_id(&h).await;
+
+    let (status, body) = exec(
+        &h,
+        "service:threads/timeline",
+        json!({"chain_root_id": tid, "limit": 50}),
+    )
+    .await;
+    let result = unwrap_result(status, &body, "threads.timeline");
+    assert!(
+        result.get("items").and_then(|v| v.as_array()).is_some(),
+        "threads.timeline missing items array: {result}"
+    );
+    assert_eq!(result["chain_root_id"], tid);
+    assert!(result["highest_chain_seq"].as_i64().is_some());
+    assert!(result.get("summary").is_some(), "missing summary: {result}");
+
+    // An upsert since the head carries the window order and no items.
+    let head = result["highest_chain_seq"].as_i64().unwrap();
+    let (status, body) = exec(
+        &h,
+        "service:threads/timeline",
+        json!({"chain_root_id": tid, "since_chain_seq": head}),
+    )
+    .await;
+    let upsert = unwrap_result(status, &body, "threads.timeline since");
+    assert!(upsert.get("order").and_then(|v| v.as_array()).is_some());
+    assert_eq!(upsert["items"], json!([]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn service_threads_timeline_refuses_clearly_without_the_ryeos_ui_bundle() {
+    let (h, _fixture) = DaemonHarness::start_fast_core_scheduling()
+        .await
+        .expect("start daemon");
+    let tid = recorded_service_thread_id(&h).await;
+
+    let (status, body) = exec(
+        &h,
+        "service:threads/timeline",
+        json!({"chain_root_id": tid}),
+    )
+    .await;
+    assert!(
+        !status.is_success(),
+        "a missing definition must be refused: {body}"
+    );
+    assert!(
+        body.to_string()
+            .contains("timeline definition is not installed"),
+        "unclear refusal: {body}"
+    );
+}
+
 // ── 3.12 fetch — resolve a known core item ──────────────────────────────
 
 #[tokio::test(flavor = "multi_thread")]

@@ -1,0 +1,16 @@
+# ryeos:signed:2026-11-17T14:51:24Z:2645a805b09d259aedcce5db1ee51d3a845b720e790cded8570815da583f3526:sHFvX0T3ETAGdX5bZPWU48bvd5GLlhH+1wjVPck68i5f86OYUiGhAMKhX0L9pY7VQJWTTHhuNpYLAq2mdB+nAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "threads"
+name: "timeline"
+kind: service
+endpoint: threads.timeline
+ui_read_only: true
+state_access: read_only_existing
+record_thread: false
+availability: daemon_only
+required_caps: []
+schema:
+  chain_root_id: string
+  limit: integer?
+  since_chain_seq: integer?
+  definition: string?
+description: "A chain's events folded into timeline items by the installed timeline definition (by chain_root_id); with since_chain_seq, the upsert since that seq"

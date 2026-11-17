@@ -30,6 +30,7 @@ pub mod scheduler_selection;
 pub mod surface_views;
 #[cfg(feature = "test-support")]
 pub mod test_support;
+pub mod timeline_host;
 
 pub use api_state::ApiState;
 pub use registry::{RawHandlerFn, ServiceAvailability, ServiceDescriptor, build_service_registry};

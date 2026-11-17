@@ -243,8 +243,9 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
     // be represented as an `/execute` JSON result. The verified command is
     // still only routing: the handler's signed daemon requests carry the
     // operator authority and are independently authorized server-side.
-    if let Some(result) = try_dispatch_client_handler(
+    if let Some(outcome) = try_dispatch_client_handler(
         &dispatch_rest,
+        console,
         &app_root,
         snapshot,
         &command_registration_policy,
@@ -252,8 +253,10 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
     )
     .await?
     {
-        let mut presenter = Presenter::for_console(console);
-        print_result(result, &mut presenter, &cli.rest, 0)?;
+        if let ClientHandlerOutcome::Json(result) = outcome {
+            let mut presenter = Presenter::for_console(console);
+            print_result(result, &mut presenter, &cli.rest, 0)?;
+        }
         return Ok(());
     }
 
@@ -523,13 +526,28 @@ pub(crate) async fn execute_verified_command_in(
     Ok(payload.get("result").cloned().unwrap_or(payload))
 }
 
+/// What a local client handler leaves for the dispatcher to do.
+enum ClientHandlerOutcome {
+    /// A machine result for the ordinary result presenter.
+    Json(Value),
+    /// The handler already wrote its output.
+    Rendered,
+}
+
+impl ClientHandlerOutcome {
+    fn json(value: Value) -> Option<Self> {
+        Some(Self::Json(value))
+    }
+}
+
 async fn try_dispatch_client_handler(
     rest: &[String],
+    console: &crate::tty::Console,
     app_root: &Path,
     snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
     command_registration_policy: &ryeos_runtime::CommandRegistrationPolicy,
     default_project: Option<&Path>,
-) -> Result<Option<Value>, CliError> {
+) -> Result<Option<ClientHandlerOutcome>, CliError> {
     let registry = CommandRegistry::from_records(&snapshot.commands, command_registration_policy)
         .map_err(|error| CliError::Local {
         detail: format!("load verified node commands: {error:#}"),
@@ -551,7 +569,7 @@ async fn try_dispatch_client_handler(
             )?;
             crate::client_handlers::export_artifact(app_root, &parameters)
                 .await
-                .map(Some)
+                .map(ClientHandlerOutcome::json)
         }
         "runtime_snapshot_run" => {
             authorize_exact_core_client_handler(
@@ -561,13 +579,13 @@ async fn try_dispatch_client_handler(
             )?;
             crate::runtime_snapshot_run::run(app_root, snapshot, &parameters)
                 .await
-                .map(Some)
+                .map(ClientHandlerOutcome::json)
         }
         "remote_admit" => {
             authorize_exact_core_client_handler(&matched.command, snapshot, "remote-admit.yaml")?;
             crate::client_handlers::remote_admit(app_root, &parameters)
                 .await
-                .map(Some)
+                .map(ClientHandlerOutcome::json)
         }
         "remote_delegate" => {
             authorize_exact_core_client_handler(
@@ -577,21 +595,21 @@ async fn try_dispatch_client_handler(
             )?;
             crate::client_handlers::remote_delegate(app_root, &parameters)
                 .await
-                .map(Some)
+                .map(ClientHandlerOutcome::json)
         }
         "sign_items" => {
             authorize_exact_core_client_handler(&matched.command, snapshot, "sign.yaml")?;
             apply_project_policy(&matched.command, &mut parameters, default_project)?;
             crate::client_handlers::sign_items(app_root, &parameters)
                 .await
-                .map(Some)
+                .map(ClientHandlerOutcome::json)
         }
         "content_pin" => {
             authorize_exact_core_client_handler(&matched.command, snapshot, "content-pin.yaml")?;
             apply_project_policy(&matched.command, &mut parameters, default_project)?;
             crate::client_handlers::content_pin(app_root, &parameters)
                 .await
-                .map(Some)
+                .map(ClientHandlerOutcome::json)
         }
         "external_content_export_qualification_testimony" => {
             authorize_exact_core_client_handler(
@@ -601,7 +619,22 @@ async fn try_dispatch_client_handler(
             )?;
             crate::client_handlers::export_qualification_testimony(app_root, &parameters)
                 .await
-                .map(Some)
+                .map(ClientHandlerOutcome::json)
+        }
+        "threads_timeline" => {
+            authorize_exact_core_client_handler(
+                &matched.command,
+                snapshot,
+                "threads-timeline.yaml",
+            )?;
+            crate::client_handlers::threads_timeline(app_root, console, &parameters)
+                .await
+                .map(|rendered| {
+                    Some(match rendered {
+                        Some(response) => ClientHandlerOutcome::Json(response),
+                        None => ClientHandlerOutcome::Rendered,
+                    })
+                })
         }
         other => Err(CliError::Local {
             detail: format!("unknown verified local client handler `{other}`"),
@@ -911,7 +944,7 @@ async fn follow_stream_descriptor(
         }
     })
     .await;
-    presenter.finish_stream()?;
+    presenter.finish_stream().await?;
     transport?;
 
     match terminal {
@@ -1335,6 +1368,38 @@ async fn post_to_daemon(
     }
 }
 
+/// Timeline responses from `service:threads/timeline` on the node, signed as
+/// the operator.
+struct NodeTimelineSource {
+    signer: std::sync::Arc<crate::transport::signing::Signer>,
+    base_url: String,
+    audience: String,
+}
+
+impl crate::exec_stream::TimelineSource for NodeTimelineSource {
+    fn fetch(
+        &self,
+        chain_root_id: &str,
+        since: Option<i64>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send + '_>>
+    {
+        let mut parameters = serde_json::json!({ "chain_root_id": chain_root_id });
+        if let Some(since) = since {
+            parameters["since_chain_seq"] = Value::from(since);
+        }
+        Box::pin(async move {
+            crate::client_handlers::call_timeline_service(
+                &self.signer,
+                &self.base_url,
+                &self.audience,
+                parameters,
+            )
+            .await
+            .map_err(|error| error.to_string())
+        })
+    }
+}
+
 /// POST to the gateway `/execute/stream`, render the live execution log to
 /// stdout, then (on success) fetch and print the final thread result so the
 /// terminal path keeps parity with `/execute`. Same signing/audience flow as
@@ -1349,8 +1414,16 @@ async fn post_to_daemon_streaming(
 
     crate::daemon_preflight::lifecycle_preflight(app_root).await?;
     let daemon_url = crate::transport::http::resolve_daemon_url(app_root).await?;
-    let signer = crate::transport::signing::Signer::resolve(app_root)?;
+    let signer = std::sync::Arc::new(crate::transport::signing::Signer::resolve(app_root)?);
     let discovered = crate::transport::discovery::discover_audience(&daemon_url).await?;
+
+    // The run's timeline comes from the node's own projection of the chain, so
+    // the plain stream prints entries and their state changes, not raw events.
+    presenter.attach_timeline(std::sync::Arc::new(NodeTimelineSource {
+        signer: signer.clone(),
+        base_url: discovered.base_url.clone(),
+        audience: discovered.principal_id.clone(),
+    }));
 
     let route_path = "/execute/stream";
     let body_bytes = serde_json::to_vec(body).expect("infallible: Value serialization");
@@ -1400,7 +1473,7 @@ async fn post_to_daemon_streaming(
             }
         })
         .await;
-    presenter.finish_stream()?;
+    presenter.finish_stream().await?;
     transport?;
 
     match terminal {
