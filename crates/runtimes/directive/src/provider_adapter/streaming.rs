@@ -4455,6 +4455,8 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
                     ("max".to_string(), json!("max")),
                 ]),
             }),
+            capture: Vec::new(),
+            replay: None,
         }
     }
 
@@ -4609,6 +4611,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
                     semantics: OutputLimitSemantics::ProviderNativeOutputTokens,
                 }),
                 reasoning: None,
+                frame_stability: None,
             }),
             pricing: None,
             extra: Default::default(),
@@ -4823,6 +4826,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
                 tools: None,
                 streaming: None,
                 reasoning: None,
+                frame_stability: None,
             }),
             pricing: None,
             extra: Default::default(),
