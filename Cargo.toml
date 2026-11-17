@@ -68,6 +68,7 @@ members = [
     "crates/tools/web-tools",
     "crates/tools/browser-tools",
     "crates/support/ryeos-tracing",
+    "crates/support/ryeos-chat-stub",
     "crates/state/ryeos-vault",
     "crates/host-adapters/modal-guest-launcher",
 ]
@@ -178,6 +179,7 @@ ryeos-lillux-isolation-adapter = { path = "crates/tools/lillux-isolation-adapter
 ryeos-lillux-oci-hook = { path = "crates/host-adapters/lillux-oci-hook" }
 ryeos-remote-lease-core = { path = "crates/host-adapters/remote-lease-core" }
 ryeos-tracing = { path = "crates/support/ryeos-tracing" }
+ryeos-chat-stub = { path = "crates/support/ryeos-chat-stub" }
 ryeos-ui = { path = "crates/daemon/ryeos-ui" }
 ryeos-vault = { path = "crates/state/ryeos-vault" }
 
