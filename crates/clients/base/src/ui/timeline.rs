@@ -1062,6 +1062,8 @@ impl RyeOsCore {
                     None => find(&timeline_layout_for(
                         binding,
                         self.data.sources.get(&source_key)?,
+                        &instance,
+                        &view_ref,
                     )),
                 }
             });
