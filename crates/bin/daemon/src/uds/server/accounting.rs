@@ -677,6 +677,12 @@ pub(super) fn handle_provider_attempt_settle(
     {
         anyhow::bail!("provider settlement coordinate contradicts admitted launch authority");
     }
+    // The retry's `reason` is runtime-asserted, exactly like the spend and
+    // completion the runtime also reports: the daemon cannot observe which
+    // failure the runtime saw. This gate bounds how many unknown-outcome
+    // retries a launch may issue and on which transport; the transport is
+    // sealed through the request hash. A runtime that mislabels a failure can
+    // only spend attempts already bounded by the ceiling and the ledger.
     if let Some(retry) = &request.retry {
         check_unknown_outcome_retry(
             retry,

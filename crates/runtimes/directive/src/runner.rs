@@ -768,6 +768,16 @@ fn retry_delay_for_reason(
     Some(lillux::time::Duration::from_millis(delay_ms))
 }
 
+/// Whether closing the failed attempt before a retry must see valid usage.
+/// A failure that leaves the provider outcome unknown never has final usage to
+/// show; when the signed policy and sealed ceiling already admit the retry
+/// (classification only returns a reason in that case), the daemon ledger
+/// bounds the cost by charging the attempt's reserved maximum, so the
+/// fail-closed usage requirement does not apply. Known-outcome retries keep it.
+fn retry_requires_attempt_usage(reason: &ProviderRetryReason, fail_closed: bool) -> bool {
+    fail_closed && !reason.leaves_outcome_unknown()
+}
+
 /// Whether a retry after an unknown provider outcome is within policy: the
 /// class is named and the failed attempt is among the first `max_retries`.
 fn unknown_outcome_admitted(
@@ -1812,7 +1822,10 @@ impl Runner {
                                 if let Some((delay, reason)) =
                                     retry_classification(error, attempt, &self.execution)
                                 {
-                                    let usage_required = self.accounting_fail_closed();
+                                    let usage_required = retry_requires_attempt_usage(
+                                        &reason,
+                                        self.accounting_fail_closed(),
+                                    );
                                     let ambiguous_without_accounting = error
                                         .downcast_ref::<crate::provider_adapter::ProviderStreamError>()
                                         .is_some_and(|error| matches!(
@@ -6309,6 +6322,38 @@ mod tests {
             delays,
             [1000, 2000, 4000, 5000, 5000, 5000].map(Duration::from_millis)
         );
+    }
+
+    #[test]
+    fn unknown_outcome_retry_is_not_blocked_by_fail_closed_usage_but_known_retries_are() {
+        for unknown in [
+            ProviderRetryReason::Timeout,
+            ProviderRetryReason::Send {
+                connect_phase: false,
+            },
+            ProviderRetryReason::MidStream {
+                live_output_events_emitted: 3,
+            },
+        ] {
+            assert!(!retry_requires_attempt_usage(&unknown, true));
+            assert!(!retry_requires_attempt_usage(&unknown, false));
+        }
+        for known in [
+            ProviderRetryReason::Status { code: 503 },
+            ProviderRetryReason::Send {
+                connect_phase: true,
+            },
+        ] {
+            assert!(retry_requires_attempt_usage(&known, true));
+            assert!(!retry_requires_attempt_usage(&known, false));
+        }
+        // Without an admitted ceiling classification yields no reason at all,
+        // so the unknown-outcome failure reaches the uncertainty error, never a
+        // retry, whatever the budget.
+        let refused = retry_cfg();
+        assert!(retry_classification(&timeout_err(), 0, &refused).is_none());
+        let admitted = unknown_policy_cfg(2, 2, vec![UnknownOutcomeClass::Timeout]);
+        assert!(retry_classification(&timeout_err(), 0, &admitted).is_some());
     }
 
     #[test]
