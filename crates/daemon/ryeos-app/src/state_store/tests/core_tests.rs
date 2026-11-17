@@ -857,7 +857,7 @@ fn closed_admission_refuses_new_claims_and_rotation_without_charging_an_attempt(
 
 #[tokio::test]
 async fn launch_owner_wait_returns_when_the_last_owner_releases_and_reports_stragglers() {
-    let store = std::sync::Arc::new(test_store());
+    let store = test_store();
     let thread = "T-owner-wait";
     store
         .create_thread_for_test(&thread_record(thread, thread))
@@ -877,21 +877,19 @@ async fn launch_owner_wait_returns_when_the_last_owner_releases_and_reports_stra
         .await;
     assert_eq!(timed_out, Err(vec![thread.to_owned()]));
 
-    let releaser = std::sync::Arc::clone(&store);
     let owner = claim.claimed_by.clone();
-    let release = tokio::spawn(async move {
+    let release = async {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        releaser
+        store
             .release_active_thread_launch_claim(thread, "owner", &owner)
             .unwrap()
-    });
-    store
-        .wait_for_launch_owners_quiesced(
-            std::time::Instant::now() + std::time::Duration::from_secs(5),
-        )
-        .await
-        .unwrap();
-    assert!(release.await.unwrap());
+    };
+    let wait = store.wait_for_launch_owners_quiesced(
+        std::time::Instant::now() + std::time::Duration::from_secs(5),
+    );
+    let (waited, released) = tokio::join!(wait, release);
+    waited.unwrap();
+    assert!(released);
 }
 
 #[test]
