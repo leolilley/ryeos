@@ -2301,30 +2301,83 @@ mod state_root_authority_tests {
     }
 }
 
-/// The signed session protocol a qualification-only local Worker may use,
-/// per launch lane. Disabled isolation runs the trusted process-group lane
-/// over a runtime workspace; enforced isolation runs descendant containment
-/// over captured scratch. Each lane's launch repeats its own check.
-pub fn qualification_worker_protocol_lane_admits(
-    session: &ryeos_engine::protocols::descriptor::PersistentSessionProtocol,
+#[cfg(test)]
+mod process_containment_settlement_mapping_tests {
+    use super::ProcessContainmentRequirement as Requirement;
+    use ryeos_state::external_content::products::qualification::VerifierProcessSettlementAuthority as Settlement;
+
+    #[test]
+    fn a_settlement_maps_to_its_containment_and_the_stricter_requirement_stands() {
+        assert_eq!(
+            Requirement::for_settlement(Settlement::TrustedProcessGroupAbsent),
+            Requirement::None
+        );
+        assert_eq!(
+            Requirement::for_settlement(Settlement::ContainmentEmpty),
+            Requirement::AnyQualifiedContainment
+        );
+        assert_eq!(
+            Requirement::for_settlement(Settlement::ScopeEmpty),
+            Requirement::CgroupScope
+        );
+        assert_eq!(
+            Requirement::None.at_least(Requirement::AnyQualifiedContainment),
+            Requirement::AnyQualifiedContainment
+        );
+        assert_eq!(
+            Requirement::CgroupScope.at_least(Requirement::AnyQualifiedContainment),
+            Requirement::CgroupScope
+        );
+        assert_eq!(
+            Requirement::AnyQualifiedContainment.at_least(Requirement::None),
+            Requirement::AnyQualifiedContainment
+        );
+    }
+}
+
+/// Whether the session protocol a node selected for a qualification-only local
+/// Worker agrees with what the node physically is. The selection reads the
+/// node's reported guarantees; this check reads its isolation posture, and the
+/// two must tell the same story: disabled isolation runs a trusted process
+/// group over a runtime workspace, enforced isolation runs descendant
+/// containment over captured scratch. The selected protocol's holding carries
+/// both facts. Each launch repeats its own further checks.
+pub fn qualification_worker_selection_admits_posture(
+    descriptor: &ryeos_engine::protocols::ProtocolDescriptor,
     enforced: bool,
-) -> bool {
-    use ryeos_engine::protocols::PersistentSessionCleanupAuthority::{
-        DescendantContainment, TrustedProcessGroup,
+) -> Result<()> {
+    use ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::{
+        CapturedExecution, NodePolicy,
     };
-    use ryeos_engine::protocols::descriptor::{
-        PersistentSessionProcessMode,
-        PersistentSessionWorkspaceAuthority::{EphemeralScratch, RuntimeWorkspace},
+    use ryeos_engine::protocols::descriptor::PersistentSessionProcessMode;
+    use ryeos_state::external_content::products::qualification::VerifierProcessSettlementAuthority::{
+        ContainmentEmpty, TrustedProcessGroupAbsent,
     };
-    let (cleanup, workspace) = if enforced {
-        (DescendantContainment, EphemeralScratch)
+    let session = ryeos_engine::protocols::validate_persistent_session_protocol(descriptor)
+        .map_err(anyhow::Error::msg)?;
+    ensure!(
+        session.process_mode == PersistentSessionProcessMode::ExclusiveSession
+            && session.channel
+                == ryeos_engine::protocols::PersistentSessionChannel::InheritedUnixSocket,
+        "qualification-only local Worker requires an exclusive session over the inherited socket"
+    );
+    let holding = descriptor.holding.as_ref().ok_or_else(|| {
+        anyhow!(
+            "qualification-only local Worker requires a session protocol that declares its holding"
+        )
+    })?;
+    let (authority, settlement, posture) = if enforced {
+        (CapturedExecution, ContainmentEmpty, "enforced isolation")
     } else {
-        (TrustedProcessGroup, RuntimeWorkspace)
+        (NodePolicy, TrustedProcessGroupAbsent, "disabled isolation")
     };
-    session.process_mode == PersistentSessionProcessMode::ExclusiveSession
-        && session.cleanup_authority == cleanup
-        && session.workspace_authority == workspace
-        && session.channel == ryeos_engine::protocols::PersistentSessionChannel::InheritedUnixSocket
+    ensure!(
+        holding.filesystem_authority == authority && holding.root_settlement == settlement,
+        "the selected qualification Worker protocol declares a holding ({:?}, {:?}) that disagrees with this node's physical posture; {posture} requires ({authority:?}, {settlement:?}): trusted process group over a runtime workspace when isolation is disabled, descendant containment over captured scratch when enforced",
+        holding.filesystem_authority,
+        holding.root_settlement
+    );
+    Ok(())
 }
 
 /// A captured-execution tool may hold callback and thread-auth credentials
@@ -2925,7 +2978,7 @@ pub fn prepare_external_qualification_local_worker_plan(
     state: &crate::state::AppState,
     root: &crate::operator_external_content::product_qualification::PreparedExternalQualificationRoot,
 ) -> Result<PreparedItemPlan> {
-    with_prepared_external_qualification_local_worker_plan(state, root, |plan, _, _, _| Ok(plan))
+    with_prepared_external_qualification_local_worker_plan(state, root, |plan, _, _, _, _| Ok(plan))
 }
 
 /// Keep one checked signed Bundle generation through local Q material binding.
@@ -2939,6 +2992,7 @@ pub fn with_prepared_external_qualification_local_worker_plan<T>(
         &ryeos_engine::kind_registry::PersistentSessionDecl,
         &ryeos_engine::protocols::VerifiedProtocol,
         &Value,
+        crate::external_qualification_local::QualificationWorkerSelectedHolding,
     ) -> Result<T>,
 ) -> Result<T> {
     state.engine.with_checked_bundle_generation(|generation| {
@@ -2994,28 +3048,47 @@ pub fn with_prepared_external_qualification_local_worker_plan<T>(
             .persistent_session
             .as_ref()
             .context("qualification-only Worker has no signed session lifecycle")?;
-        let protocol_ref = match execution
+        match execution
             .terminator
             .as_ref()
             .context("qualification-only Worker has no terminator")?
         {
-            ryeos_engine::kind_registry::TerminatorDecl::Subprocess { protocol } => protocol
-                .resolve(&resolution.composed.composed)
-                .map_err(anyhow::Error::msg)?,
+            ryeos_engine::kind_registry::TerminatorDecl::Subprocess { .. } => {}
             ryeos_engine::kind_registry::TerminatorDecl::InProcess { .. } => {
                 bail!("qualification-only Worker has no subprocess session terminator")
             }
+        }
+        // The node selects the one admissible session protocol its own
+        // guarantees meet, then the selected holding is checked against its
+        // physical posture before anything is planned under it.
+        let selected = ryeos_engine::protocols::select_subprocess_protocol(
+            execution,
+            &resolution.composed.composed,
+            &state.engine.protocols,
+            state.isolation.as_ref(),
+        )?
+        .context("qualification-only Worker has no subprocess session terminator")?;
+        let signed_protocol = selected.protocol;
+        let selected_holding = {
+            let holding = selected.holding.context(
+                "qualification-only Worker's selected protocol declares no holding",
+            )?;
+            let authority = serde_json::to_value(holding.filesystem_authority)?;
+            crate::external_qualification_local::QualificationWorkerSelectedHolding::new(
+                &signed_protocol.canonical_ref,
+                authority
+                    .as_str()
+                    .context("selected holding filesystem authority is not a name")?,
+            )?
         };
-        let signed_protocol = state.engine.protocols.require(&protocol_ref)?;
         let session = ryeos_engine::protocols::validate_persistent_session_protocol(
             &signed_protocol.descriptor,
         )
         .map_err(anyhow::Error::msg)?;
-        if !qualification_worker_protocol_lane_admits(session, state.isolation.is_enforced()) {
-            bail!(
-                "qualification-only local Worker requires a dedicated session protocol for its lane: trusted process group over a runtime workspace when isolation is disabled, descendant containment over captured scratch when enforced"
-            );
-        }
+        qualification_worker_selection_admits_posture(
+            &signed_protocol.descriptor,
+            state.isolation.is_enforced(),
+        )?;
         if session.readiness_identity_env.is_none()
             || (!content.process_environment.is_empty()
                 && !session.runtime_env_allowlist.iter().any(|name| {
@@ -3024,8 +3097,10 @@ pub fn with_prepared_external_qualification_local_worker_plan<T>(
         {
             bail!("qualification-only Worker protocol lacks its signed readiness or process environment slot");
         }
-        let filesystem_ceiling =
-            execution.project_filesystem_authority_ceiling(&resolution.composed.composed)?;
+        let filesystem_ceiling = execution.project_filesystem_authority_ceiling_selected(
+            &resolution.composed.composed,
+            selected.holding,
+        )?;
         let network_ceiling =
             execution.project_network_authority_ceiling(&resolution.composed.composed)?;
         let endpoint = execution.project_endpoint_requirement(&resolution.composed.composed)?;
@@ -3042,6 +3117,7 @@ pub fn with_prepared_external_qualification_local_worker_plan<T>(
             &context.execution_hints,
             None,
             filesystem_ceiling,
+            Some(selected),
         )?;
         if plan.root_ref != identity.canonical_ref || plan.item_kind != "worker" {
             bail!("qualification-only plan changed its accepted Worker subject");
@@ -3102,6 +3178,7 @@ pub fn with_prepared_external_qualification_local_worker_plan<T>(
             declaration,
             signed_protocol,
             &resolution.composed.composed,
+            selected_holding,
         )
     })
 }
@@ -3122,6 +3199,7 @@ fn prepare_item_plan_with_logical_context(
             engine,
             resolved,
             &verified,
+            isolation,
             sealed_content,
             parent_filesystem_ceiling,
             logical_context,
@@ -3228,6 +3306,7 @@ pub fn prepare_captured_item_plan(
             resolved,
             verified,
             program,
+            isolation,
             sealed_content,
             enclosing_filesystem_ceiling,
         )?;
@@ -3249,6 +3328,7 @@ fn assemble_captured_item_plan(
     resolved: &ResolvedExecutionRequest,
     verified: &VerifiedItem,
     program: &ryeos_engine::effective_program::FinalizedEffectiveProgram,
+    isolation: &ryeos_engine::isolation::IsolationRuntime,
     sealed_content: Option<&dyn ryeos_engine::project_content::SealedDependencyBytes>,
     enclosing_filesystem_ceiling: ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling,
 ) -> Result<PreparedItemPlan> {
@@ -3262,11 +3342,20 @@ fn assemble_captured_item_plan(
         .get(&verified.resolved.kind)
         .and_then(|schema| schema.execution.as_ref())
         .ok_or_else(|| anyhow!("captured dependency has no execution schema"))?;
+    // A dependency that lists several admissible protocols runs under the one
+    // this node selects; its holding owns the filesystem ceiling.
+    let selected = ryeos_engine::protocols::select_listed_protocol(
+        execution,
+        &program.resolution().composed.composed,
+        &engine.protocols,
+        isolation,
+    )?;
     let (filesystem_ceiling, network_ceiling) = captured_plan_isolation_ceilings(
         execution,
         program,
         &resolved.item_ref,
         &resolved.root_raw_content_digest,
+        selected.and_then(|selected| selected.holding),
         enclosing_filesystem_ceiling,
     )?;
     let mut plan = engine.build_plan_from_captured_root(
@@ -3277,6 +3366,7 @@ fn assemble_captured_item_plan(
         &resolved.plan_context.execution_hints,
         sealed_content,
         filesystem_ceiling,
+        selected,
     )?;
     plan.network_authority_ceiling = network_ceiling;
     plan.endpoint_requirement =
@@ -3323,6 +3413,7 @@ fn captured_plan_isolation_ceilings(
     program: &ryeos_engine::effective_program::FinalizedEffectiveProgram,
     expected_ref: &str,
     expected_raw_digest: &str,
+    selected_holding: Option<&ryeos_engine::protocols::ProtocolHolding>,
     enclosing_filesystem_ceiling: ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling,
 ) -> Result<(
     ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling,
@@ -3337,7 +3428,7 @@ fn captured_plan_isolation_ceilings(
     let composed = &resolution.composed.composed;
     Ok((
         execution
-            .project_filesystem_authority_ceiling(composed)?
+            .project_filesystem_authority_ceiling_selected(composed, selected_holding)?
             .intersect(enclosing_filesystem_ceiling),
         execution.project_network_authority_ceiling(composed)?,
     ))
@@ -3434,6 +3525,38 @@ pub enum ProcessContainmentRequirement {
 }
 
 impl ProcessContainmentRequirement {
+    /// The containment a root settlement demands: `scope_empty` a cgroup
+    /// scope, `containment_empty` any qualified mechanism, and the weaker
+    /// `trusted_process_group_absent` none.
+    pub fn for_settlement(
+        settlement: ryeos_state::external_content::products::qualification::VerifierProcessSettlementAuthority,
+    ) -> Self {
+        use ryeos_state::external_content::products::qualification::VerifierProcessSettlementAuthority as Settlement;
+        match settlement {
+            Settlement::ScopeEmpty => Self::CgroupScope,
+            Settlement::ContainmentEmpty => Self::AnyQualifiedContainment,
+            Settlement::TrustedProcessGroupAbsent => Self::None,
+        }
+    }
+
+    fn strength(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::AnyQualifiedContainment => 1,
+            Self::CgroupScope => 2,
+        }
+    }
+
+    /// The stricter of two requirements. A cgroup scope also answers a demand
+    /// for any qualified containment.
+    pub fn at_least(self, other: Self) -> Self {
+        if other.strength() > self.strength() {
+            other
+        } else {
+            self
+        }
+    }
+
     /// The qualified mechanism answering this requirement on this node, or the
     /// refusal that names the missing guarantee.
     fn select(
@@ -4423,6 +4546,7 @@ mod tests {
                 &program,
                 "fixture:session",
                 &"b".repeat(64),
+                None,
                 NodePolicy,
             )
             .unwrap(),
@@ -4434,7 +4558,7 @@ mod tests {
         ] {
             assert!(
                 captured_plan_isolation_ceilings(
-                    &execution, &program, reference, &digest, NodePolicy,
+                    &execution, &program, reference, &digest, None, NodePolicy,
                 )
                 .unwrap_err()
                 .to_string()
@@ -4448,6 +4572,7 @@ mod tests {
                 &inherited,
                 "fixture:session",
                 &"b".repeat(64),
+                None,
                 CapturedExecution,
             )
             .unwrap(),
@@ -4463,6 +4588,7 @@ mod tests {
                     &finalized_dependency_fixture(malformed),
                     "fixture:session",
                     &"b".repeat(64),
+                    None,
                     NodePolicy,
                 )
                 .is_err()
@@ -5821,12 +5947,26 @@ mod captured_verifier_admission_tests {
             .unwrap(),
         )
         .unwrap();
-        assert_eq!(tool["filesystem_authority"], "captured_execution");
+        assert!(tool.get("filesystem_authority").is_none());
+        assert!(tool.get("execution_protocol").is_none());
         assert_eq!(
-            tool["execution_protocol"],
-            "protocol:ryeos/core/qualification_consumer_callback"
+            tool["execution_protocols"],
+            serde_json::json!([
+                "protocol:ryeos/core/qualification_consumer_callback_contained",
+                "protocol:ryeos/core/qualification_consumer_callback_trusted",
+            ])
         );
-        admit(&protocol("qualification_consumer_callback.yaml")).unwrap();
+        let contained = protocol("qualification_consumer_callback_contained.yaml");
+        assert_eq!(
+            contained
+                .holding
+                .as_ref()
+                .map(|holding| holding.filesystem_authority),
+            Some(ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution)
+        );
+        admit(&contained).unwrap();
+        // The trusted holding runs the verifier under node policy, so it declares no captured-compatible class.
+        assert!(admit(&protocol("qualification_consumer_callback_trusted.yaml")).is_err());
         // A callback protocol that declares no captured-compatible class stays refused.
         assert!(admit(&protocol("qualification_scoped_callback.yaml")).is_err());
         assert!(admit(&protocol("tool_callback.yaml")).is_err());

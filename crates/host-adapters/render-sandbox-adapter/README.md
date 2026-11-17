@@ -50,11 +50,7 @@ support, signing, installation, or provider qualification.
 
 The current controller source also has a signed operator snapshot-production
 service and a durable one-attempt journal. A complete create response binds a
-locator, never runtime contents. The credential-free runtime probe now
-requires that locator in its schema-2 evidence; controller admission compares
-it with the retained bound attempt and product witness before this adapter
-compares its snapshot ID with the signed placement. This offline join is
-tested, but it is not a live restored-Sandbox verifier. The availability
+locator, never runtime contents. The availability
 response parser exists without a provider-contacting readiness operation. The
 durable locator now retains the bounded, adapter-validated creation projection
 (`requestedAt` and `expiresAt`) under the same operation identity so a later
@@ -71,12 +67,6 @@ service and command definitions are signed; their presence does not prove
 admission on the installed controller generation. Installed admission and the
 restored-content qualification still need verification before this path can
 authorize worker activation.
-The schema-6 snapshot probe carries a tagged source provenance and only the retained snapshot locator,
-restored-verifier observation, provider terminal observation, and exact
-product/placement coordinates. It rejects the older unjoined hashes for
-lost-stream survival, authenticated Ready, and writer exclusion. Those are
-separate execution/settlement claims, not properties established by a
-point-in-time restored-content measurement or a provider terminal status.
 Therefore the Render activation gate remains closed.
 
 ## Implemented control-plane behavior
@@ -244,18 +234,20 @@ and checks its current owner, `0400` mode, exact length, and payload digest
 before any provider contact. This is a point check, not exclusion of concurrent
 writers; the eventual upload must stream the same registered inode under
 Lillux's stable-reader check while the producer retains private-generation
-custody. The adapter cannot authenticate the controller root or establish
-guest trust. A qualified guest runtime must independently pin the controller
-root and its own runtime manifest hash, verify the assignment first, and then
-verify the import under the delegated occurrence-owner key. The final
+custody. The adapter does not establish guest trust. The signed assignment names the controller public key it verifies
+under; the adapter checks that signature before any provider contact, and the
+guest verifies it again, checks its own measured runtime manifest hash, and
+then verifies the import under the delegated occurrence-owner key. The runtime
+product carries no controller key, so one qualified product serves any
+controller. The final
 assignment cannot be placed in Sandbox create-time environment: its occurrence
 ID and activation digest do not exist until after allocation. A future
 one-shot owner launch must carry it as bounded post-allocation input, and an
 ambiguous launch response must not cause another launch.
-The generic guest verifier can now observe the exact installed runtime tree,
-read its pinned controller-root file, and recheck the full tree immediately
-before import admission. This is a point measurement only: the Render snapshot
-must still be independently qualified against that manifest/root, and the
+The generic guest verifier can now observe the exact installed runtime tree
+and recheck the full tree immediately before import admission. This is a point
+measurement only: the Render snapshot must still be independently qualified
+against that manifest, and the
 owner must exclude writers through descriptor adoption and execution.
 `ryeos-external-execution::guest_staging::stage_uploaded_guest_package` already
 imports an exact pinned regular inode into a private generation and verifies
@@ -378,29 +370,24 @@ the guest import path are qualified.
 The signed placement binding's `guest_runtime_manifest_hash` is an expected
 content identity; Render settings' `snapshot_id` is an opaque provider locator.
 Neither is evidence that the provider restored those bytes. These two
-coordinates and the controller public root must meet in one independently
-verified qualification before a new Sandbox can be allocated for RyeOS work.
+coordinates must meet in one independently verified qualification before a new Sandbox can be allocated for RyeOS work.
 
 The source product should be authored through an ordinary retained-output
-recipe. Its producer needs the exact owner executable as a **data input**, the
-node's public assignment-verification root, and a signed owner profile. It
+recipe. Its producer needs the exact owner executable as a **data input** and
+a signed owner profile; it takes no parameters and names no controller. It
 writes a fresh credential-free tree; RyeOS captures that tree as a product
 and checks its manifest against the guest's `ObservedGuestRuntime` algorithm.
 The signed Tool now declares `bundle_binary: bin:ryeos-external-guest-occurrence-owner`
 under the narrow `bundle_binary:own` kind grant. Admission captures the
 declaring Bundle's signature-verified executable into a sealed descriptor and
 then into an exact retained file realization; the producer never opens the
-installed `.ai/bin` path. The signed production graph reads the current node's
-public identity through `service:identity/public_key` and passes it to the
-producer. No credential or submission authority enters that workspace.
-The separate signed `graph:codex/guest-owner-runtime-production-for-controller`
-requires an explicit target controller public key. It retains the same product
-recipe and captured-execution Tool, so an enforced-isolation authoring node
-can produce bytes for a distinct Render controller without pretending that
-the Render controller itself can run the captured producer. The target
-controller must still import the exact witnessed product and independently
-verify that its own public root is present in the manifest; accepting a
-caller key or graph result alone would not do so. A disposable
+installed `.ai/bin` path. No credential or submission authority enters that
+workspace. Because the product is independent of any controller, an
+enforced-isolation authoring node can produce and qualify the exact bytes a
+distinct Render controller later runs, without pretending that the Render
+controller itself can run the captured producer. The Render controller still
+imports the exact witnessed product; its own key reaches the guest only inside
+the occurrence assignment it signs. A disposable
 `hosted-workflow` node on 2026-09-28 admitted the seven-bundle set but refused
 the local producer at the correct boundary:
 `captured execution requires enforced isolation before admission`. It made
@@ -498,24 +485,9 @@ signed binding generation. Its independently admitted verifier must observe
 the restored tree and root *inside that snapshot*, upload modes, owner
 survival after losing the run stream, authenticated supervisor `Ready`, and
 whole-guest termination plus writer exclusion. The generic product
-qualification machinery can retain a signed verifier result and bounded
-probe evidence. A Render-specific typed interpretation now exists, but its
-authenticated join to the placement binding is still missing. A self-described `qualified` field, a
+qualification machinery can retain a signed verifier result. A self-described `qualified` field, a
 matching create response, or a signed expectation alone must not grant
 startup capability.
-
-`src/snapshot_qualification.rs` now defines the bounded Render-specific probe
-shape and exact comparison against those expected coordinates. It rejects
-unknown fields, changed snapshot/root/manifest, weak or noncanonical controller
-keys, changed file modes, and missing provider-terminal evidence identities.
-Placement admission now rejoins both the independently admitted verifier's
-retained observation and the exact restored occurrence's daemon-retained
-provider-terminal observation to the same qualification operation. The old
-probe-provided terminal hash is no longer accepted as free-standing evidence.
-This remains only a provider-terminal join: the verifier and termination have
-not yet run as an installed Render qualification, and a provider `terminated`
-response does not prove guest-writer exclusion. The signed provider spec still
-refuses activation.
 
 The separate `ryeos-external-guest-restoration-verifier` now measures the
 restored owner tree under a fresh challenge. This adapter has an offline,
@@ -546,7 +518,7 @@ object with the exact attestation hash, product-owner principal, policy ref,
 and required claims. The node Config signer is not assumed to be the product
 owner. A non-null object is only an exact coordinate:
 fresh placement refuses it until the published witness, current
-policy, independent execution evidence, and Render probe can all be joined.
+policy, and independent execution evidence can all be joined.
 This is distinct from the Codex candidate-runtime product selection retained
 in the Worker capsule. Cleanup of an already contacted occurrence does not
 reapply this startup gate.
@@ -558,7 +530,7 @@ claims. Its subject is `workload.runtime_manifest_hash`, never the guest-owner
 runtime manifest above. Direct workloads refuse this slot. Fresh structured
 session admission refuses missing testimony and rechecks its owning signed
 head, expiry, current source allowance/policy/recipes and verifier artifact.
-This proof is not routed through the guest-owner snapshot probe. Retaining it
+Retaining it
 in the admitted session and authenticating it during historical recovery are
 still open integration gates; this source cut is not installed qualification.
 
@@ -567,49 +539,12 @@ node-signed operator grant, loads the exact published qualification and
 product witness under CAS guard, and rechecks current policy, verifier
 definition/artifact, required claims, and execution evidence. It runs before
 credential access on fresh placement paths. That authenticates the product
-proof but does not yet compare its provider-specific probe; the backend registry
+proof; the backend registry
 still refuses a non-null qualification for new contact. The exact proof and
 product owner are now CAS-owned by the schema-18 persistent-session capsule,
 separately from the Codex executable selection. No synthetic verified request
 context is constructed.
 
-The lifecycle backend now has a credential-free, provider-neutral runtime-probe
-interpretation hook. Fresh admission and retained placement call it only after
-RyeOS authenticates the corresponding proof. The hook defaults to refusal; the
-exact Render adapter now implements a sealed offline invocation with no
-credential or network descriptors. It compares source-derived owner, tree and
-controller-root identities with the bounded independent probe and returns a
-request-digest-bound response. The separate allocation gate still refuses
-qualified bindings: neither this interpretation nor a successful probe parse
-alone is an activation claim.
-
-The remaining provider-probe join has two separate owners. RyeOS authenticates the binding's exact
-qualification attestation from current published CAS, its product witness,
-current signed policy, admitted verifier definition, and execution evidence;
-the session capsule retains that result with the exact signed binding generation
-before first contact, and start/channel recovery authenticates it without
-selecting a new product head.
-The Render adapter interprets the bounded `probe_evidence` against the same
-binding's owner/account/snapshot/plan/region, controller public root, owner
-executable and runtime manifest. Neither a caller-provided JSON probe nor a
-synthetic `HandlerContext` may stand in for RyeOS's authenticated witness.
-For the captured-product source, the exact product-witness hash is the
-source-lineage join: its authenticated capture evidence retains the producer
-and root-producer admissions, including effective definition, project snapshot
-and launch authority. A materialized-artifacts source instead requires its
-distinct materialization witness and qualification path; it cannot reuse a
-capture witness. The
-removed `bundle_generation_hash` probe field had no independent installed
-observation or signed-binding source; copying it from `probe_evidence` into its
-own expectation would have proved nothing.
-RyeOS now re-verifies the retained product witness and its complete content
-closure, then derives the expected owner executable digest and controller-root
-file digest from the exact ordinary product manifest under the node's current public
-key. The large-content tier has a different manifest identity and is rejected. The
-credential-free adapter hook receives these source-derived values; the Render
-executable's sealed offline invocation now compares them with the probe. It
-still cannot authorize allocation while the signed provider spec declares
-activation `unsupported_pending` and joined installed qualification is absent.
 The proof must be rechecked at the fresh reservation/contact cut, while
 recovery of an already contacted occurrence uses its retained exact proof and
 does not select a newer witness. The existing `guest-runtime` Worker slot

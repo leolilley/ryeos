@@ -889,6 +889,10 @@ pub(super) fn prove(
             protocol.descriptor.callback_channel,
         )?;
     }
+    let launch_shape = purpose
+        .policy_source()
+        .policy
+        .retained_launch_shape_for(subordinate_proof.as_ref())?;
     Ok((
         result,
         ProductQualificationExecutionProof {
@@ -897,6 +901,7 @@ pub(super) fn prove(
             projector: projector_identity(&projector.projector),
             participants,
             subordinate_attempt: subordinate_proof,
+            launch_shape,
         },
         root_settlement_digest,
     ))
@@ -1202,9 +1207,11 @@ fn corroborate_qualification_worker_transcript(
             purpose.subject_manifest_hash(),
             &input.coordinate.scenario_id,
         )?;
-        if Some(
-            &verifier.retained_identity(purpose.policy_source(), &input.coordinate.scenario_id)?,
-        ) != purpose.remote_verifier_source(&input.coordinate.scenario_id)
+        let current_source =
+            verifier.retained_identity(purpose.policy_source(), &input.coordinate.scenario_id)?;
+        if !purpose
+            .remote_verifier_source(&input.coordinate.scenario_id)
+            .is_some_and(|retained| retained.same_signed_source(&current_source))
         {
             bail!("Q proof changed the accepted independent verifier source");
         }

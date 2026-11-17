@@ -4903,10 +4903,8 @@ name = "ryeos-external-guest-runtime-producer"
 version = "0.5.102"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
  "lillux",
  "ryeos-external-execution",
- "serde",
  "serde_json",
  "tempfile",
 ]
@@ -5387,13 +5385,16 @@ dependencies = [
  "ryeos-external-execution",
  "ryeos-external-execution-contract",
  "ryeos-isolation-protocol",
+ "ryeos-node",
  "ryeos-node-runtime",
  "ryeos-project-capture",
+ "ryeos-remote-lease-core",
  "ryeos-state",
  "ryeosd",
  "serde",
  "serde_json",
  "serde_yaml",
+ "signal-hook",
  "tar",
  "tempfile",
  "tokio",

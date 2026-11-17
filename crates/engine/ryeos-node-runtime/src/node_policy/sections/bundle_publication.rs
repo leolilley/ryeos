@@ -392,12 +392,13 @@ mod tests {
                 verifier_ref: verifier_ref.to_owned(),
                 subject_declaration_id: "subject".to_owned(),
                 allowed_claims: vec![claim.to_owned()],
-                minimum_verifier_process_settlement:
+                minimum_verifier_process_settlement: Some(
                     ryeos_state::external_content::products::qualification::VerifierProcessSettlementAuthority::ScopeEmpty,
+                ),
                 verifier_parameters: serde_json::json!({}),
                 consumer_execution_context: None,
-                requires_guarantees: Vec::new(),
                 producer_scenarios: Default::default(),
+                launch_shape: None,
             },
         }
     }

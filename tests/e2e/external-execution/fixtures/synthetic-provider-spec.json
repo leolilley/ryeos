@@ -1,0 +1,33 @@
+{
+  "schema": 2,
+  "maximum_lease_seconds": 14400,
+  "budget_weight": 1,
+  "network_policy": {
+    "creatable_types": [
+      "deny-all",
+      "allow-list"
+    ],
+    "allow_list": {
+      "rule_protocol": "https",
+      "max_rules": 4,
+      "host_syntax": "exact_dns_name"
+    }
+  },
+  "operations": {
+    "allocate": {
+      "kind": "create_once",
+      "bind_proof_profile": "synthetic_create_v1",
+      "timeout_source": "reservation",
+      "network_policy_source": "lease_guest_network_allow"
+    },
+    "terminate": {
+      "kind": "terminate_once_then_observe_exact"
+    },
+    "guest_channel": {
+      "kind": "controller_relayed_guest_frames"
+    },
+    "activate_supervisor": {
+      "kind": "one_shot_pending_activation"
+    }
+  }
+}

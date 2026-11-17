@@ -592,6 +592,7 @@ fn select_verified_product(
         relationship_name: slot.relationship.clone(),
         relationship_ref: slot.relationship_ref.clone(),
         relationship_raw_content_digest: relationship_resolution.root.raw_content_digest.clone(),
+        relationship_project_dependent: crate::external_content_admission::resolution_has_project_contributor(&relationship_resolution),
         relationship,
         witness_hash: selector.witness_hash.clone(),
         witness_source: selector.witness_source.clone(),
@@ -1320,5 +1321,137 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// The fact recorded on a selection is the shared predicate applied to the
+    /// relationship's real resolution, the same call `select_verified_product`
+    /// makes. A bundle-owned relationship records false; the same ref overlaid
+    /// from project space records true (the root-space arm). The config kind
+    /// has no extends chain or references, so the ancestor and referenced-item
+    /// arms are covered by the predicate's own unit test.
+    #[test]
+    fn relationship_resolution_records_project_dependence_from_its_real_source() {
+        use lillux::crypto::SigningKey;
+        use ryeos_engine::trust::TrustedSigner;
+
+        const REF: &str = "config:product-fixture/relationships";
+        let sign = |path: &std::path::Path, source: &str, key: &SigningKey| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(
+                path,
+                lillux::signature::sign_content(source, key, "#", None),
+            )
+            .unwrap();
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let (_store_owner, mut state) =
+            crate::state::test_support::build(directory.path()).unwrap();
+        let signer = SigningKey::from_bytes(&[53; 32]);
+        let relationship_source = |marker: &str| {
+            format!(
+                "category: product-fixture\nname: relationships\nversion: '1.0.0'\nmarker: {marker}\n"
+            )
+        };
+        let bundle = directory.path().join("fixture-bundle");
+        sign(
+            &bundle.join(".ai/manifest.yaml"),
+            "name: product-bundle\nversion: '1.0'\nprovides_kinds: []\nrequires_kinds: []\nuses_kinds: []\n",
+            &signer,
+        );
+        sign(
+            &bundle.join(".ai/config/product-fixture/relationships.yaml"),
+            &relationship_source("bundle"),
+            &signer,
+        );
+        let project = directory.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+
+        let core = ryeos_engine::test_support::core_bundle_root();
+        let roots = vec![core.clone(), bundle];
+        let trust = crate::state::test_support::live_trust_store_with(vec![TrustedSigner {
+            fingerprint: lillux::signature::compute_fingerprint(&signer.verifying_key()),
+            verifying_key: signer.verifying_key(),
+            label: Some("product fixture".into()),
+        }]);
+        let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(
+            &[core.join(".ai/node/engine/kinds")],
+            &trust,
+        )
+        .unwrap();
+        let (parsers, _) =
+            ryeos_engine::parsers::ParserRegistry::load_base(&roots, &trust, &kinds).unwrap();
+        let handlers = ryeos_engine::test_support::load_live_handler_registry();
+        let composers =
+            ryeos_engine::composers::ComposerRegistry::from_kinds(&kinds, &handlers).unwrap();
+        let tagged = roots
+            .iter()
+            .map(|root| {
+                (
+                    root.clone(),
+                    ryeos_engine::resolution::TrustClass::TrustedBundle,
+                )
+            })
+            .collect::<Vec<_>>();
+        let protocols =
+            ryeos_engine::protocols::ProtocolRegistry::load_base(&tagged, &trust).unwrap();
+        let validators =
+            ryeos_engine::effective_validators::EffectiveValidatorRegistry::from_kinds(
+                &kinds,
+                &handlers,
+                state.isolation.clone(),
+                &roots,
+            )
+            .unwrap();
+        // The installed bundle's name must differ from the relationship's
+        // namespace: a project may not shadow a namespace named for a bundle.
+        let registered = ["core", "product-bundle"]
+            .into_iter()
+            .zip(roots.iter())
+            .map(
+                |(name, root)| ryeos_engine::item_resolution::RegisteredBundleRoot {
+                    owned_namespaces: Vec::new(),
+                    name: name.into(),
+                    canonical_root: root.clone(),
+                },
+            )
+            .collect();
+        state.engine = Arc::new(
+            ryeos_engine::engine::Engine::new(
+                kinds,
+                ryeos_engine::parsers::ParserDispatcher::new(parsers, handlers),
+                roots,
+            )
+            .with_trust_store(trust.clone())
+            .with_node_trust_store(trust)
+            .with_composers(composers)
+            .with_protocols(protocols)
+            .with_effective_validators(validators)
+            .with_registered_bundle_roots(registered),
+        );
+
+        let subject = SubjectResolutionAuthority::PinnedGeneration {
+            snapshot_hash: "d".repeat(64),
+        };
+        let recorded = |engine: &ryeos_engine::engine::Engine| {
+            let roots = engine.resolution_roots(Some(project.clone()));
+            let resolution = engine
+                .effective_resolution_output(
+                    relationship_resolution_request(&roots, &subject, REF).unwrap(),
+                )
+                .unwrap();
+            (
+                resolution.root.source_space,
+                crate::external_content_admission::resolution_has_project_contributor(&resolution),
+            )
+        };
+
+        assert_eq!(recorded(&state.engine), (ItemSpace::Bundle, false));
+
+        sign(
+            &project.join(".ai/config/product-fixture/relationships.yaml"),
+            &relationship_source("project"),
+            &signer,
+        );
+        assert_eq!(recorded(&state.engine), (ItemSpace::Project, true));
     }
 }

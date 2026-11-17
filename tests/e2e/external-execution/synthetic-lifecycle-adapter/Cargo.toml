@@ -16,9 +16,11 @@ ryeos-external-execution-contract = { workspace = true }
 ryeos-codex-external-configuration = { path = "../../../../crates/tools/codex-external-configuration" }
 ryeos-codex-runtime-verifier = { path = "../../../../crates/tools/codex-runtime-verifier" }
 ryeos-project-capture = { workspace = true }
+ryeos-remote-lease-core = { workspace = true }
 ryeos-state = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+signal-hook = { workspace = true }
 tar = { workspace = true }
 toml = { workspace = true }
 
@@ -31,6 +33,7 @@ ryeos-bundle = { workspace = true }
 ryeos-engine = { workspace = true, features = ["test-support"] }
 ryeos-executor = { workspace = true, features = ["test-support"] }
 ryeos-isolation-protocol = { workspace = true }
+ryeos-node = { workspace = true }
 ryeosd = { path = "../../../../crates/bin/daemon" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 tempfile = { workspace = true }
@@ -79,6 +82,18 @@ path = "src/bin/routed_guest.rs"
 [[bin]]
 name = "ryeos-synthetic-external-candidate-connector"
 path = "../../../../crates/tools/external-candidate-connector/src/main.rs"
+
+# The production supervisor entry (held, mounted launch) a provider's guest
+# sandbox starts; the direct-launch fixture supervisor above is not one.
+[[bin]]
+name = "ryeos-synthetic-mounted-candidate-supervisor"
+path = "../../../../crates/tools/external-candidate-supervisor/src/main.rs"
+
+# The real guest occurrence owner, compiled from its production source, so a
+# provider fixture can preinstall it in its guest runtime.
+[[bin]]
+name = "ryeos-synthetic-guest-occurrence-owner"
+path = "../../../../crates/tools/external-guest-occurrence-owner/src/main.rs"
 
 [[bin]]
 name = "ryeos-synthetic-codex-external-configuration"

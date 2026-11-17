@@ -122,6 +122,12 @@ struct SnapshotQualificationComposeArgs {
     #[arg(long)]
     verifier: String,
 
+    /// JSON file stating the launch shape every occurrence under this binding is
+    /// created with: `controller_transport` and `sandbox_network_policy`. Required;
+    /// there is no default shape.
+    #[arg(long)]
+    launch_shape: PathBuf,
+
     /// JSON file mapping scenario id to a consumer verifier selection.
     #[arg(long)]
     consumer_verifiers: Option<PathBuf>,
@@ -307,6 +313,12 @@ pub fn run_snapshot_qualification_compose(
         "provider_spec".to_owned(),
         read_bytes(&args.provider_spec, "provider spec")?,
     )]);
+    {
+        let bytes = read_bytes(&args.launch_shape, "launch shape")?;
+        let _: serde_json::Value = serde_json::from_slice(&bytes)
+            .with_context(|| format!("parse launch shape {}", args.launch_shape.display()))?;
+        inputs.insert("launch_shape".to_owned(), bytes);
+    }
     if let Some(path) = &args.consumer_verifiers {
         let bytes = read_bytes(path, "consumer verifiers")?;
         // Parsed here only to refuse a malformed document before a request is
@@ -586,11 +598,13 @@ mod tests {
             "p.json",
             "--verifier",
             "hash",
+            "--launch-shape",
+            "shape.json",
         ];
         let parsed = SnapshotQualificationComposeArgs::try_parse_from(argv(&full)).unwrap();
         assert_eq!(parsed.snapshot_binding, "producer");
         assert!(parsed.consumer_verifiers.is_none());
-        for drop in 0..4 {
+        for drop in 0..5 {
             let kept: Vec<&str> = full
                 .chunks(2)
                 .enumerate()
@@ -643,6 +657,8 @@ mod tests {
             "/nonexistent/p.json",
             "--verifier",
             "hash",
+            "--launch-shape",
+            "/nonexistent/shape.json",
             "--json",
         ]);
         let error = run_snapshot_qualification_compose(&qualification, &console()).unwrap_err();

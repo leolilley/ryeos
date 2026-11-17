@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T00:27:41Z:806e884f0b6d4eb5245fa6d02b277959a26dc8b5bf4320a303866ed6077b9903:DRiLENwby3vDxJGZ7bf715IR0VXvHvAGsJsBKyLgrc7wwWlT8VyDaoxRNMpKwYeEQ/pYxfsNVPt7SOXkANRJDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T12:59:02Z:faf080c09fc4204130c2c6de8438809ae83002436491edb1328dac1d4fd4146f:R334G23e7htnOErRmQGmaDmrJkKMfwtr5uVHtwyIcXy1ewx4hgqsU3xeTNmFi/msZnTAW3UFVKMADau8YRiWDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, protocols, wire, subprocess]
@@ -101,6 +101,30 @@ During execution, the tool emits length-prefixed JSON frames on
 stdout. Each frame is a JSON object with streaming chunk data.
 The daemon reads these frames and forwards them to the event stream.
 
+## Holding
+
+A protocol descriptor may carry an optional `holding` block: the node holding
+a launch under that protocol requires.
+
+```yaml
+holding:
+  requires_guarantees:        # guarantees the node must report
+    - isolation:enforced
+  filesystem_authority: captured_execution
+  root_settlement: containment_empty
+```
+
+`requires_guarantees` uses the node guarantee grammar (names, `accept` lists
+and `any_of` groups). `filesystem_authority` is the ceiling a launch under the
+protocol holds, and `root_settlement` is the settlement its root process must
+reach. For a session protocol the descriptor load refuses a holding that
+contradicts its own session block: the filesystem authority must equal the
+workspace authority's ceiling and the settlement must match the cleanup
+authority. Items that list several protocols (`execution_protocols` on a Tool
+or Worker) let the node pick the one whose holding it meets; a descriptor with
+no `holding` cannot be one of several candidates and keeps its ordinary
+single-protocol use.
+
 ## Protocol Selection
 
 The kind schema determines which protocol to use:
@@ -111,7 +135,7 @@ The kind schema determines which protocol to use:
 | `runtime`       | `runtime`                |
 | method-bearing kind | its `execution.method_dispatch.protocol` (currently `method_runtime`) |
 
-The signed kind schema owns protocol selection. Tool authors must provide
+The signed kind schema owns protocol selection, either one `execution_protocol` or an `execution_protocols` list resolved against the node's holding. Tool authors must provide
 `execution_protocol` from its closed allowlist. Other schemas may select a fixed
 descriptor through their subprocess terminator or method declaration. The
 launcher follows verified wire mechanics without a kind-name/protocol-name table.

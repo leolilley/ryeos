@@ -25,7 +25,7 @@ use crate::objects::{
 
 pub const PRODUCT_RELATIONSHIPS_SCHEMA: &str = "ryeos.product_relationships.v1";
 pub const RESOLVED_EXTERNAL_PRODUCT_SELECTION_SCHEMA: &str =
-    "ryeos.resolved_external_product_selection.v4";
+    "ryeos.resolved_external_product_selection.v5";
 pub const EXTERNAL_PRODUCT_SELECTIONS_DERIVED_KEY: &str = "effective_external_product_selections";
 pub const MAX_PRODUCT_RELATIONSHIPS: usize = 32;
 pub const MAX_PRODUCT_SELECTIONS: usize = 32;
@@ -567,6 +567,11 @@ pub struct ResolvedExternalProductSelection {
     pub relationship_name: String,
     pub relationship_ref: String,
     pub relationship_raw_content_digest: String,
+    /// Whether the relationship's full resolution (root, ancestors or
+    /// referenced items) draws on project space. Decided by the one shared
+    /// project-contributor predicate; a selection whose relationship is
+    /// bundle-owned does not make its consumer project-dependent.
+    pub relationship_project_dependent: bool,
     pub relationship: ProductRelationship,
     pub witness_hash: String,
     pub witness_source: super::transfer::ProductWitnessSource,
@@ -779,6 +784,7 @@ impl ResolvedExternalProductSelection {
             relationship_name,
             relationship_ref,
             relationship_raw_content_digest,
+            relationship_project_dependent,
             relationship,
             witness_hash,
             witness_source: _,
@@ -805,6 +811,7 @@ impl ResolvedExternalProductSelection {
             relationship_name: &'a str,
             relationship_ref: &'a str,
             relationship_raw_content_digest: &'a str,
+            relationship_project_dependent: bool,
             relationship: &'a ProductRelationship,
             witness_hash: &'a str,
             witness_coordinate: &'a ProductCaptureCoordinate,
@@ -836,6 +843,7 @@ impl ResolvedExternalProductSelection {
             relationship_name,
             relationship_ref,
             relationship_raw_content_digest,
+            relationship_project_dependent: *relationship_project_dependent,
             relationship,
             witness_hash,
             witness_coordinate,
@@ -986,6 +994,9 @@ mod tests {
 
         let mut changed = original.clone();
         changed.relationship_raw_content_digest = "f".repeat(64);
+        assert_ne!(digest, changed.semantic_identity_digest().unwrap());
+        changed = original.clone();
+        changed.relationship_project_dependent = !original.relationship_project_dependent;
         assert_ne!(digest, changed.semantic_identity_digest().unwrap());
         changed = original.clone();
         changed.pre_selection_effective_definition_digest = "e".repeat(64);
@@ -1392,6 +1403,7 @@ mod tests {
             relationship_name: relationship.name.clone(),
             relationship_ref: witness.recipe_ref.clone(),
             relationship_raw_content_digest: witness.recipe_raw_content_digest.clone(),
+            relationship_project_dependent: false,
             relationship,
             witness_hash: proof.product_witness_hash.clone(),
             witness_source: proof.witness_source.clone(),

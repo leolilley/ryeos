@@ -353,6 +353,7 @@ mod tests {
                 session_setup: serde_json::json!({"route":"session.start"}),
                 body: serde_json::json!({"route":"turn.start"}),
             }),
+            launch_shape: None,
         };
         purpose
             .policy_source

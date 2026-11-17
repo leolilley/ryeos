@@ -422,8 +422,7 @@ pub fn prepare_after_reservation(
         .policy_ref
         .as_deref()
         .context("selected product relationship has no qualification policy")?;
-    let policy_source =
-        super::resolve_current_bundle_qualification_policy_for_local_run(state, policy_ref)?;
+    let policy_source = super::resolve_current_bundle_qualification_policy(state, policy_ref)?;
     require_current_consumer_invocation(
         state,
         &context.fingerprint,
@@ -583,14 +582,16 @@ mod tests {
                 verifier_ref: "tool:fixtures/verify".into(),
                 subject_declaration_id: "subject".into(),
                 allowed_claims: vec!["claim".into()],
-                minimum_verifier_process_settlement: VerifierProcessSettlementAuthority::ScopeEmpty,
+                minimum_verifier_process_settlement: Some(
+                    VerifierProcessSettlementAuthority::ScopeEmpty,
+                ),
                 verifier_parameters: json!({}),
                 consumer_execution_context: None,
-                requires_guarantees: Vec::new(),
                 producer_scenarios: scenarios
                     .into_iter()
                     .map(|(name, scenario)| (name.to_owned(), scenario))
                     .collect(),
+                launch_shape: None,
             },
         }
     }
@@ -609,6 +610,9 @@ mod tests {
             remote_verifier: Some(remote_selection()),
             consumer_worker_request: None,
             remote_probe_input: Some(json!({"probe": "a"})),
+            launch_shape: Some(
+                ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(),
+            ),
         }
     }
 
@@ -618,6 +622,7 @@ mod tests {
             remote_verifier: None,
             consumer_worker_request: None,
             remote_probe_input: None,
+            launch_shape: None,
         }
     }
 

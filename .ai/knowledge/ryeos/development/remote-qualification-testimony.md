@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T03:56:20Z:b9a0c5bdd03f8e15ce1031f189d09157d52909e6c32fe31c0e15b23f217edf4d:ocxbQMjia9aaYVhw3iJANm2ujJ5VY6+eZGfzWmncIO9FGuKzWqzZmn1vdhb5sIWuiIA9/TRfN9VD95i512nfDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T14:13:43Z:6618af2e01af4cf4d66051049a2771c74106acb2de57233f9daa2759beda3109:1qsi8vAgmL/FP9UTVvS8EAVbgVPfTaocSQD07sjg9xlwj+zQxly01HEUW8SGzIW9rQ8fA8/qKHBYQiJCf8dFBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "remote-qualification-testimony"
@@ -249,23 +249,27 @@ attestation's purpose. Recovery requires the join to name this node and the
 receipt to be this node's record of the same program, consumer and
 declaration binding.
 
-## Acceptance evidence v4
+## Acceptance evidence v5
 
-Removing `activation_ref` from the content lane's assertions changed what an
-acceptance states, so the acceptance evidence schema moved from v3 to v4 for
-both lanes. A record's meaning must match its version. There is no
-predecessor reader: a v1 to v3 acceptance is classified from its outer schema
+Removing `activation_ref` from the content lane's assertions moved the
+acceptance evidence schema from v3 to v4 for both lanes. The acceptance policy
+then gained a required `accepted_origin_holdings` list, which the product lane
+checks against the origin holdings recorded in the qualification evidence (v15):
+that changed what an acceptance states, so the schema moved from v4 to v5 and
+the policy schema from v2 to v3. A record's meaning must match its version.
+There is no predecessor reader: a v1 to v4 acceptance is classified from its outer schema
 and refused wherever it is read with `remote_qualification_acceptance_superseded`
 (`remote_content_acceptance_superseded` on the content use path). That
 includes a session capsule or product selection that retains one; a capsule
 24 is in any case refused by the persistent-session schema check.
 
-v4 heads live in `remote-qualification-acceptances-v4`. The v3 namespace
-`remote-qualification-testimonies` is retired: nothing resolves an
+v5 heads live in `remote-qualification-acceptances-v5`. The earlier
+namespaces `remote-qualification-testimonies` (v3) and
+`remote-qualification-acceptances-v4` are retired: nothing resolves an
 acceptance through it, and the doctor lists its heads as superseded. Because
 the namespaces differ, the cure is to export the same qualification again
 from the origin (`ryeos external-content export-qualification-testimony`);
-the receiver records a v4 acceptance at the same coordinate without
+the receiver records a v5 acceptance at the same coordinate without
 contradicting the old head. If the origin refuses the export because the
 qualification is stale or expired, re-qualify there first. Then re-sign any
 placement binding or product selection that named the old acceptance hash.

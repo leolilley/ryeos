@@ -1,15 +1,16 @@
 //! Produce one exact, credential-free guest owner runtime tree.
 //!
-//! The caller supplies an admitted executable descriptor and controller
-//! *public* root. This module does not publish a provider snapshot or qualify
-//! the provider's restored bytes, process lifetime, or filesystem custody.
+//! The caller supplies an admitted executable descriptor and the owner
+//! profile. The product carries no controller trust root: the placing
+//! controller names its key in the signed occurrence assignment, so one
+//! product serves any controller. This module does not publish a provider
+//! snapshot or qualify the provider's restored bytes, process lifetime, or
+//! filesystem custody.
 
 use std::ffi::OsStr;
 use std::io::Cursor;
 
 use anyhow::{Context as _, Result, ensure};
-use base64::Engine as _;
-use lillux::crypto::VerifyingKey;
 use ryeos_state::objects::{
     EXTERNAL_CONTENT_MANIFEST_KIND, ExternalContentManifestEntryKind, ExternalContentManifestObject,
 };
@@ -84,7 +85,7 @@ impl GuestOwnerSnapshotUpload {
     }
 }
 
-/// Read only the four admitted members through pinned descriptors and produce
+/// Read only the three admitted members through pinned descriptors and produce
 /// a deterministic plain tar. Observation before and after closes the mutable
 /// tree window; the sealed descriptor is the sole upload source thereafter.
 pub fn seal_guest_owner_snapshot_upload(
@@ -105,7 +106,7 @@ pub fn seal_guest_owner_snapshot_upload(
     );
     let mut archive = tar::Builder::new(Vec::new());
     // The immutable runtime stays root-owned. The fixed non-root guest owner
-    // may traverse and execute it, but cannot rewrite its public trust root or
+    // may traverse and execute it, but cannot rewrite its profile or
     // executable after the snapshot is restored.
     append_snapshot_directory(&mut archive, "bin/", 0o755)?;
     let bin = root
@@ -118,14 +119,6 @@ pub fn seal_guest_owner_snapshot_upload(
         "bin/ryeos-external-guest-occurrence-owner",
         0o755,
         maximum_bytes,
-    )?;
-    append_snapshot_regular(
-        &mut archive,
-        root,
-        "controller-root.hex",
-        "controller-root.hex",
-        0o644,
-        64,
     )?;
     append_snapshot_regular(
         &mut archive,
@@ -210,8 +203,6 @@ fn append_snapshot_regular(
 pub struct GuestOwnerRuntimeManifestIdentity {
     pub manifest_hash: String,
     pub owner_executable_sha256: String,
-    pub controller_root_blob_sha256: String,
-    pub controller_public_root: String,
 }
 
 struct EntryView {
@@ -224,12 +215,7 @@ struct EntryView {
 
 pub fn derive_guest_owner_runtime_manifest_identity(
     value: &Value,
-    controller_root: &VerifyingKey,
 ) -> Result<GuestOwnerRuntimeManifestIdentity> {
-    ensure!(
-        !controller_root.is_weak(),
-        "guest runtime controller root is weak"
-    );
     let manifest_hash = ryeos_state::objects::canonical_value_digest(value)?;
     ensure!(
         value.get("kind").and_then(Value::as_str) == Some(EXTERNAL_CONTENT_MANIFEST_KIND),
@@ -248,7 +234,7 @@ pub fn derive_guest_owner_runtime_manifest_identity(
         })
         .collect::<Vec<_>>();
     ensure!(
-        entries.len() == 4
+        entries.len() == 3
             && entries.iter().any(|entry| {
                 entry.path == "bin"
                     && entry.kind == ExternalContentManifestEntryKind::Dir
@@ -278,18 +264,6 @@ pub fn derive_guest_owner_runtime_manifest_identity(
         lillux::valid_hash(owner_executable_sha256),
         "guest runtime owner executable digest is invalid"
     );
-    let root = entries
-        .iter()
-        .find(|entry| entry.path == "controller-root.hex")
-        .context("guest runtime product has no controller-root file")?;
-    let expected_root = lillux::sha256_hex(hex::encode(controller_root.to_bytes()).as_bytes());
-    ensure!(
-        root.kind == ExternalContentManifestEntryKind::File
-            && root.mode == Some(0o644)
-            && root.size == Some(64)
-            && root.sha256.as_deref() == Some(expected_root.as_str()),
-        "guest runtime product does not contain the expected controller root"
-    );
     let profile = entries
         .iter()
         .find(|entry| entry.path == "guest-owner-profile.json")
@@ -307,10 +281,7 @@ pub fn derive_guest_owner_runtime_manifest_identity(
         entries.iter().all(|entry| {
             matches!(
                 entry.path.as_str(),
-                "bin"
-                    | "bin/ryeos-external-guest-occurrence-owner"
-                    | "controller-root.hex"
-                    | "guest-owner-profile.json"
+                "bin" | "bin/ryeos-external-guest-occurrence-owner" | "guest-owner-profile.json"
             )
         }),
         "guest runtime product contains an ambient entry"
@@ -318,11 +289,6 @@ pub fn derive_guest_owner_runtime_manifest_identity(
     Ok(GuestOwnerRuntimeManifestIdentity {
         manifest_hash,
         owner_executable_sha256: owner_executable_sha256.to_owned(),
-        controller_root_blob_sha256: expected_root,
-        controller_public_root: format!(
-            "ed25519:{}",
-            base64::engine::general_purpose::STANDARD.encode(controller_root.to_bytes())
-        ),
     })
 }
 
@@ -352,7 +318,6 @@ pub fn produce_guest_owner_runtime(
     owner_executable: &lillux::InheritedDescriptorAuthority,
     owner_bytes: u64,
     owner_sha256: &str,
-    controller_root: &VerifyingKey,
     profile: &GuestOwnerRuntimeProfile,
 ) -> Result<GuestOwnerRuntimeProduct> {
     owner_executable.require_owned_executable()?;
@@ -362,7 +327,6 @@ pub fn produce_guest_owner_runtime(
         owner_executable,
         owner_bytes,
         owner_sha256,
-        controller_root,
         profile,
     )
 }
@@ -376,7 +340,6 @@ pub fn produce_guest_owner_runtime_from_admitted_payload(
     payload: &lillux::InheritedDescriptorAuthority,
     owner_bytes: u64,
     owner_sha256: &str,
-    controller_root: &VerifyingKey,
     profile: &GuestOwnerRuntimeProfile,
 ) -> Result<GuestOwnerRuntimeProduct> {
     let source = payload.require_owned_regular()?;
@@ -390,7 +353,6 @@ pub fn produce_guest_owner_runtime_from_admitted_payload(
         payload,
         owner_bytes,
         owner_sha256,
-        controller_root,
         profile,
     )
 }
@@ -401,15 +363,10 @@ fn produce_guest_owner_runtime_from_exact_source(
     owner_executable: &lillux::InheritedDescriptorAuthority,
     owner_bytes: u64,
     owner_sha256: &str,
-    controller_root: &VerifyingKey,
     profile: &GuestOwnerRuntimeProfile,
 ) -> Result<GuestOwnerRuntimeProduct> {
     parent.require_owner_private_directory()?;
     profile.validate()?;
-    ensure!(
-        !controller_root.is_weak(),
-        "guest runtime controller root is weak"
-    );
     ensure!(
         (1..=MAX_OWNER_EXECUTABLE_BYTES).contains(&owner_bytes) && lillux::valid_hash(owner_sha256),
         "guest runtime owner executable exceeds its exact bound"
@@ -449,15 +406,6 @@ fn produce_guest_owner_runtime_from_exact_source(
         "guest runtime owner executable changed during production"
     );
 
-    let root_hex = hex::encode(controller_root.to_bytes());
-    root.atomic_create_regular_from_reader(
-        OsStr::new("controller-root.hex"),
-        &mut Cursor::new(root_hex.as_bytes()),
-        64,
-        0o444,
-        crate::GUEST_TEMP_PURPOSE,
-    )?
-    .context("guest runtime controller root already exists")?;
     let profile_bytes = ryeos_external_execution_contract::canonical_json(profile)?;
     root.atomic_create_regular_from_reader(
         OsStr::new("guest-owner-profile.json"),
@@ -477,7 +425,6 @@ fn produce_guest_owner_runtime_from_exact_source(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lillux::crypto::SigningKey;
     use std::os::unix::fs::PermissionsExt as _;
 
     #[test]
@@ -486,7 +433,6 @@ mod tests {
         let bin_dir = dir.path().join("bin");
         std::fs::create_dir(&bin_dir).unwrap();
         std::fs::set_permissions(&bin_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let root_key = SigningKey::from_bytes(&[43; 32]);
         let profile =
             ryeos_external_execution_contract::canonical_json(&GuestOwnerRuntimeProfile {
                 schema: 2,
@@ -504,11 +450,6 @@ mod tests {
                 "bin/ryeos-external-guest-occurrence-owner",
                 0o755,
                 b"owner".to_vec(),
-            ),
-            (
-                "controller-root.hex",
-                0o644,
-                hex::encode(root_key.verifying_key().to_bytes()).into_bytes(),
             ),
             ("guest-owner-profile.json", 0o644, profile),
         ] {
@@ -578,7 +519,6 @@ mod tests {
         let parent = lillux::PinnedDirectory::open(parent.path())
             .unwrap()
             .unwrap();
-        let key = SigningKey::from_bytes(&[43; 32]).verifying_key();
         let profile = GuestOwnerRuntimeProfile {
             schema: 2,
             account: lillux::GuestRuntimeAccount::Unix {
@@ -599,7 +539,6 @@ mod tests {
                 &authority,
                 bytes.len() as u64,
                 &digest,
-                &key,
                 &invalid_profile,
             )
             .is_err()
@@ -617,7 +556,6 @@ mod tests {
                 &authority,
                 bytes.len() as u64,
                 &"0".repeat(64),
-                &key,
                 &profile,
             )
             .is_err()
@@ -634,7 +572,6 @@ mod tests {
             &authority,
             bytes.len() as u64,
             &digest,
-            &key,
             &profile,
         )
         .unwrap();
@@ -671,21 +608,13 @@ mod tests {
         );
         let manifest = ryeos_state::observe_external_content_tree_exact(product.root()).unwrap();
         let manifest_value = serde_json::to_value(&manifest).unwrap();
-        let identity = derive_guest_owner_runtime_manifest_identity(&manifest_value, &key).unwrap();
+        let identity = derive_guest_owner_runtime_manifest_identity(&manifest_value).unwrap();
         assert_eq!(
             observed_product.measure_exact_owner_product().unwrap(),
             identity
         );
         assert_eq!(identity.manifest_hash, product.manifest_hash());
         assert_eq!(identity.owner_executable_sha256, digest);
-        assert!(identity.controller_public_root.starts_with("ed25519:"));
-        assert!(
-            derive_guest_owner_runtime_manifest_identity(
-                &manifest_value,
-                &SigningKey::from_bytes(&[44; 32]).verifying_key(),
-            )
-            .is_err()
-        );
         let mut tampered = manifest_value.clone();
         let owner_entry = tampered["entries"]
             .as_array_mut()
@@ -694,7 +623,7 @@ mod tests {
             .find(|entry| entry["path"] == "bin/ryeos-external-guest-occurrence-owner")
             .unwrap();
         owner_entry["blob_hash"] = serde_json::json!("bad");
-        assert!(derive_guest_owner_runtime_manifest_identity(&tampered, &key).is_err());
+        assert!(derive_guest_owner_runtime_manifest_identity(&tampered).is_err());
         let mut ambient = manifest_value.clone();
         ambient["entries"].as_array_mut().unwrap().insert(
             0,
@@ -707,30 +636,14 @@ mod tests {
                 "target": null
             }),
         );
-        ambient["entry_count"] = serde_json::json!(5);
+        ambient["entry_count"] = serde_json::json!(4);
         ambient["total_bytes"] = serde_json::json!(manifest.total_bytes + 1);
-        assert!(derive_guest_owner_runtime_manifest_identity(&ambient, &key).is_err());
+        assert!(derive_guest_owner_runtime_manifest_identity(&ambient).is_err());
         let mut large = manifest_value.clone();
         large["kind"] =
             serde_json::json!(ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND);
         large["schema"] = serde_json::json!(ryeos_state::objects::EXTERNAL_LARGE_CONTENT_SCHEMA);
-        assert!(derive_guest_owner_runtime_manifest_identity(&large, &key).is_err());
-        let different_root = SigningKey::from_bytes(&[44; 32]).verifying_key();
-        let changed_controller = produce_guest_owner_runtime(
-            &parent,
-            OsStr::new("changed-controller"),
-            &authority,
-            bytes.len() as u64,
-            &digest,
-            &different_root,
-            &profile,
-        )
-        .unwrap();
-        assert_ne!(
-            product.manifest_hash(),
-            changed_controller.manifest_hash(),
-            "a different controller trust root must change the runtime identity"
-        );
+        assert!(derive_guest_owner_runtime_manifest_identity(&large).is_err());
         let mut changed_profile = profile.clone();
         changed_profile.owner_timeout_seconds -= 1;
         let changed_policy = produce_guest_owner_runtime(
@@ -739,7 +652,6 @@ mod tests {
             &authority,
             bytes.len() as u64,
             &digest,
-            &key,
             &changed_profile,
         )
         .unwrap();
@@ -769,7 +681,6 @@ mod tests {
                 &authority,
                 bytes.len() as u64,
                 &digest,
-                &key,
                 &profile,
             )
             .is_err()
@@ -787,7 +698,6 @@ mod tests {
         let bytes = b"signed-owner-payload";
         let payload = lillux::sealed_memfd(c"owner-payload-fixture", bytes).unwrap();
         assert!(payload.require_owned_executable().is_err());
-        let key = SigningKey::from_bytes(&[43; 32]).verifying_key();
         let profile = GuestOwnerRuntimeProfile {
             schema: 2,
             account: lillux::GuestRuntimeAccount::Unix {
@@ -804,7 +714,6 @@ mod tests {
             &payload,
             bytes.len() as u64,
             &lillux::sha256_hex(bytes),
-            &key,
             &profile,
         )
         .unwrap();

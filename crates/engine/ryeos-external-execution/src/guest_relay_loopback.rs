@@ -274,6 +274,7 @@ impl GuestRelayLoopbackHost {
                         step,
                         last_phase,
                         detail: self.owner_report.refusal_detail().map(str::to_owned),
+                        site: self.owner_report.refusal_site(),
                     };
                 }
                 Some(Err(())) => return GuestOwnerActivationReport::MalformedReport { last_phase },

@@ -1012,7 +1012,7 @@ mod tests {
         serde_json::from_value(serde_json::json!({
             "schema":ryeos_state::external_content::products::composition::RESOLVED_EXTERNAL_PRODUCT_SELECTION_SCHEMA,
             "declaration_id":"runtime", "relationship_name":"runtime_to_worker",
-            "relationship_ref":"config:fixture/recipe", "relationship_raw_content_digest":"d".repeat(64),
+            "relationship_ref":"config:fixture/recipe", "relationship_raw_content_digest":"d".repeat(64), "relationship_project_dependent":false,
             "relationship":{
                 "name":"runtime_to_worker",
                 "producer":{"canonical_ref":"graph:fixture/build","recipe_binding":"product_recipe","product_name":"runtime","parameters":{}},

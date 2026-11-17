@@ -1,7 +1,8 @@
 //! Dedicated, one-shot owner below the existing external Worker workflow.
 //!
 //! A qualified guest snapshot must install this executable and the exact
-//! controller-root/profile tree. Until a lifecycle adapter has qualified that
+//! profile tree; the controller key arrives inside the signed assignment.
+//! Until a lifecycle adapter has qualified that
 //! snapshot and proved this process survives a lost run stream, it must
 //! remain fail-closed.
 //!
@@ -28,7 +29,7 @@ use ryeos_external_execution_contract::guest_import_authorization::{
     MAX_GUEST_IMPORT_AUTHORIZATION_BYTES, MAX_SIGNED_GUEST_OCCURRENCE_ASSIGNMENT_BYTES,
 };
 use ryeos_external_execution_contract::guest_owner_report::{
-    GuestClockReport, GuestClockTrust, GuestOwnerReport, GuestOwnerStep as Step,
+    GuestClockReport, GuestClockTrust, GuestOwnerReport, GuestOwnerSite, GuestOwnerStep as Step,
     GuestRefusalDetail, GuestSupervisorExit, GuestSupervisorStatus,
     MAX_GUEST_SUPERVISOR_STDERR_TAIL_BYTES, RefusedAt as _,
 };
@@ -267,6 +268,7 @@ fn run(assignment_bytes: &[u8]) -> Result<()> {
     let (mut supervisor_stderr, supervisor_stderr_writer) =
         lillux::stderr_tail::StderrTail::open(MAX_GUEST_SUPERVISOR_STDERR_TAIL_BYTES)
             .map_err(anyhow::Error::msg)
+            .at_site(GuestOwnerSite::StderrTail)
             .refused_at(Step::HeldPrepare)?;
     let mut held = prepare_authorized_held_guest_supervisor_once(
         &occurrence,
@@ -421,10 +423,17 @@ fn main() {
         // sanitized tail; the controller shows it and never acts on it.
         // Only a refusal site that vouched for its text sends any: the line
         // otherwise names the closed step word and nothing else.
-        report(GuestOwnerReport::refused(
-            Step::of(&error),
-            GuestRefusalDetail::of(&error).unwrap_or_default(),
-        ));
+        let step = Step::of(&error);
+        let detail = GuestRefusalDetail::of(&error).unwrap_or_default();
+        match GuestOwnerSite::of(&error) {
+            // A refusal that vouched for its text sends that text; one that
+            // names a site sends the closed site word; otherwise the line
+            // names the closed step word and nothing else.
+            Some(site) if detail.is_empty() => {
+                report(GuestOwnerReport::refused_at_site(step, site));
+            }
+            _ => report(GuestOwnerReport::refused(step, detail)),
+        }
         eprintln!("Error: {error:?}");
         std::process::exit(1);
     }

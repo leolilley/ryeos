@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-12T23:57:18Z:ca1006f9c7a568d40a7a9a555b21849965d0bdd92ca823bc874d1bf6a804975f:qWtRBYSnDZjqHw0tgtkgXmkp9Lb6lkmPqRHRgMAPOaQ1eRBB4Qat5I+0ikgUB25QBmQzYCtBdzu5KiSQvsYBDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T21:12:47Z:4dbb20e634390c9591a8e6ded4ca4f126fc1c94fe0034de45facefbe21d91dbc:rZuL4fFPtDFWFOUd3yDJa6f7HLGUbORd7d63tCe66RSLpZowhJuWd9QNGQqVh1gWKHMJhTa5IHpi98NEHsg1CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: externally-fenced-worker-runtime
@@ -49,7 +49,8 @@ launch must refuse before model-provider turn contact.
 
 A trusted disposable authoring placement is a fourth, deliberately weaker
 product. Its signed node policy may enable `trusted_process_group_sessions`,
-and its worker selects `cleanup_authority: trusted_process_group`. RyeOS then
+and the session protocol the node then selects declares
+`cleanup_authority: trusted_process_group`. RyeOS then
 owns the exact direct process-group lifecycle, retained candidate, completion
 fence, and independent evaluation, but does not claim hard containment or
 hostile descendant-death proof. This lane exists for single-tenant managed
@@ -58,9 +59,11 @@ product remains under qualification. It must not use
 `external_placement_incarnation`, satisfy that product's acceptance claims, or
 silently fall back from a missing local process scope.
 
-The trusted lane is selected explicitly by all three authorities: the signed
-node policy, the distinct trusted session protocol, and the selected trusted
-worker item. Ordinary and hardened workers remain fail-closed. One placement
+The trusted holding is selected by the node, never by a separate worker item:
+the signed node policy enables it, and the one authoring worker lists both the
+contained and the trusted session protocols, so the node picks the protocol
+whose declared holding it reports. Ordinary and hardened workers remain
+fail-closed. One placement
 should run one worker campaign at a time; import and freeze the candidate
 before recycling it. Deployment, signing, competition submission, and
 publication credentials stay outside the worker service.
@@ -225,6 +228,17 @@ owner, supervisor and launcher executables performed the guest-inputs (schema
 5) and launcher (spec schema 4) exchange. It is proved under an ephemeral
 controller key and a test configuration. A live session remains the proof of
 operation under the real controller key, connection and credentials.
+
+The scenario declares the launch shape it qualifies: controller transport,
+sandbox network-policy kind, and the resolver and hosts sources a launch
+captures. The verifier builds its bootstrap from the declared sources and
+refuses unless the supervisor's Ready reports exactly those sources with the
+digests of the provider's real files. The proof retains the shape as
+`verified`. A qualification that built nothing under its shape (a local
+verifier) retains the shape its signed policy declares as `declared`. Launch
+does not branch on that basis: it compares the binding's transport, policy kind
+and network-input sources with the retained shape, and refuses a proof that
+retained none.
 
 ### A Worker-less remote lane
 

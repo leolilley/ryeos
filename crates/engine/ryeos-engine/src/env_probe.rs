@@ -114,7 +114,17 @@ pub fn import_dry_run(
         let execution = engine.kinds.get(&verified.resolved.kind)
             .and_then(|schema| schema.execution.as_ref())
             .ok_or_else(|| anyhow::anyhow!("import-check subject has no execution contract"))?;
-        let filesystem = execution.project_filesystem_authority_ceiling(&effective.composed_value)?
+        let selected = crate::protocols::select_listed_protocol(
+            execution,
+            &effective.composed_value,
+            &engine.protocols,
+            isolation,
+        )?;
+        let filesystem = execution
+            .project_filesystem_authority_ceiling_selected(
+                &effective.composed_value,
+                selected.and_then(|selected| selected.holding),
+            )?
             .intersect(isolation_context.filesystem_authority_ceiling);
         let network = execution.project_network_authority_ceiling(&effective.composed_value)?
             .intersect(isolation_context.network_authority_ceiling);
@@ -122,7 +132,7 @@ pub fn import_dry_run(
             anyhow::bail!("import probe cannot provide captured execution admission; run the admitted tool instead");
         }
         let mut plan = generation.build_plan(
-            plan_ctx, verified, &json!({}), &ExecutionHints::default(), None, filesystem,
+            plan_ctx, verified, &json!({}), &ExecutionHints::default(), None, filesystem, selected,
         )?;
         plan.network_authority_ceiling = plan.network_authority_ceiling.intersect(network);
         if plan.filesystem_authority_ceiling == crate::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution {

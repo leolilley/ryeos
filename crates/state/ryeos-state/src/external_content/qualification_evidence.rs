@@ -11,7 +11,7 @@ use super::products::qualification::{
 };
 use super::qualification_purpose::{QualificationLaunchPurpose, QualificationSubject};
 
-pub const CONTENT_QUALIFICATION_EVIDENCE_SCHEMA: &str = "ryeos.content_qualification_evidence.v6";
+pub const CONTENT_QUALIFICATION_EVIDENCE_SCHEMA: &str = "ryeos.content_qualification_evidence.v7";
 pub const CONTENT_QUALIFICATION_ATTESTATION_POLICY: &str = "ryeos.content_qualification.v1";
 pub const CONTENT_QUALIFICATION_CLAIM: &str = "activated_content_qualified";
 
@@ -156,7 +156,7 @@ mod tests {
         let current = serde_json::to_value(evidence).unwrap();
         ContentQualificationEvidence::from_value(&current).unwrap();
         let mut predecessor = current.clone();
-        predecessor["schema"] = serde_json::json!("ryeos.content_qualification_evidence.v5");
+        predecessor["schema"] = serde_json::json!("ryeos.content_qualification_evidence.v6");
         assert!(ContentQualificationEvidence::from_value(&predecessor).is_err());
         let mut missing = current.clone();
         missing["execution_proof"]
