@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-17T05:02:43Z:b444ad158096d7bf3d8bb4ee891b3ee6a1f4a044c43fb8e72c762d91772f0d69:dvY5nalqsXgx35L/iQ+A29SFjImvAhpRFjrujhXru9q11Ad8ibY0K7cUrmW7RO+AQuTeursvLfbFumakP9kZDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-17T11:22:49Z:ccc0cb2d5e5f102856fc3a2a99aebb1ed5b3915b97b5b6f240047057a4f761ea:hctVpY4vyLSTnIZsC6kvwH6cQdMhgryh7btz951Er1M4Qi+3N4pQzgY3di9Nnta+fnovXTeqVHG53aCUgevWDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/runtimes
 tags: [runtime, directive, llm, callbacks]
@@ -25,7 +25,7 @@ The events carry them:
 |---|---|
 | `cognition_frame` | What the model is given beside the conversation: `frame_seq`, `system` (text parts), `tool_inventory` (the hash of the attachment holding the inventory, repeated in `attachment_refs`), `request_options` (`model`, optional `reasoning`, `sampling`, `max_output_tokens`) and `provider_config` (the hash of the provider configuration in force). A changed frame on resume is recorded as the next `frame_seq`. |
 | `cognition_in` | One input: `origin`, `parts`, and optionally `kind`, `ack` and `pinned`; or a turn marker `{ turn, tools_offered? }`. An input too large for one event is split into hash-bound chunks that fold back into one input. |
-| `cognition_out` | One assistant turn: `turn`, `parts` in stream order, `finish` (the normalised finish reason, or `interrupted`), optional `usage` and `provider_accounting`. An interrupted turn carries no tool calls. Streaming fragments (`delta`, `tool_use_partial`) stay ephemeral. |
+| `cognition_out` | One assistant turn: `turn`, `parts` in stream order, `finish` (the normalised finish reason, or `interrupted`), optional `usage`, `provider_accounting` and `malformed_calls` (`{call_index, raw_len, sha256}` for each tool call whose streamed arguments were not valid JSON; `call_index` counts `tool_call` parts). An interrupted turn carries no tool calls. Streaming fragments (`delta`, `tool_use_partial`) stay ephemeral. |
 | `tool_call_start` | `operation_id`, `call_id`, `tool`, `turn`, `call_index`, `effective_caps`, and `item_ref` when the call resolves to an item. |
 | `tool_call_result` | `operation_id`, `call_id`, `tool`, `status`, `parts` (the exact model-visible result) and `guard` (`result_size_bytes`, `truncated`, optional `truncated_reason`, optional `duplicate_of`). |
 
@@ -33,6 +33,39 @@ The frame, the context inputs and the launch input are appended as one batch
 under an idempotency key. A rebuild of the conversation reads these events and
 reproduces the provider request without deciding again what the live run
 decided.
+
+## Retried provider calls
+
+A provider failure that the signed execution policy and the directive's
+`provider_contact` declaration admit for retry appends one durable
+`provider_retry` event before the successor attempt. Its `retry_advance` is the
+exact daemon-stamped advancement; its `supersedes` is `{turn, attempt,
+output_events}`: the failed attempt and, for a mid-stream cut, how many live
+`cognition_out` fragments it had published. Reader rule: a `provider_retry` for
+turn T voids every progressive `cognition_out` fragment of turn T published
+since that turn's start or the previous `provider_retry`. The fragments are
+ephemeral and the retry resends the same messages, so nothing durable records
+the abandoned text; only the turn-complete `cognition_out` counts, and resume
+folds only that one.
+
+## Malformed tool calls
+
+A tool call whose streamed arguments are not valid JSON is recorded in the
+turn's `malformed_calls` and never dispatched. The runtime records the call's
+`tool_call_start` and an error `tool_call_result` that tells the model the
+arguments were not valid JSON (byte length and hash) and to resend the call.
+The call counts against `limits.tool_calls`. A malformed `directive_return`
+gets the same error result and the run continues. Resume rebuilds the decision
+from the recorded turn.
+
+## Turns cut at the output limit
+
+When the signed execution config sets `on_output_limit`, a turn the provider
+ended at its output limit is recorded with `finish: "length"` instead of failing
+the thread. A cut turn with no tool call is followed by a `cognition_in` with
+`origin: "harness"` and `kind: "output_limit"` carrying the configured message,
+then another turn. The run of trailing `length` turns is read back from the
+record on resume and bounded by `max_consecutive`.
 
 ## Durable tool loop
 

@@ -12,9 +12,21 @@ pub fn convert_messages(
     messages: &[ProviderMessage],
     schemas: &Option<MessageSchemas>,
 ) -> (Vec<Value>, Option<String>) {
+    // An assistant turn with no text and no tool call (empty, or reasoning
+    // only, as when a turn is cut at the output limit) carries nothing the next
+    // request needs, and providers reject an empty assistant message.
+    let sendable: Vec<ProviderMessage> = messages
+        .iter()
+        .filter(|message| {
+            message.role() != "assistant"
+                || message.has_tool_calls()
+                || message.text().is_some_and(|text| !text.is_empty())
+        })
+        .cloned()
+        .collect();
     match schemas {
-        None => convert_openai(messages),
-        Some(s) => convert_with_schemas(messages, s),
+        None => convert_openai(&sendable),
+        Some(s) => convert_with_schemas(&sendable, s),
     }
 }
 
@@ -372,6 +384,37 @@ mod tests {
             ProviderMessage::user("Hello"),
             ProviderMessage::assistant_text("Hi there!"),
         ]
+    }
+
+    #[test]
+    fn an_assistant_turn_with_no_text_or_calls_is_not_sent() {
+        use ryeos_provider_contract::{Message, Part, ReasoningPart, Role};
+        let reasoning_only = ProviderMessage::new(
+            Role::Assistant,
+            vec![Part::Reasoning(ReasoningPart {
+                text: Some("thinking".to_string()),
+                artefact: None,
+            })],
+        );
+        let empty = ProviderMessage::new(Role::Assistant, Vec::new());
+        // The recorded shapes are valid messages; only the wire drops them.
+        Message::validate(&reasoning_only).unwrap();
+        Message::validate(&empty).unwrap();
+        let msgs = vec![
+            ProviderMessage::user("write it"),
+            reasoning_only,
+            empty,
+            ProviderMessage::user("continue"),
+            ProviderMessage::assistant_text("done"),
+        ];
+        for schemas in [None, Some(MessageSchemas::default())] {
+            let (converted, _) = convert_messages(&msgs, &schemas);
+            let roles: Vec<&str> = converted
+                .iter()
+                .map(|message| message["role"].as_str().unwrap())
+                .collect();
+            assert_eq!(roles, ["user", "user", "assistant"]);
+        }
     }
 
     #[test]

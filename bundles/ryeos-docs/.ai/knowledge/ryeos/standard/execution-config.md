@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T05:59:40Z:90094458c6c415f28dc39a6bd09f679203b038578a01edb3393c1a4e98d01f2d:lmIkMabgAf4xEJYMg3gecFDuLNzOiOAaa2/n/r9h+slCLNHvbzFb/q1I8XRdt4Fx/ym6/WKE6w953HeT3T8dCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-17T11:22:49Z:eba4400f9d9665609ed0d4f92b9b924a11db18ab0ad30bd41d0652065fa15b95:hgLlfi+eKGN7zsol9FP/zOMxmKA7ZHF+prcG5kZ23TtRbb6qjdlx9Us4UiHlVqZdmwvldQAUCfha6EoR1U6YAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 tags: [reference, execution, retry, timeout, config]
@@ -20,9 +20,12 @@ how LLM API calls are made — timeouts, retries, backoff, and more.
 | Setting              | Default  | Description                           |
 |----------------------|----------|---------------------------------------|
 | `retries`            | 2        | Max retry attempts per API call       |
-| `retry_status_codes` | 429, 500, 502, 503 | HTTP codes that trigger retry |
+| `retry_status_codes` | 429, 500, 502, 503, 504, 529 | HTTP codes that trigger retry |
 | `never_retry`        | 401, 403, 404 | HTTP codes that never retry    |
 | `backoff_base_ms`    | 1000     | Exponential backoff base (ms)         |
+| `backoff_max_ms`     | 60000    | Cap on any single backoff delay (ms); must not be below `backoff_base_ms` |
+| `on_output_limit` | absent | Recovery when the provider ends a turn at its output limit; absent fails the thread |
+| `unknown_outcome_retry` | absent | Retry policy after a failure that leaves the provider outcome unknown; see below |
 | `timeout_seconds`    | 300      | Overall request timeout               |
 | `max_provider_output_tokens_per_turn` | 32768 | Provider-native output-token ceiling sent through the provider's signed output-limit schema |
 | `max_stream_output_bytes_per_turn` | 131072 | Exact local UTF-8 semantic-output byte backstop; `0` disables |
@@ -30,24 +33,66 @@ how LLM API calls are made — timeouts, retries, backoff, and more.
 | `accounting.failure_policy` | auto | Fail closed for unavailable usage with a finite token/spend budget; otherwise warn |
 | `accounting.budget_mode` | settled | Settle after each attempt; may overshoot a finite budget by one attempt |
 | `tool_preload`       | false    | Whether to preload tool definitions   |
-| `retry_on_timeout`   | false    | Must remain false without admitted provider deduplication/outcome lookup |
-| `retry_mid_stream`   | false    | Must remain false without admitted provider deduplication/outcome lookup |
 
 ## Retry Behavior
 
-When an API call fails with a retryable status code (429, 500, 502, 503):
-1. Wait `backoff_base_ms * 2^attempt` milliseconds
+When an API call fails with a retryable status code (429, 500, 502, 503, 504, 529):
+1. Wait `min(backoff_base_ms * 2^attempt, backoff_max_ms)` milliseconds
 2. Retry the request
 3. Repeat up to `retries` times (default: 2 → 3 total attempts)
 
 Auth errors (401, 403) and not-found (404) are never retried.
 
 Connection-establishment failures and explicitly configured retryable HTTP
-statuses may be retried. A timeout, non-connect send failure, or mid-stream cut
-may have reached the provider and is not retried. Reusing the same prompt bytes
-does not make a provider call idempotent. Configuration that enables
-`retry_on_timeout` or `retry_mid_stream` is refused until the selected provider
-route supplies an admitted deduplication or outcome-query contract.
+statuses are always retried within `retries`. A timeout, non-connect send
+failure, or mid-stream cut may have reached the provider; reusing the same
+prompt bytes does not make a provider call idempotent. Such a failure is
+retried only when all three hold:
+
+1. The directive header declares `provider_contact: repeatable`, the author's
+   statement that issuing the model call twice has no effect beyond its charge.
+2. The selected provider route is a remote transport. An admitted local worker
+   never gains repeated contact.
+3. `unknown_outcome_retry` is present and its `on` list names the failure
+   class (`timeout`, `send`, `mid_stream`).
+
+```yaml
+unknown_outcome_retry:
+  max_retries: 2          # the first N retries of a turn may follow an unknown outcome
+  on: [timeout, send, mid_stream]
+```
+
+`max_retries` must not exceed `retries`. Status retries and unknown-outcome
+retries share the early attempts: attempt N may be retried after an unknown
+outcome only while N is at most `max_retries`. Launch preparation seals the
+resulting ceiling into the launch capsule and the daemon refuses any unknown-
+outcome retry beyond it, so editing this file mid-run cannot widen it. Every
+retry is charged the full reserved maximum for the abandoned attempt. The
+removed `retry_on_timeout` and `retry_mid_stream` keys are refused.
+
+### Output limit
+
+A provider that ends a turn at its output limit (finish reason `length`) fails
+the thread unless `on_output_limit` is set:
+
+```yaml
+on_output_limit:
+  max_consecutive: 2
+  message: "Your reply was cut at the output limit. Continue from where it stopped; put large content in pieces or by path."
+```
+
+The turn is then recorded with `finish: length`, keeping only its complete
+parts (a tool call cut by the limit has unparsable arguments and is refused as
+a malformed call). If the turn made no tool call, the runtime records `message`
+as a harness input (`kind: output_limit`) and takes another turn. If it made
+tool calls, they run and the next turn follows normally. After `max_consecutive`
+turns in a row ending at the limit the thread fails as it would without the
+policy; the count is derived from the record, so resume keeps it exact. The
+turn limit still applies. `max_consecutive: 0` disables recovery.
+
+`timeout_seconds` is a total request deadline. A stream still running past it is
+cut and surfaces as a mid-stream failure, so size it for the longest legitimate
+response.
 
 The provider-native token ceiling and RyeOS-local byte backstop are independent.
 RyeOS sends the token ceiling only at the signed provider schema's declared
