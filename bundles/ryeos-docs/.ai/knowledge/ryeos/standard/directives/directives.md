@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-17T17:25:45Z:6dd9bad33e0f9f0105d30ef8190e666e7f9ebf0d95eff8aba926c2413bf76f78:Doft3Me33s52SB8o5BUXbBq6fs0HHgnHv5pG8QM2zfHJcZd7uiz43tybHe1WIDCMSLHA05X/yN4Cpsv1BaNDCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-17T17:28:58Z:12d3f07f061dd752d3ffaaaefb7876e44b08f3f2a318b690d71894e5e5053743:IS0y9+fU4Oukrkmwu5lUF39DiI0uRCtsszD2P15NFSOy/hC4GnzJXHKo4eJKdc7i7y02C7E0z9bDJy1bjJxdAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [fundamentals, directives, workflows, prompts]
 version: "2.1.0"
@@ -175,6 +175,14 @@ reserve and `E` the execution's end:
 - hard stop, from `E - R`: any model call in flight is cut, no new turn or tool
   call starts, and the run settles `timed_out` with outcome `deadline`. The
   daemon's own kill at `E` is only the backstop.
+
+Reserves stack with depth. Each level of the tree keeps its own reserve out of
+its descendants' time, and every directive defaults to the signed 30 s reserve,
+so a child ends 30 s before its parent's hard stop, a grandchild 60 s before,
+and so on. A short `run_timeout` with deep nesting can leave a deep descendant
+no window at all (it stops as soon as it launches); size `run_timeout` to at
+least the depth times the reserve plus the work, or author smaller reserves on
+the intermediate items.
 
 A directive's tools are bounded by the directive's end, not its hard stop, so a
 tool already running at the hard stop is not cut until the end.

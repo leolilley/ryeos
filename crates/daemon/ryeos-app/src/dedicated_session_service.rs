@@ -1671,13 +1671,22 @@ pub(crate) fn ensure_hosted_contact_deadline(
         session_lifetime_ceiling(state, session)?,
     )?;
     let aggregate_deadline = if let Some(scope) = launch.accounting_scope.as_ref() {
-        state
+        let tree_deadline = state
             .accounting
             .as_ref()
             .ok_or_else(|| anyhow!("hosted root accounting scope has no live ledger"))?
             .execution_resource_budget_snapshot(&scope.execution_budget_id)?
             .ok_or_else(|| anyhow!("hosted root lost its aggregate budget authority"))?
-            .deadline_at_ms
+            .deadline_at_ms;
+        // The root ends with the hold-back sealed at its launch, which leaves
+        // its ancestors their reserve (the same end `bounded_duration_authority_reached`
+        // reads).
+        let hold_back_ms = state
+            .state_store
+            .get_launch_metadata(&session.placement_thread_id)?
+            .and_then(|metadata| metadata.deadline_hold_back_ms)
+            .unwrap_or(0);
+        crate::run_deadline::effective_end_at_ms(tree_deadline, hold_back_ms)
     } else {
         None
     };

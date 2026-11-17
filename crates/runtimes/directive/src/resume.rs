@@ -5,7 +5,9 @@ use ryeos_runtime::ReplayedEventRecord;
 use ryeos_runtime::callback_client::{CallbackClient, RuntimeReplayBudget};
 use ryeos_state::ThreadUsage;
 
-use crate::directive::{DIRECTIVE_RETURN_TOOL, ProviderMessage, ProviderMessageExt};
+use crate::directive::{
+    DIRECTIVE_RETURN_TOOL, ProviderMessage, ProviderMessageExt, TIME_LEFT_TOOL,
+};
 use crate::result_guard::ResultGuard;
 use crate::runner::ToolOccurrence;
 use ryeos_provider_contract::ToolResultStatus;
@@ -503,7 +505,11 @@ fn recover_tool_state(
                 }
                 validate_replayed_tool_event(event, &open[occurrence_index].occurrence.call)?;
                 open[occurrence_index].occurrence.start_recorded = true;
-                if open[occurrence_index].occurrence.call.name != DIRECTIVE_RETURN_TOOL {
+                // The lifecycle return and the in-process time-left tool take no
+                // tool-call budget, so their starts never count against it.
+                if open[occurrence_index].occurrence.call.name != DIRECTIVE_RETURN_TOOL
+                    && open[occurrence_index].occurrence.call.name != TIME_LEFT_TOOL
+                {
                     started.push(StartedToolOccurrence {
                         operation_id: operation_id.to_string(),
                         call: open[occurrence_index].occurrence.call.clone(),

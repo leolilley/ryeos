@@ -489,9 +489,32 @@ fn finalize_dead(
     Ok(())
 }
 
+/// How a thread stopped by its run deadline settles: plainly, or keeping the
+/// frozen result generation of an advance-head run that never advanced HEAD,
+/// exactly as `finalize_dead` keeps it for a failed one.
+#[derive(Debug, PartialEq, Eq)]
+enum DeadlineSettlement {
+    Plain,
+    RetainGeneration(ryeos_state::objects::WorkspaceGenerationPair),
+}
+
+fn plan_deadline_settlement(
+    interrupted: Option<(
+        &'static str,
+        serde_json::Value,
+        ryeos_state::objects::WorkspaceGenerationPair,
+    )>,
+) -> DeadlineSettlement {
+    match interrupted {
+        Some((_, _, generation)) => DeadlineSettlement::RetainGeneration(generation),
+        None => DeadlineSettlement::Plain,
+    }
+}
+
 /// Settle a dead thread whose run deadline passed while the node was down as
 /// a typed deadline stop (`timed_out`, outcome `deadline`). Accounting is
-/// fenced exactly as for any dead thread.
+/// fenced exactly as for any dead thread, and a frozen advance-head generation
+/// stays reachable from the terminal.
 fn finalize_deadline_elapsed(
     state: &AppState,
     thread_id: &str,
@@ -504,14 +527,27 @@ fn finalize_deadline_elapsed(
         None,
         ryeos_accounting::ReconciliationReason::OwnerGenerationFenced,
     )?;
-    state
-        .threads
-        .finalize_thread(&ryeos_app::run_deadline::elapsed_finalize_params(
-            thread_id,
-            ryeos_app::run_deadline::REASON_ELAPSED_WHILE_DOWN,
-            end_at_ms,
-            now_ms,
-        ))?;
+    let params = ryeos_app::run_deadline::elapsed_finalize_params(
+        thread_id,
+        ryeos_app::run_deadline::REASON_ELAPSED_WHILE_DOWN,
+        end_at_ms,
+        now_ms,
+    );
+    match plan_deadline_settlement(interrupted_head_advance(state, thread_id)) {
+        DeadlineSettlement::RetainGeneration(generation) => {
+            tracing::warn!(
+                thread_id,
+                snapshot_hash = %generation.snapshot_hash,
+                "interrupted advance-head run stopped by its deadline keeps its generation"
+            );
+            state
+                .threads
+                .finalize_thread_retaining_generation(&params, &generation)?;
+        }
+        DeadlineSettlement::Plain => {
+            state.threads.finalize_thread(&params)?;
+        }
+    }
     Ok(())
 }
 
@@ -5061,6 +5097,23 @@ mod tests {
                 max: 3
             }
         );
+    }
+
+    #[test]
+    fn a_deadline_stop_keeps_a_frozen_advance_head_generation() {
+        let generation = ryeos_state::objects::WorkspaceGenerationPair {
+            snapshot_hash: "a".repeat(64),
+            output_capture_hash: None,
+        };
+        assert_eq!(
+            plan_deadline_settlement(Some((
+                "head_advance_interrupted",
+                serde_json::json!({}),
+                generation.clone()
+            ))),
+            DeadlineSettlement::RetainGeneration(generation)
+        );
+        assert_eq!(plan_deadline_settlement(None), DeadlineSettlement::Plain);
     }
 
     #[test]

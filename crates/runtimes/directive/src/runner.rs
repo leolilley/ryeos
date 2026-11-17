@@ -545,16 +545,22 @@ impl DeadlineInterruptTimer {
         interrupt_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
         let task = tokio::spawn(async move {
-            let wait_ms = clock
-                .hard_stop_at_ms()
-                .saturating_sub(lillux::time::timestamp_millis());
-            tokio::time::sleep(std::time::Duration::from_millis(
-                u64::try_from(wait_ms).unwrap_or(0),
-            ))
-            .await;
+            // Re-read the wall clock on every wake so a clock step cannot cut a
+            // call before the hard stop: the flag is set only once the clock
+            // itself has reached it.
             loop {
-                interrupt_flag.store(true, std::sync::atomic::Ordering::Relaxed);
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                let wait_ms = clock
+                    .hard_stop_at_ms()
+                    .saturating_sub(lillux::time::timestamp_millis());
+                if wait_ms <= 0 {
+                    interrupt_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                } else {
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        u64::try_from(wait_ms).unwrap_or(0).min(1_000),
+                    ))
+                    .await;
+                }
             }
         });
         Self { task }
@@ -1411,8 +1417,7 @@ impl Runner {
                 );
                 // Pinned so a continuation's trimmed start still carries it.
                 let input = ryeos_runtime::CognitionInput::text("harness", &text)
-                    .with_kind(ryeos_runtime::cognition::KIND_DEADLINE_WRAP_UP)
-                    .pinned();
+                    .with_kind(ryeos_runtime::cognition::KIND_DEADLINE_WRAP_UP);
                 self.callback
                     .emit_cognition_input(&input)
                     .await
@@ -3203,7 +3208,10 @@ impl Runner {
                                 raw_args: tc.arguments.to_string(),
                                 malformed: occurrence.malformed,
                             }
-                        } else if !occurrence.counted && !self.harness.try_record_tool_call() {
+                        } else if tc.name != TIME_LEFT_TOOL
+                            && !occurrence.counted
+                            && !self.harness.try_record_tool_call()
+                        {
                             let call_id = tc.id.clone().unwrap_or_default();
                             let tool_name = tc.name.clone();
                             let rendered =
@@ -3375,10 +3383,11 @@ impl Runner {
                         }
                         let call_id = tc.id.clone().unwrap_or_default();
                         let raw_args = tc.arguments.to_string();
-                        let work = if occurrence.counted || self.harness.try_record_tool_call() {
-                            if tc.name == TIME_LEFT_TOOL {
-                                BatchWork::Local(self.time_left_report())
-                            } else {
+                        // `time_left` is free: it neither needs nor takes tool-call budget.
+                        let work = if tc.name == TIME_LEFT_TOOL {
+                            BatchWork::Local(self.time_left_report())
+                        } else if occurrence.counted || self.harness.try_record_tool_call() {
+                            {
                                 match self
                                     .preflight_tool_call(
                                         &occurrence.operation_id,
@@ -7306,7 +7315,10 @@ mod tests {
         assert_eq!(appended[0]["event_type"], "cognition_in");
         assert_eq!(appended[0]["payload"]["origin"], "harness");
         assert_eq!(appended[0]["payload"]["kind"], "deadline_wrap_up");
-        assert_eq!(appended[0]["payload"]["pinned"], true);
+        assert!(
+            appended[0]["payload"].get("pinned").is_none(),
+            "the notice is a recent input, not pinned to the front of a successor"
+        );
         assert_eq!(runner.messages.len(), 1);
         assert_eq!(runner.messages[0].role(), "user");
         assert!(
