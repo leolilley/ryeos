@@ -16,7 +16,7 @@ use crate::handler_context::HandlerContext;
 use crate::handler_error::HandlerError;
 use crate::registry::ServiceDescriptor;
 use ryeos_app::cascade::{
-    CascadeMode, cancel_queued_descendants, cascade_descendants_settled, chain_segment_ids,
+    CascadeMode, cancel_queued_descendants, cascade_descendants, chain_segment_ids,
     settle_stopped_descendants,
 };
 use ryeos_app::process::{
@@ -320,11 +320,7 @@ async fn cancel_loaded_thread(
         let mut cascade = Vec::new();
         for segment in &segments {
             queued_cancelled.extend(cancel_queued_descendants(&cascade_state, segment)?);
-            cascade.extend(cascade_descendants_settled(
-                &cascade_state,
-                segment,
-                cascade_mode,
-            )?);
+            cascade.extend(cascade_descendants(&cascade_state, segment, cascade_mode)?);
         }
         for segment in &segments {
             settle_stopped_descendants(

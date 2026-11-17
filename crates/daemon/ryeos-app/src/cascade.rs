@@ -4,11 +4,12 @@
 //!
 //! Lineage comes from the runtime child-link table
 //! ([`StateStore::descendant_thread_ids`]); each descendant's current durable
-//! process identity is resolved from `thread_runtime` at signal time. A
-//! descendant without an attached identity is skipped. The cascade only
-//! SIGNALS: a killed child's own launcher, blocked waiting on the subprocess,
-//! observes the exit and finalizes the row — the cascade does not finalize on
-//! its behalf.
+//! process identity is resolved from `thread_runtime` at stop time. A
+//! descendant without an attached identity is skipped. Each stop is proven
+//! (signal, grace, group kill, group observed empty); a killed child's own
+//! launcher, blocked waiting on the subprocess, observes the exit and
+//! finalizes the row. Only [`settle_stopped_descendants`] finalizes a row on
+//! its behalf, and only after the stop is proven.
 
 use std::collections::BTreeSet;
 
@@ -19,10 +20,7 @@ use serde_json::{Value, json};
 
 use ryeos_engine::contracts::CancellationMode;
 
-use crate::process::{
-    ShutdownAction, kill_by_action, resolve_shutdown_action, signal_exact_group,
-    signal_exact_target,
-};
+use crate::process::{ShutdownAction, kill_by_action, resolve_shutdown_action};
 use crate::state::AppState;
 use crate::thread_lifecycle::ThreadFinalizeParams;
 
@@ -31,37 +29,20 @@ use crate::thread_lifecycle::ThreadFinalizeParams;
 pub enum CascadeMode {
     /// SIGKILL immediately (a `kill`).
     Hard,
-    /// One-shot SIGTERM — a cooperative `cancel`.
+    /// SIGTERM, the launch's grace, then SIGKILL of the group — a `cancel`.
     Graceful,
 }
 
-/// The single signal to deliver for `mode`. Deliberately ONE-SHOT: never an
-/// escalating SIGTERM→wait→SIGKILL. Escalation would block the async handler for
-/// the grace period AND preempt the runtime's cooperative cancel — both runtimes
-/// honour SIGTERM at their own boundary (a graph at its next node, a directive
-/// by cutting its stream), so a forced SIGKILL after a fixed grace would kill a
-/// long node mid-flight and settle it `failed` instead of `cancelled`. `kill` is
-/// SIGKILL; a graceful `cancel` is SIGTERM unless the launch's recorded stop
-/// policy is `Hard` (declared by the item or set by its execution config), in
-/// which case a one-shot SIGKILL.
-/// A hung target is escalated by the operator with an explicit `kill`.
-fn cancel_signal(mode: CascadeMode, cancellation_mode: Option<CancellationMode>) -> i32 {
+/// The shutdown for `mode`. Every stop is proven: the target is signalled, a
+/// graceful stop gets the launch's grace so the runtime can cancel
+/// cooperatively at its own boundary, and the pinned process group (the target's
+/// tools and helpers) is then killed; the stop counts only once the group is
+/// observed empty. `kill` is SIGKILL at once, as is a `cancel` whose recorded
+/// stop policy is `Hard`.
+fn stop_action(mode: CascadeMode, cancellation_mode: Option<CancellationMode>) -> ShutdownAction {
     match mode {
-        CascadeMode::Hard => libc::SIGKILL,
-        CascadeMode::Graceful => match cancellation_mode {
-            Some(CancellationMode::Hard) => libc::SIGKILL,
-            _ => libc::SIGTERM,
-        },
-    }
-}
-
-fn signal_name(signal: i32) -> &'static str {
-    if signal == libc::SIGKILL {
-        "SIGKILL"
-    } else if signal == libc::SIGTERM {
-        "SIGTERM"
-    } else {
-        "signal"
+        CascadeMode::Hard => ShutdownAction::Hard,
+        CascadeMode::Graceful => resolve_shutdown_action(cancellation_mode),
     }
 }
 
@@ -74,40 +55,6 @@ pub fn cascade_descendants(
     state: &AppState,
     root_thread_id: &str,
     mode: CascadeMode,
-) -> anyhow::Result<Vec<Value>> {
-    cascade_descendants_with(state, root_thread_id, mode, StopStrength::Signal)
-}
-
-/// Like [`cascade_descendants`], but each live descendant is stopped the way a
-/// cancelled root is: the target is signalled per `mode`, a graceful stop gets
-/// the launch's grace, and the pinned process group (every tool and helper the
-/// target started) is then killed. A descendant counts as stopped only once its
-/// group is observed empty; any other outcome fails the cascade. Descendants
-/// stop in parallel, so the wait is the longest grace, not their sum.
-pub fn cascade_descendants_settled(
-    state: &AppState,
-    root_thread_id: &str,
-    mode: CascadeMode,
-) -> anyhow::Result<Vec<Value>> {
-    cascade_descendants_with(state, root_thread_id, mode, StopStrength::Settled)
-}
-
-/// Result marker for a stop whose process group was not proved gone.
-const STOP_UNPROVEN: &str = "unproven";
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum StopStrength {
-    /// One signal to the target; nothing is awaited.
-    Signal,
-    /// Signal, grace, group kill; success only on an observed-empty group.
-    Settled,
-}
-
-fn cascade_descendants_with(
-    state: &AppState,
-    root_thread_id: &str,
-    mode: CascadeMode,
-    strength: StopStrength,
 ) -> anyhow::Result<Vec<Value>> {
     const MAX_FIXED_POINT_PASSES: usize = 16;
     let mut seen = BTreeSet::new();
@@ -124,10 +71,12 @@ fn cascade_descendants_with(
             }
             return Ok(report);
         }
+        // Descendants stop in parallel, so the wait is the longest grace, not
+        // their sum.
         let pass = std::thread::scope(|scope| {
             let handles = new_children
                 .iter()
-                .map(|child| scope.spawn(move || signal_descendant(state, child, mode, strength)))
+                .map(|child| scope.spawn(move || signal_descendant(state, child, mode)))
                 .collect::<Vec<_>>();
             handles
                 .into_iter()
@@ -145,6 +94,9 @@ fn cascade_descendants_with(
         "descendant stop did not reach a fixed point after {MAX_FIXED_POINT_PASSES} passes for {root_thread_id}: {report:?}"
     )
 }
+
+/// Result marker for a stop whose process group was not proved gone.
+const STOP_UNPROVEN: &str = "unproven";
 
 /// Every thread of `thread_id`'s chain (continuation segments), including
 /// `thread_id` itself. A follow child is linked to whichever segment suspended
@@ -345,15 +297,6 @@ pub fn repair_cancelled_window_members(state: &AppState) -> anyhow::Result<()> {
 /// A terminal row is still signalled when it retains an attached identity: a
 /// managed runtime may self-finalize before the outer owned wrapper has exited.
 pub fn signal_thread(state: &AppState, thread_id: &str, mode: CascadeMode) -> Value {
-    signal_thread_with(state, thread_id, mode, StopStrength::Signal)
-}
-
-fn signal_thread_with(
-    state: &AppState,
-    thread_id: &str,
-    mode: CascadeMode,
-    strength: StopStrength,
-) -> Value {
     let store = &state.state_store;
     let thread = match store.get_thread(thread_id) {
         Ok(Some(thread)) => thread,
@@ -391,33 +334,15 @@ fn signal_thread_with(
                 Some(crate::state_store::StopIntent::Cancel) => CascadeMode::Graceful,
                 None => mode,
             };
-            if strength == StopStrength::Settled {
-                let action = match effective_mode {
-                    CascadeMode::Hard => ShutdownAction::Hard,
-                    CascadeMode::Graceful => resolve_shutdown_action(cancellation_mode),
-                };
-                let stopped = kill_by_action(identity, action);
-                json!({
-                    "thread_id": thread_id,
-                    "pgid": pgid,
-                    "action": format!("{action:?}"),
-                    "method": stopped.method,
-                    "result": if stopped.success { "stopped" } else { STOP_UNPROVEN },
-                })
-            } else {
-                let signal = cancel_signal(effective_mode, cancellation_mode);
-                let result = if signal == libc::SIGKILL {
-                    signal_exact_group(identity, signal)
-                } else {
-                    signal_exact_target(identity, signal)
-                };
-                json!({
-                    "thread_id": thread_id,
-                    "pgid": pgid,
-                    "signal": signal_name(signal),
-                    "result": result.as_str(),
-                })
-            }
+            let action = stop_action(effective_mode, cancellation_mode);
+            let stopped = kill_by_action(identity, action);
+            json!({
+                "thread_id": thread_id,
+                "pgid": pgid,
+                "action": format!("{action:?}"),
+                "method": stopped.method,
+                "result": if stopped.success { "stopped" } else { STOP_UNPROVEN },
+            })
         } else {
             json!({ "thread_id": thread_id, "pgid": pgid, "skipped": "no_process_identity" })
         }
@@ -448,12 +373,7 @@ fn signal_thread_with(
 /// reported from its own row instead: a terminal handler is a proven stop, a
 /// running one is not. A direct stop of such a thread as the cascade target
 /// still goes through `signal_thread` and keeps the store's refusal.
-fn signal_descendant(
-    state: &AppState,
-    thread_id: &str,
-    mode: CascadeMode,
-    strength: StopStrength,
-) -> Value {
+fn signal_descendant(state: &AppState, thread_id: &str, mode: CascadeMode) -> Value {
     let thread = match state.state_store.get_thread(thread_id) {
         Ok(Some(thread)) => thread,
         Ok(None) => return json!({ "thread_id": thread_id, "skipped": "no_thread_row" }),
@@ -468,7 +388,7 @@ fn signal_descendant(
         .and_then(|metadata| metadata.launch_driver)
         == Some(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler);
     if !in_process_handler {
-        return signal_thread_with(state, thread_id, mode, strength);
+        return signal_thread(state, thread_id, mode);
     }
     in_process_descendant_report(thread_id, &thread.status)
 }
@@ -521,34 +441,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hard_mode_always_sigkills_ignoring_declared_mode() {
+    fn hard_mode_always_kills_ignoring_declared_mode() {
         // Even a thread that declared a graceful mode is SIGKILLed under Hard.
         assert_eq!(
-            cancel_signal(
+            stop_action(
                 CascadeMode::Hard,
                 Some(CancellationMode::Graceful { grace_secs: 30 })
             ),
-            libc::SIGKILL
+            ShutdownAction::Hard
         );
-        assert_eq!(cancel_signal(CascadeMode::Hard, None), libc::SIGKILL);
+        assert_eq!(stop_action(CascadeMode::Hard, None), ShutdownAction::Hard);
     }
 
     #[test]
-    fn graceful_cancel_is_one_shot_sigterm_unless_the_tool_is_hard_only() {
-        // The common case: a single SIGTERM, never an escalating SIGKILL.
-        assert_eq!(cancel_signal(CascadeMode::Graceful, None), libc::SIGTERM);
+    fn graceful_cancel_escalates_to_a_group_kill_after_its_grace() {
+        // Every cancel is a proven stop: SIGTERM, grace, then the group kill,
+        // never a signal with nothing awaited.
+        assert!(matches!(
+            stop_action(CascadeMode::Graceful, None),
+            ShutdownAction::Graceful(_)
+        ));
         assert_eq!(
-            cancel_signal(
+            stop_action(
                 CascadeMode::Graceful,
-                Some(CancellationMode::Graceful { grace_secs: 7 })
+                Some(CancellationMode::Graceful { grace_secs: 2 })
             ),
-            libc::SIGTERM
+            ShutdownAction::Graceful(Duration::from_secs(2))
         );
-        // A tool that declared it can only be hard-stopped gets a one-shot
-        // SIGKILL even on a cancel.
+        // A launch that declared it can only be hard-stopped is killed at once.
         assert_eq!(
-            cancel_signal(CascadeMode::Graceful, Some(CancellationMode::Hard)),
-            libc::SIGKILL
+            stop_action(CascadeMode::Graceful, Some(CancellationMode::Hard)),
+            ShutdownAction::Hard
         );
     }
 

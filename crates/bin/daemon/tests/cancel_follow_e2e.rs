@@ -206,7 +206,9 @@ config:
     Ok(())
 }
 
-/// A cohort follow over two items with a launch window of one: the first child
+/// A cohort follow over two items with a launch window of one, shaped like the
+/// documented `follow: true` + `over` cohort (declared `config_schema` inputs,
+/// `collect`/`collect_threads`): the first child
 /// goes live, the second stays queued until the first reaches a hard terminal.
 fn plant_cohort_follow_graph(
     project_dir: &Path,
@@ -225,6 +227,13 @@ requires:
       - ryeos.execute.directive.{child}
 config:
   start: fan
+  max_steps: 100
+  on_error: continue
+  config_schema:
+    type: object
+    required: [items]
+    properties:
+      items: {{type: array}}
   nodes:
     fan:
       node_type: action
@@ -239,6 +248,7 @@ config:
           model: "directive:{child}"
         params: {{}}
       collect: results
+      collect_threads: result_threads
       next:
         type: unconditional
         to: done
