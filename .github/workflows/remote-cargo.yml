@@ -178,7 +178,7 @@ jobs:
           conflicts="$(cat "$work/conflicts")"
           if [[ -n "$conflicts" ]]; then
               echo "::error::Refusing to restore next's bundle state: this branch differs from next $sha on paths the state would overwrite or delete, or on bundle sources the state was built from, so the run would test next's version, not the branch's. Merge origin/next into the branch, or keep branch edits out of these paths."
-              echo "$conflicts" | sed 's/^/  conflict: /'
+              while IFS= read -r path; do echo "  conflict: $path"; done <<<"$conflicts"
               exit 1
           fi
 
