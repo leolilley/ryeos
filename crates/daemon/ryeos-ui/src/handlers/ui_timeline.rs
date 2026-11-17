@@ -29,7 +29,7 @@ use ryeos_executor::executor::ServiceAvailability;
 use ryeos_state::queries::ThreadUsageTotals;
 use ryeos_timeline::{Definition, Folder, Timeline};
 
-use crate::state::{ChainFold, TimelineCache, TimelineCacheKey};
+use crate::state::{ChainFold, PresentationCache, TimelineCache, TimelineCacheKey};
 
 const SERVICE_REF: &str = "service:ui/ryeos-ui/timeline/thread";
 const ENDPOINT: &str = "ui.ryeos.timeline.thread";
@@ -38,6 +38,8 @@ const DEFAULT_LIMIT: usize = 200;
 const MAX_LIMIT: usize = 2_000;
 /// The chain-replay page cap: the store refuses a larger page.
 const REPLAY_PAGE_EVENTS: usize = 500;
+/// A tool's presentation block larger than this (serialized) is ignored.
+const MAX_PRESENTATION_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -170,14 +172,67 @@ struct Folded {
     timeline: Arc<Timeline>,
 }
 
+/// The `presentation` block of a tool call's child thread, as the fold's
+/// subject for that thread.
+///
+/// The block is read from the composed value the child's admitted launch
+/// capsule pinned, so a call shows the presentation of the tool that ran, not
+/// of the tool as it is now. This is a lean read: the thread row gives the
+/// capsule hash, one bounded CAS read gives the capsule, and only the block is
+/// kept, cached by hash. A thread with no capsule (a service call, a call
+/// refused before it ran), a capsule that is gone, or one with no block has no
+/// subject, and its entry draws as the definition says.
+fn presentation_subject(
+    state: &AppState,
+    cache: &PresentationCache,
+    thread_id: &str,
+) -> Option<Value> {
+    let hash = state
+        .state_store
+        .admitted_launch_capsule_hash(thread_id)
+        .ok()??;
+    let block = match cache.get(&hash) {
+        Some(block) => block,
+        None => {
+            let capsule = state
+                .acquire_cas_read()
+                .ok()?
+                .cas()
+                .get_object_bounded(
+                    &hash,
+                    ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES as u64,
+                )
+                .ok()??;
+            let block = presentation_block(&capsule);
+            cache.insert(hash, block.clone());
+            block
+        }
+    };
+    block.map(|block| json!({ "presentation": block }))
+}
+
+/// The presentation block inside a capsule's exact program: the composed value
+/// of the tool as it ran sits one `composed` level inside the resolution
+/// output's composed view.
+fn presentation_block(capsule: &Value) -> Option<Value> {
+    let block =
+        capsule.pointer("/exact_program/resolution_output/composed/composed/presentation")?;
+    let bounded = block.is_object()
+        && serde_json::to_vec(block).is_ok_and(|bytes| bytes.len() <= MAX_PRESENTATION_BYTES);
+    bounded.then(|| block.clone())
+}
+
 /// Fold of the chain up to its newest event. Only events after the cached
 /// highest seq are fetched (500 at a time) and pushed; the first request for a
-/// (chain, definition) folds from the start.
+/// (chain, definition) folds from the start. Before a page is pushed,
+/// `subject` is asked for each thread the definition lets present an entry in
+/// it; a thread it has no subject for draws as the definition says.
 fn timeline_for(
     cache: &TimelineCache,
     key: &TimelineCacheKey,
     definition: &Definition,
     mut fetch: impl FnMut(Option<i64>) -> Result<EventPage>,
+    mut subject: impl FnMut(&str) -> Option<Value>,
 ) -> Result<Folded> {
     let entry = match cache.get(key) {
         Some(entry) => entry,
@@ -207,6 +262,11 @@ fn timeline_for(
         let Some(last) = page.events.last().and_then(|e| e["chain_seq"].as_i64()) else {
             break Ok(());
         };
+        for thread in chain.folder.subjects_wanted(&page.events) {
+            if let Some(found) = subject(&thread) {
+                chain.folder.provide(thread, found);
+            }
+        }
         if let Err(error) = chain.folder.push(&page.events) {
             break Err(HandlerError::Internal(error).into());
         }
@@ -300,23 +360,29 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
     let ui = crate::state::get_ui_state(&state)
         .ok_or_else(|| HandlerError::Internal("UiState not set".into()))?;
     let key = (chain_root_id.clone(), definition_digest.clone());
-    let folded = timeline_for(ui.timeline_cache(), &key, &definition, |after| {
-        let page = state.events.replay(&EventReplayParams {
-            thread_id: None,
-            chain_root_id: Some(chain_root_id.clone()),
-            after_chain_seq: after,
-            limit: REPLAY_PAGE_EVENTS,
-            event_types: None,
-        })?;
-        Ok(EventPage {
-            events: page
-                .events
-                .iter()
-                .map(serde_json::to_value)
-                .collect::<Result<Vec<Value>, _>>()?,
-            next: page.next_cursor,
-        })
-    })?;
+    let folded = timeline_for(
+        ui.timeline_cache(),
+        &key,
+        &definition,
+        |after| {
+            let page = state.events.replay(&EventReplayParams {
+                thread_id: None,
+                chain_root_id: Some(chain_root_id.clone()),
+                after_chain_seq: after,
+                limit: REPLAY_PAGE_EVENTS,
+                event_types: None,
+            })?;
+            Ok(EventPage {
+                events: page
+                    .events
+                    .iter()
+                    .map(serde_json::to_value)
+                    .collect::<Result<Vec<Value>, _>>()?,
+                next: page.next_cursor,
+            })
+        },
+        |thread| presentation_subject(&state, ui.presentation_cache(), thread),
+    )?;
     let totals = state
         .state_store
         .chain_usage_totals(&chain_root_id)
@@ -561,7 +627,8 @@ mod tests {
             let cache = TimelineCache::with_capacity(4);
             let key = ("chain".to_string(), "digest".to_string());
             for count in 1..=events.len() {
-                let cached = timeline_for(&cache, &key, &def, store(&events, count)).unwrap();
+                let cached =
+                    timeline_for(&cache, &key, &def, store(&events, count), |_| None).unwrap();
                 let fresh = fold(&events[..count], &def).unwrap();
                 assert_eq!(*cached.timeline, fresh, "{name} at {count}");
                 assert_eq!(
@@ -569,7 +636,8 @@ mod tests {
                     events[count - 1]["chain_seq"].as_i64().unwrap()
                 );
             }
-            let again = timeline_for(&cache, &key, &def, store(&events, events.len())).unwrap();
+            let again =
+                timeline_for(&cache, &key, &def, store(&events, events.len()), |_| None).unwrap();
             assert_eq!(*again.timeline, fold(&events, &def).unwrap());
         }
     }
@@ -583,7 +651,8 @@ mod tests {
             let key = ("chain".to_string(), "digest".to_string());
             let mut held: Option<Value> = None;
             for count in 1..=events.len() {
-                let now = timeline_for(&cache, &key, &def, store(&events, count)).unwrap();
+                let now =
+                    timeline_for(&cache, &key, &def, store(&events, count), |_| None).unwrap();
                 let full = window_response("c", "r", "d", &now, summary(), 200, None).unwrap();
                 if let Some(previous) = &held {
                     let since = previous["highest_chain_seq"].as_i64().unwrap();
@@ -596,5 +665,153 @@ mod tests {
                 held = Some(full);
             }
         }
+    }
+    const FETCH_OP: &str = "0000000000000000000000000000000000000000000000000000000000000007";
+
+    /// A directive turn that calls a tool whose own thread is `T-2`.
+    fn fetch_chain() -> Vec<Value> {
+        let ev = |seq: i64, thread: &str, event_type: &str, payload: Value| {
+            json!({"chain_seq": seq, "chain_root_id": "T-1", "thread_id": thread,
+                   "ts": format!("2026-11-16T00:00:{seq:02}Z"),
+                   "event_type": event_type, "payload": payload})
+        };
+        vec![
+            ev(
+                1,
+                "T-1",
+                "cognition_in",
+                json!({"origin": "launch", "parts": [{"type": "text", "text": "go"}]}),
+            ),
+            ev(
+                2,
+                "T-1",
+                "cognition_out",
+                json!({"finish": "tool_calls", "turn": 1, "parts": [
+                    {"type": "tool_call", "call_id": "c1", "name": "web_fetch",
+                     "arguments": {"url": "https://example.com/a"}}]}),
+            ),
+            ev(
+                3,
+                "T-1",
+                "tool_call_start",
+                json!({"operation_id": FETCH_OP, "call_id": "c1", "tool": "web_fetch"}),
+            ),
+            ev(
+                4,
+                "T-1",
+                "child_thread_spawned",
+                json!({"child_thread_id": "T-2", "item_id": "tool:rye/web/fetch",
+                       "operation_id": FETCH_OP}),
+            ),
+            ev(
+                5,
+                "T-1",
+                "tool_call_result",
+                json!({"operation_id": FETCH_OP, "call_id": "c1", "tool": "web_fetch",
+                       "status": "ok", "guard": {"result_size_bytes": 9, "truncated": false},
+                       "parts": [{"type": "text", "text": "{\"output\":\"page text\"}"}]}),
+            ),
+            ev(
+                6,
+                "T-1",
+                "cognition_out",
+                json!({"finish": "stop", "turn": 2, "parts": [{"type": "text", "text": "done"}]}),
+            ),
+        ]
+    }
+
+    fn fetch_subject() -> Value {
+        json!({"presentation": {
+            "counts_as": "fetch",
+            "headline": ["arguments.url"],
+            "body": ["result.output"],
+        }})
+    }
+
+    fn fresh_with_subject(events: &[Value], def: &Definition) -> Timeline {
+        let mut folder = Folder::new(def.clone());
+        for thread in folder.subjects_wanted(events) {
+            folder.provide(thread, fetch_subject());
+        }
+        folder.push(events).unwrap();
+        folder.timeline()
+    }
+
+    fn resolver(thread: &str) -> Option<Value> {
+        (thread == "T-2").then(fetch_subject)
+    }
+
+    #[test]
+    fn a_presented_chain_folds_the_same_cached_as_fresh_at_every_length() {
+        let def = definition();
+        let events = fetch_chain();
+        let cache = TimelineCache::with_capacity(4);
+        let key = ("chain".to_string(), "digest".to_string());
+        for count in 1..=events.len() {
+            let cached = timeline_for(&cache, &key, &def, store(&events, count), resolver).unwrap();
+            assert_eq!(
+                *cached.timeline,
+                fresh_with_subject(&events[..count], &def),
+                "at {count}"
+            );
+        }
+        let text = serde_json::to_string(
+            &*timeline_for(&cache, &key, &def, store(&events, 6), resolver)
+                .unwrap()
+                .timeline,
+        )
+        .unwrap();
+        assert!(text.contains("https://example.com/a"));
+        assert!(text.contains("page text"));
+    }
+
+    #[test]
+    fn a_since_response_stays_whole_when_presentation_arrives() {
+        let def = definition();
+        let events = fetch_chain();
+        let cache = TimelineCache::with_capacity(4);
+        let key = ("chain".to_string(), "digest".to_string());
+        let mut held: Option<Value> = None;
+        for count in 1..=events.len() {
+            let now = timeline_for(&cache, &key, &def, store(&events, count), resolver).unwrap();
+            let full = window_response("c", "r", "d", &now, summary(), 200, None).unwrap();
+            if let Some(previous) = &held {
+                let since = previous["highest_chain_seq"].as_i64().unwrap();
+                let update =
+                    window_response("c", "r", "d", &now, summary(), 200, Some(since)).unwrap();
+                let merged = merge(previous, &update)
+                    .unwrap_or_else(|| panic!("at {count}: an id was missing"));
+                assert_eq!(Value::Array(merged), full["items"], "at {count}");
+            }
+            held = Some(full);
+        }
+    }
+
+    #[test]
+    fn a_thread_without_a_subject_draws_as_the_definition_says() {
+        let def = definition();
+        let events = fetch_chain();
+        let cache = TimelineCache::with_capacity(4);
+        let key = ("chain".to_string(), "digest".to_string());
+        let cached = timeline_for(&cache, &key, &def, store(&events, 6), |_| None).unwrap();
+        assert_eq!(*cached.timeline, fold(&events, &def).unwrap());
+    }
+
+    #[test]
+    fn the_block_is_read_from_the_capsules_composed_tool_value() {
+        let capsule = json!({"exact_program": {"resolution_output": {"composed": {
+            "composed": {"presentation": {"headline": ["arguments.url"]}}}}}});
+        assert_eq!(
+            presentation_block(&capsule),
+            Some(json!({"headline": ["arguments.url"]}))
+        );
+        // No block, a block that is not a mapping, or one over the byte bound.
+        assert_eq!(presentation_block(&json!({"exact_program": {}})), None);
+        let wrong = json!({"exact_program": {"resolution_output": {"composed": {
+            "composed": {"presentation": "x"}}}}});
+        assert_eq!(presentation_block(&wrong), None);
+        let big = json!({"exact_program": {"resolution_output": {"composed": {
+            "composed": {"presentation": {"body": ["a".repeat(MAX_PRESENTATION_BYTES)]}}}}}});
+        assert_eq!(presentation_block(&big), None);
     }
 }

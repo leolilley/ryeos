@@ -2,15 +2,19 @@
 
 use serde_json::Value;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::{Find, Format, Part, Slot, When};
 
-/// The value at `path`, or `None` when any segment is missing or null.
+/// The value at `path`, or `None` when any segment is missing or null. A
+/// segment of digits indexes an array.
 pub(crate) fn get<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
     let mut current = value;
     for segment in path.split('.') {
-        current = current.get(segment)?;
+        current = match (current, segment.parse::<usize>()) {
+            (Value::Array(items), Ok(index)) => items.get(index)?,
+            _ => current.get(segment)?,
+        };
     }
     (!current.is_null()).then_some(current)
 }
@@ -29,6 +33,8 @@ pub(crate) struct Context<'a> {
     pub spine: &'a HashSet<String>,
     /// Events folded before this one, oldest first.
     pub history: &'a [Value],
+    /// Subjects supplied for threads, by thread id.
+    pub subjects: &'a HashMap<String, Value>,
 }
 
 pub(crate) fn when_holds(when: &Option<When>, event: &Value, cx: &Context) -> bool {

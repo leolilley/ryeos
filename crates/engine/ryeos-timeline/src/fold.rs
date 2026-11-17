@@ -2,10 +2,12 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::path::Context;
-use crate::{Definition, Emission, Entry, StateSpec, Timeline, ToneRule, passes, path};
+use crate::{
+    Definition, Emission, Entry, Present, StateSpec, Timeline, ToneRule, overlay, passes, path,
+};
 
 /// Folds `events` (ascending `chain_seq`) into a timeline.
 pub fn fold(events: &[Value], definition: &Definition) -> Result<Timeline, String> {
@@ -27,6 +29,8 @@ pub struct Folder {
     /// Every spine edge seen so far, in both directions.
     links: HashMap<String, Vec<String>>,
     spine: HashSet<String>,
+    /// Subjects supplied by the host, by thread id; see [`Folder::provide`].
+    subjects: HashMap<String, Value>,
     state: State,
     rewritten_at: Option<i64>,
 }
@@ -38,9 +42,62 @@ impl Folder {
             events: Vec::new(),
             links: HashMap::new(),
             spine: HashSet::new(),
+            subjects: HashMap::new(),
             state: State::default(),
             rewritten_at: None,
         }
+    }
+
+    /// Supplies the subject of a thread: a bounded JSON object whose
+    /// `presentation` block may shape the entry the thread is adopted under
+    /// (see [`crate::Adopt::present`]). A subject must be provided before the
+    /// push of the events that adopt the thread, and is never replaced, so the
+    /// timeline stays a function of the events, the definition and the
+    /// subjects.
+    pub fn provide(&mut self, thread: impl Into<String>, subject: Value) {
+        self.subjects.entry(thread.into()).or_insert(subject);
+    }
+
+    /// Threads that `events` would adopt for presentation and whose subject
+    /// has not been provided: what the host should resolve before pushing
+    /// them. Rules that apply per array element are not considered.
+    pub fn subjects_wanted(&self, events: &[Value]) -> Vec<String> {
+        let cx = Context {
+            spine: &self.spine,
+            history: &[],
+            subjects: &self.subjects,
+        };
+        let mut wanted: Vec<String> = Vec::new();
+        for event in events {
+            let Some(rules) = event
+                .get("event_type")
+                .and_then(Value::as_str)
+                .and_then(|event_type| self.definition.events.get(event_type))
+            else {
+                continue;
+            };
+            let Some(rule) = rules.iter().find(|r| path::when_holds(&r.when, event, &cx)) else {
+                continue;
+            };
+            if rule.drop || rule.over.is_some() {
+                continue;
+            }
+            for emission in &rule.emit {
+                if !path::when_holds(&emission.when, event, &cx) {
+                    continue;
+                }
+                let Some(adopt) = emission.adopt.as_ref().filter(|a| a.present.is_some()) else {
+                    continue;
+                };
+                if let Some(thread) = path::get(event, &adopt.thread).map(path::text)
+                    && !self.subjects.contains_key(&thread)
+                    && !wanted.contains(&thread)
+                {
+                    wanted.push(thread);
+                }
+            }
+        }
+        wanted
     }
 
     /// The `chain_seq` of the push that last re-derived entries older than
@@ -88,8 +145,17 @@ impl Folder {
 
     /// The timeline of the events pushed so far.
     pub fn timeline(&self) -> Timeline {
+        let mut entries = self.state.entries.clone();
+        for entry in &mut entries {
+            if let Some((thread, present)) = self.state.presented.get(&entry.id)
+                && let Some(subject) = self.subjects.get(thread)
+                && let Some(inputs) = self.state.inputs.get(&entry.id)
+            {
+                overlay::present(entry, present, subject, inputs, &self.definition.vocabulary);
+            }
+        }
         Timeline {
-            items: passes::run(self.state.entries.clone(), &self.definition),
+            items: passes::run(entries, &self.definition),
             undeclared: self.state.undeclared.clone(),
         }
     }
@@ -143,6 +209,7 @@ impl Folder {
             let cx = Context {
                 spine: &self.spine,
                 history: &self.events[..index],
+                subjects: &self.subjects,
             };
             apply_event(&mut self.state, &self.definition, event, &cx);
         }
@@ -203,6 +270,11 @@ struct State {
     exchange: Option<String>,
     /// Adopted thread id to the entry its entries nest under.
     adopted: HashMap<String, String>,
+    /// Entry id to the adopted thread and the rules that let its subject
+    /// present the entry.
+    presented: HashMap<String, (String, Present)>,
+    /// Entry id to the presentation inputs its events contributed.
+    inputs: HashMap<String, Map<String, Value>>,
     undeclared: BTreeMap<String, u32>,
 }
 
@@ -231,7 +303,20 @@ impl State {
             && let Some(child) = path::get(event, &adopt.thread)
             && let Some(parent) = keyed_id(adopt.under.kind.prefix(), &adopt.under.key, event)
         {
-            self.adopted.insert(path::text(child), parent);
+            let child = path::text(child);
+            if let Some(present) = &adopt.present
+                && cx.subjects.contains_key(&child)
+            {
+                // The entry changes with its subject's arrival, so it reads as
+                // updated to a consumer holding an earlier window.
+                if let Some(&index) = self.by_id.get(&parent) {
+                    self.entries[index].seq.1 = seq;
+                    self.entries[index].ts.1 = ts.clone();
+                }
+                self.presented
+                    .insert(parent.clone(), (child.clone(), present.clone()));
+            }
+            self.adopted.insert(child, parent);
         }
 
         if emission.flow
@@ -259,6 +344,16 @@ impl State {
             .or_else(|| self.adopted.get(&thread).cloned());
         let tone = tone(&emission.tone, event);
         let state = emission.state.as_ref().map(|spec| state_text(spec, event));
+        for (root, slot) in &emission.inputs {
+            if let Some(value) = path::slot(slot, event, cx)
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            {
+                self.inputs
+                    .entry(id.clone())
+                    .or_default()
+                    .insert(root.clone(), value);
+            }
+        }
 
         if let Some(&index) = self.by_id.get(&id) {
             let entry = &mut self.entries[index];
