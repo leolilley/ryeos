@@ -7995,6 +7995,11 @@ async fn run_claimed_thread_row_inner(
                         "same-thread recovery lost its exact active launch owner"
                     )));
                 }
+                RuntimeRecoveryClaimRotation::AdmissionClosed => {
+                    return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "same-thread recovery refused: launch admission is closed"
+                    )));
+                }
                 RuntimeRecoveryClaimRotation::Rotated {
                     claim: next_claim,
                     next_attempt,

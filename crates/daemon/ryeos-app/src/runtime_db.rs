@@ -1545,6 +1545,9 @@ pub enum RuntimeRecoveryClaimRotation {
         attempts: u32,
     },
     LostOwner,
+    /// The daemon closed launch admission for shutdown. No claim was rotated
+    /// and no attempt was charged; the thread stays resumable.
+    AdmissionClosed,
 }
 
 /// Canonical durable fencing identity for one launch attempt. The JSON form is

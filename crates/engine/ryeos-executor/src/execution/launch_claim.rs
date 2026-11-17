@@ -21,6 +21,7 @@ pub(crate) enum RuntimeRecoveryClaimRotation {
         attempts: u32,
     },
     LostOwner,
+    AdmissionClosed,
 }
 
 /// Owned authorization to launch one existing thread row.
@@ -129,6 +130,9 @@ impl ThreadLaunchClaim {
             }
             ryeos_app::runtime_db::RuntimeRecoveryClaimRotation::LostOwner => {
                 RuntimeRecoveryClaimRotation::LostOwner
+            }
+            ryeos_app::runtime_db::RuntimeRecoveryClaimRotation::AdmissionClosed => {
+                RuntimeRecoveryClaimRotation::AdmissionClosed
             }
         })
     }

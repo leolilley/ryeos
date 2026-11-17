@@ -602,6 +602,7 @@ impl StateStore {
     ) -> Result<Option<runtime_db::LaunchClaim>> {
         let _permit = self.acquire_write_permit()?;
         let mut g = self.lock()?;
+        self.require_launch_admission_open()?;
         let _admission = Self::authorize_runtime_pin_for_thread(&g, thread_id)?;
         let outcome = g.runtime_db.claim_thread_launch(
             &self.selected_mutation_permit(
@@ -678,6 +679,7 @@ impl StateStore {
     ) -> Result<Option<runtime_db::LaunchClaim>> {
         let _permit = self.acquire_write_permit()?;
         let mut g = self.lock()?;
+        self.require_launch_admission_open()?;
         if g.state_db.get_thread(thread_id)?.is_some() {
             bail!(
                 "fresh launch reservation requires an unpublished thread ID; thread already exists: {thread_id}"
@@ -797,6 +799,12 @@ impl StateStore {
                 max_attempts,
             ),
         )?;
+        // Shutdown closes admission under this same Store lock, so a rotation
+        // either commits before the close or is refused here with the thread
+        // left unrotated for the next start.
+        if !self.process_attachment_admission_is_open() {
+            return Ok(runtime_db::RuntimeRecoveryClaimRotation::AdmissionClosed);
+        }
         let _admission = Self::authorize_runtime_pin_for_thread(&g, thread_id)?;
         if !g.active_launch_owners.contains(expected_launch_owner) {
             return Ok(runtime_db::RuntimeRecoveryClaimRotation::LostOwner);
@@ -857,6 +865,60 @@ impl StateStore {
             g.active_launch_owners.insert(next_active_owner);
         }
         Ok(outcome)
+    }
+
+    /// Refuse a new launch obligation once shutdown closed admission. Callers
+    /// hold the Store lock, which the close also takes, so no claim can be
+    /// registered after the close returns.
+    fn require_launch_admission_open(&self) -> Result<()> {
+        if !self.process_attachment_admission_is_open() {
+            bail!("launch admission is closed: the daemon is shutting down");
+        }
+        Ok(())
+    }
+
+    /// Threads that still hold a launch obligation in this daemon (a launch
+    /// future that has not released its claim). Sorted for stable logs.
+    pub fn active_launch_owner_threads(&self) -> Result<Vec<String>> {
+        let g = self.lock()?;
+        let mut threads = g
+            .active_launch_owners
+            .iter()
+            .map(|owner| {
+                serde_json::from_str::<runtime_db::LaunchOwner>(owner)
+                    .map(|owner| owner.thread_id)
+                    .unwrap_or_else(|_| "<unparseable launch owner>".to_owned())
+            })
+            .collect::<Vec<_>>();
+        threads.sort();
+        Ok(threads)
+    }
+
+    /// Wait until every launch obligation has released, or `deadline` passes.
+    /// Returns the threads still holding one on timeout. Shutdown closes
+    /// admission first, so the set can only shrink while this waits. The set
+    /// is guarded by the Store mutex and has no wake source, so this samples
+    /// it at a short interval.
+    pub async fn wait_for_launch_owners_quiesced(
+        &self,
+        deadline: std::time::Instant,
+    ) -> std::result::Result<(), Vec<String>> {
+        const SAMPLE: std::time::Duration = std::time::Duration::from_millis(20);
+        loop {
+            let remaining = match self.active_launch_owner_threads() {
+                Ok(remaining) => remaining,
+                Err(error) => {
+                    return Err(vec![format!("<launch owner registry unreadable: {error}>")]);
+                }
+            };
+            if remaining.is_empty() {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(remaining);
+            }
+            tokio::time::sleep(SAMPLE).await;
+        }
     }
 
     /// Read the current launch claim, if any — distinguishes an unlaunched
