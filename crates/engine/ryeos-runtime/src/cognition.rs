@@ -388,6 +388,45 @@ impl CognitionFramePayload {
             && self.request_options == other.request_options
             && self.provider_config == other.provider_config
     }
+
+    /// The frame components in which `other` differs from this frame, in the
+    /// order of [`FrameComponent`]. `system` compares the system parts,
+    /// `tools` the tool inventory, `reasoning` the request's reasoning
+    /// policy. Other differences (model, sampling, output limit, provider
+    /// configuration) are not components a provider can refuse.
+    pub fn differing_components(&self, other: &Self) -> Vec<FrameComponent> {
+        let mut differing = Vec::new();
+        if self.system != other.system {
+            differing.push(FrameComponent::System);
+        }
+        if self.tool_inventory != other.tool_inventory {
+            differing.push(FrameComponent::Tools);
+        }
+        if self.request_options.reasoning != other.request_options.reasoning {
+            differing.push(FrameComponent::Reasoning);
+        }
+        differing
+    }
+}
+
+/// A part of the request frame that a provider entry can refuse to see
+/// change within one conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FrameComponent {
+    System,
+    Tools,
+    Reasoning,
+}
+
+impl FrameComponent {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Tools => "tools",
+            Self::Reasoning => "reasoning",
+        }
+    }
 }
 
 /// A frame ready to append: its payload and the attachment holding the tool
@@ -511,6 +550,29 @@ mod tests {
         let mut other_inventory = first.payload.clone();
         other_inventory.tool_inventory = "cd".repeat(32);
         assert!(!first.payload.same_as(&other_inventory));
+    }
+
+    #[test]
+    fn differing_components_name_only_what_a_provider_can_refuse() {
+        let first = frame(Some("be brief"), "m").payload;
+        assert!(first.differing_components(&first.clone()).is_empty());
+        assert_eq!(
+            first.differing_components(&frame(Some("be long"), "m").payload),
+            [FrameComponent::System]
+        );
+        // A different model is a frame change but not a refusable component.
+        assert!(
+            first
+                .differing_components(&frame(Some("be brief"), "n").payload)
+                .is_empty()
+        );
+        let mut changed = first.clone();
+        changed.tool_inventory = "cd".repeat(32);
+        changed.request_options.reasoning = Some(json!({"effort": "high"}));
+        assert_eq!(
+            first.differing_components(&changed),
+            [FrameComponent::Tools, FrameComponent::Reasoning]
+        );
     }
 
     #[test]

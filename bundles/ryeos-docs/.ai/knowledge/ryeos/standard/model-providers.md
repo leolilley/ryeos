@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-16T23:09:12Z:36fa5163ae9e51a44f75612a87bc8357db7620c01b6bfa8ba446bd4222069654:p18DYFBeb/jA6KAVHSbXquSztDA7lULSRtMYvlyqYcb9h01dVj3x7gbz46XoA70Oz8y+Pxc9wEueNTZ4hjqdDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-17T18:15:21Z:e50187839c8780d26bc6caa119daab64b3f9d585f5ae87dd0bcfbe528d197023:dNjYRYN+zbnMNF6Fe9BiMALZgtn0gNYHd1Efz341+PgceNFC3uzYeXjjYQWQb8w4SnD7O8XvL8iBi7h5Y7z5Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/standard
@@ -160,6 +160,119 @@ Absence preserves the provider's existing request shape. Unsupported values,
 launch preparation. The resolved policy is frozen in the provider snapshot and
 recorded as a runtime fact before the exact provider request is serialized and
 digested.
+
+## Reasoning capture and replay
+
+What a provider returns as reasoning, and what it needs back on the next
+request, is declared on the entry under `schemas.reasoning`; the runtime never
+names a provider field. An entry that declares neither reads no reasoning from
+its stream and sends none back. Capture and replay apply to `delta_merge`
+streams only.
+
+`capture` is a list of rules, each with an `id` of 1 to 32 lowercase letters,
+digits or `_`:
+
+| Kind | Reads |
+|---|---|
+| `text_delta` | `fields`: string delta keys that are the visible reasoning text; the first one present in a chunk is taken. |
+| `blocks` | `field`: an array in the delta whose items assemble into one opaque artefact per block. `merge_keys` are string keys concatenated across the items of one block, every other key keeps its latest value. A block completes when `close_key` is present with a non-empty value, or on arrival when its `type_key` value (default `type`) is in `whole_types`. `group_key` separates interleaved blocks, `text_key` also emits that key's string as reasoning text. A block still open when the stream finishes, or displaced by one of another type, is dropped with the warning `reasoning_artefact_incomplete` and is never replayed. |
+| `tool_call_field` | `field`: a key riding on streamed tool-call entries (`merge` is `last` or `object_merge`); the value is stored on the call it belongs to. At most one such rule. |
+
+A completed block is recorded as its own reasoning part with only an artefact;
+visible reasoning text stays in adjacent text parts. Artefact bytes count toward
+`max_stream_output_bytes_per_turn` together with the text, so a provider that
+returns its thinking both as text and inside a signed block spends the cap twice
+instead of growing the recorded turn past it. An entry that wants one copy
+declares only the `blocks` rule and no `text_delta` for the same text.
+
+`replay` has an optional `compat_group` and a list of `placements`. An artefact
+is stored in an envelope `{capture, group, value}` and replays only when the
+active entry declares the same `compat_group`, so a model switch never sends one
+provider's signatures to another. The group is required once any rule stores an
+artefact.
+
+Each placement has `from` (a capture id), `into` (`message_field: <key>` for the
+joined text or the array of block values, or `tool_call_field: <key>` for the
+value set on the rendered call), a `scope` and an `on_missing`:
+
+- `scope` is `all` (every assistant message), `tool_call_turns` (messages with a
+  tool call) or `open_loop` (messages after the last user message).
+- A message owes a placement when it is in scope and proposes a tool call.
+  `on_missing` is then `omit` (send nothing), `refuse` (fail the turn with
+  `reasoning_artefact_missing`, checked when the turn completes, before any tool
+  it proposed is dispatched, and again when a request is built from history) or
+  `fill` (send the literal in the placement's sibling `fill` key; on a
+  tool-call field it goes on the first call). Text placements are never owed.
+
+Documented shapes. Entries for specific models must be confirmed against the
+live gateway before they ship; the Claude, Gemini and gpt-oss rows are
+unconfirmed.
+
+```yaml
+# Text echoed back on every assistant message (DeepSeek, Z.AI shape).
+reasoning:
+  capture:
+    - {id: text, kind: text_delta, fields: [reasoning_content]}
+  replay:
+    placements:
+      - {from: text, into: {message_field: reasoning_content}, scope: all}
+
+# Signed thinking blocks required for the current tool loop (unconfirmed).
+reasoning:
+  capture:
+    - {id: blocks, kind: blocks, field: thinking_blocks, merge_keys: [thinking],
+       close_key: signature, whole_types: [redacted_thinking]}
+  replay:
+    compat_group: claude-thinking-1
+    placements:
+      - from: blocks
+        into: {message_field: thinking_blocks}
+        scope: open_loop
+        on_missing: refuse
+
+# A signature riding on the first tool call of a batch (unconfirmed).
+reasoning:
+  capture:
+    - {id: sig, kind: tool_call_field, field: extra_content, merge: object_merge}
+  replay:
+    compat_group: gemini-sig-1
+    placements:
+      - from: sig
+        into: {tool_call_field: extra_content}
+        scope: open_loop
+        on_missing: refuse
+
+# Reasoning text sent back only inside the open loop (unconfirmed).
+reasoning:
+  capture:
+    - {id: text, kind: text_delta, fields: [reasoning]}
+  replay:
+    placements:
+      - {from: text, into: {message_field: reasoning}, scope: open_loop}
+```
+
+Reasoning effort and thinking budget use the `mode` and `effort` mappings
+above. A model that rejects an effort value maps it to one it accepts in the
+per-model value map, and an entry for a model that rejects disabling thinking
+declares no `mode.disabled`. Reasoning tokens are accounted by the usage schema:
+`reasoning_tokens_path` reads them and `reasoning_included_in_output` says
+whether `completion_tokens` already contains them (true is the usual shape).
+A reasoning count above the output count while that is declared is recorded as
+a contract anomaly. List `reasoning_tokens` among a tariff's covered dimensions
+only when the provider bills them separately from output.
+
+An entry may also declare which parts of the frame it refuses to see change
+mid-conversation:
+
+```yaml
+schemas:
+  frame_stability:
+    refuse_change_of: [system, tools, reasoning]
+```
+
+A resume or continuation whose launch changes a listed component fails with
+`frame_change_refused`, naming the component and the recorded `frame_seq`,
+before anything is recorded. Unlisted changes record the next frame.
 
 ## Provider cache usage
 

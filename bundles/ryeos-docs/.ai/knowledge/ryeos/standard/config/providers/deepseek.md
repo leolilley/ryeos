@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-17T05:02:43Z:58297145519e7bcc2b821d94e5b1e1e6e25d85f119816e7431216b462a971848:hi24W92WwFGTHW60ePoINH472qH+pYhm2sO7LWkkivh5YUuzhPmRGNPMOmjq5LQexsON8/H/HO/dWQ9jdrjaDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-17T17:48:41Z:c6cae8f1534e1981b119d572af6afec10900b163b2fba955af3587f732edc590:L29CBHqyLbi+JyyliH8dmQtAgs4/dboVNVs0FZbFjBlcPepVZ0Fh6/zdVTDwLK8D7BtwYtXhzvEl4N3aeaboDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/config/providers
 tags: [provider, deepseek, v4, models]
@@ -21,8 +21,10 @@ The directive bundle exposes `deepseek-v4-pro` and `deepseek-v4-flash`. Both
 have a 1,000,000-token context window, support thinking and non-thinking modes,
 and support tool calls. Thinking mode is provider-enabled by default. RyeOS
 records streamed `reasoning_content` as a `reasoning` part of the assistant turn,
-in stream order beside its tool calls, so it can be supplied on the following
-tool-result turn as required by DeepSeek.
+in stream order beside its tool calls, and sends it back on assistant messages
+as `reasoning_content`, so it is supplied on the following tool-result turn as
+required by DeepSeek. Both the capture and the replay are declared by the signed
+entry under `schemas.reasoning`.
 
 The legacy `deepseek-chat` and `deepseek-reasoner` aliases are not advertised:
 DeepSeek retired them on 24 July 2026.
