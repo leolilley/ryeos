@@ -93,6 +93,81 @@ jobs:
       - name: Check workflows and release/install shell
         run: ./scripts/ci/lint-workflows-and-shell.sh "$RUNNER_TEMP/ryeos-linters"
 
+      - name: Check signed files match their signed content hash
+        # Mirrors lillux::signature::content_hash_after_signature
+        # (crates/kernel/lillux/src/signature.rs): sha256 of the whole file
+        # with the signature line (line 1, or line 2 under a shebang) removed,
+        # terminator included. Hash only; the Ed25519 signature is not checked.
+        run: |
+          python3 -I - <<'PY'
+          import hashlib, os, re, shutil, subprocess, sys, tempfile
+
+          HEADER = re.compile(r"^\s*(?:#|<!--)\s*ryeos:signed:(.*?)(?:-->)?\s*$")
+
+          def check(data):
+              """Return None if unsigned or fresh, else (header_hash, content_hash)."""
+              try:
+                  text = data.decode("utf-8")
+              except UnicodeDecodeError:
+                  return None
+              # Split on "\n" only, like Rust str::lines (a "\r" stays on its line).
+              lines = re.findall(r"[^\n]*\n|[^\n]+\Z", text)
+              for idx in ((1, 0) if lines and lines[0].startswith("#!") else (0,)):
+                  if idx >= len(lines):
+                      continue
+                  m = HEADER.match(lines[idx].rstrip("\r\n"))
+                  if not m:
+                      continue
+                  parts = m.group(1).rsplit(":", 3)
+                  if len(parts) != 4:
+                      continue
+                  signed = "".join(lines[:idx] + lines[idx + 1:]).encode("utf-8")
+                  actual = hashlib.sha256(signed).hexdigest()
+                  return None if actual == parts[1] else (parts[1], actual)
+              return None
+
+          def signed_files():
+              out = subprocess.run(["git", "ls-files", "-z"], check=True, capture_output=True).stdout
+              for name in out.decode().split("\0"):
+                  if not name or os.path.islink(name) or not os.path.isfile(name):
+                      continue
+                  with open(name, "rb") as fh:
+                      data = fh.read()
+                  if b"ryeos:signed:" in data:
+                      yield name, data
+
+          # Self-check: a signed file with one byte altered must be reported stale.
+          sample = next((n for n, d in signed_files() if check(d) is None and HEADER.match(d.decode("utf-8", "replace").splitlines()[0])), None)
+          if sample is None:
+              sys.exit("self-check: no signed sample file found")
+          tmp = tempfile.mkdtemp()
+          try:
+              copy = os.path.join(tmp, "sample")
+              shutil.copyfile(sample, copy)
+              with open(copy, "rb") as fh:
+                  good = fh.read()
+              assert check(good) is None, "self-check: pristine copy reported stale"
+              assert check(good + b"x") is not None, "self-check: altered copy not reported stale"
+          finally:
+              shutil.rmtree(tmp)
+
+          stale = checked = 0
+          for name, data in signed_files():
+              try:
+                  first = data.decode("utf-8").splitlines()[:2]
+              except UnicodeDecodeError:
+                  continue
+              if not any(HEADER.match(l) for l in first):
+                  continue
+              checked += 1
+              res = check(data)
+              if res:
+                  stale += 1
+                  print(f"stale signature: {name} (header {res[0][:12]}, content {res[1][:12]})")
+          print(f"checked {checked} signed files, {stale} stale")
+          sys.exit(1 if stale else 0)
+          PY
+
       - name: Check custody token ban
         run: ./scripts/ci/check-custody-tokens.sh
 
