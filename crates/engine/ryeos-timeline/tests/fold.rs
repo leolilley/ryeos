@@ -1033,6 +1033,7 @@ fn a_turn_cut_at_the_output_limit_draws_a_marker() {
     let text = serde_json::to_string(&fold(&[cut], &def).unwrap()).unwrap();
     assert!(text.contains("turn cut at the output limit · 4"), "{text}");
     assert!(text.contains("partial answer"), "{text}");
+}
 
 /// A followed child's settlement updates its link: the outcome kind sets the
 /// state and tone, and the result summary becomes the body. A failed child
