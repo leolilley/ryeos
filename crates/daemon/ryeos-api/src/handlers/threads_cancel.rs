@@ -15,7 +15,10 @@ use serde_json::{Value, json};
 use crate::handler_context::HandlerContext;
 use crate::handler_error::HandlerError;
 use crate::registry::ServiceDescriptor;
-use ryeos_app::cascade::{CascadeMode, cancel_queued_descendants, cascade_descendants};
+use ryeos_app::cascade::{
+    CascadeMode, cancel_queued_descendants, cascade_descendants_settled, chain_segment_ids,
+    settle_stopped_descendants,
+};
 use ryeos_app::process::{
     KillResult, SIGKILL_DELIVERED_UNSETTLED, ShutdownAction, kill_by_action,
     resolve_shutdown_action,
@@ -25,6 +28,7 @@ use ryeos_app::state_store::{StopIntent, is_terminal_status};
 use ryeos_app::thread_lifecycle::ThreadFinalizeParams;
 use ryeos_engine::contracts::ThreadTerminalStatus;
 use ryeos_executor::executor::ServiceAvailability;
+use ryeos_state::objects::ThreadStatus;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -113,11 +117,55 @@ pub(crate) async fn cancel_as_node_action(
     .await
 }
 
+/// Bound on waiting for a stopped descendant's launcher to settle its row
+/// before the cancel settles the row itself.
+const DESCENDANT_SETTLE_WAIT: Duration = Duration::from_secs(15);
+
+/// Follow `continued` rows to the run's live tip. A caller names a run by the
+/// id it was given, which stays the first segment after the run suspends on a
+/// follow or hands off to a successor; the row that can be stopped is the tip.
+/// A tip that is terminal (or a chain with no recorded successor) keeps the
+/// requested row, so the caller sees the ordinary refusal for it.
+fn resolve_live_tip(
+    state: &AppState,
+    thread: ryeos_app::state_store::ThreadDetail,
+) -> Result<ryeos_app::state_store::ThreadDetail, HandlerError> {
+    const MAX_SEGMENTS: usize = 1024;
+    let mut current = thread;
+    for _ in 0..MAX_SEGMENTS {
+        if current.status != ThreadStatus::Continued.as_str() {
+            return Ok(current);
+        }
+        let Some(next_id) = current.successor_thread_id.clone() else {
+            return Ok(current);
+        };
+        current = state
+            .state_store
+            .get_thread(&next_id)
+            .map_err(|e| HandlerError::Internal(format!("{e:#}")))?
+            .ok_or_else(|| {
+                HandlerError::Internal(format!(
+                    "continuation successor {next_id} of {} has no thread row",
+                    current.thread_id
+                ))
+            })?;
+    }
+    Err(HandlerError::Internal(format!(
+        "continuation chain of {} exceeds {MAX_SEGMENTS} segments",
+        current.thread_id
+    )))
+}
+
 async fn cancel_loaded_thread(
     req: Request,
     thread: ryeos_app::state_store::ThreadDetail,
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
+    let requested_thread_id = req.thread_id;
+    let thread = resolve_live_tip(&state, thread)?;
+    let req = Request {
+        thread_id: thread.thread_id.clone(),
+    };
     // Check if already terminal — bail early with a clear message.
     let current_status = thread.status.as_str();
     if is_terminal_status(current_status) {
@@ -265,8 +313,27 @@ async fn cancel_loaded_thread(
     let cascade_state = Arc::clone(&state);
     let cascade_thread_id = req.thread_id.clone();
     let (queued_cancelled, cascade) = tokio::task::spawn_blocking(move || {
-        let queued_cancelled = cancel_queued_descendants(&cascade_state, &cascade_thread_id)?;
-        let cascade = cascade_descendants(&cascade_state, &cascade_thread_id, cascade_mode)?;
+        // A follow child hangs off whichever segment of the run suspended, so
+        // every segment's lineage is stopped, not just the target's.
+        let segments = chain_segment_ids(&cascade_state, &cascade_thread_id)?;
+        let mut queued_cancelled = Vec::new();
+        let mut cascade = Vec::new();
+        for segment in &segments {
+            queued_cancelled.extend(cancel_queued_descendants(&cascade_state, segment)?);
+            cascade.extend(cascade_descendants_settled(
+                &cascade_state,
+                segment,
+                cascade_mode,
+            )?);
+        }
+        for segment in &segments {
+            settle_stopped_descendants(
+                &cascade_state,
+                segment,
+                cascade_mode,
+                DESCENDANT_SETTLE_WAIT,
+            )?;
+        }
         Ok::<_, anyhow::Error>((queued_cancelled, cascade))
     })
     .await
@@ -359,6 +426,7 @@ async fn cancel_loaded_thread(
 
     Ok(json!({
         "thread_id": req.thread_id,
+        "requested_thread_id": requested_thread_id,
         "status": finalized.status,
         "kill": kill_info,
         "cascade": cascade,

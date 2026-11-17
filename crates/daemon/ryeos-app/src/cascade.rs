@@ -11,13 +11,18 @@
 //! its behalf.
 
 use std::collections::BTreeSet;
+
 use std::time::Duration;
 
+use anyhow::Context as _;
 use serde_json::{Value, json};
 
 use ryeos_engine::contracts::CancellationMode;
 
-use crate::process::{signal_exact_group, signal_exact_target};
+use crate::process::{
+    ShutdownAction, kill_by_action, resolve_shutdown_action, signal_exact_group,
+    signal_exact_target,
+};
 use crate::state::AppState;
 use crate::thread_lifecycle::ThreadFinalizeParams;
 
@@ -70,6 +75,40 @@ pub fn cascade_descendants(
     root_thread_id: &str,
     mode: CascadeMode,
 ) -> anyhow::Result<Vec<Value>> {
+    cascade_descendants_with(state, root_thread_id, mode, StopStrength::Signal)
+}
+
+/// Like [`cascade_descendants`], but each live descendant is stopped the way a
+/// cancelled root is: the target is signalled per `mode`, a graceful stop gets
+/// the launch's grace, and the pinned process group (every tool and helper the
+/// target started) is then killed. A descendant counts as stopped only once its
+/// group is observed empty; any other outcome fails the cascade. Descendants
+/// stop in parallel, so the wait is the longest grace, not their sum.
+pub fn cascade_descendants_settled(
+    state: &AppState,
+    root_thread_id: &str,
+    mode: CascadeMode,
+) -> anyhow::Result<Vec<Value>> {
+    cascade_descendants_with(state, root_thread_id, mode, StopStrength::Settled)
+}
+
+/// Result marker for a stop whose process group was not proved gone.
+const STOP_UNPROVEN: &str = "unproven";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StopStrength {
+    /// One signal to the target; nothing is awaited.
+    Signal,
+    /// Signal, grace, group kill; success only on an observed-empty group.
+    Settled,
+}
+
+fn cascade_descendants_with(
+    state: &AppState,
+    root_thread_id: &str,
+    mode: CascadeMode,
+    strength: StopStrength,
+) -> anyhow::Result<Vec<Value>> {
     const MAX_FIXED_POINT_PASSES: usize = 16;
     let mut seen = BTreeSet::new();
     let mut report = Vec::new();
@@ -85,15 +124,106 @@ pub fn cascade_descendants(
             }
             return Ok(report);
         }
-        report.extend(
-            new_children
+        let pass = std::thread::scope(|scope| {
+            let handles = new_children
                 .iter()
-                .map(|child| signal_descendant(state, child, mode)),
-        );
+                .map(|child| scope.spawn(move || signal_descendant(state, child, mode, strength)))
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .zip(&new_children)
+                .map(|(handle, child)| {
+                    handle.join().unwrap_or_else(|_| {
+                        json!({ "thread_id": child, "result": STOP_UNPROVEN, "error": "stop worker panicked" })
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
+        report.extend(pass);
     }
     anyhow::bail!(
         "descendant stop did not reach a fixed point after {MAX_FIXED_POINT_PASSES} passes for {root_thread_id}: {report:?}"
     )
+}
+
+/// Every thread of `thread_id`'s chain (continuation segments), including
+/// `thread_id` itself. A follow child is linked to whichever segment suspended
+/// when it was admitted, so the whole run's lineage is the union of these
+/// segments' descendants.
+pub fn chain_segment_ids(state: &AppState, thread_id: &str) -> anyhow::Result<Vec<String>> {
+    let Some(thread) = state.state_store.get_thread(thread_id)? else {
+        return Ok(vec![thread_id.to_string()]);
+    };
+    let mut ids: Vec<String> = state
+        .state_store
+        .list_chain_threads(&thread.chain_root_id)?
+        .into_iter()
+        .map(|segment| segment.thread_id)
+        .collect();
+    if !ids.iter().any(|id| id == thread_id) {
+        ids.push(thread_id.to_string());
+    }
+    Ok(ids)
+}
+
+/// Wait until every descendant of `root_thread_id` has a terminal row. A
+/// descendant whose process is already proven gone (the caller ran a settled
+/// cascade) but whose launcher has not finalized it within `wait` is finalized
+/// here with the stop intent's status, so no row outlives its stop. A
+/// descendant that cannot be finalized fails the call.
+pub fn settle_stopped_descendants(
+    state: &AppState,
+    root_thread_id: &str,
+    mode: CascadeMode,
+    wait: Duration,
+) -> anyhow::Result<()> {
+    let status = match mode {
+        CascadeMode::Graceful => "cancelled",
+        CascadeMode::Hard => "killed",
+    };
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        let mut pending = Vec::new();
+        for id in state.state_store.descendant_thread_ids(root_thread_id)? {
+            if let Some(thread) = state.state_store.get_thread(&id)?
+                && !crate::state_store::is_terminal_status(&thread.status)
+            {
+                pending.push(thread);
+            }
+        }
+        if pending.is_empty() {
+            return Ok(());
+        }
+        if std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+            continue;
+        }
+        for thread in pending {
+            let finalized = state.threads.finalize_thread(&ThreadFinalizeParams {
+                thread_id: thread.thread_id.clone(),
+                status: status.to_string(),
+                outcome_code: Some(status.to_string()),
+                result: None,
+                error: Some(json!({"reason": "ancestor_stopped"})),
+                metadata: None,
+                artifacts: Vec::new(),
+                final_cost: None,
+                summary_json: None,
+            });
+            if let Err(error) = finalized {
+                let terminal = state
+                    .state_store
+                    .get_thread(&thread.thread_id)?
+                    .is_some_and(|current| crate::state_store::is_terminal_status(&current.status));
+                if !terminal {
+                    return Err(error).with_context(|| {
+                        format!("settle stopped descendant {}", thread.thread_id)
+                    });
+                }
+            }
+        }
+        return Ok(());
+    }
 }
 
 fn scoped_child_settlement_failed(report: &Value) -> bool {
@@ -105,6 +235,7 @@ fn scoped_child_settlement_failed(report: &Value) -> bool {
 
 fn descendant_stop_unproven(report: &Value) -> bool {
     scoped_child_settlement_failed(report)
+        || report.get("result").and_then(Value::as_str) == Some(STOP_UNPROVEN)
         || matches!(
             report.get("skipped").and_then(Value::as_str),
             Some(
@@ -214,6 +345,15 @@ pub fn repair_cancelled_window_members(state: &AppState) -> anyhow::Result<()> {
 /// A terminal row is still signalled when it retains an attached identity: a
 /// managed runtime may self-finalize before the outer owned wrapper has exited.
 pub fn signal_thread(state: &AppState, thread_id: &str, mode: CascadeMode) -> Value {
+    signal_thread_with(state, thread_id, mode, StopStrength::Signal)
+}
+
+fn signal_thread_with(
+    state: &AppState,
+    thread_id: &str,
+    mode: CascadeMode,
+    strength: StopStrength,
+) -> Value {
     let store = &state.state_store;
     let thread = match store.get_thread(thread_id) {
         Ok(Some(thread)) => thread,
@@ -251,18 +391,33 @@ pub fn signal_thread(state: &AppState, thread_id: &str, mode: CascadeMode) -> Va
                 Some(crate::state_store::StopIntent::Cancel) => CascadeMode::Graceful,
                 None => mode,
             };
-            let signal = cancel_signal(effective_mode, cancellation_mode);
-            let result = if signal == libc::SIGKILL {
-                signal_exact_group(identity, signal)
+            if strength == StopStrength::Settled {
+                let action = match effective_mode {
+                    CascadeMode::Hard => ShutdownAction::Hard,
+                    CascadeMode::Graceful => resolve_shutdown_action(cancellation_mode),
+                };
+                let stopped = kill_by_action(identity, action);
+                json!({
+                    "thread_id": thread_id,
+                    "pgid": pgid,
+                    "action": format!("{action:?}"),
+                    "method": stopped.method,
+                    "result": if stopped.success { "stopped" } else { STOP_UNPROVEN },
+                })
             } else {
-                signal_exact_target(identity, signal)
-            };
-            json!({
-                "thread_id": thread_id,
-                "pgid": pgid,
-                "signal": signal_name(signal),
-                "result": result.as_str(),
-            })
+                let signal = cancel_signal(effective_mode, cancellation_mode);
+                let result = if signal == libc::SIGKILL {
+                    signal_exact_group(identity, signal)
+                } else {
+                    signal_exact_target(identity, signal)
+                };
+                json!({
+                    "thread_id": thread_id,
+                    "pgid": pgid,
+                    "signal": signal_name(signal),
+                    "result": result.as_str(),
+                })
+            }
         } else {
             json!({ "thread_id": thread_id, "pgid": pgid, "skipped": "no_process_identity" })
         }
@@ -293,7 +448,12 @@ pub fn signal_thread(state: &AppState, thread_id: &str, mode: CascadeMode) -> Va
 /// reported from its own row instead: a terminal handler is a proven stop, a
 /// running one is not. A direct stop of such a thread as the cascade target
 /// still goes through `signal_thread` and keeps the store's refusal.
-fn signal_descendant(state: &AppState, thread_id: &str, mode: CascadeMode) -> Value {
+fn signal_descendant(
+    state: &AppState,
+    thread_id: &str,
+    mode: CascadeMode,
+    strength: StopStrength,
+) -> Value {
     let thread = match state.state_store.get_thread(thread_id) {
         Ok(Some(thread)) => thread,
         Ok(None) => return json!({ "thread_id": thread_id, "skipped": "no_thread_row" }),
@@ -308,7 +468,7 @@ fn signal_descendant(state: &AppState, thread_id: &str, mode: CascadeMode) -> Va
         .and_then(|metadata| metadata.launch_driver)
         == Some(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler);
     if !in_process_handler {
-        return signal_thread(state, thread_id, mode);
+        return signal_thread_with(state, thread_id, mode, strength);
     }
     in_process_descendant_report(thread_id, &thread.status)
 }
@@ -399,6 +559,12 @@ mod tests {
         }
         assert!(descendant_stop_unproven(
             &json!({ "scoped_child_settlement": "failed" })
+        ));
+        assert!(descendant_stop_unproven(
+            &json!({ "result": STOP_UNPROVEN, "method": "sigkill_delivered_unsettled" })
+        ));
+        assert!(!descendant_stop_unproven(
+            &json!({ "result": "stopped", "method": "already_dead" })
         ));
         assert!(!descendant_stop_unproven(&json!({
             "signal": "SIGTERM",
