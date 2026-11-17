@@ -19,10 +19,10 @@ use super::launch_envelope::{
 };
 
 use super::limits::{
-    LimitsConfigSnapshot, apply_caller_limit_overrides, apply_execution_policy_defaults,
-    apply_execution_policy_item_overrides, clamp_to_schedule_ceiling, compute_effective_limits,
-    load_limits_config_snapshot, load_limits_config_snapshot_under_project_authority,
-    merge_header_limits, policy_item_override,
+    LimitsConfigSnapshot, PARAM_RUN_TIMEOUT, apply_caller_limit_overrides,
+    apply_execution_policy_defaults, apply_execution_policy_item_overrides,
+    clamp_to_schedule_ceiling, compute_effective_limits, load_limits_config_snapshot,
+    load_limits_config_snapshot_under_project_authority, merge_header_limits, policy_item_override,
 };
 use super::thread_meta::ThreadMeta;
 use crate::dispatch_error::DispatchError;
@@ -4255,6 +4255,41 @@ fn resolve_accounting_scope(
     ))
 }
 
+/// The share of the tree's run deadline this launch leaves to its ancestors.
+///
+/// A thread seals it once, at its first launch: a continuation, resume or
+/// follow successor copies the sealed value exactly, so a continued child
+/// never loses the window its parent reserved. A fresh root holds nothing
+/// back; a fresh child takes the hold-back its parent's reserve rule gives at
+/// `now_ms`. A tree without a recorded deadline holds nothing back.
+fn resolve_deadline_hold_back_ms(
+    params: &BuildAndLaunchParams<'_>,
+    metadata_template: Option<&ryeos_app::launch_metadata::RuntimeLaunchMetadata>,
+    scope: Option<&ryeos_state::objects::AdmittedAccountingScope>,
+    now_ms: i64,
+) -> Result<u64, BuildAndLaunchError> {
+    if let Some(sealed) = metadata_template.and_then(|template| template.deadline_hold_back_ms) {
+        return Ok(sealed);
+    }
+    let Some(parent) = parent_limits_from_context(params.parent_execution_context)? else {
+        return Ok(0);
+    };
+    let (Some(scope), Some(accounting)) = (scope, params.state.accounting.as_ref()) else {
+        return Ok(0);
+    };
+    let tree_deadline_at_ms = accounting
+        .execution_resource_budget_snapshot(&scope.execution_budget_id)
+        .map_err(|error| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "execution budget deadline lookup failed: {error:#}"
+            ))
+        })?
+        .and_then(|budget| budget.deadline_at_ms);
+    Ok(tree_deadline_at_ms
+        .map(|deadline| parent.deadline.child_hold_back_ms(deadline, now_ms))
+        .unwrap_or(0))
+}
+
 fn capture_managed_descriptor_document(
     path: &Path,
     expected_content_hash: &str,
@@ -5861,6 +5896,13 @@ async fn prepare_managed_launch_authority(
         }
         let (scope, minted) =
             resolve_accounting_scope(params, metadata_template, &prepared_launch)?;
+        let deadline_hold_back_ms = resolve_deadline_hold_back_ms(
+            params,
+            metadata_template,
+            scope.as_ref(),
+            lillux::time::timestamp_millis(),
+        )?;
+        metadata = metadata.with_deadline_hold_back_ms(deadline_hold_back_ms);
         if let Some(scope) = scope {
             metadata = metadata.with_accounting_scope(scope);
         }
@@ -6958,6 +7000,23 @@ async fn run_claimed_thread_row_inner(
         _ => execution_defaults,
     };
     let requested_limits = apply_execution_policy_item_overrides(&base_limits, execution_policy);
+    // The run deadline belongs to the root of an execution tree. A descendant
+    // inherits it and cannot widen or narrow it, so a descendant that asks for
+    // its own is refused rather than silently ignored.
+    if parameters.get(PARAM_RUN_TIMEOUT).is_some() && parent_execution_context.is_some() {
+        return Err(BuildAndLaunchError::from(
+            DispatchError::LaunchPreparationFailed {
+                code: "run_timeout_root_only".to_owned(),
+                message: format!(
+                    "`{PARAM_RUN_TIMEOUT}` sets the run deadline of an execution tree and is \
+                     accepted only on the root launch; a descendant inherits its parent's deadline"
+                ),
+                classification: "policy".to_owned(),
+                binding: None,
+                details: Box::new(BTreeMap::new()),
+            },
+        ));
+    }
     let requested_limits = apply_caller_limit_overrides(requested_limits, parameters)?;
     // Parent budget/depth inheritance is trusted control-plane data carried
     // out-of-band (callback token → DispatchRequest). It is never read from
@@ -6969,13 +7028,39 @@ async fn run_claimed_thread_row_inner(
     // Current launch depth (position in the spawn tree). Callback children use
     // trusted parent depth + 1; roots and same-braid continuations launch at 0.
     let current_depth = launch_depth_from_context(parent_execution_context);
-    let hard_limits = compute_effective_limits(
+    let mut hard_limits = compute_effective_limits(
         Some(&requested_limits),
         &limits_config.defaults,
         &limits_config.caps,
         parent_limits.as_ref(),
         &selected_runtime.yaml.limits,
     );
+    // Once an execution tree exists its aggregate limits are fixed by the
+    // ledger row. A continuation, resume or follow successor reads them back
+    // instead of recomputing them from authored data and parameters, so a node
+    // cap edited between segments cannot fail a live run.
+    if let (Some(scope), Some(accounting), false) = (
+        launch_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.accounting_scope.as_ref()),
+        state.accounting.as_ref(),
+        freshly_minted_accounting_scope,
+    ) && let Some(stored) = accounting
+        .execution_resource_budget_limits(&scope.execution_budget_id)
+        .map_err(|error| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "execution budget limits lookup failed: {error:#}"
+            ))
+        })?
+    {
+        hard_limits.aggregate = stored;
+    }
+    // The hold-back was sealed with the launch metadata; descendants and the
+    // runtime read it from the limits this launch mints.
+    hard_limits.deadline.hold_back_ms = launch_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.deadline_hold_back_ms)
+        .unwrap_or(0);
     // A scheduled fire carries its schedule owner's per-fire ceiling in the
     // daemon-authored fire context, sealed with the admitted request, so the
     // same ceiling applies on recovery and to continuation successors.
@@ -14549,6 +14634,7 @@ mod tests {
             depth: 3,
             duration_seconds: 45,
             aggregate: Default::default(),
+            deadline: Default::default(),
             runtime: BTreeMap::from([
                 ("actions".to_string(), 4),
                 ("payload_bytes".to_string(), 8_192),
@@ -14573,6 +14659,7 @@ mod tests {
             depth: 8,
             duration_seconds: 300,
             aggregate: Default::default(),
+            deadline: Default::default(),
             runtime: BTreeMap::from([
                 ("actions".to_string(), 12),
                 ("payload_bytes".to_string(), 65_536),
