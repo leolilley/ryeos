@@ -372,10 +372,17 @@ config:
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     let elapsed = launched.elapsed();
-    assert!(
-        chain.iter().any(|(_, s)| s == "completed"),
-        "the graph completed through its fallback: {chain:?}"
-    );
+    if !chain.iter().any(|(_, s)| s == "completed") {
+        let mut details = String::new();
+        for (thread, _) in &chain {
+            details.push_str(&thread_detail(&rig.h, thread, 3000).await);
+            details.push('\n');
+        }
+        panic!(
+            "the graph did not complete through its fallback: {chain:?}\n{details}\nstderr: {}",
+            stderr_hits(&rig.h, &["graph", "error", "refus", "deadline"], 40)
+        );
+    }
     // The run deadline is 90 s; the fallback finishes inside it.
     assert!(
         elapsed < Duration::from_secs(90),
@@ -428,6 +435,7 @@ config:
   nodes:
     call:
       node_type: action
+      follow: true
       action:
         item_id: "directive:probe/run"
         ref_bindings: { model: "directive:probe/run" }
@@ -443,15 +451,32 @@ config:
     let id = launch_graph_on(&rig, "graph:asker", json!({}))
         .await
         .expect("launch graph");
-    let (_status, _) = wait_terminal(&rig.h, &id, Duration::from_secs(90)).await;
-    let mut seen = thread_detail(&rig.h, &id, 6000).await;
-    for (thread_id, kind, payload) in chain_event_list(&rig.h, &id).await {
-        seen.push_str(&format!("\n{thread_id} {kind} {payload}"));
+    // The followed child is its own chain; wait for every thread to settle.
+    let started = Instant::now();
+    let mut seen = String::new();
+    loop {
+        let listed = rig.h.list_threads(2000).await.unwrap_or_default();
+        let settled = !listed.is_empty()
+            && listed
+                .iter()
+                .all(|t| TERMINAL.contains(&t.status.as_str()) && t.status != "continued");
+        if settled || started.elapsed() > Duration::from_secs(90) {
+            for t in &listed {
+                seen.push_str(&format!("\n[{} {}] ", t.thread_id, t.status));
+                seen.push_str(&thread_detail(&rig.h, &t.thread_id, 3000).await);
+                for (thread_id, kind, payload) in chain_event_list(&rig.h, &t.chain_root_id).await {
+                    seen.push_str(&format!("\n{thread_id} {kind} {payload}"));
+                }
+            }
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
+    let _ = id;
     assert!(
-        seen.contains("run_timeout"),
-        "the refusal names run_timeout: {}",
-        trunc(&seen, 1500)
+        seen.contains("run_timeout_root_only") || seen.contains("accepted only on the root launch"),
+        "the refusal names the root-only rule: {}",
+        trunc(&seen, 3000)
     );
     assert!(
         rig.stub.requests().await.is_empty(),
