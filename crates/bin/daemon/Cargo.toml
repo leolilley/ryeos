@@ -114,6 +114,7 @@ ryeos-runtime = { workspace = true }
 ryeos-client-base = { workspace = true }
 uuid = { workspace = true }
 ryeos-tracing = { workspace = true, features = ["test-harness"] }
+ryeos-chat-stub = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true, features = ["client", "server", "http1"] }
 hyper-util = { workspace = true, features = ["tokio", "server", "http1"] }

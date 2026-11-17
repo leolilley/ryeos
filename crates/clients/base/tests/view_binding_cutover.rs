@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 const VIEW_BEHAVIOR_GOLDENS: &[(&str, &str)] = &[
     (
         "view:ryeos/chain/timeline",
-        "2a43ab417a74a535cca93ad78afabaa486037b836b264626b2e85a28886c585e",
+        "b122348e55a2e68761ebf55a263d758056930de77e2ee230dffa54f8adf077d8",
     ),
     (
         "view:ryeos/commands/grammar",
@@ -142,11 +142,11 @@ const VIEW_BEHAVIOR_GOLDENS: &[(&str, &str)] = &[
     ),
     (
         "view:ryeos/thread/conversation",
-        "1f14ab97c751055c4de3ae8a4c1eed5bf38bf4eea32a7d37c500c7e1143e7fb4",
+        "ca15426ace52cad56a0d7ce4b3565313fd37ee07589bf5b5196cf385e55f1467",
     ),
     (
         "view:ryeos/thread/transcript",
-        "4422fb1fb9ecc87d744b9f1407ab0f74bad29b359a87560e53fd5c0cf892f3e7",
+        "9f0c263b72cd77dc962d5497213d7eae3d879e1768aa12279adf181ab294d6f4",
     ),
     (
         "view:ryeos/thread/tree",
@@ -174,7 +174,7 @@ const VIEW_BEHAVIOR_GOLDENS: &[(&str, &str)] = &[
     ),
     (
         "view:ryeos/ui/shortcuts",
-        "a83a1ac1fddb9c30c6dffcd6c8badf12d06cde215288099556c076637b7468d6",
+        "5cde671ae5f5651d832369150c5fb3b9436b6f145900a851c9527e05c94aea81",
     ),
     (
         "view:ryeos/ui/status",

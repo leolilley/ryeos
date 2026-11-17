@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-17T04:34:06Z:780739aa81315478568cd50e9387f99771881a245b19e3f730577b7ea20a3160:kJxhB36B2lHaEnXYDhiBDgt2WSGzim41Bw9vlJD56fN0yURhWUoAuB8nJHb5teEjnHfOWWCmUuFSjtW5MibzCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T06:42:40Z:cb7f9bfaa8d8a5fc2dac475148daca3f09189811fb67ccd29edf75813cbcd8db:Vh3op3HcQmIe44DARJjk/dKDty6caDOphC2WuAc+4zlwaHAICBai55mo/d8Ug1es31fWZYBTd4IaWeVZrJMkCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: thread-transcript
 title: Activity
 version: "1.0.0"
@@ -16,6 +16,16 @@ sources:
       limit: "@facet:timeline.window.limit|200"
     collection: items
     dynamic_parameters: [since_chain_seq]
+  raw:
+    ref: service:ui/ryeos-ui/timeline/raw
+    role: timeline_raw
+    params:
+      chain_root_id: "@facet:input.route.chain_root"
+      from_chain_seq: ""
+      to_chain_seq: ""
+    dynamic_parameters: [from_chain_seq, to_chain_seq]
+    activation: on_demand
+    refresh: {}
 projections:
   expand:
     fields:

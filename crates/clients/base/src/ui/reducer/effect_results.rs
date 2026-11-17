@@ -282,6 +282,9 @@ impl RyeOsCore {
             return effects;
         }
 
+        if matches!(expected, RyeOsEffectKind::CopyToClipboard { .. }) {
+            self.notice("Copied to the clipboard.", RyeOsTone::Good);
+        }
         let Some(data) = result.data else {
             self.bump_generation();
             return self.finish_source_effect(completed_source_key.as_deref(), Vec::new());
@@ -682,6 +685,7 @@ impl RyeOsCore {
         result_id: u64,
         data: serde_json::Value,
     ) -> Vec<RyeOsEffect> {
+        let mut raw_followup = Vec::new();
         match kind {
             RyeOsEffectResultKind::SourceData => {
                 if let RyeOsEffectKind::FetchSource {
@@ -729,6 +733,7 @@ impl RyeOsCore {
                         let accepted = self.data.sources.get(tile_id).cloned();
                         if let Some(accepted) = accepted.as_ref() {
                             self.settle_field_source(tile_id, accepted);
+                            raw_followup = self.settle_timeline_raw(tile_id, accepted);
                         }
                     }
                     self.bump_generation();
@@ -744,7 +749,7 @@ impl RyeOsCore {
         }
 
         self.bump_generation();
-        Vec::new()
+        raw_followup
     }
 
     /// Project signed source roles without admitting another executable source.

@@ -526,6 +526,9 @@ pub struct RyeOsDataState {
     /// the braid snapshot is. Cleared once a fresh snapshot supersedes it.
     #[serde(default)]
     pub live_delta: Option<RyeOsLiveDelta>,
+    /// The raw-events fetch a timeline entry action is waiting on.
+    #[serde(default, skip)]
+    pub(crate) pending_timeline_raw: Option<super::timeline::PendingTimelineRaw>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2009,7 +2012,6 @@ impl RyeOsCore {
 
     /// Fetch a presentation-role source for one exact mounted view. Roles are
     /// signed view metadata; this lookup never chooses an executable target.
-    #[cfg(test)]
     pub(crate) fn fetch_view_source_role(
         &mut self,
         instance_key: RyeOsViewInstanceKey,
@@ -2224,6 +2226,17 @@ impl RyeOsCore {
             return;
         };
         if binding.widget != "timeline" {
+            return;
+        }
+        // Only the timeline's own channel is a folded timeline; other channels
+        // (such as the on-demand raw events) are plain responses.
+        let is_primary =
+            super::source_key::RyeOsSourceInstanceKey::decode(source_key).is_some_and(|key| {
+                binding.primary_source().is_some_and(|(channel, _)| {
+                    key.channel == super::source_key::RyeOsSourceChannel::Named(channel.into())
+                })
+            });
+        if !is_primary {
             return;
         }
         let Some(response) = self.data.sources.get(source_key) else {
@@ -2628,6 +2641,7 @@ impl RyeOsCore {
             self.focused_row_expand_state().unwrap_or((false, false));
         let (focused_tree_collapsible, focused_tree_collapsed) =
             self.focused_tree_row_fold_state().unwrap_or((false, false));
+        let timeline_keys = self.focused_timeline_key_state();
 
         super::keymap::RyeOsKeyContext {
             dialog_open: self.focused_view_instance_key().is_some_and(|key| {
@@ -2668,6 +2682,9 @@ impl RyeOsCore {
             focused_row_expanded,
             focused_tree_collapsible,
             focused_tree_collapsed,
+            focused_timeline_entry: timeline_keys.entry,
+            focused_timeline_foldable: timeline_keys.foldable,
+            focused_source_failed: timeline_keys.source_failed,
             field: super::keymap::focused_field_key_context(self),
         }
     }

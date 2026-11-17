@@ -33,7 +33,7 @@ shared-core behavior the adapter cannot currently originate.
 | [x] `PrepareTransfer` | native | native | Existing transfer ingress carries exact producer/anchors and retained export/freeze evidence; completion returns to Core. |
 | [x] `ContactTransfer` | native | native | Existing transfer contact/reconciliation transport; no adapter-owned transfer state machine. |
 | [x] `SetLocationHash` | native | gap | Terminal returns an explicit unsupported-native-effect error. |
-| [x] `CopyToClipboard` | native | gap | Terminal returns an explicit unsupported-native-effect error. |
+| [x] `CopyToClipboard` | native | native | The browser writes the clipboard; the terminal writes the OSC 52 escape and the emulator decides whether to honour it. |
 | [x] `OpenUrl` | native | gap | Terminal returns an explicit unsupported-native-effect error. |
 | [x] `ReplaceSession` | native | native | Both redeem the one-shot successor session. |
 | [x] `ReleaseBindingAttachment` | native | native | Same exact session-bound attachment triple; explicit release only. |
@@ -181,6 +181,8 @@ exact `InputAt` addresses; character-level events remain shared keymap paths.
 | [x] `SetTreeRowCollapsed` | shared | shared | shared keymap |
 | [x] `SetViewTreeItemCollapsed` | native | gap | Browser hierarchy button addresses exact visible mount and stable row identity; terminal uses focused tree-fold keys. |
 | [x] `ActivateFocused` | shared | shared | shared keymap |
+| [x] `TimelineEntry` | shared | shared | shared keymap |
+| [x] `ToggleTimelineFold` | shared | shared | shared keymap |
 | [x] `PopLens` | shared | shared | drill return |
 <!-- parity:RyeOsUiEvent:end -->
 
