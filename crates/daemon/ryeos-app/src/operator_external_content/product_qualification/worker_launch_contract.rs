@@ -125,6 +125,7 @@ impl QualificationWorkerLaunchContract {
                     name.as_str(),
                     "RYEOS_STRUCTURED_SESSION_ROUTE_SET"
                         | "RYEOS_STRUCTURED_SESSION_EFFECT_CLASSES"
+                        | "RYEOS_STRUCTURED_SESSION_ROUTE_FIXED_PARAMS"
                 ),
                 "Q WorkerExecution home/workspace slot collides with bridge policy"
             );
@@ -140,6 +141,12 @@ impl QualificationWorkerLaunchContract {
             // judged where the admitted session capsule is available.
             .filter(|seconds| *seconds > 0)
             .context("Q WorkerExecution lifetime is invalid")?;
+        // Qualification launches its own worker without the admitted pin
+        // delivery, so an item that pins route fields cannot be qualified.
+        ensure!(
+            execution.get("route_fixed_params").is_none(),
+            "Q WorkerExecution cannot pin route fields"
+        );
         let mode = execution
             .get("mode")
             .context("Q WorkerExecution has no mode")?;

@@ -12628,18 +12628,20 @@ impl RuntimeDb {
         placement_thread_id: &str,
         command_sequence: u64,
         worker_boot_epoch: u64,
+        succeeded: bool,
         result: &serde_json::Value,
     ) -> Result<()> {
+        let state = if succeeded { "completed" } else { "failed" };
         self.conn.with_sql(|conn| {
             let result_json = serde_json::to_string(result)?;
             validate_bounded_runtime_text("recovered command result", &result_json, 256 * 1024)?;
             let now = lillux::time::timestamp_millis() as i64;
             let tx = conn.unchecked_transaction()?;
             let changed = tx.execute(
-                "UPDATE dedicated_session_command SET state='completed', result_json=?4, updated_at_ms=?5
+                "UPDATE dedicated_session_command SET state=?6, result_json=?4, updated_at_ms=?5
               WHERE placement_thread_id=?1 AND command_sequence=?2 AND worker_boot_epoch=?3
                 AND state IN ('dispatched','outcome_unknown')",
-                params![placement_thread_id, i64::try_from(command_sequence)?, i64::try_from(worker_boot_epoch)?, result_json, now],
+                params![placement_thread_id, i64::try_from(command_sequence)?, i64::try_from(worker_boot_epoch)?, result_json, now, state],
             )?;
             let session_changed = tx.execute(
                 "UPDATE dedicated_session SET send_boundary='settled',
@@ -12668,14 +12670,16 @@ impl RuntimeDb {
         placement_thread_id: &str,
         command_sequence: u64,
         worker_boot_epoch: u64,
+        succeeded: bool,
         result: &serde_json::Value,
     ) -> Result<()> {
+        let state = if succeeded { "completed" } else { "failed" };
         self.conn.with_sql(|conn| {
             let result_json = serde_json::to_string(result)?;
             validate_bounded_runtime_text("recovered command result", &result_json, 256 * 1024)?;
             let changed = conn.execute(
                 "UPDATE dedicated_session_command
-                SET state='completed', result_json=?4, updated_at_ms=?5
+                SET state=?6, result_json=?4, updated_at_ms=?5
               WHERE placement_thread_id=?1 AND command_sequence=?2 AND worker_boot_epoch=?3
                 AND state IN ('dispatched','outcome_unknown')
                 AND EXISTS(SELECT 1 FROM dedicated_session WHERE placement_thread_id=?1)",
@@ -12684,7 +12688,8 @@ impl RuntimeDb {
                     i64::try_from(command_sequence)?,
                     i64::try_from(worker_boot_epoch)?,
                     result_json,
-                    lillux::time::timestamp_millis() as i64
+                    lillux::time::timestamp_millis() as i64,
+                    state
                 ],
             )?;
             if changed != 1 {
@@ -26224,6 +26229,7 @@ mod tests {
             "T-recover",
             recovered_reattach.command_sequence,
             2,
+            true,
             &serde_json::json!({"redacted":true}),
         )
         .unwrap();
@@ -26325,6 +26331,7 @@ mod tests {
             "T-recover",
             terminal_recovered.command_sequence,
             2,
+            true,
             &serde_json::json!({"redacted":true}),
         )
         .unwrap();
@@ -28074,6 +28081,7 @@ mod tests {
             "T-ledger",
             recovered_command.command_sequence,
             1,
+            true,
             &serde_json::json!({"redacted":true,"response_digest":"c".repeat(64)}),
         )
         .unwrap();

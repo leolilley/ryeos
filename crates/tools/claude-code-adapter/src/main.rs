@@ -9,7 +9,6 @@
 mod claude;
 mod driver;
 mod invocation;
-mod os;
 mod select;
 mod sessions;
 mod stream;
@@ -30,7 +29,7 @@ fn main() -> ExitCode {
     // On SIGTERM, stop every Claude Code process group before exiting; on
     // input EOF the server does the same through `shutdown`.
     let on_signal = Arc::clone(&adapter);
-    if let Err(error) = os::exit_on_terminate(move || on_signal.shutdown()) {
+    if let Err(error) = lillux::child_group::exit_on_terminate(move || on_signal.shutdown()) {
         let _ = writeln!(
             io::stderr(),
             "claude-code-adapter: install signal handler: {error}"

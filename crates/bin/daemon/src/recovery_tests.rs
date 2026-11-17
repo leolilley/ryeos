@@ -2322,6 +2322,7 @@ async fn hosted_startup_replays_root_outboxes_before_detaching_the_old_worker_ep
                         "request_digest":request_digest,
                         "worker_boot_epoch":1,
                         "response_digest":response_digest,
+                        "succeeded":true,
                         "canonical_batch":response_batch,
                     }),
                 },
