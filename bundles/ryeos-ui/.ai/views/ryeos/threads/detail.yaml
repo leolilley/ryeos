@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-19T22:29:40Z:3db96b921b07244c6643b81ba02ee8c1fb1d3f68681fc5f56868abeef73b32d8:nR8FBRS/UWSiw5YkCOWDffklDn4jlWATMqzaQjIYKiNkxnxJuQNREkyO3FuL8ElUIiCHC/tXatBH0TRBsi4aAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T21:29:33Z:314b7636f95dc7bc49c4618575afef88a551b87859a1a99a3237fd20de73af47:1p7GUbYQuYD0RUmmgn5m9dCEpBroBCA3WWvo4HvPkwB+fWdiVTIRWmVfbWUw2Sdf0ueMW1qpGkpYjNrR9ssoBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: thread-detail
 version: "1.0.0"
 description: >-
@@ -64,6 +64,15 @@ sections:
   - title: Execution
     source_channel: detail
     collection: execution_meta
+    projection:
+      primary: value
+      meta: label
+
+  # Chain-wide settled usage from the projection (its coverage row is in
+  # Evidence coverage); not signed testimony.
+  - title: Usage
+    source_channel: detail
+    collection: usage
     projection:
       primary: value
       meta: label
