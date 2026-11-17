@@ -869,8 +869,97 @@ async fn wait_terminal_or_daemon_exit(
 
 // ── probe 2: sequential no-op tool calls ────────────────────────────────
 
+/// Redirect every tempdir the harness creates (app root, state, project) to
+/// tmpfs when `/dev/shm` exists, so durable writes cost no disk fsync.
+fn use_tmpfs_if_present(name: &str) -> &'static str {
+    let shm = Path::new("/dev/shm");
+    if !shm.is_dir() {
+        say(name, "tmpfs=unavailable (/dev/shm missing); running on the default temp dir");
+        return "disk";
+    }
+    if let Ok(out) = std::process::Command::new("df").args(["-k", "/dev/shm"]).output() {
+        say(name, &format!("tmpfs_df={:?}", String::from_utf8_lossy(&out.stdout)));
+    }
+    // SAFETY: called at the top of a single probe test (--test-threads=1)
+    // before any harness thread reads the environment.
+    unsafe { std::env::set_var("TMPDIR", "/dev/shm") };
+    "tmpfs"
+}
+
+fn field_of(line: &str, key: &str) -> Option<String> {
+    let eq = format!("{key}=");
+    if let Some(i) = line.find(&eq) {
+        let rest = &line[i + eq.len()..];
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        return Some(rest[..end].trim_matches('"').to_string());
+    }
+    let js = format!("\"{key}\":");
+    let i = line.find(&js)?;
+    let rest = line[i + js.len()..].trim_start();
+    let end = rest.find([',', '}']).unwrap_or(rest.len());
+    Some(rest[..end].trim_matches('"').to_string())
+}
+
+/// Group `StateStore contention summary` lines by contention kind and latest
+/// caller site. Each summary covers up to a 5 s interval and names only the
+/// latest caller, so attribution is a sample, not an exact split.
+fn contention_report(name: &str, log: &str) {
+    let mut groups: BTreeMap<(String, String), (u64, u64, u64, u64)> = BTreeMap::new();
+    let mut lines = 0u64;
+    for l in log.lines().filter(|l| l.contains("StateStore contention summary")) {
+        lines += 1;
+        let kind = field_of(l, "contention").unwrap_or_default();
+        let file = field_of(l, "latest_caller_file").unwrap_or_default();
+        let line = field_of(l, "latest_caller_line").unwrap_or_default();
+        let num = |k: &str| field_of(l, k).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+        let e = groups.entry((kind, format!("{file}:{line}"))).or_default();
+        e.0 += 1;
+        e.1 += num("samples");
+        e.2 += num("total_ms");
+        e.3 = e.3.max(num("max_ms"));
+    }
+    say(name, &format!("contention_summary_lines={lines}"));
+    let mut rows: Vec<_> = groups.into_iter().collect();
+    rows.sort_by(|a, b| b.1.2.cmp(&a.1.2));
+    for ((kind, site), (summaries, samples, total, max)) in rows {
+        say(
+            name,
+            &format!(
+                "contention kind={kind} site={site} summaries={summaries} samples={samples} total_ms={total} avg_ms={} max_ms={max}",
+                total.checked_div(samples).unwrap_or(0)
+            ),
+        );
+    }
+    let raw: Vec<String> = log
+        .lines()
+        .filter(|l| l.contains("StateStore contention summary"))
+        .take(60)
+        .map(|l| trunc(l, 420))
+        .collect();
+    say(name, &format!("contention_raw_first60={raw:#?}"));
+    let prof: Vec<String> = log
+        .lines()
+        .filter(|l| {
+            let lower = l.to_lowercase();
+            lower.contains("latency") || lower.contains("_us=") || lower.contains("profile")
+        })
+        .take(120)
+        .map(|l| trunc(l, 420))
+        .collect();
+    say(name, &format!("latency_profile_lines={} sample={prof:#?}", prof.len()));
+}
+
 async fn noop_tool_calls(n: u64, limits: Option<(u64, u64)>) {
-    let name = format!("noop_tool_calls_{n}");
+    noop_tool_calls_on(n, limits, false).await;
+}
+
+async fn noop_tool_calls_on(n: u64, limits: Option<(u64, u64)>, tmpfs: bool) {
+    let storage = if tmpfs {
+        use_tmpfs_if_present("noop_storage")
+    } else {
+        "disk"
+    };
+    let name = format!("noop_tool_calls_{n}_{storage}_{}", if cfg!(debug_assertions) { "debug" } else { "release" });
     let script = format!(
         "steps:\n  - repeat: {n}\n    tool_calls:\n      - {{ id: \"call_{{n}}\", name: noop_noop, arguments: {{}} }}\n  - repeat: 3\n    text: done\n"
     );
@@ -932,6 +1021,20 @@ async fn noop_tool_calls(n: u64, limits: Option<(u64, u64)>) {
     say(&name, &format!("capacity_before={before}"));
     say(&name, &format!("capacity_after={after}"));
     let log = rig.h.stderr_so_far();
+    contention_report(&name, &log);
+    {
+        // Growth: mean gap per tenth of the run (gaps in request order).
+        let ordered: Vec<u64> = requests
+            .windows(2)
+            .map(|w| (w[1].received_ms.saturating_sub(w[0].received_ms)) as u64)
+            .collect();
+        let tenth = (ordered.len() / 10).max(1);
+        let deciles: Vec<u64> = ordered
+            .chunks(tenth)
+            .map(|c| c.iter().sum::<u64>() / c.len() as u64)
+            .collect();
+        say(&name, &format!("mean_gap_ms_per_decile={deciles:?}"));
+    }
     let tail: Vec<String> = log
         .lines()
         .rev()
@@ -963,6 +1066,12 @@ async fn noop_tool_calls(n: u64, limits: Option<(u64, u64)>) {
 async fn probe_noop_tool_calls_100() {
     // No declared limits: shows what the directive kind enforces by default.
     noop_tool_calls(100, None).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "measurement"]
+async fn probe_noop_tool_calls_100_tmpfs() {
+    noop_tool_calls_on(100, None, true).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
