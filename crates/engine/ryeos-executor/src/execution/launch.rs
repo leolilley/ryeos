@@ -7981,7 +7981,7 @@ async fn run_claimed_thread_row_inner(
                 return Err(preserve_managed_row_for_shutdown(
                     state,
                     &thread_id,
-                    &provenance,
+                    provenance,
                     lifecycle_owner,
                     "runtime recovery interrupted by daemon shutdown; row preserved for recovery",
                 ));
@@ -8037,7 +8037,7 @@ async fn run_claimed_thread_row_inner(
                     return Err(preserve_managed_row_for_shutdown(
                         state,
                         &thread_id,
-                        &provenance,
+                        provenance,
                         lifecycle_owner,
                         "runtime recovery interrupted by daemon shutdown; row preserved for recovery",
                     ));
@@ -8121,7 +8121,7 @@ async fn run_claimed_thread_row_inner(
         return Err(preserve_managed_row_for_shutdown(
             state,
             &thread_id,
-            &provenance,
+            provenance,
             lifecycle_owner,
             "managed runtime interrupted by daemon shutdown; row preserved for recovery",
         ));

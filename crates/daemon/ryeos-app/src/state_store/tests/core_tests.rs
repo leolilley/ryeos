@@ -822,6 +822,10 @@ fn closed_admission_refuses_new_claims_and_rotation_without_charging_an_attempt(
         .claim_thread_launch_active(thread, "first", "daemon:test")
         .unwrap()
         .unwrap();
+    let other = "T-closed-admission-other";
+    store
+        .create_thread_for_test(&thread_record(other, other))
+        .unwrap();
     store.close_process_attachment_admission().unwrap();
     let outcome = store
         .rotate_active_thread_launch_claim_after_runtime_recovery(
@@ -844,10 +848,6 @@ fn closed_admission_refuses_new_claims_and_rotation_without_charging_an_attempt(
     assert_eq!(g.runtime_db.get_resume_attempts(thread).unwrap(), 0);
     drop(g);
 
-    let other = "T-closed-admission-other";
-    store
-        .create_thread_for_test(&thread_record(other, other))
-        .unwrap();
     assert!(
         store
             .claim_thread_launch_active(other, "second", "daemon:test")
