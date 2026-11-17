@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-15T07:11:12Z:07b33090cbf21073cee1036ac05954fc9c0cc847f94055621c5abcd647f1cb00:p70+LswAcDtUlVzH7P4i1pk6u3DCFjuEaBmvTVPUVruEOZ67HLD7iUnXoa723yXZrWpz5UZhkYXBwshb+iDTDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T22:20:51Z:e1b264051af049eb60f3dfd2393c40fc46e406f0c56a53c2c76672d9325e31e0:q/p+bE4oDS1lcYAJ80bslS02+SYzhMX0Dpe3n/72/g5Tnh0MN0T9kk4jX47LfgzLIVwrgQ7LwbOCDHo/LjdbCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
