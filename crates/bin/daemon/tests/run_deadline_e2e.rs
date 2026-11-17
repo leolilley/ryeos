@@ -473,7 +473,6 @@ fn accounting_deadlines(h: &DaemonHarness) -> Vec<i64> {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     })
-    .expect("read the execution budget rows")
 }
 
 /// A node restart mid-run keeps the same budget row and deadline, resumes the
