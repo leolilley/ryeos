@@ -5345,6 +5345,7 @@ mod imp {
             close_fd(applied_launch[0]);
             let outcome = child_target_main(
                 &request,
+                final_identities,
                 ready[1],
                 launch_failure[1],
                 applied_launch[1],
@@ -5444,6 +5445,7 @@ mod imp {
 
     fn child_target_main(
         request: &LinuxSandboxRequest,
+        final_identities: &BTreeMap<PathBuf, FinalMountIdentity>,
         ready_fd: RawFd,
         launch_failure_fd: RawFd,
         applied_launch_fd: RawFd,
@@ -5469,7 +5471,7 @@ mod imp {
         // Earlier attachment checks ran against the private root before pivot.
         // Recheck the target view after layering, fixed-parent changes and pivot,
         // while admitted descriptors are live and before readiness or exec.
-        let mount_preparation = verify_final_descriptor_mounts(&request, final_identities)?;
+        let mount_preparation = verify_final_descriptor_mounts(request, final_identities)?;
         let mut mapped_channels = Vec::with_capacity(request.target_channels.len());
         if let Some(stdio) = stdio {
             use std::os::fd::AsRawFd as _;
@@ -7603,9 +7605,12 @@ mod imp {
             const MOUNTS: usize = 100;
             const LIMIT: libc::rlim_t = 190;
             if std::env::var_os(CHILD).is_none() {
+                // Namespace creation needs a single-threaded process, so the
+                // child runs the test on its main thread.
                 let status = std::process::Command::new(std::env::current_exe().unwrap())
                     .args([
                         "--ignored",
+                        "--test-threads=1",
                         "--exact",
                         "sandbox::imp::namespace_source_tests::sealed_mount_descriptors_do_not_scale_with_mount_count",
                         "--nocapture",
