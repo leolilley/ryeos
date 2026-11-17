@@ -1164,7 +1164,9 @@ impl SealedRootExecutionRequest {
             }
         };
         let plan_context = PlanContext {
-            logical_project_root: self.project_authority.logical_project_root(),
+            logical_project_root: self
+                .project_authority
+                .logical_project_root(&self.current_site_id),
             requested_by,
             project_context,
             subject_resolution_authority: self.project_binding_subject_authority.clone(),
@@ -1712,7 +1714,9 @@ impl SealedRootExecutionRequest {
             anyhow!("invalid sealed runtime ref `{}`: {error}", self.runtime_ref)
         })?;
         let mut resolved_item = self.verified_subject.restore(capsule_root)?;
-        resolved_item.logical_project_root = self.project_authority.logical_project_root();
+        resolved_item.logical_project_root = self
+            .project_authority
+            .logical_project_root(&self.current_site_id);
         let verified_subject = VerifiedItem {
             resolved: resolved_item.clone(),
             signer: self
@@ -1723,7 +1727,9 @@ impl SealedRootExecutionRequest {
             pinned_version: self.verified_pinned_version.clone(),
         };
         let plan_context = PlanContext {
-            logical_project_root: self.project_authority.logical_project_root(),
+            logical_project_root: self
+                .project_authority
+                .logical_project_root(&self.current_site_id),
             requested_by,
             project_context: self.project_context.clone(),
             subject_resolution_authority: self.project_binding_subject_authority.clone(),
@@ -1930,10 +1936,11 @@ impl SealedRootExecutionRequest {
             },
         };
         let mut rebound_plan_context = request.plan_context.clone();
+        let site_id = rebound_plan_context.current_site_id.clone();
         rebound_plan_context.project_context = rebound_project_context;
         rebound_plan_context.subject_resolution_authority =
             provenance.subject_resolution_authority();
-        rebound_plan_context.logical_project_root = provenance.logical_project_root();
+        rebound_plan_context.logical_project_root = provenance.logical_project_root(&site_id);
         let rebound_binding =
             AdmittedProjectBinding::from_provenance(engine, &rebound_plan_context, provenance)?;
         let rebound_materialized_project_root = match provenance {
@@ -1947,7 +1954,7 @@ impl SealedRootExecutionRequest {
             } => Some(provenance.subject_effective_path().to_path_buf()),
         };
         request.resolved_item.materialized_project_root = rebound_materialized_project_root.clone();
-        request.resolved_item.logical_project_root = provenance.logical_project_root();
+        request.resolved_item.logical_project_root = provenance.logical_project_root(&site_id);
         {
             let admission = request
                 .root_admission
@@ -1960,7 +1967,7 @@ impl SealedRootExecutionRequest {
                 .resolved
                 .materialized_project_root = rebound_materialized_project_root;
             admission.verified_subject.resolved.logical_project_root =
-                provenance.logical_project_root();
+                provenance.logical_project_root(&site_id);
             // Complete request snapshots include parser/kind registry
             // semantics and belong only to fresh admission. Recovered paths
             // use the sealed execution closure plus a trust-only current

@@ -8963,7 +8963,7 @@ pub(crate) fn candidate_evaluation_provenance_from_resume_context(
         base_authority,
     )?;
     let base_plan_context = ryeos_engine::contracts::PlanContext {
-        logical_project_root: base_provenance.logical_project_root(),
+        logical_project_root: base_provenance.logical_project_root(&resume.current_site_id),
         requested_by: resume.requested_by.clone(),
         project_context: ProjectContext::LocalPath {
             path: base.effective_path.clone(),
