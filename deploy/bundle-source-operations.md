@@ -136,3 +136,16 @@ volume for rollback; never run the previous image against newly written state.
 Before production rollout, prove one complete native-bundle release and one
 portable-data release on the actual target, followed by a stopped consumer
 update and restart. Source/static checks are not substitutes for this gate.
+
+## Pre-start update in a container
+
+A hosted container can update its bundles from the catalog before the daemon
+starts. Set `RYEOS_PRESTART_BUNDLE_SET_REQUEST` to the absolute path of a
+stopped bundle-set update request file. On each start, after first-boot
+initialization and before ryeosd, `deploy/entrypoint.sh` runs
+`ryeos node bundle-set update <request> --app-root /data/app --json` against
+the stopped node. The command pins its remote and verifies the catalog; it
+exits zero when it installs a set and when the node already holds it, and the
+start continues. Any failure prints a refusal and exits the container without
+starting ryeosd. Unset or empty leaves the start unchanged. The route is not
+supported with `RYEOS_HOST_RUNTIME_BINDING`.
