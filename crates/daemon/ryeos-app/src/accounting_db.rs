@@ -13741,7 +13741,7 @@ mod tests {
     #[test]
     fn stored_aggregate_limits_are_readable_and_reproduce_the_ledger_identity() {
         let (_dir, db) = setup();
-        assert_eq!(db.execution_resource_budget_limits(EXEC).unwrap(), None);
+        assert!(db.execution_resource_budget_limits(EXEC).unwrap().is_none());
         db.create_execution_account_prepared(EXEC, THREAD, None)
             .unwrap();
         let limits = AggregateExecutionLimits {
