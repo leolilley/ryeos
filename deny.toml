@@ -16,6 +16,8 @@ ignore = [
     # time crate is a tracked migration; until it lands this is acknowledged,
     # not fixed.
     "RUSTSEC-2026-0543",
+    # chrono-tz, same reason (its own advisory).
+    "RUSTSEC-2026-0555",
 ]
 
 [licenses]
