@@ -698,12 +698,12 @@ mod tests {
         ));
     }
 
-    /// A source that serves scripted responses, gating each fetch on a permit
+    /// A source that serves scripted responses, holding each fetch until released
     /// and recording how many were in flight at once.
     struct ScriptedSource {
         responses: Mutex<std::collections::VecDeque<Result<Value, String>>>,
         sinces: Mutex<Vec<Option<i64>>>,
-        gate: Option<tokio::sync::Semaphore>,
+        gate: Option<Notify>,
         in_flight: std::sync::atomic::AtomicUsize,
         most_in_flight: std::sync::atomic::AtomicUsize,
     }
@@ -713,7 +713,7 @@ mod tests {
             Arc::new(Self {
                 responses: Mutex::new(responses.into()),
                 sinces: Mutex::new(Vec::new()),
-                gate: gated.then(|| tokio::sync::Semaphore::new(0)),
+                gate: gated.then(Notify::new),
                 in_flight: Default::default(),
                 most_in_flight: Default::default(),
             })
@@ -731,7 +731,7 @@ mod tests {
                 self.most_in_flight.fetch_max(now, Ordering::SeqCst);
                 self.sinces.lock().unwrap().push(since);
                 if let Some(gate) = &self.gate {
-                    gate.acquire().await.unwrap().forget();
+                    gate.notified().await;
                 }
                 self.in_flight.fetch_sub(1, Ordering::SeqCst);
                 self.responses
@@ -827,14 +827,14 @@ mod tests {
         for _ in 0..4 {
             wake.notify_one();
         }
-        source.gate.as_ref().unwrap().add_permits(1);
+        source.gate.as_ref().unwrap().notify_one();
         until(|| source.fetches() == 2).await;
-        source.gate.as_ref().unwrap().add_permits(1);
+        source.gate.as_ref().unwrap().notify_one();
         // The run ends: one last fetch, then the worker stops.
         closing.store(true, Ordering::Release);
         wake.notify_one();
         until(|| source.fetches() == 3).await;
-        source.gate.as_ref().unwrap().add_permits(1);
+        source.gate.as_ref().unwrap().notify_one();
         worker.await.unwrap();
         assert_eq!(source.fetches(), 3, "four coalesced events cost one fetch");
         assert_eq!(source.most_in_flight.load(Ordering::SeqCst), 1);
