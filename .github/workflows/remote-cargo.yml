@@ -20,7 +20,9 @@ name: Remote cargo
 # the next sha and run id. It fails if none is available, and refuses if the
 # branch differs from that next sha on any path the state would overwrite or
 # delete, or anywhere under bundles/ (merge origin/next, or avoid those paths).
-# Crate source differences only warn: bundle bins come from next's crates. No bundle refresh runs here.
+# Crate source differences only warn: bundle bins come from next's crates.
+# bundles=branch instead refreshes the bundles from this branch's own sources
+# (the CI bundles job, about 45 min more): use it when bundles=next refuses.
 # bundles=none (default) runs cargo on the plain checkout.
 on:
   workflow_dispatch:
@@ -41,13 +43,14 @@ on:
         required: true
         type: string
       bundles:
-        description: "none, or next to restore bundle state from a recent next CI run"
+        description: "none; next to restore bundle state from a recent next CI run; branch to refresh the bundles from this branch (about 45 min, for branches that change bundles/)"
         required: false
         default: none
         type: choice
         options:
           - none
           - next
+          - branch
       label:
         description: "Optional short label shown in the run name"
         required: false
@@ -73,7 +76,7 @@ jobs:
   cargo:
     name: cargo ${{ inputs.command }} ${{ inputs.label }}
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 150
     steps:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -191,6 +194,15 @@ jobs:
               echo "### Bundle state"
               echo "next \`$sha\`, ci.yml run [$run_id](https://github.com/$repo/actions/runs/$run_id); $(wc -l < "$work/touched") paths; no branch overlap."
           } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+      # The CI bundles job's refresh, run against this branch's own bundle and
+      # crate sources: for branches that change bundles/, where restoring next's
+      # state is refused.
+      - name: Refresh the bundles from this branch
+        if: ${{ inputs.bundles == 'branch' }}
+        env:
+          GATE_BUNDLE_TARGET_DIR: ${{ runner.temp }}/ryeos-bundle-target
+        run: ./scripts/gate.sh --refresh-bundles --no-tests
 
       - name: Run cargo
         env:

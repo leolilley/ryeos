@@ -202,6 +202,11 @@ async fn the_same_tool_runs_pinned_and_a_subprocess_tool_still_writes_live() {
         Some(&json!("completed")),
         "{body:#}"
     );
+    assert_eq!(
+        recorded_root(&h, &body).await.as_deref(),
+        Some("pinned"),
+        "a pinned launch records its pinned root: {body:#}"
+    );
 
     let (status, body) = run(
         &h,
@@ -223,6 +228,47 @@ fn explicit_live_policy_json() -> Value {
         .expect("policy json");
     policy["project"]["intent"] = json!("live");
     policy
+}
+
+/// The synchronous refusal: HTTP 403 whose body carries the typed code at
+/// the top level `code`. The launch never reaches a completed thread.
+fn assert_refused(status: reqwest::StatusCode, body: &Value, what: &str) {
+    assert_eq!(
+        status,
+        reqwest::StatusCode::FORBIDDEN,
+        "{what} must be refused with 403: {body:#}"
+    );
+    assert_eq!(
+        body.get("code").and_then(Value::as_str),
+        Some(CODE),
+        "{what} must carry {CODE} in the response body code: {body:#}"
+    );
+}
+
+/// The `root` of the single `process_input_root_selected` event of a thread.
+async fn recorded_root(h: &DaemonHarness, thread: &Value) -> Option<String> {
+    let thread_id = thread
+        .pointer("/thread/thread_id")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("thread id in {thread:#}"));
+    let events = h
+        .existing_thread_events(thread_id)
+        .await
+        .expect("replay thread events");
+    let mut roots = events
+        .iter()
+        .filter(|(event_type, _)| event_type == "process_input_root_selected")
+        .map(|(_, payload)| {
+            assert_eq!(
+                payload.as_object().map(|object| object.len()),
+                Some(1),
+                "the event carries the root kind only: {payload}"
+            );
+            payload["root"].as_str().expect("root kind").to_owned()
+        });
+    let root = roots.next();
+    assert!(roots.next().is_none(), "recorded once per launch attempt");
+    root
 }
 
 fn intent_of(thread: &Value) -> Option<&str> {
@@ -255,6 +301,11 @@ async fn a_defaulted_live_request_runs_a_sourced_tool_in_its_private_root_and_re
         Some("default"),
         "the thread records that the request did not ask for the live project: {body:#}"
     );
+    assert_eq!(
+        recorded_root(&h, &body).await.as_deref(),
+        Some("sparse_private"),
+        "the thread records the root the sourced tool actually got: {body:#}"
+    );
     assert!(
         !project.path().join("written-by-tool.txt").exists(),
         "a sourced tool's project writes land in its private root, not the live project"
@@ -276,13 +327,10 @@ async fn an_explicit_live_policy_is_refused_for_a_sourced_runtime() {
             .expect("live demand"),
     )
     .await;
-    assert!(
-        body.to_string().contains(CODE) || h.stderr_so_far().contains(CODE),
-        "an explicit live demand on a sourced runtime must name {CODE}: {status}: {body:#}"
-    );
-    assert!(
-        body.pointer("/thread/status") != Some(&json!("completed")),
-        "the refused tool must not complete: {status}: {body:#}"
+    assert_refused(
+        status,
+        &body,
+        "an explicit live demand on a sourced runtime",
     );
     assert!(
         !project.path().join("written-by-tool.txt").exists(),
@@ -316,10 +364,7 @@ async fn the_cli_live_project_policy_is_refused_for_a_sourced_runtime_and_allowe
         )
         .await
         .expect("post /execute");
-    assert!(
-        body.to_string().contains(CODE) || h.stderr_so_far().contains(CODE),
-        "--live-project on a sourced runtime must name {CODE}: {status}: {body:#}"
-    );
+    assert_refused(status, &body, "--live-project on a sourced runtime");
     assert!(!project.path().join("written-by-tool.txt").exists());
 
     let (status, body) = h
@@ -343,6 +388,11 @@ async fn the_cli_live_project_policy_is_refused_for_a_sourced_runtime_and_allowe
         intent_of(&body),
         Some("live"),
         "the thread records the explicit demand: {body:#}"
+    );
+    assert_eq!(
+        recorded_root(&h, &body).await.as_deref(),
+        Some("live"),
+        "an @subprocess tool is recorded as running in the live project: {body:#}"
     );
     assert!(
         project.path().join("written-by-subprocess.txt").is_file(),

@@ -472,7 +472,13 @@ pub async fn handle_inspect(
         .state_store
         .authenticate_execution_event_candidates(&signed.chain_root_id, &event_page.events)?;
 
-    let usage = Value::Array(Vec::new());
+    // Chain-wide totals come from the settled-usage projection, not from signed
+    // testimony, so the section carries its own coverage row saying so.
+    let usage = chain_usage_rows(
+        &state
+            .state_store
+            .chain_usage_totals(&signed.chain_root_id)?,
+    );
 
     // Staged operator-input depth (05c.1): lets the input area show an "N staged"
     // chip without a separate service call.
@@ -490,7 +496,6 @@ pub async fn handle_inspect(
     let follow = Value::Array(Vec::new());
     let evidence_coverage = [
         ("children", "signed_child_collection_not_proven"),
-        ("usage", "signed_chain_usage_not_available"),
         ("follow", "signed_follow_state_not_available"),
         ("successor", "signed_continuation_edge_not_available"),
         ("runtime", "operational_projection_not_in_signed_inspection"),
@@ -507,6 +512,11 @@ pub async fn handle_inspect(
         })
     });
     let mut evidence_coverage = evidence_coverage.to_vec();
+    evidence_coverage.push(serde_json::json!({
+        "subject": "usage",
+        "state": "observed",
+        "reason": "settled_usage_projection_not_signed_testimony",
+    }));
     evidence_coverage.push(match signed_facets {
         Some(_) => serde_json::json!({"subject": "facets", "state": "complete"}),
         None => serde_json::json!({
@@ -540,6 +550,19 @@ pub async fn handle_inspect(
             .insert("thread_meta".to_string(), meta);
     }
     Ok(response)
+}
+
+/// Label/value rows for a chain's settled usage totals, in the same row shape
+/// as the execution posture rows so one section projection renders them.
+fn chain_usage_rows(totals: &ryeos_state::queries::ThreadUsageTotals) -> Value {
+    let row = |label: &str, value: String| serde_json::json!({"label": label, "value": value});
+    Value::Array(vec![
+        row("input tokens", totals.input_tokens.to_string()),
+        row("output tokens", totals.output_tokens.to_string()),
+        row("spend (USD)", format!("{:.4}", totals.spend_usd)),
+        row("completed turns", totals.completed_turns.to_string()),
+        row("threads with usage", totals.thread_count.to_string()),
+    ])
 }
 
 /// The result owner returns None only when the authenticated snapshot contains
@@ -769,6 +792,33 @@ pub const INSPECT_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chain_usage_rows_render_every_total_as_label_value() {
+        let rows = chain_usage_rows(&ryeos_state::queries::ThreadUsageTotals {
+            thread_count: 2,
+            completed_turns: 7,
+            input_tokens: 1200,
+            output_tokens: 340,
+            spend_usd: 0.5,
+        });
+        let pairs: Vec<(&str, &str)> = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| (r["label"].as_str().unwrap(), r["value"].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("input tokens", "1200"),
+                ("output tokens", "340"),
+                ("spend (USD)", "0.5000"),
+                ("completed turns", "7"),
+                ("threads with usage", "2"),
+            ]
+        );
+    }
 
     #[test]
     fn outcome_coverage_distinguishes_every_terminal_status_without_inventing_success() {

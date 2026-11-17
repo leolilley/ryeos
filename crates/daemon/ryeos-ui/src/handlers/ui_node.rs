@@ -18,6 +18,7 @@ use ryeos_api::registry::ServiceDescriptor;
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::handler_error::HandlerError;
 use ryeos_app::state::AppState;
+use ryeos_app::state_store::AuthoritativeThreadSubject;
 use ryeos_executor::executor::ServiceAvailability;
 
 fn default_event_limit() -> usize {
@@ -25,7 +26,7 @@ fn default_event_limit() -> usize {
 }
 
 const MAX_EVENT_LIMIT: usize = 500;
-const MAX_ACTIVITY_THREADS: usize = 128;
+pub(crate) const MAX_ACTIVITY_THREADS: usize = 128;
 const MAX_THREAD_EVENTS: usize = 64;
 const MAX_THREAD_EVENT_BYTES: usize = 128 * 1024;
 const MAX_ACTIVITY_EVENT_BYTES: usize = 2 * 1024 * 1024;
@@ -50,25 +51,14 @@ pub struct ActivityRequest {
     pub window_hours: u64,
 }
 
-pub async fn handle_activity(
-    params: Value,
-    ctx: HandlerContext,
-    state: Arc<AppState>,
-) -> Result<Value> {
-    let caller = crate::seat_auth::require_seat_caller(&ctx, &state)?;
-
-    let req: ActivityRequest = serde_json::from_value(params)
-        .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
-    let window_hours = req.window_hours.clamp(1, MAX_WINDOW_HOURS);
-
-    let now_secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let since_iso = lillux::time::iso8601_from_unix_secs(
-        now_secs.saturating_sub(Duration::from_secs(window_hours * 3600).as_secs()),
-    );
-
+/// The bounded set of threads the caller may inspect under `filter`, each
+/// proven against its signed subject, plus how many rows were observed and
+/// candidates scanned (so callers can report partial coverage).
+pub(crate) fn observe_authorized_subjects(
+    ctx: &HandlerContext,
+    state: &Arc<AppState>,
+    caller: &crate::seat_auth::SeatCaller,
+) -> Result<(BTreeMap<String, AuthoritativeThreadSubject>, usize, usize)> {
     let project_root = caller.project_query_identity()?;
     let filter = ryeos_app::thread_lifecycle::ThreadListFilter {
         principal: project_root
@@ -89,9 +79,9 @@ pub async fn handle_activity(
         },
         |candidate| {
             let signed = match crate::thread_authorization::authorize_exact_thread_subjects(
-                &ctx,
-                &state,
-                &caller,
+                ctx,
+                state,
+                caller,
                 &[&candidate.thread_id],
             ) {
                 Ok(mut subjects) => subjects.pop().expect("one requested subject"),
@@ -105,6 +95,29 @@ pub async fn handle_activity(
             Ok(true)
         },
     )?;
+    Ok((subjects, observed.len(), scanned))
+}
+
+pub async fn handle_activity(
+    params: Value,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    let caller = crate::seat_auth::require_seat_caller(&ctx, &state)?;
+
+    let req: ActivityRequest = serde_json::from_value(params)
+        .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
+    let window_hours = req.window_hours.clamp(1, MAX_WINDOW_HOURS);
+
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let since_iso = lillux::time::iso8601_from_unix_secs(
+        now_secs.saturating_sub(Duration::from_secs(window_hours * 3600).as_secs()),
+    );
+
+    let (subjects, observed_len, scanned) = observe_authorized_subjects(&ctx, &state, &caller)?;
     let mut counts = BTreeMap::<String, usize>::new();
     for signed in subjects.values() {
         let status = signed.status.as_str();
@@ -137,7 +150,7 @@ pub async fn handle_activity(
     let event_limit = req.event_limit.clamp(1, MAX_EVENT_LIMIT);
     let mut events = Vec::new();
     let mut bytes_read = 0;
-    let mut partial = observed.len() == MAX_ACTIVITY_THREADS
+    let mut partial = observed_len == MAX_ACTIVITY_THREADS
         || scanned == super::ui_threads::MAX_THREAD_LIST_CANDIDATES_SCANNED;
     let mut failed = false;
     for signed in subjects.values() {
@@ -186,7 +199,7 @@ pub async fn handle_activity(
         "pulse": pulse,
         "events": events,
         "coverage": {"state":"observed", "reason":"authorized_projection_subset_not_exhaustive"},
-        "pulse_coverage": {"state":"observed", "reason":"authorized_subject_subset_not_totals", "observed_threads":observed.len(), "thread_limit":MAX_ACTIVITY_THREADS},
+        "pulse_coverage": {"state":"observed", "reason":"authorized_subject_subset_not_totals", "observed_threads":observed_len, "thread_limit":MAX_ACTIVITY_THREADS},
         "events_coverage": events_coverage,
         "usage_coverage": {"state":"unavailable", "reason":"signed_scoped_usage_not_available"},
     }))

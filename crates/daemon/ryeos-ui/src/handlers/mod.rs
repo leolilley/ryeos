@@ -31,6 +31,7 @@ pub mod ui_thread_tree;
 pub mod ui_threads;
 pub mod ui_timeline;
 pub mod ui_timeline_raw;
+pub mod ui_usage;
 pub mod ui_work;
 
 pub const ALL: &[ServiceDescriptor] = &[
@@ -62,6 +63,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_timeline::DESCRIPTOR,
     ui_timeline_raw::DESCRIPTOR,
     ui_node::ACTIVITY_DESCRIPTOR,
+    ui_usage::USAGE_DESCRIPTOR,
     #[cfg(feature = "scheduling")]
     ui_schedules::DESCRIPTOR,
     ui_gc::DESCRIPTOR,

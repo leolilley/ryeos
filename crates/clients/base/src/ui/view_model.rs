@@ -4600,6 +4600,50 @@ mod tests {
     }
 
     #[test]
+    fn actual_node_usage_binding_projects_totals_chains_and_coverage() {
+        use crate::ui::content::{ViewBinding, project_section};
+        let binding: ViewBinding = serde_yaml::from_str(include_str!(
+            "../../../../../bundles/ryeos-ui/.ai/views/ryeos/node/usage.yaml"
+        ))
+        .unwrap();
+        assert_eq!(binding.widget, "sections");
+        let response = json!({
+            "totals": [
+                {"label": "input tokens", "value": "400"},
+                {"label": "spend (USD)", "value": "1.0000"}
+            ],
+            "chains": [{
+                "chain_root_id": "T-b", "item_ref": "directive:ops/b",
+                "summary": "300 in · 10 out · $0.7500 · 2 turns",
+                "status": "completed", "spend_usd": 0.75
+            }],
+            "coverage": {"state": "partial", "reason": "settled_usage_projection"}
+        });
+        let section = |title: &str| {
+            binding
+                .sections
+                .iter()
+                .find(|s| s.title == title)
+                .unwrap_or_else(|| panic!("section {title}"))
+        };
+        let totals = project_section(section("Totals"), &response);
+        assert_eq!(totals.len(), 2);
+        assert_eq!(totals[0].primary, "400");
+        assert_eq!(totals[0].meta.as_deref(), Some("input tokens"));
+        let chains = project_section(section("By execution"), &response);
+        assert_eq!(chains.len(), 1);
+        assert_eq!(chains[0].primary, "directive:ops/b");
+        assert_eq!(
+            chains[0].meta.as_deref(),
+            Some("300 in · 10 out · $0.7500 · 2 turns")
+        );
+        let coverage = project_section(section("Coverage"), &response);
+        assert_eq!(coverage.len(), 1);
+        assert_eq!(coverage[0].primary, "partial");
+        assert_eq!(coverage[0].tone.as_deref(), Some("warn"));
+    }
+
+    #[test]
     fn actual_thread_detail_binding_projects_inspect_sections() {
         use crate::ui::content::{ViewBinding, project_section};
         let binding: ViewBinding = serde_yaml::from_str(include_str!(
@@ -4656,13 +4700,18 @@ mod tests {
         assert_eq!(coverage.len(), 1);
         assert_eq!(coverage[0].primary, "available");
         assert_eq!(coverage[0].meta.as_deref(), Some("signed result available"));
-        assert!(
-            binding
-                .sections
-                .iter()
-                .all(|section| section.title != "Usage"),
-            "inspection must not invent usage absent from its response contract"
-        );
+        // Usage rows are the inspect response's own label/value pairs; absent
+        // from a response they project to nothing rather than invented totals.
+        assert!(project_section(section("Usage"), &response).is_empty());
+        let with_usage = json!({"usage": [
+            {"label": "input tokens", "value": "1200"},
+            {"label": "spend (USD)", "value": "0.5000"}
+        ]});
+        let usage = project_section(section("Usage"), &with_usage);
+        assert_eq!(usage.len(), 2);
+        assert_eq!(usage[0].primary, "1200");
+        assert_eq!(usage[0].meta.as_deref(), Some("input tokens"));
+        assert_eq!(usage[1].primary, "0.5000");
 
         // Re-fetches on the selection facet; each section pulls the selected
         // thread via @facet, so an unset selection SUPPRESSES the fetch (D8)

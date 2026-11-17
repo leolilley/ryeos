@@ -1,0 +1,53 @@
+# ryeos:signed:2026-11-16T21:29:33Z:cf0d4280dcb32358bddb55edf5f4474b713b7c2c237e03141922b3e42b0d094f:uVHCN6I2iOFpXoIUSFxPgWMGkKg0z943vhaQG+e2UQ504tDAHdZRKVvylSgl7xBDy9TJekRiJ6BwEjNTZJOBBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: node-usage
+title: Usage
+version: "1.0.0"
+description: >-
+  Token and spend usage for the executions this caller can observe, largest
+  spend first. Totals cover the observed chains only, not the whole node.
+
+widget: sections
+sources:
+  default:
+    ref: service:ui/ryeos-ui/node/usage
+    params: {}
+affordances:
+  - id: watch-thread
+    label: Inspect execution
+    invoke:
+      plane: ui
+      facet: selection
+      value:
+        thread_id: "{record.chain_root_id}"
+      open_view: view:ryeos/threads/detail
+      drill: true
+sections:
+  - title: Totals
+    source_channel: default
+    collection: totals
+    projection:
+      primary: value
+      meta: label
+  - title: By execution
+    source_channel: default
+    collection: chains
+    projection:
+      identity: chain_root_id
+      primary: item_ref
+      meta: summary
+      expand:
+        fields: [chain_root_id, status, updated_at, thread_count, completed_turns, input_tokens, output_tokens, spend_usd]
+    activate: watch-thread
+  - title: Coverage
+    source_channel: default
+    collection: coverage
+    projection:
+      primary: state
+      meta: reason
+      tone:
+        field: state
+        map:
+          partial: warn
+        default: neutral
+refresh:
+  on_hint: [thread, activity]
