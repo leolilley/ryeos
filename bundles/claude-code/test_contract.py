@@ -330,6 +330,35 @@ class ClaudeCodeContractTests(unittest.TestCase):
             load_yaml(EXECUTIONS["bounded-turn-recovery"])["config"]["mode"]["require_post_completion_recovery"]
         )
 
+    def test_items_pin_effort_and_tools_without_overriding_the_profile(self) -> None:
+        routes = {route["id"]: route for route in self.profile["routes"]}
+        write_capable = {"Bash", "Edit", "MultiEdit", "NotebookEdit", "Write"}
+        expected = {
+            "bounded-turn": ("session.start", ["Read", "Grep", "Glob", "Edit", "Write", "Bash"]),
+            "bounded-turn-recovery": ("session.start", ["Read", "Grep", "Glob", "Edit", "Write", "Bash"]),
+            "bounded-turn-read-only": ("session.start_read_only", ["Read", "Grep", "Glob"]),
+        }
+        for name, path in EXECUTIONS.items():
+            config = load_yaml(path)["config"]
+            if name == "bounded-turn-continue":
+                # A continuation starts no session, so it has no route to pin.
+                self.assertNotIn("route_fixed_params", config)
+                continue
+            route_id, tools = expected[name]
+            pins = config["route_fixed_params"]
+            self.assertEqual(set(pins), {route_id}, name)
+            self.assertEqual(pins[route_id], {"effort": "high", "tools": tools}, name)
+            route = routes[route_id]
+            self.assertIn(route_id, self.profile["route_sets"][config["route_set"]], name)
+            owned = set(route["fixed_params"]) | set(route["workspace_fields"])
+            owned |= set(route["forbidden_fields"]) | set(route["forbidden_non_null_fields"])
+            self.assertFalse(owned & set(pins[route_id]), name)
+            self.assertEqual(config["mode"]["session_start_route"], route_id, name)
+            if route["fixed_params"].get("access") == "read_only":
+                self.assertFalse(write_capable & set(tools), name)
+            schema = json.loads((SOURCE / route["request_schema"]).read_text())
+            self.assertTrue(set(pins[route_id]) <= set(schema["properties"]), name)
+
     def test_profile_commands_activate_from_their_environments_names(self) -> None:
         for verb, (path, names) in COMMANDS.items():
             command = load_yaml(path)

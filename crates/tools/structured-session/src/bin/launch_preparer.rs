@@ -386,11 +386,32 @@ fn validate_execution_config(
         "candidate_disposition",
         "workload_client_delegation_caps",
     ];
-    if object.len() != KEYS.len() || object.keys().any(|key| !KEYS.contains(&key.as_str())) {
+    // Optional signed pins on named routes; see `route_fixed_params`.
+    const OPTIONAL_KEYS: &[&str] = &["route_fixed_params"];
+    let optional_present = OPTIONAL_KEYS
+        .iter()
+        .filter(|key| object.contains_key(**key))
+        .count();
+    if object.len() != KEYS.len() + optional_present
+        || object
+            .keys()
+            .any(|key| !KEYS.contains(&key.as_str()) && !OPTIONAL_KEYS.contains(&key.as_str()))
+        || KEYS.iter().any(|key| !object.contains_key(*key))
+    {
         return Err(wire_error(
             "worker_execution_config_invalid",
             "worker execution config has an unknown or missing field",
         ));
+    }
+    if let Some(pinned) = object.get("route_fixed_params") {
+        // Shape and bounds only: the preparer sees no profile. Session start
+        // judges the named routes and fields against the admitted profile.
+        ryeos_engine::route_fixed_params::parse_route_fixed_params(pinned).map_err(|error| {
+            wire_error(
+                "worker_execution_route_fixed_params_invalid",
+                &format!("{error:#}"),
+            )
+        })?;
     }
     let worker_ref = object.get("worker_ref").and_then(serde_json::Value::as_str);
     let environment_binding = object
@@ -1292,6 +1313,25 @@ mod tests {
             validate_execution_config(&unknown).unwrap_err().code,
             "worker_execution_config_invalid"
         );
+    }
+
+    #[test]
+    fn route_fixed_params_are_an_optional_bounded_closed_shape() {
+        let mut config = valid_config();
+        config["route_fixed_params"] = serde_json::json!({"session.start": {"effort": "high"}});
+        assert!(validate_execution_config(&config).is_ok());
+        for invalid in [
+            serde_json::json!([]),
+            serde_json::json!({"Not Canonical": {"a": 1}}),
+            serde_json::json!({"session.start": {}}),
+            serde_json::json!({"session.start": {"": 1}}),
+        ] {
+            config["route_fixed_params"] = invalid;
+            assert_eq!(
+                validate_execution_config(&config).unwrap_err().code,
+                "worker_execution_route_fixed_params_invalid"
+            );
+        }
     }
 
     #[test]

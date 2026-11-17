@@ -3902,6 +3902,32 @@ mod tests {
     }
 
     #[test]
+    fn a_worker_executions_route_fixed_params_are_covered_by_the_capsule_hash() {
+        let pinned = |effort: &str| {
+            managed_capsule(serde_json::json!({
+                "runtime_data": {"worker_execution": {
+                    "route_set": "hosted",
+                    "route_fixed_params": {"session.start": {"effort": effort}},
+                }},
+            }))
+        };
+        let base = pinned("high");
+        assert_eq!(
+            base.content_hash().unwrap(),
+            pinned("high").content_hash().unwrap()
+        );
+        assert_ne!(
+            base.content_hash().unwrap(),
+            pinned("low").content_hash().unwrap()
+        );
+        assert!(
+            !base
+                .same_cross_site_continuation_program_admission(&pinned("low"))
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn direct_capsule_rejects_a_managed_execution_closure() {
         let mut capsule = direct_capsule(DirectExecutableIdentity::CapturedContent {
             content_hash: "f".repeat(64),

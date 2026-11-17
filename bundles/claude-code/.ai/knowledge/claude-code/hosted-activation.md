@@ -96,8 +96,15 @@ per turn, in its own process group. It needs:
 
 `session/start` may carry `model`, `effort` and `tools` (a plain-name
 allow-list; `mcp__server__*` patterns allowed). The session keeps them for
-every turn, so route `fixed_params` plus `forbidden_fields` are what stop a
-goal widening them. A turn may add `deadline_seconds`, `max_budget_usd`,
+every turn, so the signed worker execution item pins them: its
+`route_fixed_params` map (route id to fields) extends that route's
+`fixed_params` at launch, and the route then refuses any goal payload that
+names a pinned field. `bounded-turn` and `bounded-turn-recovery` pin
+`effort: high` and `tools: [Read, Grep, Glob, Edit, Write, Bash]`;
+`bounded-turn-read-only` pins `effort: high` and `tools: [Read, Grep, Glob]`
+(a read-only session refuses write-capable tools in any case). `model` is left
+unpinned, so a goal may choose it. A continuation resumes the upstream
+session and starts none, so `bounded-turn-continue` pins nothing. A turn may add `deadline_seconds`, `max_budget_usd`,
 `output_schema` and `system_prompt`. Claude Code is started with only its own
 settings (`--setting-sources user`), only the adapter's MCP file
 (`--strict-mcp-config`), `--permission-mode dontAsk` with prompts denied, and
@@ -110,7 +117,6 @@ feature.
 
 ## Not in this slice
 
-Claude Code's executable storage and pinning, and the profile `fixed_params`
-that fix model, effort and tools per item, arrive in later slices. Until then
-`configuration_absence` already refuses a workspace that carries Claude Code
+Claude Code's executable storage and pinning arrive in a later slice. Until
+then `configuration_absence` already refuses a workspace that carries Claude Code
 project settings, hooks or MCP definitions, and the profile is schema 12.

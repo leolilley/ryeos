@@ -301,6 +301,8 @@ struct AdmittedSession {
     /// conversation instead of starting a session.
     continuation: bool,
     subject_contract: Option<String>,
+    /// The item's signed per-route request pins, empty when it states none.
+    route_fixed_params: ryeos_engine::route_fixed_params::RouteFixedParams,
 }
 
 fn admitted_session_capsule(
@@ -383,11 +385,21 @@ fn admitted_session_capsule(
             .ok_or_else(|| anyhow!("worker execution has no admitted config"))?,
         ceiling,
     )?;
+    let route_fixed_params = match prepared
+        .runtime_data
+        .get("worker_execution")
+        .and_then(|value| value.get("route_fixed_params"))
+    {
+        None => Default::default(),
+        Some(value) => ryeos_engine::route_fixed_params::parse_route_fixed_params(value)
+            .context("admitted worker execution route_fixed_params is invalid")?,
+    };
     Ok(AdmittedSession {
         capsule_hash,
         bounded_turn,
         continuation,
         subject_contract,
+        route_fixed_params,
     })
 }
 
@@ -545,6 +557,7 @@ fn require_structured_session_route_effect_contract(
     route_set: &str,
     allowed_effect_classes: &[String],
     recover_upstream_session: bool,
+    route_fixed_params: &ryeos_engine::route_fixed_params::RouteFixedParams,
 ) -> Result<()> {
     let authority = state.state_store.pinned_state_authority()?;
     let guard = authority.acquire_shared_guard()?;
@@ -569,6 +582,13 @@ fn require_structured_session_route_effect_contract(
         route_set,
         allowed_effect_classes,
         recover_upstream_session,
+    )?;
+    // The item's pins never override the profile: every named route must be in
+    // the selected route set and no pinned field may be one the route owns.
+    ryeos_engine::route_fixed_params::check_route_fixed_params_against_profile(
+        &profile.contract,
+        route_set,
+        route_fixed_params,
     )?;
     // A start always binds a credential profile, so only the profile's
     // requirements for that credential kind are judged against this node's
@@ -1193,6 +1213,7 @@ pub(super) async fn start(
         bounded_turn,
         continuation,
         subject_contract,
+        route_fixed_params,
     } = admitted_session_capsule(state, &request.thread_id, &request.dependency_ref)?;
     if continuation != request.continue_from.is_some() {
         bail!(
@@ -1288,6 +1309,7 @@ pub(super) async fn start(
         &request.route_set,
         &request.allowed_effect_classes,
         request.recover_upstream_session,
+        &route_fixed_params,
     )?;
     // A continuation's predecessor is judged before any secret, claim, lock or
     // worker exists, so a refusal leaves nothing to settle.
@@ -1689,6 +1711,10 @@ pub(super) async fn start(
         (
             "RYEOS_STRUCTURED_SESSION_EFFECT_CLASSES".to_owned(),
             request.allowed_effect_classes.join(","),
+        ),
+        (
+            ryeos_engine::route_fixed_params::ROUTE_FIXED_PARAMS_ENV.to_owned(),
+            serde_json::to_string(&route_fixed_params)?,
         ),
     ]);
     let start_state = state.clone();
