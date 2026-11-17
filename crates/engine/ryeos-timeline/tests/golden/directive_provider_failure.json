@@ -34,7 +34,8 @@
       "counts_as": null,
       "slots": {
         "headline": "failed",
-        "reason": "<scrubbed summary 546 chars>"
+        "reason": "<scrubbed summary 546 chars>",
+        "retry_input": "<scrubbed content 2454 chars>"
       },
       "seq": [
         8,

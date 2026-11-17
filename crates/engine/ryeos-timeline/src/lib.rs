@@ -216,15 +216,20 @@ pub enum Slot {
     Lookup { lookup: Lookup },
 }
 
-/// A value taken from an earlier event of the same thread: the latest event of
-/// type `event` whose array at `array` has an element whose `find.0` equals
-/// this event's `find.1`; the slot is that element's `get`.
+/// A value taken from an earlier event of the same thread.
+///
+/// With `array` and `find`: the latest event of type `event` whose array at
+/// `array` has an element whose `find.0` equals this event's `find.1`; the slot
+/// is that element's `get`. Without them: the latest event of type `event`
+/// where `get` resolves; the slot is that value.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Lookup {
     pub event: String,
-    pub array: String,
-    pub find: (String, String),
+    #[serde(default)]
+    pub array: Option<String>,
+    #[serde(default)]
+    pub find: Option<(String, String)>,
     pub get: String,
 }
 

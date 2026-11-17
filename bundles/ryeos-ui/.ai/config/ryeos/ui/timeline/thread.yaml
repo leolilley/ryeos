@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-16T09:49:01Z:ac261e115d4fa30116af2837f5d207bfa628fc820717ab8aef5d75376ed011d8:mRDoKubBztb69KRrRCXnSdf/A/+kaASiWI6RgmHcWjS9TF0gREbieW9m8yKSNE2BB1JTJFfrwB7UIq+7/+xJAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T23:25:00Z:2a9af1477f6764670861379d52c436a1770d959f713ba3109ee6dba9671ef434:875aBKi4Smf7Pak4keTEPAui8gyUKzetT15B3nBS/Pa3BzaZq6NdB/w+mWAgB3LpVMD6TREhx9yi/vihwV6XDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Thread timeline definition: how a chain's events fold into timeline items.
 # Declarative data read by the timeline service; the fold engine names no event type itself.
 category: ryeos/ui/timeline
@@ -67,6 +67,8 @@ events:
           project:
             headline: {first: [payload.outcome_code, payload.message]}
             reason: {first: [payload.message, payload.error.reason, payload.error.error, payload.error.summary, payload.error]}
+            # What a retry would resend: this thread's latest operator input.
+            retry_input: {lookup: {event: cognition_in, get: payload.content}}
 
   thread_completed:
     - when: {on_spine: true}
@@ -76,6 +78,41 @@ events:
           state: completed
           tone: [{default: good}]
           project: {headline: payload.outcome_code}
+
+  # A stop by the operator is not a failure. None of these can be continued,
+  # so none offers a retry.
+  thread_cancelled:
+    - when: {on_spine: true}
+      emit:
+        - type: outcome
+          key: [thread_id]
+          state: stopped
+          tone: [{default: warn}]
+          project:
+            headline: {first: [payload.outcome_code, payload.message]}
+            reason: {first: [payload.message, payload.error.reason, payload.error]}
+
+  thread_killed:
+    - when: {on_spine: true}
+      emit:
+        - type: outcome
+          key: [thread_id]
+          state: killed
+          tone: [{default: danger}]
+          project:
+            headline: {first: [payload.outcome_code, payload.message]}
+            reason: {first: [payload.message, payload.error.reason, payload.error]}
+
+  thread_timed_out:
+    - when: {on_spine: true}
+      emit:
+        - type: outcome
+          key: [thread_id]
+          state: timed_out
+          tone: [{default: danger}]
+          project:
+            headline: {first: [payload.outcome_code, payload.message]}
+            reason: {first: [payload.message, payload.error.reason, payload.error]}
 
   # Graph steps. A step and its tool call are one activity: the key is the node
   # and step, which every graph event of the step carries.

@@ -88,7 +88,8 @@
       "counts_as": null,
       "slots": {
         "headline": "failed",
-        "reason": "runtime_exited_without_callback_finalization"
+        "reason": "runtime_exited_without_callback_finalization",
+        "retry_input": "<scrubbed content 2444 chars>"
       },
       "seq": [
         16,
