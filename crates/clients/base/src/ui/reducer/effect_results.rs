@@ -700,7 +700,21 @@ impl RyeOsCore {
                     //   already superseded.
                     let floor = self.data.source_floor.get(tile_id).copied().unwrap_or(0);
                     let stored = self.data.source_stored_epoch.get(tile_id).copied();
+                    let mut data = data;
                     if result_id >= floor && stored.is_none_or(|s| result_id >= s) {
+                        // An incremental window update is applied to the
+                        // stored window; one the window cannot absorb is
+                        // replaced by a full refetch.
+                        match crate::ui::timeline::merge_window(
+                            self.data.sources.get(tile_id),
+                            data,
+                        ) {
+                            Some(merged) => data = merged,
+                            None => {
+                                self.bump_generation();
+                                return self.refetch_window_in_full(tile_id);
+                            }
+                        }
                         self.apply_bound_source_projection(request, &data);
                         let old = self.data.sources.get(tile_id).cloned();
                         self.note_source_row_changes(tile_id, old.as_ref(), &data);
@@ -1718,6 +1732,132 @@ mod tests {
                 error: None,
             },
         });
+    }
+
+    fn window_core() -> RyeOsCore {
+        source_core(
+            "view:test/window",
+            serde_json::json!({"widget":"timeline", "sources":{"default":{
+                "ref":"service:test/source",
+                "params":{"chain_root_id":"C-1"},
+                "collection":"items",
+                "dynamic_parameters":["since_chain_seq"]
+            }}}),
+        )
+    }
+
+    fn fetch(core: &mut RyeOsCore) -> (u64, serde_json::Value) {
+        let effect = core
+            .emit_fetch_source_for_instance(test_instance(), "view:test/window")
+            .pop()
+            .expect("fetch emitted");
+        let RyeOsEffectKind::FetchSource { request, .. } = &effect.kind else {
+            panic!("not a source fetch");
+        };
+        let crate::ui::binding::UiBindingPayload::SourceParameters { params } = &request.payload
+        else {
+            panic!("not source parameters");
+        };
+        (effect.id, params.clone())
+    }
+
+    fn deliver_window(core: &mut RyeOsCore, id: u64, data: serde_json::Value) -> Vec<RyeOsEffect> {
+        core.dispatch(RyeOsEvent::EffectResult {
+            result: RyeOsEffectResult {
+                id,
+                ok: true,
+                kind: RyeOsEffectResultKind::SourceData,
+                data: Some(data),
+                error: None,
+            },
+        })
+    }
+
+    fn item_ids(core: &RyeOsCore) -> Vec<String> {
+        core.data.sources[&test_source_key()]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_window_update_is_upserted_into_the_stored_window() {
+        let mut core = window_core();
+        let (id, params) = fetch(&mut core);
+        assert!(
+            params.get("since_chain_seq").is_none(),
+            "first fetch is whole"
+        );
+        deliver_window(
+            &mut core,
+            id,
+            serde_json::json!({"highest_chain_seq": 5, "older": 0, "items": [
+                {"id": "a", "v": 1}, {"id": "b", "v": 1}
+            ]}),
+        );
+
+        let (id, params) = fetch(&mut core);
+        assert_eq!(params["since_chain_seq"], "5");
+        deliver_window(
+            &mut core,
+            id,
+            serde_json::json!({"highest_chain_seq": 7, "older": 0,
+                "order": ["a", "b", "c"],
+                "items": [{"id": "b", "v": 2}, {"id": "c", "v": 1}]}),
+        );
+        let stored = &core.data.sources[&test_source_key()];
+        assert_eq!(stored["highest_chain_seq"], 7);
+        assert!(stored.get("order").is_none());
+        assert_eq!(stored["items"][0]["v"], 1);
+        assert_eq!(stored["items"][1]["v"], 2);
+        assert_eq!(item_ids(&core), ["a", "b", "c"]);
+        let (_, params) = fetch(&mut core);
+        assert_eq!(params["since_chain_seq"], "7");
+    }
+
+    #[test]
+    fn an_update_naming_an_unknown_item_refetches_the_whole_window() {
+        let mut core = window_core();
+        let (id, _) = fetch(&mut core);
+        deliver_window(
+            &mut core,
+            id,
+            serde_json::json!({"highest_chain_seq": 5, "items": [{"id": "a"}]}),
+        );
+        let (id, params) = fetch(&mut core);
+        assert_eq!(params["since_chain_seq"], "5");
+        let effects = deliver_window(
+            &mut core,
+            id,
+            serde_json::json!({"highest_chain_seq": 8, "order": ["a", "z"], "items": []}),
+        );
+        assert_eq!(
+            item_ids(&core),
+            ["a"],
+            "an unabsorbable update is not stored"
+        );
+        let refetch = effects
+            .iter()
+            .find_map(|effect| match &effect.kind {
+                RyeOsEffectKind::FetchSource { request, .. } => Some((effect.id, request)),
+                _ => None,
+            })
+            .expect("a whole-window refetch is issued");
+        let crate::ui::binding::UiBindingPayload::SourceParameters { params } = &refetch.1.payload
+        else {
+            panic!("not source parameters");
+        };
+        assert!(params.get("since_chain_seq").is_none());
+        deliver_window(
+            &mut core,
+            refetch.0,
+            serde_json::json!({"highest_chain_seq": 8, "items": [{"id": "a"}, {"id": "z"}]}),
+        );
+        assert_eq!(item_ids(&core), ["a", "z"]);
+        let (_, params) = fetch(&mut core);
+        assert_eq!(params["since_chain_seq"], "8", "incremental fetches resume");
     }
 
     #[test]

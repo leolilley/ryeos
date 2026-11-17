@@ -261,7 +261,8 @@
       "id": "rc:mrk:6",
       "exchange": "mrk:6",
       "work": 5,
-      "duration_s": 9
+      "duration_s": 9,
+      "seq": 36
     },
     {
       "item": "entry",
