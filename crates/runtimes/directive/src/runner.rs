@@ -723,6 +723,24 @@ fn unknown_outcome_admitted(
         })
 }
 
+/// What a retry abandons: the failed attempt of a turn and the count of live
+/// output fragments it had published. A reader voids every progressive
+/// fragment of that turn published since its marker or the previous retry.
+/// The value is derived from the decision so recovery can check it exactly.
+pub(crate) fn retry_supersedes(decision: &ProviderRetryDecision) -> Value {
+    let output_events = match decision.reason {
+        ProviderRetryReason::MidStream {
+            live_output_events_emitted,
+        } => live_output_events_emitted,
+        _ => 0,
+    };
+    json!({
+        "turn": decision.turn,
+        "attempt": decision.failed_attempt_number,
+        "output_events": output_events,
+    })
+}
+
 fn retry_policy_digest(execution: &ExecutionConfig) -> anyhow::Result<HexDigest> {
     let value = json!({
         "schema": "ryeos.directive.provider-retry-policy.v2",
@@ -4373,6 +4391,7 @@ impl Runner {
                     "max_retries": self.execution.retries,
                     "backoff_ms": advance.decision.backoff_ms,
                     "decision_digest": digest,
+                    "supersedes": retry_supersedes(&advance.decision),
                     "retry_advance": advance,
                 }),
             )

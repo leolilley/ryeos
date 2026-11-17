@@ -974,3 +974,42 @@ fn chunks_image_first_inputs_and_retry_read_only_the_latest_input() {
         "an image-only latest input offers no retry, not an older text"
     );
 }
+
+#[test]
+fn a_provider_retry_marker_names_the_reason_and_any_superseded_output() {
+    let def = definition();
+    let retry = |seq: i64, output_events: u64| {
+        ev(
+            seq,
+            "2026-11-18T00:00:00Z",
+            "T-1",
+            "provider_retry",
+            json!({
+                "turn": 1,
+                "attempt": 1,
+                "backoff_ms": 1000,
+                "supersedes": {"turn": 1, "attempt": 1, "output_events": output_events},
+                "retry_advance": {"decision": {"reason": {"kind": "mid_stream"}}},
+            }),
+        )
+    };
+    let headlines = |evs: &[Value]| -> Vec<String> {
+        let timeline = fold(evs, &def).unwrap();
+        let text = serde_json::to_string(&timeline).unwrap();
+        let mut found = Vec::new();
+        for needle in [
+            "provider retry, attempt 1 · partial output superseded, live events: 4",
+            "provider retry, attempt 1",
+        ] {
+            if text.contains(needle) {
+                found.push(needle.to_string());
+            }
+        }
+        assert!(text.contains("mid_stream"), "{text}");
+        found
+    };
+    let cut = headlines(&[retry(1, 4)]);
+    assert!(cut.contains(&"provider retry, attempt 1 · partial output superseded, live events: 4".to_string()));
+    let clean = headlines(&[retry(1, 0)]);
+    assert_eq!(clean, vec!["provider retry, attempt 1".to_string()]);
+}

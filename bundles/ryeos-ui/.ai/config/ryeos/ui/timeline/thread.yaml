@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-17T08:54:07Z:3df19d5717060d34c010d9919a20e97b8633e50bec486dac0a99790eb2434edc:qXO5EG/vSMlgROcZF0ZKLVLjLjrFslBUP5LoIUoteXeQ8XllSQQTWBpsyMkvz7AXvtJqKuS1Sv1cPr6vj4jMAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T11:18:31Z:e56af7bdaac1725553bcfbd523b8b089b4104201dddd0a836b876799c4b21e9c:KH1RiRuwXqaELyc2F2vsNQFq81ytHTVUZn7d27DVt4dfdql04HUfQrlVz950icPDTRCbaZjufnw7bhAsihN0Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Thread timeline definition: how a chain's events fold into timeline items.
 # Declarative data read by the timeline service; the fold engine names no event type itself.
 category: ryeos/ui/timeline
@@ -312,11 +312,25 @@ events:
           project: {detail: {join: [{path: payload.steps, prefix: "steps: "}]}}
 
   # Provider and accounting notices.
+  # A retry after a mid-stream cut voids the live fragments of that turn
+  # published so far; the headline says so when any were emitted.
   provider_retry:
+    - when: {ne: [payload.supersedes.output_events, 0]}
+      emit:
+        - type: marker
+          tone: [{default: warn}]
+          project:
+            headline:
+              join:
+                - {path: payload.attempt, prefix: "provider retry, attempt "}
+                - {path: payload.supersedes.output_events, prefix: "partial output superseded, live events: "}
+            reason: payload.retry_advance.decision.reason.kind
     - emit:
         - type: marker
           tone: [{default: warn}]
-          project: {headline: {join: [{path: payload.attempt, prefix: "provider retry, attempt "}]}, reason: payload.error}
+          project:
+            headline: {join: [{path: payload.attempt, prefix: "provider retry, attempt "}]}
+            reason: payload.retry_advance.decision.reason.kind
   cost_untracked:
     - emit:
         - type: marker

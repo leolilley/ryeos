@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-17T05:02:43Z:b444ad158096d7bf3d8bb4ee891b3ee6a1f4a044c43fb8e72c762d91772f0d69:dvY5nalqsXgx35L/iQ+A29SFjImvAhpRFjrujhXru9q11Ad8ibY0K7cUrmW7RO+AQuTeursvLfbFumakP9kZDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-17T11:18:31Z:d84cde6a89b8b2aff619893ba71a58d593906766d30465f9ab7c7fda71b8014e:YMqGOyURPAgVa6lOrmLD5uFIjLeJQmDU9af4Uc9hfLcuIxhUKffGVEzHV2z20ke5r2Cc3Dq40r+ifeKNFR5EAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/runtimes
 tags: [runtime, directive, llm, callbacks]
@@ -33,6 +33,20 @@ The frame, the context inputs and the launch input are appended as one batch
 under an idempotency key. A rebuild of the conversation reads these events and
 reproduces the provider request without deciding again what the live run
 decided.
+
+## Retried provider calls
+
+A provider failure that the signed execution policy and the directive's
+`provider_contact` declaration admit for retry appends one durable
+`provider_retry` event before the successor attempt. Its `retry_advance` is the
+exact daemon-stamped advancement; its `supersedes` is `{turn, attempt,
+output_events}`: the failed attempt and, for a mid-stream cut, how many live
+`cognition_out` fragments it had published. Reader rule: a `provider_retry` for
+turn T voids every progressive `cognition_out` fragment of turn T published
+since that turn's start or the previous `provider_retry`. The fragments are
+ephemeral and the retry resends the same messages, so nothing durable records
+the abandoned text; only the turn-complete `cognition_out` counts, and resume
+folds only that one.
 
 ## Durable tool loop
 

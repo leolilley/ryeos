@@ -891,6 +891,10 @@ fn recover_provider_retry_testimonies(
                 anyhow::bail!("resume: provider_retry {field} contradicts its exact advancement");
             }
         }
+        if event.payload.get("supersedes") != Some(&crate::runner::retry_supersedes(&advance.decision))
+        {
+            anyhow::bail!("resume: provider_retry supersedes contradicts its exact advancement");
+        }
         match by_coordinate.get(&coordinate) {
             Some(prior) if prior != &digest => {
                 anyhow::bail!(
@@ -2638,6 +2642,7 @@ mod tests {
                 "max_retries": 3,
                 "backoff_ms": advance.decision.backoff_ms,
                 "decision_digest": advance.decision_digest,
+                "supersedes": crate::runner::retry_supersedes(&advance.decision),
                 "retry_advance": advance,
             }),
         }
@@ -2730,6 +2735,59 @@ mod tests {
             error
                 .to_string()
                 .contains("outside its active provider turn")
+        );
+    }
+
+    #[test]
+    fn retry_supersedes_counts_live_fragments_and_recovery_checks_it() {
+        let mut advance = retry_advance(1, 1, "cut");
+        advance.decision.reason = ryeos_accounting::ProviderRetryReason::MidStream {
+            live_output_events_emitted: 7,
+        };
+        assert_eq!(
+            crate::runner::retry_supersedes(&advance.decision),
+            json!({"turn": 1, "attempt": 1, "output_events": 7})
+        );
+        let status = retry_advance(1, 1, "status");
+        assert_eq!(
+            crate::runner::retry_supersedes(&status.decision)["output_events"],
+            json!(0)
+        );
+
+        let prelude = ReplayedEventRecord {
+            event_type: "cognition_in".to_string(),
+            payload: json!({"turn": 1}),
+        };
+        let sources = vec!["T-current".to_string(); 2];
+        let mut event = retry_event(&status);
+        let accepted = recover_provider_retry_testimonies(
+            &[prelude.clone(), event.clone()],
+            &sources,
+            "T-current",
+            ResumeMode::NativeSameThread,
+        );
+        assert!(accepted.is_ok());
+
+        event.payload["supersedes"]["output_events"] = json!(3);
+        let error = recover_provider_retry_testimonies(
+            &[prelude.clone(), event],
+            &sources,
+            "T-current",
+            ResumeMode::NativeSameThread,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("supersedes contradicts"));
+
+        let mut missing = retry_event(&status);
+        missing.payload.as_object_mut().unwrap().remove("supersedes");
+        assert!(
+            recover_provider_retry_testimonies(
+                &[prelude, missing],
+                &sources,
+                "T-current",
+                ResumeMode::NativeSameThread,
+            )
+            .is_err()
         );
     }
 
