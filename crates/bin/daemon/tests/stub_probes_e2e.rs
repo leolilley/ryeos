@@ -276,7 +276,10 @@ async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Rig> {
             |bundle_root| plant_provider(bundle_root, &url, &fixture.publisher),
         )
     };
-    let (h, fixture) = DaemonHarness::start_fast_with(plant, move |_cmd| {
+    let (h, fixture) = DaemonHarness::start_fast_with(plant, move |cmd| {
+        if let Ok(filter) = std::env::var("PROBE_RUST_LOG") {
+            cmd.env("RUST_LOG", filter);
+        }
         *spawn_cell_tweak.lock().expect("spawn cell") = Some(Instant::now());
     })
     .await?;
@@ -1012,6 +1015,41 @@ fn call_timeline(name: &str, log: &str) {
     say(name, &format!("call_largest_gaps={top:#?}"));
 }
 
+/// With PROBE_RUST_LOG set: every stderr line of three consecutive mid-run
+/// calls, offset from the first line, with the gap since the previous line.
+fn full_call_dump(name: &str, log: &str) {
+    if std::env::var("PROBE_RUST_LOG").is_err() {
+        return;
+    }
+    fn stamp_ms(line: &str) -> Option<f64> {
+        let t = line.trim_start().split('Z').next()?.split('T').nth(1)?;
+        let mut p = t.split(':');
+        let h: f64 = p.next()?.parse().ok()?;
+        let m: f64 = p.next()?.parse().ok()?;
+        let s: f64 = p.next()?.parse().ok()?;
+        Some((h * 3600.0 + m * 60.0 + s) * 1000.0)
+    }
+    let lines: Vec<&str> = log.lines().collect();
+    let marks: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.contains("resolved project execution context"))
+        .map(|(i, _)| i)
+        .collect();
+    if marks.len() < 30 {
+        say(name, &format!("full_dump skipped markers={}", marks.len()));
+        return;
+    }
+    let (a, b) = (marks[18], marks[24]);
+    let t0 = stamp_ms(lines[a]).unwrap_or(0.0);
+    let mut prev = t0;
+    for l in &lines[a..b] {
+        let t = stamp_ms(l).unwrap_or(prev);
+        println!("DUMP +{:.0} d{:.0} {}", t - t0, t - prev, trunc(l.splitn(2, "Z ").nth(1).unwrap_or(l), 230));
+        prev = t;
+    }
+}
+
 fn contention_report(name: &str, raw_log: &str) {
     let log = strip_ansi(raw_log);
     let log = log.as_str();
@@ -1042,6 +1080,7 @@ fn contention_report(name: &str, raw_log: &str) {
         );
     }
     call_timeline(name, log);
+    full_call_dump(name, log);
     let raw: Vec<String> = log
         .lines()
         .filter(|l| l.contains("StateStore contention summary"))
@@ -1178,6 +1217,19 @@ async fn noop_tool_calls_on(n: u64, limits: Option<(u64, u64)>, tmpfs: bool) {
 async fn probe_noop_tool_calls_100() {
     // No declared limits: shows what the directive kind enforces by default.
     noop_tool_calls(100, None).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "measurement"]
+async fn probe_noop_tool_calls_30_trace() {
+    // SAFETY: single-test run (--test-threads=1), set before the daemon spawns.
+    unsafe {
+        std::env::set_var(
+            "PROBE_RUST_LOG",
+            "info,ryeosd=debug,ryeos_executor=debug,ryeos_app=debug,ryeos_api=debug,ryeos_directive_runtime=debug,ryeos_engine=debug,ryeos_state=debug",
+        )
+    };
+    noop_tool_calls_on(30, None, true).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
