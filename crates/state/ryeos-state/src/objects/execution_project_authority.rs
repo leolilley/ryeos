@@ -1515,6 +1515,7 @@ mod tests {
     fn live_access_schema_requires_explicit_confinement() {
         let missing = serde_json::json!({
             "access": "read_write",
+            "intent": "default",
             "authorized_write_namespaces": ["project"]
         });
         let error = serde_json::from_value::<LiveAccessAuthority>(missing).unwrap_err();

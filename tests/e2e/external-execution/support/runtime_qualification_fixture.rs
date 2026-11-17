@@ -38,6 +38,7 @@ pub fn write_guest_runtime_sources(
         verifier_runtime_manifest_hash,
         required_claims,
         &LARGE_GUEST_PRODUCT,
+        &super::runtime_qualification::ordinary_launch_shape(),
     );
 }
 

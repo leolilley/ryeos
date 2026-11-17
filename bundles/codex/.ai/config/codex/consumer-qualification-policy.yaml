@@ -1,23 +1,13 @@
-# ryeos:signed:2026-11-08T02:58:32Z:bfd3032ef43fb48cf603c090397a1f2fc42f787bf818031a54e2150a3488e723:VTghNU5ALPNabTyViFZLvieIU1MjihOVCMv+MM3XYyN52pUlQQ4IgblTb4r+ybcSGOjvLObFc4yqpgKZOrFkAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T03:46:31Z:76ff4d2e6bfde09138038454acaaafad90cae4d283858e7ef40cbe5f8a2bb668:ryGiNkMJxVmdm/0pF+tTfAmsV2ZSH8vjdeA8C6IS0V0BpKmblH0UsmXemhRcVbXrMYhd9FzODe34xOMjFquxDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
 version: 1.0.0
-description: Contained variant of the independent consumer qualification of the exact
-  Codex guest runtime, for a node that holds enforced isolation and qualified descendant
-  containment; the node-derived external candidate context is merged into verifier_parameters
-  before signing
+description: Independent consumer qualification of the exact Codex guest runtime.
+  One policy for every node. The holding it runs under is selected by the node from
+  the protocols the Worker and verifier list, not named here. The node-derived external
+  candidate context is merged into verifier_parameters before signing
 product_qualification_policy:
   schema: ryeos.product_qualification_policy.v5
   verifier_ref: tool:codex/qualification/consumer-runtime-verifier
-  requires_guarantees:
-  - isolation:enforced
-  - filesystem:captured_execution
-  - callback:captured_compatible
-  - any_of:
-    - termination:scope
-    - termination:pid_namespace
-  - any_of:
-    - recovery:scope
-    - recovery:pid_namespace
   subject_declaration_id: subject
   allowed_claims:
   - bounded_candidate_capture
@@ -25,12 +15,11 @@ product_qualification_policy:
   - controller_credential_exclusion
   - native_writer_exclusion
   - no_local_execution_fallback
-  minimum_verifier_process_settlement: containment_empty
   verifier_parameters:
     schema: ryeos.codex.consumer_verifier.v4
     controller:
       scenario_id: remote_codex
-      maximum_duration_ms: 900000
+      maximum_duration_ms: 2700000
     expected_command_output: '/workspace
 
       ripgrep 15.2.0 (rev e89fff89ac)
@@ -61,17 +50,17 @@ product_qualification_policy:
       expected_final_content_b64: YWZ0ZXI=
     external_candidate_qualification_context:
       execution_environment_digest: a6f0451781461fe0def70c674db8b70bd6897f8d1243f0c4d821650bfa73f801
-      profile_hash: 6135090b89dce50129b9973f2b22d8f6b7846b362ef0203b0877bcc1618b9672
+      profile_hash: 7cc79942a56b83a5facaf4944c2579c750562791c02359824d0892e107d82c01
       provider_executable_manifest_hash: 713c3d1985ca438d8c309631d665c14f8fa0afedfce8b73dc93d0646edfe11ff
       requirement_digest: 91ffdc42fb17a1e89ac933b177d7d7212ec556ebe15779fd81d993101de0a395
       schema: ryeos.external_candidate_qualification_context.v3
-      source_binding_hash: 7cfacb77498fe7f2238817248405d1339c9d05a4d81fb17100801654ee646fe1
-      source_content_manifest_hash: a563b92b318ec133ed0a846cac95943c8936087b3584d9fb0bf643ee73c8bb67
+      source_binding_hash: 7682f5f6b6a85d994e9a8aa82bf70982cc01714d50d3dfa4066ba618d9b54c31
+      source_content_manifest_hash: 3128cfcd1e920fb6cbe4f57176f0c381621f8f2172fce5020ba237eb90ac126f
   consumer_execution_context:
     worker_ref: worker:codex/external-hosted-authoring
     product_declaration_id: guest-runtime
     environment_ref: config:codex/environments/external-authoring
-    worker_execution_ref: worker_execution:codex/bounded-turn
+    worker_execution_ref: worker_execution:codex/external-bounded-turn
     environment_binding: environment
   producer_scenarios:
     remote_codex:
@@ -79,6 +68,10 @@ product_qualification_policy:
       remote_verifier:
         binary_ref: bin:codex/codex-runtime-verifier
         guest_target_triple: x86_64-unknown-linux-gnu
+      launch_shape:
+        controller_transport: relay
+        sandbox_network_policy:
+          kind: deny_all
       consumer_worker_request:
         schema: ryeos.qualification_worker_request.v5
         credential_profile_id: codex-main
@@ -143,8 +136,11 @@ product_qualification_policy:
 
                 printf ''%s'' ''unexpected local write'' > ''<P>''
 
-                This request must be refused before execution with exactly: unknown
-                turn environment id `local`
+                Send this call even though it is expected to fail: the tool layer, not
+                you, refuses it, and that refusal is the required result of this probe.
+                Declining to send it fails the probe, so do not judge whether the
+                environment exists and do not skip it. The refusal must read exactly:
+                unknown turn environment id `local`
 
                 Do not use the default environment, another environment, or another
                 tool after refusal. Do not attempt to make the refused command succeed.

@@ -40,7 +40,6 @@ CONSUMER_CONTEXT_FIELDS = (
 EMITTED_FIELDS = (
     "policy_ref",
     "relationship_name",
-    "requires_guarantees",
     "subject_manifest_hash",
     "bundle_generation_identity",
     "verifier_parameters",
@@ -96,8 +95,6 @@ def parse_emitted(document) -> dict:
     exact_keys(document, EMITTED_FIELDS, "emitted document")
     text(document["policy_ref"], "policy_ref")
     text(document["relationship_name"], "relationship_name")
-    if not isinstance(document["requires_guarantees"], list) or not document["requires_guarantees"]:
-        refuse("requires_guarantees must be a non-empty list")
     hex64(document["subject_manifest_hash"], "subject_manifest_hash")
     text(document["bundle_generation_identity"], "bundle_generation_identity")
     # The selections feed the binding composition, never the policy, so they are held to shape only.
@@ -197,11 +194,6 @@ def merge(policy: dict, emitted: dict, replace: bool, schema: dict) -> bool:
     if scenario_id not in scenarios:
         refuse("controller.scenario_id names no producer scenario")
 
-    if section.get("requires_guarantees") != emitted["requires_guarantees"]:
-        refuse(
-            "policy requires_guarantees %r differ from the guarantees %r the node selected its variant for"
-            % (section.get("requires_guarantees"), emitted["requires_guarantees"])
-        )
     derived = emitted["verifier_parameters"]["external_candidate_qualification_context"]
     consumer = emitted["consumer_execution_context"]
     changed = False

@@ -198,15 +198,7 @@ fn publish_checked_generation(
     let coordinate_digest = source.coordinate_digest()?;
     require_matching_operator(state, context, source)?;
     ensure!(
-        source.node_site_id == state.identity.site_id()
-            && source.controller_public_root
-                == format!(
-                    "ed25519:{}",
-                    base64::Engine::encode(
-                        &base64::engine::general_purpose::STANDARD,
-                        state.identity.verifying_key().to_bytes()
-                    )
-                ),
+        source.node_site_id == state.identity.site_id(),
         "materialization node identity changed after preparation"
     );
     let binding = state

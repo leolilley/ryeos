@@ -7276,50 +7276,8 @@ fn node_capability_report_reader(
     policy_generation: String,
 ) -> ryeos_app::node_requirement_admission::NodeCapabilityReportReader {
     ryeos_app::node_requirement_admission::NodeCapabilityReportReader::new(move || {
-        current_node_capability_view(&app_root, &policy_generation)
+        ryeos_node::capability_report::current_node_capability_view(&app_root, &policy_generation)
     })
-}
-
-fn current_node_capability_view(
-    app_root: &std::path::Path,
-    policy_generation: &str,
-) -> Result<lillux::process_control::HostCapabilities> {
-    use ryeos_app::node_requirement_admission::{NodeReportUnreadable, NodeRequirementRefused};
-    let signed =
-        ryeos_node::capability_report::SignedNodeCapabilityReport::read_verified(app_root)?
-            .ok_or_else(|| {
-                NodeRequirementRefused(
-                    "launch refused: no verified node capability report is recorded".to_owned(),
-                )
-            })?;
-    let staleness = signed.staleness(Some(policy_generation)).map_err(|error| {
-        NodeReportUnreadable(format!("observe this host's generation: {error:#}"))
-    })?;
-    if let Some(reason) = staleness {
-        anyhow::bail!(NodeRequirementRefused(format!(
-            "launch refused: the recorded node capability report is stale: {reason}"
-        )));
-    }
-    let mut view = lillux::process_control::HostCapabilities {
-        provided: signed.report.provided,
-        missing: signed.report.missing,
-    };
-    let credential_home = ryeos_node::capability_report::CREDENTIAL_PRIVATE_HOME;
-    if view.provided.contains_key(credential_home) {
-        let state_dir = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).state();
-        let observed = lillux::process_control::PrivateDirectoryFacts::observe(
-            app_root,
-            &ryeos_app::private_artifact_home::root(&state_dir),
-        );
-        if let Err(reason) = lillux::process_control::decide_private_directory(&observed) {
-            view.provided.remove(credential_home);
-            view.refuse(
-                credential_home,
-                format!("credential home root is no longer private at admission: {reason}"),
-            );
-        }
-    }
-    Ok(view)
 }
 
 /// Prove one exact process group dead from its identity alone, killing it

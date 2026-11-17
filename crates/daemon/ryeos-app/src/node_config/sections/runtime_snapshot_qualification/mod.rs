@@ -9,6 +9,7 @@ use anyhow::{Context as _, Result, ensure};
 use ryeos_external_execution_contract::restored_runtime_measurement::{
     ConsumerRuntimeVerificationCoordinate, ConsumerRuntimeVerifierSelection,
 };
+use ryeos_external_execution_contract::runtime_snapshot::LaunchShape;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -37,6 +38,10 @@ struct QualificationDocument {
     settings: Value,
     verifier_artifact_hash: String,
     consumer_verifiers: BTreeMap<String, ConsumerRuntimeVerifierSelection>,
+    /// The shape every occurrence created under this binding has: how its
+    /// controller is reached and what its sandbox may reach. Copied into the
+    /// qualification intent at create.
+    launch_shape: LaunchShape,
     contact_timeout_seconds: u32,
     /// Budget of the one contact that delivers a consumer verifier archive
     /// into the restored occurrence. An archive transfer outlasts any plain
@@ -49,10 +54,11 @@ impl QualificationDocument {
     fn validate(&self) -> Result<()> {
         ensure!(
             self.kind == "node"
-                && self.schema == 4
-                && self.protocol == "ryeos.runtime-snapshot-qualification.v4",
+                && self.schema == 5
+                && self.protocol == "ryeos.runtime-snapshot-qualification.v5",
             "unsupported runtime snapshot qualification binding"
         );
+        self.launch_shape.validate()?;
         ensure!(
             self.consumer_verifiers.len() <= 8,
             "snapshot qualification consumer verifier inventory exceeds bound"
@@ -102,6 +108,24 @@ impl QualificationDocument {
             "qualification contact, delivery or lifetime budget is invalid"
         );
         Ok(())
+    }
+}
+
+/// The shape the test fixtures create occurrences under: https, with an
+/// allow-list naming one host.
+#[cfg(test)]
+pub(crate) fn test_launch_shape() -> LaunchShape {
+    use ryeos_external_execution_contract::runtime_snapshot::{
+        LaunchControllerTransport, LaunchSandboxNetworkPolicy,
+    };
+    LaunchShape {
+        controller_transport: LaunchControllerTransport::Https,
+        sandbox_network_policy: LaunchSandboxNetworkPolicy::AllowList {
+            hosts: ["controller.invalid".to_owned()].into(),
+        },
+        network_inputs: Some(
+            ryeos_external_execution_contract::runtime_snapshot::LaunchNetworkInputs::operator(),
+        ),
     }
 }
 
@@ -247,8 +271,8 @@ impl InstalledRuntimeSnapshotQualificationBinding {
         let settings = serde_json::json!({"schema":1,"owner_id":"owner-1"});
         let document = QualificationDocument {
             kind: "node".into(),
-            schema: 4,
-            protocol: "ryeos.runtime-snapshot-qualification.v4".into(),
+            schema: 5,
+            protocol: "ryeos.runtime-snapshot-qualification.v5".into(),
             production_binding_id: production_binding_id.to_owned(),
             production_binding_digest: production_binding_digest.to_owned(),
             provider_spec_digest: provider_spec_digest.to_owned(),
@@ -258,6 +282,7 @@ impl InstalledRuntimeSnapshotQualificationBinding {
             settings,
             verifier_artifact_hash: verifier_artifact_hash.to_owned(),
             consumer_verifiers,
+            launch_shape: test_launch_shape(),
             contact_timeout_seconds: 60,
             delivery_timeout_seconds: 600,
             maximum_lifetime_seconds: 900,
@@ -376,6 +401,9 @@ impl InstalledRuntimeSnapshotQualificationBinding {
     pub(crate) fn consumer_verifiers(&self) -> &BTreeMap<String, ConsumerRuntimeVerifierSelection> {
         &self.document.consumer_verifiers
     }
+    pub(crate) fn launch_shape(&self) -> &LaunchShape {
+        &self.document.launch_shape
+    }
     pub(crate) fn contact_timeout_seconds(&self) -> u32 {
         self.document.contact_timeout_seconds
     }
@@ -442,8 +470,8 @@ impl NodeConfigSection for RuntimeSnapshotQualificationSection {
         crate::node_config::coherence::require_admitted_binding_schema(
             SECTION_NAME,
             body,
-            &[4],
-            "ryeos.runtime-snapshot-qualification.v4",
+            &[5],
+            "ryeos.runtime-snapshot-qualification.v5",
         )?;
         let document: QualificationDocument = serde_json::from_value(body.clone())
             .context("invalid runtime snapshot qualification binding")?;
@@ -463,8 +491,8 @@ mod tests {
         let settings = serde_json::json!({"schema":1,"owner_id":"owner-1"});
         QualificationDocument {
             kind: "node".into(),
-            schema: 4,
-            protocol: "ryeos.runtime-snapshot-qualification.v4".into(),
+            schema: 5,
+            protocol: "ryeos.runtime-snapshot-qualification.v5".into(),
             production_binding_id: "test-source".into(),
             production_binding_digest: "1".repeat(64),
             provider_spec_digest: "2".repeat(64),
@@ -474,6 +502,7 @@ mod tests {
             settings,
             verifier_artifact_hash: "3".repeat(64),
             consumer_verifiers: BTreeMap::new(),
+            launch_shape: test_launch_shape(),
             contact_timeout_seconds: 60,
             delivery_timeout_seconds: 600,
             maximum_lifetime_seconds: 900,
@@ -507,8 +536,8 @@ mod tests {
     #[test]
     fn consumer_selection_is_explicit_bounded_and_distinct_from_owner_artifact() {
         let mut predecessor = document();
-        predecessor.schema = 3;
-        predecessor.protocol = "ryeos.runtime-snapshot-qualification.v3".into();
+        predecessor.schema = 4;
+        predecessor.protocol = "ryeos.runtime-snapshot-qualification.v4".into();
         assert!(predecessor.validate().is_err());
         let mut selected = document();
         selected.consumer_verifiers.insert(
@@ -546,5 +575,22 @@ mod tests {
         let mut absent = serde_json::to_value(document()).unwrap();
         absent.as_object_mut().unwrap().remove("consumer_verifiers");
         assert!(serde_json::from_value::<QualificationDocument>(absent).is_err());
+    }
+
+    #[test]
+    fn the_binding_declares_its_launch_shape_and_the_predecessor_is_refused() {
+        let mut absent = serde_json::to_value(document()).unwrap();
+        absent.as_object_mut().unwrap().remove("launch_shape");
+        assert!(serde_json::from_value::<QualificationDocument>(absent).is_err());
+        let mut bad = document();
+        bad.launch_shape.sandbox_network_policy =
+            ryeos_external_execution_contract::runtime_snapshot::LaunchSandboxNetworkPolicy::AllowList {
+                hosts: Default::default(),
+            };
+        assert!(bad.validate().is_err());
+        let mut v4 = document();
+        v4.schema = 4;
+        v4.protocol = "ryeos.runtime-snapshot-qualification.v4".into();
+        assert!(v4.validate().is_err());
     }
 }

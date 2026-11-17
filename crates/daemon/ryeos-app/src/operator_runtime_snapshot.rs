@@ -1,7 +1,7 @@
 //! Operator-owned, one-attempt production of an unqualified provider locator.
 //!
 //! The upload is staged from current CAS authority by the executor. This
-//! owner independently rejoins its manifest and controller root to the current
+//! owner independently rejoins its manifest and owner executable to the current
 //! product witness before claiming the durable contact attempt. A locator is
 //! not an installed-runtime qualification or placement grant.
 
@@ -154,8 +154,7 @@ fn current_captured_product_source(
         &witness.evidence.manifest_hash,
         limits.max_object_bytes,
     )?;
-    let identity =
-        derive_guest_owner_runtime_manifest_identity(&manifest, state.identity.verifying_key())?;
+    let identity = derive_guest_owner_runtime_manifest_identity(&manifest)?;
     ensure!(
         identity.manifest_hash == witness.evidence.manifest_hash
             && witness.attestation_hash == witness_hash,
@@ -916,8 +915,7 @@ fn create_qualification_occurrence_checked(
             current.source.materialization_binding_digest == *materialization_binding_digest
                 && current.identity.manifest_hash == source.intent.guest_runtime_manifest_hash
                 && current.identity.owner_executable_sha256
-                    == source.intent.owner_executable_sha256
-                && current.identity.controller_public_root == source.intent.controller_public_root,
+                    == source.intent.owner_executable_sha256,
             "materialized qualification differs from current exact runtime source"
         );
     }
@@ -926,38 +924,8 @@ fn create_qualification_occurrence_checked(
     state
         .external_placement_backends
         .preflight_snapshot_qualification_create(producer, qualification, &credential)?;
-    let now = lillux::time::timestamp_millis();
-    let mut intent = RuntimeSnapshotQualificationIntent {
-        schema: RUNTIME_SNAPSHOT_QUALIFICATION_SCHEMA,
-        operation_id: String::new(),
-        owner_principal: context.fingerprint.clone(),
-        snapshot_operation_id: source.intent.operation_id.clone(),
-        snapshot_intent_digest: source.intent.digest()?,
-        snapshot_id: locator.snapshot_id.clone(),
-        provider_id: producer.backend().to_owned(),
-        provider_group_id: producer.provider_group_id().to_owned(),
-        qualification_profile_digest: qualification.digest().to_owned(),
-        adapter_artifact_hash: producer.adapter_artifact_hash().to_owned(),
-        provider_spec_digest: qualification.provider_spec_digest().to_owned(),
-        settings_digest: qualification.settings_digest().to_owned(),
-        verifier_artifact_hash: qualification.verifier_artifact_hash().to_owned(),
-        maximum_lifetime_seconds: qualification.maximum_lifetime_seconds(),
-        attempt_deadline_ms: now
-            .checked_add(i64::from(qualification.contact_timeout_seconds()) * 1_000)
-            .context("qualification create deadline overflow")?,
-    };
-    intent.operation_id = intent.derived_operation_id()?;
-    if let Some(existing) = state
-        .state_store
-        .snapshot_qualification_operation(&intent.operation_id)?
-    {
-        intent.attempt_deadline_ms = existing.intent.attempt_deadline_ms;
-        ensure!(
-            intent == existing.intent,
-            "retained qualification attempt contradicts current signed coordinates"
-        );
-    }
-    intent.validate_for(&source.intent, &locator)?;
+    // The publish below hashes the payload closure several times, so it runs before the contact deadline is
+    // taken: the deadline then bounds the provider contact, not the node's own escrow work.
     // Retain the exact generation this occurrence is made under: both signed
     // bindings and the producer's lifecycle closure. Its termination resolves
     // through them, so a later recompose or bundle replacement cannot strand
@@ -978,6 +946,39 @@ fn create_qualification_occurrence_checked(
         qualification: qualification.retained_generation()?,
         lifecycle_root_hash: published_lifecycle.root_hash().to_owned(),
     };
+    let now = lillux::time::timestamp_millis();
+    let mut intent = RuntimeSnapshotQualificationIntent {
+        schema: RUNTIME_SNAPSHOT_QUALIFICATION_SCHEMA,
+        operation_id: String::new(),
+        owner_principal: context.fingerprint.clone(),
+        snapshot_operation_id: source.intent.operation_id.clone(),
+        snapshot_intent_digest: source.intent.digest()?,
+        snapshot_id: locator.snapshot_id.clone(),
+        provider_id: producer.backend().to_owned(),
+        provider_group_id: producer.provider_group_id().to_owned(),
+        qualification_profile_digest: qualification.digest().to_owned(),
+        adapter_artifact_hash: producer.adapter_artifact_hash().to_owned(),
+        provider_spec_digest: qualification.provider_spec_digest().to_owned(),
+        settings_digest: qualification.settings_digest().to_owned(),
+        verifier_artifact_hash: qualification.verifier_artifact_hash().to_owned(),
+        maximum_lifetime_seconds: qualification.maximum_lifetime_seconds(),
+        launch_shape: qualification.launch_shape().clone(),
+        attempt_deadline_ms: now
+            .checked_add(i64::from(qualification.contact_timeout_seconds()) * 1_000)
+            .context("qualification create deadline overflow")?,
+    };
+    intent.operation_id = intent.derived_operation_id()?;
+    if let Some(existing) = state
+        .state_store
+        .snapshot_qualification_operation(&intent.operation_id)?
+    {
+        intent.attempt_deadline_ms = existing.intent.attempt_deadline_ms;
+        ensure!(
+            intent == existing.intent,
+            "retained qualification attempt contradicts current signed coordinates"
+        );
+    }
+    intent.validate_for(&source.intent, &locator)?;
     let reserved = state
         .state_store
         .reserve_snapshot_qualification(&intent, &generation)?;
@@ -1332,7 +1333,7 @@ fn verify_qualification_occurrence_under_contact_gate(
         .preflight_snapshot_qualification_create(producer, qualification, &credential)?;
     let now = lillux::time::timestamp_millis();
     let mut intent = RestoredVerifierAttemptIntent {
-        schema: 2,
+        schema: ryeos_external_execution_contract::restored_runtime_measurement::RESTORED_VERIFIER_ATTEMPT_SCHEMA,
         operation_id: String::new(),
         qualification_operation_id: qualified.intent.operation_id.clone(),
         restored_occurrence_id: occurrence.occurrence_id.clone(),
@@ -1507,6 +1508,21 @@ impl PreparedConsumerAttempt {
     }
 }
 
+/// One occurrence is one sandbox with one shape: a consumer attempt may run on
+/// it only when the signed scenario declares exactly the shape it was created
+/// under.
+fn require_occurrence_shape_matches_scenario(
+    declared: &ryeos_external_execution_contract::runtime_snapshot::LaunchShape,
+    occurrence: &ryeos_external_execution_contract::runtime_snapshot::LaunchShape,
+) -> Result<()> {
+    if let Some(difference) = declared.first_difference(occurrence) {
+        anyhow::bail!(
+            "the qualified occurrence was created under a launch shape the scenario does not declare: {difference} (scenario first, occurrence second)"
+        );
+    }
+    Ok(())
+}
+
 pub fn prepare_consumer_verifier_attempt_for_callback(
     state: &AppState,
     token: &str,
@@ -1556,8 +1572,15 @@ pub fn prepare_consumer_verifier_attempt_for_callback(
         .iter()
         .find(|profile| profile.digest() == qualification.intent.qualification_profile_digest)
         .context("consumer challenge protected profile disappeared")?;
+    let declared_shape = &admitted
+        .purpose()
+        .remote_verifier_sources
+        .get(&admitted.coordinate().scenario_id)
+        .context("consumer challenge has no retained verifier source")?
+        .launch_shape;
+    require_occurrence_shape_matches_scenario(declared_shape, &qualification.intent.launch_shape)?;
     let mut intent = RestoredVerifierAttemptIntent {
-        schema: 2,
+        schema: ryeos_external_execution_contract::restored_runtime_measurement::RESTORED_VERIFIER_ATTEMPT_SCHEMA,
         operation_id: String::new(),
         qualification_operation_id: qualification_operation_id.into(),
         restored_occurrence_id: occurrence.occurrence_id.clone(),
@@ -1569,6 +1592,7 @@ pub fn prepare_consumer_verifier_attempt_for_callback(
             coordinate: admitted.coordinate().clone(),
             nonce_hex: hex::encode(lillux::crypto::generate_random_bytes::<32>()),
             guest_runtime_manifest_hash: source.intent.guest_runtime_manifest_hash.clone(),
+            launch_shape: qualification.intent.launch_shape.clone(),
         },
         // The first contact delivers the consumer archive, which outlasts a
         // plain provider round trip; the profile's delivery budget bounds it.
@@ -1587,16 +1611,19 @@ pub fn prepare_consumer_verifier_attempt_for_callback(
                     coordinate,
                     nonce_hex,
                     guest_runtime_manifest_hash,
+                    launch_shape,
                 },
                 RemoteVerificationPurpose::ConsumerRuntime {
                     coordinate: retained_coordinate,
                     nonce_hex: retained_nonce,
                     guest_runtime_manifest_hash: retained_manifest,
+                    launch_shape: retained_shape,
                 },
             ) => {
                 ensure!(
                     coordinate == retained_coordinate
-                        && guest_runtime_manifest_hash == retained_manifest,
+                        && guest_runtime_manifest_hash == retained_manifest
+                        && launch_shape == retained_shape,
                     "consumer challenge replay changed accepted coordinate or owner runtime"
                 );
                 *nonce_hex = retained_nonce.clone();
@@ -1948,7 +1975,7 @@ fn verify_consumer_occurrence_with_callback(
                 })
                 .context("consumer signed producer absent")?;
             let challenge = ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeChallenge {
-                schema: 1, intent: intent.clone(), selection: selection.clone(),
+                schema: ryeos_external_execution_contract::restored_runtime_measurement::CONSUMER_RUNTIME_CHALLENGE_SCHEMA, intent: intent.clone(), selection: selection.clone(),
             };
             let upload = archive.delivery_descriptor_for_challenge(&challenge)?;
             let request = RestoredVerifierAdapterRequest {
@@ -2401,132 +2428,6 @@ pub fn observe_readiness(
         .bind_runtime_snapshot_readiness(&observed.value)
 }
 
-/// Rejoin an independently qualified runtime probe to the daemon's one-shot
-/// provider journal. The probe can name a locator, but cannot manufacture a
-/// bound attempt or replace the source product, controller, or operator.
-pub(crate) fn verify_probe_snapshot_locator(
-    state: &AppState,
-    proof: &ryeos_state::external_content::products::composition::AdmittedProductQualification,
-    source: &GuestOwnerRuntimeManifestIdentity,
-    provider_id: &str,
-    owner_principal: &str,
-) -> Result<Option<ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotLocator>> {
-    let Some(value) = proof
-        .evidence
-        .result
-        .probe_evidence
-        .get("runtime_snapshot_locator")
-    else {
-        return Ok(None);
-    };
-    let named: ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotLocator =
-        serde_json::from_value(value.clone())
-            .context("runtime probe has an invalid snapshot locator")?;
-    let record = state
-        .state_store
-        .runtime_snapshot_operation(&named.operation_id)?
-        .context("runtime probe names no retained snapshot operation")?;
-    validate_probe_snapshot_record(&record, &named, proof, source, provider_id, owner_principal)?;
-    let verifier = verify_probe_restored_verifier_record(
-        state,
-        &record,
-        proof,
-        source,
-        provider_id,
-        owner_principal,
-    )?;
-    verify_probe_provider_terminal_record(state, proof, &verifier, provider_id, owner_principal)?;
-    Ok(Some(named))
-}
-
-fn verify_probe_restored_verifier_record(
-    state: &AppState,
-    snapshot: &RuntimeSnapshotRecord,
-    proof: &ryeos_state::external_content::products::composition::AdmittedProductQualification,
-    source: &GuestOwnerRuntimeManifestIdentity,
-    provider_id: &str,
-    owner_principal: &str,
-) -> Result<RestoredVerifierAttemptRecord> {
-    let evidence = &proof.evidence.result.probe_evidence;
-    let operation_id = evidence
-        .get("restored_verifier_operation_id")
-        .and_then(serde_json::Value::as_str)
-        .context("runtime probe lacks exact restored verifier operation")?;
-    let observation_hash = evidence
-        .get("restored_verifier_observation_hash")
-        .and_then(serde_json::Value::as_str)
-        .context("runtime probe lacks exact restored verifier observation")?;
-    ensure!(
-        lillux::valid_hash(operation_id) && lillux::valid_hash(observation_hash),
-        "runtime probe has invalid verifier evidence identity"
-    );
-    let retained = state
-        .state_store
-        .restored_verifier_attempt(operation_id)?
-        .context("runtime probe names no retained verifier attempt")?;
-    let observation = retained
-        .observation
-        .as_ref()
-        .context("runtime probe verifier has no complete observation")?
-        .owner_measurement()?;
-    ensure!(
-        retained.phase == RestoredVerifierAttemptPhase::Observed
-            && !observation.contact_deadline_exceeded
-            && retained.intent.owner_challenge()?.operation_id == snapshot.intent.operation_id
-            && retained.intent.owner_challenge()?.snapshot_id
-                == snapshot
-                    .locator
-                    .as_ref()
-                    .context("probe snapshot lost locator")?
-                    .snapshot_id
-            && retained.intent.restored_occurrence_id == observation.occurrence_id
-            && snapshot.intent.provider_id == provider_id
-            && snapshot.intent.owner_principal == owner_principal
-            && observation.measurement.manifest_hash == source.manifest_hash
-            && observation.measurement.owner_executable_sha256 == source.owner_executable_sha256
-            && observation.measurement.controller_public_root == source.controller_public_root
-            && lillux::sha256_hex(&ryeos_external_execution_contract::canonical_json(
-                observation
-            )?) == observation_hash,
-        "runtime probe verifier differs from exact timely retained observation"
-    );
-    Ok(retained)
-}
-
-fn verify_probe_provider_terminal_record(
-    state: &AppState,
-    proof: &ryeos_state::external_content::products::composition::AdmittedProductQualification,
-    verifier: &RestoredVerifierAttemptRecord,
-    provider_id: &str,
-    owner_principal: &str,
-) -> Result<()> {
-    let evidence = &proof.evidence.result.probe_evidence;
-    let operation_id = evidence
-        .get("qualification_termination_operation_id")
-        .and_then(serde_json::Value::as_str)
-        .context("runtime probe lacks exact qualification termination operation")?;
-    let observation_hash = evidence
-        .get("provider_terminal_observation_hash")
-        .and_then(serde_json::Value::as_str)
-        .context("runtime probe lacks exact provider terminal observation")?;
-    ensure!(
-        lillux::valid_hash(operation_id) && lillux::valid_hash(observation_hash),
-        "runtime probe has invalid provider terminal evidence identity"
-    );
-    let retained = state
-        .state_store
-        .qualification_termination_operation(operation_id)?
-        .context("runtime probe names no retained qualification termination")?;
-    validate_provider_terminal_join(
-        &retained,
-        &verifier.intent.qualification_operation_id,
-        &verifier.intent.restored_occurrence_id,
-        provider_id,
-        owner_principal,
-        observation_hash,
-    )
-}
-
 fn validate_provider_terminal_join(
     retained: &QualificationTerminationRecord,
     qualification_operation_id: &str,
@@ -2554,33 +2455,6 @@ fn validate_provider_terminal_join(
     Ok(())
 }
 
-fn validate_probe_snapshot_record(
-    record: &RuntimeSnapshotRecord,
-    named: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotLocator,
-    proof: &ryeos_state::external_content::products::composition::AdmittedProductQualification,
-    source: &GuestOwnerRuntimeManifestIdentity,
-    provider_id: &str,
-    owner_principal: &str,
-) -> Result<()> {
-    ensure!(
-        record.phase == RuntimeSnapshotPhase::Bound
-            && record.locator.as_ref() == Some(named)
-            && record.intent.owner_principal == owner_principal
-            && record.intent.owner_principal == proof.evidence.product_coordinate.owner_principal
-            && record.intent.provider_id == provider_id
-            && record.intent.source
-                == RuntimeSnapshotSource::CapturedProduct {
-                    product_witness_hash: proof.evidence.product_witness_hash.clone(),
-                }
-            && record.intent.guest_runtime_manifest_hash == source.manifest_hash
-            && record.intent.owner_executable_sha256 == source.owner_executable_sha256
-            && record.intent.controller_public_root == source.controller_public_root,
-        "runtime probe locator differs from its exact bound product and provider attempt"
-    );
-    named.validate_for(&record.intent)?;
-    Ok(())
-}
-
 /// Rejoin a materialized source to the complete retained restoration journal.
 /// This is deliberately distinct from product qualification: it proves exact
 /// provenance and observations, but does not by itself assert that the runtime
@@ -2604,7 +2478,6 @@ fn verify_materialized_restoration_journal(
             && snapshot.intent.provider_id == provider_id
             && snapshot.intent.guest_runtime_manifest_hash == identity.manifest_hash
             && snapshot.intent.owner_executable_sha256 == identity.owner_executable_sha256
-            && snapshot.intent.controller_public_root == identity.controller_public_root
             && snapshot.phase == RuntimeSnapshotPhase::Bound
             && snapshot.runner_deadline_exceeded == Some(false)
             && snapshot
@@ -3060,7 +2933,6 @@ fn produce_checked(
         source,
         guest_runtime_manifest_hash: exact_identity.manifest_hash,
         owner_executable_sha256: exact_identity.owner_executable_sha256,
-        controller_public_root: exact_identity.controller_public_root,
         upload_sha256: upload.sha256().to_owned(),
         upload_bytes: upload.bytes(),
         attempt_deadline_ms,
@@ -3423,8 +3295,7 @@ pub fn continue_staged_create(
     ensure!(
         retained.source.materialization_binding_digest == *materialization_binding_digest
             && retained.identity.manifest_hash == parent.intent.guest_runtime_manifest_hash
-            && retained.identity.owner_executable_sha256 == parent.intent.owner_executable_sha256
-            && retained.identity.controller_public_root == parent.intent.controller_public_root,
+            && retained.identity.owner_executable_sha256 == parent.intent.owner_executable_sha256,
         "snapshot continuation changed its retained materialized runtime"
     );
     let binding = state
@@ -3519,7 +3390,6 @@ mod tests {
     }
 
     use super::*;
-    use base64::Engine as _;
     use ryeos_external_execution_contract::restored_runtime_measurement::{
         ConsumerVerifierAdapterObservation, RestoredOwnerMeasurement,
         RestoredVerifierAdapterObservation, RestoredVerifierObservation,
@@ -3539,6 +3409,27 @@ mod tests {
                 panic!("owner-measurement fixture contains a consumer result")
             }
         }
+    }
+
+    #[test]
+    fn an_occurrence_shape_the_scenario_does_not_declare_is_refused_with_both_values() {
+        use ryeos_external_execution_contract::runtime_snapshot::LaunchShape;
+        let https = LaunchShape::https_allow_list(
+            ["controller.invalid".to_owned()],
+            ryeos_external_execution_contract::runtime_snapshot::LaunchNetworkInputs::operator(),
+        );
+        require_occurrence_shape_matches_scenario(&https, &https).unwrap();
+        let message = format!(
+            "{:#}",
+            require_occurrence_shape_matches_scenario(&https, &LaunchShape::relay_deny_all())
+                .unwrap_err()
+        );
+        assert!(
+            message.contains("created under a launch shape the scenario does not declare")
+                && message.contains("launch_shape.controller_transport: Https versus Relay")
+                && message.contains("(scenario first, occurrence second)"),
+            "{message}"
+        );
     }
 
     #[test]
@@ -3567,19 +3458,9 @@ mod tests {
     #[test]
     fn materialized_restoration_requires_exact_complete_journals() {
         let owner = format!("fp:{}", "1".repeat(64));
-        let root = format!(
-            "ed25519:{}",
-            base64::engine::general_purpose::STANDARD.encode(
-                lillux::crypto::SigningKey::from_bytes(&[3; 32])
-                    .verifying_key()
-                    .to_bytes()
-            )
-        );
         let identity = GuestOwnerRuntimeManifestIdentity {
             manifest_hash: "2".repeat(64),
             owner_executable_sha256: "3".repeat(64),
-            controller_root_blob_sha256: "4".repeat(64),
-            controller_public_root: root.clone(),
         };
         let source = RuntimeSnapshotSource::BundleMaterialization {
             materialization_attestation_hash: "5".repeat(64),
@@ -3603,7 +3484,6 @@ mod tests {
             source: source.clone(),
             guest_runtime_manifest_hash: identity.manifest_hash.clone(),
             owner_executable_sha256: identity.owner_executable_sha256.clone(),
-            controller_public_root: root,
             upload_sha256: "d".repeat(64),
             upload_bytes: 1024,
             attempt_deadline_ms: 1_000_000,
@@ -3657,6 +3537,8 @@ mod tests {
             settings_digest: "4".repeat(64),
             verifier_artifact_hash: "5".repeat(64),
             maximum_lifetime_seconds: 900,
+            launch_shape:
+                ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(),
             attempt_deadline_ms: 1_100_000,
         };
         qualification_intent.operation_id = qualification_intent.derived_operation_id().unwrap();
@@ -3683,7 +3565,7 @@ mod tests {
             nonce_hex: "7".repeat(64),
         };
         let mut verifier_intent = RestoredVerifierAttemptIntent {
-            schema: 2,
+            schema: ryeos_external_execution_contract::restored_runtime_measurement::RESTORED_VERIFIER_ATTEMPT_SCHEMA,
             operation_id: String::new(),
             qualification_operation_id: qualification.intent.operation_id.clone(),
             restored_occurrence_id: occurrence.occurrence_id.clone(),
@@ -3708,7 +3590,6 @@ mod tests {
                 challenge_digest: challenge.digest().unwrap(),
                 manifest_hash: identity.manifest_hash.clone(),
                 owner_executable_sha256: identity.owner_executable_sha256.clone(),
-                controller_public_root: identity.controller_public_root.clone(),
             },
             contact_deadline_exceeded: false,
         };
@@ -3830,129 +3711,6 @@ mod tests {
                 &owner,
             )
             .is_err()
-        );
-    }
-
-    #[test]
-    fn runtime_probe_requires_exact_bound_snapshot_product_and_owner() {
-        let manifest_hash = "7".repeat(64);
-        let selections = ryeos_state::external_content::products::qualification::test_support::qualified_runtime_selections(&manifest_hash).unwrap();
-        let proof = selections
-            .get("auxiliary")
-            .unwrap()
-            .qualification
-            .as_ref()
-            .unwrap();
-        let owner = proof.evidence.product_coordinate.owner_principal.clone();
-        let root_key = lillux::crypto::SigningKey::from_bytes(&[3u8; 32]).verifying_key();
-        let source = GuestOwnerRuntimeManifestIdentity {
-            manifest_hash: manifest_hash.clone(),
-            owner_executable_sha256: "8".repeat(64),
-            controller_root_blob_sha256: "9".repeat(64),
-            controller_public_root: format!(
-                "ed25519:{}",
-                base64::engine::general_purpose::STANDARD.encode(root_key.to_bytes())
-            ),
-        };
-        let now = lillux::time::timestamp_millis();
-        let mut intent = RuntimeSnapshotIntent {
-            schema: RUNTIME_SNAPSHOT_INTENT_SCHEMA,
-            operation_id: String::new(),
-            owner_principal: owner.clone(),
-            provider_id: "test-backend".into(),
-            source_occurrence_id: "sbx-source".into(),
-            source_bootstrap_operation_id: None,
-            source_created_at: None,
-            source_timeout_seconds: None,
-            provider_group_id: "sbg-group".into(),
-            production_profile_digest: "3".repeat(64),
-            adapter_artifact_hash: "4".repeat(64),
-            provider_spec_digest: "d".repeat(64),
-            settings_digest: "5".repeat(64),
-            source: RuntimeSnapshotSource::CapturedProduct {
-                product_witness_hash: proof.evidence.product_witness_hash.clone(),
-            },
-            guest_runtime_manifest_hash: manifest_hash,
-            owner_executable_sha256: source.owner_executable_sha256.clone(),
-            controller_public_root: source.controller_public_root.clone(),
-            upload_sha256: "a".repeat(64),
-            upload_bytes: 1024,
-            attempt_deadline_ms: now + 60_000,
-        };
-        intent.operation_id = intent.derived_operation_id().unwrap();
-        let named = ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotLocator {
-            schema: RUNTIME_SNAPSHOT_RESULT_SCHEMA,
-            operation_id: intent.operation_id.clone(),
-            intent_digest: intent.digest().unwrap(),
-            source_occurrence_id: intent.source_occurrence_id.clone(),
-            provider_group_id: intent.provider_group_id.clone(),
-            snapshot_id: "snp-exact".into(),
-            provider_response_sha256: "b".repeat(64),
-            provider_creation_observation: serde_json::json!({"schema": 1}),
-            adapter_observation_sha256: lillux::sha256_hex(br#"{"schema":1}"#),
-        };
-        let mut record = RuntimeSnapshotRecord {
-            intent,
-            phase: RuntimeSnapshotPhase::Bound,
-            locator: Some(named.clone()),
-            readiness: None,
-            completion_at_ms: Some(now),
-            runner_deadline_exceeded: Some(false),
-            created_at_ms: now,
-            updated_at_ms: now,
-        };
-        validate_probe_snapshot_record(&record, &named, proof, &source, "test-backend", &owner)
-            .unwrap();
-        record.phase = RuntimeSnapshotPhase::Quarantined;
-        assert!(
-            validate_probe_snapshot_record(&record, &named, proof, &source, "test-backend", &owner)
-                .is_err()
-        );
-        record.phase = RuntimeSnapshotPhase::Bound;
-        record.intent.source = RuntimeSnapshotSource::CapturedProduct {
-            product_witness_hash: "f".repeat(64),
-        };
-        assert!(
-            validate_probe_snapshot_record(&record, &named, proof, &source, "test-backend", &owner)
-                .is_err()
-        );
-        record.intent.source = RuntimeSnapshotSource::CapturedProduct {
-            product_witness_hash: proof.evidence.product_witness_hash.clone(),
-        };
-        record.intent.source = RuntimeSnapshotSource::BundleMaterialization {
-            materialization_attestation_hash: "a".repeat(64),
-            source_coordinate_digest: "b".repeat(64),
-            materialization_binding_digest: "c".repeat(64),
-        };
-        assert!(
-            validate_probe_snapshot_record(
-                &record,
-                &named,
-                proof,
-                &source,
-                "test-backend",
-                &owner,
-            )
-            .is_err()
-        );
-        record.intent.source = RuntimeSnapshotSource::CapturedProduct {
-            product_witness_hash: proof.evidence.product_witness_hash.clone(),
-        };
-        assert!(
-            validate_probe_snapshot_record(
-                &record,
-                &named,
-                proof,
-                &source,
-                "another-provider",
-                &owner
-            )
-            .is_err()
-        );
-        record.locator.as_mut().unwrap().snapshot_id = "snp-other".into();
-        assert!(
-            validate_probe_snapshot_record(&record, &named, proof, &source, "test-backend", &owner)
-                .is_err()
         );
     }
 

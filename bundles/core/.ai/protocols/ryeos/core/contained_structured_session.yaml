@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-16T08:18:29Z:fea8448dbd1f5ab92fbd2abc0331adfc15a1e383b3e8e532532a586d2df83201:o9q82TaNDV9xypnGiDe+MumEkxLo6DNgPXb1zOOOzbh19WzmR191vcF0ld4VBPdRtseFxO4BVuDqdDq7WdxdDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T06:56:49Z:cea5959fbf770dbb52f93d488170f70f1af56e3409b16c7d10d26bb7d892ec4b:LncwRTGtB25kEzAPYDfA8fmvPgTnBrs17kAVclXOqFOG/xipkUjqhdoRvlfUNqh1RB4S56ppuZn2f/vDrEuQCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: protocol
 name: contained_structured_session
 category: ryeos/core
@@ -29,6 +29,7 @@ session:
     - RYEOS_STRUCTURED_SESSION_ROUTE_SET
     - RYEOS_STRUCTURED_SESSION_EFFECT_CLASSES
     - RYEOS_STRUCTURED_SESSION_PROFILE_HASH
+    - RYEOS_STRUCTURED_SESSION_ROUTE_FIXED_PARAMS
     - RYEOS_SESSION_PROCESS_ENVIRONMENT
     - RYEOS_SESSION_SECRET_FD
   readiness_identity_env: RYEOS_SESSION_BOOT_IDENTITY
@@ -38,3 +39,12 @@ session:
   wire_protocol: ryeos.structured-session
   wire_version: 2
   max_frame_bytes: 16777216
+holding:
+  requires_guarantees:
+    - isolation:enforced
+    - filesystem:captured_execution
+    - callback:captured_compatible
+    - { any_of: [termination:scope, termination:pid_namespace] }
+    - { any_of: [recovery:scope, recovery:pid_namespace] }
+  filesystem_authority: captured_execution
+  root_settlement: containment_empty

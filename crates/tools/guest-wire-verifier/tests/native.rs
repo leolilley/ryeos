@@ -34,7 +34,6 @@ fn main() {
     let subject = SubjectEvidence {
         owner_executable_sha256: identity.owner_executable_sha256,
         manifest_hash: identity.manifest_hash,
-        controller_public_root: identity.controller_public_root,
     };
     let member_digests = BTreeMap::from([
         (
@@ -56,6 +55,8 @@ fn main() {
         attempt_deadline: lillux::time::MonotonicDeadline::after(
             lillux::time::Duration::from_secs(300),
         ),
+        network_inputs:
+            ryeos_external_execution_contract::runtime_snapshot::LaunchNetworkInputs::operator(),
     })
     .unwrap();
     let expected = Expected {
