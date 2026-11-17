@@ -536,7 +536,15 @@ pub fn resolve_execution_project_authority(
             )
         }
     }?;
-    authority.with_child_policy(child_policy)
+    let authority = authority.with_child_policy(child_policy)?;
+    match &policy.project {
+        ProjectExecutionPolicy::LiveDirect { intent, .. } => {
+            authority.with_live_intent((*intent).into())
+        }
+        ProjectExecutionPolicy::Projectless | ProjectExecutionPolicy::Pinned { .. } => {
+            Ok(authority)
+        }
+    }
 }
 
 /// Closed execution authority resolved at the HTTP admission boundary.

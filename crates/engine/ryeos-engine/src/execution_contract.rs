@@ -110,6 +110,36 @@ impl LiveAccess {
     }
 }
 
+/// Whether a project-backed request asked for the live project or accepted
+/// the daemon's choice of root. `Default` lets the daemon pick the root a tool
+/// shape gets (the live project for an `@subprocess` tool without
+/// `source_scope`, a sparse private admitted-input root for a sourced
+/// runtime). `Live` is an explicit demand for the live project: a launch whose
+/// resolved root is not live is refused with
+/// `live_project_unavailable_to_sourced_runtime`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveIntent {
+    #[default]
+    Default,
+    Live,
+}
+
+impl From<LiveIntent> for ryeos_state::objects::LiveProjectIntent {
+    fn from(intent: LiveIntent) -> Self {
+        match intent {
+            LiveIntent::Default => Self::Default,
+            LiveIntent::Live => Self::Live,
+        }
+    }
+}
+
+impl LiveIntent {
+    pub const fn is_default(&self) -> bool {
+        matches!(self, Self::Default)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectCaptureScope {
@@ -167,6 +197,9 @@ pub enum ProjectExecutionPolicy {
     LiveDirect {
         access: LiveAccess,
         child_policy: ChildProjectPolicy,
+        /// Absent means `default`. Written only when explicit.
+        #[serde(default, skip_serializing_if = "LiveIntent::is_default")]
+        intent: LiveIntent,
     },
     Pinned {
         source: PinnedSource,
@@ -221,8 +254,22 @@ impl ExecutionPolicy {
             project: ProjectExecutionPolicy::LiveDirect {
                 access: LiveAccess::ReadWrite,
                 child_policy: ChildProjectPolicy::Inherit,
+                intent: LiveIntent::Default,
             },
         }
+    }
+
+    /// Demand the live project explicitly: a launch whose resolved root is
+    /// not live is refused rather than run against a private copy.
+    pub fn demand_live_project(mut self) -> anyhow::Result<Self> {
+        match &mut self.project {
+            ProjectExecutionPolicy::LiveDirect { intent, .. } => *intent = LiveIntent::Live,
+            ProjectExecutionPolicy::Pinned { .. } | ProjectExecutionPolicy::Projectless => {
+                anyhow::bail!("a live project demand requires a live-direct project policy")
+            }
+        }
+        self.validate()?;
+        Ok(self)
     }
 
     pub fn local_pinned_capture(response: ExecutionResponse) -> Self {

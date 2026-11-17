@@ -1,0 +1,26 @@
+# ryeos:signed:2026-11-16T23:03:18Z:f3c67ca42f931e3b7433d5037f6eb05383b708eb4dfd3c45ec65725d5bf89a40:w+scYvGWS2ZpGkafQ0dBDU+nRiYeaN1/FYiKwesTgiBD1gZXOZa0BnOijnI7WMZ+gZiYdcvXd0fmVEU5KIFKDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "ryeos/core/bundle"
+name: "profile-sign"
+executor_id: "@subprocess"
+execution_protocol: "protocol:ryeos/core/tool_callback"
+required_caps: []
+description: "Sign an init profile in place with a publisher key. The profile is validated first; the key is the app root's operator key unless a key file path is given."
+
+config:
+  command: "bin:ryeos-core-tools"
+  args:
+    - "profile-sign"
+    - "--stdin-json"
+  input_data: "${params_json}"
+  timeout_secs: 60
+
+config_schema:
+  type: object
+  properties:
+    profile:
+      type: string
+      description: "Init profile file, .ai/node/init/profiles/<name>.yaml."
+    key:
+      type: string
+      description: "Signing key PEM file path. Defaults to the app root's operator signing key."
+  required: [profile]

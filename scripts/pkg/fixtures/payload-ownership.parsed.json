@@ -21,6 +21,22 @@
     ]
    },
    {
+    "bundle_name": "claude-code",
+    "bundle_sets": [
+     "development",
+     "release-artifacts"
+    ],
+    "host_features": [],
+    "payloads": [
+     {
+      "binary": "claude-code-adapter",
+      "build_class": "static",
+      "cargo_features": [],
+      "cargo_package": "ryeos-claude-code-adapter"
+     }
+    ]
+   },
+   {
     "bundle_name": "codex",
     "bundle_sets": [
      "development",

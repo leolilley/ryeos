@@ -79,6 +79,17 @@ pub enum LiveProjectAccess {
     ReadWrite,
 }
 
+/// What the request asked of the live project. `Default` accepts whatever
+/// root the daemon selects for the tool shape; `Live` demands the live project
+/// and is refused (`live_project_unavailable_to_sourced_runtime`) wherever the
+/// resolved root is not live. Children inherit the parent's intent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveProjectIntent {
+    Default,
+    Live,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LiveSymlinkPolicy {
@@ -121,6 +132,7 @@ impl LiveFilesystemConfinement {
 #[serde(deny_unknown_fields)]
 pub struct LiveAccessAuthority {
     pub access: LiveProjectAccess,
+    pub intent: LiveProjectIntent,
     pub authorized_write_namespaces: Vec<String>,
     pub confinement: LiveFilesystemConfinement,
 }
@@ -721,6 +733,28 @@ impl ExecutionProjectAuthority {
         Ok(self)
     }
 
+    /// Record whether the request demanded the live project. Only a live
+    /// authority has an intent to record.
+    pub fn with_live_intent(mut self, intent: LiveProjectIntent) -> anyhow::Result<Self> {
+        match &mut self {
+            Self::LiveProject { live_access, .. } => live_access.intent = intent,
+            Self::Projectless { .. } | Self::PinnedGeneration { .. } => {
+                anyhow::bail!("only a live project authority carries a live-project intent")
+            }
+        }
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// True when the request explicitly demanded the live project.
+    pub fn demands_live_project(&self) -> bool {
+        matches!(
+            self,
+            Self::LiveProject { live_access, .. }
+                if live_access.intent == LiveProjectIntent::Live
+        )
+    }
+
     pub fn child_policy(&self) -> ChildProjectAuthorityPolicy {
         match self {
             Self::Projectless { .. } => ChildProjectAuthorityPolicy::Inherit,
@@ -773,6 +807,7 @@ impl ExecutionProjectAuthority {
         };
         let live_access = LiveAccessAuthority {
             access,
+            intent: LiveProjectIntent::Default,
             authorized_write_namespaces,
             confinement,
         };
@@ -1573,6 +1608,7 @@ mod tests {
     fn live_access_schema_preserves_exact_confinement() {
         let unconfined = LiveAccessAuthority {
             access: LiveProjectAccess::ReadWrite,
+            intent: LiveProjectIntent::Default,
             authorized_write_namespaces: vec!["project".to_string()],
             confinement: LiveFilesystemConfinement::UnconfinedHost,
         };
@@ -1585,6 +1621,7 @@ mod tests {
 
         let confined = LiveAccessAuthority {
             access: LiveProjectAccess::ReadOnly,
+            intent: LiveProjectIntent::Default,
             authorized_write_namespaces: Vec::new(),
             confinement: LiveFilesystemConfinement::DescriptorRootedFixedParents {
                 denied_control_paths: vec![".ai".to_string()],
@@ -1603,6 +1640,7 @@ mod tests {
 
         let false_read_only = LiveAccessAuthority {
             access: LiveProjectAccess::ReadOnly,
+            intent: LiveProjectIntent::Default,
             authorized_write_namespaces: Vec::new(),
             confinement: LiveFilesystemConfinement::UnconfinedHost,
         };
