@@ -7612,7 +7612,6 @@ mod imp {
         }
 
         #[test]
-        #[ignore = "native namespace component control; explicitly opt in on a supported host"]
         fn sealed_mount_descriptors_do_not_scale_with_mount_count() {
             // At two descriptors per mount (retained pin plus inherited
             // source) this many mounts cannot fit under the limit below.
