@@ -479,15 +479,17 @@ config:
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     let _ = id;
+    // The detached child's launch refusal is logged by the daemon; the thread
+    // records may carry it as well.
+    let stderr = rig.h.stderr_so_far();
+    let refused = |text: &str| {
+        text.contains("run_timeout_root_only") || text.contains("accepted only on the root launch")
+    };
     assert!(
-        seen.contains("run_timeout_root_only") || seen.contains("accepted only on the root launch"),
-        "the refusal names the root-only rule: {}\nstderr: {}",
-        trunc(&seen, 1200),
-        stderr_hits(
-            &rig.h,
-            &["run_timeout", "follow", "refus", "waiter", "launch failed"],
-            40
-        )
+        refused(&seen) || refused(&stderr),
+        "the refusal names the root-only rule: {}\nstderr hits: {}",
+        trunc(&seen, 600),
+        stderr_hits(&rig.h, &["detached launch failed", "run_timeout"], 6)
     );
     assert!(
         rig.stub.requests().await.is_empty(),
