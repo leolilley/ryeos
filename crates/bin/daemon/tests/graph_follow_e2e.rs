@@ -1503,7 +1503,7 @@ async fn graph_follow_live_input_records_service_under_the_callers_exact_project
             .filter(|(thread_id, event_type, payload)| {
                 thread_id == &child.thread_id
                     && event_type == "cognition_in"
-                    && payload.get("content").and_then(Value::as_str) == Some(input_text)
+                    && payload.pointer("/parts/0/text").and_then(Value::as_str) == Some(input_text)
             })
             .count();
         if child_completed
@@ -1540,7 +1540,7 @@ async fn graph_follow_live_input_records_service_under_the_callers_exact_project
             .filter(|(thread_id, event_type, payload)| {
                 thread_id == &child.thread_id
                     && event_type == "cognition_in"
-                    && payload.get("content").and_then(Value::as_str) == Some(input_text)
+                    && payload.pointer("/parts/0/text").and_then(Value::as_str) == Some(input_text)
             })
             .count(),
         1,

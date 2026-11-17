@@ -5,9 +5,13 @@ use ryeos_runtime::ReplayedEventRecord;
 use ryeos_runtime::callback_client::{CallbackClient, RuntimeReplayBudget};
 use ryeos_state::ThreadUsage;
 
-use crate::directive::{DIRECTIVE_RETURN_TOOL, ProviderMessage};
+use crate::directive::{DIRECTIVE_RETURN_TOOL, ProviderMessage, ProviderMessageExt};
 use crate::result_guard::ResultGuard;
 use crate::runner::ToolOccurrence;
+use ryeos_provider_contract::ToolResultStatus;
+use ryeos_runtime::{
+    CognitionFramePayload, CognitionOutPayload, FINISH_INTERRUPTED, ToolResultPayload,
+};
 
 #[derive(Debug)]
 pub struct ResumeState {
@@ -39,6 +43,18 @@ pub struct ResumeState {
     /// Exact retry decisions already represented in the current thread braid.
     /// Used only to make testimony append lost-reply recovery idempotent.
     pub provider_retry_testimony_digests: std::collections::BTreeSet<String>,
+    /// The latest frame recorded on the path: what the model was given besides
+    /// the conversation. `None` when the path recorded none.
+    pub frame: Option<CognitionFramePayload>,
+}
+
+impl ResumeState {
+    /// A thread that was marked running and then lost its process before it
+    /// wrote any launch record: nothing recorded, nothing to rebuild. Its
+    /// resume is a fresh launch.
+    pub fn has_no_launch_records(&self) -> bool {
+        self.frame.is_none() && self.messages.is_empty() && self.last_turn_coordinate == 0
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +109,19 @@ pub(crate) fn directive_tool_operation_id(
 /// rather than silently truncating (which would drop conversation history).
 const MAX_CONTINUATION_PATH: usize = 10_000;
 
+/// The event types a recovery reads. Everything else a thread records, such
+/// as launch audit and accounting transitions, is neither fetched nor counted
+/// against the replay budget.
+const RECOVERY_EVENT_TYPES: [&str; 7] = [
+    "cognition_frame",
+    "cognition_in",
+    "cognition_out",
+    "tool_call_start",
+    "tool_call_result",
+    "thread_usage",
+    "provider_retry",
+];
+
 pub async fn load_resume_state(
     callback: &CallbackClient,
     previous_thread_id: &str,
@@ -114,13 +143,21 @@ pub async fn load_resume_state(
     let mut replay_budget = RuntimeReplayBudget::default();
     for thread_id in &path {
         let page = callback
-            .replay_thread_with_budget(thread_id, &mut replay_budget)
+            .replay_thread_with_budget(thread_id, Some(&RECOVERY_EVENT_TYPES), &mut replay_budget)
             .await?;
         source_thread_ids.extend(std::iter::repeat_n(thread_id.clone(), page.events.len()));
         events.extend(page.events);
     }
 
-    let messages = reconstruct_messages(&events)?;
+    let own_start = match mode {
+        // The current thread's events are the suffix of its own path.
+        ResumeMode::NativeSameThread => source_thread_ids
+            .iter()
+            .position(|source| source == previous_thread_id)
+            .unwrap_or(events.len()),
+        // Every thread of a successor's path is a predecessor.
+        ResumeMode::Continuation => events.len(),
+    };
     let recovered_tools = recover_tool_state(&events, &source_thread_ids)?;
     if !recovered_tools.pending.is_empty() {
         let pending_source = recovered_tools
@@ -157,27 +194,19 @@ pub async fn load_resume_state(
     } else {
         ResumeDisposition::ContinueProvider
     };
-    // An unresolved tool result must retain its owning assistant message on
-    // the provider wire even when a continuation requested zero carried
-    // turns. Otherwise the recovered result would be an orphan tool message.
-    let must_retain_active_turn = mode == ResumeMode::NativeSameThread
-        && (!recovered_tools.pending.is_empty()
-            || !matches!(disposition, ResumeDisposition::ContinueProvider)
-            || events
-                .iter()
-                .any(|event| final_cognition_turn(event).is_ok_and(|v| v.is_some())));
-    let retained_turns = if must_retain_active_turn {
-        carry_turns.max(1)
-    } else {
-        carry_turns
-    };
-    let messages = trim_to_recent_turns(messages, retained_turns);
-    let pin_last_assistant = mode == ResumeMode::NativeSameThread
-        && (must_retain_active_turn || !recovered_tools.pending.is_empty());
-    let trimmed = trim_to_token_budget(messages, 16_000, pin_last_assistant)?;
+    // The conversation a recovery rebuilds. Same-thread recovery never trims
+    // the current thread's own events: it rebuilds everything the thread
+    // recorded. A predecessor thread's part of the path is what a successor
+    // started from, so it is carried the way the successor's start carried it:
+    // pinned inputs, then the most recent turns.
+    let frame = latest_frame(&events)?;
+    let predecessor = fold_messages(&events[..own_start])?;
+    let own = fold_messages(&events[own_start..])?;
+    let mut messages = carry_into_successor(predecessor, carry_turns)?;
+    messages.extend(own.into_iter().map(|folded| folded.message));
 
     Ok(ResumeState {
-        messages: trimmed,
+        messages,
         pending_tools: recovered_tools.pending,
         disposition,
         last_turn_coordinate: turn_progress.last_coordinate,
@@ -187,40 +216,38 @@ pub async fn load_resume_state(
         thread_usage,
         result_guard,
         provider_retry_testimony_digests,
+        frame,
     })
 }
 
-fn replayed_result_text(event: &ReplayedEventRecord) -> Result<&str> {
-    let text = event
-        .payload
-        .get("result_text")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            anyhow::anyhow!("resume: tool_call_result has no exact string result_text")
-        })?;
-    if text.len() > ryeos_runtime::callback_client::TOOL_RESULT_INLINE_MAX_BYTES {
-        anyhow::bail!("resume: tool_call_result result_text exceeds the runtime event bound");
+/// Parse a replayed `tool_call_result` into its typed payload. A payload in
+/// any other shape is refused; there is no reader for an earlier shape.
+fn replayed_tool_result(event: &ReplayedEventRecord) -> Result<ToolResultPayload> {
+    let result: ToolResultPayload = serde_json::from_value(event.payload.clone())
+        .context("resume: tool_call_result is not a recorded tool result")?;
+    result
+        .validate()
+        .context("resume: invalid tool_call_result")?;
+    let text_bytes: usize = result.text().len();
+    if text_bytes > ryeos_runtime::callback_client::TOOL_RESULT_INLINE_MAX_BYTES {
+        anyhow::bail!("resume: tool_call_result text exceeds the runtime event bound");
     }
-    if event.payload.get("result").is_some() {
-        anyhow::bail!("resume: tool_call_result carries obsolete parsed result authority");
-    }
-    Ok(text)
+    Ok(result)
 }
 
-fn optional_replay_string<'a>(payload: &'a Value, field: &str) -> Result<Option<&'a str>> {
-    match payload.get(field) {
-        None => Ok(None),
-        Some(Value::String(value)) => Ok(Some(value)),
-        Some(_) => anyhow::bail!("resume: replay field {field:?} is not a string"),
-    }
+/// Parse a replayed final `cognition_out` into its typed payload.
+fn replayed_cognition_out(event: &ReplayedEventRecord) -> Result<CognitionOutPayload> {
+    let payload: CognitionOutPayload = serde_json::from_value(event.payload.clone())
+        .context("resume: cognition_out is not a recorded turn")?;
+    payload
+        .validate()
+        .context("resume: invalid cognition_out")?;
+    Ok(payload)
 }
 
-fn optional_replay_bool(payload: &Value, field: &str) -> Result<Option<bool>> {
-    match payload.get(field) {
-        None => Ok(None),
-        Some(Value::Bool(value)) => Ok(Some(*value)),
-        Some(_) => anyhow::bail!("resume: replay field {field:?} is not a boolean"),
-    }
+/// Whether a final `cognition_out` records a turn cut short by an interrupt.
+fn is_interrupted_turn(event: &ReplayedEventRecord) -> bool {
+    event.payload.get("finish").and_then(Value::as_str) == Some(FINISH_INTERRUPTED)
 }
 
 /// Rebuild only the current process generation's duplicate guard. Upstream
@@ -240,34 +267,15 @@ fn recover_result_guard(
         if source_thread_id != current_thread_id || event.event_type != "tool_call_result" {
             continue;
         }
-        let text = replayed_result_text(event)?;
-        let tool = event
-            .payload
-            .get("tool")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow::anyhow!("resume: tool_call_result has no tool identity"))?;
-        let duplicate_of = event
-            .payload
-            .get("duplicate_of")
-            .map(|value| {
-                value.as_str().ok_or_else(|| {
-                    anyhow::anyhow!("resume: tool_call_result duplicate_of is not a string")
-                })
-            })
-            .transpose()?;
-        let deduplicated = optional_replay_bool(&event.payload, "deduplicated")?;
-        if duplicate_of.is_some() != (deduplicated == Some(true)) {
-            anyhow::bail!("resume: tool_call_result duplicate metadata is contradictory");
-        }
-        let truncated_reason = optional_replay_string(&event.payload, "truncated_reason")?;
-        if tool == DIRECTIVE_RETURN_TOOL || truncated_reason == Some("error_envelope") {
-            if duplicate_of.is_some() {
+        let result = replayed_tool_result(event)?;
+        if result.tool == DIRECTIVE_RETURN_TOOL || result.status == ToolResultStatus::Error {
+            if result.guard.duplicate_of.is_some() {
                 anyhow::bail!("resume: unguarded tool result claims duplicate metadata");
             }
             continue;
         }
         guard
-            .restore_result(text, duplicate_of)
+            .restore_result(&result.text(), result.guard.duplicate_of.as_deref())
             .map_err(|error| anyhow::anyhow!("resume: invalid result-guard evidence: {error}"))?;
     }
     Ok(guard)
@@ -357,10 +365,7 @@ fn recover_tool_state(
                     );
                 }
                 current_batch = None;
-                let Some(tool_calls) = replayed_tool_calls(&event.payload)? else {
-                    open.clear();
-                    continue;
-                };
+                let tool_calls = replayed_cognition_out(event)?.message().calls();
                 if tool_calls.is_empty() {
                     open.clear();
                     continue;
@@ -390,6 +395,8 @@ fn recover_tool_state(
                                 turn,
                                 call_index,
                             ),
+                            turn,
+                            call_index,
                             start_recorded: false,
                             counted: false,
                             spawn_counted: false,
@@ -449,11 +456,7 @@ fn recover_tool_state(
                         );
                     }
                 }
-                validate_replayed_tool_event(
-                    event,
-                    &open[occurrence_index].occurrence.call,
-                    false,
-                )?;
+                validate_replayed_tool_event(event, &open[occurrence_index].occurrence.call)?;
                 open[occurrence_index].occurrence.start_recorded = true;
                 if open[occurrence_index].occurrence.call.name != DIRECTIVE_RETURN_TOOL {
                     started.push(StartedToolOccurrence {
@@ -493,7 +496,7 @@ fn recover_tool_state(
                         "resume: tool_call_result appeared outside the proposal-order result prefix"
                     );
                 }
-                validate_replayed_tool_event(event, &open[occurrence_index].occurrence.call, true)?;
+                validate_replayed_tool_event(event, &open[occurrence_index].occurrence.call)?;
                 if open[occurrence_index].occurrence.call.name == DIRECTIVE_RETURN_TOOL {
                     if open[..occurrence_index].iter().any(|entry| !entry.settled) {
                         anyhow::bail!(
@@ -547,18 +550,15 @@ fn recover_lifecycle_settlement(
     call: &crate::directive::ToolCall,
     event_index: usize,
 ) -> Result<RecoveredLifecycleSettlement> {
-    match optional_replay_string(&event.payload, "truncated_reason")? {
-        Some("error_envelope") => Ok(RecoveredLifecycleSettlement::Failed { event_index }),
-        Some(reason) => anyhow::bail!(
-            "resume: directive_return result has impossible truncation reason {reason:?}"
-        ),
-        None => {
-            if event.payload.get("truncated").and_then(Value::as_bool) != Some(false) {
+    let result = replayed_tool_result(event)?;
+    match result.status {
+        ToolResultStatus::Error => Ok(RecoveredLifecycleSettlement::Failed { event_index }),
+        ToolResultStatus::Ok => {
+            if result.guard.truncated {
                 anyhow::bail!("resume: successful directive_return result is truncated");
             }
-            let result_text = replayed_result_text(event)?;
-            let outputs: Value = serde_json::from_str(result_text).context(
-                "resume: successful directive_return result_text is not exact JSON outputs",
+            let outputs: Value = serde_json::from_str(&result.text()).context(
+                "resume: successful directive_return result text is not exact JSON outputs",
             )?;
             let proposed = crate::adapter::parse_tool_arguments(&call.arguments.to_string())
                 .map_err(|error| {
@@ -611,7 +611,6 @@ fn find_open_occurrence_index(
 fn validate_replayed_tool_event(
     event: &ReplayedEventRecord,
     call: &crate::directive::ToolCall,
-    result_phase: bool,
 ) -> Result<()> {
     let observed_tool = event.payload.get("tool").and_then(Value::as_str);
     if observed_tool != Some(call.name.as_str()) {
@@ -620,11 +619,7 @@ fn validate_replayed_tool_event(
             event.event_type
         );
     }
-    let expected_call_id = if result_phase {
-        Some(call.id.as_deref().unwrap_or(""))
-    } else {
-        call.id.as_deref()
-    };
+    let expected_call_id = call.id.as_deref();
     if event.payload.get("call_id").and_then(Value::as_str) != expected_call_id {
         anyhow::bail!(
             "resume: {} call_id does not match its cognition proposal",
@@ -678,15 +673,7 @@ fn validate_replayed_cognition_out(event: &ReplayedEventRecord) -> Result<()> {
         return Ok(());
     }
     if is_stream_fragment(event) {
-        for final_key in [
-            "content",
-            "tool_calls",
-            "reasoning_content",
-            "interrupted",
-            "provider_accounting",
-            "input_tokens",
-            "output_tokens",
-        ] {
+        for final_key in ["parts", "finish", "usage", "provider_accounting"] {
             if event.payload.get(final_key).is_some() {
                 anyhow::bail!(
                     "resume: streaming cognition_out also carries final field {final_key:?}"
@@ -695,16 +682,7 @@ fn validate_replayed_cognition_out(event: &ReplayedEventRecord) -> Result<()> {
         }
         return Ok(());
     }
-    if let Some(interrupted) = event.payload.get("interrupted") {
-        if interrupted.as_bool() != Some(true) {
-            anyhow::bail!("resume: cognition_out interrupted marker is not true");
-        }
-        if event.payload.get("tool_calls").is_some() {
-            anyhow::bail!(
-                "resume: interrupted cognition_out cannot authorize completed tool calls"
-            );
-        }
-    }
+    replayed_cognition_out(event)?;
     Ok(())
 }
 
@@ -754,12 +732,7 @@ fn recover_turn_progress(events: &[ReplayedEventRecord]) -> Result<RecoveredTurn
             );
         }
         progress.last_coordinate = turn;
-        if event
-            .payload
-            .get("interrupted")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
+        if is_interrupted_turn(event) {
             continue;
         }
         progress.completed = progress
@@ -1013,12 +986,7 @@ fn recover_resume_disposition(
     if later_cognition_input {
         return Ok(ResumeDisposition::ContinueProvider);
     }
-    if last_cognition
-        .payload
-        .get("interrupted")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
+    if is_interrupted_turn(last_cognition) {
         return Ok(ResumeDisposition::ContinueProvider);
     }
     if let Some(batch) = tools.current_batch.as_ref() {
@@ -1087,12 +1055,7 @@ fn recover_thread_usage(
         let Some(turn) = final_cognition_turn(event)? else {
             continue;
         };
-        if event
-            .payload
-            .get("interrupted")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
+        if is_interrupted_turn(event) {
             if unconsumed_settlement_turn == Some(u64::from(turn)) {
                 unconsumed_settlement_turn = None;
             }
@@ -1127,48 +1090,6 @@ fn recover_thread_usage(
     Ok(latest)
 }
 
-fn replayed_tool_calls(payload: &Value) -> Result<Option<Vec<crate::directive::ToolCall>>> {
-    let items = match payload.get("tool_calls") {
-        None | Some(Value::Null) => return Ok(None),
-        Some(Value::Array(items)) => items,
-        Some(_) => {
-            anyhow::bail!("malformed cognition_out replay: 'tool_calls' is not an array or null")
-        }
-    };
-    items
-        .iter()
-        .map(|item| {
-            let id = match item.get("id") {
-                None | Some(Value::Null) => None,
-                Some(Value::String(id)) => Some(id.clone()),
-                Some(_) => {
-                    anyhow::bail!("malformed tool_call in replay: 'id' is not a string or null")
-                }
-            };
-            let name = item
-                .get("name")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "malformed tool_call in replay: missing or non-string 'name' field"
-                    )
-                })?
-                .to_string();
-            let arguments = item.get("arguments").cloned().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "malformed tool_call in replay: missing 'arguments' field on tool '{name}'"
-                )
-            })?;
-            Ok(crate::directive::ToolCall {
-                id,
-                name,
-                arguments,
-            })
-        })
-        .collect::<Result<Vec<_>>>()
-        .map(Some)
-}
-
 /// Fold the chain's transcript-bearing events into provider messages. The
 /// substrate vocabulary is the cognition transcript — there is no "user":
 ///
@@ -1181,9 +1102,46 @@ fn replayed_tool_calls(payload: &Value) -> Result<Option<Vec<crate::directive::T
 /// tool-dispatch starts, graph milestones) carries no message and is skipped —
 /// folding a chain is lossy by design, not an error. `role` is the provider-wire
 /// mapping applied here, not a substrate concept.
-fn reconstruct_messages(events: &[ReplayedEventRecord]) -> Result<Vec<ProviderMessage>> {
+/// The latest `cognition_frame` on the path. Frames are numbered from 1 and
+/// each is the previous number plus one; anything else is refused.
+fn latest_frame(events: &[ReplayedEventRecord]) -> Result<Option<CognitionFramePayload>> {
+    let mut latest: Option<CognitionFramePayload> = None;
+    for event in events
+        .iter()
+        .filter(|event| event.event_type == "cognition_frame")
+    {
+        let frame: CognitionFramePayload = serde_json::from_value(event.payload.clone())
+            .context("resume: cognition_frame is not a recorded frame")?;
+        frame
+            .validate()
+            .context("resume: invalid cognition_frame")?;
+        let expected = latest.as_ref().map_or(1, |previous| previous.frame_seq + 1);
+        if frame.frame_seq != expected {
+            anyhow::bail!(
+                "resume: cognition_frame {} does not follow frame {}",
+                frame.frame_seq,
+                expected - 1
+            );
+        }
+        latest = Some(frame);
+    }
+    Ok(latest)
+}
+
+/// One message of a fold, with whether the input that produced it is pinned.
+#[derive(Debug, Clone)]
+struct FoldedMessage {
+    message: ProviderMessage,
+    pinned: bool,
+}
+
+fn fold_messages(events: &[ReplayedEventRecord]) -> Result<Vec<FoldedMessage>> {
     let mut messages = Vec::new();
     let mut cognition_in = ryeos_runtime::CognitionInAssembler::default();
+    let unpinned = |message: ProviderMessage| FoldedMessage {
+        message,
+        pinned: false,
+    };
 
     for event in events {
         validate_replayed_cognition_out(event)?;
@@ -1195,64 +1153,34 @@ fn reconstruct_messages(events: &[ReplayedEventRecord]) -> Result<Vec<ProviderMe
         }
         match event.event_type.as_str() {
             // An inline or completely reassembled cognition_in is exactly one
-            // stimulus. Marker-only payloads and intermediate chunks add no
-            // provider turn.
+            // input. Turn markers and intermediate chunks add no message.
             "cognition_in" => {
-                if let ryeos_runtime::CognitionInAssembly::Complete(content) =
+                if let ryeos_runtime::CognitionInAssembly::Complete(input) =
                     cognition_in.push(&event.payload)?
                 {
-                    messages.push(ProviderMessage {
-                        role: "user".to_string(),
-                        content: Some(serde_json::json!(content)),
-                        tool_calls: None,
-                        tool_call_id: None,
-                        reasoning_content: None,
-                    });
+                    messages.extend(
+                        crate::launch_records::input_messages(&input)
+                            .into_iter()
+                            .map(|message| FoldedMessage {
+                                message,
+                                pinned: input.pinned,
+                            }),
+                    );
                 }
             }
-            "cognition_out"
-                if event.payload.get("delta").is_some()
-                    || event.payload.get("tool_use").is_some()
-                    || event.payload.get("tool_use_partial").is_some() =>
-            {
-                // Streaming fragments are UI/event-log data, not replayable
-                // provider history. The final transcript-bearing
-                // cognition_out emitted at turn completion is folded below.
-            }
+            // Streaming fragments are UI/event-log data, not replayable
+            // provider history. The final transcript-bearing cognition_out
+            // emitted at turn completion is folded below.
+            "cognition_out" if is_stream_fragment(event) => {}
             "cognition_out" => {
-                let tool_calls = replayed_tool_calls(&event.payload)?;
-
-                messages.push(ProviderMessage {
-                    role: "assistant".to_string(),
-                    content: event.payload.get("content").cloned(),
-                    tool_calls,
-                    tool_call_id: None,
-                    reasoning_content: event
-                        .payload
-                        .get("reasoning_content")
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
-                });
+                messages.push(unpinned(replayed_cognition_out(event)?.message()));
             }
             "tool_call_result" => {
-                let call_id = event
-                    .payload
-                    .get("call_id")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-                // The retained string is exactly what the live runner put in
-                // the provider message. Never parse JSON-looking content:
-                // doing so changes both OpenAI-style wire content and custom
-                // schema template rendering after a crash.
-                let content = Some(serde_json::json!(replayed_result_text(event)?));
-
-                messages.push(ProviderMessage {
-                    role: "tool".to_string(),
-                    content,
-                    tool_calls: None,
-                    tool_call_id: call_id,
-                    reasoning_content: None,
-                });
+                // The retained text is exactly what the live runner put in the
+                // provider message. Never parse JSON-looking content: doing so
+                // changes both OpenAI-style wire content and custom schema
+                // template rendering after a crash.
+                messages.push(unpinned(replayed_tool_result(event)?.message()));
             }
             // Non-conversational chain events carry no message — skip.
             _ => {}
@@ -1265,8 +1193,149 @@ fn reconstruct_messages(events: &[ReplayedEventRecord]) -> Result<Vec<ProviderMe
     Ok(messages)
 }
 
+#[cfg(test)]
+fn reconstruct_messages(events: &[ReplayedEventRecord]) -> Result<Vec<ProviderMessage>> {
+    Ok(fold_messages(events)?
+        .into_iter()
+        .map(|folded| folded.message)
+        .collect())
+}
+
+/// Token budget of the conversation a successor starts from.
+const SUCCESSOR_START_TOKEN_BUDGET: u64 = 16_000;
+
+/// A rebuilt starting conversation that a provider would reject.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResumeFoldError {
+    /// The conversation does not begin with a user message.
+    DoesNotStartWithUser { role: String },
+    /// An assistant tool call has no result before the conversation moves on.
+    UnansweredToolCall { call_id: String },
+    /// A tool result names a call that is not in the conversation.
+    OrphanToolResult { call_id: String },
+    /// The pinned inputs alone are larger than the starting budget.
+    PinnedInputsExceedBudget { budget: u64 },
+}
+
+impl std::fmt::Display for ResumeFoldError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DoesNotStartWithUser { role } => write!(
+                f,
+                "resume: the successor's starting conversation begins with a {role} message, not a user message"
+            ),
+            Self::UnansweredToolCall { call_id } => write!(
+                f,
+                "resume: tool call {call_id:?} in the successor's starting conversation has no result"
+            ),
+            Self::OrphanToolResult { call_id } => write!(
+                f,
+                "resume: tool result {call_id:?} in the successor's starting conversation has no call"
+            ),
+            Self::PinnedInputsExceedBudget { budget } => write!(
+                f,
+                "resume: pinned inputs alone exceed the {budget}-token starting budget"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ResumeFoldError {}
+
+/// The conversation a successor starts from, taken from its predecessors'
+/// part of the path: the pinned inputs in their original order, then the most
+/// recent `carry_turns` turns and as many of them as fit the token budget.
+/// When nothing needs dropping the conversation keeps its original order.
+/// The result begins with a user message and every tool call in it has its
+/// result, or the rebuild fails with a [`ResumeFoldError`].
+fn carry_into_successor(
+    folded: Vec<FoldedMessage>,
+    carry_turns: u32,
+) -> Result<Vec<ProviderMessage>> {
+    if folded.is_empty() {
+        return Ok(Vec::new());
+    }
+    let whole: Vec<ProviderMessage> = folded.iter().map(|f| f.message.clone()).collect();
+    let (pinned, rest): (Vec<_>, Vec<_>) = folded.into_iter().partition(|f| f.pinned);
+    let pinned: Vec<ProviderMessage> = pinned.into_iter().map(|f| f.message).collect();
+    let rest: Vec<ProviderMessage> = rest.into_iter().map(|f| f.message).collect();
+    let rest_len = rest.len();
+
+    let recent = trim_to_recent_turns(rest, carry_turns);
+    let pinned_tokens = crate::estimate::estimate_tokens(&pinned);
+    if pinned_tokens > SUCCESSOR_START_TOKEN_BUDGET {
+        return Err(ResumeFoldError::PinnedInputsExceedBudget {
+            budget: SUCCESSOR_START_TOKEN_BUDGET,
+        }
+        .into());
+    }
+    let recent = trim_to_token_budget(recent, SUCCESSOR_START_TOKEN_BUDGET - pinned_tokens)?;
+
+    let mut messages = if recent.len() == rest_len {
+        whole
+    } else {
+        let mut messages = pinned;
+        messages.extend(recent);
+        messages
+    };
+    // A conversation with no pinned input can still begin on an assistant or
+    // tool message after a trim: drop those until a user message leads.
+    while messages
+        .first()
+        .is_some_and(|message| message.role() != "user")
+    {
+        messages.remove(0);
+    }
+    check_well_formed(&messages)?;
+    Ok(messages)
+}
+
+/// Checks that a starting conversation begins with a user message and that
+/// every tool call is answered by a result and every result has its call.
+fn check_well_formed(messages: &[ProviderMessage]) -> Result<(), ResumeFoldError> {
+    if let Some(first) = messages.first()
+        && first.role() != "user"
+    {
+        return Err(ResumeFoldError::DoesNotStartWithUser {
+            role: first.role().to_string(),
+        });
+    }
+    let mut open: Vec<String> = Vec::new();
+    for message in messages {
+        if message.role() == "tool" {
+            for part in &message.parts {
+                if let ryeos_provider_contract::Part::ToolResult(result) = part {
+                    match open.iter().position(|id| *id == result.call_id) {
+                        Some(index) => {
+                            open.remove(index);
+                        }
+                        None => {
+                            return Err(ResumeFoldError::OrphanToolResult {
+                                call_id: result.call_id.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        if let Some(call_id) = open.first() {
+            return Err(ResumeFoldError::UnansweredToolCall {
+                call_id: call_id.clone(),
+            });
+        }
+        open.extend(message.tool_calls().map(|call| call.call_id.clone()));
+    }
+    if let Some(call_id) = open.first() {
+        return Err(ResumeFoldError::UnansweredToolCall {
+            call_id: call_id.clone(),
+        });
+    }
+    Ok(())
+}
+
 fn count_turns(messages: &[ProviderMessage]) -> u32 {
-    messages.iter().filter(|m| m.role == "assistant").count() as u32
+    messages.iter().filter(|m| m.role() == "assistant").count() as u32
 }
 
 /// Keep only the most recent `carry_turns` assistant turns plus the context
@@ -1292,7 +1361,7 @@ fn trim_to_recent_turns(
     let mut seen = 0u32;
     let mut cutoff = 0usize;
     for (idx, msg) in messages.iter().enumerate() {
-        if msg.role == "assistant" {
+        if msg.role() == "assistant" {
             seen += 1;
             if seen == turns_to_drop {
                 cutoff = idx + 1;
@@ -1301,7 +1370,7 @@ fn trim_to_recent_turns(
         }
     }
     let mut trimmed = messages.split_off(cutoff);
-    while trimmed.first().is_some_and(|msg| msg.role == "tool") {
+    while trimmed.first().is_some_and(|msg| msg.role() == "tool") {
         trimmed.remove(0);
     }
     trimmed
@@ -1310,23 +1379,22 @@ fn trim_to_recent_turns(
 fn trim_to_token_budget(
     mut messages: Vec<ProviderMessage>,
     max_tokens: u64,
-    pin_last_assistant: bool,
 ) -> Result<Vec<ProviderMessage>> {
     if messages.is_empty() {
         return Ok(messages);
     }
 
     loop {
-        let total: u64 = messages.iter().map(estimate_tokens).sum();
+        let total = crate::estimate::estimate_tokens(&messages);
         if total <= max_tokens {
             return Ok(messages);
         }
 
         let assistant_count = messages
             .iter()
-            .filter(|message| message.role == "assistant")
+            .filter(|message| message.role() == "assistant")
             .count();
-        if assistant_count == 0 || (pin_last_assistant && assistant_count == 1) {
+        if assistant_count == 0 {
             anyhow::bail!(
                 "resume: required provider transcript suffix exceeds the {max_tokens}-token recovery budget"
             );
@@ -1334,47 +1402,22 @@ fn trim_to_token_budget(
 
         let assistant_index = messages
             .iter()
-            .position(|message| message.role == "assistant")
+            .position(|message| message.role() == "assistant")
             .expect("assistant_count proved one exists");
         let mut group_end = assistant_index + 1;
         while messages
             .get(group_end)
-            .is_some_and(|message| message.role == "tool")
+            .is_some_and(|message| message.role() == "tool")
         {
             group_end += 1;
         }
         messages.drain(..group_end);
         while messages
             .first()
-            .is_some_and(|message| message.role == "tool")
+            .is_some_and(|message| message.role() == "tool")
         {
             messages.remove(0);
         }
-    }
-}
-
-fn estimate_tokens(msg: &ProviderMessage) -> u64 {
-    let mut count = estimate_tokens_from_value(&msg.content);
-    for tc in msg.tool_calls.iter().flatten() {
-        count += estimate_tokens_from_value(&Some(tc.arguments.clone()));
-    }
-    count
-}
-
-fn estimate_tokens_from_value(v: &Option<Value>) -> u64 {
-    match v {
-        Some(Value::String(s)) => (s.len() as u64) / 4,
-        Some(Value::Number(_)) => 1,
-        Some(Value::Bool(_)) => 1,
-        Some(Value::Null) | None => 0,
-        Some(Value::Array(arr)) => arr
-            .iter()
-            .map(|v| estimate_tokens_from_value(&Some(v.clone())))
-            .sum(),
-        Some(Value::Object(obj)) => obj
-            .values()
-            .map(|v| estimate_tokens_from_value(&Some(v.clone())))
-            .sum(),
     }
 }
 
@@ -1428,7 +1471,12 @@ mod tests {
         async fn append_event(&self, _: &str, _: &str, _: Value) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
-        async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> {
+        async fn append_events(
+            &self,
+            _: &str,
+            _: Vec<Value>,
+            _: ryeos_runtime::callback::EventAppendOptions,
+        ) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
         async fn replay_events(&self, _: Value) -> Result<Value, CallbackError> {
@@ -1483,6 +1531,74 @@ mod tests {
         }
     }
 
+    fn text_parts(text: &str) -> Value {
+        json!([{"type": "text", "text": text}])
+    }
+
+    /// A recorded operator input.
+    fn input(text: &str) -> Value {
+        json!({"origin": "operator", "parts": text_parts(text)})
+    }
+
+    /// A completed text-only turn.
+    fn out(turn: u32, text: &str) -> Value {
+        json!({"turn": turn, "parts": text_parts(text), "finish": "stop"})
+    }
+
+    /// A turn cut short by an interrupt.
+    fn out_interrupted(turn: u32, text: &str) -> Value {
+        json!({"turn": turn, "parts": text_parts(text), "finish": "interrupted"})
+    }
+
+    /// A turn that proposes tool calls, given as `{id, name, arguments}`
+    /// objects.
+    fn out_calls(turn: u32, calls: Value) -> Value {
+        let parts: Vec<Value> = calls
+            .as_array()
+            .expect("calls are an array")
+            .iter()
+            .map(|call| {
+                json!({
+                    "type": "tool_call",
+                    "call_id": call["id"],
+                    "name": call["name"],
+                    "arguments": call["arguments"],
+                })
+            })
+            .collect();
+        json!({"turn": turn, "parts": parts, "finish": "tool_calls"})
+    }
+
+    fn result_with(
+        operation_id: &str,
+        call_id: &str,
+        tool: &str,
+        text: &str,
+        status: &str,
+        duplicate_of: Option<&str>,
+    ) -> Value {
+        let mut guard = json!({"result_size_bytes": text.len(), "truncated": false});
+        if let Some(hash) = duplicate_of {
+            guard["duplicate_of"] = json!(hash);
+        }
+        json!({
+            "operation_id": operation_id,
+            "call_id": call_id,
+            "tool": tool,
+            "status": status,
+            "parts": text_parts(text),
+            "guard": guard,
+        })
+    }
+
+    fn result(operation_id: &str, call_id: &str, tool: &str, text: &str) -> Value {
+        result_with(operation_id, call_id, tool, text, "ok", None)
+    }
+
+    fn error_result(operation_id: &str, call_id: &str, tool: &str, text: &str) -> Value {
+        result_with(operation_id, call_id, tool, text, "error", None)
+    }
+
     fn make_callback(events: Vec<ReplayedEventRecord>) -> CallbackClient {
         let inner: Arc<dyn RuntimeCallbackAPI> = Arc::new(MockCallback { events });
         CallbackClient::from_inner(inner, "T-test", "/tmp/test", "tat-test")
@@ -1522,13 +1638,12 @@ mod tests {
     async fn continuation_refuses_an_unresolved_predecessor_tool_batch() {
         let callback = make_callback(vec![ReplayedEventRecord {
             event_type: "cognition_out".to_string(),
-            payload: json!({
-                "turn": 1,
-                "content": null,
-                "tool_calls": [
+            payload: out_calls(
+                1,
+                json!([
                     {"id":"call-a", "name":"tool:a", "arguments":{"a":1}}
-                ]
-            }),
+                ]),
+            ),
         }]);
         let error = load_resume_state(&callback, "T-predecessor", 8, ResumeMode::Continuation)
             .await
@@ -1546,14 +1661,13 @@ mod tests {
         let second = directive_tool_operation_id(&source, 3, 1);
         let events = vec![ReplayedEventRecord {
             event_type: "cognition_out".to_string(),
-            payload: json!({
-                "turn": 3,
-                "content": null,
-                "tool_calls": [
+            payload: out_calls(
+                3,
+                json!([
                     {"id":"call-a", "name":"tool:a", "arguments":{"a":1}},
                     {"id":"call-b", "name":"tool:b", "arguments":{"b":2}}
-                ]
-            }),
+                ]),
+            ),
         }];
         (events, vec![source], first, second)
     }
@@ -1620,6 +1734,35 @@ mod tests {
     }
 
     #[test]
+    fn recovered_occurrences_carry_their_turn_and_call_index_and_accept_the_recorded_keys() {
+        let (mut events, mut sources, first, second) = proposed_tool_batch();
+        for (operation_id, call_id, tool, call_index) in [
+            (first.clone(), "call-a", "tool:a", 0),
+            (second.clone(), "call-b", "tool:b", 1),
+        ] {
+            events.push(ReplayedEventRecord {
+                event_type: "tool_call_start".to_string(),
+                payload: json!({
+                    "operation_id": operation_id,
+                    "call_id": call_id,
+                    "tool": tool,
+                    "item_ref": tool,
+                    "turn": 3,
+                    "call_index": call_index,
+                }),
+            });
+            sources.push("T-source".to_string());
+        }
+        let recovered = recover_tool_state(&events, &sources).unwrap();
+        assert_eq!(recovered.pending.len(), 2);
+        for (index, occurrence) in recovered.pending.iter().enumerate() {
+            assert!(occurrence.start_recorded);
+            assert_eq!(occurrence.turn, 3);
+            assert_eq!(occurrence.call_index, index);
+        }
+    }
+
+    #[test]
     fn replay_folds_settled_prefix_and_returns_only_unfinished_suffix() {
         let (mut events, mut sources, first, second) = proposed_tool_batch();
         for (event_type, payload) in [
@@ -1633,12 +1776,7 @@ mod tests {
             ),
             (
                 "tool_call_result",
-                json!({
-                    "operation_id":first,
-                    "call_id":"call-a",
-                    "tool":"tool:a",
-                    "result_text":"{\"ok\":true}"
-                }),
+                result(&first, "call-a", "tool:a", "{\"ok\":true}"),
             ),
         ] {
             events.push(ReplayedEventRecord {
@@ -1671,7 +1809,7 @@ mod tests {
         };
         let mut events = vec![ReplayedEventRecord {
             event_type: "cognition_out".to_string(),
-            payload: json!({"turn":1, "content":null, "tool_calls":selected}),
+            payload: out_calls(1, json!(selected)),
         }];
         let mut sources = vec![source.clone()];
         if return_index == 1 {
@@ -1683,7 +1821,7 @@ mod tests {
                 },
                 ReplayedEventRecord {
                     event_type: "tool_call_result".to_string(),
-                    payload: json!({"operation_id":first,"call_id":"call-a","tool":"tool:a","truncated":false,"result_text":"{}"}),
+                    payload: result(&first, "call-a", "tool:a", "{}"),
                 },
             ]);
             sources.extend([source.clone(), source.clone()]);
@@ -1696,9 +1834,19 @@ mod tests {
         events.push(ReplayedEventRecord {
             event_type: "tool_call_result".to_string(),
             payload: if succeeded {
-                json!({"operation_id":return_operation,"call_id":"call-return","tool":DIRECTIVE_RETURN_TOOL,"truncated":false,"result_text":"{\"answer\":\"done\"}"})
+                result(
+                    &return_operation,
+                    "call-return",
+                    DIRECTIVE_RETURN_TOOL,
+                    "{\"answer\":\"done\"}",
+                )
             } else {
-                json!({"operation_id":return_operation,"call_id":"call-return","tool":DIRECTIVE_RETURN_TOOL,"truncated":false,"truncated_reason":"error_envelope","result_text":"{\"error\":\"invalid\"}"})
+                error_result(
+                    &return_operation,
+                    "call-return",
+                    DIRECTIVE_RETURN_TOOL,
+                    "{\"error\":\"invalid\"}",
+                )
             },
         });
         sources.extend([source.clone(), source]);
@@ -1754,11 +1902,7 @@ mod tests {
         let (mut events, mut sources) = lifecycle_batch_events(0, true);
         events.push(ReplayedEventRecord {
             event_type: "cognition_out".to_string(),
-            payload: json!({
-                "turn": 2,
-                "content": "a later process must not reopen a terminal directive",
-                "interrupted": true
-            }),
+            payload: out_interrupted(2, "a later process must not reopen a terminal directive"),
         });
         sources.push("T-lifecycle".to_string());
 
@@ -1784,7 +1928,7 @@ mod tests {
         for (operation_id, call_id, tool) in calls {
             events.push(ReplayedEventRecord {
                 event_type: "tool_call_result".to_string(),
-                payload: json!({"operation_id":operation_id,"call_id":call_id,"tool":tool,"truncated":false,"result_text":"{}"}),
+                payload: result(&operation_id, call_id, tool, "{}"),
             });
             sources.push("T-source".to_string());
         }
@@ -1805,7 +1949,7 @@ mod tests {
             },
             ReplayedEventRecord {
                 event_type: "cognition_in".to_string(),
-                payload: json!({"content":"cannot interleave"}),
+                payload: input("cannot interleave"),
             },
         ]);
         sources.extend(["T-source".to_string(), "T-source".to_string()]);
@@ -1878,7 +2022,7 @@ mod tests {
         let (mut events, mut sources, _, _) = proposed_tool_batch();
         events.push(ReplayedEventRecord {
             event_type: "cognition_out".to_string(),
-            payload: json!({"turn": 4, "content": "skipped unresolved tools"}),
+            payload: out(4, "skipped unresolved tools"),
         });
         sources.push("T-source".to_string());
         assert!(
@@ -1912,12 +2056,7 @@ mod tests {
             },
             ReplayedEventRecord {
                 event_type: "tool_call_result".to_string(),
-                payload: json!({
-                    "operation_id":first,
-                    "call_id":"call-a",
-                    "tool":"tool:a",
-                    "result_text":"{}"
-                }),
+                payload: result(&first, "call-a", "tool:a", "{}"),
             },
         ]);
         sources.extend(["T-source".to_string(), "T-successor".to_string()]);
@@ -1933,11 +2072,11 @@ mod tests {
     fn replay_only_turn_needs_no_fabricated_usage_settlement() {
         let events = vec![ReplayedEventRecord {
             event_type: "cognition_out".to_string(),
-            payload: json!({
-                "turn": 1,
-                "content": "replayed",
-                "provider_accounting": {"replayed_from": "ab".repeat(32)}
-            }),
+            payload: {
+                let mut payload = out(1, "replayed");
+                payload["provider_accounting"] = json!({"replayed_from": "ab".repeat(32)});
+                payload
+            },
         }];
         let progress = recover_turn_progress(&events).unwrap();
         assert_eq!(progress.completed, 1);
@@ -1948,7 +2087,7 @@ mod tests {
     fn live_turn_without_exact_usage_settlement_fails_closed() {
         let events = vec![ReplayedEventRecord {
             event_type: "cognition_out".to_string(),
-            payload: json!({"turn": 1, "content": "live"}),
+            payload: out(1, "live"),
         }];
         let progress = recover_turn_progress(&events).unwrap();
         assert!(
@@ -1965,11 +2104,11 @@ mod tests {
             usage_event(0, 1),
             ReplayedEventRecord {
                 event_type: "cognition_out".to_string(),
-                payload: json!({"turn": 1, "content": "partial", "interrupted": true}),
+                payload: out_interrupted(1, "partial"),
             },
             ReplayedEventRecord {
                 event_type: "cognition_out".to_string(),
-                payload: json!({"turn": 2, "content": "retry"}),
+                payload: out(2, "retry"),
             },
         ];
         let progress = recover_turn_progress(&events).unwrap();
@@ -1998,15 +2137,15 @@ mod tests {
         let events = vec![
             ReplayedEventRecord {
                 event_type: "cognition_out".to_string(),
-                payload: json!({"turn": 1, "content": "partial", "interrupted": true}),
+                payload: out_interrupted(1, "partial"),
             },
             ReplayedEventRecord {
                 event_type: "cognition_out".to_string(),
-                payload: json!({
-                    "turn": 2,
-                    "content": "completed replay",
-                    "provider_accounting": {"replayed_from": "cd".repeat(32)}
-                }),
+                payload: {
+                    let mut payload = out(2, "completed replay");
+                    payload["provider_accounting"] = json!({"replayed_from": "cd".repeat(32)});
+                    payload
+                },
             },
         ];
         assert_eq!(
@@ -2022,17 +2161,18 @@ mod tests {
     fn interrupted_or_mixed_stream_cognition_cannot_authorize_tool_calls() {
         let interrupted = vec![ReplayedEventRecord {
             event_type: "cognition_out".to_string(),
-            payload: json!({
-                "turn": 1,
-                "interrupted": true,
-                "tool_calls": [{"id":"c1","name":"tool:a","arguments":{}}]
-            }),
+            payload: {
+                let mut payload = out_calls(1, json!([{"id":"c1","name":"tool:a","arguments":{}}]));
+                payload["finish"] = json!("interrupted");
+                payload
+            },
         }];
         assert!(
-            recover_tool_state(&interrupted, &["T-source".to_string()])
-                .unwrap_err()
-                .to_string()
-                .contains("cannot authorize completed tool calls")
+            format!(
+                "{:#}",
+                recover_tool_state(&interrupted, &["T-source".to_string()]).unwrap_err()
+            )
+            .contains("cannot carry tool calls")
         );
 
         let mixed = vec![ReplayedEventRecord {
@@ -2040,7 +2180,7 @@ mod tests {
             payload: json!({
                 "turn": 1,
                 "delta": "live",
-                "tool_calls": [{"id":"c1","name":"tool:a","arguments":{}}]
+                "parts": [{"type": "tool_call", "call_id": "c1", "name": "tool:a", "arguments": {}}]
             }),
         }];
         assert!(
@@ -2055,30 +2195,35 @@ mod tests {
     fn malformed_retained_tool_calls_cannot_disappear_during_replay() {
         let event = ReplayedEventRecord {
             event_type: "cognition_out".to_string(),
-            payload: json!({"turn": 1, "content": "contradictory", "tool_calls": {}}),
+            payload: json!({
+                "turn": 1,
+                "parts": {"type": "tool_call"},
+                "finish": "tool_calls"
+            }),
         };
         let error = recover_tool_state(&[event], &["T-source".to_string()]).unwrap_err();
-        assert!(error.to_string().contains("not an array or null"));
+        assert!(error.to_string().contains("not a recorded turn"));
     }
 
     #[test]
-    fn malformed_optional_tool_call_id_cannot_be_downgraded_to_absent() {
+    fn a_tool_call_part_without_a_string_id_is_refused() {
         let event = ReplayedEventRecord {
             event_type: "cognition_out".to_string(),
             payload: json!({
                 "turn": 1,
-                "tool_calls": [{"id": {}, "name": "tool:a", "arguments": {}}]
+                "parts": [{"type": "tool_call", "call_id": {}, "name": "tool:a", "arguments": {}}],
+                "finish": "tool_calls"
             }),
         };
         let error = recover_tool_state(&[event], &["T-source".to_string()]).unwrap_err();
-        assert!(error.to_string().contains("'id' is not a string or null"));
+        assert!(error.to_string().contains("not a recorded turn"));
     }
 
     #[test]
     fn retained_terminal_cognition_is_parsed_without_another_provider_call() {
         let events = vec![ReplayedEventRecord {
             event_type: "cognition_out".to_string(),
-            payload: json!({"turn":1,"content":"done"}),
+            payload: out(1, "done"),
         }];
         let recovered = recover_tool_state(&events, &["T-source".to_string()]).unwrap();
         assert_eq!(
@@ -2089,7 +2234,7 @@ mod tests {
         let mut redirected = events.clone();
         redirected.push(ReplayedEventRecord {
             event_type: "cognition_in".to_string(),
-            payload: json!({"content":"steer"}),
+            payload: input("steer"),
         });
         let recovered = recover_tool_state(
             &redirected,
@@ -2103,28 +2248,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oversized_pending_proposal_fails_closed_before_dispatch() {
+    async fn a_large_pending_proposal_is_kept_whole_by_same_thread_recovery() {
         let callback = make_callback(vec![ReplayedEventRecord {
             event_type: "cognition_out".to_string(),
-            payload: json!({
-                "turn":1,
-                "content":null,
-                "tool_calls":[{
-                    "id":"large-call",
-                    "name":"tool:large",
-                    "arguments":{"payload":"x".repeat(70_000)}
-                }],
-                "provider_accounting":{"replayed_from":"ef".repeat(32)}
-            }),
+            payload: {
+                let mut payload = out_calls(
+                    1,
+                    json!([{
+                        "id":"large-call",
+                        "name":"tool:large",
+                        "arguments":{"payload":"x".repeat(70_000)}
+                    }]),
+                );
+                payload["provider_accounting"] = json!({"replayed_from":"ef".repeat(32)});
+                payload
+            },
         }]);
-        let error = load_resume_state(&callback, "nonexistent", 0, ResumeMode::NativeSameThread)
+        // The thread's own turns are never trimmed, so the proposal that the
+        // old recovery budget would have refused is rebuilt with its call
+        // still pending.
+        let state = load_resume_state(&callback, "nonexistent", 0, ResumeMode::NativeSameThread)
             .await
-            .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("required provider transcript suffix exceeds")
-        );
+            .unwrap();
+        assert_eq!(state.messages.len(), 1);
+        assert!(state.messages[0].has_tool_calls());
+        assert_eq!(state.pending_tools.len(), 1);
     }
 
     #[test]
@@ -2137,38 +2285,37 @@ mod tests {
             },
             ReplayedEventRecord {
                 event_type: "cognition_in".to_string(),
-                payload: json!({"content": "Hello"}),
+                payload: input("Hello"),
             },
             ReplayedEventRecord {
                 event_type: "cognition_out".to_string(),
-                payload: json!({"turn": 1, "content": "Hi there!"}),
+                payload: out(1, "Hi there!"),
             },
             ReplayedEventRecord {
                 event_type: "cognition_in".to_string(),
-                payload: json!({"content": "Do something"}),
+                payload: input("Do something"),
             },
             ReplayedEventRecord {
                 event_type: "cognition_out".to_string(),
-                payload: json!({
-                    "turn": 2,
-                    "content": null,
-                    "tool_calls": [{"id": "c1", "name": "read_file", "arguments": {"path": "/tmp"}}]
-                }),
+                payload: out_calls(
+                    2,
+                    json!([{"id": "c1", "name": "read_file", "arguments": {"path": "/tmp"}}]),
+                ),
             },
             ReplayedEventRecord {
                 event_type: "tool_call_result".to_string(),
-                payload: json!({"call_id": "c1", "tool": "read_file", "result_text": "file contents"}),
+                payload: result(&"1".repeat(64), "c1", "read_file", "file contents"),
             },
         ];
 
         let messages = reconstruct_messages(&events).unwrap();
         assert_eq!(messages.len(), 5);
-        assert_eq!(messages[0].role, "user");
-        assert_eq!(messages[1].role, "assistant");
-        assert_eq!(messages[2].role, "user");
-        assert!(messages[3].tool_calls.is_some());
-        assert_eq!(messages[4].role, "tool");
-        assert_eq!(messages[4].tool_call_id.as_deref(), Some("c1"));
+        assert_eq!(messages[0].role(), "user");
+        assert_eq!(messages[1].role(), "assistant");
+        assert_eq!(messages[2].role(), "user");
+        assert!(messages[3].has_tool_calls());
+        assert_eq!(messages[4].role(), "tool");
+        assert_eq!(messages[4].tool_call_id(), Some("c1"));
     }
 
     #[test]
@@ -2176,19 +2323,11 @@ mod tests {
         let exact = r#"{"ok":true,"nested":{"value":7}}"#;
         let events = vec![ReplayedEventRecord {
             event_type: "tool_call_result".to_string(),
-            payload: json!({
-                "call_id": "call-exact",
-                "tool": "tool:exact",
-                "result_text": exact,
-                "truncated": false,
-            }),
+            payload: result(&"2".repeat(64), "call-exact", "tool:exact", exact),
         }];
 
         let messages = reconstruct_messages(&events).unwrap();
-        assert_eq!(
-            messages[0].content.as_ref().and_then(Value::as_str),
-            Some(exact)
-        );
+        assert_eq!(messages[0].text().as_deref(), Some(exact));
         let (wire, system) = crate::provider_adapter::messages::convert_messages(&messages, &None);
         assert!(system.is_none());
         assert_eq!(wire[0]["content"].as_str(), Some(exact));
@@ -2196,23 +2335,26 @@ mod tests {
     }
 
     #[test]
-    fn replay_rejects_tool_results_without_exact_string_content() {
+    fn replay_rejects_tool_results_in_any_other_shape() {
+        let operation_id = "3".repeat(64);
+        let mut missing_status = result(&operation_id, "c", "tool:t", "{}");
+        missing_status.as_object_mut().unwrap().remove("status");
+        let mut old_text_field = result(&operation_id, "c", "tool:t", "{}");
+        old_text_field["result_text"] = json!("{}");
+        let mut no_call_id = result(&operation_id, "c", "tool:t", "{}");
+        no_call_id["call_id"] = json!("");
         for payload in [
-            json!({"call_id":"c","tool":"tool:t"}),
-            json!({"call_id":"c","tool":"tool:t","result_text":{"ok":true}}),
-            json!({"call_id":"c","tool":"tool:t","result_text":"{}","result":{}}),
+            json!({"call_id":"c","tool":"tool:t","result_text":"{}","truncated":false}),
+            missing_status,
+            old_text_field,
+            no_call_id,
         ] {
             let error = reconstruct_messages(&[ReplayedEventRecord {
                 event_type: "tool_call_result".to_string(),
                 payload,
             }])
             .unwrap_err();
-            assert!(
-                error.to_string().contains("result_text")
-                    || error
-                        .to_string()
-                        .contains("obsolete parsed result authority")
-            );
+            assert!(error.to_string().contains("tool_call_result"), "{error:#}");
         }
     }
 
@@ -2224,21 +2366,18 @@ mod tests {
         let events = vec![
             ReplayedEventRecord {
                 event_type: "tool_call_result".to_string(),
-                payload: json!({
-                    "tool":"tool:t",
-                    "result_text":content,
-                    "truncated":false,
-                }),
+                payload: result(&"4".repeat(64), "c1", "tool:t", &content),
             },
             ReplayedEventRecord {
                 event_type: "tool_call_result".to_string(),
-                payload: json!({
-                    "tool":"tool:t",
-                    "result_text":marker,
-                    "truncated":false,
-                    "deduplicated":true,
-                    "duplicate_of":hash,
-                }),
+                payload: result_with(
+                    &"5".repeat(64),
+                    "c2",
+                    "tool:t",
+                    &marker,
+                    "ok",
+                    Some(hash.as_str()),
+                ),
             },
         ];
         let sources = vec!["T-current".to_string(), "T-current".to_string()];
@@ -2249,49 +2388,46 @@ mod tests {
     }
 
     #[test]
-    fn malformed_optional_result_metadata_cannot_be_downgraded_to_absent() {
-        for (field, value, expected) in [
-            ("deduplicated", json!({}), "not a boolean"),
-            ("truncated_reason", json!(false), "not a string"),
-        ] {
-            let mut payload = json!({
-                "tool":"tool:t",
-                "result_text":"{}",
-                "truncated":false,
-            });
-            payload[field] = value;
-            let error = recover_result_guard(
-                &[ReplayedEventRecord {
-                    event_type: "tool_call_result".to_string(),
-                    payload,
-                }],
-                &["T-current".to_string()],
-                "T-current",
-            )
-            .unwrap_err();
-            assert!(error.to_string().contains(expected), "{error:#}");
-        }
+    fn error_results_never_enter_the_result_guard() {
+        let content = "x".repeat(1024);
+        let events = vec![ReplayedEventRecord {
+            event_type: "tool_call_result".to_string(),
+            payload: error_result(&"6".repeat(64), "c1", "tool:t", &content),
+        }];
+        let mut guard =
+            recover_result_guard(&events, &["T-current".to_string()], "T-current").unwrap();
+        // The error text was never seen by the guard, so the same bytes from
+        // a successful call are not a duplicate.
+        assert!(guard.process(&content).duplicate_of.is_none());
+
+        let mut duplicate = events.clone();
+        duplicate[0].payload["guard"]["duplicate_of"] = json!("a".repeat(64));
+        let error =
+            recover_result_guard(&duplicate, &["T-current".to_string()], "T-current").unwrap_err();
+        assert!(
+            format!("{error:#}").contains("cannot be a duplicate"),
+            "{error:#}"
+        );
     }
 
     #[test]
     fn reconstruct_messages_folds_chunked_cognition_input_once() {
         let content = "large ARC evidence\n".repeat(20_000);
-        let events = ryeos_runtime::encode_cognition_in_payloads(&content)
-            .unwrap()
-            .into_iter()
-            .map(|payload| ReplayedEventRecord {
-                event_type: "cognition_in".to_string(),
-                payload,
-            })
-            .collect::<Vec<_>>();
+        let events = ryeos_runtime::encode_cognition_in_payloads(
+            &ryeos_runtime::CognitionInput::text("launch", content.as_str()),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|payload| ReplayedEventRecord {
+            event_type: "cognition_in".to_string(),
+            payload,
+        })
+        .collect::<Vec<_>>();
 
         let messages = reconstruct_messages(&events).unwrap();
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].role, "user");
-        assert_eq!(
-            messages[0].content.as_ref().and_then(Value::as_str),
-            Some(content.as_str())
-        );
+        assert_eq!(messages[0].role(), "user");
+        assert_eq!(messages[0].text().as_deref(), Some(content.as_str()));
     }
 
     #[test]
@@ -2299,7 +2435,7 @@ mod tests {
         let events = vec![
             ReplayedEventRecord {
                 event_type: "cognition_in".to_string(),
-                payload: json!({"content": "Hello"}),
+                payload: input("Hello"),
             },
             ReplayedEventRecord {
                 event_type: "cognition_out".to_string(),
@@ -2315,71 +2451,65 @@ mod tests {
             },
             ReplayedEventRecord {
                 event_type: "cognition_out".to_string(),
-                payload: json!({"turn": 1, "content": "Hi there!"}),
+                payload: out(1, "Hi there!"),
             },
         ];
 
         let messages = reconstruct_messages(&events).unwrap();
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].role, "user");
-        assert_eq!(messages[1].role, "assistant");
-        assert_eq!(
-            messages[1].content.as_ref().and_then(|v| v.as_str()),
-            Some("Hi there!")
-        );
+        assert_eq!(messages[0].role(), "user");
+        assert_eq!(messages[1].role(), "assistant");
+        assert_eq!(messages[1].text().as_deref(), Some("Hi there!"));
 
         let trimmed = trim_to_recent_turns(messages, 1);
         assert_eq!(trimmed.len(), 2);
-        assert_eq!(trimmed[0].role, "user");
-        assert_eq!(trimmed[1].role, "assistant");
+        assert_eq!(trimmed[0].role(), "user");
+        assert_eq!(trimmed[1].role(), "assistant");
     }
 
     #[test]
     fn interrupted_seal_folds_as_assistant_then_redirect() {
         // A live-interrupt seal is a content-bearing cognition_out (with
-        // interrupted:true, no tool_calls). Resume must fold it as an assistant
+        // finish "interrupted", no tool calls). Resume must fold it as an assistant
         // message in order — the redirect input follows as the next user turn,
         // and the fresh cognition's output after that. The `interrupted` marker is
         // ignored by the fold (only content/tool_calls/reasoning are read).
         let events = vec![
             ReplayedEventRecord {
                 event_type: "cognition_in".to_string(),
-                payload: json!({"content": "start the long task"}),
+                payload: input("start the long task"),
             },
             ReplayedEventRecord {
                 event_type: "cognition_out".to_string(),
-                payload: json!({"turn": 1, "content": "working on it, step on", "interrupted": true}),
+                payload: out_interrupted(1, "working on it, step on"),
             },
             // The operator's redirect, folded as a durable cognition_in by the
             // daemon's poll-and-persist.
             ReplayedEventRecord {
                 event_type: "cognition_in".to_string(),
-                payload: json!({"content": "stop — do X instead"}),
+                payload: input("stop — do X instead"),
             },
             ReplayedEventRecord {
                 event_type: "cognition_out".to_string(),
-                payload: json!({"turn": 2, "content": "doing X"}),
+                payload: out(2, "doing X"),
             },
         ];
         let messages = reconstruct_messages(&events).unwrap();
         assert_eq!(messages.len(), 4);
-        assert_eq!(messages[0].role, "user");
-        assert_eq!(messages[1].role, "assistant");
+        assert_eq!(messages[0].role(), "user");
+        assert_eq!(messages[1].role(), "assistant");
         assert_eq!(
-            messages[1].content.as_ref().and_then(|c| c.as_str()),
+            messages[1].text().as_deref(),
             Some("working on it, step on"),
             "interrupted partial content is preserved"
         );
         assert!(
-            messages[1].tool_calls.is_none(),
+            !messages[1].has_tool_calls(),
             "an interrupted seal carries no tool_calls — no unpaired tool call"
         );
-        assert_eq!(messages[2].role, "user");
-        assert_eq!(
-            messages[2].content.as_ref().and_then(|c| c.as_str()),
-            Some("stop — do X instead")
-        );
-        assert_eq!(messages[3].role, "assistant");
+        assert_eq!(messages[2].role(), "user");
+        assert_eq!(messages[2].text().as_deref(), Some("stop — do X instead"));
+        assert_eq!(messages[3].role(), "assistant");
     }
 
     #[test]
@@ -2397,7 +2527,7 @@ mod tests {
             },
             ReplayedEventRecord {
                 event_type: "cognition_in".to_string(),
-                payload: json!({"content": "Hello"}),
+                payload: input("Hello"),
             },
             ReplayedEventRecord {
                 event_type: "thread_usage".to_string(),
@@ -2410,40 +2540,16 @@ mod tests {
         ];
         let messages = reconstruct_messages(&events).unwrap();
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[0].role(), "user");
     }
 
     #[test]
     fn count_turns_correct() {
         let messages = vec![
-            ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!("hello")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "assistant".to_string(),
-                content: Some(json!("hi")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!("again")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "assistant".to_string(),
-                content: Some(json!("there")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
+            ProviderMessage::user("hello"),
+            ProviderMessage::assistant_text("hi"),
+            ProviderMessage::user("again"),
+            ProviderMessage::assistant_text("there"),
         ];
         assert_eq!(count_turns(&messages), 2);
     }
@@ -2455,14 +2561,14 @@ mod tests {
         let events = vec![
             ReplayedEventRecord {
                 event_type: "cognition_out".to_string(),
-                payload: json!({
-                    "turn": 1,
-                    "tool_calls": [{
+                payload: out_calls(
+                    1,
+                    json!([{
                         "id": "call-return",
                         "name": DIRECTIVE_RETURN_TOOL,
                         "arguments": {"answer": "done"}
-                    }]
-                }),
+                    }]),
+                ),
             },
             ReplayedEventRecord {
                 event_type: "tool_call_start".to_string(),
@@ -2481,22 +2587,15 @@ mod tests {
     fn trim_to_token_budget_works() {
         let mut messages = Vec::new();
         for i in 0..100 {
-            messages.push(ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!(format!("message {} with some content here", i))),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            });
-            messages.push(ProviderMessage {
-                role: "assistant".to_string(),
-                content: Some(json!(format!("answer {i} with some content here"))),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            });
+            messages.push(ProviderMessage::user(format!(
+                "message {} with some content here",
+                i
+            )));
+            messages.push(ProviderMessage::assistant_text(format!(
+                "answer {i} with some content here"
+            )));
         }
-        let trimmed = trim_to_token_budget(messages, 200, true).unwrap();
+        let trimmed = trim_to_token_budget(messages, 200).unwrap();
         assert!(trimmed.len() < 200);
         assert!(!trimmed.is_empty());
     }
@@ -2578,7 +2677,7 @@ mod tests {
 
         events.push(ReplayedEventRecord {
             event_type: "cognition_out".to_string(),
-            payload: json!({"turn": 1, "content": "settled"}),
+            payload: out(1, "settled"),
         });
         sources.push("T-current".to_string());
         assert_eq!(
@@ -2639,15 +2738,15 @@ mod tests {
         let events = vec![
             ReplayedEventRecord {
                 event_type: "cognition_in".to_string(),
-                payload: json!({"content": "Do task"}),
+                payload: input("Do task"),
             },
             ReplayedEventRecord {
                 event_type: "cognition_out".to_string(),
-                payload: json!({
-                    "turn": 1,
-                    "content": "Done!",
-                    "provider_accounting": {"replayed_from": "ab".repeat(32)}
-                }),
+                payload: {
+                    let mut payload = out(1, "Done!");
+                    payload["provider_accounting"] = json!({"replayed_from": "ab".repeat(32)});
+                    payload
+                },
             },
         ];
         let callback = make_callback(events);
@@ -2699,7 +2798,12 @@ mod tests {
         async fn append_event(&self, _: &str, _: &str, _: Value) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
-        async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> {
+        async fn append_events(
+            &self,
+            _: &str,
+            _: Vec<Value>,
+            _: ryeos_runtime::callback::EventAppendOptions,
+        ) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
         async fn replay_events(&self, params: Value) -> Result<Value, CallbackError> {
@@ -2728,17 +2832,17 @@ mod tests {
             };
             let events = match tid {
                 "T1" => vec![
-                    ev("cognition_in", json!({"content": "turn1 in"})),
+                    ev("cognition_in", input("turn1 in")),
                     ev("thread_usage", usage(1)),
-                    ev("cognition_out", json!({"turn": 1, "content": "turn1 out"})),
+                    ev("cognition_out", out(1, "turn1 out")),
                 ],
                 "T2" => vec![
-                    ev("cognition_in", json!({"content": "turn2 in"})),
+                    ev("cognition_in", input("turn2 in")),
                     ev("thread_usage", usage(2)),
-                    ev("cognition_out", json!({"turn": 2, "content": "turn2 out"})),
+                    ev("cognition_out", out(2, "turn2 out")),
                 ],
                 // Non-continuation child sharing the chain root — must NOT fold.
-                "T1-child" => vec![ev("cognition_out", json!({"content": "POLLUTION"}))],
+                "T1-child" => vec![ev("cognition_out", out(1, "POLLUTION"))],
                 _ => vec![],
             };
             Ok(serde_json::to_value(ReplayResponse {
@@ -2800,16 +2904,7 @@ mod tests {
             .await
             .unwrap();
 
-        let contents: Vec<String> = state
-            .messages
-            .iter()
-            .filter_map(|m| {
-                m.content
-                    .as_ref()
-                    .and_then(|c| c.as_str())
-                    .map(String::from)
-            })
-            .collect();
+        let contents: Vec<String> = state.messages.iter().filter_map(|m| m.text()).collect();
         // Both turns, root-first, in order; the chain-sharing child is excluded.
         assert_eq!(
             contents,
@@ -2821,6 +2916,207 @@ mod tests {
         );
         assert_eq!(state.turns_completed, 2);
         assert_eq!(state.thread_usage.unwrap().completed_turns, 2);
+    }
+
+    #[tokio::test]
+    async fn same_thread_recovery_keeps_every_event_of_the_current_thread() {
+        // T2 crashed and is resumed in place. Its own conversation is rebuilt
+        // whole even with a carry of zero turns; only the predecessor's part
+        // of the path is carried the way T2's start carried it.
+        let inner: Arc<dyn RuntimeCallbackAPI> = Arc::new(PathMock);
+        let callback = CallbackClient::from_inner(inner, "T2", "/tmp/test", "tat-test");
+        for carry in [0, 1, 8] {
+            let state = load_resume_state(&callback, "T2", carry, ResumeMode::NativeSameThread)
+                .await
+                .unwrap();
+            let texts: Vec<String> = state.messages.iter().filter_map(|m| m.text()).collect();
+            let own = ["turn2 in".to_string(), "turn2 out".to_string()];
+            assert!(texts.ends_with(&own), "carry {carry}: {texts:?}");
+        }
+        let all = load_resume_state(&callback, "T2", 8, ResumeMode::NativeSameThread)
+            .await
+            .unwrap();
+        assert_eq!(all.messages.len(), 4);
+        let own_only = load_resume_state(&callback, "T2", 0, ResumeMode::NativeSameThread)
+            .await
+            .unwrap();
+        assert_eq!(own_only.messages.len(), 2);
+    }
+
+    fn folded(message: ProviderMessage, pinned: bool) -> FoldedMessage {
+        FoldedMessage { message, pinned }
+    }
+
+    #[test]
+    fn a_successor_start_keeps_pinned_inputs_and_the_recent_turns() {
+        let conversation = vec![
+            folded(ProviderMessage::user("launch"), true),
+            folded(ProviderMessage::assistant_text("a1"), false),
+            folded(ProviderMessage::user("u2"), false),
+            folded(ProviderMessage::assistant_text("a2"), false),
+            folded(ProviderMessage::user("u3"), false),
+            folded(ProviderMessage::assistant_text("a3"), false),
+        ];
+        let carried = carry_into_successor(conversation, 1).unwrap();
+        let texts: Vec<String> = carried.iter().filter_map(|m| m.text()).collect();
+        assert_eq!(texts, ["launch", "u3", "a3"]);
+        assert_eq!(carried[0].role(), "user");
+    }
+
+    #[test]
+    fn a_zero_carry_still_keeps_pinned_inputs() {
+        let conversation = vec![
+            folded(ProviderMessage::user("launch"), true),
+            folded(ProviderMessage::assistant_text("a1"), false),
+        ];
+        let carried = carry_into_successor(conversation, 0).unwrap();
+        let texts: Vec<String> = carried.iter().filter_map(|m| m.text()).collect();
+        assert_eq!(texts, ["launch"]);
+    }
+
+    #[test]
+    fn nothing_dropped_means_nothing_reordered() {
+        let conversation = vec![
+            folded(ProviderMessage::user("u1"), false),
+            folded(ProviderMessage::assistant_text("a1"), false),
+            folded(ProviderMessage::user("pinned later"), true),
+            folded(ProviderMessage::assistant_text("a2"), false),
+        ];
+        let carried = carry_into_successor(conversation, 8).unwrap();
+        let texts: Vec<String> = carried.iter().filter_map(|m| m.text()).collect();
+        assert_eq!(texts, ["u1", "a1", "pinned later", "a2"]);
+    }
+
+    #[test]
+    fn without_a_pinned_input_the_start_is_cut_to_a_user_message() {
+        let conversation = vec![
+            folded(ProviderMessage::user("u1"), false),
+            folded(ProviderMessage::assistant_text("a1"), false),
+            folded(ProviderMessage::user("u2"), false),
+            folded(ProviderMessage::assistant_text("a2"), false),
+        ];
+        let carried = carry_into_successor(conversation, 1).unwrap();
+        let texts: Vec<String> = carried.iter().filter_map(|m| m.text()).collect();
+        assert_eq!(texts, ["u2", "a2"]);
+    }
+
+    #[test]
+    fn a_start_with_a_broken_tool_pairing_fails_with_a_typed_error() {
+        let call = crate::directive::ToolCall {
+            id: Some("c1".to_string()),
+            name: "tool:a".to_string(),
+            arguments: json!({}),
+        };
+        let unanswered = vec![
+            ProviderMessage::user("go"),
+            ProviderMessage::assistant(None, vec![call], None),
+            ProviderMessage::user("and then"),
+        ];
+        assert_eq!(
+            check_well_formed(&unanswered),
+            Err(ResumeFoldError::UnansweredToolCall {
+                call_id: "c1".to_string()
+            })
+        );
+        let orphan = vec![
+            ProviderMessage::user("go"),
+            ProviderMessage::tool_result("c9", "result"),
+        ];
+        assert_eq!(
+            check_well_formed(&orphan),
+            Err(ResumeFoldError::OrphanToolResult {
+                call_id: "c9".to_string()
+            })
+        );
+        let assistant_first = vec![ProviderMessage::assistant_text("hi")];
+        assert_eq!(
+            check_well_formed(&assistant_first),
+            Err(ResumeFoldError::DoesNotStartWithUser {
+                role: "assistant".to_string()
+            })
+        );
+        // A typed error survives the anyhow boundary.
+        let error: anyhow::Error = ResumeFoldError::PinnedInputsExceedBudget { budget: 1 }.into();
+        assert!(error.downcast_ref::<ResumeFoldError>().is_some());
+    }
+
+    fn frame_event(frame_seq: u32, system: &str) -> ReplayedEventRecord {
+        let mut frame = crate::launch_records::build_frame(
+            1,
+            &crate::launch_records::FrameSource {
+                system_prompt: Some(system),
+                inventory: &[],
+                model: "m",
+                reasoning: None,
+                sampling: None,
+                max_output_tokens: 0,
+                provider_config_hash: &"ab".repeat(32),
+            },
+        )
+        .unwrap();
+        frame.payload.frame_seq = frame_seq;
+        ReplayedEventRecord {
+            event_type: "cognition_frame".to_string(),
+            payload: ryeos_runtime::cognition::to_payload(&frame.payload).unwrap(),
+        }
+    }
+
+    fn input_events(inputs: &[ryeos_runtime::CognitionInput]) -> Vec<ReplayedEventRecord> {
+        inputs
+            .iter()
+            .flat_map(|input| ryeos_runtime::encode_cognition_in_payloads(input).unwrap())
+            .map(|payload| ReplayedEventRecord {
+                event_type: "cognition_in".to_string(),
+                payload,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn recorded_launch_records_fold_to_the_messages_the_live_run_had() {
+        let inputs = crate::launch_records::launch_inputs(Some("before"), "go", Some("after"));
+        let mut events = vec![frame_event(1, "system text")];
+        events.extend(input_events(&inputs));
+
+        let folded = fold_messages(&events).unwrap();
+        let messages: Vec<ProviderMessage> = folded.iter().map(|f| f.message.clone()).collect();
+        assert_eq!(messages, crate::launch_records::messages_of(&inputs));
+        // Only the stimulus is pinned; the acknowledgements follow their input.
+        let pinned: Vec<bool> = folded.iter().map(|f| f.pinned).collect();
+        assert_eq!(pinned, [false, false, true, false, false]);
+
+        let frame = latest_frame(&events).unwrap().unwrap();
+        assert_eq!(frame.system_text().as_deref(), Some("system text"));
+    }
+
+    #[test]
+    fn frames_are_numbered_without_gaps_and_the_latest_wins() {
+        let events = vec![frame_event(1, "one"), frame_event(2, "two")];
+        let latest = latest_frame(&events).unwrap().unwrap();
+        assert_eq!(latest.frame_seq, 2);
+        assert_eq!(latest.system_text().as_deref(), Some("two"));
+
+        let gap = vec![frame_event(1, "one"), frame_event(3, "three")];
+        assert!(latest_frame(&gap).is_err());
+        let starts_late = vec![frame_event(2, "two")];
+        assert!(latest_frame(&starts_late).is_err());
+        assert!(latest_frame(&[]).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_thread_that_recorded_nothing_resumes_as_a_fresh_launch() {
+        let empty = make_callback(vec![]);
+        let state = load_resume_state(&empty, "T-empty", 8, ResumeMode::NativeSameThread)
+            .await
+            .unwrap();
+        assert!(state.has_no_launch_records());
+
+        let with_frame = make_callback(vec![frame_event(1, "system text")]);
+        let state = load_resume_state(&with_frame, "T-framed", 8, ResumeMode::NativeSameThread)
+            .await
+            .unwrap();
+        assert!(!state.has_no_launch_records());
+        assert_eq!(state.frame.unwrap().frame_seq, 1);
     }
 
     #[tokio::test]
@@ -2837,110 +3133,38 @@ mod tests {
     #[test]
     fn trim_to_recent_turns_keeps_last_n_assistant_turns_with_context() {
         let messages = vec![
-            ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!("u1")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "assistant".to_string(),
-                content: Some(json!("a1")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!("u2")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "assistant".to_string(),
-                content: Some(json!("a2")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "tool".to_string(),
-                content: Some(json!("tool2")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!("u3")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "assistant".to_string(),
-                content: Some(json!("a3")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
+            ProviderMessage::user("u1"),
+            ProviderMessage::assistant_text("a1"),
+            ProviderMessage::user("u2"),
+            ProviderMessage::assistant_text("a2"),
+            ProviderMessage::tool_result("c0", "tool2"),
+            ProviderMessage::user("u3"),
+            ProviderMessage::assistant_text("a3"),
         ];
 
         let trimmed = trim_to_recent_turns(messages, 2);
         let contents: Vec<_> = trimmed
             .iter()
-            .filter_map(|m| m.content.as_ref().and_then(|v| v.as_str()))
-            .collect();
+            .filter_map(|m| m.text())
+            .collect::<Vec<String>>();
         assert_eq!(contents, vec!["u2", "a2", "tool2", "u3", "a3"]);
     }
 
     #[test]
     fn trim_to_recent_turns_drops_leading_orphan_tool_results() {
         let messages = vec![
-            ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!("u1")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "assistant".to_string(),
-                content: Some(json!("a1 tool call")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "tool".to_string(),
-                content: Some(json!("orphan if kept")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!("u2")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "assistant".to_string(),
-                content: Some(json!("a2")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
+            ProviderMessage::user("u1"),
+            ProviderMessage::assistant_text("a1 tool call"),
+            ProviderMessage::tool_result("c0", "orphan if kept"),
+            ProviderMessage::user("u2"),
+            ProviderMessage::assistant_text("a2"),
         ];
 
         let trimmed = trim_to_recent_turns(messages, 1);
         let contents: Vec<_> = trimmed
             .iter()
-            .filter_map(|m| m.content.as_ref().and_then(|v| v.as_str()))
-            .collect();
+            .filter_map(|m| m.text())
+            .collect::<Vec<String>>();
         assert_eq!(contents, vec!["u2", "a2"]);
     }
 }

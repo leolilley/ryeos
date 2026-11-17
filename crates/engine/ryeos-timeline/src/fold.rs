@@ -185,6 +185,7 @@ fn apply_event(state: &mut State, definition: &Definition, event: &Value, cx: &C
         if let Value::Object(fields) = &mut view {
             fields.insert("item".into(), element.clone());
             fields.insert("item_index".into(), Value::from(index));
+            fields.insert("item_last".into(), Value::from(index + 1 == elements.len()));
         }
         for emission in &rule.emit {
             if path::when_holds(&emission.when, &view, cx) {

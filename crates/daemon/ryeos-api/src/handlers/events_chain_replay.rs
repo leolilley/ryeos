@@ -64,6 +64,7 @@ pub async fn handle(
             chain_root_id: Some(req.chain_root_id),
             after_chain_seq: req.after_chain_seq,
             limit: req.limit,
+            event_types: None,
         })
         .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
 

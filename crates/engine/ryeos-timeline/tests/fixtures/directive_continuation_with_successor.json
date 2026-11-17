@@ -147,7 +147,14 @@
    "event_id": 387,
    "event_type": "cognition_in",
    "payload": {
-    "content": "<scrubbed content 2444 chars>"
+    "origin": "launch",
+    "parts": [
+     {
+      "text": "<scrubbed content 2444 chars>",
+      "type": "text"
+     }
+    ],
+    "pinned": true
    },
    "prev_chain_event_hash": "000000000000000000000000000000000000000000000000000000000000000a",
    "prev_thread_event_hash": "000000000000000000000000000000000000000000000000000000000000000a",
@@ -278,8 +285,19 @@
    "event_id": 392,
    "event_type": "cognition_out",
    "payload": {
-    "input_tokens": 1202,
-    "output_tokens": 173,
+    "finish": "tool_calls",
+    "parts": [
+     {
+      "text": "<scrubbed reasoning_content 641 chars>",
+      "type": "reasoning"
+     },
+     {
+      "arguments": {},
+      "call_id": "call_1",
+      "name": "test_anchor_demo_anchor_demo",
+      "type": "tool_call"
+     }
+    ],
     "provider_accounting": {
      "attempt_id": "T-9a872e22-c114-09e5-7864-fe953820a457:1:1",
      "attempt_number": 1,
@@ -310,15 +328,11 @@
      "snapshots_seen": 1,
      "source": "signed_metadata"
     },
-    "reasoning_content": "<scrubbed reasoning_content 641 chars>",
-    "tool_calls": [
-     {
-      "arguments": {},
-      "id": "call_1",
-      "name": "test_anchor_demo_anchor_demo"
-     }
-    ],
-    "turn": 1
+    "turn": 1,
+    "usage": {
+     "input_tokens": 1202,
+     "output_tokens": 173
+    }
    },
    "prev_chain_event_hash": "000000000000000000000000000000000000000000000000000000000000000f",
    "prev_thread_event_hash": "000000000000000000000000000000000000000000000000000000000000000f",
@@ -392,11 +406,13 @@
    "event_type": "tool_call_start",
    "payload": {
     "call_id": "call_1",
+    "call_index": 0,
     "effective_caps": [
      "ryeos.execute.tool.test/anchor_demo/anchor_demo"
     ],
     "operation_id": "0000000000000000000000000000000000000000000000000000000000000014",
-    "tool": "test_anchor_demo_anchor_demo"
+    "tool": "test_anchor_demo_anchor_demo",
+    "turn": 1
    },
    "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000012",
    "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000012",
@@ -413,11 +429,19 @@
    "event_type": "tool_call_result",
    "payload": {
     "call_id": "call_1",
+    "guard": {
+     "result_size_bytes": 291,
+     "truncated": false
+    },
     "operation_id": "0000000000000000000000000000000000000000000000000000000000000014",
-    "result_size_bytes": 291,
-    "result_text": "<scrubbed result_text 291 chars>",
-    "tool": "test_anchor_demo_anchor_demo",
-    "truncated": false
+    "parts": [
+     {
+      "text": "<scrubbed result_text 291 chars>",
+      "type": "text"
+     }
+    ],
+    "status": "ok",
+    "tool": "test_anchor_demo_anchor_demo"
    },
    "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000013",
    "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000013",
@@ -651,9 +675,13 @@
    "event_id": 409,
    "event_type": "cognition_out",
    "payload": {
-    "content": "<scrubbed content 24 chars>",
-    "input_tokens": 1492,
-    "output_tokens": 13,
+    "finish": "stop",
+    "parts": [
+     {
+      "text": "<scrubbed content 24 chars>",
+      "type": "text"
+     }
+    ],
     "provider_accounting": {
      "attempt_id": "T-ca555175-4866-8d88-a845-3f4a430fa456:2:1",
      "attempt_number": 1,
@@ -684,7 +712,11 @@
      "snapshots_seen": 1,
      "source": "signed_metadata"
     },
-    "turn": 2
+    "turn": 2,
+    "usage": {
+     "input_tokens": 1492,
+     "output_tokens": 13
+    }
    },
    "prev_chain_event_hash": "000000000000000000000000000000000000000000000000000000000000001e",
    "prev_thread_event_hash": "000000000000000000000000000000000000000000000000000000000000001e",

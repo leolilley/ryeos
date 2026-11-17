@@ -5255,6 +5255,7 @@ dependencies = [
  "ryeos-effect-contract",
  "ryeos-engine",
  "ryeos-expression",
+ "ryeos-provider-contract",
  "ryeos-state",
  "serde",
  "serde_json",

@@ -750,6 +750,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                                         thread_id: Some(thread_id_for_stream.clone()),
                                         after_chain_seq: next_after,
                                         limit: replay_batch_size,
+                                        event_types: None,
                                     });
                                     match page {
                                         Ok(page_result) => {
@@ -836,6 +837,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                                         thread_id: Some(thread_id_for_stream.clone()),
                                         after_chain_seq: next_after,
                                         limit: replay_batch_size,
+                                        event_types: None,
                                     });
                                     match page {
                                         Ok(page_result) => {

@@ -160,6 +160,14 @@ pub struct ProviderCallObservationPublication {
     pub inserted: bool,
 }
 
+/// Bytes a runtime event append stores as a `thread_attachment` object in the
+/// same write permit that appends the events naming it.
+#[derive(Debug, Clone)]
+pub struct NewThreadAttachment {
+    pub media_type: String,
+    pub bytes: Vec<u8>,
+}
+
 #[derive(Debug)]
 pub struct NewBundleEventAttachment {
     pub name: String,

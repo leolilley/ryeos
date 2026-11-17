@@ -109,6 +109,7 @@ impl CompiledRouteInvocation for CompiledChainTailInvocation {
                         thread_id: None,
                         after_chain_seq: Some(cursor),
                         limit: REPLAY_BATCH_SIZE,
+                        event_types: None,
                     });
                     match page {
                         Ok(page) => {

@@ -285,7 +285,12 @@ mod tests {
         async fn append_event(&self, _: &str, _: &str, _: Value) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
-        async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> {
+        async fn append_events(
+            &self,
+            _: &str,
+            _: Vec<Value>,
+            _: ryeos_runtime::callback::EventAppendOptions,
+        ) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
         async fn replay_events(&self, _: Value) -> Result<Value, CallbackError> {

@@ -108,7 +108,8 @@ pub struct Rule {
     /// Apply the emissions once per element of the array at this path, in
     /// element order, so entries keep the order of the parts they come from.
     /// Each element is visible to `when`, keys and slots as `item`, and its
-    /// position as `item_index`; a keyless entry's id gains `/<index>`.
+    /// position as `item_index` (`item_last` is true for the final element);
+    /// a keyless entry's id gains `/<index>`.
     #[serde(default)]
     pub over: Option<String>,
     /// Entries this event creates or updates; one event may emit several.
@@ -127,6 +128,13 @@ pub struct When {
     /// `[path, literal]`.
     #[serde(default)]
     pub eq: Option<(String, Value)>,
+    /// `[path, literal]`: the value at `path` is absent or differs from the
+    /// literal.
+    #[serde(default)]
+    pub ne: Option<(String, Value)>,
+    /// `[path, [literal, ...]]`: the value at `path` equals one of the literals.
+    #[serde(default)]
+    pub one_of: Option<(String, Vec<Value>)>,
     /// Whether the event's thread is on the spine.
     #[serde(default)]
     pub on_spine: Option<bool>,
@@ -247,19 +255,53 @@ pub enum Slot {
 
 /// A value taken from an earlier event of the same thread.
 ///
-/// With `array` and `find`: the latest event of type `event` whose array at
-/// `array` has an element whose `find.0` equals this event's `find.1`; the slot
-/// is that element's `get`. Without them: the latest event of type `event`
-/// where `get` resolves; the slot is that value.
+/// Candidates are the earlier events of type `event` for which `when`, if
+/// present, holds (it is evaluated against the earlier event), latest first.
+///
+/// With `when`, only the latest candidate is read: `when` names the one event
+/// the value must come from, and if that event has no matching element or no
+/// `get`, the slot is absent rather than an older event's value. Without
+/// `when`, the search runs back to the first candidate that yields a value.
+///
+/// With `array` and `find`: the candidate's array at `array` must have an
+/// element matching `find`; the slot is that element's `get`. Without them:
+/// the slot is the candidate's `get`.
+///
+/// `find` is either `[field, path]` (the element's `field` equals the value
+/// at `path` in the event being folded) or `{field, equals}` (the element's
+/// `field` equals the literal `equals`). For example, the text of the latest
+/// operator or launch input's first text part:
+///
+/// ```yaml
+/// lookup:
+///   event: cognition_in
+///   when: {one_of: [payload.origin, [operator, launch]]}
+///   array: payload.parts
+///   find: {field: type, equals: text}
+///   get: text
+/// ```
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Lookup {
     pub event: String,
     #[serde(default)]
+    pub when: Option<When>,
+    #[serde(default)]
     pub array: Option<String>,
     #[serde(default)]
-    pub find: Option<(String, String)>,
+    pub find: Option<Find>,
     pub get: String,
+}
+
+/// How a lookup picks an element of an array.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum Find {
+    /// `[field, path]`: the element's `field` equals the value at `path` in
+    /// the event being folded.
+    Source((String, String)),
+    /// The element's `field` equals the literal.
+    Literal { field: String, equals: Value },
 }
 
 #[derive(Debug, Clone, Deserialize)]

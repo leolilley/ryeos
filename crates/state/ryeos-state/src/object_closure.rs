@@ -1274,14 +1274,20 @@ fn collect_object_closure_from_source(
             }
             report.large_object_hashes.insert(large_object);
         }
-        let project_file_size = if identity.kind == "project_file" {
-            Some(
+        let declared_blob_size = match identity.kind.as_str() {
+            "project_file" => Some((
+                "project_file",
                 crate::objects::ProjectFile::from_value(&value)
                     .map_err(|error| anyhow::anyhow!(error))?
                     .size,
-            )
-        } else {
-            None
+            )),
+            crate::objects::THREAD_ATTACHMENT_KIND => Some((
+                crate::objects::THREAD_ATTACHMENT_KIND,
+                crate::objects::ThreadAttachment::from_value(&value)
+                    .map_err(|error| anyhow::anyhow!(error))?
+                    .byte_length,
+            )),
+            _ => None,
         };
         for blob in decoded.blob_hashes {
             check()?;
@@ -1308,13 +1314,13 @@ fn collect_object_closure_from_source(
                 };
                 match inspected {
                     Some((actual_size, actual_hash)) => {
-                        if let Some(expected_size) = project_file_size
+                        if let Some((declaring_kind, expected_size)) = declared_blob_size
                             && actual_size != expected_size
                         {
                             report.malformed_objects.push(MalformedObject {
                                 hash: hash.clone(),
                                 reason: format!(
-                                    "project_file declares size {expected_size}, but blob {blob} has size {actual_size}"
+                                    "{declaring_kind} declares size {expected_size}, but blob {blob} has size {actual_size}"
                                 ),
                             });
                             continue;
@@ -1856,6 +1862,81 @@ mod tests {
         assert!(report.is_complete(), "{report:?}");
         assert_eq!(report.object_hashes.len(), 4);
         assert!(report.blob_hashes.contains(&blob_hash));
+    }
+
+    fn thread_event_naming(cas_root: &Path, refs: &[String]) -> String {
+        write_object(
+            cas_root,
+            &json!({
+                "schema": 1,
+                "kind": "thread_event",
+                "chain_root_id": "chain",
+                "chain_seq": 1,
+                "thread_id": "thread",
+                "thread_seq": 1,
+                "event_type": "cognition_frame",
+                "durability": "durable",
+                "ts": "2026-01-01T00:00:00Z",
+                "prev_chain_event_hash": null,
+                "prev_thread_event_hash": null,
+                "payload": {"attachment_refs": refs},
+            }),
+        )
+    }
+
+    #[test]
+    fn thread_event_reaches_its_attachment_object_and_blob() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cas_root = tmp.path().join("objects");
+        let blob_hash = write_blob(&cas_root, b"inventory");
+        let attachment = write_object(
+            &cas_root,
+            &crate::objects::ThreadAttachment {
+                media_type: "application/json".to_owned(),
+                byte_length: b"inventory".len() as u64,
+                blob_hash: blob_hash.clone(),
+            }
+            .to_value(),
+        );
+        let event = thread_event_naming(&cas_root, std::slice::from_ref(&attachment));
+        let report = collect_object_closure(&cas_root, [event.clone()]).unwrap();
+        assert!(report.is_complete(), "{report:?}");
+        assert!(report.object_hashes.contains(&attachment));
+        assert!(report.blob_hashes.contains(&blob_hash));
+    }
+
+    #[test]
+    fn thread_attachment_with_a_wrong_declared_length_is_malformed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cas_root = tmp.path().join("objects");
+        let blob_hash = write_blob(&cas_root, b"inventory");
+        let attachment = write_object(
+            &cas_root,
+            &crate::objects::ThreadAttachment {
+                media_type: "application/json".to_owned(),
+                byte_length: 3,
+                blob_hash,
+            }
+            .to_value(),
+        );
+        let event = thread_event_naming(&cas_root, &[attachment]);
+        let report = collect_object_closure(&cas_root, [event]).unwrap();
+        assert!(!report.is_complete(), "{report:?}");
+        assert!(
+            report
+                .malformed_objects
+                .iter()
+                .any(|object| object.reason.contains("thread_attachment declares size 3"))
+        );
+    }
+
+    #[test]
+    fn thread_event_naming_a_missing_attachment_is_incomplete() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cas_root = tmp.path().join("objects");
+        let event = thread_event_naming(&cas_root, &[h("ee")]);
+        let report = collect_object_closure(&cas_root, [event]).unwrap();
+        assert!(!report.is_complete(), "{report:?}");
     }
 
     #[test]

@@ -82,6 +82,7 @@ impl NodePolicyTable {
             Box::new(sections::persistent_sessions::PersistentSessionPolicySection),
             Box::new(sections::provider_environment::ProviderEnvironmentPolicySection),
             Box::new(sections::sealed_vault_names::SealedVaultNamesPolicySection),
+            Box::new(sections::thread_attachments::ThreadAttachmentsPolicySection),
             Box::new(sections::thread_history::ThreadHistoryPolicySection),
             Box::new(sections::ui_browser_sessions::UiBrowserSessionPolicySection),
             Box::new(sections::ui_inspection::UiInspectionPolicySection),
@@ -189,6 +190,13 @@ pub fn default_launch_trust_record() -> Arc<dyn ErasedNodePolicy> {
 #[cfg(any(test, feature = "test-support"))]
 pub fn shipped_event_storage_record() -> Arc<dyn ErasedNodePolicy> {
     Arc::new(sections::event_storage::EventStoragePolicy::as_shipped())
+}
+
+/// The shipped `thread_attachments` policy record. Exact test snapshots
+/// include it wherever runtime events are appended.
+#[cfg(any(test, feature = "test-support"))]
+pub fn shipped_thread_attachments_record() -> Arc<dyn ErasedNodePolicy> {
+    Arc::new(sections::thread_attachments::ThreadAttachmentsPolicy::as_shipped())
 }
 
 /// The shipped `authorization` policy record with the standard grant

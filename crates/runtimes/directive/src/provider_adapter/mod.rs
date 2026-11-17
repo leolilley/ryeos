@@ -1,5 +1,6 @@
 pub mod http;
 pub mod messages;
+pub mod parts_builder;
 pub mod prepared;
 pub mod streaming;
 pub mod tools;

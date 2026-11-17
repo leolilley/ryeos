@@ -2016,7 +2016,8 @@ def prove_tool_loop(thread_id, label):
         call
         for item in observed
         if item["event_type"] == "cognition_out"
-        for call in (item["payload"].get("tool_calls") or [])
+        for call in (item["payload"].get("parts") or [])
+        if call.get("type") == "tool_call"
     ]
     if [call.get("name") for call in proposed] != expected:
         raise SystemExit(f"{label} model proposal order differs: {proposed!r}")
@@ -2041,11 +2042,17 @@ def prove_tool_loop(thread_id, label):
             raise SystemExit(f"{label} has a non-canonical operation id")
     leaf_results = []
     for item in results:
-        result_text = item["payload"].get("result_text")
-        if not isinstance(result_text, str):
+        result_parts = item["payload"].get("parts")
+        if not isinstance(result_parts, list) or not all(
+            isinstance(part, dict)
+            and part.get("type") == "text"
+            and isinstance(part.get("text"), str)
+            for part in result_parts
+        ):
             raise SystemExit(
-                f"{label} tool settlement has no exact result_text: {item!r}"
+                f"{label} tool settlement has no exact text parts: {item!r}"
             )
+        result_text = "".join(part["text"] for part in result_parts)
         try:
             dispatch = json.loads(result_text)
         except json.JSONDecodeError as error:

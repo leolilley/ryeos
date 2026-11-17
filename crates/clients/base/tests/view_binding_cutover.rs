@@ -46,7 +46,7 @@ const VIEW_BEHAVIOR_GOLDENS: &[(&str, &str)] = &[
     ),
     (
         "view:ryeos/home/overview",
-        "c6dad9ccb70adf8e8df83d3f34ddf344bb966046a81d34195818af8877fa6085",
+        "4c7c23b93e1384ac2ce78ed2d6f91ddc593d20fa22ad73d1b256ed6e407338d4",
     ),
     (
         "view:ryeos/input",
@@ -70,7 +70,7 @@ const VIEW_BEHAVIOR_GOLDENS: &[(&str, &str)] = &[
     ),
     (
         "view:ryeos/node/events",
-        "2d0dc2e761a99f230cfb338efa5126682984ea9261939a8628852cd69539b86a",
+        "f819ad0496758fd7ff6156161c53a19cdb9b0e2409057049dff9e77b8d5bd94c",
     ),
     (
         "view:ryeos/node/gc",
