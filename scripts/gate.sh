@@ -396,9 +396,11 @@ if [[ "$crash_qualification_only" != "1" ]]; then
     if [[ ${#selected_packages[@]} -eq 0 || "$explicit_workspace" == 1 ]]; then
         adapter_selected=1
     else
+        adapter_package=ryeos-claude-code-adapter
         for selection in "${selected_packages[@]}"; do
+            # A selection may be a package glob, so it is the pattern here.
             # shellcheck disable=SC2254
-            case ryeos-claude-code-adapter in ${selection%@*}) adapter_selected=1 ;; esac
+            case "$adapter_package" in ${selection%@*}) adapter_selected=1 ;; esac
         done
     fi
     [[ "$adapter_selected" == 0 ]] \
