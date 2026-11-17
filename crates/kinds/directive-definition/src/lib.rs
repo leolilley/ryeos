@@ -960,6 +960,30 @@ pub fn resolve_accounting_authority(
 }
 
 impl ProviderConfig {
+    /// The exact URL a provider request is sent to for `model`, or `None` for
+    /// a transport that makes no HTTP request. `{model}` in `base_url` is
+    /// substituted first. `extra.stream_url` then selects the join: absent
+    /// appends `/chat/completions`, empty uses the base unchanged, otherwise
+    /// it is appended behind exactly one separating `/`.
+    pub fn effective_request_url(&self, model: &str) -> Option<String> {
+        let base_url = self.transport.remote_base_url()?;
+        let base = base_url.replace("{model}", model);
+        let stream_url = self.extra.get("stream_url").and_then(|v| v.as_str());
+        Some(match stream_url {
+            Some("") => base,
+            Some(suffix) => format!(
+                "{}{}",
+                base.trim_end_matches('/'),
+                if suffix.starts_with('/') {
+                    suffix.to_string()
+                } else {
+                    format!("/{suffix}")
+                }
+            ),
+            None => format!("{}/chat/completions", base.trim_end_matches('/')),
+        })
+    }
+
     pub fn setup_projection(&self, provider_id: &str) -> Result<ProviderSetupProjection> {
         let setup = match self.extra.get("setup") {
             Some(value) => {
@@ -2326,6 +2350,12 @@ fn runtime_facts(
             )
         })?,
     );
+    if let Some(url) = snapshot
+        .provider
+        .effective_request_url(&snapshot.model_name)
+    {
+        facts.insert("request_url".to_string(), Value::String(url));
+    }
     if let Some(profile) = &snapshot.matched_profile {
         facts.insert(
             "matched_profile".to_string(),
@@ -2619,6 +2649,37 @@ mod shipped_provider_config_tests {
                 .validate(&format!(" for shipped model {model}"))
                 .unwrap_or_else(|error| panic!("invalid shipped DeepSeek config: {error:#}"));
         }
+    }
+
+    #[test]
+    fn effective_request_url_follows_the_family_join_rules() {
+        let load = |yaml: &str| -> ProviderConfig {
+            serde_json::from_value(serde_yaml::from_str::<serde_json::Value>(yaml).unwrap())
+                .expect("shipped provider config")
+        };
+        let deepseek = load(include_str!(
+            "../../../../bundles/directive/.ai/config/ryeos-runtime/model-providers/deepseek.yaml"
+        ));
+        assert_eq!(
+            deepseek.effective_request_url("deepseek-v4-pro").as_deref(),
+            Some("https://api.deepseek.com/chat/completions")
+        );
+        let anthropic = load(include_str!(
+            "../../../../bundles/directive/.ai/config/ryeos-runtime/model-providers/anthropic.yaml"
+        ));
+        assert_eq!(
+            anthropic.effective_request_url("claude-x").as_deref(),
+            Some("https://api.anthropic.com/v1/messages")
+        );
+        let google = load(include_str!(
+            "../../../../bundles/directive/.ai/config/ryeos-runtime/model-providers/google.yaml"
+        ));
+        assert_eq!(
+            google.effective_request_url("gemini-x").as_deref(),
+            Some(
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-x:streamGenerateContent?alt=sse"
+            )
+        );
     }
 
     #[test]
