@@ -613,6 +613,7 @@ async fn dispatch_managed_subprocess(
                 "content_dependencies": dependencies.content_dependencies,
                 "environment_contributions": dependencies.environment_contributions,
                 "credential_readiness": credential_readiness,
+                "runtime_facts": preview_runtime_facts(&launch_contract.runtime_facts),
                 "admission_ready": runtime_preparation_ready,
             },
         }));
@@ -700,6 +701,22 @@ fn report_preview_secret_presence(
         binding: None,
         details: Box::new(std::collections::BTreeMap::new()),
     })
+}
+
+/// The preview's `runtime_facts` view: the launch preparer's declared safe
+/// facts (contract-bounded in kind and size, never opaque runtime data or
+/// secret values). The workload-client request is an internal handoff, not an
+/// operator-facing fact, and is left out.
+fn preview_runtime_facts(
+    facts: &std::collections::BTreeMap<String, Value>,
+) -> std::collections::BTreeMap<&str, &Value> {
+    facts
+        .iter()
+        .filter(|(name, _)| {
+            name.as_str() != ryeos_runtime::workload_client::WORKLOAD_CLIENT_REQUEST_FACT
+        })
+        .map(|(name, value)| (name.as_str(), value))
+        .collect()
 }
 
 /// The preview's `credential_readiness` view: `required_none` when nothing is

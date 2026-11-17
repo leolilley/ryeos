@@ -5239,6 +5239,12 @@ impl IsolationRuntime {
                 max_processes: limits.max_processes,
                 deny_process_creation: limits.deny_process_creation,
             });
+        relocate_sources_off_target_slots(
+            &mut authorities,
+            &mut authority_handles,
+            &target_channel_plan,
+            &sealed_payload_plan,
+        )?;
         let plan = IsolationPlan {
             target_limits,
             target: IsolationTarget {
@@ -7982,6 +7988,66 @@ fn refused(reason: String) -> EngineError {
     EngineError::IsolationPolicyRefused { reason }
 }
 
+/// Keep every inherited source descriptor off the child's declared target
+/// slots. A target slot is a fixed child coordinate (a sealed payload's
+/// descriptor number, a channel above stdio), while source descriptors are
+/// whatever numbers the daemon holds; one that happens to sit on another
+/// role's slot would be overwritten when that slot is placed, so the
+/// protocol refuses the request. Such a source is duplicated above the
+/// highest slot and the plan names the duplicate.
+fn relocate_sources_off_target_slots(
+    authorities: &mut [IsolationAuthority],
+    authority_handles: &mut [lillux::InheritedDescriptorAuthority],
+    target_channels: &[IsolationTargetChannel],
+    sealed_payloads: &[IsolationTargetSealedPayload],
+) -> Result<(), EngineError> {
+    let slots = target_channels
+        .iter()
+        .filter(|channel| channel.target_fd > 2)
+        .map(|channel| (channel.target_fd, &channel.source))
+        .chain(
+            sealed_payloads
+                .iter()
+                .map(|payload| (payload.target_fd, &payload.source)),
+        )
+        .collect::<BTreeMap<u32, &IsolationAuthorityId>>();
+    let Some(highest) = slots.keys().next_back().copied() else {
+        return Ok(());
+    };
+    let floor = highest
+        .checked_add(1)
+        .ok_or_else(|| refused("target descriptor slot has no successor".into()))?;
+    for authority in authorities.iter_mut() {
+        let Some(owner) = slots.get(&authority.inherited_fd) else {
+            continue;
+        };
+        // A role's own source may already sit on its own slot.
+        if **owner == authority.id {
+            continue;
+        }
+        let handle = authority_handles
+            .iter_mut()
+            .find(|handle| handle.inherited_descriptor().ok() == Some(authority.inherited_fd))
+            .ok_or_else(|| {
+                refused(format!(
+                    "source descriptor of {} sits on a target slot and has no retained owner",
+                    authority.id.as_str()
+                ))
+            })?;
+        let relocated = handle.duplicate_at_or_above(floor).map_err(|error| {
+            refused(format!(
+                "relocate {} off a target slot: {error}",
+                authority.id.as_str()
+            ))
+        })?;
+        authority.inherited_fd = relocated
+            .inherited_descriptor()
+            .map_err(|error| refused(format!("inspect relocated descriptor: {error}")))?;
+        *handle = relocated;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7990,6 +8056,46 @@ mod tests {
         IsolationBackendSelection, IsolationCapability,
     };
     use std::collections::BTreeSet;
+
+    #[test]
+    fn a_source_on_another_roles_target_slot_is_moved_above_every_slot() {
+        let memfd = |name: &std::ffi::CStr| lillux::sealed_memfd(name, b"x").unwrap();
+        // Put an unrelated authority's source exactly on the payload's slot,
+        // and the payload's own source on its slot too (that one may stay).
+        let slot = 997;
+        let other = memfd(c"other").duplicate_at_or_above(slot).unwrap();
+        let other_fd = other.inherited_descriptor().unwrap();
+        assert_eq!(other_fd, slot, "the test needs the slot free");
+        let payload = memfd(c"payload");
+        let payload_fd = payload.inherited_descriptor().unwrap();
+        let other_id = IsolationAuthorityId::new("character-device-0").unwrap();
+        let payload_id = IsolationAuthorityId::new("target-sealed-payload-0").unwrap();
+        let mut authorities = vec![
+            IsolationAuthority {
+                id: other_id,
+                inherited_fd: other_fd,
+                purpose: IsolationAuthorityPurpose::CharacterDevice,
+            },
+            IsolationAuthority {
+                id: payload_id.clone(),
+                inherited_fd: payload_fd,
+                purpose: IsolationAuthorityPurpose::TargetSealedPayload,
+            },
+        ];
+        let mut handles = vec![other, payload];
+        let payloads = [IsolationTargetSealedPayload {
+            source: payload_id,
+            target_fd: slot,
+            env_name: "SLOT".to_owned(),
+        }];
+        relocate_sources_off_target_slots(&mut authorities, &mut handles, &[], &payloads).unwrap();
+        assert!(authorities[0].inherited_fd > slot);
+        assert_eq!(
+            handles[0].inherited_descriptor().unwrap(),
+            authorities[0].inherited_fd
+        );
+        assert_eq!(authorities[1].inherited_fd, payload_fd);
+    }
 
     fn workspace_receipt_fixture() -> (
         AdapterWorkspaceRequest,

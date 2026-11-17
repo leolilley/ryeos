@@ -70,7 +70,7 @@ const VIEW_BEHAVIOR_GOLDENS: &[(&str, &str)] = &[
     ),
     (
         "view:ryeos/node/events",
-        "f87d2a200935a980a74ba52b3b8b5c6fa3e8a1575fbaf9c052298970ddd11424",
+        "2d0dc2e761a99f230cfb338efa5126682984ea9261939a8628852cd69539b86a",
     ),
     (
         "view:ryeos/node/gc",

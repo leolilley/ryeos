@@ -17,6 +17,7 @@ pub mod install;
 pub mod manifest_audit;
 pub mod manifest_sign;
 pub mod node_logs;
+pub mod profile_sign;
 pub mod publish;
 mod publisher_transaction;
 pub mod runtime_owned;

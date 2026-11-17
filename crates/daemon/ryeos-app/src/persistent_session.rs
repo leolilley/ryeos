@@ -7905,6 +7905,7 @@ while True:
             ready_timeout_ms: 100,
             request_timeout_ms: 100,
             idle_timeout_ms: 100,
+            max_lifetime_seconds_ceiling: 603_600,
         }
     }
 
@@ -9855,6 +9856,7 @@ while True:
             ready_timeout_ms: 2_000,
             request_timeout_ms: 2_000,
             idle_timeout_ms: 2_000,
+            max_lifetime_seconds_ceiling: 603_600,
         };
         let wire = test_wire();
         let mut deltas = Vec::new();

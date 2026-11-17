@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use crate::error::EngineError;
 
-const MAX_CACHE_ENTRIES: usize = 256;
+const MAX_CACHE_ENTRIES: usize = 2048;
 const MAX_CACHE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CACHE_ENTRY_BYTES: usize = 4 * 1024 * 1024;
 // One entry never exceeds the whole cache, so the per-entry bound is the only
@@ -64,8 +64,14 @@ struct InFlight {
 
 /// A bounded cache for parser descriptors that explicitly promise deterministic,
 /// side-effect-free content-addressed execution.
+///
+/// Entries are keyed by the dispatcher fingerprint, the parser ref and the
+/// digest of the signature-stripped content, so one cache can be shared by
+/// several dispatchers (see [`super::ParserDispatcher::with_parse_results`]):
+/// a file whose bytes were already parsed under the same parser set is not
+/// parsed again, and a changed file has a different digest and is parsed.
 #[derive(Debug, Default)]
-pub(super) struct ParseResultCache {
+pub struct ParseResultCache {
     state: Mutex<CacheState>,
 }
 
@@ -280,6 +286,32 @@ mod tests {
             assert_eq!(value, serde_json::json!({"value": 1}));
         }
         assert_eq!(builds.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn second_pass_parses_only_files_whose_content_changed() {
+        let cache = Arc::new(ParseResultCache::default());
+        let builds = AtomicUsize::new(0);
+        let parse = |cache: &ParseResultCache, digest: &str| {
+            cache
+                .get_or_build(key(digest), 8, || {
+                    builds.fetch_add(1, Ordering::SeqCst);
+                    Ok(serde_json::json!({ "digest": digest }))
+                })
+                .unwrap()
+        };
+        // Source pass parses three files.
+        for digest in ["a", "b", "c"] {
+            parse(&cache, digest);
+        }
+        assert_eq!(builds.load(Ordering::SeqCst), 3);
+        // Staging pass over the same bytes, with one file edited, through a
+        // handle another pass holds: only the edited file is parsed.
+        let staging_pass = Arc::clone(&cache);
+        for digest in ["a", "b", "c-edited"] {
+            parse(&staging_pass, digest);
+        }
+        assert_eq!(builds.load(Ordering::SeqCst), 4);
     }
 
     #[test]

@@ -54,6 +54,7 @@ fn store_structured_session_capsule_with_schema(
             ready_timeout_ms: 1,
             request_timeout_ms: 1,
             idle_timeout_ms: 1,
+            max_lifetime_seconds_ceiling: 603_600,
         },
         wire: PersistentSessionWireContract {
             channel_env: "RYEOS_SESSION_FD".to_owned(),

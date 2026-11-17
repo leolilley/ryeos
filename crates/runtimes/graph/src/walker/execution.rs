@@ -368,6 +368,7 @@ impl Walker {
                         child_thread_id: None,
                         integrity: true,
                         dispatch: None,
+                        outcome: None,
                     }))
                 } else {
                     let action_digest = match dispatch::rendered_action_digest(&rendered_action) {
@@ -529,6 +530,7 @@ impl Walker {
                     // A failed native child may have spent tokens — preserve it.
                     cost: failure.cost,
                     observation,
+                    outcome: failure.outcome,
                 })
             }
             Ok(dispatch::ActionOutcome::Success(success)) => {
@@ -857,6 +859,10 @@ impl Walker {
                         }
                     }
                     dispatch::ActionOutcome::Failure(failure) => {
+                        // A worker child's slot keeps its structured outcome
+                        // (kind and partial result); any other failed slot
+                        // stays null.
+                        results[index] = failure.outcome.clone().unwrap_or(Value::Null);
                         errors.push(ErrorRecord {
                             step,
                             node: current.to_string(),
