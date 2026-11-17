@@ -1,4 +1,4 @@
-use crate::directive::{ProviderMessage, ProviderMessageExt};
+use crate::directive::ProviderMessage;
 
 pub struct ContinuationCheck {
     context_window: u64,
@@ -28,31 +28,10 @@ impl ContinuationCheck {
         self.estimate_live_context_tokens(messages) >= self.threshold()
     }
 
-    /// Rough token estimate of the live message window: message content,
-    /// replayed `reasoning_content`, and tool-call names/arguments (tool-result
-    /// content is counted via the tool message's `content`). Character-count /
-    /// 4 — deliberately provider-agnostic; it only needs to track the context
-    /// window, not bill.
+    /// Rough token estimate of the live message window, by the one estimator
+    /// the recovery trim also uses.
     pub fn estimate_live_context_tokens(&self, messages: &[ProviderMessage]) -> u64 {
-        let char_count: usize = messages
-            .iter()
-            .map(|m| {
-                let mut chars = 0;
-                if let Some(content) = m.content_value() {
-                    chars += content.to_string().len();
-                }
-                if let Some(reasoning) = m.reasoning_text() {
-                    chars += reasoning.len();
-                }
-                for tc in m.calls() {
-                    chars += tc.arguments.to_string().len();
-                    chars += tc.name.len();
-                }
-                chars
-            })
-            .sum();
-
-        (char_count as u64) / 4
+        crate::estimate::estimate_tokens(messages)
     }
 
     pub fn threshold(&self) -> u64 {
@@ -63,6 +42,7 @@ impl ContinuationCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::directive::ProviderMessageExt;
 
     fn make_message(role: &str, content: &str) -> ProviderMessage {
         match role {
@@ -111,7 +91,7 @@ mod tests {
         let with = check.estimate_live_context_tokens(std::slice::from_ref(&with_reasoning));
         let without = check.estimate_live_context_tokens(&[make_message("assistant", "")]);
         assert!(with > without);
-        assert_eq!(with, 1000); // (2 quotes for empty content + 4000 reasoning) / 4
+        assert_eq!(with, 1000); // 4000 reasoning characters / 4; an empty text adds none
     }
 
     #[test]
@@ -126,9 +106,8 @@ mod tests {
         let a = "a".repeat(400);
         let b = "b".repeat(400);
         let messages = vec![make_message("user", &a), make_message("assistant", &b)];
-        // content is JSON-stringified, so each 400-char string is 402 chars
-        // (surrounding quotes): (402 + 402) / 4 = 201.
+        // Text counts by its length, not its JSON encoding: (400 + 400) / 4.
         let tokens = check.estimate_live_context_tokens(&messages);
-        assert_eq!(tokens, 201);
+        assert_eq!(tokens, 200);
     }
 }

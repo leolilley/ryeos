@@ -1185,7 +1185,7 @@ fn trim_to_token_budget(
     }
 
     loop {
-        let total: u64 = messages.iter().map(estimate_tokens).sum();
+        let total = crate::estimate::estimate_tokens(&messages);
         if total <= max_tokens {
             return Ok(messages);
         }
@@ -1218,31 +1218,6 @@ fn trim_to_token_budget(
         {
             messages.remove(0);
         }
-    }
-}
-
-fn estimate_tokens(msg: &ProviderMessage) -> u64 {
-    let mut count = estimate_tokens_from_value(&msg.content_value());
-    for tc in msg.calls() {
-        count += estimate_tokens_from_value(&Some(tc.arguments.clone()));
-    }
-    count
-}
-
-fn estimate_tokens_from_value(v: &Option<Value>) -> u64 {
-    match v {
-        Some(Value::String(s)) => (s.len() as u64) / 4,
-        Some(Value::Number(_)) => 1,
-        Some(Value::Bool(_)) => 1,
-        Some(Value::Null) | None => 0,
-        Some(Value::Array(arr)) => arr
-            .iter()
-            .map(|v| estimate_tokens_from_value(&Some(v.clone())))
-            .sum(),
-        Some(Value::Object(obj)) => obj
-            .values()
-            .map(|v| estimate_tokens_from_value(&Some(v.clone())))
-            .sum(),
     }
 }
 

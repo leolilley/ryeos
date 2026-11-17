@@ -10,6 +10,7 @@ mod budget;
 mod continuation;
 mod directive;
 mod dispatcher;
+mod estimate;
 #[cfg(test)]
 mod expression_inventory_tests;
 mod harness;
