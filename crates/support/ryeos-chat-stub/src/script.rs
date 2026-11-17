@@ -30,7 +30,23 @@
 //! - `fail`: `{status, body}`; the response is that HTTP status with that
 //!   body and nothing else in the step is used.
 //! - `text`, `reasoning`: assistant text and reasoning text.
-//! - `tool_calls`: list of `{id?, name, arguments}`.
+//! - `reasoning_field`: the delta key carrying `reasoning` (default
+//!   `reasoning_content`; `reasoning` is the other common one).
+//! - `thinking_blocks`: list of `{thinking, signature?, redacted?}` sent as
+//!   `delta.thinking_blocks` items. A block with `redacted` is a
+//!   `redacted_thinking` item holding that data. A block with no
+//!   `signature` never closes, which is the incomplete-block case.
+//! - `tool_calls`: list of `{id?, name, arguments, fields?}`; `fields` is a
+//!   map of extra keys merged into the call's first delta entry (or the
+//!   call object of a non-streamed reply).
+//! - `require`: strict-provider simulation. A request that breaks it gets
+//!   HTTP 400 naming the missing or forbidden field, and is recorded as
+//!   rejected. Only assistant messages after the last user message are
+//!   checked unless `all_history: true`.
+//!   `assistant_tool_turn_has: [key]` (every assistant message with tool
+//!   calls carries the key), `tool_call_has: [key]` (the first tool call
+//!   of every assistant tool-call message carries the key) and
+//!   `assistant_lacks: [key]` (no assistant message carries the key).
 //! - `finish_reason`: `stop`, `tool_calls` or `length` (any string is
 //!   passed through). Defaults to `tool_calls` when calls are present,
 //!   otherwise `stop`.
@@ -38,7 +54,10 @@
 //!   5); extra keys are copied into the usage object verbatim.
 //! - `stream`: how a streamed reply is cut into SSE events:
 //!   `text_chunk_bytes`, `argument_chunk_bytes` (split text and tool-call
-//!   arguments over several events), `tool_call_index: false` (omit the
+//!   arguments over several events), `thinking_chunk_bytes` (split each
+//!   thinking block's text), `signature_last: true` (send a block's
+//!   signature in its own final chunk instead of with its last text piece),
+//!   `tool_call_index: false` (omit the
 //!   per-call `index` field), `tool_call_ids: false` (omit ids from
 //!   deltas), `usage_chunk: false` (omit usage from the final event),
 //!   `done_marker: false` (omit the `[DONE]` sentinel).
@@ -75,6 +94,12 @@ pub struct Step {
     #[serde(default)]
     pub reasoning: Option<String>,
     #[serde(default)]
+    pub reasoning_field: Option<String>,
+    #[serde(default)]
+    pub thinking_blocks: Vec<ThinkingBlock>,
+    #[serde(default)]
+    pub require: Option<Require>,
+    #[serde(default)]
     pub tool_calls: Vec<ToolCall>,
     #[serde(default)]
     pub finish_reason: Option<String>,
@@ -96,6 +121,9 @@ impl Default for Step {
             fail: None,
             text: None,
             reasoning: None,
+            reasoning_field: None,
+            thinking_blocks: Vec::new(),
+            require: None,
             tool_calls: Vec::new(),
             finish_reason: None,
             usage: None,
@@ -123,6 +151,34 @@ pub struct ToolCall {
     /// A string is sent as is; any other JSON value is serialised.
     #[serde(default = "empty_object")]
     pub arguments: Value,
+    /// Extra keys merged into the call's first streamed entry.
+    #[serde(default)]
+    pub fields: Map<String, Value>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThinkingBlock {
+    #[serde(default)]
+    pub thinking: String,
+    #[serde(default)]
+    pub signature: Option<String>,
+    /// Makes this a `redacted_thinking` item holding these opaque bytes.
+    #[serde(default)]
+    pub redacted: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Require {
+    #[serde(default)]
+    pub assistant_tool_turn_has: Vec<String>,
+    #[serde(default)]
+    pub tool_call_has: Vec<String>,
+    #[serde(default)]
+    pub assistant_lacks: Vec<String>,
+    #[serde(default)]
+    pub all_history: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -152,6 +208,10 @@ pub struct StreamShape {
     pub text_chunk_bytes: Option<usize>,
     #[serde(default)]
     pub argument_chunk_bytes: Option<usize>,
+    #[serde(default)]
+    pub thinking_chunk_bytes: Option<usize>,
+    #[serde(default)]
+    pub signature_last: bool,
     #[serde(default = "yes")]
     pub tool_call_index: bool,
     #[serde(default = "yes")]
@@ -167,6 +227,8 @@ impl Default for StreamShape {
         Self {
             text_chunk_bytes: None,
             argument_chunk_bytes: None,
+            thinking_chunk_bytes: None,
+            signature_last: false,
             tool_call_index: true,
             tool_call_ids: true,
             usage_chunk: true,

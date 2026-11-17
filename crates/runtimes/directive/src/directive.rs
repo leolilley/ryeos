@@ -543,6 +543,13 @@ pub fn normalize_provider_call_answer(
     Ok(answer)
 }
 
+/// A value captured for one tool call by a signed `tool_call_field` rule.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolCallArtefact {
+    pub capture_id: String,
+    pub value: Value,
+}
+
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     /// Incremental assistant text.
@@ -551,6 +558,9 @@ pub enum StreamEvent {
     /// streams thinking separately (Anthropic extended thinking, Gemini
     /// thoughts, OpenAI o-series). Not all providers produce these.
     ReasoningDelta(String),
+    /// One completed opaque reasoning block captured by a signed capture
+    /// rule. Meaningless to this crate beyond being stored and replayed.
+    ReasoningArtefact { capture_id: String, value: Value },
     /// Complete tool call ready to dispatch.
     ToolUse {
         id: Option<String>,
@@ -568,6 +578,9 @@ pub enum StreamEvent {
         /// `tool_use` braid event instead of surfacing a silent empty
         /// invocation the operator cannot connect to the upstream fault.
         malformed_args: Option<MalformedArgs>,
+        /// A value a signed capture rule collected for this call, to be
+        /// stored on the call's part and replayed by declared rule.
+        artefact: Option<ToolCallArtefact>,
     },
     /// Partial tool call argument JSON streamed mid-flight.
     ///

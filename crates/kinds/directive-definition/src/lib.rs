@@ -311,11 +311,28 @@ pub struct SchemasConfig {
     pub output_limit: Option<OutputLimitConfig>,
     #[serde(default)]
     pub reasoning: Option<ReasoningSchemaConfig>,
+    /// Which parts of the request frame a provider refuses to see change
+    /// mid-conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_stability: Option<FrameStabilityConfig>,
+}
+
+/// Frame components a provider refuses to see change within one
+/// conversation. A resume or continuation whose launch frame differs in a
+/// listed component fails with `frame_change_refused` instead of recording a
+/// new frame.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FrameStabilityConfig {
+    #[serde(default)]
+    pub refuse_change_of: Vec<ryeos_runtime::cognition::FrameComponent>,
 }
 
 /// Signed mapping from provider-neutral reasoning policy to provider-native
-/// request fields. The runtime follows only these declared paths and values;
-/// provider and model identities never influence request mutation.
+/// request fields, and the signed rules for capturing and replaying what a
+/// provider returns as reasoning. The runtime follows only these declared
+/// paths, values and rules; provider and model identities never influence
+/// request mutation, capture or replay.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReasoningSchemaConfig {
@@ -323,6 +340,227 @@ pub struct ReasoningSchemaConfig {
     pub mode: Option<ReasoningModeSchemaConfig>,
     #[serde(default)]
     pub effort: Option<ReasoningEffortSchemaConfig>,
+    /// What to read out of a streamed response. Empty reads nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capture: Vec<ReasoningCaptureRule>,
+    /// What to send back on later requests. Absent sends nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay: Option<ReasoningReplayConfig>,
+}
+
+/// One capture rule, applied to every chunk of a `delta_merge` stream.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ReasoningCaptureRule {
+    /// String delta fields that carry the visible reasoning text. The first
+    /// listed field present in a chunk is taken.
+    TextDelta { id: String, fields: Vec<String> },
+    /// An array field in the delta whose items assemble into one opaque
+    /// artefact per block.
+    Blocks {
+        id: String,
+        field: String,
+        /// Key holding an item's block type. Defaults to `type`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        type_key: Option<String>,
+        /// String keys concatenated across the items of one block.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        merge_keys: Vec<String>,
+        /// A key whose presence completes the block.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        close_key: Option<String>,
+        /// Item types that are complete on arrival.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        whole_types: Vec<String>,
+        /// A key whose value separates interleaved blocks, such as `index`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group_key: Option<String>,
+        /// A key whose string value is also emitted as reasoning text.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text_key: Option<String>,
+    },
+    /// A field riding on each streamed tool-call entry.
+    ToolCallField {
+        id: String,
+        field: String,
+        merge: ToolCallFieldMerge,
+    },
+}
+
+impl ReasoningCaptureRule {
+    pub fn id(&self) -> &str {
+        match self {
+            Self::TextDelta { id, .. }
+            | Self::Blocks { id, .. }
+            | Self::ToolCallField { id, .. } => id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ToolCallFieldMerge {
+    /// The latest value replaces earlier ones.
+    Last,
+    /// Object values merge key by key, later keys winning.
+    ObjectMerge,
+}
+
+/// How captured reasoning goes back on later requests.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ReasoningReplayConfig {
+    /// Names the set of entries whose artefacts are interchangeable. An
+    /// artefact replays only when the active entry declares the group it was
+    /// captured under. Required once any rule captures an artefact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compat_group: Option<String>,
+    pub placements: Vec<ReplayPlacement>,
+}
+
+/// One placement. Authored as `from`, `into: {message_field: key}` or
+/// `into: {tool_call_field: key}`, `scope`, and `on_missing` (`omit`,
+/// `refuse` or `fill` with a sibling `fill` literal).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(try_from = "RawReplayPlacement", into = "RawReplayPlacement")]
+pub struct ReplayPlacement {
+    /// The capture rule id whose output is replayed.
+    pub from: String,
+    pub into: ReplayTarget,
+    pub scope: ReplayScope,
+    pub on_missing: OnMissing,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawReplayPlacement {
+    from: String,
+    into: RawReplayTarget,
+    scope: ReplayScope,
+    #[serde(default)]
+    on_missing: RawOnMissing,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fill: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawReplayTarget {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    message_field: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_call_field: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RawOnMissing {
+    #[default]
+    Omit,
+    Refuse,
+    Fill,
+}
+
+impl TryFrom<RawReplayPlacement> for ReplayPlacement {
+    type Error = String;
+
+    fn try_from(raw: RawReplayPlacement) -> Result<Self, String> {
+        let into = match (raw.into.message_field, raw.into.tool_call_field) {
+            (Some(key), None) => ReplayTarget::MessageField(key),
+            (None, Some(key)) => ReplayTarget::ToolCallField(key),
+            _ => {
+                return Err(
+                    "replay placement `into` must name exactly one of message_field or tool_call_field"
+                        .to_string(),
+                );
+            }
+        };
+        let on_missing = match (raw.on_missing, raw.fill) {
+            (RawOnMissing::Omit, None) => OnMissing::Omit,
+            (RawOnMissing::Refuse, None) => OnMissing::Refuse,
+            (RawOnMissing::Fill, Some(value)) => OnMissing::Fill(value),
+            (RawOnMissing::Fill, None) => {
+                return Err("replay placement on_missing fill needs a `fill` value".to_string());
+            }
+            (_, Some(_)) => {
+                return Err(
+                    "replay placement `fill` is only valid with on_missing fill".to_string()
+                );
+            }
+        };
+        Ok(Self {
+            from: raw.from,
+            into,
+            scope: raw.scope,
+            on_missing,
+        })
+    }
+}
+
+impl From<ReplayPlacement> for RawReplayPlacement {
+    fn from(placement: ReplayPlacement) -> Self {
+        let (message_field, tool_call_field) = match placement.into {
+            ReplayTarget::MessageField(key) => (Some(key), None),
+            ReplayTarget::ToolCallField(key) => (None, Some(key)),
+        };
+        let (on_missing, fill) = match placement.on_missing {
+            OnMissing::Omit => (RawOnMissing::Omit, None),
+            OnMissing::Refuse => (RawOnMissing::Refuse, None),
+            OnMissing::Fill(value) => (RawOnMissing::Fill, Some(value)),
+        };
+        Self {
+            from: placement.from,
+            into: RawReplayTarget {
+                message_field,
+                tool_call_field,
+            },
+            scope: placement.scope,
+            on_missing,
+            fill,
+        }
+    }
+}
+
+/// Where a replayed value is written.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ReplayTarget {
+    /// A top-level key of the rendered assistant message.
+    MessageField(String),
+    /// A top-level key of each rendered tool call that carries a value.
+    ToolCallField(String),
+}
+
+impl ReplayTarget {
+    pub fn key(&self) -> &str {
+        match self {
+            Self::MessageField(key) | Self::ToolCallField(key) => key,
+        }
+    }
+}
+
+/// Which assistant messages a placement applies to.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ReplayScope {
+    /// Every assistant message.
+    All,
+    /// Assistant messages that carry a tool call.
+    ToolCallTurns,
+    /// Assistant messages after the last user message.
+    OpenLoop,
+}
+
+/// What a message in scope that proposes a tool call but holds no matching
+/// artefact does.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum OnMissing {
+    /// Send nothing.
+    #[default]
+    Omit,
+    /// Fail the turn with `reasoning_artefact_missing`.
+    Refuse,
+    /// Send this literal.
+    Fill(Value),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1467,6 +1705,37 @@ impl ProviderConfig {
             .and_then(|schemas| schemas.reasoning.as_ref())
         {
             validate_reasoning_schema(reasoning, context)?;
+            let delta_merge = self
+                .schemas
+                .as_ref()
+                .and_then(|schemas| schemas.streaming.as_ref())
+                .and_then(|streaming| streaming.mode)
+                == Some(StreamingMode::DeltaMerge);
+            if (!reasoning.capture.is_empty() || reasoning.replay.is_some()) && !delta_merge {
+                bail!(
+                    "provider config{context}: reasoning capture and replay require streaming mode delta_merge"
+                );
+            }
+        }
+
+        if let Some(stability) = self
+            .schemas
+            .as_ref()
+            .and_then(|schemas| schemas.frame_stability.as_ref())
+        {
+            let listed = &stability.refuse_change_of;
+            if listed.is_empty() {
+                bail!(
+                    "provider config{context}: schemas.frame_stability must list at least one component in refuse_change_of"
+                );
+            }
+            let distinct: std::collections::BTreeSet<&str> =
+                listed.iter().map(|component| component.as_str()).collect();
+            if distinct.len() != listed.len() {
+                bail!(
+                    "provider config{context}: schemas.frame_stability.refuse_change_of lists a component twice"
+                );
+            }
         }
 
         if let Some(pricing) = self.pricing.as_ref()
@@ -2209,9 +2478,16 @@ fn validate_reasoning_selection(
 }
 
 fn validate_reasoning_schema(config: &ReasoningSchemaConfig, context: &str) -> Result<()> {
-    if config.mode.is_none() && config.effort.is_none() {
-        bail!("provider config{context}: schemas.reasoning must declare mode or effort mapping");
+    if config.mode.is_none()
+        && config.effort.is_none()
+        && config.capture.is_empty()
+        && config.replay.is_none()
+    {
+        bail!(
+            "provider config{context}: schemas.reasoning must declare a mode or effort mapping, capture rules or replay"
+        );
     }
+    validate_reasoning_capture_and_replay(config, context)?;
     if let Some(mode) = config.mode.as_ref() {
         validate_reasoning_path("reasoning.mode.path", &mode.path, context)?;
         validate_reasoning_wire_value(
@@ -2250,6 +2526,207 @@ fn validate_reasoning_schema(config: &ReasoningSchemaConfig, context: &str) -> R
         );
     }
     Ok(())
+}
+
+fn validate_reasoning_identifier(label: &str, value: &str, context: &str) -> Result<()> {
+    let mut bytes = value.bytes();
+    let valid = value.len() <= 64
+        && bytes
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic() || first == b'_')
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+    if !valid {
+        bail!("provider config{context}: {label} must be a 1-64 byte identifier");
+    }
+    Ok(())
+}
+
+fn validate_reasoning_capture_and_replay(
+    config: &ReasoningSchemaConfig,
+    context: &str,
+) -> Result<()> {
+    if config.capture.len() > 16 {
+        bail!("provider config{context}: reasoning.capture may declare at most 16 rules");
+    }
+    if config
+        .capture
+        .iter()
+        .filter(|rule| matches!(rule, ReasoningCaptureRule::ToolCallField { .. }))
+        .count()
+        > 1
+    {
+        bail!(
+            "provider config{context}: reasoning.capture may declare at most one tool_call_field rule, since a call holds one artefact"
+        );
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    let mut captures_artefact = false;
+    for rule in &config.capture {
+        let id = rule.id();
+        if id.is_empty()
+            || id.len() > 32
+            || !id
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            bail!(
+                "provider config{context}: reasoning capture id {id:?} must be 1-32 lowercase ASCII letters, digits or '_'"
+            );
+        }
+        if !ids.insert(id.to_string()) {
+            bail!("provider config{context}: reasoning capture id {id:?} is declared twice");
+        }
+        match rule {
+            ReasoningCaptureRule::TextDelta { fields, .. } => {
+                if fields.is_empty() || fields.len() > 8 {
+                    bail!(
+                        "provider config{context}: reasoning capture {id:?} must name 1-8 text fields"
+                    );
+                }
+                for field in fields {
+                    validate_reasoning_identifier("reasoning capture field", field, context)?;
+                }
+            }
+            ReasoningCaptureRule::Blocks {
+                field,
+                type_key,
+                merge_keys,
+                close_key,
+                whole_types,
+                group_key,
+                text_key,
+                ..
+            } => {
+                captures_artefact = true;
+                validate_reasoning_identifier("reasoning capture field", field, context)?;
+                for key in type_key
+                    .iter()
+                    .chain(merge_keys)
+                    .chain(close_key)
+                    .chain(group_key)
+                    .chain(text_key)
+                {
+                    validate_reasoning_identifier("reasoning capture key", key, context)?;
+                }
+                if close_key.is_none() && whole_types.is_empty() {
+                    bail!(
+                        "provider config{context}: reasoning capture {id:?} needs a close_key or whole_types, or no block could ever complete"
+                    );
+                }
+                if whole_types.len() > 8
+                    || whole_types
+                        .iter()
+                        .any(|kind| kind.is_empty() || kind.len() > 64)
+                {
+                    bail!(
+                        "provider config{context}: reasoning capture {id:?} whole_types must hold at most 8 non-empty names"
+                    );
+                }
+            }
+            ReasoningCaptureRule::ToolCallField { field, .. } => {
+                captures_artefact = true;
+                validate_reasoning_identifier("reasoning capture field", field, context)?;
+            }
+        }
+    }
+    let Some(replay) = config.replay.as_ref() else {
+        if captures_artefact {
+            bail!(
+                "provider config{context}: reasoning capture that stores an artefact needs a replay block naming a compat_group"
+            );
+        }
+        return Ok(());
+    };
+    if let Some(group) = replay.compat_group.as_deref()
+        && (group.is_empty()
+            || group.len() > 64
+            || !group.bytes().all(|byte| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || matches!(byte, b'_' | b'-' | b'.')
+            }))
+    {
+        bail!(
+            "provider config{context}: reasoning replay compat_group must be 1-64 lowercase ASCII letters, digits, '_', '-' or '.'"
+        );
+    }
+    if (captures_artefact || replay_places_artefact(config)) && replay.compat_group.is_none() {
+        bail!(
+            "provider config{context}: reasoning replay needs a compat_group once any capture rule stores an artefact"
+        );
+    }
+    if replay.placements.is_empty() || replay.placements.len() > 16 {
+        bail!("provider config{context}: reasoning replay must declare 1-16 placements");
+    }
+    let mut targets = std::collections::BTreeSet::new();
+    for placement in &replay.placements {
+        let Some(rule) = config
+            .capture
+            .iter()
+            .find(|rule| rule.id() == placement.from)
+        else {
+            bail!(
+                "provider config{context}: reasoning replay placement names unknown capture {:?}",
+                placement.from
+            );
+        };
+        validate_reasoning_identifier(
+            "reasoning replay target key",
+            placement.into.key(),
+            context,
+        )?;
+        let kind_matches = matches!(
+            (rule, &placement.into),
+            (
+                ReasoningCaptureRule::TextDelta { .. } | ReasoningCaptureRule::Blocks { .. },
+                ReplayTarget::MessageField(_)
+            ) | (
+                ReasoningCaptureRule::ToolCallField { .. },
+                ReplayTarget::ToolCallField(_)
+            )
+        );
+        if !kind_matches {
+            bail!(
+                "provider config{context}: reasoning replay of capture {:?} cannot go into that kind of target",
+                placement.from
+            );
+        }
+        if matches!(rule, ReasoningCaptureRule::TextDelta { .. })
+            && !matches!(placement.on_missing, OnMissing::Omit)
+        {
+            bail!(
+                "provider config{context}: reasoning text replay is never missing, so on_missing must stay omit"
+            );
+        }
+        if !targets.insert(placement.into.clone()) {
+            bail!("provider config{context}: two reasoning replay placements write the same key");
+        }
+    }
+    for rule in &config.capture {
+        if !matches!(rule, ReasoningCaptureRule::TextDelta { .. })
+            && !replay
+                .placements
+                .iter()
+                .any(|placement| placement.from == rule.id())
+        {
+            bail!(
+                "provider config{context}: reasoning capture {:?} stores an artefact that no replay placement names",
+                rule.id()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn replay_places_artefact(config: &ReasoningSchemaConfig) -> bool {
+    config.replay.as_ref().is_some_and(|replay| {
+        replay.placements.iter().any(|placement| {
+            config.capture.iter().any(|rule| {
+                rule.id() == placement.from
+                    && !matches!(rule, ReasoningCaptureRule::TextDelta { .. })
+            })
+        })
+    })
 }
 
 fn validate_reasoning_path(label: &str, path: &str, context: &str) -> Result<()> {
@@ -2511,6 +2988,8 @@ mod reasoning_tests {
                     ("max".to_string(), Value::String("max".to_string())),
                 ]),
             }),
+            capture: Vec::new(),
+            replay: None,
         }
     }
 
@@ -2937,5 +3416,258 @@ mod shipped_model_binding_tests {
         let conflict = prepare(&self_modeled, "directive:ryeos/models/general", &binding)
             .expect_err("a distinct binding over a self-modeled primary");
         assert_eq!(conflict.code, "primary_model_conflict");
+    }
+}
+
+#[cfg(test)]
+mod reasoning_capture_config_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn provider_with(streaming_mode: &str, reasoning: Value) -> ProviderConfig {
+        serde_json::from_value(json!({
+            "family": "chat_completions",
+            "transport": {"kind": "remote_http", "base_url": "https://example.invalid"},
+            "schemas": {
+                "streaming": {"mode": streaming_mode},
+                "output_limit": {
+                    "path": "max_tokens",
+                    "semantics": "provider_native_output_tokens"
+                },
+                "reasoning": reasoning
+            },
+            "pricing": {"explicitly_free": true},
+            "body_template": {"model": "{model}", "messages": "{messages}", "stream": "{stream}"}
+        }))
+        .expect("provider fixture parses")
+    }
+
+    fn validate(reasoning: Value) -> Result<()> {
+        provider_with("delta_merge", reasoning).validate("")
+    }
+
+    fn claude_shape() -> Value {
+        json!({
+            "capture": [
+                {"id": "text", "kind": "text_delta", "fields": ["reasoning_content"]},
+                {"id": "blocks", "kind": "blocks", "field": "thinking_blocks",
+                 "merge_keys": ["thinking"], "close_key": "signature",
+                 "whole_types": ["redacted_thinking"]}
+            ],
+            "replay": {
+                "compat_group": "claude-thinking-1",
+                "placements": [{
+                    "from": "blocks",
+                    "into": {"message_field": "thinking_blocks"},
+                    "scope": "open_loop",
+                    "on_missing": "refuse"
+                }]
+            }
+        })
+    }
+
+    fn gemini_shape() -> Value {
+        json!({
+            "capture": [
+                {"id": "text", "kind": "text_delta", "fields": ["reasoning_content"]},
+                {"id": "sig", "kind": "tool_call_field", "field": "extra_content",
+                 "merge": "object_merge"}
+            ],
+            "replay": {
+                "compat_group": "gemini-sig-1",
+                "placements": [{
+                    "from": "sig",
+                    "into": {"tool_call_field": "extra_content"},
+                    "scope": "open_loop",
+                    "on_missing": "fill", "fill": {"signature": "placeholder"}
+                }]
+            }
+        })
+    }
+
+    fn text_shape() -> Value {
+        json!({
+            "capture": [{"id": "text", "kind": "text_delta", "fields": ["reasoning"]}],
+            "replay": {"placements": [{
+                "from": "text",
+                "into": {"message_field": "reasoning_content"},
+                "scope": "all"
+            }]}
+        })
+    }
+
+    #[test]
+    fn the_documented_shapes_are_accepted() {
+        validate(claude_shape()).expect("claude-shaped entry");
+        validate(gemini_shape()).expect("gemini-shaped entry");
+        validate(text_shape()).expect("text-only entry");
+        validate(json!({"capture": [
+            {"id": "text", "kind": "text_delta", "fields": ["reasoning_content"]}
+        ]}))
+        .expect("capture without replay");
+    }
+
+    #[test]
+    fn an_entry_without_the_new_fields_serialises_without_them() {
+        let provider = provider_with(
+            "delta_merge",
+            json!({"effort": {"path": "reasoning_effort", "values": {"high": "high"}}}),
+        );
+        let value = serde_json::to_value(&provider).unwrap();
+        let reasoning = &value["schemas"]["reasoning"];
+        assert!(reasoning.get("capture").is_none());
+        assert!(reasoning.get("replay").is_none());
+        assert!(value["schemas"].get("frame_stability").is_none());
+    }
+
+    #[test]
+    fn duplicate_capture_ids_are_refused() {
+        let mut shape = claude_shape();
+        shape["capture"][1]["id"] = json!("text");
+        assert!(validate(shape).is_err());
+    }
+
+    #[test]
+    fn a_placement_must_name_a_declared_capture() {
+        let mut shape = claude_shape();
+        shape["replay"]["placements"][0]["from"] = json!("nope");
+        assert!(validate(shape).is_err());
+    }
+
+    #[test]
+    fn an_artefact_placement_needs_a_compat_group() {
+        let mut shape = claude_shape();
+        shape["replay"]
+            .as_object_mut()
+            .unwrap()
+            .remove("compat_group");
+        assert!(validate(shape).is_err());
+    }
+
+    #[test]
+    fn an_artefact_capture_needs_a_replay_block() {
+        let mut shape = claude_shape();
+        shape.as_object_mut().unwrap().remove("replay");
+        assert!(validate(shape).is_err());
+    }
+
+    #[test]
+    fn capture_is_refused_outside_delta_merge() {
+        let effort = json!({"effort": {"path": "reasoning_effort", "values": {"high": "high"}}});
+        let mut control = provider_with("event_typed", effort);
+        control.family = ProtocolFamily::AnthropicMessages;
+        control.validate("").expect("control validates");
+        let mut anthropic = provider_with("event_typed", claude_shape());
+        anthropic.family = ProtocolFamily::AnthropicMessages;
+        let error = anthropic
+            .validate("")
+            .expect_err("capture needs delta_merge");
+        assert!(error.to_string().contains("delta_merge"), "{error}");
+    }
+
+    #[test]
+    fn target_keys_must_be_identifiers() {
+        let mut shape = claude_shape();
+        shape["replay"]["placements"][0]["into"] = json!({"message_field": "a.b"});
+        assert!(validate(shape).is_err());
+        let mut shape = claude_shape();
+        shape["capture"][1]["field"] = json!("");
+        assert!(validate(shape).is_err());
+    }
+
+    #[test]
+    fn a_capture_kind_and_a_target_kind_must_agree() {
+        let mut shape = gemini_shape();
+        shape["replay"]["placements"][0]["into"] = json!({"message_field": "extra_content"});
+        assert!(validate(shape).is_err());
+    }
+
+    #[test]
+    fn blocks_need_a_way_to_complete() {
+        let mut shape = claude_shape();
+        let block = shape["capture"][1].as_object_mut().unwrap();
+        block.remove("close_key");
+        block.remove("whole_types");
+        assert!(validate(shape).is_err());
+    }
+
+    #[test]
+    fn text_replay_is_never_missing() {
+        let mut shape = text_shape();
+        shape["replay"]["placements"][0]["on_missing"] = json!("refuse");
+        assert!(validate(shape).is_err());
+    }
+
+    #[test]
+    fn two_placements_may_not_write_the_same_key() {
+        let mut shape = text_shape();
+        let placement = shape["replay"]["placements"][0].clone();
+        shape["replay"]["placements"]
+            .as_array_mut()
+            .unwrap()
+            .push(placement);
+        assert!(validate(shape).is_err());
+    }
+
+    #[test]
+    fn fill_goes_with_on_missing_fill_and_nothing_else() {
+        let mut shape = claude_shape();
+        shape["replay"]["placements"][0]["fill"] = json!({"x": 1});
+        assert!(serde_json::from_value::<ReasoningSchemaConfig>(shape).is_err());
+        let mut shape = gemini_shape();
+        shape["replay"]["placements"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("fill");
+        assert!(serde_json::from_value::<ReasoningSchemaConfig>(shape).is_err());
+        let mut shape = text_shape();
+        shape["replay"]["placements"][0]["into"] =
+            json!({"message_field": "a", "tool_call_field": "b"});
+        assert!(serde_json::from_value::<ReasoningSchemaConfig>(shape).is_err());
+    }
+
+    #[test]
+    fn an_artefact_capture_no_placement_names_is_refused() {
+        let mut shape = claude_shape();
+        shape["capture"].as_array_mut().unwrap().push(json!(
+            {"id": "extra", "kind": "tool_call_field", "field": "x", "merge": "last"}
+        ));
+        let error = validate(shape).expect_err("unused artefact capture");
+        assert!(error.to_string().contains("no replay placement"), "{error}");
+    }
+
+    #[test]
+    fn frame_stability_refuses_empty_and_duplicate_lists() {
+        let with = |list: Value| {
+            let mut provider = provider_with("delta_merge", text_shape());
+            provider.schemas.as_mut().unwrap().frame_stability =
+                Some(serde_json::from_value(json!({"refuse_change_of": list})).unwrap());
+            provider.validate("")
+        };
+        with(json!(["system", "reasoning"])).expect("distinct components");
+        assert!(with(json!([])).is_err());
+        assert!(with(json!(["tools", "tools"])).is_err());
+    }
+
+    #[test]
+    fn unknown_capture_fields_are_refused_at_parse() {
+        let parsed = serde_json::from_value::<ReasoningSchemaConfig>(json!({
+            "capture": [{"id": "t", "kind": "text_delta", "fields": ["a"], "vendor": "x"}]
+        }));
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn frame_stability_parses_closed_components() {
+        let parsed: FrameStabilityConfig =
+            serde_json::from_value(json!({"refuse_change_of": ["system", "tools", "reasoning"]}))
+                .unwrap();
+        assert_eq!(parsed.refuse_change_of.len(), 3);
+        assert!(
+            serde_json::from_value::<FrameStabilityConfig>(
+                json!({"refuse_change_of": ["sampling"]})
+            )
+            .is_err()
+        );
     }
 }

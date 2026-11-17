@@ -2,15 +2,27 @@ use serde_json::{Value, json};
 
 use crate::directive::{ProviderMessage, ProviderMessageExt};
 use ryeos_directive_definition::{
-    AssistantToolCallsPlacement, MessageSchemas, SystemMessageMode, TextPlacement,
-    ToolResultWrapMode,
+    AssistantToolCallsPlacement, MessageSchemas, ReasoningSchemaConfig, SystemMessageMode,
+    TextPlacement, ToolResultWrapMode,
 };
 use ryeos_provider_contract::Part;
 
-#[tracing::instrument(level = "debug", name = "provider:build_messages", skip(messages, schemas), fields(count = messages.len()))]
+use super::reasoning_replay::ReplayPlan;
+
+/// What the request builder is told beyond the history and the message
+/// schemas. Every field defaults to off.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ConvertOptions<'a> {
+    /// The entry's reasoning schema, whose `replay` placements say what
+    /// captured reasoning goes back on assistant messages. `None` sends none.
+    pub reasoning: Option<&'a ReasoningSchemaConfig>,
+}
+
+#[tracing::instrument(level = "debug", name = "provider:build_messages", skip(messages, schemas, options), fields(count = messages.len()))]
 pub fn convert_messages(
     messages: &[ProviderMessage],
     schemas: &Option<MessageSchemas>,
+    options: &ConvertOptions<'_>,
 ) -> (Vec<Value>, Option<String>) {
     // An assistant turn with no text and no tool call (empty, or reasoning
     // only, as when a turn is cut at the output limit) carries nothing the next
@@ -24,45 +36,55 @@ pub fn convert_messages(
         })
         .cloned()
         .collect();
+    let plan = options
+        .reasoning
+        .and_then(|reasoning| ReplayPlan::new(&sendable, reasoning));
     match schemas {
-        None => convert_openai(&sendable),
-        Some(s) => convert_with_schemas(&sendable, s),
+        None => convert_openai(&sendable, plan.as_ref()),
+        Some(s) => convert_with_schemas(&sendable, s, plan.as_ref()),
     }
 }
 
-fn convert_openai(messages: &[ProviderMessage]) -> (Vec<Value>, Option<String>) {
+fn convert_openai(
+    messages: &[ProviderMessage],
+    plan: Option<&ReplayPlan<'_>>,
+) -> (Vec<Value>, Option<String>) {
     let converted: Vec<Value> = messages
         .iter()
-        .map(|msg| {
+        .enumerate()
+        .map(|(index, msg)| {
             let mut obj = json!({ "role": msg.role() });
             match msg.content_value() {
                 Some(content) => obj["content"] = content,
                 None => obj["content"] = Value::Null,
             }
             if msg.has_tool_calls() {
-                obj["tool_calls"] = json!(
-                    msg.calls()
-                        .iter()
-                        .map(|tc| {
-                            json!({
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tc.name,
-                                    "arguments": tc.arguments,
-                                }
-                            })
+                let mut calls = msg
+                    .calls()
+                    .iter()
+                    .map(|tc| {
+                        json!({
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.name,
+                                "arguments": tc.arguments,
+                            }
                         })
-                        .collect::<Vec<_>>()
-                );
+                    })
+                    .collect::<Vec<_>>();
+                if let Some(plan) = plan {
+                    plan.apply_to_calls(index, msg, &mut calls);
+                }
+                obj["tool_calls"] = json!(calls);
             }
             if let Some(id) = msg.tool_call_id() {
                 obj["tool_call_id"] = json!(id);
             }
             if msg.role() == "assistant"
-                && let Some(reasoning) = msg.reasoning_text()
+                && let Some(plan) = plan
             {
-                obj["reasoning_content"] = json!(reasoning);
+                plan.apply_to_message(index, msg, &mut obj);
             }
             obj
         })
@@ -73,6 +95,7 @@ fn convert_openai(messages: &[ProviderMessage]) -> (Vec<Value>, Option<String>) 
 fn convert_with_schemas(
     messages: &[ProviderMessage],
     schemas: &MessageSchemas,
+    plan: Option<&ReplayPlan<'_>>,
 ) -> (Vec<Value>, Option<String>) {
     use std::collections::HashMap;
 
@@ -121,7 +144,7 @@ fn convert_with_schemas(
     let mut converted = Vec::new();
     let mut pending_tool_results: Vec<Value> = Vec::new();
 
-    for msg in messages {
+    for (msg_index, msg) in messages.iter().enumerate() {
         // Extract system messages whenever they are NOT meant to ride
         // inline as a message-role entry. Both `body_field` (Anthropic)
         // and `body_inject` (Gemini) need extraction so the adapter can
@@ -156,12 +179,6 @@ fn convert_with_schemas(
         };
 
         let mut obj = json!({ "role": mapped_role });
-
-        if msg.role() == "assistant"
-            && let Some(reasoning) = msg.reasoning_text()
-        {
-            obj["reasoning_content"] = json!(reasoning);
-        }
 
         if msg.role() == "system" && system_mode == SystemMessageMode::MessageRole {
             match msg.content_value() {
@@ -238,7 +255,7 @@ fn convert_with_schemas(
 
         if msg.has_tool_calls() {
             // Render each tool_call with the profile's template (if any).
-            let rendered: Vec<Value> = msg
+            let mut rendered: Vec<Value> = msg
                 .calls()
                 .iter()
                 .map(|tc| {
@@ -267,6 +284,9 @@ fn convert_with_schemas(
                     }
                 })
                 .collect();
+            if let Some(plan) = plan {
+                plan.apply_to_calls(msg_index, msg, &mut rendered);
+            }
 
             match tc_placement {
                 AssistantToolCallsPlacement::InlineBlocks => {
@@ -303,6 +323,11 @@ fn convert_with_schemas(
             }
         }
 
+        if msg.role() == "assistant"
+            && let Some(plan) = plan
+        {
+            plan.apply_to_message(msg_index, msg, &mut obj);
+        }
         converted.push(obj);
     }
 
@@ -408,7 +433,7 @@ mod tests {
             ProviderMessage::assistant_text("done"),
         ];
         for schemas in [None, Some(MessageSchemas::default())] {
-            let (converted, _) = convert_messages(&msgs, &schemas);
+            let (converted, _) = convert_messages(&msgs, &schemas, &ConvertOptions::default());
             let roles: Vec<&str> = converted
                 .iter()
                 .map(|message| message["role"].as_str().unwrap())
@@ -420,7 +445,7 @@ mod tests {
     #[test]
     fn default_openai_format() {
         let msgs = sample_messages();
-        let (converted, system) = convert_messages(&msgs, &None);
+        let (converted, system) = convert_messages(&msgs, &None, &ConvertOptions::default());
         assert_eq!(system, None);
         assert_eq!(converted.len(), 3);
         assert_eq!(converted[0]["role"], "system");
@@ -449,7 +474,7 @@ mod tests {
             system_message: None,
             tool_result: None,
         };
-        let (converted, _) = convert_messages(&msgs, &Some(schemas));
+        let (converted, _) = convert_messages(&msgs, &Some(schemas), &ConvertOptions::default());
         assert_eq!(converted[1]["role"], "model");
     }
 
@@ -470,7 +495,8 @@ mod tests {
             }),
             tool_result: None,
         };
-        let (converted, system) = convert_messages(&msgs, &Some(schemas));
+        let (converted, system) =
+            convert_messages(&msgs, &Some(schemas), &ConvertOptions::default());
         assert_eq!(system, Some("You are helpful.".to_string()));
         assert_eq!(converted.len(), 2);
         assert!(
@@ -501,7 +527,8 @@ mod tests {
             }),
             tool_result: None,
         };
-        let (converted, system) = convert_messages(&msgs, &Some(schemas));
+        let (converted, system) =
+            convert_messages(&msgs, &Some(schemas), &ConvertOptions::default());
         assert_eq!(system, None);
         assert_eq!(converted.len(), 3);
         assert_eq!(converted[0]["role"], "my_system");
@@ -521,7 +548,8 @@ mod tests {
             system_message: None,
             tool_result: None,
         };
-        let (converted, _) = convert_messages(&msgs, &Some(schemas.clone()));
+        let (converted, _) =
+            convert_messages(&msgs, &Some(schemas.clone()), &ConvertOptions::default());
         assert_eq!(converted[0]["content"], "Hello world");
 
         // With text_placement + text_block_template (Gemini-style):
@@ -532,7 +560,8 @@ mod tests {
             text_block_template: Some(json!({"text": "{text}"})),
             ..schemas.clone()
         };
-        let (converted, _) = convert_messages(&msgs, &Some(schemas_wrap));
+        let (converted, _) =
+            convert_messages(&msgs, &Some(schemas_wrap), &ConvertOptions::default());
         assert_eq!(
             converted[0]["parts"],
             json!([{"text": "Hello world"}]),
@@ -553,7 +582,7 @@ mod tests {
             system_message: None,
             tool_result: None,
         };
-        let (converted, _) = convert_messages(&msgs, &Some(schemas));
+        let (converted, _) = convert_messages(&msgs, &Some(schemas), &ConvertOptions::default());
         assert_eq!(converted[0]["text"], "test");
     }
 
@@ -563,7 +592,7 @@ mod tests {
     fn convert_messages_emits_span() {
         let msgs = sample_messages();
         let (_, spans) = trace_test::capture_traces(|| {
-            convert_messages(&msgs, &None);
+            convert_messages(&msgs, &None, &ConvertOptions::default());
         });
 
         let span = trace_test::find_span(&spans, "provider:build_messages");
@@ -606,7 +635,8 @@ mod tests {
             }),
             tool_result: None,
         };
-        let (converted, system) = convert_messages(&msgs, &Some(schemas));
+        let (converted, system) =
+            convert_messages(&msgs, &Some(schemas), &ConvertOptions::default());
         assert_eq!(
             system,
             Some("you are helpful".to_string()),
@@ -671,7 +701,7 @@ mod tests {
             system_message: None,
             tool_result: None,
         };
-        let (converted, _) = convert_messages(&msgs, &Some(schemas));
+        let (converted, _) = convert_messages(&msgs, &Some(schemas), &ConvertOptions::default());
         assert_eq!(converted.len(), 1);
         assert_eq!(converted[0]["role"], "user");
         assert_eq!(
@@ -705,7 +735,7 @@ mod tests {
                 }),
             }),
         };
-        let (converted, _) = convert_messages(&msgs, &Some(schemas));
+        let (converted, _) = convert_messages(&msgs, &Some(schemas), &ConvertOptions::default());
         // Two consecutive tool messages → ONE user message with two blocks.
         assert_eq!(converted.len(), 1);
         assert_eq!(converted[0]["role"], "user");
@@ -737,7 +767,7 @@ mod tests {
                 }),
             }),
         };
-        let (converted, _) = convert_messages(&msgs, &Some(schemas));
+        let (converted, _) = convert_messages(&msgs, &Some(schemas), &ConvertOptions::default());
         assert_eq!(converted.len(), 1);
         assert_eq!(converted[0]["role"], "tool");
         assert_eq!(converted[0]["tool_call_id"], "tc_xyz");
@@ -771,7 +801,8 @@ mod tests {
             system_message: None,
             tool_result: None,
         };
-        let (converted, _) = convert_messages(&[message], &Some(schemas));
+        let (converted, _) =
+            convert_messages(&[message], &Some(schemas), &ConvertOptions::default());
         let blocks = converted[0]["content"].as_array().unwrap();
         let kinds: Vec<_> = blocks
             .iter()
@@ -810,7 +841,7 @@ mod tests {
             system_message: None,
             tool_result: None,
         };
-        let (converted, _) = convert_messages(&msgs, &Some(schemas));
+        let (converted, _) = convert_messages(&msgs, &Some(schemas), &ConvertOptions::default());
         assert_eq!(converted.len(), 1);
         assert_eq!(converted[0]["role"], "assistant");
         // tool_calls MUST NOT be at top level
@@ -860,7 +891,7 @@ mod tests {
             system_message: None,
             tool_result: None,
         };
-        let (converted, _) = convert_messages(&msgs, &Some(schemas));
+        let (converted, _) = convert_messages(&msgs, &Some(schemas), &ConvertOptions::default());
         assert_eq!(converted.len(), 1);
         let tc_arr = converted[0]["tool_calls"]
             .as_array()
@@ -915,7 +946,7 @@ mod tests {
                 }),
             }),
         };
-        let (converted, _) = convert_messages(&msgs, &Some(schemas));
+        let (converted, _) = convert_messages(&msgs, &Some(schemas), &ConvertOptions::default());
         // Three messages → three converted messages (user, assistant, user-tool-result).
         assert_eq!(converted.len(), 3, "got: {:#?}", converted);
         // Find the tool-result message (last).
@@ -955,7 +986,8 @@ mod tests {
             }),
             tool_result: None,
         };
-        let (converted, system) = convert_messages(&msgs, &Some(schemas));
+        let (converted, system) =
+            convert_messages(&msgs, &Some(schemas), &ConvertOptions::default());
         assert_eq!(
             system,
             Some("be brief".to_string()),
@@ -995,7 +1027,7 @@ mod tests {
             system_message: None,
             tool_result: None,
         };
-        let (converted, _) = convert_messages(&msgs, &Some(schemas));
+        let (converted, _) = convert_messages(&msgs, &Some(schemas), &ConvertOptions::default());
         assert_eq!(converted.len(), 1);
         let content = converted[0]["content"]
             .as_array()
