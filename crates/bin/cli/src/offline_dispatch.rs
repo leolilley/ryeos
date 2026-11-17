@@ -150,7 +150,23 @@ pub async fn try_offline_dispatch(
 
     // 5. Resolve once through the engine, then dispatch by composed fields.
     let item = effective_item(&engine, canonical, project_path, execute_ref)?;
-    let tail = &argv[matched.consumed..];
+    // `--live-project` is the same explicit intent the daemon path carries:
+    // strip it from the parameter tail, enforce it where the tool runs.
+    let live_flags: Vec<_> = matched
+        .command
+        .control_flags
+        .iter()
+        .filter(|flag| flag.binding == ryeos_runtime::ControlFlagBinding::LiveProject)
+        .cloned()
+        .collect();
+    let mut stripped_tail = argv[matched.consumed..].to_vec();
+    let demands_live = ryeos_app::command_invocation::strip_declared_control_flags(
+        &mut stripped_tail,
+        &live_flags,
+    )
+    .map_err(|detail| CliError::Local { detail })?
+    .live_project;
+    let tail = &stripped_tail[..];
 
     // Auto commands inherit their resolved service's dual-mode placement.
     // Do not start a standalone state owner while the live daemon owns it.
@@ -201,7 +217,19 @@ pub async fn try_offline_dispatch(
         (engine, isolation, item)
     };
 
+    let refuse_unenforceable_demand = |what: &str| -> Result<(), CliError> {
+        if demands_live {
+            return Err(CliError::Local {
+                detail: format!(
+                    "--live-project is enforced only for offline tool execution; {what} cannot honour it"
+                ),
+            });
+        }
+        Ok(())
+    };
+
     if has_launch_binary_ref(&item.composed_value) {
+        refuse_unenforceable_demand("an offline client launch")?;
         return exec_client(
             &engine,
             item,
@@ -224,6 +252,7 @@ pub async fn try_offline_dispatch(
             app_root,
             project_path,
             &isolation,
+            demands_live,
         )?;
         return match service {
             ServiceDispatchOutcome::Handled(outcome) => Ok(outcome),
@@ -237,6 +266,7 @@ pub async fn try_offline_dispatch(
                 // admission. Retaining the parent's shared registry guard while
                 // waiting for that child would deadlock any standalone service
                 // that reconciles or mutates the registry.
+                refuse_unenforceable_demand("a standalone service")?;
                 drop(engine);
                 drop(_generation_guard);
                 drop(isolation);
@@ -255,6 +285,7 @@ pub async fn try_offline_dispatch(
             app_root,
             project_path,
             &isolation,
+            demands_live,
         )
         .map(|result| result.map(OfflineDispatchOutcome::Json));
     }
@@ -519,6 +550,7 @@ struct OfflineProjectIsolationAuthority {
 fn resolve_offline_project_isolation_authority(
     project_path: &Path,
     isolation: &ryeos_engine::isolation::IsolationRuntime,
+    intent: ryeos_engine::execution_contract::LiveIntent,
 ) -> Result<OfflineProjectIsolationAuthority, CliError> {
     // A foreground offline subprocess is an explicit local-operator action.
     // Preserve the historical mutable-project contract, but express it through
@@ -528,6 +560,7 @@ fn resolve_offline_project_isolation_authority(
         ryeos_app::execution_policy::resolve_offline_local_live_project_authority(
             project_path,
             isolation,
+            intent,
         )
         .map_err(|error| CliError::Local {
             detail: format!("resolve offline project authority: {error:#}"),
@@ -548,6 +581,41 @@ fn resolve_offline_project_isolation_authority(
     })
 }
 
+/// An explicit live demand is refused wherever the tool would not get the
+/// live project, by the same guard the daemon applies. The offline path never
+/// builds a private root, so a tool that retains filesystem bindings is
+/// exactly the case the daemon would have put in one.
+fn enforce_live_demand(
+    derived: &HashMap<String, Value>,
+    tool_ref: &str,
+    executor_id: &str,
+    demands_live: bool,
+) -> Result<(), CliError> {
+    use ryeos_engine::execution_contract::{
+        ProcessInputRootSelection, derived_has_filesystem_bindings, live_project_refusal_applies,
+        live_project_unavailable_error,
+    };
+    let root = if derived_has_filesystem_bindings(derived).map_err(|error| CliError::Local {
+        detail: format!("offline tool `{tool_ref}`: {error:#}"),
+    })? {
+        ProcessInputRootSelection::SparsePrivate
+    } else {
+        ProcessInputRootSelection::Existing
+    };
+    if live_project_refusal_applies(root, demands_live) {
+        return Err(CliError::Local {
+            detail: live_project_unavailable_error(
+                tool_ref,
+                executor_id,
+                derived.contains_key(ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY),
+                "read_write",
+            )
+            .to_string(),
+        });
+    }
+    Ok(())
+}
+
 fn exec_tool(
     engine: &ryeos_engine::engine::Engine,
     item: &EffectiveItem,
@@ -556,6 +624,7 @@ fn exec_tool(
     app_root: &Path,
     project_path: &str,
     isolation: &ryeos_engine::isolation::IsolationRuntime,
+    demands_live: bool,
 ) -> Result<Option<Value>, CliError> {
     // A host-authority tool runs only through the daemon, under the node
     // lane, the operator's exact grant and the configured operator. The
@@ -603,8 +672,16 @@ fn exec_tool(
         })?;
     let project_path_owned = project_path_buf.to_string_lossy().into_owned();
     let project_path = project_path_owned.as_str();
-    let project_authority =
-        resolve_offline_project_isolation_authority(&project_path_buf, isolation)?;
+    enforce_live_demand(&item.derived, tool_ref_str, executor_id, demands_live)?;
+    let project_authority = resolve_offline_project_isolation_authority(
+        &project_path_buf,
+        isolation,
+        if demands_live {
+            ryeos_engine::execution_contract::LiveIntent::Live
+        } else {
+            ryeos_engine::execution_contract::LiveIntent::Default
+        },
+    )?;
 
     let config = item
         .composed_value
@@ -850,6 +927,7 @@ fn dispatch_service(
     app_root: &Path,
     project_path: &str,
     isolation: &ryeos_engine::isolation::IsolationRuntime,
+    demands_live: bool,
 ) -> Result<ServiceDispatchOutcome, CliError> {
     // Check availability
     let availability = item
@@ -935,6 +1013,7 @@ fn dispatch_service(
         app_root,
         project_path,
         isolation,
+        demands_live,
     )
     .map(|result| ServiceDispatchOutcome::Handled(result.map(OfflineDispatchOutcome::Json)))
 }
@@ -1199,8 +1278,17 @@ mod tests {
         let authority = resolve_offline_project_isolation_authority(
             project.path(),
             &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
+            ryeos_engine::execution_contract::LiveIntent::Default,
         )
         .unwrap();
+        assert!(!authority._project_authority.demands_live_project());
+        let demanded = resolve_offline_project_isolation_authority(
+            project.path(),
+            &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
+            ryeos_engine::execution_contract::LiveIntent::Live,
+        )
+        .unwrap();
+        assert!(demanded._project_authority.demands_live_project());
 
         assert_eq!(
             authority.project,
@@ -1727,6 +1815,58 @@ else:
 
         assert_eq!(result["name"], "leo");
         assert_eq!(result["project_path"], fixture.project_str());
+    }
+
+    #[test]
+    fn live_project_flag_is_carried_off_the_parameter_tail_and_runs_a_live_tool() {
+        let fixture = Fixture::new();
+        fixture.write_standard_descriptors(Some("local_execute: tool:custom/echo\n"));
+        fixture.write_signed(
+            &fixture
+                .bundle
+                .join(ryeos_engine::AI_DIR)
+                .join("node")
+                .join("commands")
+                .join("custom.yaml"),
+            "tokens: [\"custom\"]\ndescription: Custom offline command\nforms:\n  - slots:\n      - field: name\ndispatch:\n  kind: execute_ref\n  execute: service:custom\ncontrol_flags:\n  - flag: live-project\n    help: demand the live project\n    binding: live_project\n",
+        );
+        let argv = vec![
+            "custom".to_string(),
+            "leo".to_string(),
+            "--live-project".to_string(),
+        ];
+        let result = expect_json(
+            try_offline_dispatch_for_test(&argv, &fixture.system, &fixture.project_str())
+                .unwrap()
+                .expect("handled offline"),
+        );
+        assert_eq!(result["name"], "leo");
+        assert!(
+            result.get("live_project").is_none(),
+            "the demand is a control, never a tool parameter: {result}"
+        );
+    }
+
+    #[test]
+    fn explicit_live_demand_is_refused_for_a_tool_that_retains_bindings_and_only_then() {
+        let sourced = HashMap::from([(
+            ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY.to_string(),
+            serde_json::json!({}),
+        )]);
+        let plain = HashMap::new();
+
+        let err = enforce_live_demand(&sourced, "tool:acme/sweep", "tool:py", true).unwrap_err();
+        let CliError::Local { detail } = err else {
+            panic!("typed local refusal")
+        };
+        assert!(
+            detail.starts_with(ryeos_engine::execution_contract::LIVE_PROJECT_UNAVAILABLE_CODE),
+            "{detail}"
+        );
+        assert!(detail.contains("tool:acme/sweep"), "{detail}");
+        // Defaulted request and a live-capable tool are not refused.
+        enforce_live_demand(&sourced, "tool:acme/sweep", "tool:py", false).unwrap();
+        enforce_live_demand(&plain, "tool:acme/sweep", "@subprocess", true).unwrap();
     }
 
     #[test]

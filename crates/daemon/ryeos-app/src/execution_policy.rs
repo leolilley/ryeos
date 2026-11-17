@@ -245,6 +245,7 @@ pub fn resolve_local_live_authority(
 pub fn resolve_offline_local_live_project_authority(
     project_path: &std::path::Path,
     isolation: &ryeos_engine::isolation::IsolationRuntime,
+    intent: LiveIntent,
 ) -> anyhow::Result<ryeos_state::objects::ExecutionProjectAuthority> {
     let policy = ExecutionPolicy {
         schema_version: EXECUTION_POLICY_SCHEMA_VERSION,
@@ -256,7 +257,7 @@ pub fn resolve_offline_local_live_project_authority(
         project: ProjectExecutionPolicy::LiveDirect {
             access: LiveAccess::ReadWrite,
             child_policy: ChildProjectPolicy::Inherit,
-            intent: LiveIntent::Default,
+            intent,
         },
     };
     policy.validate()?;
@@ -799,8 +800,17 @@ mod policy_tests {
         let authority = resolve_offline_local_live_project_authority(
             project.path(),
             &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
+            LiveIntent::Default,
         )
         .unwrap();
+        assert!(!authority.demands_live_project());
+        let demanded = resolve_offline_local_live_project_authority(
+            project.path(),
+            &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
+            LiveIntent::Live,
+        )
+        .unwrap();
+        assert!(demanded.demands_live_project());
 
         assert!(matches!(
             authority,

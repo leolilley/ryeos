@@ -140,6 +140,101 @@ impl LiveIntent {
     }
 }
 
+/// Which root a process's inputs are laid out in. Chosen by the executor once
+/// the tool's retained bindings and the project authority are known; the
+/// explicit live-intent guard reads it, on the daemon and offline CLI paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessInputRootSelection {
+    Existing,
+    SparsePrivate,
+    PinnedReadOnlyPrivate,
+    CandidateIntegrationPrivate,
+}
+
+/// The root kind a launch attempt's process inputs were laid out in, as
+/// recorded by the `process_input_root_selected` thread event. Names the kind
+/// only, never a path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessInputRootKind {
+    /// The live project itself.
+    Live,
+    /// A private admitted-input root holding only the verified source.
+    SparsePrivate,
+    /// A pinned (read-only or copy-on-write) project generation.
+    Pinned,
+    /// A private root for candidate integration.
+    CandidateIntegration,
+    /// No project root (projectless launch).
+    Projectless,
+}
+
+/// Payload of the `process_input_root_selected` event. Strict: one field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessInputRootSelectedPayload {
+    pub root: ProcessInputRootKind,
+}
+
+/// Whether an execution's derived facts retain filesystem bindings (a source
+/// closure or external-content realizations). Such a tool never runs from the
+/// live project: it gets a private admitted-input root.
+pub fn derived_has_filesystem_bindings(
+    derived: &std::collections::HashMap<String, serde_json::Value>,
+) -> anyhow::Result<bool> {
+    let has_source = derived.contains_key(ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY);
+    // Runtime-root realizations are not project fold-back exclusions, but
+    // still require exact filesystem binding before this process can launch.
+    let has_external = derived
+        .get(ryeos_state::objects::EXTERNAL_REALIZATIONS_DERIVED_KEY)
+        .map(ryeos_state::objects::ExternalContentRealizationSet::from_value)
+        .transpose()?
+        .is_some_and(|realizations| !realizations.is_empty());
+    Ok(has_source || has_external)
+}
+
+/// Stable refusal code: a live project authority was explicitly demanded for
+/// a tool whose retained filesystem bindings force a private admitted-input
+/// root.
+pub const LIVE_PROJECT_UNAVAILABLE_CODE: &str = "live_project_unavailable_to_sourced_runtime";
+
+/// Typed refusal for a launch whose explicit live project demand could never
+/// reach the process.
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub struct LiveProjectUnavailableToSourcedRuntime {
+    pub message: String,
+}
+
+/// The guard fires wherever the request explicitly demanded the live project
+/// and the resolved root is not the existing (live) root.
+pub fn live_project_refusal_applies(root: ProcessInputRootSelection, demands_live: bool) -> bool {
+    demands_live && root != ProcessInputRootSelection::Existing
+}
+
+pub fn live_project_unavailable_error(
+    tool: &str,
+    runtime: &str,
+    has_source: bool,
+    access: &str,
+) -> LiveProjectUnavailableToSourcedRuntime {
+    let reason = if has_source {
+        "the runtime declares source_scope, so the tool runs from a private admitted-input root holding only its verified source"
+    } else {
+        "the tool retains external content, so it runs from a private admitted-input root"
+    };
+    LiveProjectUnavailableToSourcedRuntime {
+        message: format!(
+            "{LIVE_PROJECT_UNAVAILABLE_CODE}: `{tool}` (runtime `{runtime}`) was launched with \
+             an explicit live project demand ({access}), but {reason}; the live project is never mounted \
+             and project writes would be silently discarded. Use an `@subprocess` tool without \
+             source_scope for live project access, or run with `--pin-project` / a pinned project \
+             policy for a copy-on-write generation, or return structured results instead of writing \
+             to the project."
+        ),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectCaptureScope {
@@ -637,5 +732,30 @@ mod tests {
             ..ExecutionPolicy::projectless(ExecutionResponse::Accepted)
         };
         assert!(policy.validate().is_err());
+    }
+
+    #[test]
+    fn process_input_root_payload_is_a_strict_closed_kind_with_no_path() {
+        let payload = ProcessInputRootSelectedPayload {
+            root: ProcessInputRootKind::SparsePrivate,
+        };
+        let value = serde_json::to_value(payload).unwrap();
+        assert_eq!(value, serde_json::json!({"root": "sparse_private"}));
+        assert_eq!(
+            serde_json::from_value::<ProcessInputRootSelectedPayload>(value).unwrap(),
+            payload
+        );
+        assert!(
+            serde_json::from_value::<ProcessInputRootSelectedPayload>(
+                serde_json::json!({"root": "live", "path": "/home/x"})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ProcessInputRootSelectedPayload>(
+                serde_json::json!({"root": "elsewhere"})
+            )
+            .is_err()
+        );
     }
 }
