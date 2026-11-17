@@ -1162,11 +1162,13 @@ impl DaemonHarness {
                     .exact_bundles()
                     .expect("Standard-central-auth profile has an exact bundle inventory"),
             )?,
-            FastBundleSelection::Development | FastBundleSelection::DevelopmentHosted => copy_core_to_temp_prepared(
-                fast_fixture::FastFixtureProfile::Development
-                    .exact_bundles()
-                    .expect("Development profile has an exact bundle inventory"),
-            )?,
+            FastBundleSelection::Development | FastBundleSelection::DevelopmentHosted => {
+                copy_core_to_temp_prepared(
+                    fast_fixture::FastFixtureProfile::Development
+                        .exact_bundles()
+                        .expect("Development profile has an exact bundle inventory"),
+                )?
+            }
         };
 
         let selected_profile = match bundle_selection {

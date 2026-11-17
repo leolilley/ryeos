@@ -1064,7 +1064,8 @@ fn materialize_seed_node_policy_generation(
         );
     }
     // Every fast-fixture node runs under its profile's fixture host class.
-    let host_class = selected_profile.host_class(profile.host_classes()?.iter().map(String::as_str))?;
+    let host_class =
+        selected_profile.host_class(profile.host_classes()?.iter().map(String::as_str))?;
     let mut profile = profile.for_host_class(host_class).with_context(|| {
         format!(
             "select the fixture host class of profile {}",
@@ -1469,9 +1470,7 @@ fn hosted_host_enclosure_floor(
     floor.retain(|entry| {
         let name = match entry {
             serde_json::Value::String(name) => Some(name.as_str()),
-            serde_json::Value::Object(spec) => {
-                spec.get("name").and_then(serde_json::Value::as_str)
-            }
+            serde_json::Value::Object(spec) => spec.get("name").and_then(serde_json::Value::as_str),
             _ => None,
         };
         !name.is_some_and(enclosure_only)
