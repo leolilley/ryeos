@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-16T07:32:54Z:2099b2da1fec78fd5108c796390c494a74f6b06f42a78fb829832bbf0e5be11a:gACRfThTrLMgl8Q3LY9P6c16vKupzSo5FQMfB1409zlZkaOvJBLJNkPfrvV8Jr6sYkVa0lb+QreMeE802sxDCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T23:12:59Z:7c782a0ad76797095d7d9346c1acf15e05c592e9844cb82152f5d9dc6d097fe7:jEe27RP9pPqHSInzIa0SGbj0Dgqqd16JfAxhlFYwl6fAScQ2hF5cjC+/VziUs/kmvh3Fu8rPtppjovbGgYEcAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "supervised-smoke"
@@ -67,7 +67,7 @@ signed with one operator's key. Scratch is removed at the end.
 | bash runtime tool runs | The same for the bash runtime; the check records the tool's `PATH` (WARN when unset). |
 | DNS and HTTPS reachable from sandbox | Name resolution and an outbound HTTPS request work from inside the sandbox, in both runtimes. |
 | `--pin-project` read/write project data | A pinned launch gives python and bash tools a project they can read and write (copy-on-write generation). |
-| scheduled live fire refused | A one-shot schedule (`max_fires` 1) whose policy grants `live_direct` `read_write` on a python tool fails in launch preparation (`live_project_unavailable_to_sourced_runtime`) and writes nothing to the live project. The schedule is deregistered afterwards, success or not. |
+| scheduled live fire refused | A one-shot schedule (`max_fires` 1) whose policy grants `live_direct` `read_write` on a python tool (a schedule's `live_direct` is an explicit live demand, so no extra policy field is needed) fails in launch preparation (`live_project_unavailable_to_sourced_runtime`) and writes nothing to the live project. The schedule is deregistered afterwards, success or not. |
 | graph anchor_chain + retry note | `graph:test/anchor_chain` completes with the interpreter-based tools, and its flaky step carries the "retry not attempted" note (an unretryable tool failure is explained, not silent). |
 | stopped-node standalone op (`--allow-restart`) | With the node stopped, `ryeos bundle list` runs standalone: the supplementary-group refusal is gone. The node is always started again. |
 | directive force_continue (`--paid`) | A context-window continuation hands off to a successor that completes with `E2E_FORCE_CONTINUE_READY`, without "no checkpoint to resume from". |
