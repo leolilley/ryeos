@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-17T12:45:45Z:73c7e13d08add06d06d7de0b67da2beecb3e2d1bd5f6240dadcb16988f12f14f:P8UrZJDm1b5eu80uzMEXVjn/BAGeIoji2N8e247esnXa+/6S3pmI3exAHVK6Ht2WxMA5hNbH+mpFVV/CFocDAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T15:16:28Z:9137eda851ae6314167cbdbdf0dcdf514905c75cd402c1326e6ac570fab98dd7:owvaM+HOt7F2PPKQdYv+YES/78XH/agWld3+fV7D1lG7xky1Ih4LL6jLT3W9RBCb0vISwT5pXAzwmY9H/0gsCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Thread timeline definition: how a chain's events fold into timeline items.
 # Declarative data read by the timeline service; the fold engine names no event type itself.
 category: ryeos/ui/timeline
@@ -6,6 +6,7 @@ version: "1.0.0"
 description: How a chain's events fold into timeline items.
 
 vocabulary:
+  - {key: fetch, one: page, many: pages}
   - {key: other, one: operation, many: operations}
   - {key: system_event, one: system event, many: system events}
 
@@ -108,6 +109,11 @@ events:
           when: {eq: [item_last, true], one_of: [payload.finish, [interrupted]]}
           tone: [{default: warn}]
           project: {headline: {join: [{path: payload.turn, prefix: "turn interrupted · "}]}}
+        - type: marker
+          key: [thread_id, payload.turn]
+          when: {eq: [item_last, true], one_of: [payload.finish, [length]]}
+          tone: [{default: warn}]
+          project: {headline: {join: [{path: payload.turn, prefix: "turn cut at the output limit · "}]}}
 
   # The stable frame of a conversation is written once at launch.
   cognition_frame: [{drop: true}]
@@ -250,6 +256,9 @@ events:
           project:
             headline: payload.tool
             detail: {lookup: {event: cognition_out, array: payload.parts, find: [call_id, payload.call_id], get: arguments}}
+          # The call's arguments, for the tool's own presentation paths.
+          inputs:
+            arguments: {lookup: {event: cognition_out, array: payload.parts, find: [call_id, payload.call_id], get: arguments}}
 
   tool_call_result:
     - when: {has: payload.graph_run_id}
@@ -276,9 +285,17 @@ events:
           key: [payload.operation_id]
           when: {eq: [payload.status, ok], has: payload.guard.truncated_reason}
           tone: [{default: warn}]
+        # The result text the model saw, for the tool's own presentation paths.
+        # A cut result is not valid data, so it offers none.
+        - type: activity
+          key: [payload.operation_id]
+          when: {eq: [payload.status, ok], lacks: payload.guard.truncated_reason}
+          inputs: {result: payload.parts.0.text}
 
   # Work in another thread. The child's outcome is not in this chain, so the
-  # link's state is unknown from here.
+  # link's state is unknown from here. The child's own presentation (a tool's
+  # display hints, pinned at its launch) may fill the headline, detail and body
+  # of the activity it runs under; the displaced headline stays as the tool.
   child_thread_spawned:
     - when: {has: payload.node}
       emit:
@@ -286,14 +303,24 @@ events:
           key: [payload.child_thread_id]
           state: unknown
           parent: {type: activity, key: [payload.node, payload.step]}
-          adopt: {thread: payload.child_thread_id, under: {type: activity, key: [payload.node, payload.step]}}
+          adopt:
+            thread: payload.child_thread_id
+            under: {type: activity, key: [payload.node, payload.step]}
+            present:
+              slots: {headline: 300, detail: 300, body: 4000}
+              displace: {headline: tool}
           project: {headline: payload.item_id, target: payload.child_thread_id}
     - emit:
         - type: link
           key: [payload.child_thread_id]
           state: unknown
           parent: {type: activity, key: [payload.operation_id]}
-          adopt: {thread: payload.child_thread_id, under: {type: activity, key: [payload.operation_id]}}
+          adopt:
+            thread: payload.child_thread_id
+            under: {type: activity, key: [payload.operation_id]}
+            present:
+              slots: {headline: 300, detail: 300, body: 4000}
+              displace: {headline: tool}
           project: {headline: payload.item_id, target: payload.child_thread_id}
 
   # A followed child settled: its link takes the child's outcome and the
@@ -326,11 +353,25 @@ events:
           project: {detail: {join: [{path: payload.steps, prefix: "steps: "}]}}
 
   # Provider and accounting notices.
+  # A retry after a mid-stream cut voids the live fragments of that turn
+  # published so far; the headline says so when any were emitted.
   provider_retry:
+    - when: {ne: [payload.supersedes.output_events, 0]}
+      emit:
+        - type: marker
+          tone: [{default: warn}]
+          project:
+            headline:
+              join:
+                - {path: payload.attempt, prefix: "provider retry, attempt "}
+                - {path: payload.supersedes.output_events, prefix: "partial output superseded, live events: "}
+            reason: payload.retry_advance.decision.reason.kind
     - emit:
         - type: marker
           tone: [{default: warn}]
-          project: {headline: {join: [{path: payload.attempt, prefix: "provider retry, attempt "}]}, reason: payload.error}
+          project:
+            headline: {join: [{path: payload.attempt, prefix: "provider retry, attempt "}]}
+            reason: payload.retry_advance.decision.reason.kind
   cost_untracked:
     - emit:
         - type: marker

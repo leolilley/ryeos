@@ -148,9 +148,13 @@ fn prepare_inner(
     })
     .map_err(domain_error)?;
 
+    let unknown_outcome_policy =
+        ryeos_directive_definition::resolve_unknown_outcome_policy(execution.as_ref())
+            .map_err(domain_error)?;
     let external_effect_authority = ryeos_directive_definition::resolve_external_effect_authority(
         &directive,
         &prepared.snapshot.provider,
+        unknown_outcome_policy.as_ref(),
     )
     .map_err(|error| {
         wire_error(

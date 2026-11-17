@@ -48,10 +48,12 @@ use super::{
 // and vault namespace), as provider environments already did. V38 records the
 // request's live-project intent (`default` or `live`) in every live project
 // authority; an explicit live demand is refused wherever the resolved root is
-// not live. Every schema change here requires a matching
+// not live. V39 seals the external-effect authority's unknown-outcome retry
+// ceiling, the number of leading retries a runtime may issue after a failure
+// that leaves it unknown whether the external system acted. Every schema change here requires a matching
 // Operational dispatch-effect replay-index epoch bump, which retires effects
 // sealed under predecessor capsule contracts.
-pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 38;
+pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 39;
 pub const MAX_ADMITTED_LAUNCH_CAPSULE_BYTES: usize = 16 * 1024 * 1024;
 pub const ADMITTED_DIRECT_COMMAND_ROOT: &str = "/ryeos/admitted-direct-command";
 pub const ADMITTED_DIRECT_PROJECT_ROOT: &str = "/ryeos/admitted-project";

@@ -1188,6 +1188,7 @@ impl CallbackClient {
             finish: crate::cognition::FINISH_INTERRUPTED.to_string(),
             usage: None,
             provider_accounting: None,
+            malformed_calls: Vec::new(),
         };
         payload.validate()?;
         self.append_runtime_event(
@@ -1206,6 +1207,7 @@ impl CallbackClient {
         tokens: Option<(u64, u64)>,
         parts: Vec<Part>,
         provider_accounting: Option<Value>,
+        malformed_calls: Vec<crate::cognition::MalformedCall>,
     ) -> Result<()> {
         let payload = crate::cognition::CognitionOutPayload {
             turn,
@@ -1218,6 +1220,7 @@ impl CallbackClient {
                 },
             ),
             provider_accounting,
+            malformed_calls,
         };
         payload.validate()?;
         self.append_runtime_event(
@@ -2184,6 +2187,11 @@ mod tests {
                 "generation_header_id": "generation-1",
                 "contract_anomalies": ["reported output exceeds request limit"],
             })),
+            vec![crate::cognition::MalformedCall {
+                call_index: 0,
+                raw_len: 9,
+                sha256: "cd".repeat(32),
+            }],
         )
         .await
         .unwrap();
@@ -2202,6 +2210,8 @@ mod tests {
             "generation-1"
         );
         assert!(evt.get("delta").is_none());
+        assert_eq!(evt["malformed_calls"][0]["call_index"], 0);
+        assert_eq!(evt["malformed_calls"][0]["raw_len"], 9);
     }
 
     // ── replay_chain pagination ──────────────────────────────────────

@@ -1060,6 +1060,7 @@ fn view_set_vm(core: &RyeOsCore) -> Option<RyeOsViewSetVm> {
 struct RowLocalState<'a> {
     cursor: Option<usize>,
     collapsed: Option<&'a std::collections::BTreeSet<usize>>,
+    timeline_folds: Option<&'a std::collections::BTreeMap<String, bool>>,
     expanded_rows: Option<&'a std::collections::BTreeSet<String>>,
     collapsed_tree_rows: Option<&'a std::collections::BTreeSet<String>>,
     changed_rows: Option<&'a std::collections::BTreeMap<String, crate::view_set::RowFlash>>,
@@ -1073,6 +1074,7 @@ fn mounted_selected_state<'a>(
         Some(crate::view_set::ViewLocalState::GenericList {
             cursor,
             collapsed,
+            timeline_folds,
             expanded_rows,
             collapsed_tree_rows,
             changed_rows,
@@ -1080,6 +1082,7 @@ fn mounted_selected_state<'a>(
         }) => RowLocalState {
             cursor: Some(*cursor),
             collapsed: Some(collapsed),
+            timeline_folds: Some(timeline_folds),
             expanded_rows: Some(expanded_rows),
             collapsed_tree_rows: Some(collapsed_tree_rows),
             changed_rows: Some(changed_rows),
@@ -1124,6 +1127,7 @@ pub(super) fn bound_view_vm(core: &RyeOsCore, tile_id: TileId, view_ref: &str) -
         RowLocalState {
             cursor: selected_cursor(core, tile_id),
             collapsed: selected_collapsed(core, tile_id),
+            timeline_folds: selected_timeline_folds(core, tile_id),
             expanded_rows,
             collapsed_tree_rows,
             changed_rows,
@@ -1141,6 +1145,7 @@ fn bound_view_vm_keyed(
     let RowLocalState {
         cursor,
         collapsed,
+        timeline_folds,
         expanded_rows,
         collapsed_tree_rows,
         changed_rows,
@@ -1497,11 +1502,11 @@ fn bound_view_vm_keyed(
             };
             // Apply the operator's folds, then project over the VISIBLE list so
             // the cursor, scroll, and point all address what's actually shown.
-            let empty = std::collections::BTreeSet::new();
+            let empty = std::collections::BTreeMap::new();
             let windowed = super::timeline::fold_timeline_window(
                 layout,
                 super::timeline::live_delta_entry(core),
-                collapsed.unwrap_or(&empty),
+                timeline_folds.unwrap_or(&empty),
                 cursor.unwrap_or(0),
                 TIMELINE_RENDER_WINDOW,
             );
@@ -3729,6 +3734,17 @@ fn selected_collapsed(
     }
 }
 
+fn selected_timeline_folds(
+    core: &RyeOsCore,
+    tile_id: TileId,
+) -> Option<&std::collections::BTreeMap<String, bool>> {
+    let view_set = core.active_view_set()?;
+    match &view_set.tiles.get(&tile_id)?.local {
+        ViewLocalState::GenericList { timeline_folds, .. } => Some(timeline_folds),
+        ViewLocalState::None | ViewLocalState::Field(_) => None,
+    }
+}
+
 type SelectedRowState<'a> = (
     Option<&'a std::collections::BTreeSet<String>>,
     Option<&'a std::collections::BTreeSet<String>>,
@@ -3917,6 +3933,7 @@ mod tests {
             RowLocalState {
                 cursor: None,
                 collapsed: None,
+                timeline_folds: None,
                 expanded_rows: None,
                 collapsed_tree_rows: None,
                 changed_rows: None,
@@ -4087,6 +4104,7 @@ mod tests {
             RowLocalState {
                 cursor: None,
                 collapsed: None,
+                timeline_folds: None,
                 expanded_rows: None,
                 collapsed_tree_rows: None,
                 changed_rows: None,
@@ -5078,35 +5096,26 @@ mod tests {
             matches!(
                 effects.as_slice(),
                 [RyeOsEffect { kind: RyeOsEffectKind::CopyToClipboard { text }, .. }]
-                    if text == "two"
+                    if text == "two, done"
             ),
             "got {effects:?}"
         );
     }
 
     #[test]
-    fn f_folds_the_cluster_under_the_point_and_again_unfolds_it() {
+    fn f_opens_the_collapsed_cluster_under_the_point_and_again_folds_it() {
         let cluster = json!({
             "item": "cluster", "id": "c1", "headline": "2 operations",
             "members": [activity("one", [1, 1]), activity("two", [2, 2])]
         });
         let mut core = feed_core(json!([cluster]));
-        // Point on the newest entry, a member; walk to the header.
-        let instance = core.focused_view_instance_key().unwrap();
-        let tile = core.active_view_set().unwrap().focused_tile.0.to_string();
-        core.dispatch(RyeOsEvent::Ui {
-            event: RyeOsUiEvent::SetTileCursor {
-                tile_id: tile,
-                index: 2,
-            },
-        });
+        // A cluster starts folded: only its header shows, and the point is on it.
         assert!(core.key_context().focused_timeline_foldable);
-        assert_eq!(timeline_entries(&core).len(), 3);
-        press(&mut core, 'f', false);
         assert_eq!(timeline_entries(&core).len(), 1, "members are hidden");
         press(&mut core, 'f', false);
-        assert_eq!(timeline_entries(&core).len(), 3, "members are back");
-        let _ = instance;
+        assert_eq!(timeline_entries(&core).len(), 3, "members are shown");
+        press(&mut core, 'f', false);
+        assert_eq!(timeline_entries(&core).len(), 1, "members are hidden again");
     }
 
     #[test]
