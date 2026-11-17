@@ -46,7 +46,7 @@ const VIEW_BEHAVIOR_GOLDENS: &[(&str, &str)] = &[
     ),
     (
         "view:ryeos/home/overview",
-        "7bee4bf0bd63749a10249d4c29af93c7b4bc4b4e151c1391e2d77176c4e3488e",
+        "c6dad9ccb70adf8e8df83d3f34ddf344bb966046a81d34195818af8877fa6085",
     ),
     (
         "view:ryeos/input",
