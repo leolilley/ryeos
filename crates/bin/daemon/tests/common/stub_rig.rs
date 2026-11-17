@@ -321,13 +321,24 @@ pub async fn launch_live(
     node: &SigningKey,
     project: &str,
 ) -> anyhow::Result<String> {
+    launch_live_with(bind, user, node, project, json!({"name": "probe"})).await
+}
+
+/// Launch the probe directive with explicit launch parameters.
+pub async fn launch_live_with(
+    bind: SocketAddr,
+    user: &SigningKey,
+    node: &SigningKey,
+    project: &str,
+    parameters: Value,
+) -> anyhow::Result<String> {
     let path = "/execute/launch";
     let body = json!({
         "item_ref": DIRECTIVE_REF,
         "launch_id": format!("L-{}", uuid::Uuid::new_v4().simple()),
         "ref_bindings": { "model": DIRECTIVE_REF },
         "project_path": project,
-        "parameters": {"name": "probe"},
+        "parameters": parameters,
         "execution_policy": ryeos_app::execution_policy::ExecutionPolicy::local_live(
             ryeos_app::execution_policy::ExecutionResponse::Accepted
         ),
@@ -361,6 +372,23 @@ pub async fn launch_on(rig: &Rig) -> anyhow::Result<String> {
         rig.h.user_key.as_ref().expect("user key"),
         rig.h.node_key.as_ref().expect("node key"),
         &rig.project_str(),
+    )
+    .await
+}
+
+/// Launch the probe directive with extra launch parameters merged over the
+/// default `{"name": "probe"}`.
+pub async fn launch_on_with(rig: &Rig, extra: Value) -> anyhow::Result<String> {
+    let mut parameters = json!({"name": "probe"});
+    if let (Some(base), Some(extra)) = (parameters.as_object_mut(), extra.as_object()) {
+        base.extend(extra.clone());
+    }
+    launch_live_with(
+        rig.h.bind,
+        rig.h.user_key.as_ref().expect("user key"),
+        rig.h.node_key.as_ref().expect("node key"),
+        &rig.project_str(),
+        parameters,
     )
     .await
 }
