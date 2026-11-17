@@ -867,6 +867,7 @@ fn plan_policy_apply(
             "node policy input declares path-owned field `{forbidden}`"
         );
     }
+    let body = admit_policy_input_roots(app_root, section, body)?;
     let trust_store = ryeos_engine::trust::TrustStore::load_node_registry(app_root)
         .context("load trust store for current node policies")?;
     if section == ryeos_node_runtime::node_policy::sections::host_access::SECTION_NAME {
@@ -886,6 +887,18 @@ fn plan_policy_apply(
         Path::new("offline-operation-input/policy"),
     )?;
     Ok((trust_store, update))
+}
+
+/// An external-content body's declared import roots, measured and recorded in
+/// `roots` as initialization does for the profile's, so a root an operator
+/// declares on an existing node is admitted. Other sections pass unchanged.
+fn admit_policy_input_roots(app_root: &Path, section: &str, body: Value) -> Result<Value> {
+    if section != ryeos_node_runtime::node_policy::sections::external_content::SECTION_NAME {
+        return Ok(body);
+    }
+    ryeos_node_runtime::node_policy::sections::external_content::admit_declared_roots(
+        &body, app_root,
+    )
 }
 
 /// A host-access grant hands its item operator-equivalent authority, so its
@@ -1952,6 +1965,51 @@ mod tests {
     use ryeos_engine::roots::RuntimeRoot;
     use ryeos_node_runtime::identity::NodeIdentity;
     use ryeos_node_runtime::state_lock::{StateLock, default_lock_path};
+
+    #[test]
+    fn a_policy_apply_admits_an_import_root_declared_after_init() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app_root = tmp.path().join("app");
+        let imports = tmp.path().join("imports");
+        std::fs::create_dir_all(&app_root).unwrap();
+        std::fs::create_dir_all(&imports).unwrap();
+        let body: Value = serde_yaml::from_str(&format!(
+            r#"
+schema: 2
+roots: {{}}
+declared_roots:
+  release-imports:
+    path: {}
+limits:
+  max_depth: 11
+  max_entries: 65536
+  max_file_bytes: 1503300328
+  max_total_bytes: 2147483648
+  store_budget_bytes: 4294967296
+  minimum_free_bytes: 2147483648
+managed_activation:
+  enabled: false
+"#,
+            imports.display()
+        ))
+        .unwrap();
+        let admitted = admit_policy_input_roots(&app_root, "external_content", body.clone())
+            .expect("declared root admitted");
+        let root = &admitted["roots"]["release-imports"];
+        assert_eq!(root["path"], json!(imports.display().to_string()));
+        assert!(root.get("root_identity").is_some(), "{admitted}");
+        // Re-applying the admitted body is stable, so the prospective and the
+        // applied generation digests agree.
+        assert_eq!(
+            admit_policy_input_roots(&app_root, "external_content", admitted.clone()).unwrap(),
+            admitted
+        );
+        // Other sections pass through untouched.
+        assert_eq!(
+            admit_policy_input_roots(&app_root, "host_access", body.clone()).unwrap(),
+            body
+        );
+    }
 
     #[test]
     fn a_snapshot_compose_names_one_source_of_provider_facts() {
