@@ -104,6 +104,12 @@ struct WorkerExecutionConfig {
     mode: WorkerExecutionMode,
     candidate_disposition: String,
     workload_client_delegation_caps: Vec<String>,
+    /// Signed per-route request pins. The daemon reads them from the admitted
+    /// launch data when it starts the worker; the runtime only accepts their
+    /// presence.
+    #[serde(default)]
+    #[allow(dead_code)]
+    route_fixed_params: Option<Value>,
     /// The environment's subject-projection contract, judged by the daemon at
     /// admission; the runtime only accepts its presence.
     #[allow(dead_code)]
@@ -1400,6 +1406,7 @@ mod tests {
             candidate_disposition: "retained_for_review".to_owned(),
             workload_client_delegation_caps: vec!["ryeos.execute.tool.*".to_owned()],
             credential_subject_contract: None,
+            route_fixed_params: None,
         };
         validate_runtime_mode_policy(&config).unwrap();
 
@@ -1499,6 +1506,7 @@ mod tests {
             candidate_disposition: "retained_for_review".to_owned(),
             workload_client_delegation_caps: Vec::new(),
             credential_subject_contract: None,
+            route_fixed_params: None,
         };
         validate_runtime_mode_policy(&config).unwrap();
         // A continuation that also names a session-start route is a

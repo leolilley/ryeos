@@ -112,6 +112,8 @@ mod chain_retirement;
 mod seat_leases;
 mod thread_queries;
 use thread_queries::*;
+mod run_attention;
+pub use run_attention::{FailedRunAttention, RunOrigin};
 mod external_allocation;
 mod publications;
 mod selected_metadata;

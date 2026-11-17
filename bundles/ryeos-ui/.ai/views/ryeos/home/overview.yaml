@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-19T22:29:40Z:9246c8c03b3e2f03463e69697dd750d05c4b788140059c4ba9f54211419c8dc6:e5ipDEuKzdfcuW3n5kBtkuoo1c0mdXqmbFpu5KBLLgWqwrViuVtev4vqWAqkTojO/lH17w+QARnod7QJscJsBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T21:46:28Z:f119e9d8f1fe89823910cf8f8df66deaff24d2d400b7b4de0a728f99c1f7d3a5:ZSDMtYGqjhhnY5uRqr/43jiFaL5YhV53iVHubYigyYhiQBMnaxZRnAxIgk6vpjWUzN+QgOiQhpLreKFt+cnoCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: assistant-home
 title: Home
 version: "1.0.0"
@@ -33,40 +33,29 @@ affordances:
         thread_id: "{record.thread_id}"
       open_view: view:ryeos/threads/detail
       drill: true
-  - id: review-attention
-    label: Review request
+  - id: open-attention
+    label: Open work
     invoke:
       plane: ui
       facet: selection
       merge:
         work:
-          thread: "{record.placement_thread_id}"
-          chain_root: "{record.chain_root_id}"
-      open_view: view:ryeos/work/approvals
-      drill: true
-  - id: review-candidate
-    label: Review candidate
-    invoke:
-      plane: ui
-      facet: selection
-      merge:
-        work:
-          thread: "{record.placement_thread_id}"
-          chain_root: "{record.chain_root_id}"
-      open_view: view:ryeos/work/candidate
+          thread: "{record.subject.thread_id}"
+          chain_root: "{record.subject.chain_root_id}"
+      open_view: view:ryeos/work/overview
       drill: true
 sections:
   - title: Needs attention
     source_channel: attention
     collection: attention
     projection:
-      primary: operation_class
-      meta: state
+      primary: title
+      meta: detail.summary
       tone:
-        field: state
-        map: { pending: warn }
+        field: tone
+        map: { warn: warn, danger: danger }
         default: neutral
-    activate: review-attention
+    activate: open-attention
   - title: Active executions
     source_channel: active
     collection: threads
@@ -80,17 +69,6 @@ sections:
     projection:
       primary: state
       meta: reason
-  - title: Candidates to review
-    source_channel: attention
-    collection: candidates
-    projection:
-      primary: candidate_snapshot_hash
-      meta: publication_result
-      tone:
-        field: publication_result
-        map: { retained: warn, retained_for_review: warn }
-        default: neutral
-    activate: review-candidate
   - title: Recent movement
     source_channel: movement
     collection: events
