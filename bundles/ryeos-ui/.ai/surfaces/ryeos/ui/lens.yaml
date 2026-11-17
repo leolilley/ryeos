@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-08T06:41:16Z:8b945aa33d38234c5d75153788774da5544f5f29c6d4822ad02e002782b317b3:CpxUJrYFAtfufGpm8KD1po6qvuGZ6YTW6pATW0Z6fpvjmCw2KFRokJSXh/AGFACbfvLeFuL8iQm1JB8i9PzpCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T21:29:33Z:3887c8fcf981655b71e6222fcfae5082aa6e20067357d76cf75391f2ec6c15d0:XoXP+TLL1LVm8VdlqNbMSTJG1StuRZuMmHeoqVG4xv2xZOwOWqWlxsmFkl3tRSe7k+CcO98zUGtKVdm5839wCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-lens
 title: Lens
 version: "1.0.0"
@@ -67,6 +67,7 @@ library:
     views:
       - view:ryeos/projects/list
       - view:ryeos/node/events
+      - view:ryeos/node/usage
       - view:ryeos/node/remotes
       - view:ryeos/node/bundles
       - view:ryeos/node/gc

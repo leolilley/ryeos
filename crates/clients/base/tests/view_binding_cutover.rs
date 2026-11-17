@@ -89,6 +89,10 @@ const VIEW_BEHAVIOR_GOLDENS: &[(&str, &str)] = &[
         "828d0007c41a100f87ee56b6e878cd9aa1b57e192b242070d2bc61f0abf25fa6",
     ),
     (
+        "view:ryeos/node/usage",
+        "31d00c797ed35c8e273451cf7e8cf963ad708870935d4f6ada5952f9aeee7e55",
+    ),
+    (
         "view:ryeos/programs/list",
         "2f31a9720d68e200c187d62b6df414cc914fdfd9ccced3aa2fdbbbd0c58ad0e4",
     ),
@@ -150,7 +154,7 @@ const VIEW_BEHAVIOR_GOLDENS: &[(&str, &str)] = &[
     ),
     (
         "view:ryeos/threads/detail",
-        "5104802d2a4cdd5f88f044b7efd300169542611d38af9468b10a2178be828dad",
+        "929c8c7e3ec73cab95402596bc6c193f465dc1e2bf82b146682bccbbe30dde0c",
     ),
     (
         "view:ryeos/threads/history",
@@ -534,7 +538,7 @@ fn every_bundled_view_resolves_and_validates_under_the_named_source_contract() {
     let files = yaml_files_below(&views_root);
     assert_eq!(
         files.len(),
-        47,
+        48,
         "authored inventory includes the Surfaces catalogue and session-details View"
     );
 
