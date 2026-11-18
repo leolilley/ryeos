@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-17T17:28:58Z:12d3f07f061dd752d3ffaaaefb7876e44b08f3f2a318b690d71894e5e5053743:IS0y9+fU4Oukrkmwu5lUF39DiI0uRCtsszD2P15NFSOy/hC4GnzJXHKo4eJKdc7i7y02C7E0z9bDJy1bjJxdAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-18T07:27:10Z:994cde2d18df6ab6d51475b7bba4d277fe1bd8d2935d74eb29baeb2d0be77267:RnBymX4LD0Dbr+DhTcXX5sn79wnYKb5AKHrdy5zc0GM5iGjU1lqkrHZQvGjy04L6iCGEAewnryOPdeaZAXTbBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [fundamentals, directives, workflows, prompts]
 version: "2.1.0"
@@ -184,8 +184,13 @@ no window at all (it stops as soon as it launches); size `run_timeout` to at
 least the depth times the reserve plus the work, or author smaller reserves on
 the intermediate items.
 
-A directive's tools are bounded by the directive's end, not its hard stop, so a
-tool already running at the hard stop is not cut until the end.
+A directive's tools are bounded by its hard stop: a tool still running when the
+hard stop arrives is cut there, whatever timeout the tool declares. The cut call
+is recorded as `tool_interrupted_at_deadline`, an interrupted call whose outcome
+is unknown, because the tool may have partially acted before it was stopped. It
+is never retried, and the model sees it as an error with that code. A tool call
+made at or after the hard stop does not start. A tool's own timeout still
+applies when it is the shorter.
 
 The model can ask for the clock with the built-in `time_left` tool, which is
 offered only when the run has a deadline. It returns `now_ms`,
