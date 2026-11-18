@@ -334,7 +334,14 @@ impl CallbackClient {
                 client
                     .append_events(&self.thread_id, events, options)
                     .await
-                    .map_err(|error| anyhow::anyhow!("{error}"))?;
+                    .map_err(|error| match error {
+                        CallbackError::ActionFailed { code, message, .. }
+                            if code == crate::callback::ATTACHMENT_REFUSED_CODE =>
+                        {
+                            anyhow::Error::new(crate::callback::AttachmentRefused(message))
+                        }
+                        other => anyhow::anyhow!("{other}"),
+                    })?;
                 Ok(())
             }
             None if contains_transcript => Err(anyhow::anyhow!(
@@ -1477,6 +1484,9 @@ mod tests {
         events: Mutex<Vec<(String, Value)>>,
         /// The options of every batch append, in order.
         options: Mutex<Vec<crate::callback::EventAppendOptions>>,
+        /// Answers an append that carries attachments with the node's
+        /// attachment refusal.
+        refuse_attachments: std::sync::atomic::AtomicBool,
     }
 
     impl EventRecorder {
@@ -1484,6 +1494,7 @@ mod tests {
             Self {
                 events: Mutex::new(Vec::new()),
                 options: Mutex::new(Vec::new()),
+                refuse_attachments: std::sync::atomic::AtomicBool::new(false),
             }
         }
 
@@ -1547,6 +1558,17 @@ mod tests {
             events: Vec<Value>,
             options: crate::callback::EventAppendOptions,
         ) -> Result<Value, CallbackError> {
+            if !options.attachments.is_empty()
+                && self
+                    .refuse_attachments
+                    .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(CallbackError::ActionFailed {
+                    code: crate::callback::ATTACHMENT_REFUSED_CODE.to_string(),
+                    message: "attachment is too large".to_string(),
+                    retryable: false,
+                });
+            }
             self.options.lock().unwrap().push(options);
             let mut recorded = self.events.lock().unwrap();
             for event in events {
@@ -1761,6 +1783,7 @@ mod tests {
                 truncated,
                 truncated_reason: reason.map(str::to_string),
                 duplicate_of: duplicate_of.map(str::to_string),
+                dropped_images: Vec::new(),
             },
             attachment_refs: Vec::new(),
         }
@@ -1814,6 +1837,30 @@ mod tests {
         );
         let options = recorder.options.lock().unwrap();
         assert_eq!(options[0].attachments, vec![attachment]);
+    }
+
+    #[tokio::test]
+    async fn a_node_attachment_refusal_reaches_the_caller_as_a_typed_error() {
+        let (cb, recorder) = make_recorder_client();
+        recorder
+            .refuse_attachments
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let (result, attachment) = image_tool_result(b"pixels");
+        let error = cb
+            .emit_tool_result_with_attachments(&result, vec![attachment])
+            .await
+            .unwrap_err();
+        let refused = error
+            .downcast_ref::<crate::callback::AttachmentRefused>()
+            .expect("a typed refusal");
+        assert!(refused.0.contains("too large"), "{refused}");
+        assert!(recorder.last("tool_call_result").is_none());
+        // Without images the same result still appends.
+        let mut plain = result.clone();
+        plain.parts.truncate(1);
+        plain.attachment_refs.clear();
+        cb.emit_tool_result(&plain).await.unwrap();
+        assert!(recorder.last("tool_call_result").is_some());
     }
 
     #[tokio::test]

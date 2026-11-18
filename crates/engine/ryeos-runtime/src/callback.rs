@@ -101,6 +101,15 @@ impl EventAppendOptions {
     }
 }
 
+/// The wire code of an append whose attachments the node's policy refuses.
+pub const ATTACHMENT_REFUSED_CODE: &str = "attachment_refused";
+
+/// An event append refused because of its attachments: too many, a media type
+/// the node does not accept, or too large. The events were not appended.
+#[derive(Debug, thiserror::Error)]
+#[error("attachment_refused: {0}")]
+pub struct AttachmentRefused(pub String);
+
 #[derive(Debug, thiserror::Error)]
 pub enum CallbackError {
     #[error("{code}: {message}")]

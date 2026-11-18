@@ -24,6 +24,27 @@ const MAX_NAMED_ATTACHMENT_CACHE: usize = 4096;
 /// that carry images, and inputs.
 const ATTACHMENT_NAMING_EVENT_TYPES: [&str; 2] = ["tool_call_result", "cognition_in"];
 
+/// An attachment upload the node's `thread_attachments` policy refuses: too
+/// many in one append, a media type it does not accept, or too large. A
+/// caller can tell it from a failure of the append itself and drop the
+/// attachment instead of giving up.
+#[derive(Debug)]
+pub struct AttachmentRefusal(pub String);
+
+impl std::fmt::Display for AttachmentRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for AttachmentRefusal {}
+
+impl AttachmentRefusal {
+    pub fn code(&self) -> &'static str {
+        ryeos_runtime::callback::ATTACHMENT_REFUSED_CODE
+    }
+}
+
 /// The media type and bytes of one stored attachment.
 #[derive(Debug, Clone)]
 pub struct StoredAttachment {
@@ -467,11 +488,12 @@ fn validate_attachment_uploads(
         return Ok(Vec::new());
     }
     if params.attachments.len() > policy.max_attachments_per_turn as usize {
-        bail!(
+        return Err(AttachmentRefusal(format!(
             "append carries {} attachments (node limit {} per turn)",
             params.attachments.len(),
             policy.max_attachments_per_turn
-        );
+        ))
+        .into());
     }
     let mut named = BTreeSet::new();
     for event in &params.events {
@@ -483,20 +505,22 @@ fn validate_attachment_uploads(
     let mut uploads = Vec::with_capacity(params.attachments.len());
     for upload in &params.attachments {
         if !policy.accepts(&upload.media_type) {
-            bail!(
+            return Err(AttachmentRefusal(format!(
                 "attachment media type '{}' is not accepted by this node",
                 upload.media_type
-            );
+            ))
+            .into());
         }
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&upload.bytes_b64)
             .context("attachment bytes_b64 is not valid base64")?;
         if bytes.len() as u64 > policy.max_bytes_per_attachment {
-            bail!(
+            return Err(AttachmentRefusal(format!(
                 "attachment is {} bytes (node limit {})",
                 bytes.len(),
                 policy.max_bytes_per_attachment
-            );
+            ))
+            .into());
         }
         let object = ryeos_state::objects::ThreadAttachment::for_bytes(&upload.media_type, &bytes)?;
         let hash = object.object_hash()?;
