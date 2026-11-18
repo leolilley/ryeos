@@ -106,12 +106,26 @@ pub fn shell(
     let chrome = &vm.presentation.chrome;
     // The body keeps its own 18 side padding; the 44 here brings the tiles to
     // 62 from the left edge, clear of the Surfaces switcher.
+    let renaming_surface = matches!(
+        &local.rename,
+        Some(crate::Rename {
+            target: RenameTarget::Surface(_),
+            ..
+        })
+    );
+    // While a Surface is renamed the switcher widens to hold the form; the body
+    // moves over for that moment rather than sit under it.
+    let room = if renaming_surface {
+        theme::SWITCHER_INSET + theme::SWITCHER_RENAME_WIDTH
+    } else {
+        theme::SWITCHER_ROOM
+    };
     let main = row()
         .w_full()
         .grow(1.0)
         .min_h(0.0)
         // look: the switcher's room is always taken; hiding the switcher and its edge setting need a preference the view model does not carry.
-        .child(el().w(theme::SWITCHER_ROOM).h_full())
+        .child(el().w(room).h_full())
         .child(
             col()
                 .grow(1.0)
@@ -463,6 +477,9 @@ fn view_set_strip(top_bar: &RyeOsTopBarVm, local: &Local) -> El {
         .center_y()
         .role("navigation")
         .label("View sets")
+        // Equal spacers either side keep the group centred; when it overflows they
+        // collapse and the group scrolls between the switcher and the readout.
+        .child(el().grow(1.0))
         .child(tabs)
         .child(
             col()
