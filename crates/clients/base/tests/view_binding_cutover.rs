@@ -363,6 +363,7 @@ fn node_inventory_views_have_one_origin_and_remotes_do_not_retarget_input() {
     for (origin, source) in [
         ("node/bundles", "service:bundle/list"),
         ("node/remotes", "service:ui/ryeos-ui/remotes/list"),
+        ("node/machines", "service:ui/ryeos-ui/node/machines"),
         ("node/gc", "service:ui/ryeos-ui/gc/status"),
     ] {
         let text = fs::read_to_string(views.join(format!("{origin}.yaml"))).unwrap();
@@ -671,7 +672,7 @@ fn every_bundled_view_resolves_and_validates_under_the_named_source_contract() {
     let files = yaml_files_below(&views_root);
     assert_eq!(
         files.len(),
-        49,
+        50,
         "authored inventory includes the Surfaces catalogue and session-details View"
     );
 
