@@ -4023,6 +4023,7 @@ enum WrapperPoll {
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const CAPTURE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const POST_STOP_DRAIN_READS: usize = 1024;
+/// Setup limit used only when the caller gave no request deadline.
 const SUPERVISED_STATUS_SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 const ATTACHMENT_ABORT_SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
 const SUPERVISED_STATUS_MAX_LINE_BYTES: usize = 64 * 1024;
@@ -10312,14 +10313,20 @@ fn lib_spawn_with_stdio(
         };
         running.status_thread = Some(status_thread);
         running.applied_receipt_rx = applied_rx;
-        let relative_setup = supervised_setup_deadline(start, timeout);
+        let (relative_setup, mut setup_bound) = supervised_setup_bound(start, timeout);
         let setup_deadline = absolute_deadline.map_or(relative_setup, |original| {
             // Sample on the original worker clock; never restart its expiry.
             start
                 .checked_add(original.remaining())
-                .map_or(Instant::now(), |expiry| relative_setup.min(expiry))
+                .map_or(Instant::now(), |expiry| {
+                    if expiry < relative_setup {
+                        setup_bound = SupervisedSetupBound::RequestDeadline;
+                    }
+                    relative_setup.min(expiry)
+                })
         });
-        let setup_wait = setup_deadline.saturating_duration_since(Instant::now());
+        let wait_began = Instant::now();
+        let setup_wait = setup_deadline.saturating_duration_since(wait_began);
         let initial_observation = status_rx.recv_timeout(setup_wait);
         let reported_pid = match initial_observation {
             Ok(Ok(InitialLauncherStatus::Target(pid, preparation))) => {
@@ -10347,8 +10354,9 @@ fn lib_spawn_with_stdio(
                 let failure = spawn_failure(
                     start,
                     format!(
-                        "Failed to spawn: supervised launcher did not report its target PID before the bounded setup/request deadline ({:.3} seconds remaining after launch setup)",
-                        setup_wait.as_secs_f64()
+                        "Failed to spawn: supervised launcher did not report its target PID after waiting {:.3} seconds (bound: {})",
+                        wait_began.elapsed().as_secs_f64(),
+                        setup_bound.describe()
                     ),
                 );
                 return Err(running.into_spawn_failure(failure));
@@ -11249,15 +11257,45 @@ fn resolve_supervised_identity(
     Err("supervised process identity is unsupported on this platform".to_string())
 }
 
-fn supervised_setup_deadline(start: Instant, timeout: f64) -> Instant {
-    let status_deadline = start
-        .checked_add(SUPERVISED_STATUS_SETUP_TIMEOUT)
-        .unwrap_or_else(Instant::now);
+/// Which bound limits supervised launch setup (target-PID report, fork
+/// custody, attachment boundary).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SupervisedSetupBound {
+    /// The caller's own request deadline.
+    RequestDeadline,
+    /// No caller deadline: the fixed default keeps a launch from waiting forever.
+    DefaultLimit,
+}
+
+impl SupervisedSetupBound {
+    fn describe(self) -> String {
+        match self {
+            Self::RequestDeadline => "request deadline".to_string(),
+            Self::DefaultLimit => format!(
+                "default setup limit of {} seconds, no request deadline given",
+                SUPERVISED_STATUS_SETUP_TIMEOUT.as_secs()
+            ),
+        }
+    }
+}
+
+/// The setup wait follows the caller's request deadline when one was given;
+/// the fixed default applies only when the caller gave none. Setup time still
+/// counts against the request, so this never extends it.
+fn supervised_setup_bound(start: Instant, timeout: f64) -> (Instant, SupervisedSetupBound) {
     request_timeout_duration(timeout)
         .and_then(|timeout| start.checked_add(timeout))
-        .map_or(status_deadline, |request_deadline| {
-            std::cmp::min(status_deadline, request_deadline)
+        .map(|deadline| (deadline, SupervisedSetupBound::RequestDeadline))
+        .or_else(|| {
+            start
+                .checked_add(SUPERVISED_STATUS_SETUP_TIMEOUT)
+                .map(|deadline| (deadline, SupervisedSetupBound::DefaultLimit))
         })
+        .unwrap_or_else(|| (Instant::now(), SupervisedSetupBound::DefaultLimit))
+}
+
+fn supervised_setup_deadline(start: Instant, timeout: f64) -> Instant {
+    supervised_setup_bound(start, timeout).0
 }
 
 #[cfg(target_os = "linux")]
@@ -15396,5 +15434,40 @@ mod native_terminal_atomic_pipe_write_tests {
             std::io::ErrorKind::WouldBlock
         );
         assert!(writer.file_identity().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod supervised_setup_deadline_tests {
+    use super::*;
+
+    #[test]
+    fn request_deadline_longer_than_default_is_the_setup_deadline() {
+        let start = Instant::now();
+        let (deadline, bound) = supervised_setup_bound(start, 30.0);
+        assert_eq!(deadline, start + Duration::from_secs(30));
+        assert_eq!(bound, SupervisedSetupBound::RequestDeadline);
+        assert_eq!(
+            supervised_setup_deadline(start, 30.0),
+            start + Duration::from_secs(30)
+        );
+    }
+
+    #[test]
+    fn shorter_request_deadline_is_the_setup_deadline() {
+        let start = Instant::now();
+        let (deadline, bound) = supervised_setup_bound(start, 1.5);
+        assert_eq!(deadline, start + Duration::from_millis(1500));
+        assert_eq!(bound, SupervisedSetupBound::RequestDeadline);
+    }
+
+    #[test]
+    fn no_request_deadline_uses_the_named_default() {
+        let start = Instant::now();
+        for none in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let (deadline, bound) = supervised_setup_bound(start, none);
+            assert_eq!(deadline, start + SUPERVISED_STATUS_SETUP_TIMEOUT);
+            assert_eq!(bound, SupervisedSetupBound::DefaultLimit);
+        }
     }
 }
