@@ -718,9 +718,9 @@ mod tests {
         assert!(usage.is_valid(), "{:?}", usage.anomalies);
 
         // A route that reports no cache fields yields none, with no anomaly.
-        let usage = harvest_included_cache(concat!(
+        let usage = harvest_included_cache(
             "data: {\"usage\":{\"prompt_tokens\":137,\"completion_tokens\":37}}\n",
-        ))
+        )
         .expect("usage");
         assert_eq!(usage.cache_read_tokens, None);
         assert_eq!(usage.cache_write_tokens, None);

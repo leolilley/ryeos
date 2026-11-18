@@ -91,8 +91,6 @@ pub struct PreparedRequestMetrics {
     pub provider_tool_schema_bytes: u64,
     pub provider_tool_count: u32,
     pub provider_tool_schema_sha256: String,
-    pub cache_marks_placed: u32,
-    pub cache_marks_skipped: u32,
 }
 
 #[cfg(not(feature = "latency-profiling"))]
@@ -143,6 +141,13 @@ pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<Prepar
         .as_ref()
         .map(|marks| super::cache_marks::apply_cache_marks(&mut converted_messages, marks))
         .unwrap_or_default();
+    if provider.cache_marks.is_some() {
+        tracing::debug!(
+            placed = cache_mark_outcome.placed,
+            skipped = cache_mark_outcome.skipped,
+            "provider:cache_marks"
+        );
+    }
 
     let tool_schema = provider.schemas.as_ref().and_then(|s| s.tools.clone());
     let tools_val = super::tools::serialize_tools(input.tools, &tool_schema);
@@ -358,14 +363,9 @@ pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<Prepar
         provider_tool_schema_bytes,
         provider_tool_count: u32::try_from(input.tools.len()).unwrap_or(u32::MAX),
         provider_tool_schema_sha256,
-        cache_marks_placed: cache_mark_outcome.placed,
-        cache_marks_skipped: cache_mark_outcome.skipped,
     };
     #[cfg(not(feature = "latency-profiling"))]
-    let request_metrics = {
-        let _ = cache_mark_outcome;
-        PreparedRequestMetrics
-    };
+    let request_metrics = PreparedRequestMetrics;
 
     Ok(PreparedProviderRequest {
         transport,
