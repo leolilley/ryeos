@@ -620,8 +620,19 @@ fn a_hidden_status_bar_keeps_only_the_health_dot() {
     );
     assert!(keyed(&rt, "shell:launch").is_none(), "no launch control");
     let [x, y, w, h] = keyed(&rt, "shell:health").expect("the health dot remains");
-    assert!((w - 6.0).abs() < 0.5 && (h - 6.0).abs() < 0.5, "a 6-point dot, not {w}x{h}");
+    assert!(
+        (w - 6.0).abs() < 0.5 && (h - 6.0).abs() < 0.5,
+        "a 6-point dot, not {w}x{h}"
+    );
     // pinned 14 from the right and bottom of a 1280 x 800 window
-    assert!((x + w - (1280.0 - 14.0)).abs() < 1.0, "dot right edge at {}", x + w);
-    assert!((y + h - (800.0 - 14.0)).abs() < 1.0, "dot bottom edge at {}", y + h);
+    assert!(
+        (x + w - (1280.0 - 14.0)).abs() < 1.0,
+        "dot right edge at {}",
+        x + w
+    );
+    assert!(
+        (y + h - (800.0 - 14.0)).abs() < 1.0,
+        "dot bottom edge at {}",
+        y + h
+    );
 }

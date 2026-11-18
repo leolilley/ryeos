@@ -7,8 +7,8 @@ use ryeos_client_base::layout::SplitBranch;
 use ryeos_client_base::ui::event::{RyeOsInputAction, RyeOsTransportFreshness};
 use ryeos_client_base::ui::view_model::{
     RyeOsDialogVm, RyeOsInputVm, RyeOsLayoutNodeVm, RyeOsNoticeVm, RyeOsSplitAxisVm,
-    RyeOsSurfaceChoiceVm, RyeOsTileIntentVm, RyeOsTone, RyeOsTopBarVm,
-    RyeOsViewModel, RyeOsViewSetVm,
+    RyeOsSurfaceChoiceVm, RyeOsTileIntentVm, RyeOsTone, RyeOsTopBarVm, RyeOsViewModel,
+    RyeOsViewSetVm,
 };
 use ryeos_client_base::ui::{RyeOsUiEvent, RyeOsUiIntent};
 
@@ -250,17 +250,23 @@ fn system_bar(vm: &RyeOsViewModel, local: &Local) -> El {
             theme::SWITCHER_WIDTH
         })
         .min_h(0.0)
-        .child(switcher.child(
-        col()
-            .size(theme::SWITCHER_CHIP, 30.0)
-            .center()
-            .radius(theme::RADIUS_ROW)
-            .role("button")
-            .label("Open a Surface")
-            .hover(t.select_fill())
-            .child(crate::icons::glyph(&crate::icons::PLUS, 12.0, t.ink_at(0.40)))
-            .on_press(|app: &mut App| app.ui(RyeOsUiEvent::OpenLauncher)),
-    ))
+        .child(
+            switcher.child(
+                col()
+                    .size(theme::SWITCHER_CHIP, 30.0)
+                    .center()
+                    .radius(theme::RADIUS_ROW)
+                    .role("button")
+                    .label("Open a Surface")
+                    .hover(t.select_fill())
+                    .child(crate::icons::glyph(
+                        &crate::icons::PLUS,
+                        12.0,
+                        t.ink_at(0.40),
+                    ))
+                    .on_press(|app: &mut App| app.ui(RyeOsUiEvent::OpenLauncher)),
+            ),
+        )
 }
 
 /// One open Surface as a chip in the switcher. The current one has the strong
@@ -327,13 +333,11 @@ fn surface_entry(surface: &RyeOsSurfaceChoiceVm, local: &Local) -> El {
             ));
         }
     } else {
-        entry = entry
-            .hover(t.select_fill())
-            .on_press(move |app: &mut App| {
-                app.ui(RyeOsUiEvent::Activate {
-                    intent: select.clone(),
-                });
+        entry = entry.hover(t.select_fill()).on_press(move |app: &mut App| {
+            app.ui(RyeOsUiEvent::Activate {
+                intent: select.clone(),
             });
+        });
     }
     entry
 }
@@ -387,10 +391,7 @@ fn view_set_strip(top_bar: &RyeOsTopBarVm, local: &Local) -> El {
                 Some(crate::Rename { target: RenameTarget::ViewSet(id), .. }) if *id == view_set_id
             );
         let (word, mark) = if tab.active {
-            (
-                theme::medium(theme::TYPE_TITLE),
-                t.ink_at(0.90),
-            )
+            (theme::medium(theme::TYPE_TITLE), t.ink_at(0.90))
         } else {
             (theme::ui(13.5), t.ink.alpha(0.0))
         };
@@ -488,7 +489,11 @@ fn view_set_strip(top_bar: &RyeOsTopBarVm, local: &Local) -> El {
                 .role("button")
                 .label("New view set")
                 .hover(t.select_fill())
-                .child(crate::icons::glyph(&crate::icons::PLUS, 15.0, t.ink_at(0.40)))
+                .child(crate::icons::glyph(
+                    &crate::icons::PLUS,
+                    15.0,
+                    t.ink_at(0.40),
+                ))
                 .on_press(|app: &mut App| {
                     app.ui(RyeOsUiEvent::Activate {
                         intent: RyeOsUiIntent::NewViewSet,
@@ -994,7 +999,11 @@ fn status_bar(vm: &RyeOsViewModel) -> El {
             },
         )
         .hover(t.select_fill())
-        .child(crate::icons::glyph(&crate::icons::PLUS, 11.0, t.ink_at(0.60)));
+        .child(crate::icons::glyph(
+            &crate::icons::PLUS,
+            11.0,
+            t.ink_at(0.60),
+        ));
     let launcher = row()
         .key("shell:launch")
         .role("button")
@@ -1003,17 +1012,13 @@ fn status_bar(vm: &RyeOsViewModel) -> El {
         .center_y()
         .child(chip)
         .on_press(|app: &mut App| app.ui(RyeOsUiEvent::OpenLauncher));
-    let keys = island()
-        .min_w(0.0)
-        .gap(6.0)
-        .child(launcher)
-        .child(
-            text(theme::drawable(&model.key_hint, theme::Face::Ui).into_owned())
-                .font(theme::TYPE_MICRO)
-                .color(t.ink_at(0.55))
-                .truncate()
-                .min_w(0.0),
-        );
+    let keys = island().min_w(0.0).gap(6.0).child(launcher).child(
+        text(theme::drawable(&model.key_hint, theme::Face::Ui).into_owned())
+            .font(theme::TYPE_MICRO)
+            .color(t.ink_at(0.55))
+            .truncate()
+            .min_w(0.0),
+    );
     let mut status = island();
     // Attention tints only a dot.
     if let Some(color) = model.attention.and_then(|tone| t.tone(tone)) {
@@ -1075,7 +1080,12 @@ fn status_bar(vm: &RyeOsViewModel) -> El {
 fn notices(notices: &[RyeOsNoticeVm], documents: &[(DocumentOffer, Option<String>)]) -> El {
     let p = Palette::get();
     let mut stack = col()
-        .pin(None, None, Some(20.0), Some(theme::STATUS_BAR_HEIGHT + 18.0))
+        .pin(
+            None,
+            None,
+            Some(20.0),
+            Some(theme::STATUS_BAR_HEIGHT + 18.0),
+        )
         .w(390.0)
         .gap(8.0);
     for (offer, link) in documents {
