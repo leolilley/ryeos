@@ -8,6 +8,7 @@
 
 use anyhow::{Context as _, Result};
 use ryeos_directive_definition::{ReasoningConfig, SamplingConfig};
+use ryeos_runtime::cognition::{CognitionFramePayload, FrameComponent};
 use ryeos_runtime::{CognitionInput, FrameRecord, FrameRequestOptions};
 
 use crate::directive::{ProviderMessage, ProviderMessageExt, ToolSchema};
@@ -96,6 +97,20 @@ pub fn messages_of(inputs: &[CognitionInput]) -> Vec<ProviderMessage> {
     inputs.iter().flat_map(input_messages).collect()
 }
 
+/// The first frame component the launch changes that the provider entry
+/// refuses to see change within one conversation, or `None` when the launch
+/// may record its frame as the next one.
+pub fn refused_frame_change(
+    recorded: &CognitionFramePayload,
+    launch: &CognitionFramePayload,
+    refuse_change_of: &[FrameComponent],
+) -> Option<FrameComponent> {
+    recorded
+        .differing_components(launch)
+        .into_iter()
+        .find(|component| refuse_change_of.contains(component))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,5 +177,44 @@ mod tests {
         assert!(one.payload.same_as(&again.payload));
         assert!(!one.payload.same_as(&source(&[]).payload));
         assert_eq!(one.payload.request_options.max_output_tokens, None);
+    }
+
+    #[test]
+    fn only_a_listed_component_makes_a_frame_change_refused() {
+        let frame = |system: &str, reasoning: Option<ReasoningConfig>| {
+            build_frame(
+                1,
+                &FrameSource {
+                    system_prompt: Some(system),
+                    inventory: &[],
+                    model: "m",
+                    reasoning: reasoning.as_ref(),
+                    sampling: None,
+                    max_output_tokens: 0,
+                    provider_config_hash: &"ab".repeat(32),
+                },
+            )
+            .unwrap()
+            .payload
+        };
+        let high = ReasoningConfig {
+            mode: ryeos_directive_definition::ReasoningMode::Enabled,
+            effort: Some("high".to_string()),
+        };
+        let recorded = frame("sys", None);
+        let changed_effort = frame("sys", Some(high));
+        assert_eq!(
+            refused_frame_change(&recorded, &changed_effort, &[FrameComponent::Reasoning]),
+            Some(FrameComponent::Reasoning)
+        );
+        assert_eq!(
+            refused_frame_change(&recorded, &changed_effort, &[FrameComponent::System]),
+            None
+        );
+        assert_eq!(refused_frame_change(&recorded, &changed_effort, &[]), None);
+        assert_eq!(
+            refused_frame_change(&recorded, &recorded.clone(), &[FrameComponent::System]),
+            None
+        );
     }
 }
