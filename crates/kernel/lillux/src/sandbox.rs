@@ -2712,7 +2712,7 @@ mod imp {
     }
 
     fn launch_with_stdio_and_loopback(
-        mut request: LinuxSandboxRequest,
+        request: LinuxSandboxRequest,
         stdio: Option<&[std::fs::File; 3]>,
         ingress: Option<std::net::SocketAddr>,
         private_source: Option<&LinuxSealedPrivateSourceFilesystem>,
@@ -2769,24 +2769,18 @@ mod imp {
             .any(|mount| !sources.contains_key(&mount.source_fd))
             .then(SealedSourceStaging::create)
             .transpose()?;
+        // Sealed sources are copied and pinned just before their first mount
+        // and released after their last, so descriptor use stays bounded by
+        // the sources in flight, not by the number of mounts. Reanchored
+        // sources were opened above, before the private root hid their paths.
+        let mut remaining_uses = BTreeMap::<u32, usize>::new();
         for mount in &request.mounts {
-            if let std::collections::btree_map::Entry::Vacant(entry) =
-                sources.entry(mount.source_fd)
+            *remaining_uses.entry(mount.source_fd).or_default() += 1;
+            if !sources.contains_key(&mount.source_fd)
+                && mount.access != LinuxSandboxMountAccess::ReadOnly
             {
-                if mount.access != LinuxSandboxMountAccess::ReadOnly {
-                    return Err("sealed mount source cannot grant writable access".to_string());
-                }
-                let staging = sealed_staging
-                    .as_ref()
-                    .ok_or_else(|| "sealed source lacks private staging authority".to_string())?;
-                entry.insert(materialize_sealed_mount_source(
-                    raw_fd(mount.source_fd)?,
-                    &staging.content,
-                )?);
+                return Err("sealed mount source cannot grant writable access".to_string());
             }
-        }
-        for mount in &mut request.mounts {
-            mount.source_fd = sources[&mount.source_fd].inherited_descriptor()?;
         }
         // The detached template is NOT an ordinary mount source: reanchoring
         // it would replace the admitted filesystem with unrelated path bytes.
@@ -2803,31 +2797,61 @@ mod imp {
             create_directory_target(&rooted(&overlay.destination)?)?;
             mount_overlay(overlay)?;
         }
-        let mut mounts = request.mounts.clone();
+        // The flag marks mounts whose source_fd is still the request's
+        // original descriptor; descendants carry their own retained source.
+        let mut mounts = request
+            .mounts
+            .iter()
+            .cloned()
+            .map(|mount| (mount, true))
+            .collect::<Vec<_>>();
         let mut overlay_descendant_sources = Vec::new();
         if let Some(overlay) = &request.overlay {
             for descendant in &overlay.writable_descendant_mounts {
                 let source = reanchor_overlay_descendant_source(&overlay.destination, descendant)?;
-                mounts.push(LinuxSandboxMount {
-                    source_fd: source.inherited_descriptor()?,
-                    destination: descendant.destination.clone(),
-                    access: LinuxSandboxMountAccess::Writable,
-                    layer: 10,
-                });
+                mounts.push((
+                    LinuxSandboxMount {
+                        source_fd: source.inherited_descriptor()?,
+                        destination: descendant.destination.clone(),
+                        access: LinuxSandboxMountAccess::Writable,
+                        layer: 10,
+                    },
+                    false,
+                ));
                 overlay_descendant_sources.push(source);
             }
         }
-        mounts.sort_by(|left, right| {
+        mounts.sort_by(|(left, _), (right, _)| {
             left.layer
                 .cmp(&right.layer)
                 .then_with(|| left.destination.cmp(&right.destination))
         });
-        for (index, mount) in mounts.iter().enumerate() {
+        let ordered = mounts
+            .iter()
+            .map(|(mount, _)| mount.clone())
+            .collect::<Vec<_>>();
+        let mut final_identities = BTreeMap::<PathBuf, FinalMountIdentity>::new();
+        for (index, (admitted, from_request)) in mounts.iter().enumerate() {
+            let original = admitted.source_fd;
+            let mut mount = admitted.clone();
+            if *from_request {
+                if let std::collections::btree_map::Entry::Vacant(entry) = sources.entry(original) {
+                    let staging = sealed_staging.as_ref().ok_or_else(|| {
+                        "sealed source lacks private staging authority".to_string()
+                    })?;
+                    entry.insert(materialize_sealed_mount_source(
+                        raw_fd(original)?,
+                        &staging.content,
+                    )?);
+                }
+                mount.source_fd = sources[&original].inherited_descriptor()?;
+            }
+            let mount = &mount;
             prepare_descriptor_mount_target(
                 &mount.destination,
                 descriptor_kind(mount.source_fd)?,
                 request.overlay.as_ref().map(|overlay| &overlay.destination),
-                &mounts[..index],
+                &ordered[..index],
             )
             .map_err(|error| format!("prepare mount {}: {error}", mount.destination.display()))?;
             bind_descriptor_mount(mount)
@@ -2842,6 +2866,21 @@ mod imp {
             {
                 fixed_parents::install(mount, view, index)?;
             }
+            // Keep identity as plain data: the descriptor is released below
+            // and is never consulted again.
+            final_identities.insert(
+                mount.destination.clone(),
+                final_mount_identity(mount.source_fd)?,
+            );
+            if *from_request {
+                let uses = remaining_uses
+                    .get_mut(&original)
+                    .ok_or("mount source use count is missing")?;
+                *uses -= 1;
+                if *uses == 0 {
+                    sources.remove(&original);
+                }
+            }
         }
         if let Some(staging) = sealed_staging {
             staging.detach()?;
@@ -2853,8 +2892,14 @@ mod imp {
         ensure_regular_path(&executable, "sandbox executable")?;
         let cwd = rooted(&request.cwd)?;
         ensure_directory_path(&cwd, "sandbox cwd")?;
-        spawn_target(request, stdio, occupancy, terminal_writer)
-            .map(|process| (process, loopback_source))
+        spawn_target(
+            request,
+            &final_identities,
+            stdio,
+            occupancy,
+            terminal_writer,
+        )
+        .map(|process| (process, loopback_source))
     }
 
     fn validate_request(request: &LinuxSandboxRequest) -> Result<(), String> {
@@ -4500,6 +4545,7 @@ mod imp {
 
     fn verify_final_descriptor_mounts(
         request: &LinuxSandboxRequest,
+        identities: &BTreeMap<PathBuf, FinalMountIdentity>,
     ) -> Result<LinuxSandboxMountPreparationReceipt, String> {
         let mut observed = Vec::with_capacity(
             request.mounts.len()
@@ -4509,7 +4555,10 @@ mod imp {
                     .map_or(0, |overlay| overlay.writable_descendant_mounts.len()),
         );
         for mount in &request.mounts {
-            let (kind, read_only) = verify_final_descriptor_mount(mount)?;
+            let identity = identities
+                .get(&mount.destination)
+                .ok_or("final target mount lost its recorded source identity")?;
+            let (kind, read_only) = verify_final_identity_mount(mount, identity)?;
             observed.push((&mount.destination, kind, read_only));
         }
         if let Some(overlay) = &request.overlay {
@@ -4641,11 +4690,38 @@ mod imp {
         })
     }
 
-    fn verify_final_descriptor_mount(mount: &LinuxSandboxMount) -> Result<(u8, bool), String> {
-        let source = mount_source_stat(raw_fd(mount.source_fd)?)?;
+    /// Source identity recorded while the descriptor was live. The descriptor
+    /// is released right after its last mount, so the final-root check
+    /// compares against this data instead of a descriptor.
+    struct FinalMountIdentity {
+        kind: libc::mode_t,
+        inode: Option<(libc::dev_t, libc::ino_t)>,
+    }
+
+    fn final_mount_identity(fd: u32) -> Result<FinalMountIdentity, String> {
+        let source = mount_source_stat(raw_fd(fd)?)?;
         let kind = source.st_mode & libc::S_IFMT;
-        let inode = (kind != libc::S_IFDIR).then_some((source.st_dev, source.st_ino));
-        verify_final_mount_view(&mount.destination, kind, mount.access, inode)
+        Ok(FinalMountIdentity {
+            kind,
+            inode: (kind != libc::S_IFDIR).then_some((source.st_dev, source.st_ino)),
+        })
+    }
+
+    fn verify_final_identity_mount(
+        mount: &LinuxSandboxMount,
+        identity: &FinalMountIdentity,
+    ) -> Result<(u8, bool), String> {
+        verify_final_mount_view(
+            &mount.destination,
+            identity.kind,
+            mount.access,
+            identity.inode,
+        )
+    }
+
+    #[cfg(test)]
+    fn verify_final_descriptor_mount(mount: &LinuxSandboxMount) -> Result<(u8, bool), String> {
+        verify_final_identity_mount(mount, &final_mount_identity(mount.source_fd)?)
     }
 
     fn verify_final_mount_view(
@@ -5095,6 +5171,7 @@ mod imp {
 
     fn spawn_target(
         request: LinuxSandboxRequest,
+        final_identities: &BTreeMap<PathBuf, FinalMountIdentity>,
         stdio: Option<&[std::fs::File; 3]>,
         mut occupancy: Option<&mut crate::exec::PendingNamespaceWatchdog>,
         terminal_writer: Option<&crate::InheritedDescriptorAuthority>,
@@ -5125,7 +5202,6 @@ mod imp {
             .target_channels
             .iter()
             .map(|(source, _)| raw_fd(*source))
-            .chain(request.mounts.iter().map(|mount| raw_fd(mount.source_fd)))
             .collect::<Result<BTreeSet<_>, _>>()?;
         if let Some(stdio) = stdio {
             preserved.extend(stdio.iter().map(std::os::fd::AsRawFd::as_raw_fd));
@@ -5284,6 +5360,7 @@ mod imp {
             close_fd(applied_launch[0]);
             let outcome = child_target_main(
                 &request,
+                final_identities,
                 ready[1],
                 launch_failure[1],
                 applied_launch[1],
@@ -5383,6 +5460,7 @@ mod imp {
 
     fn child_target_main(
         request: &LinuxSandboxRequest,
+        final_identities: &BTreeMap<PathBuf, FinalMountIdentity>,
         ready_fd: RawFd,
         launch_failure_fd: RawFd,
         applied_launch_fd: RawFd,
@@ -5408,7 +5486,7 @@ mod imp {
         // Earlier attachment checks ran against the private root before pivot.
         // Recheck the target view after layering, fixed-parent changes and pivot,
         // while admitted descriptors are live and before readiness or exec.
-        let mount_preparation = verify_final_descriptor_mounts(request)?;
+        let mount_preparation = verify_final_descriptor_mounts(request, final_identities)?;
         let mut mapped_channels = Vec::with_capacity(request.target_channels.len());
         if let Some(stdio) = stdio {
             use std::os::fd::AsRawFd as _;
@@ -7531,6 +7609,97 @@ mod imp {
                     "piped-extra component control failed: {error}; bounded cleanup: {cleanup:?}"
                 );
             }
+        }
+
+        #[test]
+        fn sealed_mount_descriptors_do_not_scale_with_mount_count() {
+            // At two descriptors per mount (retained pin plus inherited
+            // source) this many mounts cannot fit under the limit below.
+            const MOUNTS: usize = 100;
+            const LIMIT: libc::rlim_t = 190;
+            // Namespace creation needs a single-threaded process and the
+            // limit must not leak into the harness, so the work runs in a
+            // forked child that reports through its exit status.
+            let pid = unsafe { libc::fork() };
+            assert!(pid >= 0);
+            if pid != 0 {
+                let mut status = 0;
+                assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+                assert!(
+                    libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+                    "forked preparation child failed: status {status}"
+                );
+                return;
+            }
+            let outcome = std::panic::catch_unwind(|| {
+                let sources = ["/bin", "/usr", "/lib", "/lib64"]
+                    .into_iter()
+                    .filter(|path| Path::new(path).exists())
+                    .map(|path| {
+                        (
+                            PathBuf::from(path),
+                            crate::secure_fs::pin_canonical_mount_source(
+                                &std::fs::canonicalize(path).unwrap(),
+                            )
+                            .unwrap(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let sealed = (0..MOUNTS)
+                    .map(|index| {
+                        crate::sealed_memfd(c"many-sealed-mounts", format!("{index}").as_bytes())
+                            .unwrap()
+                    })
+                    .collect::<Vec<_>>();
+                let mut request = super::super::tests::minimal_request();
+                // Setup refuses symlinked executables, so name the resolved shell.
+                request.executable = std::fs::canonicalize("/bin/sh").unwrap();
+                request.argv0 = "sh".into();
+                request.cwd = "/".into();
+                request.arguments = vec!["-c".into(), "exit 0".into()];
+                request.mounts = sources
+                    .iter()
+                    .map(|(destination, source)| LinuxSandboxMount {
+                        source_fd: source.inherited_descriptor().unwrap(),
+                        destination: destination.clone(),
+                        access: LinuxSandboxMountAccess::ReadOnly,
+                        layer: 0,
+                    })
+                    .chain(
+                        sealed
+                            .iter()
+                            .enumerate()
+                            .map(|(index, source)| LinuxSandboxMount {
+                                source_fd: source.inherited_descriptor().unwrap(),
+                                destination: PathBuf::from(format!("/sealed/{index}")),
+                                access: LinuxSandboxMountAccess::ReadOnly,
+                                layer: 0,
+                            }),
+                    )
+                    .collect();
+                let expected = LinuxSandboxMountPreparationCommitments::from_admitted_mounts(
+                    &request.mounts,
+                    &[],
+                )
+                .unwrap();
+                // The sandbox child inherits this limit. Every descriptor already
+                // open stays valid; only new allocations are bounded.
+                let limit = libc::rlimit {
+                    rlim_cur: LIMIT,
+                    rlim_max: LIMIT,
+                };
+                assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+                let deadline =
+                    crate::time::MonotonicDeadline::after(std::time::Duration::from_secs(10));
+                let (mut held, pipes) = super::super::prepare_linux_sandbox_piped(request)
+                    .expect("preparation must not exhaust descriptors");
+                let observed = held.mount_preparation_receipt();
+                let cleanup = held.terminate_namespace_for_export_until(deadline);
+                drop((held, pipes, sources, sealed));
+                let observed = observed.expect("mount preparation receipt");
+                assert!(observed.matches_commitments(&expected), "{cleanup:?}");
+            });
+            unsafe { libc::_exit(i32::from(outcome.is_err())) };
         }
 
         #[test]

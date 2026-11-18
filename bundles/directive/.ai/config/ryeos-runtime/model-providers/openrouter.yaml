@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-11T02:28:27Z:7de314ecf22491706fdfc9c24fca9986605d3c7d791781ed073d42f49f7df668:koIInz6gXMqZ6HoIxjch/zJjQ4eYE7e339c7emc7ZC2rzCZByKNwpVzUMYbDDuUPQpT8l20CUFR/LEI6nzDQDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T17:48:41Z:40f144119b7fb9e73beae282786d2f09fe593bd76db555c81e35f8a2827ddcea:O+RL0PD1vbWWwIce/zSxjkIBXUcEA7/E9fnO/1+o9VmaDPCNDoP5ks4B1iIsPJnReiDXsX2FyU1bPUQgGw4TDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
 family: chat_completions
 transport:
@@ -62,6 +62,14 @@ schemas:
         finish_reasons: [error]
         code_path: code
         metadata_path: metadata
+  reasoning:
+    capture:
+      - {id: text, kind: text_delta, fields: [reasoning_content, reasoning]}
+    replay:
+      placements:
+        - from: text
+          into: {message_field: reasoning_content}
+          scope: all
   output_limit: {path: max_tokens, semantics: provider_native_output_tokens}
 body_template:
   model: "{model}"
