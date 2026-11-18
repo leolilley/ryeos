@@ -407,6 +407,7 @@ mod tests {
                 chrome_hidden: false,
                 background_transparent: false,
                 input: None,
+                authorship: None,
             }),
             focused_tile: "1".into(),
             center_is_empty: false,

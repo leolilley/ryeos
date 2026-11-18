@@ -150,5 +150,102 @@ fn typed_operator_refusal(error: &(dyn std::error::Error + 'static)) -> Option<H
     {
         return Some(delegation_handler_error(refusal));
     }
+    if let Some(engine_error) = error.downcast_ref::<ryeos_engine::error::EngineError>() {
+        return project_shadow_handler_error(engine_error);
+    }
     None
+}
+
+/// Stable code for a ref left unavailable because a project file shadows an
+/// installed bundle item of a kind that refuses it.
+pub const PROJECT_SHADOWS_BUNDLE_ITEM_CODE: &str = "project_shadows_bundle_item";
+
+/// The structured response for a project file shadowing an installed bundle
+/// item of a kind whose signed schema refuses it: 409 because the request is
+/// well formed and the conflict is in the project's files, with both files
+/// named so the operator can move the project one.
+pub fn project_shadow_handler_error(
+    error: &ryeos_engine::error::EngineError,
+) -> Option<HandlerError> {
+    use ryeos_engine::error::EngineError;
+
+    match error {
+        EngineError::Shared(inner) => project_shadow_handler_error(inner),
+        EngineError::ProjectShadowsBundleItem {
+            canonical_ref,
+            kind,
+            bundle,
+            project_path,
+            bundle_path,
+        } => Some(HandlerError::Structured {
+            code: PROJECT_SHADOWS_BUNDLE_ITEM_CODE.to_owned(),
+            status: 409,
+            body: serde_json::json!({
+                "code": PROJECT_SHADOWS_BUNDLE_ITEM_CODE,
+                "error": error.to_string(),
+                "item_ref": canonical_ref,
+                "kind": kind,
+                "bundle": bundle,
+                "project_path": project_path.display().to_string(),
+                "bundle_path": bundle_path.display().to_string(),
+                "retryable": false,
+                "remediation": "rename or remove the project file",
+            }),
+        }),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod project_shadow_tests {
+    use super::*;
+
+    fn refusal() -> ryeos_engine::error::EngineError {
+        ryeos_engine::error::EngineError::ProjectShadowsBundleItem {
+            canonical_ref: "surface:shared/root".to_owned(),
+            kind: "surface".to_owned(),
+            bundle: "shipper".to_owned(),
+            project_path: "/project/.ai/surfaces/shared/root.yaml".into(),
+            bundle_path: "/bundles/shipper/.ai/surfaces/shared/root.yaml".into(),
+        }
+    }
+
+    /// A handler that fails on the engine's shadow refusal answers with the
+    /// stable code and a message naming the project file and the bundle,
+    /// whether the refusal is the error itself, shared, or under context.
+    #[test]
+    fn project_shadow_refusal_becomes_a_named_conflict_with_both_files() {
+        let direct = anyhow::Error::new(refusal());
+        let shared = anyhow::Error::new(ryeos_engine::error::EngineError::Shared(
+            std::sync::Arc::new(refusal()),
+        ));
+        let wrapped = anyhow::Error::new(refusal()).context("compile the project surface");
+        for error in [direct, shared, wrapped] {
+            match extract_handler_error(&error) {
+                Some(HandlerError::Structured { code, status, body }) => {
+                    assert_eq!(code, PROJECT_SHADOWS_BUNDLE_ITEM_CODE);
+                    assert_eq!(status, 409);
+                    assert_eq!(body["item_ref"], "surface:shared/root");
+                    assert_eq!(body["bundle"], "shipper");
+                    assert_eq!(
+                        body["project_path"],
+                        "/project/.ai/surfaces/shared/root.yaml"
+                    );
+                    let message = body["error"].as_str().expect("message");
+                    assert!(message.contains("surface:shared/root"), "{message}");
+                    assert!(message.contains("shipper"), "{message}");
+                    assert!(message.contains("unavailable"), "{message}");
+                }
+                other => panic!("expected the named shadow conflict, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn other_engine_errors_are_not_mapped_to_the_shadow_conflict() {
+        let error = anyhow::Error::new(ryeos_engine::error::EngineError::UnsupportedKind {
+            kind: "widget".to_owned(),
+        });
+        assert!(extract_handler_error(&error).is_none());
+    }
 }

@@ -81,20 +81,12 @@ fn session_context(
 ) -> ryeos_ui::browser_session::LaunchContext {
     // A real, signed Config root; never a Surface masquerading as Config.
     let body = "category: test\nversion: '1'\nshared_presentation:\n  schema: 2\n  title: Test presentation\n  launcher: launch\n  dialogs:\n    - id: launch\n      title: Launch\n      view: 'view:ryeos/home'\n  capabilities:\n    sources: []\n    affordances: []\n";
-    let key = lillux::crypto::load_signing_key(
-        &ryeos_engine::test_support::workspace_root().join(".dev-keys/PUBLISHER_DEV.pem"),
-    )
-    .expect("established development publisher key");
-    let dir = state.config.app_root.join(".ai/config/test");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("presentation.yaml"),
-        lillux::signature::sign_content(body, &key, "#", None),
-    )
-    .unwrap();
-    // The Config lives in the project space of the fixture application root,
-    // so its binding is the one the daemon would mint: the engine's own
-    // effective identity of the Config and of its View closure.
+    // The shell's presentation Config is read from installed bundles only,
+    // so the fixture Config is an item of the state's fixture bundle. Its
+    // binding is the one the daemon would mint: the engine's own effective
+    // identity of the Config, resolved with no project, and of its View
+    // closure, resolved under the session project.
+    test_state::write_fixture_bundle_item(state, "config/test/presentation.yaml", body);
     let project_root = state.config.app_root.canonicalize().unwrap();
     let mut context = launch_context(
         "config:test/presentation",
@@ -109,21 +101,19 @@ fn session_context(
     let embedded = state
         .engine
         .with_checked_bundle_generation(|generation| -> anyhow::Result<_> {
-            let root = generation.effective_item_under_project_authority(
-                ryeos_engine::engine::EffectiveItemRequest {
+            let root =
+                generation.effective_item(ryeos_engine::engine::EffectiveItemRequest {
                     logical_project_root: None,
                     item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(
                         "config:test/presentation",
                     )?,
                     expected_kind: Some("config".into()),
-                    project_root: Some(project_root.clone()),
+                    project_root: None,
                     subject_resolution_authority:
                         ryeos_engine::contracts::SubjectResolutionAuthority::for_live_project_root(
-                            Some(&project_root),
+                            None,
                         ),
-                },
-                authority.as_ref(),
-            )?;
+                })?;
             ryeos_api::surface_views::resolve_effective_ui_view_closure_in_generation(
                 generation,
                 Some(&project_root),
@@ -1117,10 +1107,7 @@ async fn prepare_refuses_an_item_edited_in_place_although_composes_are_cached() 
     assert!(after_retry.hits > after_prepare.hits);
 
     // Edit the Config in place: same ref, same signer, different content.
-    let path = state
-        .config
-        .app_root
-        .join(".ai/config/test/presentation.yaml");
+    let path = test_state::fixture_bundle_root(&state).join(".ai/config/test/presentation.yaml");
     let original = std::fs::read_to_string(&path).unwrap();
     let body: String = original
         .lines()
@@ -2825,10 +2812,11 @@ async fn an_executable_admission_the_signed_binding_does_not_declare_is_refused_
         .await
         .expect_err("a preparation the signed binding does not declare must be refused");
     let message = format!("{error:#}");
-    // The validator refuses with Forbidden, which the service dispatch maps
-    // to a capability denial; the retired stopgap refused with a bad request.
+    // The validator refuses with Forbidden, which the service dispatch
+    // reports as the service's own refusal; the retired stopgap refused with
+    // a bad request.
     assert!(
-        message.contains("service_cap_denied"),
+        message.contains("service_refused"),
         "the signed-binding validator must refuse: {message}"
     );
     assert_eq!(

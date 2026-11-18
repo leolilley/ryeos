@@ -93,6 +93,10 @@ pub struct SurfaceSpec {
     pub instruments: Vec<InstrumentSpec>,
     #[serde(default)]
     pub capabilities: Option<SurfaceCapabilitySpec>,
+    /// Daemon-stamped marker, present only when this Surface is
+    /// project-authored. Absent for bundle Surfaces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorship: Option<crate::ui::content::ItemAuthorship>,
 }
 
 /// One declared launcher group: a titled, ordered set of view refs.
@@ -661,6 +665,7 @@ pub fn builtin_default() -> SurfaceSpec {
         affordances: Vec::new(),
         instruments: Vec::new(),
         capabilities: None,
+        authorship: None,
     }
 }
 

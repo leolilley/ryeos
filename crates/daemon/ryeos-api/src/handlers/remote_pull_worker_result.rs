@@ -596,7 +596,7 @@ fn validate_local_base(
     if policy.sync_scope != ProjectSyncScope::FullProject {
         bail!("hosted worker-result pull requires a full_project admitted base");
     }
-    ryeos_state::project_sync::validate_project_tree_paths(&tree, &policy)?;
+    ryeos_state::project_sync::validate_stored_project_tree_paths(&tree, &policy)?;
     ryeos_state::project_sync::validate_captured_policy_source(&cas, &tree, &policy)?;
     drop(guard);
     Ok((authority, tree))

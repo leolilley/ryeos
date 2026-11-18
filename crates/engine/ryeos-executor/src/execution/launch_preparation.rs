@@ -4075,6 +4075,7 @@ fn map_binding_resolution_error(
         | ResolutionError::IntegrityFailure { .. }
         | ResolutionError::MetadataAnchoringFailed { .. }
         | ResolutionError::KindNotExecutable { .. }
+        | ResolutionError::ProjectShadowsBundleItem { .. }
         | ResolutionError::ComposedValueContractViolation { .. } => preparation_error_with_binding(
             "ref_binding_resolution_failed",
             format!("binding `{binding}` has an invalid definition: {detail}"),

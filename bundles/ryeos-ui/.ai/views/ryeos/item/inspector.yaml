@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-19T22:29:40Z:6ce3090ff23aee82dbb0df6e1a856f1d963005dd6b9ac856cf3b05464dd71f0a:IM6VDalaZHF+97os8WNBy7CDDuoM6jcFpbr8bI6RL/3Bb2qW6sTnE+I3sLLio7vO0oPfGhEJ2jXyMzobYHaBDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T11:51:40Z:d97fc536465e41fb8d8a8f073bf90bbb205edeb994fbef60f1d673050216450a:ziyU5XVUwMnyfJPjjmeWYKfK9SQVsK4ke9DYWKjOkwaRnfQ/D6JYVc11xoN00RfKk4/ozfTDbR+1KjABhO0NBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: item-inspector
 version: "1.0.0"
 description: Key-value inspection of the selection — an item (provenance first), or an inspected summary (an error terminal's full event)
@@ -18,7 +18,9 @@ sources:
       include_effective: true
 projections:
   detail:
+    - item.title
     - item.canonical_ref
+    - item.title_source
     - item.item_kind
     - item.space
     - item.executable

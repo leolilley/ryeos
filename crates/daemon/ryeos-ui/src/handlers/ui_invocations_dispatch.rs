@@ -36,6 +36,9 @@ use crate::{seat_auth::SeatCaller, thread_authorization::authorize_exact_thread_
 struct BoundInvocation {
     target: CompiledUiTarget,
     params: Value,
+    /// Whether the bound entry is a source a project-authored item declared.
+    /// Read from the retained compiled binding, never from the request.
+    project_authored_source: bool,
 }
 
 pub(crate) fn validate_prepared_operation_binding(
@@ -254,6 +257,7 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
                 prepared.project_content.as_ref(),
             )?;
             super::ui_launch_mint::compile_target(generation, &prepared, &item_ref)
+                .map_err(ui_target_refusal_to_handler)
         })?;
     if current != bound.target {
         return Err(binding_stale(
@@ -371,10 +375,11 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
         } else {
             None
         };
-    let mut result = crate::seat_auth::with_compiled_ui_session(
+    let mut result = crate::seat_auth::with_compiled_ui_source_session(
         &session,
         attachment.clone(),
         Some(producer.clone()),
+        bound.project_authored_source,
         async {
             if bound.target.source_safe {
                 execute_read_only_service(
@@ -1133,6 +1138,7 @@ fn resolve_binding_request(
                 }
             }
             Ok(BoundInvocation {
+                project_authored_source: false,
                 target: surface_route.target.clone(),
                 params: Value::Object(params.clone()),
             })
@@ -1153,6 +1159,7 @@ fn resolve_binding_request(
                     )
                 })?;
             Ok(BoundInvocation {
+                project_authored_source: source.project_authored,
                 target: source.target.clone(),
                 params: bind_source_parameters(source, params, project_root)?,
             })
@@ -1269,6 +1276,7 @@ fn resolve_binding_request(
             };
             let params = resolve_session_markers(&params, project_root)?;
             Ok(BoundInvocation {
+                project_authored_source: false,
                 target: target.clone(),
                 params,
             })
@@ -1747,6 +1755,25 @@ fn map_dispatch_error(error: anyhow::Error) -> HandlerError {
         .downcast::<ryeos_executor::dispatch_error::DispatchError>()
         .unwrap_or_else(ryeos_executor::dispatch_error::DispatchError::Internal);
     dispatch_error_to_handler(error)
+}
+
+/// Answer a refused binding target with its own name. A target of a kind
+/// that is not a service is refused again here, at dispatch, whatever a
+/// retained binding says.
+fn ui_target_refusal_to_handler(error: anyhow::Error) -> anyhow::Error {
+    match error.downcast_ref::<crate::compiled_binding::UiTargetRefusal>() {
+        Some(refusal) => HandlerError::Structured {
+            code: refusal.code().to_owned(),
+            status: 403,
+            body: json!({
+                "code": refusal.code(),
+                "error": refusal.to_string(),
+                "retryable": false,
+            }),
+        }
+        .into(),
+        None => error,
+    }
 }
 
 fn dispatch_error_to_handler(error: ryeos_executor::dispatch_error::DispatchError) -> HandlerError {

@@ -1,0 +1,153 @@
+# ryeos:signed:2026-08-10T10:56:47Z:c566fb88358a7af0e28b6c24bac3df74eef8a608cc7bda1ee8e16bf976b81a9d:HygCWsYXxxuVvk1aOKR8O+Tmzl8Trl2yjlTNDlbgp0+Ga4oefefP+P+aJDvRLz2EdfqIVJOh/I1IDF9tWQ5zDA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
+name: farm-project-field
+title: Farm project field
+version: "1.0.0"
+description: "Kaggriculture campaign structure, match-run lanes keyed by matchup, and farm execution evidence over generic RyeOS field facts."
+
+widget: field
+sources:
+  project:
+    ref: service:ui/ryeos-ui/field/project
+    params: {}
+  runs:
+    ref: service:ui/ryeos-ui/field/runs
+    params:
+      item_ref: graph:farm/match
+      limit: 500
+  execution:
+    ref: service:ui/ryeos-ui/field/execution
+    params:
+      thread_id: "@facet:selection.thread_id"
+      cursor: "@field:cursor"
+      expansions: "@field:expansions"
+      max_depth: 32
+      max_nodes: 1000
+projections:
+  schema_version: ryeos.ui.field.projection.v1
+  groups:
+    - { id: program, label: Farm program, layout: flow }
+    - { id: match, label: Match definition, parent: program, layout: flow }
+    - { id: runs, label: Match runs, layout: lanes }
+    - { id: economy, label: Day economics, layout: lanes }
+    - { id: ladder, label: Ladder evidence, layout: stack }
+  layers:
+    - { id: structure, label: Signed structure, default_visible: true }
+    - { id: runs, label: Runs, default_visible: true }
+    - { id: economy, label: Match evidence, default_visible: true }
+    - { id: ladder, label: Ladder evidence, default_visible: true }
+  entity_rules:
+    - match: { source: project, kind: item_ref, canonical_ref: graph:farm/match }
+      set: { role: match-entry, group: match, layer: structure, shape: capsule, emphasis: strong, tone: accent }
+    - match: { source: project, kind: graph_definition, canonical_ref: graph:farm/match }
+      set: { role: match-definition, group: match, layer: structure, shape: hex, fill: hollow, emphasis: strong }
+    - match: { source: project, kind: graph_node, canonical_ref: graph:farm/match }
+      set: { role: match-node, group: match, layer: structure, shape: rect, fill: hollow }
+    - match: { source: project, kind: graph_definition }
+      set: { role: graph-definition, group: program, layer: structure, shape: hex, fill: hollow }
+    - match: { source: project, kind: graph_node }
+      set: { role: graph-node, group: program, layer: structure, shape: rect, fill: hollow, emphasis: quiet }
+    - match: { source: runs, kind: run_summary }
+      set:
+        role: match-run
+        group: runs
+        layer: runs
+        lane: "{attributes.thread.facets.game}"
+        shape: capsule
+        tone:
+          field: status
+          map: { running: accent, completed: good, failed: danger, cancelled: warn }
+          default: neutral
+        motion:
+          field: status
+          map: { running: pulse }
+          default: none
+        secondary: "{attributes.thread.facets.fleet}"
+    - match: { source: execution, kind: hook_observation, attributes.observation.kind: farm.day_summary }
+      set:
+        role: day-summary
+        group: economy
+        layer: economy
+        lane: "{attributes.thread.facets.game}"
+        order: "{attributes.observation.payload.day}"
+        shape: rect
+        fill: hollow
+        label: "d{attributes.observation.payload.day}"
+    - match: { source: execution, kind: hook_observation, attributes.observation.kind: farm.match_result }
+      set:
+        role: match-result
+        group: economy
+        layer: economy
+        lane: "{attributes.thread.facets.game}"
+        shape: diamond
+        emphasis: strong
+        tone: accent
+        label: "{attributes.observation.payload.matchup_key}"
+        secondary: "seed {attributes.observation.payload.seed}"
+    - match: { source: execution, kind: hook_observation, attributes.observation.kind: farm.counterfactual_result }
+      set:
+        role: counterfactual
+        group: ladder
+        layer: ladder
+        shape: diamond
+        fill: hollow
+        tone: accent
+        label: "{attributes.observation.payload.candidate_key}"
+        secondary: "delta {attributes.observation.payload.delta}"
+    - match: { source: execution, kind: hook_observation, attributes.observation.kind: farm.episode_ingested }
+      set:
+        role: episode-ingested
+        group: ladder
+        layer: ladder
+        shape: anchor
+        emphasis: strong
+        label: "{attributes.observation.payload.episode_id}"
+    - match: { source: execution, kind: hook_observation, attributes.observation.kind: farm.submission_packaged }
+      set:
+        role: submission-packaged
+        group: ladder
+        layer: ladder
+        shape: capsule
+        emphasis: strong
+        tone: good
+        label: "{attributes.observation.payload.candidate_key}"
+    - match: { source: execution, kind: hook_observation, attributes.observation.kind: farm.leaderboard_sample }
+      set:
+        role: leaderboard-sample
+        group: ladder
+        layer: ladder
+        shape: rect
+        fill: ghost
+        emphasis: quiet
+        secondary: "rank {attributes.observation.payload.rank}"
+    - match: { source: execution, kind: hook_failure }
+      set: { role: evidence-failure, group: ladder, layer: ladder, shape: diamond, tone: danger, emphasis: strong }
+  relation_rules:
+    - match: { source: project, kind: contains }
+      set: { layer: structure, stroke: solid, directed: true }
+    - match: { source: project, kind: calls }
+      set: { layer: structure, stroke: dashed, directed: true, emphasis: quiet }
+    - match: { source: project, kind: flows_to }
+      set: { layer: structure, stroke: solid, directed: true, motion: flow }
+    - match: { source: runs, kind: executes_definition }
+      set: { layer: runs, stroke: solid, directed: true, tone: accent }
+    - match: { source: runs, kind: at_graph_node }
+      set: { layer: runs, stroke: dotted, directed: true, tone: accent }
+    - match: { source: execution, kind: contains }
+      set: { layer: economy, stroke: solid, directed: true }
+    - match: { source: execution, kind: observes }
+      set: { layer: economy, stroke: dotted, directed: true }
+selection:
+  change: select
+  activate: select
+affordances:
+  - id: select
+    label: Follow
+    invoke:
+      plane: ui
+      facet: selection
+      value:
+        thread_id: "{record.attributes.thread.id}"
+        game: "{record.attributes.thread.facets.game}"
+        entity_id: "{record.id}"
+refresh:
+  on_hint: [thread, activity]

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-17T01:35:34Z:37f9b643200e45646c8bad4bc5a1bfb7dd2c1c8d6c1e9347e7c977528a0b572e:O+iKY/CRvG7zBpwCSuRwY6u79DJ6SqK+VWZOfjgLDw2igXtuqsOPznnTFVjW9jiEaPgSsZGz107gSfJNuuVFDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T07:29:39Z:c1afd2f590c981711f357e517237d2173857ed42a8bf594df54544a8b9a38f97:9x4dPcNKNN1ybHNpkBDuQl9Hbjpam2K/N/E6LdJD0HnnGMdgmjuTH1nnGFAqY5dABZgQuU9/10qMVlLmFiUOAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: core
 version: 0.5.0
 description: 'Engine foundation: kind schemas, handlers, parsers, services, tools'
@@ -23,6 +23,37 @@ runtime_authority:
   - create
 owns_namespaces:
 - ryeos/core
+sync_include:
+- kind: tool
+- kind: parser
+- kind: handler
+- kind: protocol
+- root: .ai/manifest.source.yaml
+  shape: file
+- root: .ai/manifest.yaml
+  shape: file
+- root: .ai/directives
+  shape: directory
+- root: .ai/graphs
+  shape: directory
+- root: .ai/knowledge
+  shape: directory
+- root: .ai/node/engine/kinds
+  shape: directory
+- root: .ai/node/commands
+  shape: directory
+- root: .ai/config/agent
+  shape: directory
+- root: .ai/config/execution
+  shape: directory
+- root: .ai/config/directive-runtime
+  shape: directory
+- root: .ai/config/ryeos-runtime
+  shape: directory
+- root: .ai/config/development
+  shape: directory
+- root: .ai/config/schedules
+  shape: directory
 isolation_backends:
 - id: linux-lillux
   protocol: ryeos.isolation-adapter/v16

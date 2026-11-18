@@ -119,7 +119,14 @@ async fn browser_boot_sequence_endpoints_accept_same_session() {
     .expect("items/effective should resolve RyeOS UI surface");
     assert_eq!(effective["canonical_ref"], "surface:ryeos/ui/base");
 
-    let dimension = ryeos_ui::seat_auth::with_compiled_ui_attachment(
+    let session_id = ctx
+        .fingerprint
+        .strip_prefix("session:")
+        .expect("session context")
+        .to_owned();
+    let dimension = test_state::with_dispatched_session(
+        &state,
+        &session_id,
         attachment.clone(),
         (ryeos_ui::handlers::ui_dimension::DESCRIPTOR.handler)(
             json!(null),

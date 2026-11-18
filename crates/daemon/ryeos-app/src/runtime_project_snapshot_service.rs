@@ -603,7 +603,7 @@ where
             }
             file_count += 1;
             let rel = canonical_relative_path(relative)?;
-            ryeos_state::project_sync::validate_project_manifest_path(
+            ryeos_state::project_sync::validate_stored_project_manifest_path(
                 &rel,
                 policy.sync_scope,
                 Some(&matcher),
@@ -656,7 +656,7 @@ fn build_project_tree(
         Ok(project_file)
     })?;
     let tree = ProjectTree { files };
-    ryeos_state::project_sync::validate_project_tree_paths(&tree, policy)?;
+    ryeos_state::project_sync::validate_stored_project_tree_paths(&tree, policy)?;
     Ok(tree)
 }
 
@@ -719,7 +719,7 @@ fn load_snapshot_and_manifest(
         cas,
         &snapshot.effective_policy_hash,
     )?)?;
-    ryeos_state::project_sync::validate_project_tree_paths(&tree, &policy)?;
+    ryeos_state::project_sync::validate_stored_project_tree_paths(&tree, &policy)?;
     ryeos_state::project_sync::validate_captured_policy_source(cas, &tree, &policy)?;
     Ok((snapshot, tree))
 }

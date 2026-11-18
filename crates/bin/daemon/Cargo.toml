@@ -66,6 +66,7 @@ ryeos-engine = { workspace = true }
 ryeos-external-execution-contract = { workspace = true }
 ryeos-isolation-protocol = { workspace = true }
 ryeos-node = { workspace = true }
+ryeos-bundle = { workspace = true }
 ryeos-state = { workspace = true }
 ryeos-scheduler-contract = { workspace = true }
 ryeos-scheduler = { workspace = true, optional = true }

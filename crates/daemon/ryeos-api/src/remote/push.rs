@@ -280,7 +280,13 @@ pub async fn push_project_ai_only(
         )?;
         let tree = {
             let guard = authority.acquire_shared_guard()?;
-            ryeos_project_capture::ingest_project_tree(authority, &guard, &project_root, &policy)?
+            ryeos_project_capture::ingest_project_tree_ai_only(
+                authority,
+                &guard,
+                &project_root,
+                &policy,
+                &state.sync_include,
+            )?
         };
         ryeos_state::project_sync::validate_captured_policy_source(&local_cas, &tree, &policy)?;
         if ryeos_state::project_sync::capture_snapshot_policy_from_pinned(

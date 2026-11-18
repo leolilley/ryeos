@@ -169,7 +169,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     let target_ignore = state
         .node_policy
         .require::<ryeos_node_runtime::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy>()?;
-    ryeos_state::project_sync::validate_project_tree_paths(&tree, &policy)?;
+    ryeos_state::project_sync::validate_project_tree_paths(&tree, &policy, &state.sync_include)?;
     ryeos_state::project_sync::validate_project_tree_against_target_ignore(
         &tree,
         &target_ignore.matcher,
