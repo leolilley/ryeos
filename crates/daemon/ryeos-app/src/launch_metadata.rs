@@ -1440,6 +1440,68 @@ impl RuntimeLaunchMetadata {
         }
     }
 
+    /// Require that this operational launch metadata still describes the
+    /// launch `admitted` rooted in the state store.
+    ///
+    /// Launch metadata is the runtime database's working copy; the capsule is
+    /// the authority. A continuation seed derived from metadata that drifted
+    /// from its capsule would feed unadmitted bindings, closure or
+    /// capabilities to whatever reads the seed next.
+    pub fn require_admitted_by(
+        &self,
+        admitted: &ryeos_state::objects::AdmittedLaunchCapsule,
+    ) -> anyhow::Result<()> {
+        let operational = self.admitted_launch_capsule()?.ok_or_else(|| {
+            anyhow::anyhow!("operational launch metadata has no admitted launch capsule")
+        })?;
+        if !admitted.same_continuation_admission(&operational)? {
+            anyhow::bail!(
+                "operational launch metadata differs from its authoritative CAS admission"
+            );
+        }
+        Ok(())
+    }
+
+    /// Derive the launch seed of an operator rebind successor.
+    ///
+    /// `source_capsule` is the source's capsule as rooted in the state store.
+    /// This metadata must still describe that capsule, or no seed is derived:
+    /// the ordinary continuation makes the same comparison before it reads
+    /// descriptors or credentials, and a rebind, which prepares the launch
+    /// again from this seed, must not start from anything the capsule did
+    /// not admit.
+    ///
+    /// The seed is otherwise the ordinary continuation seed: everything a
+    /// continuation copies from its source (runtime policy, admitted closure,
+    /// accounting scope, deadline hold-back, effect authority) is copied the
+    /// same way. The one difference is the sealed invocation, rebased onto
+    /// the ref bindings the operator named. The seed's closure and
+    /// realization are still the source's; launch preparation replaces the
+    /// binding-derived part and the state boundary compares the result with
+    /// the source.
+    pub fn operator_rebind_successor_seed(
+        &self,
+        source_thread_id: &str,
+        source_capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
+        resume_context: ResumeContext,
+        handler_context: &crate::handler_context::HandlerContext,
+        names: &std::collections::BTreeSet<String>,
+    ) -> anyhow::Result<Self> {
+        self.require_admitted_by(source_capsule)
+            .with_context(|| format!("operator rebind source {source_thread_id}"))?;
+        let sealed = self
+            .sealed_root_request
+            .as_ref()
+            .ok_or_else(|| {
+                anyhow::anyhow!("source {source_thread_id} has no admitted launch capsule")
+            })?
+            .for_operator_rebind_invocation(&resume_context, handler_context, names)?;
+        Ok(self
+            .continuation_successor_seed(resume_context)
+            .with_continuation_source(source_thread_id)
+            .with_sealed_root_request(sealed))
+    }
+
     /// Record the principal (and grant digest, when grant-backed) that covered
     /// this thread's declared capabilities.
     /// Seal the share of the run deadline this thread leaves to its ancestors.

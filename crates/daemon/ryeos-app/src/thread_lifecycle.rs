@@ -2418,6 +2418,26 @@ impl RootExecutionAdmission {
         self.admitted_request_snapshot.as_ref()
     }
 
+    /// Admit the complete request authority current now for the project this
+    /// admission resolves under.
+    ///
+    /// A restored admission carries no request snapshot, because recovery
+    /// reuses its sealed closure and resolves nothing. A continuation that
+    /// binds a different item must resolve it, and so needs the parser and
+    /// trust view of the exact project materialization it holds. This issues
+    /// that view through the same state-proof path a fresh content-addressed
+    /// launch uses. Live and projectless bindings return `None`; their
+    /// snapshot is read from the engine directly.
+    pub fn admit_current_request_snapshot(
+        &self,
+    ) -> Result<Option<Arc<ryeos_engine::engine::AdmittedRequestAuthoritySnapshot>>> {
+        let binding = self.resolution_project_binding();
+        binding.admit_request_authority_snapshot(
+            &binding.request_engine,
+            self.resolution_plan_context(),
+        )
+    }
+
     /// Rebind this still-in-memory root admission to the exact output
     /// authority conditioned on its provenance before first capsule or row
     /// publication. The state constructor proves that workspace outputs are
@@ -4278,6 +4298,10 @@ impl ThreadLifecycleService {
     /// for a freshly created successor, and returns handler-friendly
     /// `ThreadDetail`s. Same-fingerprint double-submits return `Existing`; a
     /// different fingerprint onto an already-continued source is `Conflict`.
+    ///
+    /// `transition` is the operator transition the caller commits: a plain
+    /// follow-up, or a rebind naming the ref bindings it replaces. The state
+    /// boundary selects its capsule comparison from it.
     pub fn create_or_get_operator_continuation(
         &self,
         successor: &NewThreadRecord,
@@ -4285,6 +4309,7 @@ impl ThreadLifecycleService {
         reason: Option<&str>,
         request_fingerprint: &str,
         launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
+        transition: crate::launch_metadata::ContinuationAuthorityTransitionKind,
         initial_events: Vec<NewEventRecord>,
     ) -> Result<OperatorContinuation> {
         validate_kind(&successor.kind, self.kind_profiles())?;
@@ -4330,7 +4355,7 @@ impl ThreadLifecycleService {
             reason,
             request_fingerprint,
             Some(launch_metadata),
-            crate::launch_metadata::ContinuationAuthorityTransitionKind::OperatorFollowUp,
+            transition,
             initial_events,
         )?;
 

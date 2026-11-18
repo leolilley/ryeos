@@ -14,6 +14,13 @@
 //! - otherwise (not-yet-running, or a settled non-continuable status) →
 //!   structured refusal.
 //!
+//! A `thread` target may also carry `rebind`: ref bindings the operator wants
+//! the continuation to run with. It applies only when a successor is created.
+//! A binding that names what the thread already runs with changes nothing and
+//! takes the ordinary continuation. Input folded into a running thread keeps
+//! that thread's bindings; the result says the rebind was not applied, and
+//! nothing is held for later.
+//!
 //! Submit result contract (input-design.md):
 //! `{ thread_id?, delivery: launched|submitted|refused, notice? }`.
 //! A live fold returns `submitted` with the SAME `thread_id` (no new thread).
@@ -59,6 +66,12 @@ pub enum Target {
     },
     Thread {
         thread_id: String,
+        /// Ref bindings to rebind on the continuation, name → canonical ref.
+        /// Each is authorised and resolved like a binding of a fresh launch,
+        /// and admitted only where the thread's runtime contract lets an
+        /// operator rebind that name.
+        #[serde(default)]
+        rebind: BTreeMap<String, String>,
     },
 }
 
@@ -207,6 +220,15 @@ fn authorize_execution_refs(
     ctx: &HandlerContext,
     state: &AppState,
 ) -> Result<(), HandlerError> {
+    authorize_execution_refs_for(item_ref, ref_bindings, &ctx.scopes, &state.authorizer)
+}
+
+fn authorize_execution_refs_for(
+    item_ref: &str,
+    ref_bindings: &BTreeMap<String, String>,
+    scopes: &[String],
+    authorizer: &ryeos_runtime::authorizer::Authorizer,
+) -> Result<(), HandlerError> {
     ryeos_executor::execution::launch_preparation::validate_ref_bindings(ref_bindings)
         .map_err(dispatch_error)?;
     for (label, value) in std::iter::once(("item_ref", item_ref)).chain(
@@ -222,14 +244,150 @@ fn authorize_execution_refs(
             "execute",
         );
         let policy = ryeos_runtime::authorizer::AuthorizationPolicy::require(&required);
-        state
-            .authorizer
-            .authorize(&ctx.scopes, &policy)
-            .map_err(|_| {
-                HandlerError::Forbidden(format!("missing required capability: {required}"))
-            })?;
+        authorizer.authorize(scopes, &policy).map_err(|_| {
+            HandlerError::Forbidden(format!("missing required capability: {required}"))
+        })?;
     }
     Ok(())
+}
+
+/// What became of the rebind a request carried: `None` when it carried none.
+///
+/// `applied` is true only when the returned successor runs with the requested
+/// bindings. Otherwise `reason` is `unchanged` (they already were the thread's
+/// bindings), `thread_running` (the input was folded into the live thread,
+/// which keeps its bindings) or `conflict` (the thread already continued
+/// another way).
+fn rebind_report(
+    requested: &BTreeMap<String, String>,
+    outcome: RebindOutcome<'_>,
+) -> Option<Value> {
+    if requested.is_empty() {
+        return None;
+    }
+    Some(match outcome {
+        RebindOutcome::Applied(changes) if !changes.is_empty() => json!({
+            "applied": true,
+            "names": changes.keys().collect::<Vec<_>>(),
+        }),
+        RebindOutcome::Applied(_) => json!({"applied": false, "reason": "unchanged"}),
+        RebindOutcome::ThreadRunning => json!({"applied": false, "reason": "thread_running"}),
+        RebindOutcome::Conflict => json!({"applied": false, "reason": "conflict"}),
+    })
+}
+
+enum RebindOutcome<'a> {
+    /// A successor runs with these changed bindings (none when the request
+    /// named only what the thread already ran with).
+    Applied(&'a BTreeMap<String, String>),
+    ThreadRunning,
+    Conflict,
+}
+
+/// Syntax of a requested rebind: daemon-wide name and size limits, and a
+/// canonical ref at every name. Says nothing about permission.
+fn validate_rebind_request(rebind: &BTreeMap<String, String>) -> Result<(), HandlerError> {
+    ryeos_executor::execution::launch_preparation::validate_ref_bindings(rebind)
+        .map_err(dispatch_error)?;
+    for (name, value) in rebind {
+        ryeos_engine::canonical_ref::CanonicalRef::parse(value).map_err(|error| {
+            HandlerError::BadRequest(format!("invalid rebind `{name}`: {error}"))
+        })?;
+    }
+    Ok(())
+}
+
+/// Whether an existing successor was born from this same operator request:
+/// the same input, the same sender, and the same ref bindings.
+///
+/// The comparison reads the bindings recorded in the successor's launch
+/// identity at its birth. Nothing is resolved again, so a retry of a rebind
+/// that already produced a successor finds it even after the bound item or
+/// the signed configuration changed.
+fn born_from_same_request(
+    successor: &ryeos_app::launch_metadata::ResumeContext,
+    requested: &ryeos_app::launch_metadata::ResumeContext,
+) -> bool {
+    successor.ref_bindings == requested.ref_bindings
+        && successor.parameters == requested.parameters
+        && successor.requested_by == requested.requested_by
+}
+
+/// Launch an operator successor that exists but was left `created`: prepare
+/// it from its own persisted launch metadata and require the same handoff
+/// proof as a newly created successor. Nothing about its birth is recomputed.
+async fn redrive_created_operator_successor(
+    state: &Arc<AppState>,
+    successor_id: &str,
+) -> Result<(), HandlerError> {
+    let launch_metadata = state
+        .state_store
+        .get_launch_metadata(successor_id)
+        .map_err(|error| HandlerError::Internal(format!("{error:#}")))?
+        .ok_or_else(|| {
+            HandlerError::Internal(format!(
+                "operator successor {successor_id} has no persisted launch metadata"
+            ))
+        })?;
+    let prepared = ryeos_executor::execution::launch::prepare_existing_operator_successor_launch(
+        state,
+        successor_id,
+        &launch_metadata,
+    )
+    .await
+    .map_err(build_and_launch_error)?;
+    let task_id = successor_id.to_string();
+    let st = (**state).clone();
+    let (handoff, ready) = ryeos_executor::execution::launch::LaunchHandoff::channel();
+    let task = tokio::spawn(async move {
+        ryeos_executor::execution::launch::launch_prepared_operator_successor(
+            st, &task_id, prepared, &handoff,
+        )
+        .await
+    });
+    let ready_thread_id = await_operator_handoff(task, ready).await?;
+    if ready_thread_id != successor_id {
+        return Err(HandlerError::Internal(
+            "operator relaunch handoff returned a different thread identity".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Attach the rebind report to a result that carried a rebind request.
+fn with_rebind_report(mut result: Value, report: Option<Value>) -> Value {
+    if let (Some(report), Some(object)) = (report, result.as_object_mut()) {
+        object.insert("rebind".to_string(), report);
+    }
+    result
+}
+
+/// The durable record of an operator rebind, committed in the successor's
+/// birth batch: which thread was continued, each replaced ref binding, and
+/// the launch's runtime facts before and after. Only the daemon writes it.
+fn launch_binding_rebound_event(
+    rebound: &ryeos_executor::execution::launch_rebind::ReboundLaunch,
+) -> ryeos_app::state_store::NewEventRecord {
+    let event_type = ryeos_runtime::RuntimeEventType::LaunchBindingRebound;
+    ryeos_app::state_store::NewEventRecord {
+        event_type: event_type.as_str().to_owned(),
+        storage_class: event_type.storage_class().as_str().to_owned(),
+        payload: json!({
+            "source_thread_id": rebound.source_thread_id,
+            "changes": rebound
+                .changes
+                .iter()
+                .map(|change| json!({
+                    "input": "ref_binding",
+                    "name": change.name,
+                    "from": change.from,
+                    "to": change.to,
+                }))
+                .collect::<Vec<_>>(),
+            "from_facts": rebound.from_facts,
+            "to_facts": rebound.to_facts,
+        }),
+    }
 }
 
 fn dispatch_error(error: ryeos_executor::dispatch_error::DispatchError) -> HandlerError {
@@ -469,7 +627,7 @@ pub async fn handle(
         })
     };
 
-    let thread_id = match target {
+    let (thread_id, rebind) = match target {
         Target::Fresh {
             item_ref,
             project_path,
@@ -545,7 +703,13 @@ pub async fn handle(
                 "notice": Value::Null,
             }));
         }
-        Target::Thread { thread_id } => thread_id,
+        Target::Thread { thread_id, rebind } => {
+            // Checked before the thread is even looked up, so a malformed
+            // rebind is a bad request on every path, including input folded
+            // into a running thread, where the rebind is otherwise unused.
+            validate_rebind_request(&rebind)?;
+            (thread_id, rebind)
+        }
     };
 
     // Resolve the prior turn. Eligibility only — a
@@ -669,13 +833,19 @@ pub async fn handle(
                     }
                 }
 
-                return Ok(json!({
-                    "thread_id": detail.thread_id,
-                    "delivery": "submitted",
-                    "notice": notice,
-                    "pending": pending,
-                    "execution": exec_facts(&detail.kind),
-                }));
+                // The live thread keeps the bindings it was admitted with. A
+                // rebind carried with folded input is reported as not applied
+                // and is not held for a later continuation.
+                return Ok(with_rebind_report(
+                    json!({
+                        "thread_id": detail.thread_id,
+                        "delivery": "submitted",
+                        "notice": notice,
+                        "pending": pending,
+                        "execution": exec_facts(&detail.kind),
+                    }),
+                    rebind_report(&rebind, RebindOutcome::ThreadRunning),
+                ));
             }
             FollowUpDecision::Refuse(notice) => {
                 return Ok(json!({
@@ -712,10 +882,24 @@ pub async fn handle(
         &state,
     )?;
 
+    // A rebind that names what the thread already runs with is no change and
+    // takes the ordinary continuation below. What remains is authorised like
+    // the bindings of a fresh launch before anything is prepared.
+    let rebind_changes = ryeos_executor::execution::launch::operator_rebind_changes(
+        &state,
+        &previous.thread_id,
+        &rebind,
+    )
+    .map_err(build_and_launch_error)?;
+    if !rebind_changes.is_empty() {
+        authorize_execution_refs(&prior_resume.item_ref, &rebind_changes, &ctx, &state)?;
+    }
+
     use ryeos_engine::contracts::{EffectivePrincipal, Principal};
     let parameters = json!({ "input": input });
     let mut resume_context = prior_resume;
     resume_context.parameters = parameters.clone();
+    resume_context.ref_bindings.extend(rebind_changes.clone());
     // Operator authority is re-derived from the verified caller; execution
     // identity itself remains inherited from the predecessor.
     resume_context.requested_by = EffectivePrincipal::Local(Principal {
@@ -723,23 +907,92 @@ pub async fn handle(
         scopes: ctx.scopes.clone(),
     });
 
+    // A rebind that already produced this thread's successor is answered from
+    // that successor. Preparing the rebind again would resolve the bound item
+    // and read signed configuration as they are now, so a retry could fail or
+    // look like a different choice merely because something was edited since.
+    if !rebind_changes.is_empty()
+        && let Some(successor_id) = previous.successor_thread_id.as_deref()
+    {
+        let successor = state
+            .state_store
+            .get_thread(successor_id)
+            .map_err(|error| HandlerError::Internal(format!("{error:#}")))?
+            .ok_or_else(|| {
+                HandlerError::Internal(format!("successor {successor_id} is missing"))
+            })?;
+        let successor_resume = state
+            .state_store
+            .get_launch_metadata(successor_id)
+            .map_err(|error| HandlerError::Internal(format!("{error:#}")))?
+            .and_then(|metadata| metadata.resume_context);
+        if successor_resume
+            .as_ref()
+            .is_some_and(|born| born_from_same_request(born, &resume_context))
+        {
+            if successor.status == ryeos_state::objects::ThreadStatus::Created.as_str() {
+                redrive_created_operator_successor(&state, successor_id).await?;
+            }
+            return Ok(with_rebind_report(
+                json!({
+                    "thread_id": successor.thread_id,
+                    "delivery": "launched",
+                    "notice": Value::Null,
+                    "execution": exec_facts(&successor.kind),
+                }),
+                rebind_report(&rebind, RebindOutcome::Applied(&rebind_changes)),
+            ));
+        }
+        return Ok(with_rebind_report(
+            json!({
+                "thread_id": successor.thread_id,
+                "delivery": "refused",
+                "notice": format!(
+                    "thread {} already continued as {} by a different input; \
+                     follow that thread or start a new chain",
+                    previous.thread_id, successor.thread_id
+                ),
+                "execution": exec_facts(&successor.kind),
+            }),
+            rebind_report(&rebind, RebindOutcome::Conflict),
+        ));
+    }
+
     // The successor preparer restores the predecessor's sealed admitted
     // program and reapplies current caller authorization before birth. Do not
     // re-resolve mutable project bytes here: operator continuation changes the
     // stimulus and principal authority, not the admitted program.
     let candidate_id = ryeos_app::thread_lifecycle::new_thread_id();
-    let prepared = ryeos_executor::execution::launch::prepare_operator_successor_launch(
-        &state,
-        &candidate_id,
-        &resume_context,
-        &previous.thread_id,
-        &ctx,
-    )
-    .await
-    .map_err(build_and_launch_error)?;
-    let initial_audit_events = prepared
+    let prepared = if rebind_changes.is_empty() {
+        ryeos_executor::execution::launch::prepare_operator_successor_launch(
+            &state,
+            &candidate_id,
+            &resume_context,
+            &previous.thread_id,
+            &ctx,
+        )
+        .await
+    } else {
+        // The changed bindings are prepared again against current signed
+        // configuration; everything else stays the admitted program.
+        let names = rebind_changes.keys().cloned().collect();
+        ryeos_executor::execution::launch::prepare_operator_rebind_successor_launch(
+            &state,
+            &candidate_id,
+            &resume_context,
+            &previous.thread_id,
+            &ctx,
+            &names,
+        )
+        .await
+    };
+    let prepared = prepared.map_err(build_and_launch_error)?;
+    let mut initial_audit_events = prepared
         .initial_audit_events()
         .map_err(build_and_launch_error)?;
+    if let Some(rebound) = prepared.rebound() {
+        initial_audit_events.push(launch_binding_rebound_event(rebound));
+    }
 
     let successor_record = ryeos_app::state_store::NewThreadRecord {
         thread_id: candidate_id.clone(),
@@ -786,6 +1039,7 @@ pub async fn handle(
             Some(ryeos_state::queries::ContinuationReasonMarker::OperatorFollowUp.as_str()),
             &fingerprint,
             prepared.launch_metadata(),
+            prepared.continuation_transition(),
             initial_audit_events,
         )
         .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
@@ -810,78 +1064,56 @@ pub async fn handle(
                     "operator launch handoff returned a different thread identity".to_string(),
                 ));
             }
-            Ok(json!({
-                "thread_id": detail.thread_id,
-                "delivery": "launched",
-                "notice": Value::Null,
-                "execution": exec_facts(&detail.kind),
-            }))
+            Ok(with_rebind_report(
+                json!({
+                    "thread_id": detail.thread_id,
+                    "delivery": "launched",
+                    "notice": Value::Null,
+                    "execution": exec_facts(&detail.kind),
+                }),
+                rebind_report(&rebind, RebindOutcome::Applied(&rebind_changes)),
+            ))
         }
         OperatorContinuation::Existing(detail) => {
             // Idempotent double-submit → the SAME successor id. If it was stranded
             // `created`, consume the freshly recomputed authority and require the
             // same handoff proof as a newly created successor.
+            // The candidate authority named a speculative ID and its snapshot
+            // was never committed. A stranded successor is re-driven from its
+            // exact durable identity without recapturing its birth snapshot.
+            drop(prepared);
             if detail.status == ryeos_state::objects::ThreadStatus::Created.as_str() {
-                let successor_id = detail.thread_id.clone();
-                // The candidate authority named a speculative ID and its
-                // snapshot was never committed. Re-drive from the exact durable
-                // successor identity without recapturing its birth snapshot.
-                drop(prepared);
-                let launch_metadata = state
-                    .state_store
-                    .get_launch_metadata(&successor_id)
-                    .map_err(|error| HandlerError::Internal(format!("{error:#}")))?
-                    .ok_or_else(|| {
-                        HandlerError::Internal(format!(
-                            "operator successor {successor_id} has no persisted launch metadata"
-                        ))
-                    })?;
-                let prepared =
-                    ryeos_executor::execution::launch::prepare_existing_operator_successor_launch(
-                        &state,
-                        &successor_id,
-                        &launch_metadata,
-                    )
-                    .await
-                    .map_err(build_and_launch_error)?;
-                let task_id = successor_id.clone();
-                let st = (*state).clone();
-                let (handoff, ready) = ryeos_executor::execution::launch::LaunchHandoff::channel();
-                let task = tokio::spawn(async move {
-                    ryeos_executor::execution::launch::launch_prepared_operator_successor(
-                        st, &task_id, prepared, &handoff,
-                    )
-                    .await
-                });
-                let ready_thread_id = await_operator_handoff(task, ready).await?;
-                if ready_thread_id != successor_id {
-                    return Err(HandlerError::Internal(
-                        "operator relaunch handoff returned a different thread identity"
-                            .to_string(),
-                    ));
-                }
-            } else {
-                drop(prepared);
+                redrive_created_operator_successor(&state, &detail.thread_id).await?;
             }
-            Ok(json!({
-                "thread_id": detail.thread_id,
-                "delivery": "launched",
-                "notice": Value::Null,
-                "execution": exec_facts(&detail.kind),
-            }))
+            // The same request met its own successor, which was born with
+            // exactly these bindings.
+            Ok(with_rebind_report(
+                json!({
+                    "thread_id": detail.thread_id,
+                    "delivery": "launched",
+                    "notice": Value::Null,
+                    "execution": exec_facts(&detail.kind),
+                }),
+                rebind_report(&rebind, RebindOutcome::Applied(&rebind_changes)),
+            ))
         }
         OperatorContinuation::Conflict(detail) => {
             drop(prepared);
-            Ok(json!({
-                "thread_id": detail.thread_id,
-                "delivery": "refused",
-                "notice": format!(
-                    "thread {} already continued as {} by a different input; \
-                     follow that thread or start a new chain",
-                    previous.thread_id, detail.thread_id
-                ),
-                "execution": exec_facts(&detail.kind),
-            }))
+            // One predecessor has one successor. A second continuation with
+            // another input or another binding choice is this conflict.
+            Ok(with_rebind_report(
+                json!({
+                    "thread_id": detail.thread_id,
+                    "delivery": "refused",
+                    "notice": format!(
+                        "thread {} already continued as {} by a different input; \
+                         follow that thread or start a new chain",
+                        previous.thread_id, detail.thread_id
+                    ),
+                    "execution": exec_facts(&detail.kind),
+                }),
+                rebind_report(&rebind, RebindOutcome::Conflict),
+            ))
         }
     }
 }
@@ -1100,6 +1332,243 @@ mod tests {
                 }
                 other => panic!("expected structured continuity conflict, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn a_thread_target_takes_an_optional_rebind() {
+        let request: Request = serde_json::from_value(json!({
+            "input": "continue",
+            "target": {"kind": "thread", "thread_id": "T-1"},
+        }))
+        .unwrap();
+        match request.target {
+            Target::Thread { thread_id, rebind } => {
+                assert_eq!(thread_id, "T-1");
+                assert!(rebind.is_empty());
+            }
+            Target::Fresh { .. } => panic!("expected a thread target"),
+        }
+
+        let request: Request = serde_json::from_value(json!({
+            "input": "continue",
+            "target": {
+                "kind": "thread",
+                "thread_id": "T-1",
+                "rebind": {"model": "directive:test/models/second"},
+            },
+        }))
+        .unwrap();
+        match request.target {
+            Target::Thread { rebind, .. } => assert_eq!(
+                rebind,
+                BTreeMap::from([(
+                    "model".to_string(),
+                    "directive:test/models/second".to_string()
+                )])
+            ),
+            Target::Fresh { .. } => panic!("expected a thread target"),
+        }
+
+        // A fresh target states its bindings as `ref_bindings`; it has no rebind.
+        assert!(
+            serde_json::from_value::<Request>(json!({
+                "input": "start",
+                "target": {
+                    "kind": "fresh",
+                    "item_ref": "directive:test/item",
+                    "project_path": "/project",
+                    "ref_bindings": {},
+                    "rebind": {"model": "directive:test/models/second"},
+                },
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_rebind_is_reported_only_when_requested_and_applied_only_on_a_successor() {
+        let requested = BTreeMap::from([(
+            "model".to_string(),
+            "directive:test/models/second".to_string(),
+        )]);
+        let none = BTreeMap::new();
+
+        // No rebind in the request: the result is exactly what it was.
+        let plain = json!({"thread_id": "T-2", "delivery": "launched"});
+        for outcome in [
+            RebindOutcome::Applied(&none),
+            RebindOutcome::ThreadRunning,
+            RebindOutcome::Conflict,
+        ] {
+            assert_eq!(
+                with_rebind_report(plain.clone(), rebind_report(&none, outcome)),
+                plain
+            );
+        }
+
+        assert_eq!(
+            rebind_report(&requested, RebindOutcome::Applied(&requested)),
+            Some(json!({"applied": true, "names": ["model"]}))
+        );
+        // Requested, but it named what the thread already ran with.
+        assert_eq!(
+            rebind_report(&requested, RebindOutcome::Applied(&none)),
+            Some(json!({"applied": false, "reason": "unchanged"}))
+        );
+        // Input folded into a running thread: the choice is not applied.
+        let folded = with_rebind_report(
+            json!({"thread_id": "T-1", "delivery": "submitted", "pending": 1}),
+            rebind_report(&requested, RebindOutcome::ThreadRunning),
+        );
+        assert_eq!(folded["delivery"], "submitted");
+        assert_eq!(
+            folded["rebind"],
+            json!({"applied": false, "reason": "thread_running"})
+        );
+        assert_eq!(
+            rebind_report(&requested, RebindOutcome::Conflict),
+            Some(json!({"applied": false, "reason": "conflict"}))
+        );
+    }
+
+    #[test]
+    fn a_rebound_binding_needs_the_execute_capability_on_the_new_ref() {
+        let authorizer = ryeos_runtime::authorizer::Authorizer::new();
+        let rebind = BTreeMap::from([(
+            "model".to_string(),
+            "directive:test/models/second".to_string(),
+        )]);
+        let item = "directive:test/item";
+        let item_cap = "ryeos.execute.directive.test/item".to_string();
+
+        let error = authorize_execution_refs_for(
+            item,
+            &rebind,
+            std::slice::from_ref(&item_cap),
+            &authorizer,
+        )
+        .expect_err("the caller cannot execute the new binding");
+        match error {
+            HandlerError::Forbidden(message) => assert!(
+                message.contains("ryeos.execute.directive.test/models/second"),
+                "{message}"
+            ),
+            other => panic!("expected a forbidden refusal, got {other:?}"),
+        }
+
+        authorize_execution_refs_for(
+            item,
+            &rebind,
+            &[
+                item_cap,
+                "ryeos.execute.directive.test/models/second".to_string(),
+            ],
+            &authorizer,
+        )
+        .expect("a caller holding both capabilities may rebind");
+    }
+
+    #[test]
+    fn the_rebound_event_records_each_change_and_the_facts_on_both_sides() {
+        let rebound = ryeos_executor::execution::launch_rebind::ReboundLaunch {
+            source_thread_id: "T-source".to_string(),
+            changes: vec![ryeos_executor::execution::launch_rebind::ReboundBinding {
+                name: "model".to_string(),
+                from: "directive:test/models/first".to_string(),
+                to: "directive:test/models/second".to_string(),
+            }],
+            from_facts: BTreeMap::from([("model_name".to_string(), json!("first-model"))]),
+            to_facts: BTreeMap::from([("model_name".to_string(), json!("second-model"))]),
+        };
+        let event = launch_binding_rebound_event(&rebound);
+        assert_eq!(
+            event.event_type,
+            ryeos_state::event_types::LAUNCH_BINDING_REBOUND
+        );
+        assert_eq!(event.storage_class, "indexed");
+        assert_eq!(
+            event.payload,
+            json!({
+                "source_thread_id": "T-source",
+                "changes": [{
+                    "input": "ref_binding",
+                    "name": "model",
+                    "from": "directive:test/models/first",
+                    "to": "directive:test/models/second",
+                }],
+                "from_facts": {"model_name": "first-model"},
+                "to_facts": {"model_name": "second-model"},
+            })
+        );
+    }
+
+    #[test]
+    fn a_malformed_rebind_is_a_bad_request() {
+        validate_rebind_request(&BTreeMap::new()).unwrap();
+        validate_rebind_request(&BTreeMap::from([(
+            "model".to_string(),
+            "directive:test/models/second".to_string(),
+        )]))
+        .unwrap();
+        // Not a canonical ref.
+        let error = validate_rebind_request(&BTreeMap::from([(
+            "model".to_string(),
+            "not a ref".to_string(),
+        )]))
+        .expect_err("a value that is not a canonical ref is refused");
+        assert!(
+            matches!(
+                error,
+                HandlerError::BadRequest(_) | HandlerError::Structured { .. }
+            ),
+            "{error:?}"
+        );
+        // Not a binding name.
+        assert!(
+            validate_rebind_request(&BTreeMap::from([(
+                "not a name".to_string(),
+                "directive:test/models/second".to_string(),
+            )]))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_retried_rebind_is_recognised_by_the_bindings_recorded_at_birth() {
+        let authority = pinned_authority(
+            ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+            Vec::new(),
+        );
+        let mut requested = resume_identity(authority);
+        requested.parameters = json!({"input": "continue"});
+        requested.ref_bindings.insert(
+            "model".to_string(),
+            "directive:test/models/second".to_string(),
+        );
+        let born = requested.clone();
+        assert!(born_from_same_request(&born, &requested));
+
+        // Another binding choice, another input, or another sender is a
+        // different request for the one successor slot.
+        let mut other_choice = requested.clone();
+        other_choice.ref_bindings.insert(
+            "model".to_string(),
+            "directive:test/models/third".to_string(),
+        );
+        let mut no_choice = requested.clone();
+        no_choice.ref_bindings.clear();
+        let mut other_input = requested.clone();
+        other_input.parameters = json!({"input": "something else"});
+        let mut other_sender = requested.clone();
+        other_sender.requested_by = ryeos_engine::contracts::EffectivePrincipal::Local(
+            ryeos_engine::contracts::Principal {
+                fingerprint: "user:other".to_string(),
+                scopes: Vec::new(),
+            },
+        );
+        for different in [other_choice, no_choice, other_input, other_sender] {
+            assert!(!born_from_same_request(&born, &different));
         }
     }
 
