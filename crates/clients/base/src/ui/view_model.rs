@@ -49,11 +49,32 @@ pub struct RyeOsViewModel {
 /// The attention overlay lists: rows that need the user and rows that are
 /// running, each list with the full count when the rows shown are a subset.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct RyeOsOverlayVm {
+    /// Whether the overlay sheet is open.
+    pub open: bool,
+    /// The selected row as a flat index across `needs_you` then `running`.
+    pub selected: Option<usize>,
     pub needs_you: Vec<RyeOsOverlayRowVm>,
     pub running: Vec<RyeOsOverlayRowVm>,
     pub needs_you_count: Option<usize>,
     pub running_count: Option<usize>,
+    /// Key hints for the sheet footer: move, open, acknowledge, close.
+    pub key_hints: Vec<RyeOsKeyHintVm>,
+}
+
+impl RyeOsOverlayVm {
+    /// The number of rows the selection ranges over.
+    pub fn row_count(&self) -> usize {
+        self.needs_you.len() + self.running.len()
+    }
+
+    /// The row at a flat index: `needs_you` first, then `running`.
+    pub fn row(&self, index: usize) -> Option<&RyeOsOverlayRowVm> {
+        self.needs_you
+            .get(index)
+            .or_else(|| self.running.get(index.checked_sub(self.needs_you.len())?))
+    }
 }
 
 /// One overlay row: what it is, where it lives, how urgent, how long it has
@@ -878,8 +899,14 @@ pub fn build_view_model(core: &RyeOsCore) -> RyeOsViewModel {
         notices: core.notices_vm(),
         transport: transport_vm(core),
         effect_failures: effect_failures_vm(core),
-        overlay: RyeOsOverlayVm::default(),
+        overlay: overlay_vm(core),
     }
+}
+
+fn overlay_vm(core: &RyeOsCore) -> RyeOsOverlayVm {
+    let mut overlay = core.ui.overlay.clone();
+    overlay.key_hints = super::keymap::overlay_key_hints();
+    overlay
 }
 
 fn transport_vm(core: &RyeOsCore) -> RyeOsTransportVm {
@@ -4113,6 +4140,7 @@ fn tile_id_text(id: TileId) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::keymap::{RyeOsKey, RyeOsKeyEvent, RyeOsKeyModifiers, ryeos_key_command};
 
     fn spec_with_mark(mark: crate::surface::SurfaceChipMarkSpec) -> crate::surface::SurfaceSpec {
         let mut spec = crate::surface::builtin_default();
@@ -5059,6 +5087,157 @@ mod tests {
 
         let undeclared = build_view_model(&core_with_surface_yaml("name: Plain\n"));
         assert!(undeclared.presentation.chrome.top_bar.add_tab);
+    }
+
+    fn overlay_row(id: &str, keys: &str) -> RyeOsOverlayRowVm {
+        RyeOsOverlayRowVm {
+            id: id.to_string(),
+            title: id.to_string(),
+            where_: "here".to_string(),
+            tone: RyeOsTone::Neutral,
+            since_ms: 0,
+            actions: vec![RyeOsOverlayActionVm {
+                keys: keys.to_string(),
+                word: "do".to_string(),
+                intent: RyeOsUiIntent::Refresh,
+            }],
+        }
+    }
+
+    fn core_with_overlay_rows() -> RyeOsCore {
+        let mut core = core_with_surface_yaml("name: Plain\n");
+        core.ui.overlay.needs_you = vec![overlay_row("ask", "a")];
+        core.ui.overlay.running = vec![overlay_row("run", "x")];
+        core
+    }
+
+    fn overlay_of(core: &RyeOsCore) -> RyeOsOverlayVm {
+        build_view_model(core).overlay
+    }
+
+    #[test]
+    fn overlay_toggle_selection_and_navigation_work_over_fixture_rows() {
+        let mut core = core_with_overlay_rows();
+        assert!(!overlay_of(&core).open);
+        core.dispatch_ui(RyeOsUiEvent::ToggleOverlay);
+        let open = overlay_of(&core);
+        assert!(open.open);
+        assert_eq!(open.selected, Some(0));
+        assert_eq!(open.key_hints.len(), 4);
+
+        core.dispatch_ui(RyeOsUiEvent::MoveOverlay { delta: 1 });
+        assert_eq!(overlay_of(&core).selected, Some(1));
+        core.dispatch_ui(RyeOsUiEvent::MoveOverlay { delta: 5 });
+        assert_eq!(overlay_of(&core).selected, Some(1));
+        core.dispatch_ui(RyeOsUiEvent::MoveOverlay { delta: -9 });
+        assert_eq!(overlay_of(&core).selected, Some(0));
+
+        core.dispatch_ui(RyeOsUiEvent::ToggleOverlay);
+        let closed = overlay_of(&core);
+        assert!(!closed.open);
+        assert_eq!(closed.selected, None);
+    }
+
+    #[test]
+    fn an_empty_overlay_opens_with_nothing_selected_and_ignores_movement() {
+        let mut core = core_with_surface_yaml("name: Plain\n");
+        core.dispatch_ui(RyeOsUiEvent::ToggleOverlay);
+        core.dispatch_ui(RyeOsUiEvent::MoveOverlay { delta: 1 });
+        let overlay = overlay_of(&core);
+        assert!(overlay.open);
+        assert_eq!(overlay.selected, None);
+        assert!(core.dispatch_ui(RyeOsUiEvent::ActivateOverlay).is_empty());
+    }
+
+    #[test]
+    fn escape_closes_the_overlay_and_changes_nothing_else() {
+        let mut core = core_with_overlay_rows();
+        core.dispatch_ui(RyeOsUiEvent::ToggleOverlay);
+        let before = build_view_model(&core);
+        let command = ryeos_key_command(
+            RyeOsKeyEvent {
+                key: RyeOsKey::Escape,
+                modifiers: RyeOsKeyModifiers::default(),
+            },
+            core.key_context(),
+        );
+        core.apply_key_command(command);
+        let mut after = build_view_model(&core);
+        assert!(!after.overlay.open);
+        after.overlay.open = true;
+        after.overlay.selected = before.overlay.selected;
+        after.generation = before.generation;
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn activating_a_row_dispatches_its_intent_and_closes_the_overlay() {
+        for event in [
+            RyeOsUiEvent::ActivateOverlay,
+            RyeOsUiEvent::ActivateOverlayKey { ch: 'a' },
+        ] {
+            let mut core = core_with_overlay_rows();
+            core.dispatch_ui(RyeOsUiEvent::ToggleOverlay);
+            let effects = core.dispatch_ui(event);
+            assert!(!effects.is_empty(), "Refresh ran");
+            assert!(!overlay_of(&core).open);
+        }
+        let mut core = core_with_overlay_rows();
+        core.dispatch_ui(RyeOsUiEvent::ToggleOverlay);
+        core.dispatch_ui(RyeOsUiEvent::ActivateOverlayKey { ch: 'z' });
+        assert!(overlay_of(&core).open, "no action has that key");
+    }
+
+    #[test]
+    fn a_row_intent_dispatched_by_the_client_closes_the_overlay() {
+        let mut core = core_with_overlay_rows();
+        core.dispatch_ui(RyeOsUiEvent::ToggleOverlay);
+        core.dispatch_ui(RyeOsUiEvent::Activate {
+            intent: RyeOsUiIntent::Refresh,
+        });
+        assert!(!overlay_of(&core).open);
+    }
+
+    #[test]
+    fn selecting_a_surface_card_closes_the_overlay() {
+        let mut core = core_with_overlay_rows();
+        core.dispatch_ui(RyeOsUiEvent::ToggleOverlay);
+        let select = build_view_model(&core).session.surfaces[0]
+            .select_intent
+            .clone();
+        core.dispatch_ui(RyeOsUiEvent::Activate { intent: select });
+        assert!(!overlay_of(&core).open);
+    }
+
+    #[test]
+    fn an_unrelated_intent_leaves_the_overlay_open() {
+        let mut core = core_with_overlay_rows();
+        core.dispatch_ui(RyeOsUiEvent::ToggleOverlay);
+        core.dispatch_ui(RyeOsUiEvent::Activate {
+            intent: RyeOsUiIntent::ToggleBottomStatusBar,
+        });
+        assert!(overlay_of(&core).open);
+    }
+
+    #[test]
+    fn the_overlay_key_opens_over_a_surface_that_hides_every_edge() {
+        let mut core = core_with_surface_yaml(
+            "name: Bare\nstyle:\n  switcher: hidden\n  status_bar: hidden\n  add_tab: false\n",
+        );
+        let vm = build_view_model(&core);
+        assert_eq!(vm.presentation.chrome.switcher.edge, RyeOsEdgeVm::Hidden);
+        assert_eq!(vm.presentation.chrome.status_bar.edge, RyeOsEdgeVm::Hidden);
+        assert!(!vm.presentation.chrome.top_bar.add_tab);
+        let alt_o = RyeOsKeyEvent {
+            key: RyeOsKey::Char('o'),
+            modifiers: RyeOsKeyModifiers {
+                alt: true,
+                ..Default::default()
+            },
+        };
+        let command = ryeos_key_command(alt_o, core.key_context());
+        core.apply_key_command(command);
+        assert!(overlay_of(&core).open);
     }
 
     #[test]

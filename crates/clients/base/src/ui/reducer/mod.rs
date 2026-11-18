@@ -370,6 +370,35 @@ impl RyeOsCore {
                 };
                 self.dispatch_ui(RyeOsUiEvent::OpenDialog { dialog_id: id })
             }
+            RyeOsUiEvent::ToggleOverlay => {
+                let overlay = &mut self.ui.overlay;
+                overlay.open = !overlay.open;
+                overlay.selected = (overlay.open && overlay.row_count() > 0).then_some(0);
+                self.bump_generation();
+                Vec::new()
+            }
+            RyeOsUiEvent::MoveOverlay { delta } => {
+                let overlay = &mut self.ui.overlay;
+                let count = overlay.row_count();
+                if overlay.open && count > 0 {
+                    let next = match overlay.selected {
+                        Some(index) => index as i64 + i64::from(delta),
+                        None => 0,
+                    };
+                    overlay.selected = Some(next.clamp(0, count as i64 - 1) as usize);
+                    self.bump_generation();
+                }
+                Vec::new()
+            }
+            RyeOsUiEvent::ActivateOverlay => {
+                let intent = self.selected_overlay_action(|_| true);
+                self.activate_overlay_intent(intent)
+            }
+            RyeOsUiEvent::ActivateOverlayKey { ch } => {
+                let keys = ch.to_string();
+                let intent = self.selected_overlay_action(|action| action.keys == keys);
+                self.activate_overlay_intent(intent)
+            }
             RyeOsUiEvent::OpenDialog { dialog_id } => self.open_dialog(&dialog_id),
             RyeOsUiEvent::CloseDialog { instance_key } => self.close_dialog(&instance_key),
             RyeOsUiEvent::FocusInput => {
@@ -671,7 +700,52 @@ impl RyeOsCore {
         }
     }
 
+    /// The intent of the first action, matching `accept`, on the selected
+    /// overlay row; None when the overlay is closed or nothing is selected.
+    fn selected_overlay_action(
+        &self,
+        accept: impl Fn(&super::view_model::RyeOsOverlayActionVm) -> bool,
+    ) -> Option<RyeOsUiIntent> {
+        let overlay = &self.ui.overlay;
+        if !overlay.open {
+            return None;
+        }
+        overlay
+            .row(overlay.selected?)?
+            .actions
+            .iter()
+            .find(|action| accept(action))
+            .map(|action| action.intent.clone())
+    }
+
+    fn activate_overlay_intent(&mut self, intent: Option<RyeOsUiIntent>) -> Vec<RyeOsEffect> {
+        match intent {
+            Some(intent) => self.dispatch_intent(intent),
+            None => Vec::new(),
+        }
+    }
+
+    /// Whether `intent` is one the open overlay offers: a Surface card's
+    /// selection or an action on one of its rows. Dispatching it closes the
+    /// overlay, so a client never sends a second event for that.
+    fn overlay_offers_intent(&self, intent: &RyeOsUiIntent) -> bool {
+        let overlay = &self.ui.overlay;
+        overlay.open
+            && (matches!(intent, RyeOsUiIntent::SelectSurface { .. })
+                || overlay
+                    .needs_you
+                    .iter()
+                    .chain(&overlay.running)
+                    .flat_map(|row| &row.actions)
+                    .any(|action| &action.intent == intent))
+    }
+
     pub(crate) fn dispatch_intent(&mut self, intent: RyeOsUiIntent) -> Vec<RyeOsEffect> {
+        if self.overlay_offers_intent(&intent) {
+            self.ui.overlay.open = false;
+            self.ui.overlay.selected = None;
+            self.bump_generation();
+        }
         match intent {
             RyeOsUiIntent::Refresh => self.initial_effects(),
             RyeOsUiIntent::OpenNewPresentationDocument => self.open_new_presentation_document(),

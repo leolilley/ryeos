@@ -357,6 +357,18 @@ pub enum RyeOsUiEvent {
         direction: FocusDirection,
     },
     OpenLauncher,
+    /// Open the attention overlay, or close it when open.
+    ToggleOverlay,
+    /// Move the overlay selection by `delta` rows while it is open.
+    MoveOverlay {
+        delta: i32,
+    },
+    /// Dispatch the selected overlay row's first action.
+    ActivateOverlay,
+    /// Dispatch the selected overlay row's action whose keys are `ch`.
+    ActivateOverlayKey {
+        ch: char,
+    },
     OpenDialog {
         dialog_id: String,
     },

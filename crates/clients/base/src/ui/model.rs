@@ -434,6 +434,9 @@ pub struct RyeOsUiState {
     pub top_status_visible: bool,
     #[serde(default = "default_true")]
     pub bottom_status_visible: bool,
+    /// The attention overlay: open state, selection and the rows it lists.
+    #[serde(default)]
+    pub overlay: super::view_model::RyeOsOverlayVm,
 }
 
 impl Default for RyeOsUiState {
@@ -451,6 +454,7 @@ impl Default for RyeOsUiState {
             // works if we decide on content later.
             top_status_visible: false,
             bottom_status_visible: true,
+            overlay: Default::default(),
         }
     }
 }
@@ -2751,6 +2755,7 @@ impl RyeOsCore {
         let timeline_keys = self.focused_timeline_key_state();
 
         super::keymap::RyeOsKeyContext {
+            overlay_open: self.ui.overlay.open,
             dialog_open: self.focused_view_instance_key().is_some_and(|key| {
                 self.presentation.as_ref().is_some_and(|presentation| {
                     presentation
