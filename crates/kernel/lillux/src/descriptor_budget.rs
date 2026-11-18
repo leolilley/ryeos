@@ -1,20 +1,21 @@
 //! Open-descriptor budget for a process that sets up a sandbox from inherited
 //! descriptors.
 //!
-//! A sandbox setup process holds, for every inherited descriptor it was handed,
-//! the original plus one private authority derived from it (the re-anchored
-//! source, or the byte copy materialized into private staging). It also keeps
-//! one transient duplicate alive while it inspects or copies a source, and a
-//! few staging directory handles. The limit installed on that process must
+//! A sandbox setup process holds every inherited descriptor it was handed
+//! until that source's last mount is bound and verified; only then does it
+//! release the source and the private authority derived from it (the
+//! re-anchored source, or the byte copy materialized into private staging).
+//! It also keeps a few staging directory handles. The limit installed on that process must
 //! cover that peak; it is unrelated to the limit the eventual target runs under.
 
 use std::fmt;
 
 /// Descriptors held per inherited descriptor at the setup peak: the original,
-/// its re-anchored or materialized private authority, and one transient
-/// duplicate (kind inspection, positional copy source, ancestor pin) that is
-/// live while its siblings are still held.
-pub const SETUP_DESCRIPTORS_PER_INHERITED: u64 = 3;
+/// held until its last mount is bound, and its private authority while that
+/// source still has mounts to bind. Transient duplicates (kind inspection,
+/// positional copy source, ancestor pin) live one source at a time and are
+/// covered by [`SETUP_FIXED_DESCRIPTORS`].
+pub const SETUP_DESCRIPTORS_PER_INHERITED: u64 = 2;
 
 /// Fixed setup cost independent of the mount count: stdio (3), request and
 /// status descriptors, the report pipe, private root and staging handles
@@ -74,7 +75,10 @@ mod tests {
     fn budget_scales_with_descriptors() {
         let few = setup_open_files(2, Some(4096)).unwrap().unwrap();
         let many = setup_open_files(40, Some(4096)).unwrap().unwrap();
-        assert_eq!(few, SETUP_FIXED_DESCRIPTORS + 2 * SETUP_DESCRIPTORS_PER_INHERITED);
+        assert_eq!(
+            few,
+            SETUP_FIXED_DESCRIPTORS + 2 * SETUP_DESCRIPTORS_PER_INHERITED
+        );
         assert_eq!(many - few, 38 * SETUP_DESCRIPTORS_PER_INHERITED);
     }
 
