@@ -6,7 +6,9 @@
 
 use ryeos_client_base::layout::Rect;
 use ryeos_client_base::text_surface::{Style, TextSurface};
-use ryeos_client_base::ui::view_model::{RyeOsRowDetailVm, RyeOsTimelineEntryVm, RyeOsTone};
+use ryeos_client_base::ui::view_model::{
+    RyeOsRowDetailVm, RyeOsTimelineDockVm, RyeOsTimelineEntryVm, RyeOsTimelineLaneVm, RyeOsTone,
+};
 
 use super::super::primitives::fill_line;
 use super::super::text::{display_width, join_with_right_meta, truncate, wrap_words};
@@ -59,6 +61,70 @@ pub struct TimelineEntryMeta<'a> {
     pub expandable: &'a [bool],
     pub expanded: &'a [bool],
     pub details: &'a [Vec<RyeOsRowDetailVm>],
+}
+
+/// Docked asks drawn at most; the rest stay in the flow.
+const MAX_DOCKED: usize = 3;
+
+/// Rows the foot under the feed takes: one for the status lane, reserved
+/// whether or not it has text, then one per docked ask. At least one row stays
+/// for the feed.
+pub fn foot_rows(height: u16, docked: usize) -> u16 {
+    let wanted = 1 + docked.min(MAX_DOCKED) as u16;
+    wanted.min(height.saturating_sub(1))
+}
+
+/// Draws the status lane, then the docked asks, one row each, in `rect`.
+pub fn draw_foot(
+    surface: &mut TextSurface,
+    rect: Rect,
+    lane: Option<&RyeOsTimelineLaneVm>,
+    dock: &[RyeOsTimelineDockVm],
+) {
+    let width = rect.w as usize;
+    if width == 0 || rect.h == 0 {
+        return;
+    }
+    let x = rect.x as usize;
+    let y = rect.y as usize;
+    if let Some(lane) = lane {
+        surface.draw_text(
+            x,
+            y,
+            &truncate(&format!("▸ {}", lane.label), width),
+            tone_style(lane.tone),
+        );
+    }
+    for (index, ask) in dock.iter().take(usize::from(rect.h) - 1).enumerate() {
+        let (primary, meta, tone) = match &ask.entry {
+            RyeOsTimelineEntryVm::Line {
+                primary,
+                meta,
+                tone,
+                ..
+            } => (primary.clone(), meta.clone(), *tone),
+            other => (other.label(), None, RyeOsTone::Warn),
+        };
+        // The answering actions are listed beside the ask; the command
+        // overlay runs them.
+        let labels: Vec<&str> = ask
+            .actions
+            .iter()
+            .filter(|action| action.intent.is_some())
+            .map(|action| action.label.as_str())
+            .collect();
+        let meta = if labels.is_empty() {
+            meta
+        } else {
+            Some(labels.join(" · "))
+        };
+        surface.draw_text(
+            x,
+            y + 1 + index,
+            &join_with_right_meta(tone_glyph(tone), &primary, meta.as_deref(), width),
+            tone_style(tone),
+        );
+    }
 }
 
 pub fn draw_timeline(
@@ -636,5 +702,41 @@ mod tests {
             "selected midpoint row: {:?}",
             row_text(&surface, 20, 2)
         );
+    }
+
+    #[test]
+    fn the_foot_reserves_the_lane_row_and_leaves_the_feed_a_row() {
+        assert_eq!(foot_rows(10, 0), 1);
+        assert_eq!(foot_rows(10, 2), 3);
+        assert_eq!(foot_rows(10, 9), 4);
+        assert_eq!(foot_rows(2, 5), 1);
+        assert_eq!(foot_rows(1, 0), 0);
+    }
+
+    #[test]
+    fn the_foot_draws_the_lane_above_the_docked_asks() {
+        let lane = RyeOsTimelineLaneVm {
+            label: "Waiting for approval".to_string(),
+            tone: RyeOsTone::Warn,
+        };
+        let dock = [RyeOsTimelineDockVm {
+            id: "ask:1".to_string(),
+            entry: line("approval requested: write"),
+            actions: Vec::new(),
+        }];
+        let mut surface = TextSurface::new(40, 2);
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            w: 40,
+            h: 2,
+        };
+        draw_foot(&mut surface, rect, Some(&lane), &dock);
+        assert!(row_text(&surface, 40, 0).contains("Waiting for approval"));
+        assert!(row_text(&surface, 40, 1).contains("approval requested: write"));
+        // An idle lane draws nothing but keeps its row.
+        let mut idle = TextSurface::new(40, 2);
+        draw_foot(&mut idle, rect, None, &[]);
+        assert!(row_text(&idle, 40, 0).trim().is_empty());
     }
 }

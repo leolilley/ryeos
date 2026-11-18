@@ -24,5 +24,17 @@
       ]
     }
   ],
-  "undeclared": {}
+  "undeclared": {},
+  "notice_noun": {
+    "key": "system_event",
+    "one": "system event",
+    "many": "system events"
+  },
+  "lane_matches": [
+    {
+      "label": "Working",
+      "entry": null,
+      "status": "running"
+    }
+  ]
 }

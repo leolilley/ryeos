@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-17T06:42:40Z:9e5584c8d38e95a53f15c6c6a5ef29806424408eadc5085842fa541a524ee166:OinNz60zG57UJzKTmne94Q3adQevLmMTFOF5sEIQqsCMu/XR4wxfDzGMIa2myZfTiCpvVDaD2kXCS1A3+4HMCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T22:59:58Z:4837d276601d0a5320f9e0a42ff9d0961532c83c8228c7a448a6a3b9025693fd:MCj+BWpXOSKZBwqCTzE86vjGIMDThgGrWO9GES/Di0szuto4S4weBkm62s95N0roaSkWlBMAfFDTwHOA1zj+Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: chain-timeline
 version: "1.0.0"
 description: Timeline of the input route's conversation chain, folded by the daemon's timeline service
@@ -46,5 +46,42 @@ affordances:
       facet: timeline.window
       value:
         limit: "{record.next_limit}"
+  # Answering a docked pending ask: the digest-fenced service the approvals
+  # views call. A client lists these beside an ask only where the surface
+  # admits them. The record is the ask's own fields plus the chain id.
+  - id: accept
+    label: Approve
+    producer: selection
+    visible_when:
+      all:
+        - { field: type, equals: ask }
+        - { field: state, equals: pending }
+    enabled_when: { field: accept_allowed, equals: true }
+    disabled_reason: This approval request cannot be accepted; decline it or inspect its authority.
+    invoke:
+      plane: rye
+      ref: service:worker-executions/resolve-approval
+      args:
+        chain_root_id: "{record.chain_root_id}"
+        approval_id: "{record.approval_id}"
+        request_digest: "{record.request_digest}"
+        accept: true
+      notice: Approval accepted
+  - id: decline
+    label: Decline
+    producer: selection
+    visible_when:
+      all:
+        - { field: type, equals: ask }
+        - { field: state, equals: pending }
+    invoke:
+      plane: rye
+      ref: service:worker-executions/resolve-approval
+      args:
+        chain_root_id: "{record.chain_root_id}"
+        approval_id: "{record.approval_id}"
+        request_digest: "{record.request_digest}"
+        accept: false
+      notice: Approval declined
 refresh:
   on_hint: thread

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-17T22:20:51Z:e1b264051af049eb60f3dfd2393c40fc46e406f0c56a53c2c76672d9325e31e0:q/p+bE4oDS1lcYAJ80bslS02+SYzhMX0Dpe3n/72/g5Tnh0MN0T9kk4jX47LfgzLIVwrgQ7LwbOCDHo/LjdbCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T00:08:34Z:ee7e96c92381a1932cbe2739356d9a20725436cdf350dc05277be5677415ded4:yLjXaDka9Kmh6Jwy55EMFUmCKpbusGYHkNfwE+GDo+hIXDYp3F46mQMYWGrldaZye9GrPGH+/cySln6w0MQMDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -336,7 +336,7 @@ for profile_name in "${node_init_profiles[@]}"; do
         | sed -nE 's/^          trusted_process_group_sessions: (true|false)$/\1/p'
     )"
     case "$profile_name:$host_class" in
-      hosted-workflow:*|hosted-controller:*|standard:hosted|development:local)
+      hosted-workflow:*|hosted-controller:*|standard:hosted)
         [[ "$declared_trust" == true ]] ;;
       *)
         [[ "$declared_trust" == false ]] ;;

@@ -863,9 +863,10 @@ impl ExecutionProvenance {
     }
 
     /// The logical project of this execution for signer project scopes (see
-    /// `ExecutionProjectAuthority::logical_project_root`).
-    pub fn logical_project_root(&self) -> Option<PathBuf> {
-        self.project_authority().logical_project_root()
+    /// `ExecutionProjectAuthority::logical_project_root`), judged on the node
+    /// whose site is `site_id`.
+    pub fn logical_project_root(&self, site_id: &str) -> Option<PathBuf> {
+        self.project_authority().logical_project_root(site_id)
     }
 
     pub fn project_authority(&self) -> &ryeos_state::objects::ExecutionProjectAuthority {

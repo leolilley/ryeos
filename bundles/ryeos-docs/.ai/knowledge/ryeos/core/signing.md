@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-16T01:11:15Z:1db716001eb248a97afeea1805534b4f845a841484326814c6091ca2d37a3543:8sPVCZhZCxcl5ktLW0/EHMLBYFsK5ABM4juFJl5tHpDHleUSI5K0DzaLDmK78cHAH347aSi2b+rGydHS9cfCBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-17T22:15:27Z:9757a13ce7a14a1fca6fe0406a17f3f5d5efae7eba7fff7095d8ee4e487f2043:FZn2qWw8mM8vFKweRo8O6r/K/BTcCvRlRRK/HpI+DOm/U+5eYwOOycUVV6mdOVGkPmpd8ji681MGKVsnx7OqDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -210,10 +210,15 @@ project path as the node knows it. A run against a live project matches by that
 path. A run against a pinned generation, a copy-on-write workspace or a pushed
 head is materialized at a per-generation checkout, so it matches by the
 project's original path instead, but only when the node's stable project
-identity for it is local (`local:<path>`); the checkout path never matches. A
-run whose logical project is unknown (for example a head whose project
-identity names another site) is judged as no project, so a signer scoped to
-specific projects is untrusted there.
+identity for it is local: `local:<path>`, or `<site>:<path>` where `<site>` is
+this node's own site id (how a pinned head launched on this node is stamped).
+The checkout path never matches. A run whose logical project is unknown (for
+example a head whose project identity names another site) is judged as no
+project, so a signer scoped to specific projects is untrusted there.
+
+A signer with an empty `projects` list may sign for every project.
+`ryeos trust scope <fp> --project <root>` replaces the list;
+`ryeos trust scope <fp> --any-project` clears it again.
 
 The scope is checked on every verification. A signer outside its scope is
 not trusted for that item: in project space the item is
