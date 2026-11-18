@@ -263,6 +263,7 @@ pub fn compiled_ui_attachment() -> Option<std::sync::Arc<AdmittedBindingAttachme
 /// Retain the authenticated transport association without replacing the
 /// durable principal used by verified execution. Only the dispatch owner can
 /// establish this scope after resolving the attachment in the browser session.
+#[cfg(test)]
 pub(crate) async fn with_compiled_ui_session<F>(
     session: &crate::browser_session::BrowserSession,
     attachment: std::sync::Arc<AdmittedBindingAttachment>,
