@@ -5439,10 +5439,27 @@ impl IsolationRuntime {
         }
 
         // The adapter's own limit covers its sandbox setup, which holds
-        // descriptors in proportion to what it inherits. The caller's request
+        // descriptors in proportion to what it inherits and places every
+        // target slot before the target's limit applies. The caller's request
         // is for the target and travels in the plan (`target_limits`).
-        let effective_open_files =
-            adapter_setup_open_files(inherited_fds.len(), self.inspection.limits.open_files)?;
+        let highest_target_slot = launch_request
+            .plan
+            .target_channels
+            .iter()
+            .map(|channel| channel.target_fd)
+            .chain(
+                launch_request
+                    .plan
+                    .target_sealed_payloads
+                    .iter()
+                    .map(|payload| payload.target_fd),
+            )
+            .max();
+        let effective_open_files = adapter_setup_open_files(
+            inherited_fds.len(),
+            highest_target_slot,
+            self.inspection.limits.open_files,
+        )?;
         let effective_stdout_bytes = limits
             .as_ref()
             .and_then(|limits| limits.max_stdout_bytes)
@@ -7996,13 +8013,15 @@ fn target_open_files(policy: Option<u64>, requested: Option<u64>) -> Option<u64>
 }
 
 /// Open-file limit for the adapter process that builds the sandbox, derived
-/// from the descriptors it inherits and bounded by the policy ceiling. A need
-/// above the ceiling is refused here rather than failing mid-setup.
+/// from the descriptors it inherits and the highest target slot it places,
+/// and bounded by the policy ceiling. A need above the ceiling is refused here
+/// rather than failing mid-setup.
 fn adapter_setup_open_files(
     inherited_descriptors: usize,
+    highest_target_slot: Option<u32>,
     policy: Option<u64>,
 ) -> Result<Option<u64>, EngineError> {
-    lillux::descriptor_budget::setup_open_files(inherited_descriptors, policy)
+    lillux::descriptor_budget::setup_open_files(inherited_descriptors, highest_target_slot, policy)
         .map_err(|error| refused(error.to_string()))
 }
 
@@ -8085,17 +8104,31 @@ mod tests {
 
     #[test]
     fn adapter_open_files_follow_inherited_descriptors_not_the_target_request() {
-        let small = adapter_setup_open_files(4, Some(4096)).unwrap().unwrap();
-        let large = adapter_setup_open_files(60, Some(4096)).unwrap().unwrap();
+        let small = adapter_setup_open_files(4, None, Some(4096))
+            .unwrap()
+            .unwrap();
+        let large = adapter_setup_open_files(60, None, Some(4096))
+            .unwrap()
+            .unwrap();
         assert!(large > small);
         // A full bundle set must not be squeezed to the target's 64.
         assert!(large > 64);
-        assert_eq!(adapter_setup_open_files(60, None).unwrap(), None);
+        assert_eq!(adapter_setup_open_files(60, None, None).unwrap(), None);
+    }
+
+    #[test]
+    fn adapter_open_files_cover_a_high_sealed_payload_slot() {
+        // A session start seals its delivered secret at a fixed slot far above
+        // what a handful of inherited descriptors would budget.
+        let limit = adapter_setup_open_files(5, Some(197), Some(4096))
+            .unwrap()
+            .unwrap();
+        assert!(limit > 197, "{limit}");
     }
 
     #[test]
     fn adapter_open_files_refuse_above_the_policy_ceiling_with_a_clear_reason() {
-        let error = adapter_setup_open_files(1000, Some(128)).unwrap_err();
+        let error = adapter_setup_open_files(1000, None, Some(128)).unwrap_err();
         match error {
             EngineError::IsolationPolicyRefused { reason } => {
                 assert!(reason.contains("1000"), "{reason}");
