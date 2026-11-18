@@ -114,6 +114,7 @@ fn draw_layout_node(
             background_transparent,
             input,
             tabs,
+            authorship,
             ..
         } => {
             let rect = if tabs.len() > 1 && rect.h > 1 {
@@ -149,6 +150,12 @@ fn draw_layout_node(
                         format!("{} · {attachment}", group_label.as_deref().unwrap_or(title))
                     }
                     None => group_label.as_deref().unwrap_or(title).to_string(),
+                };
+                // A project-authored view says so in its title, in the same
+                // plain title style (plain key text: no vocabulary reaches here).
+                let title = match authorship {
+                    Some(authorship) => format!("{title} · {}", authorship.indication()),
+                    None => title,
                 };
                 chrome::draw_tile(
                     surface,

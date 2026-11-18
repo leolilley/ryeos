@@ -783,6 +783,7 @@ fn layout(
             chrome_hidden,
             background_transparent,
             input,
+            authorship,
             ..
         } => {
             let supplement = supplement.as_ref();
@@ -814,6 +815,7 @@ fn layout(
                     supplement,
                     view,
                     input: input.as_ref(),
+                    authorship: authorship.as_ref(),
                 },
                 local,
             );

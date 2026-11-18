@@ -100,6 +100,32 @@ pub struct ViewBinding {
     /// view — degrade honestly, never drop silently.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub degraded: Option<String>,
+    /// Daemon-stamped marker: present only when this view was authored from
+    /// project space. Absent for bundle (node) views.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorship: Option<ItemAuthorship>,
+}
+
+/// Where a composed item was authored, as stamped by the daemon. Only
+/// project-authored items carry it; the daemon owns the value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ItemAuthorship {
+    pub space: String,
+    pub trust_class: String,
+}
+
+impl ItemAuthorship {
+    /// Plain-key indication text for a project-authored item: `project`,
+    /// with the trust class appended when it is not `trusted_project`.
+    pub fn indication(&self) -> String {
+        match self.trust_class.as_str() {
+            "trusted_project" => self.space.clone(),
+            "untrusted_project" => format!("{} \u{b7} untrusted", self.space),
+            "unsigned" => format!("{} \u{b7} unsigned", self.space),
+            other => format!("{} \u{b7} {other}", self.space),
+        }
+    }
 }
 
 /// Renderer-neutral presentation eligibility for one signed affordance.
@@ -2364,6 +2390,45 @@ mod tests {
         let binding = out.get("view:ryeos/gone").expect("present");
         assert_eq!(binding.degraded.as_deref(), Some("item not found"));
         assert_eq!(binding.view_ref.as_deref(), Some("view:ryeos/gone"));
+    }
+
+    #[test]
+    fn embedded_view_authorship_parses() {
+        let surface = json!({ "views": {
+            "view:proj/mine": {
+                "widget": "rows",
+                "authorship": { "space": "project", "trust_class": "untrusted_project" }
+            }
+        }});
+        let out = views_from_surface(Some(&surface));
+        let binding = out.get("view:proj/mine").expect("present");
+        assert!(binding.degraded.is_none(), "{:?}", binding.degraded);
+        let authorship = binding.authorship.as_ref().expect("authorship parsed");
+        assert_eq!(authorship.space, "project");
+        assert_eq!(authorship.trust_class, "untrusted_project");
+        assert_eq!(authorship.indication(), "project \u{b7} untrusted");
+    }
+
+    #[test]
+    fn embedded_bundle_view_has_no_authorship() {
+        let surface = json!({ "views": {
+            "view:ryeos/threads": { "widget": "rows" }
+        }});
+        let out = views_from_surface(Some(&surface));
+        let binding = out.get("view:ryeos/threads").expect("present");
+        assert!(binding.degraded.is_none(), "{:?}", binding.degraded);
+        assert_eq!(binding.authorship, None);
+    }
+
+    #[test]
+    fn degraded_entry_has_no_authorship() {
+        let surface = json!({ "views": {
+            "view:ryeos/gone": { "degraded": "item not found" }
+        }});
+        let out = views_from_surface(Some(&surface));
+        let binding = out.get("view:ryeos/gone").expect("present");
+        assert_eq!(binding.degraded.as_deref(), Some("item not found"));
+        assert_eq!(binding.authorship, None);
     }
 
     #[test]

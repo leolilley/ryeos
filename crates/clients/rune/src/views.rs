@@ -99,6 +99,8 @@ pub struct FrameSpec<'a> {
     pub supplement: Option<&'a RyeOsViewSupplementVm>,
     pub view: &'a RyeOsViewVm,
     pub input: Option<&'a RyeOsInputVm>,
+    /// Set when the view is project-authored; drawn beside the label.
+    pub authorship: Option<&'a ryeos_client_base::ui::content::ItemAuthorship>,
 }
 
 /// The key of a tile's actions menu, and of the control that opens it.
@@ -169,6 +171,19 @@ fn frame_header(spec: &FrameSpec<'_>, local: &crate::Local) -> El {
         .child(header_label(spec.label, p.text));
     if let Some(detail) = spec.detail.filter(|detail| !detail.is_empty()) {
         identity = identity.child(frame_detail(detail));
+    }
+    if let Some(authorship) = spec.authorship {
+        let tone = if authorship.trust_class == "trusted_project" {
+            p.muted
+        } else {
+            p.yellow
+        };
+        identity = identity.child(
+            text(authorship.indication())
+                .font(theme::data(9.0).tracking(0.4))
+                .color(tone)
+                .truncate(),
+        );
     }
     let mut title_row = row()
         .w_full()
