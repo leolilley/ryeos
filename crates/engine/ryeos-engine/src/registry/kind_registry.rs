@@ -2794,12 +2794,13 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
         _ => None,
     };
     let project_shadowing = match data.get("project_shadowing") {
-        Some(value) if !value.is_null() => serde_yaml::from_value::<ProjectShadowing>(
-            value.clone(),
-        )
-        .map_err(|error| EngineError::SchemaLoaderError {
-            reason: format!("{display}: invalid `project_shadowing`: {error}"),
-        })?,
+        Some(value) if !value.is_null() => {
+            serde_yaml::from_value::<ProjectShadowing>(value.clone()).map_err(|error| {
+                EngineError::SchemaLoaderError {
+                    reason: format!("{display}: invalid `project_shadowing`: {error}"),
+                }
+            })?
+        }
         _ => ProjectShadowing::default(),
     };
     let root_executable = execution

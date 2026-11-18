@@ -151,10 +151,13 @@ fn draw_layout_node(
                     }
                     None => group_label.as_deref().unwrap_or(title).to_string(),
                 };
-                // A project-authored view says so in its title, in the same
-                // plain title style (plain key text: no vocabulary reaches here).
+                // A project-authored view says so after its title. The title is
+                // one unstyled string drawn in the border, so the mark takes
+                // the title's style rather than a dim one. The word `project`
+                // is the plain key: no vocabulary mechanism reaches this draw
+                // site. Drawn whenever authorship is present.
                 let title = match authorship {
-                    Some(authorship) => format!("{title} · {}", authorship.indication()),
+                    Some(authorship) => format!("{title} [project: {}]", authorship.mark_tail()),
                     None => title,
                 };
                 chrome::draw_tile(

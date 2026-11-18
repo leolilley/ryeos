@@ -1558,8 +1558,12 @@ mod tests {
 
         // A project item under its own ref, and a bundle item nothing in the
         // project names, both resolve as before.
-        let mine = resolve_item_full(&roots, &schema, &CanonicalRef::parse("view:mine/x").unwrap())
-            .unwrap();
+        let mine = resolve_item_full(
+            &roots,
+            &schema,
+            &CanonicalRef::parse("view:mine/x").unwrap(),
+        )
+        .unwrap();
         assert_eq!(mine.winner_space, ItemSpace::Project);
         let theirs = resolve_item_full(
             &roots,

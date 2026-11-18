@@ -172,19 +172,6 @@ fn frame_header(spec: &FrameSpec<'_>, local: &crate::Local) -> El {
     if let Some(detail) = spec.detail.filter(|detail| !detail.is_empty()) {
         identity = identity.child(frame_detail(detail));
     }
-    if let Some(authorship) = spec.authorship {
-        let tone = if authorship.trust_class == "trusted_project" {
-            p.muted
-        } else {
-            p.yellow
-        };
-        identity = identity.child(
-            text(authorship.indication())
-                .font(theme::data(9.0).tracking(0.4))
-                .color(tone)
-                .truncate(),
-        );
-    }
     let mut title_row = row()
         .w_full()
         .min_h(HEADER_HEIGHT)
@@ -192,6 +179,12 @@ fn frame_header(spec: &FrameSpec<'_>, local: &crate::Local) -> El {
         .center_y()
         .gap(10.0)
         .child(identity.grow(1.0));
+    // The mark for a project-authored view: always drawn when present, at
+    // the right of the title row, in ink (never a warning tone). The title
+    // truncates before the mark does.
+    if let Some(authorship) = spec.authorship {
+        title_row = title_row.child(authorship_chip(authorship));
+    }
     let Some(tile) = &spec.tile else {
         // A frame without tile tools names its attachment or its detail.
         let aside = spec
@@ -271,6 +264,29 @@ fn frame_header(spec: &FrameSpec<'_>, local: &crate::Local) -> El {
         );
     }
     header
+}
+
+/// The chip that marks a project-authored view: the word `project` (plain
+/// key; no vocabulary reaches the frame), a separator, then the signer's name
+/// (or fingerprint prefix), or the trust word when there is no signer.
+fn authorship_chip(authorship: &ryeos_client_base::ui::content::ItemAuthorship) -> El {
+    let p = Palette::get();
+    row()
+        .h(22.0)
+        .px(9.0)
+        .gap(7.0)
+        .center_y()
+        .radius(11.0)
+        .border(1.0, p.text.alpha(0.22))
+        .label(format!("Project view, {}", authorship.mark_tail()))
+        .child(text("project").font(theme::ui(11.0)).color(p.muted))
+        .child(el().size(1.0, 10.0).fill(p.text.alpha(0.18)))
+        .child(
+            text(authorship.mark_tail())
+                .font(rune::tok::TextStyle::new(11.0, 500.0).family(theme::UI))
+                .color(p.text.alpha(0.85))
+                .truncate(),
+        )
 }
 
 fn frame_detail(detail: &str) -> El {

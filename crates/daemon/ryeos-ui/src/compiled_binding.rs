@@ -261,8 +261,7 @@ impl OwnerGrant<'_> {
         if !target.source_safe {
             return Some("source target is not declared read-only".to_string());
         }
-        if self.authority == Authority::Project
-            && !lane_allows(self.project_source_ceiling, target)
+        if self.authority == Authority::Project && !lane_allows(self.project_source_ceiling, target)
         {
             return Some(format!(
                 "{REFUSAL_PROJECT_SOURCE_OUTSIDE_CEILING}: a project-authored item may bind only the read services the node lists for project-authored UI; `{}` is not listed",
@@ -547,7 +546,13 @@ impl SessionCompiledUiBinding {
                 .affordances
                 .get(&self.binding.surface.canonical_ref),
         );
-        mark_authorship(surface_fields, authorship_marker(&self.binding.surface));
+        mark_authorship(
+            surface_fields,
+            Some(&self.binding.surface),
+            self.binding
+                .sources
+                .get(&self.binding.surface.canonical_ref),
+        );
         if self.binding.surface_route.is_none()
             && let Some(input) = surface_fields
                 .get_mut("input")
@@ -564,13 +569,11 @@ impl SessionCompiledUiBinding {
                 let Some(fields) = view.as_object_mut() else {
                     continue;
                 };
-                let marker = match self.binding.views.get(view_ref) {
-                    Some(EmbeddedViewIdentity::Resolved { identity }) => {
-                        authorship_marker(identity)
-                    }
+                let identity = match self.binding.views.get(view_ref) {
+                    Some(EmbeddedViewIdentity::Resolved { identity }) => Some(identity),
                     Some(EmbeddedViewIdentity::Degraded { .. }) | None => None,
                 };
-                mark_authorship(fields, marker);
+                mark_authorship(fields, identity, self.binding.sources.get(view_ref));
                 sanitize_sources(fields, self.binding.sources.get(view_ref));
                 sanitize_affordances(fields, self.binding.affordances.get(view_ref));
                 let retained = self.binding.affordances.get(view_ref);
@@ -1067,10 +1070,7 @@ fn lane_allows(patterns: &[String], target: &CompiledUiTarget) -> bool {
             .any(|granted| ryeos_state::capability::grant_matches(granted, required))
     };
     target_execute_capability(target).is_some_and(|capability| admits(&capability))
-        && target
-            .required_caps
-            .iter()
-            .all(|required| admits(required))
+        && target.required_caps.iter().all(|required| admits(required))
 }
 
 fn source_dynamic_parameters(feeds: &Value) -> Vec<String> {
@@ -1092,29 +1092,44 @@ fn source_dynamic_parameters(feeds: &Value) -> Vec<String> {
     parameters.into_iter().collect()
 }
 
-/// The marker a project-authored item carries in the presentation, or `None`
-/// for an item every member of which is a verified bundle item.
-fn authorship_marker(identity: &EffectiveUiItemIdentity) -> Option<Value> {
-    match Authority::of(identity) {
-        Authority::Node => None,
-        Authority::Project | Authority::Untrusted => Some(serde_json::json!({
-            "space": "project",
-            "trust_class": identity.effective_trust_class,
-        })),
+/// Settle the authorship marker an item carries in the presentation. An
+/// item every member of which is a verified bundle item carries none. Any
+/// other item carries one whose space, trust class and ref are written here
+/// from the binding's own identity record, and whose `source_refs` are the
+/// sources this binding actually retained for it, so the marker says what
+/// the item reads, not what it asked to read. The signer stays as the
+/// composition layer stamped it from the engine's provenance.
+fn mark_authorship(
+    fields: &mut serde_json::Map<String, Value>,
+    identity: Option<&EffectiveUiItemIdentity>,
+    retained: Option<&BTreeMap<String, CompiledUiSource>>,
+) {
+    let key = ryeos_api::surface_views::AUTHORSHIP_KEY;
+    let Some(identity) = identity.filter(|identity| Authority::of(identity) != Authority::Node)
+    else {
+        fields.remove(key);
+        return;
+    };
+    let signer = fields
+        .get(key)
+        .and_then(|stamped| stamped.get("signer"))
+        .filter(|signer| signer.get("fingerprint").is_some_and(Value::is_string))
+        .cloned();
+    let source_refs: BTreeSet<&str> = retained
+        .into_iter()
+        .flat_map(|sources| sources.values())
+        .map(|source| source.target.identity.canonical_ref.as_str())
+        .collect();
+    let mut marker = serde_json::json!({
+        "space": "project",
+        "trust_class": identity.effective_trust_class,
+        "ref": identity.canonical_ref,
+        "source_refs": source_refs,
+    });
+    if let Some(signer) = signer {
+        marker["signer"] = signer;
     }
-}
-
-/// Write the daemon's own authorship fact over whatever the item authored
-/// under that key, so a view or surface file can neither claim nor hide it.
-fn mark_authorship(fields: &mut serde_json::Map<String, Value>, marker: Option<Value>) {
-    match marker {
-        Some(marker) => {
-            fields.insert("authorship".to_string(), marker);
-        }
-        None => {
-            fields.remove("authorship");
-        }
-    }
+    fields.insert(key.to_string(), marker);
 }
 
 #[cfg(test)]
@@ -1584,7 +1599,10 @@ mod tests {
 
         let sources = &compiled.binding.sources[VIEW_REF];
         assert_eq!(sources.keys().collect::<Vec<_>>(), ["project"]);
-        assert_eq!(sources["project"].target.identity.canonical_ref, FIELD_PROJECT);
+        assert_eq!(
+            sources["project"].target.identity.canonical_ref,
+            FIELD_PROJECT
+        );
         refused_as(
             &compiled,
             "source:view:test/input:default",
@@ -1671,15 +1689,30 @@ mod tests {
         assert!(project_view.get("authorship").is_none());
         assert_eq!(
             project_view["views"][VIEW_REF]["authorship"],
-            serde_json::json!({"space": "project", "trust_class": "trusted_project"})
+            serde_json::json!({
+                "space": "project",
+                "trust_class": "trusted_project",
+                "ref": VIEW_REF,
+                "source_refs": [FIELD_PROJECT]
+            }),
+            "the marker lists the sources the binding kept, not the ones the view asked for"
         );
 
         let project_surface = present(TrustClass::TrustedProject, TrustClass::TrustedBundle);
         assert_eq!(
             project_surface["authorship"],
-            serde_json::json!({"space": "project", "trust_class": "trusted_project"})
+            serde_json::json!({
+                "space": "project",
+                "trust_class": "trusted_project",
+                "ref": SURFACE_REF,
+                "source_refs": []
+            })
         );
-        assert!(project_surface["views"][VIEW_REF].get("authorship").is_none());
+        assert!(
+            project_surface["views"][VIEW_REF]
+                .get("authorship")
+                .is_none()
+        );
 
         for (trust, name) in [
             (TrustClass::UntrustedProject, "untrusted_project"),
@@ -1688,9 +1721,44 @@ mod tests {
             let untrusted = present(TrustClass::TrustedBundle, trust);
             assert_eq!(
                 untrusted["views"][VIEW_REF]["authorship"],
-                serde_json::json!({"space": "project", "trust_class": name})
+                serde_json::json!({
+                    "space": "project",
+                    "trust_class": name,
+                    "ref": VIEW_REF,
+                    "source_refs": []
+                })
             );
         }
+
+        // The signer the composition layer stamped from the engine's
+        // provenance is carried through; anything else an item wrote under
+        // the key is not.
+        let mut stamped = authored.clone();
+        stamped["views"][VIEW_REF]["authorship"] = serde_json::json!({
+            "space": "bundle",
+            "source_refs": ["service:test/write"],
+            "signer": {"fingerprint": "ab".repeat(32), "name": "Farm author"}
+        });
+        let carried = compile_authored_by(
+            TrustClass::TrustedBundle,
+            TrustClass::TrustedProject,
+            &["cap.read", "cap.write"],
+            &ceiling(&[FIELD_PROJECT]),
+            &stamped,
+            bundle_service_target,
+        )
+        .sanitize_effective_surface(&stamped)
+        .unwrap();
+        assert_eq!(
+            carried["views"][VIEW_REF]["authorship"],
+            serde_json::json!({
+                "space": "project",
+                "trust_class": "trusted_project",
+                "ref": VIEW_REF,
+                "source_refs": [FIELD_PROJECT],
+                "signer": {"fingerprint": "ab".repeat(32), "name": "Farm author"}
+            })
+        );
     }
 
     /// A project view whose signer is not pinned, or which is unsigned,
@@ -1769,7 +1837,9 @@ mod tests {
             REFUSAL_PROJECT_SOURCE_OUTSIDE_CEILING,
         );
         assert_eq!(
-            compiled.binding.sources[VIEW_REF].keys().collect::<Vec<_>>(),
+            compiled.binding.sources[VIEW_REF]
+                .keys()
+                .collect::<Vec<_>>(),
             ["project"]
         );
         assert!(matches!(
@@ -1862,7 +1932,9 @@ mod tests {
             bundle_service_target,
         );
         assert_eq!(
-            compiled.binding.sources[VIEW_REF].keys().collect::<Vec<_>>(),
+            compiled.binding.sources[VIEW_REF]
+                .keys()
+                .collect::<Vec<_>>(),
             ["project"]
         );
         assert!(compiled.binding.surface_route.is_none());
@@ -2189,7 +2261,10 @@ mod tests {
             sources.keys().collect::<Vec<_>>(),
             ["execution", "project", "runs"]
         );
-        assert_eq!(sources["project"].target.identity.canonical_ref, FIELD_PROJECT);
+        assert_eq!(
+            sources["project"].target.identity.canonical_ref,
+            FIELD_PROJECT
+        );
         assert_eq!(sources["runs"].target.identity.canonical_ref, FIELD_RUNS);
         assert_eq!(
             sources["runs"].parameters,
@@ -2231,12 +2306,19 @@ mod tests {
     fn shipped_project_source_ceiling_names_each_service_exactly() {
         let shipped = shipped_project_source_ceiling();
         assert_eq!(shipped, ceiling(&[FIELD_PROJECT]));
-        for widened in ["ryeos.execute.service.*", "ryeos.execute.service.ui/ryeos-ui/field/*", ""] {
+        for widened in [
+            "ryeos.execute.service.*",
+            "ryeos.execute.service.ui/ryeos-ui/field/*",
+            "",
+        ] {
             let refusal = crate::handlers::ui_launch_mint::ProjectAuthoringConfig::from_value(
                 serde_json::json!({"sources": [widened]}),
             )
             .unwrap_err();
-            assert!(refusal.contains("must name one service exactly"), "{refusal}");
+            assert!(
+                refusal.contains("must name one service exactly"),
+                "{refusal}"
+            );
         }
     }
 
@@ -2284,11 +2366,9 @@ mod tests {
                 );
             }
             assert!(
-                compiled
-                    .binding
-                    .attenuated
-                    .iter()
-                    .all(|entry| entry.reason.starts_with(REFUSAL_PROJECT_SOURCE_OUTSIDE_CEILING)),
+                compiled.binding.attenuated.iter().all(|entry| entry
+                    .reason
+                    .starts_with(REFUSAL_PROJECT_SOURCE_OUTSIDE_CEILING)),
                 "{surface}: {:?}",
                 compiled.binding.attenuated
             );

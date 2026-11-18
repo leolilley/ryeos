@@ -1056,6 +1056,12 @@ impl CheckedEngineGeneration<'_> {
     /// generation held by this guard. Downstream coherent-batch consumers
     /// retain this value; they must not reconstruct it from item payloads or
     /// registered paths.
+    /// The label the node's trust registry records for a signer, when it
+    /// records the signer at all. A display name only: it grants nothing.
+    pub fn signer_label(&self, fingerprint: &str) -> Option<String> {
+        self.engine.signer_label(fingerprint)
+    }
+
     pub fn request_engine_generation_identity(&self) -> &str {
         &self.request_engine_generation_identity
     }
@@ -1559,6 +1565,20 @@ impl Engine {
     /// Return the exact retained content root for a named bundle in this
     /// engine generation. Callers must obtain `name` from typed resolution
     /// provenance; a matching source pathname is not authority.
+    /// The label the node's trust registry records for a signer, when it
+    /// records the signer at all. A display name only: it grants nothing.
+    pub fn signer_label(&self, fingerprint: &str) -> Option<String> {
+        self.trust_store
+            .signer(fingerprint)
+            .map(|record| record.label.clone())
+            .or_else(|| {
+                self.trust_store
+                    .get(fingerprint)
+                    .and_then(|signer| signer.label.clone())
+            })
+            .filter(|label| !label.is_empty())
+    }
+
     pub fn registered_bundle_root(&self, name: &str) -> Option<&std::path::Path> {
         self.registered_bundle_roots
             .iter()

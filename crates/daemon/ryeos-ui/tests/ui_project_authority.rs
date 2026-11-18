@@ -609,7 +609,11 @@ async fn project_file_shadowing_a_bound_view_leaves_that_view_unavailable_with_i
         other => panic!("the shadowed view must be degraded, got {other:?}"),
     }
     assert!(!binding.sources.contains_key("view:ryeos/threads/history"));
-    assert!(!binding.affordances.contains_key("view:ryeos/threads/history"));
+    assert!(
+        !binding
+            .affordances
+            .contains_key("view:ryeos/threads/history")
+    );
     assert!(
         binding
             .sources
