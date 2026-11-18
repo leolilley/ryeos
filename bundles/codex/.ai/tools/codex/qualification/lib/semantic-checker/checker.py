@@ -43,6 +43,28 @@ def require(condition, message):
         raise Refused(message)
 
 
+_EXCERPT_BYTES = 400
+_CREDENTIAL_SHAPES = (
+    re.compile(r"\bBearer\s+\S+", re.IGNORECASE),
+    re.compile(r"\beyJ[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]+)*"),
+    re.compile(r"\b(?:sk|pk|rk|rnd|ghp|gho|ghs|xox[abp])[-_][A-Za-z0-9_-]{8,}"),
+    re.compile(r"[A-Za-z0-9+/_=-]{32,}"),
+)
+
+
+def cell_excerpt(source):
+    """A bounded, credential-redacted description of a refused model cell.
+
+    Length and digest are of the whole cell. The excerpt is the first 400 bytes after anything shaped like a credential
+    is replaced, so a refusal can be diagnosed without the cell being retained or a secret being printed."""
+    raw = source.encode("utf-8", "replace")
+    cleaned = source
+    for shape in _CREDENTIAL_SHAPES:
+        cleaned = shape.sub("[redacted]", cleaned)
+    head = cleaned.encode("utf-8", "replace")[:_EXCERPT_BYTES].decode("utf-8", "replace")
+    return "cell %d bytes sha256=%s excerpt=%s" % (len(raw), hashlib.sha256(raw).hexdigest(), json.dumps(head))
+
+
 def typed_equal(left, right):
     """JSON semantic equality preserving bool/number and integer/float types."""
     pending = [(left, right)]
@@ -486,10 +508,13 @@ def _conversation(expected, provider, path, thread, turn, messages, presentation
 
     def cell_role(source):
         require(0 < len(source.encode("utf-8")) <= MAX_CELL_SOURCE_BYTES and "\0" not in source,
-                "cell source bound")
-        require(re.search(r"\bimport\b|\brequire\s*\(|\btools\s*\[", source) is None, "cell import or dynamic tool")
-        require(re.findall(r"\btools\s*\.\s*([A-Za-z_$][\w$]*)", source) == ["exec_command"],
-                "cell must make exactly one exec_command call")
+                "cell source bound: " + cell_excerpt(source))
+        require(re.search(r"\bimport\b|\brequire\s*\(|\btools\s*\[", source) is None,
+                "cell import or dynamic tool: " + cell_excerpt(source))
+        calls = re.findall(r"\btools\s*\.\s*([A-Za-z_$][\w$]*)", source)
+        require(calls == ["exec_command"],
+                "cell must make exactly one exec_command call (tools calls seen: %s): %s"
+                % (json.dumps(calls[:12]), cell_excerpt(source)))
         literals = _js_strings(source)
         matching = [i for i, spec in enumerate(roles) if spec[0] in literals]
         require(len(matching) == 1, "unknown role command")

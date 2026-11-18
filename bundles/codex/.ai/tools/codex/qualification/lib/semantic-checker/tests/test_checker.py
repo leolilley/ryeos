@@ -431,6 +431,45 @@ class CheckerSourceTests(unittest.TestCase):
             with self.subTest(mutation=name), self.assertRaises(checker.Refused):
                 self.check(values)
 
+    def test_refused_cell_is_described_without_a_credential(self):
+        secret = "sk-" + "a1B2c3D4e5F6g7H8i9J0"
+        bearer = "Bearer abcdef0123456789tokenvalue"
+        blob = "Z9y8X7w6V5u4T3s2R1q0P9o8N7m6L5k4"
+        cases = {
+            "two_exec_calls": lambda s: s + " await tools.exec_command({});",
+            "second_tool": lambda s: s + " await tools.apply_patch({});",
+            "dynamic_tool": lambda s: s.replace("tools.exec_command", "tools['exec_command']"),
+        }
+        for name, change in cases.items():
+            values = fixture(code_mode=True)
+            batch = values[2]["batches"][0]
+            messages = [synthetic_decode(e["payload"]["notification_json"], checker.MAX_EVENT_BYTES)
+                        for e in batch["events"]]
+            for message in messages:
+                item = message["params"].get("item", {})
+                if item.get("type") == "custom_tool_call" and item["call_id"] == "cell-call-0":
+                    item["input"] = change(item["input"]) + " /* %s %s %s */" % (secret, bearer, blob)
+                    cell = item["input"]
+            batch["events"] = [{"payload": {"notification_json": synthetic_json(m)}} for m in messages]
+            with self.subTest(mutation=name), self.assertRaises(checker.Refused) as raised:
+                self.check(values)
+            text = str(raised.exception)
+            self.assertIn("cell %d bytes sha256=%s" % (len(cell.encode()), hashlib.sha256(cell.encode()).hexdigest()), text)
+            self.assertIn("excerpt=", text)
+            for leaked in (secret, "abcdef0123456789tokenvalue", blob):
+                self.assertNotIn(leaked, text)
+            if name != "dynamic_tool":
+                self.assertIn("tools calls seen:", text)
+
+    def test_cell_excerpt_is_bounded_and_redacts_credential_shapes(self):
+        long_cell = "tools.exec_command({cmd: 'x'}); " + ("y " * 600)
+        text = checker.cell_excerpt(long_cell)
+        self.assertIn("cell %d bytes" % len(long_cell), text)
+        self.assertLess(len(text), 700)
+        redacted = checker.cell_excerpt('a "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc123" b')
+        self.assertNotIn("eyJhbGci", redacted)
+        self.assertIn("[redacted]", redacted)
+
     def test_cell_string_reader_decodes_literals_and_skips_comments(self):
         self.assertEqual(checker._js_strings('a("x\\"y", \'z\\n\') // "c"\n/* \'d\' */ `e` "\\u0041\\x42\\u{43}"'),
                          ['x"y', "z\n", "e", "ABC"])
