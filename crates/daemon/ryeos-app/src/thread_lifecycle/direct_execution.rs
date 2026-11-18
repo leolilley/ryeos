@@ -3539,6 +3539,22 @@ impl ProcessContainmentRequirement {
         }
     }
 
+    /// An enforced node never settles a direct verifier by the trusted
+    /// process-group lane, so its requirement is at least any qualified
+    /// containment. A signed policy minimum is a floor, and the shipped
+    /// bundle-release and environment-qualification policies name the lowest
+    /// one (`trusted_process_group_absent`) while running on the enforced
+    /// release-authority node; the node exceeds that floor with its own
+    /// containment and the signed policy is not rewritten. A non-enforced
+    /// node keeps the requirement unchanged.
+    pub fn with_enforced_floor(self, enforced: bool) -> Self {
+        if enforced {
+            self.at_least(Self::AnyQualifiedContainment)
+        } else {
+            self
+        }
+    }
+
     fn strength(self) -> u8 {
         match self {
             Self::None => 0,
@@ -3559,7 +3575,7 @@ impl ProcessContainmentRequirement {
 
     /// The qualified mechanism answering this requirement on this node, or the
     /// refusal that names the missing guarantee.
-    fn select(
+    pub(crate) fn select(
         self,
         containment: &ryeos_engine::isolation::DescendantContainmentReadiness,
     ) -> Result<Option<ryeos_engine::isolation::DescendantContainmentGuarantee>> {

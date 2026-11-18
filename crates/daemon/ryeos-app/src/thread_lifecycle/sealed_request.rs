@@ -850,11 +850,7 @@ impl SealedRootExecutionRequest {
                 "a qualification policy that names no minimum settlement takes its containment from the selected protocol's holding, and none was supplied"
             ),
         }?;
-        Ok(if enforced {
-            requirement.at_least(Requirement::AnyQualifiedContainment)
-        } else {
-            requirement
-        })
+        Ok(requirement.with_enforced_floor(enforced))
     }
 
     /// Whether the sealed root demands any retained containment.
