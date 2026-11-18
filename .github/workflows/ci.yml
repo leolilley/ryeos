@@ -1002,10 +1002,11 @@ jobs:
       - name: Prepare the runner
         # The durable-root probe refuses an app root on the VM's root disk, so
         # this places TMPDIR on a loop-mounted volume.
-        run: ./scripts/ci/prepare-runner.sh
+        run: ./scripts/ci/prepare-runner.sh --host-service
 
       - name: Exercise installed restart and resume
         env:
+          RYEOS_SMOKE_HOST_SERVICE: "1"
           # The manual smoke job populates bundles with the repository's dev
           # publisher. Trust that exact document explicitly; release artifacts
           # use the hardcoded official publisher and need no override.
@@ -1065,10 +1066,11 @@ jobs:
       - name: Prepare the runner
         # The durable-root probe refuses an app root on the VM's root disk, so
         # this places TMPDIR on a loop-mounted volume.
-        run: ./scripts/ci/prepare-runner.sh
+        run: ./scripts/ci/prepare-runner.sh --host-service
 
       - name: Exercise the browser client
         env:
+          RYEOS_SMOKE_HOST_SERVICE: "1"
           RYEOS_SMOKE_TRUST_FILE: ${{ env.RYEOS_SMOKE_PREFIX }}/share/ryeos/.ai/PUBLISHER_TRUST.toml
           RYEOS_SMOKE_BUNDLE_SOURCE: ${{ env.RYEOS_SMOKE_PREFIX }}/share/ryeos
           RYEOS_SMOKE_SHOTS: ${{ runner.temp }}/browser-smoke
