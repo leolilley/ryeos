@@ -45,10 +45,32 @@ struct GroupMember {
     state: char,
 }
 
-/// Parse `/proc/<pid>/stat` text into `(state, parent pid, process group)`.
-fn parse_proc_stat(raw: &str) -> Result<(char, u32, i64), String> {
-    let close = raw.rfind(')').ok_or("malformed stat comm")?;
-    let mut fields = raw[close + 1..].split_whitespace();
+/// Fields of `/proc/<pid>/stat` after the command name, read from raw bytes.
+///
+/// The name sits between the first `(` and the last `)` and may hold any
+/// bytes, including non-UTF-8 ones and parentheses, so only the text after it
+/// (state, parent pid, group, and the numeric fields) is interpreted.
+pub(crate) fn proc_stat_fields_after_comm(raw: &[u8]) -> Result<Vec<&str>, String> {
+    let open = raw
+        .iter()
+        .position(|byte| *byte == b'(')
+        .ok_or("malformed stat comm")?;
+    let close = raw
+        .iter()
+        .rposition(|byte| *byte == b')')
+        .filter(|close| *close > open)
+        .ok_or("malformed stat comm")?;
+    raw[close + 1..]
+        .split(|byte| byte.is_ascii_whitespace())
+        .filter(|field| !field.is_empty())
+        .map(|field| std::str::from_utf8(field).map_err(|_| "non-text stat field".to_string()))
+        .collect()
+}
+
+/// Parse `/proc/<pid>/stat` bytes into `(state, parent pid, process group)`.
+fn parse_proc_stat(raw: &[u8]) -> Result<(char, u32, i64), String> {
+    let fields = proc_stat_fields_after_comm(raw)?;
+    let mut fields = fields.into_iter();
     let state = fields
         .next()
         .and_then(|value| value.chars().next())
@@ -89,7 +111,7 @@ fn scan_group_members(pgid: i64, ignored: Option<u32>) -> Option<Vec<GroupMember
         if Some(pid) == ignored {
             continue;
         }
-        let raw = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        let raw = match std::fs::read(format!("/proc/{pid}/stat")) {
             Ok(raw) => raw,
             Err(error)
                 if error.kind() == std::io::ErrorKind::NotFound
@@ -170,6 +192,9 @@ fn decide_group_presence(members: &[GroupMember], checker_pid: u32) -> GroupPres
 /// signals that pgid again, so a later reuse of the number cannot be hit.
 #[cfg(target_os = "linux")]
 pub fn group_presence(pgid: i64, retained_leader: Option<u32>, owned: &[u32]) -> GroupPresence {
+    if pgid <= 1 {
+        return GroupPresence::Undecidable;
+    }
     let checker_pid = std::process::id();
     let Some(mut members) = scan_group_members(pgid, retained_leader) else {
         return GroupPresence::Undecidable;
@@ -1582,14 +1607,9 @@ mod linux {
     }
 
     pub(super) fn read_process_stat(pid: u32) -> std::io::Result<ProcessStat> {
-        let raw = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
-        let close = raw.rfind(')').ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "malformed procfs stat comm",
-            )
-        })?;
-        let fields: Vec<_> = raw[close + 1..].split_whitespace().collect();
+        let raw = std::fs::read(format!("/proc/{pid}/stat"))?;
+        let fields = proc_stat_fields_after_comm(&raw)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         let state = fields
             .first()
             .and_then(|value| value.chars().next())
@@ -2272,10 +2292,44 @@ mod group_presence_tests {
 
     #[test]
     fn garbled_stat_is_unparseable() {
-        assert!(parse_proc_stat("garbage").is_err());
-        assert!(parse_proc_stat("1 (x) Z").is_err());
-        assert!(parse_proc_stat("1 (x) Z notanumber 5").is_err());
-        assert_eq!(parse_proc_stat("1 (a b) Z 7 9 9"), Ok(('Z', 7, 9)));
+        assert!(parse_proc_stat(b"garbage").is_err());
+        assert!(parse_proc_stat(b"1 (x) Z").is_err());
+        assert!(parse_proc_stat(b"1 (x) Z notanumber 5").is_err());
+        assert_eq!(parse_proc_stat(b"1 (a b) Z 7 9 9"), Ok(('Z', 7, 9)));
+        // Parentheses and non-UTF-8 bytes inside the command name.
+        assert_eq!(parse_proc_stat(b"1 (a) (b)) S 7 9 9"), Ok(('S', 7, 9)));
+        assert_eq!(parse_proc_stat(b"1 (\xff\xfe) R 3 4 4"), Ok(('R', 3, 4)));
+    }
+
+    #[test]
+    fn non_utf8_command_name_does_not_make_the_scan_undecidable() {
+        let child = fork_group_member(|| {
+            unsafe { libc::prctl(libc::PR_SET_NAME, b"\xff\xfe\0".as_ptr()) };
+            pause_forever();
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let raw = std::fs::read(format!("/proc/{child}/stat")).expect("read stat");
+            if raw.windows(2).any(|pair| pair == b"\xff\xfe") {
+                break;
+            }
+            assert!(Instant::now() < deadline, "comm was never set");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        wait_for_state(child, child, 'S');
+        assert_eq!(
+            group_presence(i64::from(child), None, &[]),
+            GroupPresence::Present
+        );
+        unsafe { libc::kill(child, libc::SIGKILL) };
+        reap_blocking(child);
+    }
+
+    #[test]
+    fn unusable_group_numbers_are_undecidable() {
+        for pgid in [i64::MIN, -5, 0, 1] {
+            assert_eq!(group_presence(pgid, None, &[]), GroupPresence::Undecidable);
+        }
     }
 
     #[test]

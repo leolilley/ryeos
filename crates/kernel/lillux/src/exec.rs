@@ -8618,11 +8618,20 @@ impl RunningProcess {
             {
                 return;
             }
-            let _ = wait_owned_process_group_quiescent(
+            let deadline = Instant::now() + ATTACHMENT_ABORT_SETTLE_TIMEOUT;
+            if let Err(error) = wait_owned_process_group_quiescent(
                 self.wrapper_pgid,
                 self.wrapper_pid,
-                ATTACHMENT_ABORT_SETTLE_TIMEOUT,
-            );
+                deadline.saturating_duration_since(Instant::now()),
+            ) {
+                // Lillux carries no logging dependency; stderr is its
+                // diagnostic channel. The durable owner still proves
+                // settlement itself.
+                eprintln!(
+                    "process group {} did not drain before wrapper reap: {error}",
+                    self.wrapper_pgid
+                );
+            }
         }
     }
 
@@ -11661,12 +11670,10 @@ fn validate_direct_attachment_identity(pid: u32, pgid: i64) -> Result<(), String
 
 #[cfg(target_os = "linux")]
 fn read_linux_process_birth(pid: u32) -> Result<LinuxProcessBirth, String> {
-    let raw = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+    let raw = std::fs::read(format!("/proc/{pid}/stat"))
         .map_err(|error| format!("read /proc/{pid}/stat: {error}"))?;
-    let close = raw
-        .rfind(')')
-        .ok_or_else(|| format!("malformed /proc/{pid}/stat comm"))?;
-    let fields: Vec<_> = raw[close + 1..].split_whitespace().collect();
+    let fields = crate::process_control::proc_stat_fields_after_comm(&raw)
+        .map_err(|error| format!("/proc/{pid}/stat: {error}"))?;
     let state = fields
         .first()
         .and_then(|value| value.chars().next())
