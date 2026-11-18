@@ -8012,6 +8012,52 @@ mod imp {
         }
 
         #[test]
+        fn setup_budget_places_a_sealed_payload_at_a_high_fixed_slot() {
+            // A session start seals its delivered secret at slot 197 while the
+            // setup process inherits only a few descriptors. The limit runs in
+            // a child so this test process keeps its own.
+            const CHILD: &str = "RYEOS_SETUP_BUDGET_HIGH_SLOT_CHILD";
+            const SLOT: u32 = 197;
+            if std::env::var_os(CHILD).is_some() {
+                let install = |value: u64| {
+                    let limit = libc::rlimit {
+                        rlim_cur: value,
+                        rlim_max: value,
+                    };
+                    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+                };
+                let source = tempfile::tempfile().unwrap();
+                // A count-only budget sits below the slot: placing fails.
+                let count_only = crate::descriptor_budget::SETUP_FIXED_DESCRIPTORS
+                    + 3 * crate::descriptor_budget::SETUP_DESCRIPTORS_PER_INHERITED;
+                assert!(count_only <= u64::from(SLOT));
+                let budget =
+                    crate::descriptor_budget::setup_open_files(3, Some(SLOT), Some(64), Some(4096))
+                        .unwrap()
+                        .unwrap();
+                assert!(budget > u64::from(SLOT));
+                // Lowering only: install the budget, check the slot places,
+                // then lower to the count-only value and check it refuses.
+                install(budget);
+                place_target_channel(source.as_raw_fd(), SLOT as RawFd).unwrap();
+                assert_eq!(unsafe { libc::close(SLOT as RawFd) }, 0);
+                install(count_only);
+                let error = place_target_channel(source.as_raw_fd(), SLOT as RawFd).unwrap_err();
+                assert!(error.contains("Bad file descriptor"), "{error}");
+                return;
+            }
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "setup_budget_places_a_sealed_payload_at_a_high_fixed_slot",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+
+        #[test]
         fn filesystem_socket_uses_existing_mount_kind_and_exact_identity() {
             let temporary = tempfile::tempdir().unwrap();
             let path = temporary.path().join("callback.sock");
