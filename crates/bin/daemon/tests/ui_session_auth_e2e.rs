@@ -171,10 +171,7 @@ async fn browser_session_authority_lifecycle_over_http() -> anyhow::Result<()> {
             |_, _, _| Ok(()),
             |cmd| {
                 // The daemon's per-phase timing lines for mint and seat open.
-                cmd.env(
-                    "RUST_LOG",
-                    "info,ryeos_ui::timing=debug,ryeos_engine::timing=debug",
-                );
+                cmd.env("RUST_LOG", "info,ryeos_ui::timing=debug");
             },
         ),
     )
@@ -191,7 +188,7 @@ async fn browser_session_authority_lifecycle_over_http() -> anyhow::Result<()> {
     let log = harness.stderr_so_far();
     for line in log
         .lines()
-        .filter(|line| line.contains("request phase timing") || line.contains("engine work timing"))
+        .filter(|line| line.contains("request phase timing"))
     {
         eprintln!("daemon {line}");
     }
