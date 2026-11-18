@@ -7976,7 +7976,44 @@ async fn run_claimed_thread_row_inner(
         // The blocking owner performs any proved pre-contact/checked-abort
         // borrower settlement while it still holds the request lifelines.
         // Neither an arbitrary error nor a JoinError supplies that proof here.
-        Ok(result) => result?,
+        Ok(Ok(spawned)) => spawned,
+        Ok(Err(error)) => {
+            // A successor whose end passed between its launch admission and
+            // the spawn (the spawn waits for a blocking worker, which load
+            // lengthens) is a deadline stop like one found elapsed at
+            // admission, not a failed launch.
+            let now_ms = lillux::time::timestamp_millis();
+            let elapsed_end_at_ms = successor_end_at_ms.filter(|end| {
+                now_ms >= *end
+                    && error
+                        .downcast_ref::<DispatchError>()
+                        .is_some_and(|refusal| refusal.code() == "budget_exhausted")
+            });
+            if let Some(end_at_ms) = elapsed_end_at_ms {
+                crate::dispatch::finalize_method_thread_with_params(
+                    state,
+                    launch_owner,
+                    ryeos_app::run_deadline::elapsed_finalize_params(
+                        &thread_id,
+                        ryeos_app::run_deadline::REASON_ELAPSED_BEFORE_LAUNCH,
+                        end_at_ms,
+                        now_ms,
+                    ),
+                )?;
+                return Err(BuildAndLaunchError::from(
+                    DispatchError::LaunchPreparationFailed {
+                        code: "deadline_elapsed".to_owned(),
+                        message: "the run deadline passed before this thread could launch; it \
+                                  settled as a deadline stop"
+                            .to_owned(),
+                        classification: "policy".to_owned(),
+                        binding: None,
+                        details: Box::new(BTreeMap::new()),
+                    },
+                ));
+            }
+            return Err(error.into());
+        }
         Err(error) => {
             lifecycle_owner.revoke_tokens_after_unsettled_wait();
             return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
@@ -8064,21 +8101,8 @@ async fn run_claimed_thread_row_inner(
             // which is dropped. Without this the operator only ever sees a bare
             // "failed" and is locked out of why the thread died. `{err:#}` keeps
             // the full cause chain (e.g. "missing required secret …").
-            // A successor whose end passed between the launch admission and
-            // the spawn (the spawn waits for a blocking worker, which load
-            // lengthens) is a deadline stop like one found elapsed at
-            // admission, not a failed launch.
-            let now_ms = lillux::time::timestamp_millis();
-            let elapsed_end_at_ms = successor_end_at_ms
-                .filter(|end| terminal_code == "budget_exhausted" && now_ms >= *end);
-            let finalize_params = match elapsed_end_at_ms {
-                Some(end_at_ms) => ryeos_app::run_deadline::elapsed_finalize_params(
-                    &thread_id,
-                    ryeos_app::run_deadline::REASON_ELAPSED_BEFORE_LAUNCH,
-                    end_at_ms,
-                    now_ms,
-                ),
-                None => ThreadFinalizeParams {
+            let _ = state.threads.finalize_thread_owned(
+                &ThreadFinalizeParams {
                     thread_id: thread_id.clone(),
                     status: "failed".to_string(),
                     outcome_code: Some(terminal_code.to_string()),
@@ -8092,13 +8116,10 @@ async fn run_claimed_thread_row_inner(
                     final_cost: None,
                     summary_json: None,
                 },
-            };
-            let settled_status = finalize_params.status.clone();
-            let _ = state
-                .threads
-                .finalize_thread_owned(&finalize_params, launch_owner);
+                launch_owner,
+            );
             let failed_meta = ThreadMeta {
-                status: settled_status,
+                status: "failed".to_string(),
                 completed_at: Some(lillux::time::iso8601_now()),
                 ..meta
             };
