@@ -2329,8 +2329,8 @@ impl RyeOsCore {
     /// shrank under it.
     pub(crate) fn rebuild_overlay_rows(&mut self) {
         use super::dto::RyeOsAttentionItemDto;
-        use super::view_model::{RyeOsOverlayActionVm, RyeOsOverlayRowVm};
         use super::event::RyeOsUiIntent;
+        use super::view_model::{RyeOsOverlayActionVm, RyeOsOverlayRowVm};
         let projects = self.data.projects.as_ref();
         let where_ = |project_root: Option<&str>| -> String {
             let Some(root) = project_root.filter(|root| !root.is_empty()) else {
@@ -2378,7 +2378,11 @@ impl RyeOsCore {
         };
         let (needs_you, running, needs_you_count, running_count) = match &self.data.attention {
             Some(attention) => (
-                attention.items.iter().map(|item| row(item, false)).collect(),
+                attention
+                    .items
+                    .iter()
+                    .map(|item| row(item, false))
+                    .collect(),
                 attention
                     .running
                     .items

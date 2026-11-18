@@ -5403,7 +5403,12 @@ mod tests {
             .insert(tab_id, json!({"thread": "t-x", "chain_root": "c-none"}));
         assert_eq!(flags(&core), (Some(false), Some(false)));
 
-        core.data.attention.as_mut().unwrap().counts.chains_truncated = true;
+        core.data
+            .attention
+            .as_mut()
+            .unwrap()
+            .counts
+            .chains_truncated = true;
         assert_eq!(
             flags(&core),
             (None, Some(false)),
@@ -5423,14 +5428,20 @@ mod tests {
         assert_eq!(approval.title, "Approval requested");
         assert_eq!(approval.tone, RyeOsTone::Warn);
         assert_eq!(approval.since_ms, 10);
-        assert_eq!(approval.where_, "alpha", "no registered project: the path tail");
+        assert_eq!(
+            approval.where_, "alpha",
+            "no registered project: the path tail"
+        );
         let actions = |row: &RyeOsOverlayRowVm| {
             row.actions
                 .iter()
                 .map(|action| (action.keys.clone(), action.word.clone()))
                 .collect::<Vec<_>>()
         };
-        assert_eq!(actions(approval), [("enter".to_string(), "open".to_string())]);
+        assert_eq!(
+            actions(approval),
+            [("enter".to_string(), "open".to_string())]
+        );
         let failed = &overlay.needs_you[1];
         assert_eq!(failed.where_, "this node");
         assert_eq!(
@@ -5476,7 +5487,11 @@ mod tests {
         shorter.running.items.clear();
         core.data.attention = Some(shorter);
         core.rebuild_overlay_rows();
-        assert_eq!(overlay_of(&core).selected, Some(0), "clamped onto the last row");
+        assert_eq!(
+            overlay_of(&core).selected,
+            Some(0),
+            "clamped onto the last row"
+        );
 
         let mut none = attention_fixture();
         none.items.clear();
@@ -5489,7 +5504,11 @@ mod tests {
 
         core.data.attention = Some(attention_fixture());
         core.rebuild_overlay_rows();
-        assert_eq!(overlay_of(&core).selected, Some(0), "rows arrived under an open sheet");
+        assert_eq!(
+            overlay_of(&core).selected,
+            Some(0),
+            "rows arrived under an open sheet"
+        );
     }
 
     #[test]
@@ -5499,7 +5518,10 @@ mod tests {
         core.rebuild_overlay_rows();
         let overlay = overlay_of(&core);
         assert!(overlay.needs_you.is_empty() && overlay.running.is_empty());
-        assert_eq!((overlay.needs_you_count, overlay.running_count), (None, None));
+        assert_eq!(
+            (overlay.needs_you_count, overlay.running_count),
+            (None, None)
+        );
     }
 
     #[test]

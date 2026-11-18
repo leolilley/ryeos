@@ -778,7 +778,9 @@ impl RyeOsCore {
         else {
             return None;
         };
-        let context = self.binding_attachments.get(&request.binding_attachment_id)?;
+        let context = self
+            .binding_attachments
+            .get(&request.binding_attachment_id)?;
         let role = (context.descriptor.root_ref == *view_ref)
             .then(|| context.surface_sources.get(channel))
             .flatten()
@@ -1548,10 +1550,7 @@ mod tests {
                 })
                 .map(|effect| effect.id)
         };
-        for (label, version) in [
-            ("v2", Some("ryeos.ui.attention.v2")),
-            ("unversioned", None),
-        ] {
+        for (label, version) in [("v2", Some("ryeos.ui.attention.v2")), ("unversioned", None)] {
             let id = attention_fetch(&core.initial_effects()).expect("surface source fetch");
             let mut data = serde_json::json!({
                 "attention": [],

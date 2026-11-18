@@ -1222,9 +1222,7 @@ mod tests {
     #[test]
     fn by_project_sums_to_the_total_and_chains_list_distinct_chains() {
         let config = shipped_config();
-        let item = |kind: &str, project: Value, chain: &str| {
-            json!({"kind": kind, "project_root": project, "subject": {"chain_root_id": chain}})
-        };
+        let item = |kind: &str, project: Value, chain: &str| json!({"kind": kind, "project_root": project, "subject": {"chain_root_id": chain}});
         let counts = counts(
             &config,
             &[
@@ -1295,7 +1293,10 @@ mod tests {
         assert_eq!(block["tone"], "accent");
         assert_eq!(block["chains"], json!(["T-run-a", "T-run-b"]));
         assert_eq!(block["chains_truncated"], false);
-        assert_eq!(block["by_project"], json!([{"project_root": null, "count": 2}]));
+        assert_eq!(
+            block["by_project"],
+            json!([{"project_root": null, "count": 2}])
+        );
         // The page is limited; the count is not.
         let items = block["items"].as_array().unwrap();
         assert_eq!(items.len(), 1);

@@ -245,7 +245,9 @@ impl RyeOsAttentionDto {
     /// Read a response of the contract this client speaks; any other version
     /// is refused with the reason, since there is no reader for it.
     pub fn from_response(value: &serde_json::Value) -> Result<Self, String> {
-        let found = value.get("schema_version").and_then(serde_json::Value::as_str);
+        let found = value
+            .get("schema_version")
+            .and_then(serde_json::Value::as_str);
         if found != Some(ATTENTION_CONTRACT) {
             return Err(format!(
                 "attention response is {}; this client reads {ATTENTION_CONTRACT}",
