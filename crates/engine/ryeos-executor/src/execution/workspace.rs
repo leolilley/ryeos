@@ -57,6 +57,11 @@ pub fn apply_workspace_delta(
 ) -> Result<Option<ProjectTree>> {
     authority.ensure_guard(guard)?;
     policy.validate()?;
+    if policy.sync_scope == ryeos_state::project_sync::ProjectSyncScope::AiOnly {
+        anyhow::bail!(
+            "workspace fold-back captures full_project snapshots only; an ai_only snapshot's capture filter is the node's sync_include table"
+        );
+    }
     ryeos_project_capture::validate_operational_exclusions(operational_shadow_paths)?;
     if mutations.len() > ryeos_isolation_protocol::MAX_WORKSPACE_MUTATIONS {
         anyhow::bail!("workspace mutation count exceeds protocol limit");
@@ -74,12 +79,7 @@ pub fn apply_workspace_delta(
             continue;
         }
         let included = !ryeos_state::project_sync::is_project_snapshot_floor_excluded(relative)
-            && !matcher.is_ignored(relative)
-            && (policy.sync_scope != ryeos_state::project_sync::ProjectSyncScope::AiOnly
-                || matches!(
-                    ryeos_state::project_sync::classify_project_ai_path(relative, Some(&matcher)),
-                    ryeos_state::project_sync::ProjectAiPathClass::Deployable(_)
-                ));
+            && !matcher.is_ignored(relative);
         if let ryeos_isolation_protocol::WorkspaceMutationKind::Unrepresentable { reason } =
             mutation.kind
         {
@@ -105,7 +105,7 @@ pub fn apply_workspace_delta(
                 if !included {
                     continue;
                 }
-                ryeos_state::project_sync::validate_project_manifest_path(
+                ryeos_state::project_sync::validate_stored_project_manifest_path(
                     relative,
                     policy.sync_scope,
                     Some(&matcher),
@@ -227,7 +227,7 @@ pub fn apply_workspace_delta(
         base_tree,
         operational_shadow_paths,
     )?;
-    ryeos_state::project_sync::validate_project_tree_paths(&next, policy)?;
+    ryeos_state::project_sync::validate_stored_project_tree_paths(&next, policy)?;
     Ok((next != *base_tree).then_some(next))
 }
 

@@ -725,6 +725,7 @@ fn build_app_state(
             })
             .unwrap(),
         ),
+        sync_include: std::sync::Arc::new(ryeos_state::project_sync::SyncInclude::for_tests()),
         vault_fingerprint: None,
         accounting: None,
         persistent_sessions: Arc::new(ryeos_app::persistent_session::PersistentSessionPool::new()),
