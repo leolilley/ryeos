@@ -1634,17 +1634,15 @@ impl RyeOsTimelineEntryVm {
 /// [`merge_timeline_window`]) as plain text lines.
 pub fn timeline_text(response: &Value) -> TimelineText {
     let line =
-        |id: &str,
-         entry: &RyeOsTimelineEntryVm,
-         indent: u8,
-         role: String,
-         text_streamed: bool| TimelineTextLine {
-            id: id.to_string(),
-            indent,
-            text: entry.label(),
-            tone: entry.tone(),
-            role,
-            text_streamed,
+        |id: &str, entry: &RyeOsTimelineEntryVm, indent: u8, role: String, text_streamed: bool| {
+            TimelineTextLine {
+                id: id.to_string(),
+                indent,
+                text: entry.label(),
+                tone: entry.tone(),
+                role,
+                text_streamed,
+            }
         };
     let mut lead = Vec::new();
     if let Some(entry) = summary_entry(response) {
