@@ -557,14 +557,13 @@ fn the_switcher_holds_the_left_edge_and_the_status_islands_float() {
         .iter()
         .map(|[_, ty, _, th]| ty + th)
         .fold(0.0_f32, f32::max);
-    let status = rt
-        .elements()
-        .into_iter()
-        .find(|element| element.role == "status")
-        .expect("the node's status is in the status bar");
+    // Views draw their own `status` roles (a timeline's lane, a field's
+    // readout), so the node's health is found by its own key.
+    let [_, status_top, _, _] =
+        keyed(&rt, "shell:health").expect("the node's health is in the status bar");
     assert!(
-        status.rect[1] >= body_bottom - 0.5,
+        status_top >= body_bottom - 0.5,
         "the node's status at {} sits below the body, which ends at {body_bottom}",
-        status.rect[1]
+        status_top
     );
 }

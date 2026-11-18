@@ -966,6 +966,7 @@ fn status_bar(vm: &RyeOsViewModel) -> El {
         row()
             .gap(6.0)
             .center_y()
+            .key("shell:health")
             .role("status")
             .label(format!(
                 "{} · {}",
