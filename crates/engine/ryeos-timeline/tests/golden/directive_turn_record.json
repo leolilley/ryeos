@@ -10,6 +10,7 @@
       "parent": null,
       "exchange": "msg:4/0",
       "counts_as": null,
+      "text_streamed": true,
       "slots": {
         "body": "<scrubbed launch stimulus 300 chars>"
       },
@@ -64,6 +65,7 @@
       "parent": null,
       "exchange": "msg:4/0",
       "counts_as": null,
+      "text_streamed": true,
       "slots": {
         "body": "<scrubbed text 40 chars>"
       },
@@ -200,6 +202,7 @@
       "parent": null,
       "exchange": "msg:4/0",
       "counts_as": null,
+      "text_streamed": true,
       "slots": {
         "body": "<scrubbed answer 30 chars>"
       },
@@ -222,6 +225,7 @@
       "parent": null,
       "exchange": "msg:17/0",
       "counts_as": null,
+      "text_streamed": true,
       "slots": {
         "body": "<scrubbed steer 50 chars>"
       },
@@ -266,6 +270,7 @@
       "parent": null,
       "exchange": "msg:17/0",
       "counts_as": null,
+      "text_streamed": true,
       "slots": {
         "body": "<scrubbed steer addendum 25 chars>"
       },
@@ -320,6 +325,7 @@
       "parent": null,
       "exchange": "msg:17/0",
       "counts_as": null,
+      "text_streamed": true,
       "slots": {
         "body": "<scrubbed partial text 15 chars>"
       },
