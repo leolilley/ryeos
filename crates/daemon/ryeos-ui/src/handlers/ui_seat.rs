@@ -1721,6 +1721,18 @@ pub async fn handle_open(
                 }
                 return Ok(producer_response(&presentation_id, &detail, &retained));
             }
+            // A new claim, unlike the replay above of one that already
+            // committed, requires the seat's retained admission to still
+            // hold: prepare may have answered an error after publishing the
+            // membership and writing the initialization record, and a bundle
+            // or Config change since then must not let such a seat be claimed.
+            // The replay is deliberately exempt, so a client whose claim
+            // committed can still learn its producer after a later change.
+            // Cost: a first claim re-resolves every initial closure, as
+            // prepare does. With the compose cache warm that is cheap; cold,
+            // after a daemon restart, it is about prepare's cold cost (about
+            // 1.8 s) on top of the claim, within the route's 10 s limit.
+            initialization::require_current_admission(&state, &session, &presentation_id)?;
             if detail.status != "running" {
                 return Err(
                     HandlerError::Conflict("presentation seat is not running".into()).into(),
