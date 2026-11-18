@@ -8552,16 +8552,10 @@ async fn run_claimed_thread_row_inner(
             );
         }
         // When the canonical session projection replaced the runtime's stdout
-        // result above, its status is the authority: a declared worker
-        // failure value settles the thread failed. An operator stop still
-        // settles as that stop.
-        if !matches!(
-            terminal_status,
-            ryeos_state::objects::ThreadStatus::Killed
-                | ryeos_state::objects::ThreadStatus::Cancelled
-        ) {
-            terminal_status = runtime_terminal_status(runtime_result.status);
-        }
+        // result above, its status is the authority in both directions (a
+        // declared worker failure fails the thread; a completed projection
+        // completes it). An operator stop still settles as that stop.
+        terminal_status = terminal::settled_terminal_status(terminal_status, &runtime_result);
         let observed_runtime_status = runtime_result.status;
         let fallback = match head_advance_not_applied.as_ref() {
             // An operator stop still settles as that stop.

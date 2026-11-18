@@ -12713,10 +12713,14 @@ impl RuntimeDb {
             // The response's own observations apply first under the same
             // transition gate, so a reattach that reports its upstream
             // conversation uncertain has already moved the session to
-            // `outcome_unknown`; the command still settles, and the state
-            // stays for the runtime's next status read.
+            // `outcome_unknown`. The command still settles; the session keeps
+            // the (outcome_unknown, outcome_unknown) pair every other writer
+            // of that state produces and every no-worker consumer accepts,
+            // and the state stays for the runtime's next status read.
             let session_changed = tx.execute(
-                "UPDATE dedicated_session SET send_boundary='settled', updated_at_ms=?3
+                "UPDATE dedicated_session
+                SET send_boundary=CASE WHEN state='outcome_unknown' THEN 'outcome_unknown' ELSE 'settled' END,
+                    updated_at_ms=?3
               WHERE placement_thread_id=?1 AND worker_boot_epoch=?2
                 AND state IN ('idle','turn_running','awaiting_approval','recovering','outcome_unknown')
                 AND send_boundary='contacted'",
@@ -26849,7 +26853,34 @@ mod tests {
         .unwrap();
         let session = db.dedicated_session("T-recover").unwrap().unwrap();
         assert_eq!(session.state, "outcome_unknown");
-        assert_eq!(session.send_boundary, "settled");
+        assert_eq!(session.send_boundary, "outcome_unknown");
+        let command_state: String = db
+            .conn
+            .with_sql(|connection| {
+                Ok(connection.query_row(
+                    "SELECT state FROM dedicated_session_command
+                  WHERE placement_thread_id='T-recover' AND command_sequence=?1",
+                    params![i64::try_from(reattach.command_sequence).unwrap()],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(command_state, "completed");
+
+        // Reaping that worker leaves a worker-less session in a pair the
+        // workspace capture and scope retirement consumers accept.
+        db.fence_abandoned_worker_process("worker-recover-2", "T-recover", 2, "reaped")
+            .unwrap();
+        let retired = db.dedicated_session("T-recover").unwrap().unwrap();
+        assert!(retired.worker_instance_id.is_none());
+        assert!(
+            matches!(
+                (retired.state.as_str(), retired.send_boundary.as_str()),
+                ("recovering", "none") | ("outcome_unknown", "outcome_unknown")
+            ),
+            "{:?}",
+            (retired.state, retired.send_boundary)
+        );
     }
 
     #[test]
