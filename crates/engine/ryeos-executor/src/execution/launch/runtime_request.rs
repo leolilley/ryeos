@@ -43,9 +43,11 @@ pub(super) struct SpawnRuntimeParams<'a> {
     pub owns_workspace: bool,
     pub envelope: &'a LaunchEnvelope,
     pub timeout_secs: u64,
-    /// Durable execution-tree deadline minted under the shared accounting
-    /// scope. Kept absolute until the final pre-spawn boundary so queueing and
-    /// launch preparation cannot restart or extend the remaining window.
+    /// This execution's absolute end: the durable execution-tree deadline
+    /// minted under the shared accounting scope, less the hold-back sealed for
+    /// this execution. Kept absolute until the final pre-spawn boundary so
+    /// queueing and launch preparation cannot restart or extend the remaining
+    /// window.
     pub aggregate_deadline_at_ms: Option<i64>,
     pub callback: &'a EnvelopeCallback,
     pub thread_id: &'a str,
@@ -1156,6 +1158,30 @@ mod tests {
             waited.result,
             Ok(RuntimeProcessOutcome::Terminal(_))
         ));
+    }
+
+    #[test]
+    fn spawn_timeout_is_the_nearer_of_the_segment_cap_and_the_run_end() {
+        let in_ms = |offset: i64| Some(lillux::time::timestamp_millis() + offset);
+        // A run end well inside the segment cap bounds the spawn.
+        let bounded = effective_runtime_timeout(3_600, in_ms(60_000)).unwrap();
+        assert!(bounded <= std::time::Duration::from_secs(60), "{bounded:?}");
+        assert!(bounded > std::time::Duration::from_secs(50), "{bounded:?}");
+        // A segment cap inside the run end bounds the spawn.
+        let capped = effective_runtime_timeout(30, in_ms(3_600_000)).unwrap();
+        assert_eq!(capped, std::time::Duration::from_secs(30));
+        // Neither bound means no timeout; a run end alone still bounds it.
+        assert_eq!(
+            effective_runtime_timeout(0, None).unwrap(),
+            std::time::Duration::ZERO
+        );
+        assert!(effective_runtime_timeout(0, in_ms(10_000)).unwrap() > std::time::Duration::ZERO);
+    }
+
+    #[test]
+    fn a_run_end_that_has_passed_refuses_the_spawn() {
+        let past = Some(lillux::time::timestamp_millis() - 1);
+        assert!(effective_runtime_timeout(60, past).is_err());
     }
 
     #[test]

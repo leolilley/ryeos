@@ -2970,6 +2970,31 @@ pub(crate) fn finalize_method_thread_if_needed(
     }
 }
 
+/// Finalize a thread with fully formed terminal params, under the same
+/// ownership and shutdown rules as [`finalize_method_thread_if_needed`].
+pub(crate) fn finalize_method_thread_with_params(
+    state: &AppState,
+    launch_owner: &str,
+    params: ryeos_app::thread_lifecycle::ThreadFinalizeParams,
+) -> anyhow::Result<MethodFinalizeOutcome> {
+    use ryeos_app::thread_lifecycle::FinalizeIfNonterminalOutcome;
+
+    Ok(
+        match state
+            .threads
+            .finalize_if_nonterminal_owned(&params, launch_owner)?
+        {
+            FinalizeIfNonterminalOutcome::Finalized(_) => MethodFinalizeOutcome::Finalized,
+            FinalizeIfNonterminalOutcome::AlreadyTerminal { .. } => {
+                MethodFinalizeOutcome::AlreadyTerminal
+            }
+            FinalizeIfNonterminalOutcome::PreservedForShutdown => {
+                MethodFinalizeOutcome::PreservedForShutdown
+            }
+        },
+    )
+}
+
 /// Conditional cleanup for a child whose operational-lineage write failed.
 /// The lifecycle service performs the status/process/launch-claim check and the
 /// terminal write under one StateStore lock.

@@ -260,6 +260,9 @@ pub struct RigOptions {
     pub marker_sleep_seconds: u64,
     /// Plant the provider with a signed tariff so spend limits reserve money.
     pub paid_provider: bool,
+    /// Seal the key the graph runtime's preflight needs, for tests that launch
+    /// a graph.
+    pub graph_vault: bool,
     /// YAML spliced under the provider's `schemas:` (see
     /// `plant_provider_with`), for example a `reasoning:` capture and replay
     /// declaration. Empty plants the fixed provider unchanged.
@@ -279,6 +282,7 @@ impl Default for RigOptions {
             nap_seconds: 1.0,
             marker_sleep_seconds: 25,
             paid_provider: false,
+            graph_vault: false,
             provider_schemas_extra: String::new(),
             directive_reasoning: None,
         }
@@ -290,6 +294,9 @@ pub struct Rig {
     pub stub: StubServer,
     pub project: tempfile::TempDir,
     pub aux: tempfile::TempDir,
+    /// The key that signs everything planted in the fixture, for tests that
+    /// plant more items into `project`.
+    pub publisher: SigningKey,
     /// Instants captured while the harness started the node: when the signed
     /// fixture state was ready (just before the daemon was spawned).
     pub spawn_at: Instant,
@@ -320,6 +327,7 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
     let stub = StubServer::start(Script::from_yaml_str(script_yaml)?).await;
     let url = stub.base_url.clone();
     let paid_provider = opts.paid_provider;
+    let graph_vault = opts.graph_vault;
     let schemas_extra = opts.provider_schemas_extra.clone();
     let spawn_cell: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
     let spawn_cell_tweak = spawn_cell.clone();
@@ -327,6 +335,9 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
     let plant =
         move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
             register_workflow_bundles(state_path, fixture)?;
+            if graph_vault {
+                plant_vault_with_zen_key(state_path)?;
+            }
             register_config_fixture_bundle(
                 state_path,
                 "fixture-stub-model-config",
@@ -402,6 +413,7 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
         stub,
         project,
         aux,
+        publisher: fixture.publisher.clone(),
         spawn_at,
         started_at,
     })
@@ -415,13 +427,46 @@ pub async fn launch_live(
     node: &SigningKey,
     project: &str,
 ) -> anyhow::Result<String> {
+    launch_live_with(bind, user, node, project, json!({"name": "probe"})).await
+}
+
+/// Launch the probe directive with explicit launch parameters.
+pub async fn launch_live_with(
+    bind: SocketAddr,
+    user: &SigningKey,
+    node: &SigningKey,
+    project: &str,
+    parameters: Value,
+) -> anyhow::Result<String> {
+    launch_item_with(
+        bind,
+        user,
+        node,
+        project,
+        DIRECTIVE_REF,
+        json!({ "model": DIRECTIVE_REF }),
+        parameters,
+    )
+    .await
+}
+
+/// Launch any item live with explicit reference bindings and parameters.
+pub async fn launch_item_with(
+    bind: SocketAddr,
+    user: &SigningKey,
+    node: &SigningKey,
+    project: &str,
+    item_ref: &str,
+    ref_bindings: Value,
+    parameters: Value,
+) -> anyhow::Result<String> {
     let path = "/execute/launch";
     let body = json!({
-        "item_ref": DIRECTIVE_REF,
+        "item_ref": item_ref,
         "launch_id": format!("L-{}", uuid::Uuid::new_v4().simple()),
-        "ref_bindings": { "model": DIRECTIVE_REF },
+        "ref_bindings": ref_bindings,
         "project_path": project,
-        "parameters": {"name": "probe"},
+        "parameters": parameters,
         "execution_policy": ryeos_app::execution_policy::ExecutionPolicy::local_live(
             ryeos_app::execution_policy::ExecutionResponse::Accepted
         ),
@@ -457,6 +502,68 @@ pub async fn launch_on(rig: &Rig) -> anyhow::Result<String> {
         &rig.project_str(),
     )
     .await
+}
+
+/// Launch the probe directive with extra launch parameters merged over the
+/// default `{"name": "probe"}`.
+pub async fn launch_on_with(rig: &Rig, extra: Value) -> anyhow::Result<String> {
+    let mut parameters = json!({"name": "probe"});
+    if let (Some(base), Some(extra)) = (parameters.as_object_mut(), extra.as_object()) {
+        base.extend(extra.clone());
+    }
+    launch_live_with(
+        rig.h.bind,
+        rig.h.user_key.as_ref().expect("user key"),
+        rig.h.node_key.as_ref().expect("node key"),
+        &rig.project_str(),
+        parameters,
+    )
+    .await
+}
+
+/// Launch a graph live on the rig's node, optionally with launch parameters.
+pub async fn launch_graph_on(
+    rig: &Rig,
+    item_ref: &str,
+    parameters: Value,
+) -> anyhow::Result<String> {
+    launch_item_with(
+        rig.h.bind,
+        rig.h.user_key.as_ref().expect("user key"),
+        rig.h.node_key.as_ref().expect("node key"),
+        &rig.project_str(),
+        item_ref,
+        json!({}),
+        parameters,
+    )
+    .await
+}
+
+/// Seal the key the graph runtime's preflight requires.
+pub fn plant_vault_with_zen_key(state_path: &Path) -> anyhow::Result<()> {
+    use std::collections::HashMap;
+    let pub_path = state_path
+        .join(ryeos_engine::AI_DIR)
+        .join("node")
+        .join("vault")
+        .join("public_key.pem");
+    let pub_key = lillux::vault::read_public_key(&pub_path)?;
+    let store_path = ryeos_app::vault::default_sealed_store_path(state_path);
+    let secrets = HashMap::from([(
+        "ZEN_API_KEY".to_string(),
+        "test-zen-api-key-value".to_string(),
+    )]);
+    ryeos_app::vault::write_sealed_secrets(&store_path, &pub_key, &secrets)?;
+    Ok(())
+}
+
+/// Plant a signed graph under `.ai/graphs/<name>.yaml` in the rig's project.
+pub fn plant_graph(rig: &Rig, name: &str, body: &str) -> anyhow::Result<()> {
+    let dir = rig.project.path().join(".ai/graphs");
+    std::fs::create_dir_all(&dir)?;
+    let signed = lillux::signature::sign_content(body, &rig.publisher, "#", None);
+    std::fs::write(dir.join(format!("{name}.yaml")), signed)?;
+    Ok(())
 }
 
 pub async fn status_of(h: &DaemonHarness, thread_id: &str) -> String {

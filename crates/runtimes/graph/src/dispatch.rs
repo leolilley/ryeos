@@ -660,6 +660,25 @@ fn worker_outcome(result: &Value) -> Option<Value> {
     .then(|| result.clone())
 }
 
+/// A followed child that the run deadline stopped has no outcome record of its
+/// own, so the graph is given the same shape a worker child reports: the
+/// `deadline` classification beside the child thread, status and partial
+/// result. A recovery node can then branch on `state._outcome.outcome_kind`.
+fn deadline_outcome(
+    status: RuntimeResultStatus,
+    child_thread_id: &str,
+    result: &Value,
+) -> Option<Value> {
+    (status == RuntimeResultStatus::TimedOut).then(|| {
+        json!({
+            "outcome_kind": ryeos_runtime::envelope::status_outcome_kind(status),
+            "child_thread_id": child_thread_id,
+            "status": status.as_str(),
+            "result": result,
+        })
+    })
+}
+
 /// Exact cohort wrapper written by the daemon's follow join. Every field is
 /// required and unknown fields are rejected before graph execution resumes.
 #[derive(Debug, Deserialize)]
@@ -752,7 +771,8 @@ fn classify_follow_envelope_value(value: Value) -> Result<ClassifiedFollowEnvelo
             dispatch: None,
         })
     } else {
-        let failure_outcome = worker_outcome(&result);
+        let failure_outcome = worker_outcome(&result)
+            .or_else(|| deadline_outcome(status, &envelope_child_thread_id, &result));
         let structured_failure = parse_runtime_failure(&result);
         let mut runtime_failure_contract_error = runtime_failure_contract_error(&result);
         if let Some(failure) = structured_failure.as_ref()
@@ -2583,6 +2603,33 @@ mod tests {
             assert_eq!(failure.outcome, Some(value), "{kind}");
             assert_eq!(failure.child_thread_id.as_deref(), Some("T-follow-child"));
         }
+    }
+
+    #[test]
+    fn a_child_stopped_by_the_run_deadline_exposes_a_deadline_outcome() {
+        let stopped = json!({"outcome": "deadline", "phase": "hard_stop"});
+        let classified = classify_follow_envelope(canonical_follow_envelope(
+            false,
+            RuntimeResultStatus::TimedOut,
+            stopped.clone(),
+        ))
+        .expect("canonical timed-out follow envelope");
+        let outcome = expect_action_failure(classified.outcome)
+            .outcome
+            .expect("a deadline outcome record");
+        assert_eq!(outcome["outcome_kind"], "deadline");
+        assert_eq!(outcome["status"], "timed_out");
+        assert_eq!(outcome["child_thread_id"], "T-follow-child");
+        assert_eq!(outcome["result"], stopped);
+
+        // Other failures without a classification still report none.
+        let failed = classify_follow_envelope(canonical_follow_envelope(
+            false,
+            RuntimeResultStatus::Failed,
+            json!("boom"),
+        ))
+        .expect("canonical failed follow envelope");
+        assert!(expect_action_failure(failed.outcome).outcome.is_none());
     }
 
     #[test]
