@@ -91,6 +91,8 @@ pub struct PreparedRequestMetrics {
     pub provider_tool_schema_bytes: u64,
     pub provider_tool_count: u32,
     pub provider_tool_schema_sha256: String,
+    pub cache_marks_placed: u32,
+    pub cache_marks_skipped: u32,
 }
 
 #[cfg(not(feature = "latency-profiling"))]
@@ -127,7 +129,7 @@ pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<Prepar
         input.images,
         input.messages,
     )?;
-    let (converted_messages, system_prompt) = super::messages::convert_messages(
+    let (mut converted_messages, system_prompt) = super::messages::convert_messages(
         input.messages,
         &schemas.cloned(),
         &super::messages::ConvertOptions {
@@ -135,6 +137,12 @@ pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<Prepar
             images: image_render.as_ref(),
         },
     );
+    // Marks are written last, over exactly the messages the request sends.
+    let cache_mark_outcome = provider
+        .cache_marks
+        .as_ref()
+        .map(|marks| super::cache_marks::apply_cache_marks(&mut converted_messages, marks))
+        .unwrap_or_default();
 
     let tool_schema = provider.schemas.as_ref().and_then(|s| s.tools.clone());
     let tools_val = super::tools::serialize_tools(input.tools, &tool_schema);
@@ -350,9 +358,14 @@ pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<Prepar
         provider_tool_schema_bytes,
         provider_tool_count: u32::try_from(input.tools.len()).unwrap_or(u32::MAX),
         provider_tool_schema_sha256,
+        cache_marks_placed: cache_mark_outcome.placed,
+        cache_marks_skipped: cache_mark_outcome.skipped,
     };
     #[cfg(not(feature = "latency-profiling"))]
-    let request_metrics = PreparedRequestMetrics;
+    let request_metrics = {
+        let _ = cache_mark_outcome;
+        PreparedRequestMetrics
+    };
 
     Ok(PreparedProviderRequest {
         transport,
@@ -647,5 +660,44 @@ mod tests {
             Err(error) => error,
         };
         assert!(format!("{error:#}").contains("image_attachment_missing"));
+    }
+    fn marks() -> Value {
+        json!({
+            "mark": {"cache_control": {"type": "ephemeral"}},
+            "text_part_template": {"type": "text", "text": "{text}"},
+            "max_marks": 4,
+            "positions": ["system", "newest", "previous_tail"]
+        })
+    }
+
+    #[test]
+    fn marks_land_on_the_lowered_image_message_and_an_entry_without_marks_sends_none() {
+        let mut store = crate::provider_adapter::images::ImageStore::default();
+        store.insert(&"a".repeat(64), "image/png", b"pixels");
+        let plain = prepare_images(&image_provider(), &store).expect("prepared");
+        assert!(!String::from_utf8_lossy(&plain.body_bytes).contains("cache_control"));
+
+        let mut value = serde_json::to_value(image_provider()).expect("provider value");
+        value["cache_marks"] = marks();
+        let provider: ProviderConfig = serde_json::from_value(value).expect("marked provider");
+        let prepared = prepare_images(&provider, &store).expect("prepared");
+        let body: Value = serde_json::from_slice(&prepared.body_bytes).expect("body");
+        let messages = body["messages"].as_array().expect("messages");
+        // The mark rides the last part of the synthetic image message, which
+        // is the newest wire message; the earlier user message is the
+        // previous tail.
+        let newest = messages.last().expect("newest")["content"]
+            .as_array()
+            .expect("parts")
+            .last()
+            .expect("last part")
+            .clone();
+        assert_eq!(newest["type"], "image_url");
+        assert_eq!(newest["cache_control"], json!({"type": "ephemeral"}));
+        assert_eq!(
+            messages[0]["content"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        assert!(!messages[1].to_string().contains("cache_control"));
     }
 }
