@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-18T05:21:01Z:afed433308fc22dd11c1e72bf917cc2fd076f0a55302ce9d18fbd7ebfb13b4c5:/Ju2LltvnOqGK7rIRSDhUFB3BB1Pu8/l809Rhw1WyU4dUjLDfkpsZO529/ycLQdl3su40pgL/Z11im51xgnxAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T05:22:28Z:f7f09cd03a1aabdc8adcb9781db9f2e32aa68ec0882c17928b8731d1d20cc828:bE1FR7iGNumf0YJA9ub9ZIzO1PFyDe8yqT6Nd9NQNjni2By//eALxrbf+95++QjcVWGDyQPmVUy5dJMQAjoCCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Externally invoked host helper in the development bundle; lib/ is excluded
 # from Tool resolution, so this is signed source, not an admitted Tool. It
 # grants no RyeOS authority. Run it from a checkout of this repository.
@@ -22,7 +22,13 @@
 # hashes a path package outside the building workspace (the shared client crates and
 # ryeos-timeline) by its absolute path, and that hash reaches the wasm bytes, so the build
 # goes through one fixed path, /tmp/ryeos-rune-web/src, a symlink to this checkout taken
-# under a lock. Cargo keeps the symlinked path as written.
+# under a lock. Cargo keeps the symlinked path as written. The path is fixed so the output
+# is byte-identical across checkouts and machines. Because it sits in a world-writable
+# directory, the script creates /tmp/ryeos-rune-web itself (mode 0700) and refuses to build
+# unless it is a real directory, not a symlink, owned by the current user with no group or
+# other write. It only ever replaces its own `src` link inside it. Otherwise another local
+# user could point the build at their own tree and get it into the signed, checked-in
+# package.
 #
 # Environment: CARGO (default cargo), CARGO_TARGET_DIR (default <repo>/crates/clients/rune/target),
 # WASM_BINDGEN (default wasm-bindgen; must match the locked wasm-bindgen crate).
@@ -54,7 +60,15 @@ fi
 
 fixed_parent=/tmp/ryeos-rune-web
 fixed=$fixed_parent/src
-mkdir -p "$fixed_parent"
+if [[ ! -e $fixed_parent && ! -L $fixed_parent ]]; then
+    mkdir -m 0700 "$fixed_parent" 2>/dev/null || true
+fi
+# stat without -L reports the entry itself, never a symlink's target.
+read -r owner mode kind < <(stat -c '%u %a %F' "$fixed_parent")
+if [[ $kind != directory || $owner != "$(id -u)" || $(( 8#$mode & 8#022 )) -ne 0 ]]; then
+    echo "$fixed_parent must be a directory owned by $(id -u) with no group or other write (found: $kind, uid $owner, mode $mode)" >&2
+    exit 1
+fi
 exec 9>"$fixed_parent/lock"
 flock 9
 ln -sfn "$root" "$fixed"
