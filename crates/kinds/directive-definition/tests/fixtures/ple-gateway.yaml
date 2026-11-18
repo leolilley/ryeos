@@ -1,0 +1,204 @@
+# Mirrors the ple-agent entry file bundle/.ai/config/ryeos-runtime/model-providers/ple-gateway.yaml.
+# Update both together; this copy exists only so the entry is validated here.
+category: "ryeos-runtime/model-providers"
+# Gateway entry for the PLE model route: one Chat Completions endpoint serving
+# every model, one credential name. Every per-model row below is PROVISIONAL:
+# measured on a LiteLLM stand-in; the organisers' route may differ.
+#
+# base_url is a placeholder. The entry cannot read the environment; the start
+# path writes the node-space override that carries the real MODEL_BASE_URL and
+# signs it. No `extra.setup`: this node is never set up interactively, so the
+# setup endpoint rules do not apply. No tariff and no spend authority: the
+# route reports usage, which is recorded, and nothing is priced.
+family: chat_completions
+transport:
+  kind: remote_http
+  base_url: "https://gateway.invalid/v1"
+auth:
+  env_var: OPENAI_API_KEY
+  header_name: Authorization
+  prefix: "Bearer "
+headers:
+  Content-Type: application/json
+# Models without an `accepts` block take no images and the tool result is an
+# error: the route answers 200 and silently drops an image a text model
+# cannot read, so support is declared per model and never learned.
+image_input:
+  unsupported: refuse
+schemas:
+  accounting: {require_usage: true}
+  messages:
+    role_map: {user: user, assistant: assistant, system: system, tool: tool}
+    content_key: content
+    system_message: {mode: message_role}
+    tool_result:
+      role: tool
+      wrap_mode: direct
+      block_template:
+        tool_call_id: "{tool_call_id}"
+        content: "{content}"
+    tool_call_block_template:
+      id: "{id}"
+      type: function
+      function:
+        name: "{name}"
+        arguments: "{input_json}"
+  tools:
+    template:
+      type: function
+      function:
+        name: "{name}"
+        description: "{description}"
+        parameters: "{schema}"
+  streaming:
+    mode: delta_merge
+    metadata:
+      usage:
+        path: usage
+        input_tokens_path: prompt_tokens
+        output_tokens_path: completion_tokens
+        reasoning_tokens_path: completion_tokens_details.reasoning_tokens
+        reasoning_included_in_output: true
+        # Cached counts ride at the top level of the final usage chunk and
+        # prompt_tokens already includes them.
+        cache_read_tokens_path: cache_read_input_tokens
+        cache_write_tokens_path: cache_creation_input_tokens
+        cache_included_in_input: true
+        aggregation: latest_snapshot
+        single_snapshot: true
+      finish_reason_path: choices.0.finish_reason
+      response_id_path: id
+      error:
+        path: error
+        message_path: message
+        code_path: code
+  reasoning:
+    capture:
+      - {id: text, kind: text_delta, fields: [reasoning_content]}
+  output_limit: {path: max_completion_tokens, semantics: provider_native_output_tokens}
+body_template:
+  model: "{model}"
+  messages: "{messages}"
+  tools: "{tools}"
+  stream: "{stream}"
+  stream_options:
+    include_usage: true
+extra:
+  stream_url: "/chat/completions"
+profiles:
+  # Opus 5.5: images in a user message and in a tool result; signed thinking
+  # blocks replayed verbatim inside the open tool loop; explicit cache marks
+  # (the route caches only where marked); cached counts as above. A profile's
+  # `schemas` replaces the entry's whole, so the shared route is restated.
+  - name: claude-opus-5-5
+    match: ["*claude-opus-5-5"]
+    image_input:
+      unsupported: refuse
+      accepts:
+        media_types: [image/png, image/jpeg, image/gif, image/webp]
+        # Limits are not measured (no limit text seen); conservative values.
+        max_bytes_per_image: 3145728
+        max_images_per_request: 20
+        text_part_template: {type: text, text: "{text}"}
+        image_part_template: {type: image_url, image_url: {url: "{data_url}"}}
+        tool_result_note: "[{count} image(s) follow in the next message]"
+        deferred_label: "Image {index} from tool result {call_id}:"
+        omitted_note: "[earlier image omitted: {media_type} {width}x{height}]"
+        cost: {base_tokens: 0, pixels_per_token: 750, max_tokens: 1600, unknown_dimensions_tokens: 1600}
+    cache_marks:
+      mark: {cache_control: {type: ephemeral}}
+      text_part_template: {type: text, text: "{text}"}
+      max_marks: 4
+      positions: [system, newest, previous_tail]
+    schemas:
+    accounting: {require_usage: true}
+    messages:
+      role_map: {user: user, assistant: assistant, system: system, tool: tool}
+      content_key: content
+      system_message: {mode: message_role}
+      tool_result:
+        role: tool
+        wrap_mode: direct
+        block_template:
+          tool_call_id: "{tool_call_id}"
+          content: "{content}"
+      tool_call_block_template:
+        id: "{id}"
+        type: function
+        function:
+          name: "{name}"
+          arguments: "{input_json}"
+    tools:
+      template:
+        type: function
+        function:
+          name: "{name}"
+          description: "{description}"
+          parameters: "{schema}"
+    streaming:
+      mode: delta_merge
+      metadata:
+        usage:
+          path: usage
+          input_tokens_path: prompt_tokens
+          output_tokens_path: completion_tokens
+          reasoning_tokens_path: completion_tokens_details.reasoning_tokens
+          reasoning_included_in_output: true
+          # Cached counts ride at the top level of the final usage chunk and
+          # prompt_tokens already includes them.
+          cache_read_tokens_path: cache_read_input_tokens
+          cache_write_tokens_path: cache_creation_input_tokens
+          cache_included_in_input: true
+          aggregation: latest_snapshot
+          single_snapshot: true
+        finish_reason_path: choices.0.finish_reason
+        response_id_path: id
+        error:
+          path: error
+          message_path: message
+          code_path: code
+    reasoning:
+      # Thinking arrives as blocks: an opening chunk with an empty
+      # signature, then one carrying the signature (which closes the block).
+      # Text is empty on this route, so no text rule: one copy only.
+      capture:
+        - id: blocks
+          kind: blocks
+          field: thinking_blocks
+          merge_keys: [thinking]
+          close_key: signature
+          whole_types: [redacted_thinking]
+      replay:
+        compat_group: claude-thinking-1
+        placements:
+          - from: blocks
+            into: {message_field: thinking_blocks}
+            scope: open_loop
+            on_missing: omit
+    output_limit: {path: max_completion_tokens, semantics: provider_native_output_tokens}
+  # Gemini and Gemma: images accepted, also inside a tool message (the request
+  # builder still moves them into one user message after the tool results).
+  # Caching is automatic, so no marks. Argon's signature rides the first
+  # parallel call and its id; the id is echoed verbatim and a missing
+  # signature was not refused, so no replay row.
+  - name: gemini-gemma-images
+    match: ["*gemini-4-argon", "*gemini-3.8-flash", "*gemini-3.1-pro-preview", "*gemma-4-26b"]
+    image_input:
+      unsupported: refuse
+      accepts:
+        media_types: [image/png, image/jpeg, image/gif, image/webp]
+        # Limits are not measured (no limit text seen); conservative values.
+        max_bytes_per_image: 3145728
+        max_images_per_request: 20
+        text_part_template: {type: text, text: "{text}"}
+        image_part_template: {type: image_url, image_url: {url: "{data_url}"}}
+        tool_result_note: "[{count} image(s) follow in the next message]"
+        deferred_label: "Image {index} from tool result {call_id}:"
+        omitted_note: "[earlier image omitted: {media_type} {width}x{height}]"
+        cost: {base_tokens: 0, pixels_per_token: 750, max_tokens: 1600, unknown_dimensions_tokens: 1600}
+  # gpt-oss and GLM answer 200 and silently drop images: refused up front.
+  # Reasoning text arrives as reasoning_content (the entry's capture rule).
+  - name: text-only-models
+    match: ["*gpt-oss-120b", "*glm-5.2"]
+    image_input:
+      unsupported: refuse
