@@ -136,7 +136,7 @@ pub(crate) fn host_direct_provenance_before_admission(
     .then(|| provenance.subject_effective_path().to_path_buf());
     let Ok((_, output)) =
         engine.effective_item_with_resolution(ryeos_engine::engine::EffectiveItemRequest {
-            logical_project_root: provenance.logical_project_root(),
+            logical_project_root: provenance.logical_project_root(state.threads.site_id()),
             item_ref: item.clone(),
             expected_kind: Some(item.kind.clone()),
             project_root,

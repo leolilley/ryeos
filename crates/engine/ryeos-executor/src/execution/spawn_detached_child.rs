@@ -416,7 +416,7 @@ pub async fn spawn_detached_child(
         }
     };
     let child_plan_context = ryeos_engine::contracts::PlanContext {
-        logical_project_root: child_provenance.logical_project_root(),
+        logical_project_root: child_provenance.logical_project_root(&parent.current_site_id),
         requested_by: requested_by.clone(),
         project_context: child_project_context.clone(),
         subject_resolution_authority: child_provenance.subject_resolution_authority(),

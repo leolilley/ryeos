@@ -124,7 +124,7 @@ pub async fn run(
     .then_some(project_path);
     let engine_roots = engine
         .resolution_roots(resolution_project_root.map(Path::to_path_buf))
-        .with_logical_project_root(provenance.logical_project_root());
+        .with_logical_project_root(provenance.logical_project_root(&plan_ctx.current_site_id));
     let node_config_root = engine.node_config_root();
     let resolution_materialization =
         ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
