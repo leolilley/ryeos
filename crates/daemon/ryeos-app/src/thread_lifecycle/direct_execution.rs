@@ -2306,6 +2306,60 @@ mod process_containment_settlement_mapping_tests {
     use super::ProcessContainmentRequirement as Requirement;
     use ryeos_state::external_content::products::qualification::VerifierProcessSettlementAuthority as Settlement;
 
+    fn policy_files(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            if path.is_dir() {
+                if name != "node_modules" && name != "target" && name != ".git" {
+                    policy_files(&path, found);
+                }
+            } else if path.extension().is_some_and(|ext| ext == "yaml") {
+                found.push(path);
+            }
+        }
+    }
+
+    /// Every shipped signed qualification policy, whatever minimum it names,
+    /// runs on an enforced node under at least qualified containment, so a
+    /// newly added policy cannot slip past the enforced floor.
+    #[test]
+    fn every_shipped_policy_minimum_is_raised_to_containment_under_enforcement() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../bundles");
+        let mut files = Vec::new();
+        policy_files(&root, &mut files);
+        let mut checked = 0;
+        let mut trusted_floor = 0;
+        for path in files {
+            let text = std::fs::read_to_string(&path).unwrap();
+            if !text.contains("minimum_verifier_process_settlement:") {
+                continue;
+            }
+            let doc: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+            let Some(minimum) = doc
+                .get("product_qualification_policy")
+                .and_then(|policy| policy.get("minimum_verifier_process_settlement"))
+            else {
+                continue;
+            };
+            let minimum: Settlement = serde_yaml::from_value(minimum.clone()).unwrap();
+            let required = Requirement::for_settlement(minimum);
+            assert!(
+                required.with_enforced_floor(true).strength()
+                    >= Requirement::AnyQualifiedContainment.strength(),
+                "{}",
+                path.display()
+            );
+            assert_eq!(required.with_enforced_floor(false), required);
+            checked += 1;
+            trusted_floor += usize::from(minimum == Settlement::TrustedProcessGroupAbsent);
+        }
+        assert!(
+            checked >= 10 && trusted_floor >= 10,
+            "{checked} {trusted_floor}"
+        );
+    }
+
     #[test]
     fn a_settlement_maps_to_its_containment_and_the_stricter_requirement_stands() {
         assert_eq!(
