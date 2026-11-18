@@ -1186,4 +1186,337 @@ mod tests {
         );
         assert_eq!(compiled.posture, EffectiveUiPosture::ObservationOnly);
     }
+
+    // ── Project-authored surfaces and views ─────────────────────────────
+    //
+    // The tests below pin how the compiler treats a surface or view whose
+    // effective trust class says it came from project space. They assert
+    // the behaviour as it is today. Where a test documents an exposure, its
+    // comment says so; such a test is expected to change when the exposure
+    // is closed.
+
+    const VIEW_REF: &str = "view:test/input";
+    const SURFACE_REF: &str = "surface:test/root";
+
+    fn identity_of(item_ref: &str, byte: char, trust: TrustClass) -> EffectiveUiItemIdentity {
+        EffectiveUiItemIdentity {
+            effective_trust_class: trust,
+            ..identity(item_ref, byte)
+        }
+    }
+
+    /// Stand-in for the signed service registry: `…/read` is a read-only
+    /// service needing `cap.read`, anything else writes and needs
+    /// `cap.write`. Targets are always bundle services.
+    fn bundle_service_target(item_ref: &str) -> Result<CompiledUiTarget> {
+        let read_only = item_ref.ends_with("/read");
+        Ok(CompiledUiTarget {
+            identity: identity(item_ref, if read_only { 'c' } else { 'd' }),
+            required_caps: vec![if read_only { "cap.read" } else { "cap.write" }.into()],
+            source_safe: read_only,
+            dispatch_class: CompiledUiDispatchClass::Verified,
+            result_effect: None,
+            parameter_schema: BTreeMap::from([
+                ("input".to_string(), "string".to_string()),
+                ("target".to_string(), "object".to_string()),
+                ("intent".to_string(), "string?".to_string()),
+            ]),
+        })
+    }
+
+    fn compile_authored_by(
+        surface_trust: TrustClass,
+        view_trust: TrustClass,
+        caller_scopes: &[&str],
+        surface: &Value,
+        resolve_target: impl FnMut(&str) -> Result<CompiledUiTarget>,
+    ) -> SessionCompiledUiBinding {
+        let caller_scopes: Vec<String> = caller_scopes.iter().map(|s| s.to_string()).collect();
+        SessionCompiledUiBinding::compile(
+            BindingCompileContext {
+                contract_revision: "test.v1",
+                principal_id: "principal:test",
+                caller_scopes: &caller_scopes,
+                project_root: Some("/project"),
+                node_policy_generation_digest: "policy:test",
+                identities: EmbeddedSurfaceIdentity {
+                    request_engine_generation_identity: "engine:test".into(),
+                    surface: identity_of(SURFACE_REF, 'a', surface_trust),
+                    views: BTreeMap::from([(
+                        VIEW_REF.into(),
+                        EmbeddedViewIdentity::Resolved {
+                            identity: identity_of(VIEW_REF, 'b', view_trust),
+                        },
+                    )]),
+                },
+            },
+            surface,
+            resolve_target,
+        )
+        .unwrap()
+    }
+
+    fn attenuation<'a>(
+        compiled: &'a SessionCompiledUiBinding,
+        coordinate: &str,
+    ) -> Option<&'a str> {
+        compiled
+            .binding
+            .attenuated
+            .iter()
+            .find(|entry| entry.coordinate == coordinate)
+            .map(|entry| entry.reason.as_str())
+    }
+
+    /// Documents an exposure. A view supplied from project space and signed
+    /// by a signer the operator pinned for that space (`TrustedProject`)
+    /// keeps its executing affordance and its mount-time source under a
+    /// bundle surface, exactly as a bundle-authored view would. Activating
+    /// the affordance dispatches the write service under the session's
+    /// scopes.
+    #[test]
+    fn trusted_project_view_under_a_bundle_surface_keeps_its_source_and_executing_affordance() {
+        let compiled = compile_authored_by(
+            TrustClass::TrustedBundle,
+            TrustClass::TrustedProject,
+            &["cap.read", "cap.write"],
+            &surface(serde_json::json!(["cap.write"])),
+            bundle_service_target,
+        );
+
+        let source = &compiled.binding.sources[VIEW_REF]["default"];
+        assert_eq!(source.target.identity.canonical_ref, "service:test/read");
+        assert_eq!(
+            source.activation,
+            ryeos_client_base::ui::content::SourceActivation::Initial,
+            "a source with no authored activation is fetched when the view mounts"
+        );
+        match &compiled.binding.affordances[VIEW_REF]["run"] {
+            CompiledUiAffordance::Execution { target, .. } => {
+                assert_eq!(target.identity.canonical_ref, "service:test/write");
+            }
+            other => panic!("expected an executing affordance, got {other:?}"),
+        }
+        assert_eq!(compiled.posture, EffectiveUiPosture::Interactive);
+        assert_eq!(
+            attenuation(&compiled, "affordance:view:test/input:run"),
+            None
+        );
+        assert_eq!(
+            attenuation(&compiled, "source:view:test/input:default"),
+            None
+        );
+    }
+
+    /// Documents an exposure. Nothing in the compiled grant or in the
+    /// presentation sent to the renderer distinguishes a trusted project
+    /// view from a bundle view. The only difference is the trust class kept
+    /// in the daemon-side identity record, which the presentation does not
+    /// carry.
+    #[test]
+    fn trusted_project_view_yields_the_same_grant_and_presentation_as_a_bundle_view() {
+        let authored = surface(serde_json::json!(["cap.write"]));
+        let bundle = compile_authored_by(
+            TrustClass::TrustedBundle,
+            TrustClass::TrustedBundle,
+            &["cap.read", "cap.write"],
+            &authored,
+            bundle_service_target,
+        );
+        let project = compile_authored_by(
+            TrustClass::TrustedBundle,
+            TrustClass::TrustedProject,
+            &["cap.read", "cap.write"],
+            &authored,
+            bundle_service_target,
+        );
+
+        assert_eq!(project.binding.sources, bundle.binding.sources);
+        assert_eq!(project.binding.affordances, bundle.binding.affordances);
+        assert_eq!(project.binding.surface_route, bundle.binding.surface_route);
+        assert_eq!(project.binding.attenuated, bundle.binding.attenuated);
+        assert_eq!(project.posture, bundle.posture);
+        assert_eq!(
+            project.sanitize_effective_surface(&authored).unwrap(),
+            bundle.sanitize_effective_surface(&authored).unwrap(),
+            "the renderer receives an identical presentation for both authors"
+        );
+
+        assert_ne!(project.binding.views, bundle.binding.views);
+        assert_eq!(
+            project.binding.views[VIEW_REF],
+            EmbeddedViewIdentity::Resolved {
+                identity: identity_of(VIEW_REF, 'b', TrustClass::TrustedProject),
+            }
+        );
+    }
+
+    /// A project view whose signer is not pinned, or which is unsigned,
+    /// still takes its place in the surface, but every source and every
+    /// affordance it declares is removed, UI-local ones included. Bundle
+    /// content around it is unaffected.
+    #[test]
+    fn untrusted_or_unsigned_project_view_is_attenuated_to_a_static_presentation() {
+        let mut authored = surface(serde_json::json!(["cap.write"]));
+        authored["views"][VIEW_REF]["widget"] = serde_json::json!("text");
+        authored["views"][VIEW_REF]["affordances"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": "local",
+                "invoke": {"plane": "ui", "open_view": "view:test/other"}
+            }));
+
+        for trust in [TrustClass::UntrustedProject, TrustClass::Unsigned] {
+            let compiled = compile_authored_by(
+                TrustClass::TrustedBundle,
+                trust,
+                &["cap.read", "cap.write"],
+                &authored,
+                bundle_service_target,
+            );
+
+            assert!(
+                !compiled.binding.sources.contains_key(VIEW_REF),
+                "{trust:?}"
+            );
+            assert!(
+                !compiled.binding.affordances.contains_key(VIEW_REF),
+                "{trust:?}"
+            );
+            assert_eq!(
+                attenuation(&compiled, "source:view:test/input:default"),
+                Some("untrusted surface/view authority excludes sources")
+            );
+            for id in ["run", "local"] {
+                assert_eq!(
+                    attenuation(&compiled, &format!("affordance:view:test/input:{id}")),
+                    Some("untrusted surface/view authority excludes affordances")
+                );
+            }
+
+            // The bundle surface's own source and input route still compile.
+            assert!(compiled.binding.sources[SURFACE_REF].contains_key("shell"));
+            assert!(compiled.binding.surface_route.is_some());
+
+            // The view body still reaches the renderer, without behaviour.
+            let presentation = compiled.sanitize_effective_surface(&authored).unwrap();
+            let view = &presentation["views"][VIEW_REF];
+            assert_eq!(view["widget"], "text");
+            assert_eq!(view["sources"], serde_json::json!({}));
+            assert_eq!(view["affordances"], serde_json::json!([]));
+        }
+    }
+
+    /// Documents an exposure. A surface supplied from project space by a
+    /// pinned signer is trusted like a bundle surface: its own input route,
+    /// its own sources and the affordances of the views it binds all
+    /// compile. The capability ceiling consulted is the one this same
+    /// surface declares.
+    #[test]
+    fn trusted_project_surface_keeps_its_route_its_sources_and_its_views_affordances() {
+        let compiled = compile_authored_by(
+            TrustClass::TrustedProject,
+            TrustClass::TrustedBundle,
+            &["cap.read", "cap.write"],
+            &surface(serde_json::json!(["cap.write"])),
+            bundle_service_target,
+        );
+
+        assert_eq!(
+            compiled
+                .binding
+                .surface_route
+                .as_ref()
+                .unwrap()
+                .target
+                .identity
+                .canonical_ref,
+            "service:test/write"
+        );
+        assert!(compiled.binding.sources[SURFACE_REF].contains_key("shell"));
+        assert!(matches!(
+            compiled.binding.affordances[VIEW_REF]["run"],
+            CompiledUiAffordance::Execution { .. }
+        ));
+        assert_eq!(compiled.posture, EffectiveUiPosture::Interactive);
+    }
+
+    /// An untrusted or unsigned project surface carries no behaviour at
+    /// all: its route, its sources and every view's sources and affordances
+    /// are removed, even for views that are themselves bundle-authored.
+    #[test]
+    fn untrusted_project_surface_attenuates_itself_and_every_view_it_binds() {
+        for trust in [TrustClass::UntrustedProject, TrustClass::Unsigned] {
+            let compiled = compile_authored_by(
+                trust,
+                TrustClass::TrustedBundle,
+                &["cap.read", "cap.write"],
+                &surface(serde_json::json!(["cap.write"])),
+                bundle_service_target,
+            );
+            assert!(compiled.binding.sources.is_empty(), "{trust:?}");
+            assert!(compiled.binding.affordances.is_empty(), "{trust:?}");
+            assert!(compiled.binding.surface_route.is_none(), "{trust:?}");
+            assert_eq!(compiled.posture, EffectiveUiPosture::ObservationOnly);
+        }
+    }
+
+    /// The two bounds that do apply to a trusted project view: the surface
+    /// ceiling and the session's own scopes. A target outside either is
+    /// attenuated.
+    #[test]
+    fn trusted_project_view_affordance_is_bounded_by_the_surface_ceiling_and_the_caller_scopes() {
+        let outside_caller = compile_authored_by(
+            TrustClass::TrustedBundle,
+            TrustClass::TrustedProject,
+            &["cap.read"],
+            &surface(serde_json::json!(["cap.write"])),
+            bundle_service_target,
+        );
+        assert!(!outside_caller.binding.affordances.contains_key(VIEW_REF));
+        assert_eq!(
+            attenuation(&outside_caller, "affordance:view:test/input:run"),
+            Some("caller lacks target capabilities")
+        );
+        assert!(outside_caller.binding.sources[VIEW_REF].contains_key("default"));
+
+        let outside_ceiling = compile_authored_by(
+            TrustClass::TrustedBundle,
+            TrustClass::TrustedProject,
+            &["cap.read", "cap.write"],
+            &surface(serde_json::json!(["cap.unrelated"])),
+            bundle_service_target,
+        );
+        assert!(!outside_ceiling.binding.affordances.contains_key(VIEW_REF));
+        assert!(
+            attenuation(&outside_ceiling, "affordance:view:test/input:run").is_some(),
+            "a target outside the surface's affordance lane is attenuated"
+        );
+    }
+
+    /// Both bounds are expressed over the target's declared capabilities,
+    /// so a target that declares none passes any non-empty ceiling and any
+    /// caller, including a caller holding no scope. This pins the compile
+    /// gate only; a later execution layer may still refuse the dispatch.
+    #[test]
+    fn a_target_declaring_no_required_caps_passes_any_nonempty_ceiling_and_any_caller() {
+        let compiled = compile_authored_by(
+            TrustClass::TrustedBundle,
+            TrustClass::TrustedProject,
+            &[],
+            &surface(serde_json::json!(["cap.unrelated"])),
+            |item_ref| {
+                Ok(CompiledUiTarget {
+                    required_caps: Vec::new(),
+                    ..bundle_service_target(item_ref)?
+                })
+            },
+        );
+        assert!(matches!(
+            compiled.binding.affordances[VIEW_REF]["run"],
+            CompiledUiAffordance::Execution { .. }
+        ));
+        assert!(compiled.binding.surface_route.is_some());
+    }
 }
