@@ -18,6 +18,13 @@ use super::rows::draw_detail;
 /// Cells sit two columns in, past the tone-glyph gutter.
 const GUTTER: usize = 2;
 
+/// The least height at which the coverage foot (rule and sentence) is drawn
+/// and still leaves the header and a row.
+const FOOT_MIN_HEIGHT: usize = 4;
+
+/// Indent per level of a hierarchical table, in columns.
+const INDENT: &str = "  ";
+
 #[cfg(test)]
 pub fn draw_table(
     surface: &mut TextSurface,
@@ -43,12 +50,17 @@ pub fn draw_table_with_coverage(
         return;
     }
     let left = rect.x as usize;
-    let bottom = rect.y as usize + height;
+    let mut bottom = rect.y as usize + height;
     let mut y = rect.y as usize;
-    if let Some(coverage) = coverage {
+    // The coverage sentence sits at the foot, dim, above a rule.
+    if let Some(coverage) = coverage
+        && height >= FOOT_MIN_HEIGHT
+    {
         let line = format!("{} / {}", coverage.state, coverage.reason);
-        surface.draw_text(left, y, &truncate(&line, width), style_muted());
-        y += 1;
+        bottom -= 1;
+        surface.draw_text(left, bottom, &truncate(&line, width), style_muted());
+        bottom -= 1;
+        surface.draw_text(left, bottom, &"─".repeat(width), style_muted());
     }
 
     // Column count drives the layout: prefer the declared headers, else fall
@@ -73,7 +85,7 @@ pub fn draw_table_with_coverage(
             surface.draw_text(
                 left + GUTTER + i * col_w,
                 y,
-                &truncate(header, cell_w),
+                &truncate(&header.to_uppercase(), cell_w),
                 style_muted(),
             );
         }
@@ -207,9 +219,8 @@ fn draw_row(
     surface.draw_text(left, y, glyph, glyph_style);
 
     for (i, cell) in row.cells.iter().enumerate().take(ncols) {
-        // First column is the identifier (foreground); later columns are
-        // secondary detail (muted) — unless the whole row is selected or
-        // the column projected its own tone for this cell.
+        // Cells take the body ink; a status word takes its tone's colour,
+        // unless the whole row is selected.
         let cell_tone = row
             .cell_tones
             .get(i)
@@ -220,10 +231,8 @@ fn draw_row(
             style
         } else if let Some(tone) = cell_tone {
             tone_style(tone)
-        } else if i == 0 {
-            style
         } else {
-            style_muted()
+            style
         };
         let cell_x = left + GUTTER + i * col_w;
         if i == 0
@@ -247,23 +256,11 @@ fn draw_row(
 }
 
 fn hierarchy_prefix(tree: &ryeos_client_base::ui::view_model::RyeOsTableHierarchyVm) -> String {
-    let depth = tree.ancestor_continues.len();
-    let mut prefix = String::new();
-    for continues in tree
-        .ancestor_continues
-        .iter()
-        .copied()
-        .take(depth.saturating_sub(1))
-    {
-        prefix.push_str(if continues { "│ " } else { "  " });
-    }
-    if depth > 0 {
-        prefix.push_str(if tree.is_last { "└─" } else { "├─" });
-    }
+    let mut prefix = INDENT.repeat(tree.ancestor_continues.len());
     prefix.push_str(if tree.has_children {
         if tree.collapsed { "▸ " } else { "▾ " }
     } else {
-        "· "
+        "  "
     });
     prefix
 }
@@ -328,7 +325,7 @@ mod tests {
 
     #[test]
     fn table_coverage_is_visible_on_nonempty_page() {
-        let (mut s, rect) = surface(72, 4);
+        let (mut s, rect) = surface(72, 5);
         draw_table_with_coverage(
             &mut s,
             rect,
@@ -340,8 +337,10 @@ mod tests {
             }),
             0,
         );
-        assert!(row_text(&s, 72, 0).contains("observed / projection_locator_not_exhaustive"));
-        assert!(row_text(&s, 72, 2).contains("T-ab"));
+        // The row sits under the header; the sentence is the last line, over a rule.
+        assert!(row_text(&s, 72, 1).contains("T-ab"));
+        assert!(row_text(&s, 72, 3).starts_with('─'));
+        assert!(row_text(&s, 72, 4).contains("observed / projection_locator_not_exhaustive"));
     }
 
     #[test]
@@ -358,9 +357,9 @@ mod tests {
         let ncols = 3usize;
         let col_w = (60 - GUTTER) / ncols;
         let cell_x = |i: usize| GUTTER + i * col_w;
-        assert!(from_col(&header, cell_x(0)).starts_with("thread"));
-        assert!(from_col(&header, cell_x(1)).starts_with("item"));
-        assert!(from_col(&header, cell_x(2)).starts_with("status"));
+        assert!(from_col(&header, cell_x(0)).starts_with("THREAD"));
+        assert!(from_col(&header, cell_x(1)).starts_with("ITEM"));
+        assert!(from_col(&header, cell_x(2)).starts_with("STATUS"));
 
         // Each cell starts at the same x as its column header.
         let body = row_text(&s, 60, 1);
@@ -396,7 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn hierarchy_prefix_carries_guides_connector_and_fold_state() {
+    fn hierarchy_prefix_indents_two_spaces_per_level_and_marks_fold_state() {
         assert_eq!(
             hierarchy_prefix(&RyeOsTableHierarchyVm {
                 ancestor_continues: vec![true, false],
@@ -404,7 +403,7 @@ mod tests {
                 has_children: true,
                 collapsed: true,
             }),
-            "│ ├─▸ "
+            "    ▸ "
         );
         assert_eq!(
             hierarchy_prefix(&RyeOsTableHierarchyVm {
@@ -413,7 +412,7 @@ mod tests {
                 has_children: false,
                 collapsed: false,
             }),
-            "· "
+            "  "
         );
     }
 
