@@ -17,6 +17,7 @@ pub mod ui_invocations_dispatch;
 pub mod ui_items;
 pub mod ui_launch;
 pub mod ui_launch_mint;
+pub mod ui_machines;
 pub mod ui_node;
 pub mod ui_projects;
 pub mod ui_remotes;
@@ -65,6 +66,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_timeline_raw::DESCRIPTOR,
     ui_node::ACTIVITY_DESCRIPTOR,
     ui_usage::USAGE_DESCRIPTOR,
+    ui_machines::MACHINES_DESCRIPTOR,
     #[cfg(feature = "scheduling")]
     ui_schedules::DESCRIPTOR,
     ui_gc::DESCRIPTOR,
