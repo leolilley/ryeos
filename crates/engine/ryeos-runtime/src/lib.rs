@@ -44,9 +44,9 @@ pub use callback::{
 };
 pub use checkpoint::CheckpointWriter;
 pub use cognition::{
-    CognitionFramePayload, CognitionInput, CognitionOutPayload, CognitionUsage, FINISH_INTERRUPTED,
-    FrameRecord, FrameRequestOptions, MalformedCall, ToolResultGuard, ToolResultPayload,
-    TurnMarker,
+    CognitionFramePayload, CognitionInput, CognitionOutPayload, CognitionUsage, DroppedImage,
+    FINISH_INTERRUPTED, FrameRecord, FrameRequestOptions, MalformedCall, ToolResultGuard,
+    ToolResultPayload, TurnMarker,
 };
 pub use command::{
     CommandAliasDef, CommandArgumentArity, CommandArgumentDef, CommandArgumentForm,

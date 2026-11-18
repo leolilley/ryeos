@@ -351,9 +351,6 @@ fn composed_isolation_policy() -> ryeos_engine::isolation::IsolationPolicy {
     });
     policy.filesystem.proc_filesystem =
         ryeos_isolation_protocol::IsolationProcFilesystem::PidNamespace;
-    // Deterministic signed fixtures use the explicit trusted process-group
-    // contract, not a claim of provisioned hard process-scope containment.
-    policy.trusted_process_group_sessions = true;
     policy
 }
 

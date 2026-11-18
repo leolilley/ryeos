@@ -1,0 +1,75 @@
+# ryeos:signed:2026-11-18T05:28:58Z:b3baa0194e2f1be331cdbab2768b22fde3cb4ce2baadc77e9bab3df018c735b4:mR03NA0YQ25BPp/krKcQuJjtbJb9whMoPN7+W4Wc05PmVNnBcZeNbBR3AKI099ADI6e4ZwgjtQ6XjUAt9ecoCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/ui
+version: "1.0.0"
+description: The words the machines view shows for locality groups, nodes, answers and relations.
+
+# Every sentence the machines service returns comes from here, keyed on the
+# stable keys the locality comparison emits. A key that is not listed is shown
+# as itself, never hidden and never guessed at. Templates take `{name}`
+# placeholders that the service fills from the response; nothing else in the
+# service carries wording.
+
+# Joins names inside one sentence.
+list_separator: ", "
+# Joins the lines of one row's detail.
+line_separator: "; "
+# Marks the group that holds the node this client is attached to.
+this_computer: This computer
+
+# A group's state: the grade of the grouping, shown beside its name.
+states:
+  declared_confirmed: Named by you, confirmed this boot
+  declared: Named by you
+  declared_contradicted: Named by you, but these nodes report different boots
+  observed: Same boot
+  alone: On its own
+  cannot_tell: Cannot tell
+
+# What a node's row says about the fan-out. `disagrees` is shown instead of
+# `answered` for a node whose boot differs from the rest of a declared machine.
+answers:
+  answered: Answered
+  did_not_answer: Did not answer
+  not_granted: Not granted
+  not_asked: Not asked
+  disagrees: Reports a different boot
+
+kinds:
+  this: This node
+  remote: Remote
+  installed_not_connected: Installed here, not connected
+
+relations:
+  boot: Boot
+  storage: Storage
+  account: Account
+
+# Why a node, or one of its relations, could not tell.
+reasons:
+  emulated_kernel: the kernel is emulated, so its boot id says nothing
+  not_measurable: this host cannot measure it
+  user_namespace: it runs in a nested user namespace, where a uid names nothing outside it
+  not_reported: the node reported nothing for it
+  timeout: no answer in time
+  unreachable: could not be reached
+  service_not_installed: the remote does not serve locality
+  inbound_only: inbound-only remote, never dialled from here
+  remote_invalid: the remote's pin failed verification
+  remote_error: the remote answered with an error
+  invalid_answer: the remote's answer was not valid locality facts
+
+templates:
+  # A node that did not answer: `{answer}` is the answers text.
+  did_not_answer: "{answer}: {reason}"
+  # One relation of one node.
+  fact_shared: Shared with {names}
+  fact_measured: Measured, not shared
+  fact_unknown: "Cannot tell: {reason}"
+  fact_unknown_bare: Cannot tell
+  fact_line: "{relation}: {text}"
+  # Group-level lines.
+  relation_shared: "{relation}: {names} share it"
+  relation_unknown: "{relation}: {names} cannot tell ({reason})"
+  relation_unknown_bare: "{relation}: {names} cannot tell"
+  disagreeing: "Reports a different boot: {names}"
+  declared_missing: "Named but not seen: {names}"

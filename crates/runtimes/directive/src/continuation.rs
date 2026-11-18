@@ -1,8 +1,12 @@
+use ryeos_directive_definition::ImageAcceptConfig;
+
 use crate::directive::ProviderMessage;
 
 pub struct ContinuationCheck {
     context_window: u64,
     threshold_ratio: f64,
+    /// How the model counts an image, when its entry declares image input.
+    images: Option<ImageAcceptConfig>,
 }
 
 impl ContinuationCheck {
@@ -10,7 +14,15 @@ impl ContinuationCheck {
         Self {
             context_window,
             threshold_ratio,
+            images: None,
         }
+    }
+
+    /// The same check with the model's image cost declaration, so an image
+    /// counts toward the window as the request would carry it.
+    pub fn with_images(mut self, images: Option<ImageAcceptConfig>) -> Self {
+        self.images = images;
+        self
     }
 
     /// Continue when the LIVE context that will be sent on the next provider
@@ -31,7 +43,7 @@ impl ContinuationCheck {
     /// Rough token estimate of the live message window, by the one estimator
     /// the recovery trim also uses.
     pub fn estimate_live_context_tokens(&self, messages: &[ProviderMessage]) -> u64 {
-        crate::estimate::estimate_tokens(messages)
+        crate::estimate::estimate_tokens(messages, self.images.as_ref())
     }
 
     pub fn threshold(&self) -> u64 {

@@ -202,7 +202,7 @@ pub fn daemon_isolation_roots() -> Vec<PathBuf> {
 }
 
 /// Enforced descriptor-bound realization mounts, as qualification verifiers
-/// require; trusted process-group sessions are the explicit fixture contract.
+/// require; verifiers settle by retained PID-namespace containment.
 pub fn composed_isolation_policy() -> ryeos_engine::isolation::IsolationPolicy {
     let mut policy = ryeos_engine::isolation::IsolationPolicy::disabled_for_authoring();
     policy.mode = ryeos_engine::isolation::IsolationMode::Enforce;
@@ -212,7 +212,6 @@ pub fn composed_isolation_policy() -> ryeos_engine::isolation::IsolationPolicy {
     });
     policy.filesystem.proc_filesystem =
         ryeos_isolation_protocol::IsolationProcFilesystem::PidNamespace;
-    policy.trusted_process_group_sessions = true;
     policy
 }
 
