@@ -585,9 +585,11 @@ impl<P: Platform + 'static> ClientRuntime<P> {
     /// Execute effects. An effect id is started at most once for the life of
     /// the runtime (ids are monotonic across session replacement), registered
     /// before anything runs so the core never waits on an effect nobody
-    /// started. The effects of one call run concurrently and report as one
-    /// message, in emission order. An effect re-checks, when it runs, that
-    /// its batch is still the current one and reads the producer then.
+    /// started. The effects of one call run concurrently and each reports as
+    /// soon as it finishes, so one slow request never holds back the others'
+    /// answers; those that finish together report as one message, in
+    /// emission order. An effect re-checks, when it runs, that its batch is
+    /// still the current one and reads the producer then.
     pub fn submit(&mut self, effects: Vec<RyeOsEffect>) {
         self.reap_batches();
         if effects.is_empty() || self.inbox.is_detached() {
@@ -615,8 +617,10 @@ impl<P: Platform + 'static> ClientRuntime<P> {
         let task = self.shared.platform.spawner().spawn({
             let tag = tag.clone();
             async move {
-                let results = execute_batch(&env, &batch).await;
-                inbox.finish_effects(tag, results);
+                execute_batch(&env, &batch, |results| {
+                    inbox.finish_effects(tag.clone(), results);
+                })
+                .await;
             }
         });
         self.batches.push(EffectBatch {
