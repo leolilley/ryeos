@@ -150,7 +150,11 @@ async fn expect_not_found(
 async fn project_authored_field_definition_source_refuses_threads_outside_the_session_project() {
     let (_state_dir, _state_owner, state) = test_state::build_test_state();
     let (_projects, session, ctx) = two_project_session(&state);
-    create_outside_thread(&state, "T-projectless", ExecutionProjectAuthority::PROJECTLESS);
+    create_outside_thread(
+        &state,
+        "T-projectless",
+        ExecutionProjectAuthority::PROJECTLESS,
+    );
     let state = Arc::new(state);
     ryeos_ui::seat_auth::with_project_authored_compiled_ui_source(
         root_attachment(&session),
@@ -176,7 +180,11 @@ async fn project_authored_field_definition_source_refuses_threads_outside_the_se
 async fn project_authored_field_execution_source_refuses_threads_outside_the_session_project() {
     let (_state_dir, _state_owner, state) = test_state::build_test_state();
     let (_projects, session, ctx) = two_project_session(&state);
-    create_outside_thread(&state, "T-projectless", ExecutionProjectAuthority::PROJECTLESS);
+    create_outside_thread(
+        &state,
+        "T-projectless",
+        ExecutionProjectAuthority::PROJECTLESS,
+    );
     let state = Arc::new(state);
     ryeos_ui::seat_auth::with_project_authored_compiled_ui_source(
         root_attachment(&session),
@@ -203,7 +211,11 @@ async fn project_authored_field_execution_source_refuses_threads_outside_the_ses
 async fn project_authored_field_runs_source_lists_only_the_session_project() {
     let (_state_dir, _state_owner, state) = test_state::build_test_state();
     let (_projects, session, ctx) = two_project_session(&state);
-    create_outside_thread(&state, "T-projectless", ExecutionProjectAuthority::PROJECTLESS);
+    create_outside_thread(
+        &state,
+        "T-projectless",
+        ExecutionProjectAuthority::PROJECTLESS,
+    );
     let state = Arc::new(state);
     let list = |ctx: HandlerContext, state: Arc<AppState>| async move {
         let runs = (ryeos_ui::handlers::ui_field_runs::DESCRIPTOR.handler)(

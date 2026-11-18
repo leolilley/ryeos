@@ -641,7 +641,9 @@ pub fn load_project_authoring_config(
             HandlerError::Internal(format!("load {PROJECT_AUTHORING_CONFIG_REF}: {error}"))
         })?;
     match value {
-        Some(value) => Ok(ProjectAuthoringConfig::from_value(value).map_err(HandlerError::Internal)?),
+        Some(value) => {
+            Ok(ProjectAuthoringConfig::from_value(value).map_err(HandlerError::Internal)?)
+        }
         None => Ok(ProjectAuthoringConfig {
             category: None,
             version: None,

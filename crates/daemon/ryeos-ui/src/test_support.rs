@@ -573,7 +573,10 @@ pub fn fixture_bundle_root(state: &AppState) -> std::path::PathBuf {
         .engine
         .bundle_roots
         .iter()
-        .find(|root| root.file_name().is_some_and(|name| name == FIXTURE_BUNDLE_DIR))
+        .find(|root| {
+            root.file_name()
+                .is_some_and(|name| name == FIXTURE_BUNDLE_DIR)
+        })
         .cloned()
         .expect("state built with live bundles has a fixture bundle root")
 }

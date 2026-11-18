@@ -101,18 +101,19 @@ fn session_context(
     let embedded = state
         .engine
         .with_checked_bundle_generation(|generation| -> anyhow::Result<_> {
-            let root = generation.effective_item(ryeos_engine::engine::EffectiveItemRequest {
-                logical_project_root: None,
-                item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(
-                    "config:test/presentation",
-                )?,
-                expected_kind: Some("config".into()),
-                project_root: None,
-                subject_resolution_authority:
-                    ryeos_engine::contracts::SubjectResolutionAuthority::for_live_project_root(
-                        None,
-                    ),
-            })?;
+            let root =
+                generation.effective_item(ryeos_engine::engine::EffectiveItemRequest {
+                    logical_project_root: None,
+                    item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(
+                        "config:test/presentation",
+                    )?,
+                    expected_kind: Some("config".into()),
+                    project_root: None,
+                    subject_resolution_authority:
+                        ryeos_engine::contracts::SubjectResolutionAuthority::for_live_project_root(
+                            None,
+                        ),
+                })?;
             ryeos_api::surface_views::resolve_effective_ui_view_closure_in_generation(
                 generation,
                 Some(&project_root),
