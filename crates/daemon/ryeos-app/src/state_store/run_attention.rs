@@ -33,6 +33,7 @@ pub struct FailedRunAttention {
     pub status: String,
     pub item_ref: String,
     pub project_root: Option<String>,
+    pub created_at: String,
     pub updated_at: String,
 }
 
@@ -86,6 +87,7 @@ impl StateStore {
                 status: head.status,
                 item_ref: head.item_ref,
                 project_root: head.project_root,
+                created_at: head.created_at,
                 updated_at: head.updated_at,
             });
         }

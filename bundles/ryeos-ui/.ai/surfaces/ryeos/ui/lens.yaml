@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-18T02:10:47Z:7e36f50c8a39b9a10b68e261b5844a09945a2e0e3d856c68cc1fa50d390b8b6c:JEmrPRzYqB3Z9PfIwMr9LeybCyJSG53XrG53VDSF24TzdEWixZlHlyiL24KJG1F5zJ6Hh67/HJejtAwrR6MQBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T23:23:10Z:1e6330e56f2a6b550f6380a155fe91602134f882c492de831a3ae732c2ecdf5c:UKi0iRPXz7VZC9Qwvdzd+H4KBF3t8gdA898s00jYwryD9knI9NkpcLEcC6QWVhQ7utbkdFSNUv02NeNjGaMIAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-lens
 title: Lens
 version: "1.0.0"
@@ -23,7 +23,7 @@ sources:
   attention:
     ref: service:ui/ryeos-ui/work/attention
     role: attention
-    params: { limit: 1 }
+    params: { limit: 25 }
     refresh: { on_hint: [thread, activity] }
   file_read:
     ref: service:ui/ryeos-ui/files/read
