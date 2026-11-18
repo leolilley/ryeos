@@ -90,7 +90,7 @@ fn entry_ids(timeline: &Timeline) -> Vec<(String, String)> {
                 items: r.members.clone(),
                 undeclared: Default::default(),
                 notice_noun: None,
-                lane: None,
+                lane_matches: Vec::new(),
             })),
         }
     }
@@ -1083,12 +1083,12 @@ fn a_settled_child_gives_its_link_the_outcome_and_summary() {
 }
 
 fn lane_label(events: &[Value]) -> Option<String> {
-    fold(events, &definition())
-        .unwrap()
-        .lane
-        .map(|lane| lane.label)
+    lane_for(events, "running").map(|lane| lane.label)
 }
 
+fn lane_for(events: &[Value], status: &str) -> Option<ryeos_timeline::Lane> {
+    fold(events, &definition()).unwrap().lane(status)
+}
 fn running_call(seq: i64) -> Value {
     ev(
         seq,
@@ -1110,8 +1110,23 @@ fn approval_requested(seq: i64) -> Value {
 }
 
 #[test]
+fn a_running_chain_with_no_entries_is_working_by_status_with_no_entry() {
+    let lane = lane_for(&[], "running").expect("the status row matches");
+    assert_eq!(lane.label, "Working");
+    assert_eq!(lane.entry, None);
+    // Other statuses name nothing, and an entry row outranks the status row.
+    assert_eq!(lane_for(&[], "completed"), None);
+    let events = [approval_requested(1)];
+    assert_eq!(
+        lane_for(&events, "running")
+            .map(|lane| lane.label)
+            .as_deref(),
+        Some("Waiting for approval")
+    );
+}
+
+#[test]
 fn an_idle_thread_has_no_lane() {
-    assert_eq!(lane_label(&[]), None);
     let mut seq = 1;
     let mut events = vec![ask(&mut seq, "2026-11-16T00:00:00Z", "hello")];
     events.extend(op(
@@ -1122,24 +1137,23 @@ fn an_idle_thread_has_no_lane() {
         false,
     ));
     events.push(say(&mut seq, "2026-11-16T00:00:03Z", "done"));
-    assert_eq!(lane_label(&events), None);
+    // Nothing is running and the chain has finished.
+    assert_eq!(lane_for(&events, "completed"), None);
 }
 
 #[test]
 fn a_running_operation_is_working_and_names_its_entry() {
-    let timeline = fold(&[running_call(1)], &definition()).unwrap();
-    let lane = timeline.lane.expect("a running call is working");
+    let lane = lane_for(&[running_call(1)], "running").expect("a running call is working");
     assert_eq!(lane.label, "Working");
-    assert_eq!(lane.entry, "act:op-1");
+    assert_eq!(lane.entry.as_deref(), Some("act:op-1"));
 }
 
 #[test]
 fn a_pending_ask_beats_working() {
     let events = [running_call(1), approval_requested(2)];
-    let timeline = fold(&events, &definition()).unwrap();
-    let lane = timeline.lane.expect("the ask is pending");
+    let lane = lane_for(&events, "running").expect("the ask is pending");
     assert_eq!(lane.label, "Waiting for approval");
-    assert_eq!(lane.entry, "ask:ap-1");
+    assert_eq!(lane.entry.as_deref(), Some("ask:ap-1"));
 }
 
 #[test]
@@ -1182,5 +1196,5 @@ fn the_lane_comes_only_from_the_definition_table() {
     let mut def = definition();
     def.lane.clear();
     let timeline = fold(&[running_call(1), approval_requested(2)], &def).unwrap();
-    assert_eq!(timeline.lane, None);
+    assert_eq!(timeline.lane("running"), None);
 }

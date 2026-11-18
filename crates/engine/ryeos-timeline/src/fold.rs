@@ -154,7 +154,7 @@ impl Folder {
                 overlay::present(entry, present, subject, inputs, &self.definition.vocabulary);
             }
         }
-        let lane = passes::lane(&entries, &self.definition.lane);
+        let lane_matches = passes::lane_matches(&entries, &self.definition.lane);
         let notice_noun = self.definition.folds.notice.as_ref().and_then(|key| {
             self.definition
                 .vocabulary
@@ -166,7 +166,7 @@ impl Folder {
             items: passes::run(entries, &self.definition),
             undeclared: self.state.undeclared.clone(),
             notice_noun,
-            lane,
+            lane_matches,
         }
     }
 

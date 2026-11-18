@@ -94,14 +94,29 @@ impl Definition {
     }
 }
 
-/// One row of the status lane table: an entry of `kind` whose latest state is
-/// `state` is drawn as `label`.
+/// One row of the status lane table, in one of two forms: an entry of `type`
+/// whose latest state is `state`, or the chain's status. Either is drawn as
+/// `label`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum LaneRow {
+    Entry(EntryLaneRow),
+    Status(StatusLaneRow),
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct LaneRow {
+pub struct EntryLaneRow {
     #[serde(rename = "type")]
     pub kind: EntryKind,
     pub state: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusLaneRow {
+    pub status: String,
     pub label: String,
 }
 
@@ -439,13 +454,24 @@ impl Item {
     }
 }
 
-/// What the thread is doing now, derived from the entries' latest states.
+/// What the thread is doing now.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Lane {
     /// The matching [`LaneRow`]'s label.
     pub label: String,
-    /// Id of the entry the row matched.
-    pub entry: String,
+    /// Id of the entry an entry row matched; absent for a status row.
+    pub entry: Option<String>,
+}
+
+/// A lane table row that can match, in table order: an entry row that found
+/// an entry, or a status row awaiting the chain's status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LaneMatch {
+    pub label: String,
+    /// The entry an entry row matched.
+    pub entry: Option<String>,
+    /// The status a status row waits for.
+    pub status: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -456,6 +482,27 @@ pub struct Timeline {
     /// The noun a client counts undeclared events under, from the
     /// definition's notice noun; absent when the definition names none.
     pub notice_noun: Option<Noun>,
-    /// The status lane; absent when nothing matches the table (idle).
-    pub lane: Option<Lane>,
+    /// The lane table rows that can match, in table order. The chain's status
+    /// is not part of the fold, so a status row is resolved by [`Timeline::lane`].
+    pub lane_matches: Vec<LaneMatch>,
+}
+
+impl Timeline {
+    /// The status lane for a chain in `status`: the first table row that
+    /// matches, whether by entry or by status. `None` when idle.
+    pub fn lane(&self, status: &str) -> Option<Lane> {
+        self.lane_matches
+            .iter()
+            .find_map(|row| match (&row.entry, &row.status) {
+                (Some(entry), _) => Some(Lane {
+                    label: row.label.clone(),
+                    entry: Some(entry.clone()),
+                }),
+                (None, Some(wanted)) if wanted == status => Some(Lane {
+                    label: row.label.clone(),
+                    entry: None,
+                }),
+                _ => None,
+            })
+    }
 }

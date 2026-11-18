@@ -2468,6 +2468,18 @@ mod tests {
         // accented.
         let lane = timeline_lane(&json!({"lane": {"label": "Working", "entry": "gone"}}), &[]);
         assert_eq!(lane.map(|lane| lane.tone), Some(RyeOsTone::Accent));
+        // A status row names no entry; the lane still draws, accented.
+        let lane = timeline_lane(
+            &json!({"lane": {"label": "Working", "entry": null}}),
+            &items,
+        );
+        assert_eq!(
+            lane,
+            Some(RyeOsTimelineLaneVm {
+                label: "Working".to_string(),
+                tone: RyeOsTone::Accent
+            })
+        );
         assert_eq!(timeline_lane(&json!({"lane": null}), &items), None);
         assert_eq!(timeline_lane(&json!({}), &items), None);
     }

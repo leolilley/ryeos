@@ -328,7 +328,7 @@ fn timeline_for(
                     items: Vec::new(),
                     undeclared: Default::default(),
                     notice_noun: None,
-                    lane: None,
+                    lane_matches: Vec::new(),
                 }),
             }));
             cache.insert(key.clone(), entry.clone());
@@ -395,14 +395,14 @@ fn window_response(
     let timeline = &folded.timeline;
     // An activity a dead thread left running must not read as work in
     // progress, so a settled chain has no lane whatever its entries say.
-    let settled = summary
+    let status = summary
         .get("status")
         .and_then(Value::as_str)
-        .is_some_and(chain_settled);
-    let lane = if settled {
+        .unwrap_or_default();
+    let lane = if chain_settled(status) {
         None
     } else {
-        timeline.lane.as_ref()
+        timeline.lane(status)
     };
     let older = older_count(timeline.items.len(), limit);
     let window = &timeline.items[older..];
@@ -503,7 +503,7 @@ mod tests {
             items,
             undeclared: BTreeMap::new(),
             notice_noun: None,
-            lane: None,
+            lane_matches: Vec::new(),
         }
     }
 
@@ -543,14 +543,19 @@ mod tests {
         );
     }
 
+    fn working_by_entry() -> ryeos_timeline::LaneMatch {
+        ryeos_timeline::LaneMatch {
+            label: "Working".to_string(),
+            entry: Some("act:1".to_string()),
+            status: None,
+        }
+    }
+
     #[test]
     fn the_response_carries_the_lane_and_the_notice_noun_beside_the_window() {
         let mut state = folded(1, 9);
         let mut timeline = timeline(1);
-        timeline.lane = Some(ryeos_timeline::Lane {
-            label: "Working".to_string(),
-            entry: "act:1".to_string(),
-        });
+        timeline.lane_matches = vec![working_by_entry()];
         timeline.notice_noun = Some(ryeos_timeline::Noun {
             key: "system_event".to_string(),
             one: "system event".to_string(),
@@ -572,10 +577,7 @@ mod tests {
     fn a_settled_chain_has_no_lane_whatever_its_entries_say() {
         let mut state = folded(1, 9);
         let mut timeline = timeline(1);
-        timeline.lane = Some(ryeos_timeline::Lane {
-            label: "Working".to_string(),
-            entry: "act:1".to_string(),
-        });
+        timeline.lane_matches = vec![working_by_entry()];
         state.timeline = Arc::new(timeline);
         let respond = |status: &str| {
             let summary = chain_summary(status, &ThreadUsageTotals::default());
@@ -587,6 +589,28 @@ mod tests {
         for status in ["killed", "timed_out", "failed", "cancelled", "completed"] {
             assert_eq!(respond(status)["lane"], Value::Null, "{status}");
         }
+    }
+
+    #[test]
+    fn a_status_row_names_a_running_chain_with_no_entry_and_a_settled_one_has_none() {
+        let mut state = folded(0, 9);
+        let mut timeline = timeline(0);
+        timeline.lane_matches = vec![ryeos_timeline::LaneMatch {
+            label: "Working".to_string(),
+            entry: None,
+            status: Some("running".to_string()),
+        }];
+        state.timeline = Arc::new(timeline);
+        let respond = |status: &str| {
+            let summary = chain_summary(status, &ThreadUsageTotals::default());
+            window_response("c", "config:x", "d", &state, summary, 200, None).unwrap()
+        };
+        assert_eq!(
+            respond("running")["lane"],
+            json!({"label": "Working", "entry": null})
+        );
+        assert_eq!(respond("created")["lane"], Value::Null);
+        assert_eq!(respond("killed")["lane"], Value::Null);
     }
 
     #[test]
