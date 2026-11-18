@@ -828,6 +828,19 @@ impl App {
     }
 }
 
+/// Select the theme by name (`night`, `paper` or `gruvbox`) for every later
+/// draw; false, with nothing changed, for any other name. Night is in force
+/// until something selects another.
+pub fn select_theme(name: &str) -> bool {
+    match theme::ThemeId::from_name(name) {
+        Some(id) => {
+            theme::use_theme(id);
+            true
+        }
+        None => false,
+    }
+}
+
 /// The app. `fonts` are the coverage faces the page fetched beside the
 /// renderer (CJK and emoji); Rune keeps its embedded Inter and IBM Plex Mono
 /// first and falls back to these.

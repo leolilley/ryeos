@@ -4156,6 +4156,38 @@ fn mint_budget_id(prefix: &str) -> String {
     format!("{prefix}-{}", &hex[..16])
 }
 
+/// A continuation or recovery that carries financial authority cannot be
+/// admitted on a node whose accounting ledger is unavailable. An operator can
+/// reach this by continuing a paid thread, so it is a typed refusal.
+pub(crate) const ACCOUNTING_LEDGER_UNAVAILABLE: &str = "accounting_ledger_unavailable";
+/// A finite hard spend limit needs a mechanically proven spend bound.
+pub(crate) const HARD_SPEND_BOUND_INELIGIBLE: &str = "hard_spend_bound_ineligible";
+
+fn accounting_ledger_unavailable(authority_digest: &str) -> DispatchError {
+    DispatchError::LaunchPolicyForbidden {
+        code: ACCOUNTING_LEDGER_UNAVAILABLE.to_owned(),
+        message: format!(
+            "accounting ledger is unavailable; a recovered launch carrying financial \
+             authority {authority_digest} cannot be admitted"
+        ),
+        binding: None,
+    }
+}
+
+/// The refusal of a launch whose finite hard spend limit meets a sealed
+/// financial authority with no proven spend bound.
+fn hard_spend_bound_ineligible(spend_limit: &str, spend_bound: &str) -> DispatchError {
+    DispatchError::LaunchPolicyForbidden {
+        code: HARD_SPEND_BOUND_INELIGIBLE.to_owned(),
+        message: format!(
+            "hard spend limit {spend_limit} requires a mechanically proven spend bound; this \
+             route's sealed financial authority is `{spend_bound}` and is ineligible for hard \
+             spend"
+        ),
+        binding: None,
+    }
+}
+
 /// Resolve the immutable accounting scope for a launch whose runtime declares
 /// a financial authority.
 ///
@@ -4186,10 +4218,8 @@ fn resolve_accounting_scope(
             params.state.accounting.as_ref(),
             prepared_launch.financial_authority.as_ref(),
         ) {
-            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-                "accounting ledger is unavailable; a recovered launch carrying financial \
-                 authority {} cannot be admitted",
-                financial_authority.authority_digest
+            return Err(BuildAndLaunchError::from(accounting_ledger_unavailable(
+                &financial_authority.authority_digest,
             )));
         }
         return Ok((Some(existing), false));
@@ -4416,6 +4446,32 @@ async fn prepare_managed_launch_authority(
     metadata_template: Option<&ryeos_app::launch_metadata::RuntimeLaunchMetadata>,
     transferred_continuation_capsule: Option<&ryeos_state::objects::AdmittedLaunchCapsule>,
 ) -> Result<PreparedManagedLaunchAuthority, BuildAndLaunchError> {
+    Box::pin(prepare_managed_launch_authority_in_mode(
+        params,
+        thread_id,
+        metadata_template,
+        transferred_continuation_capsule,
+        None,
+    ))
+    .await
+}
+
+/// The managed launch authority pass, with an explicit re-prepare mode.
+///
+/// `rebind_names` is `None` for every launch but one: the first preparation
+/// of an operator rebind successor. There it names the ref bindings the
+/// operator replaced, and the pass prepares the binding-derived part of the
+/// launch again instead of reusing the source capsule's. Runtime, protocol
+/// and executor still come from the source capsule. A rebound successor that
+/// already exists is prepared like any other admitted row, from its own
+/// rooted capsule, and never enters this mode.
+async fn prepare_managed_launch_authority_in_mode(
+    params: &BuildAndLaunchParams<'_>,
+    thread_id: &str,
+    metadata_template: Option<&ryeos_app::launch_metadata::RuntimeLaunchMetadata>,
+    transferred_continuation_capsule: Option<&ryeos_state::objects::AdmittedLaunchCapsule>,
+    rebind_names: Option<&BTreeSet<String>>,
+) -> Result<PreparedManagedLaunchAuthority, BuildAndLaunchError> {
     // Allocated before any reader of the state root, and only for a launch
     // that proceeds; validation-only requests never reach here.
     params
@@ -4491,8 +4547,61 @@ async fn prepare_managed_launch_authority(
         .as_ref()
         .or(transferred_continuation_capsule)
         .or(inherited_admitted_capsule.as_ref());
-    if let (Some(authoritative), Some(template)) =
-        (authoritative_admitted_capsule, metadata_template)
+    // An operator rebind re-prepares part of what its source admitted, so its
+    // seed cannot equal the source capsule and is not a sealable capsule yet.
+    // The permission to rebind is read here, from the runtime descriptor
+    // sealed in the source capsule, before anything is resolved or read; the
+    // capsule comparison runs after preparation, once the successor's own
+    // capsule exists.
+    if let Some(names) = rebind_names {
+        let source = super::launch_rebind::rebind_source_capsule(
+            persisted_admitted_capsule.as_ref(),
+            transferred_continuation_capsule,
+            inherited_admitted_capsule.as_ref(),
+            metadata_template.is_some(),
+        )
+        .map_err(BuildAndLaunchError::Internal)?;
+        ryeos_app::state_store::require_operator_rebindable(source, names).map_err(|error| {
+            BuildAndLaunchError::from(super::launch_rebind::rebind_refusal(
+                super::launch_rebind::REBIND_NOT_PERMITTED,
+                format!("{error:#}"),
+                names,
+            ))
+        })?;
+        // Preparation below runs the launch preparer registered for this
+        // runtime now. Its output is only what the sealed executor was
+        // admitted to consume while the installed runtime descriptor is the
+        // sealed one, so an upgraded or removed runtime refuses the rebind
+        // before any preparer runs.
+        let ryeos_state::objects::AdmittedLaunchArtifactIdentity::ManagedRuntime {
+            runtime_ref: sealed_runtime_ref,
+            runtime_content_hash: sealed_runtime_content_hash,
+            ..
+        } = &source.artifact_identity
+        else {
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "operator rebind found a non-managed admitted artifact identity"
+            )));
+        };
+        let installed_runtime_content_hash =
+            ryeos_engine::canonical_ref::CanonicalRef::parse(sealed_runtime_ref)
+                .ok()
+                .and_then(|canonical| engine.runtimes.lookup_by_ref(&canonical))
+                .map(|runtime| runtime.raw_content_digest.as_str());
+        super::launch_rebind::require_sealed_runtime_installed(
+            sealed_runtime_ref,
+            sealed_runtime_content_hash,
+            installed_runtime_content_hash,
+            names,
+        )
+        .map_err(BuildAndLaunchError::from)?;
+    }
+    let admission_seed = if rebind_names.is_some() {
+        None
+    } else {
+        metadata_template
+    };
+    if let (Some(authoritative), Some(template)) = (authoritative_admitted_capsule, admission_seed)
     {
         let template_capsule = template
             .admitted_launch_capsule()
@@ -5138,6 +5247,28 @@ async fn prepare_managed_launch_authority(
         drop(runtime_preparation_timer);
         prepared?
     };
+    if let Some(names) = rebind_names {
+        let source_capsule = admitted_capsule.ok_or_else(|| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "operator rebind has no admitted source capsule to re-prepare"
+            ))
+        })?;
+        // The source's prepared launch stands for everything a binding does
+        // not determine; preparation runs again for the rest.
+        let rebound = Box::pin(prepare_rebound_runtime_launch(
+            params,
+            root_admission,
+            source_capsule,
+            &selected_runtime,
+            &verified_protocol,
+            &resolution,
+            &engine_roots,
+            &prepared_launch,
+            names,
+        ))
+        .await?;
+        prepared_launch = rebound;
+    }
     super::launch_preparation::validate_prepared_project_result_requirement(
         &selected_runtime,
         &prepared_launch,
@@ -5620,44 +5751,13 @@ async fn prepare_managed_launch_authority(
         };
     // Credentials are read only after the installed runtime closure has been
     // matched to the authoritative capsule. A failed recovery attempt cannot
-    // obtain secrets for substituted code.
-    let mut secret_requirements = build_secret_requirements(params.metadata_required_secrets);
-    merge_prepared_secret_requirements(
-        &mut secret_requirements,
-        &prepared_launch.required_secrets,
-    )?;
-    let secret_names: Vec<String> = secret_requirements
-        .iter()
-        .map(|requirement| requirement.name.clone())
-        .collect();
-    let secret_env = ryeos_app::vault::authorize_secret_delivery(
-        &params.state.secret_sources(),
-        ryeos_app::vault::SecretRecipient {
-            principal: params.acting_principal,
-        },
-        &secret_names,
-        params.provenance.project_authority(),
-    )
-    .map_err(|error| match error {
-        VaultReadError::MissingSecrets { names, .. } => BuildAndLaunchError::MissingSecrets {
-            item_ref: params.resolved.item_ref.clone(),
-            secrets: missing_secrets_from_requirements(&names, &secret_requirements),
-        },
-        // An authorization refusal carrying the ceiling's own code.
-        VaultReadError::NameRefused(refusal) => {
-            BuildAndLaunchError::LaunchPreparation(Box::new(DispatchError::LaunchPolicyForbidden {
-                code: refusal.code().to_owned(),
-                message: refusal.to_string(),
-                binding: None,
-            }))
-        }
-        error @ VaultReadError::AuthorityViolation(_) => {
-            BuildAndLaunchError::Internal(anyhow::anyhow!("vault read refused: {error}"))
-        }
-        VaultReadError::Internal(error) => {
-            BuildAndLaunchError::Internal(anyhow::anyhow!("vault read failed: {error:#}"))
-        }
-    })?;
+    // obtain secrets for substituted code. A rebound successor's capsule is
+    // compared with its source only once its metadata is complete, so its
+    // credentials are read after that comparison, further down.
+    let secret_env_before_metadata = match rebind_names {
+        None => Some(read_launch_secret_env(params, &prepared_launch)?),
+        Some(_) => None,
+    };
     let native_resume = selected_runtime.yaml.native_resume.clone();
     let (checkpoint_dir, checkpoint_authority) = if native_resume.is_some() {
         let thread_state = ryeos_app::launch_metadata::daemon_thread_state_dir(
@@ -5805,6 +5905,34 @@ async fn prepare_managed_launch_authority(
             executor_blob_hash: executor_blob_hash.clone(),
         },
     };
+    // A rebound successor keeps the source's descriptor documents and
+    // executor blob exactly and seals the re-prepared launch beside them.
+    let admitted_execution_closure = match (rebind_names, admitted_execution_closure) {
+        (None, closure) => closure,
+        (
+            Some(_),
+            ryeos_state::objects::AdmittedExecutionClosure::ManagedRuntime {
+                prepared_runtime_launch: _,
+                runtime_descriptor_document,
+                protocol_descriptor_document,
+                executor_blob_hash,
+            },
+        ) => ryeos_state::objects::AdmittedExecutionClosure::ManagedRuntime {
+            prepared_runtime_launch: serde_json::to_value(&prepared_launch).map_err(|error| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "serialize rebound prepared launch: {error}"
+                ))
+            })?,
+            runtime_descriptor_document,
+            protocol_descriptor_document,
+            executor_blob_hash,
+        },
+        (Some(_), _) => {
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "operator rebind found a non-managed admitted execution closure"
+            )));
+        }
+    };
     let launch_metadata = {
         let original_pushed_head_ref =
             ryeos_app::launch_metadata::OriginalPushedHeadRef::from_provenance(params.provenance);
@@ -5907,7 +6035,22 @@ async fn prepare_managed_launch_authority(
             metadata = metadata.with_accounting_scope(scope);
         }
         freshly_minted_accounting_scope = minted;
+        if let Some(names) = rebind_names {
+            let source_capsule = admitted_capsule.ok_or_else(|| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "operator rebind has no admitted source capsule to compare with"
+                ))
+            })?;
+            metadata =
+                seal_rebound_launch_metadata(metadata, source_capsule, &prepared_launch, names)?;
+        }
         Some(metadata)
+    };
+    // In rebind mode the comparison with the source capsule has just passed;
+    // only now are the re-prepared launch's credentials read.
+    let secret_env = match secret_env_before_metadata {
+        Some(secret_env) => secret_env,
+        None => read_launch_secret_env(params, &prepared_launch)?,
     };
     Ok(PreparedManagedLaunchAuthority {
         effective_program,
@@ -5930,6 +6073,268 @@ async fn prepare_managed_launch_authority(
         freshly_minted_accounting_scope,
         selected_resources: None,
     })
+}
+
+/// Read the secrets a managed launch delivers to its runtime: the item's
+/// declared secrets and the ones launch preparation requires. The caller
+/// decides when; this must not run before the launch's closure has been
+/// matched to the capsule that admits it.
+fn read_launch_secret_env(
+    params: &BuildAndLaunchParams<'_>,
+    prepared_launch: &super::launch_preparation::PreparedRuntimeLaunch,
+) -> Result<ryeos_engine::contracts::DeliveredSecretEnv, BuildAndLaunchError> {
+    let mut secret_requirements = build_secret_requirements(params.metadata_required_secrets);
+    merge_prepared_secret_requirements(
+        &mut secret_requirements,
+        &prepared_launch.required_secrets,
+    )?;
+    let secret_names: Vec<String> = secret_requirements
+        .iter()
+        .map(|requirement| requirement.name.clone())
+        .collect();
+    ryeos_app::vault::authorize_secret_delivery(
+        &params.state.secret_sources(),
+        ryeos_app::vault::SecretRecipient {
+            principal: params.acting_principal,
+        },
+        &secret_names,
+        params.provenance.project_authority(),
+    )
+    .map_err(|error| match error {
+        VaultReadError::MissingSecrets { names, .. } => BuildAndLaunchError::MissingSecrets {
+            item_ref: params.resolved.item_ref.clone(),
+            secrets: missing_secrets_from_requirements(&names, &secret_requirements),
+        },
+        // An authorization refusal carrying the ceiling's own code.
+        VaultReadError::NameRefused(refusal) => {
+            BuildAndLaunchError::LaunchPreparation(Box::new(DispatchError::LaunchPolicyForbidden {
+                code: refusal.code().to_owned(),
+                message: refusal.to_string(),
+                binding: None,
+            }))
+        }
+        error @ VaultReadError::AuthorityViolation(_) => {
+            BuildAndLaunchError::Internal(anyhow::anyhow!("vault read refused: {error}"))
+        }
+        VaultReadError::Internal(error) => {
+            BuildAndLaunchError::Internal(anyhow::anyhow!("vault read failed: {error:#}"))
+        }
+    })
+}
+
+/// Decode the prepared launch a managed capsule admitted.
+fn admitted_prepared_runtime_launch(
+    capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
+) -> Result<super::launch_preparation::PreparedRuntimeLaunch, BuildAndLaunchError> {
+    let ryeos_state::objects::AdmittedExecutionClosure::ManagedRuntime {
+        prepared_runtime_launch,
+        ..
+    } = &capsule.execution_closure
+    else {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "admitted capsule has no managed prepared launch"
+        )));
+    };
+    serde_json::from_value(prepared_runtime_launch.clone()).map_err(|error| {
+        BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "decode admitted prepared runtime launch: {error}"
+        ))
+    })
+}
+
+/// The runtime fact contract sealed in a managed capsule's runtime descriptor.
+fn admitted_runtime_fact_contract(
+    capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
+) -> Result<BTreeMap<String, ryeos_engine::runtime_registry::RuntimeFactDecl>, BuildAndLaunchError>
+{
+    let ryeos_state::objects::AdmittedExecutionClosure::ManagedRuntime {
+        runtime_descriptor_document,
+        ..
+    } = &capsule.execution_closure
+    else {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "admitted capsule has no managed runtime descriptor"
+        )));
+    };
+    let runtime: ryeos_engine::runtime_registry::RuntimeYaml = serde_yaml::from_str(
+        &lillux::signature::strip_signature_lines(runtime_descriptor_document),
+    )
+    .map_err(|error| {
+        BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "decode admitted runtime descriptor: {error}"
+        ))
+    })?;
+    Ok(runtime.launch_contract.runtime_facts)
+}
+
+/// Run launch preparation again for an operator rebind successor and join
+/// its result onto the prepared launch the source capsule admitted.
+///
+/// Taken from the source capsule: the primary resolution, the runtime
+/// descriptor with its launch contract, the protocol, and the executor the
+/// result will run on.
+///
+/// Taken from the node as it is now: the stated ref bindings' items, the
+/// signed configuration the contract's config inputs name, the request
+/// snapshot (parsers and trust) of the project materialization the successor
+/// holds, and the launch preparer registered for the runtime. The caller has
+/// already refused unless the installed runtime descriptor is byte-for-byte
+/// the sealed one, so that preparer and its handler configuration are the
+/// ones the sealed contract names; the preparer's own executable is the
+/// installed bundle's and is not pinned by the capsule.
+///
+/// Every check launch preparation makes for a first admission applies: the
+/// principal must be authorized to execute each bound item, and each must
+/// resolve, be of an allowed kind and space, and be trusted.
+#[allow(clippy::too_many_arguments)]
+async fn prepare_rebound_runtime_launch(
+    params: &BuildAndLaunchParams<'_>,
+    root_admission: &ryeos_app::thread_lifecycle::RootExecutionAdmission,
+    source_capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
+    selected_runtime: &ryeos_engine::runtime_registry::VerifiedRuntime,
+    verified_protocol: &ryeos_engine::protocols::VerifiedProtocol,
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+    engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    admitted_prepared_launch: &super::launch_preparation::PreparedRuntimeLaunch,
+    names: &BTreeSet<String>,
+) -> Result<super::launch_preparation::PreparedRuntimeLaunch, BuildAndLaunchError> {
+    let engine = params.provenance.request_engine();
+    let subject_resolution_authority = root_admission.resolution_subject_authority().clone();
+    let resolution_project_root = root_admission.resolution_workspace();
+    let request_snapshot = match root_admission
+        .admit_current_request_snapshot()
+        .map_err(BuildAndLaunchError::Internal)?
+    {
+        Some(admitted) => engine.effective_request_snapshot_under_admitted_authority(
+            resolution_project_root.ok_or_else(|| {
+                anyhow::anyhow!("admitted pinned request snapshot has no execution project root")
+            })?,
+            &admitted,
+        ),
+        None if subject_resolution_authority
+            .operational_generation()
+            .is_some() =>
+        {
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "content-addressed operator rebind has no admitted request snapshot"
+            )));
+        }
+        None => engine
+            .effective_request_snapshot(resolution_project_root, &subject_resolution_authority)
+            .map(Arc::new),
+    }
+    .map_err(|error| anyhow::anyhow!("effective request snapshot: {error}"))?;
+    let executor_chain_identity =
+        super::launch_rebind::admitted_executor_chain_identity(&source_capsule.artifact_identity)
+            .map_err(BuildAndLaunchError::Internal)?;
+    let binding_generation_identity = engine.registered_bundle_generation_fingerprint();
+    let binding_plan_context_identity = [
+        request_snapshot.request_engine_generation_identity.as_str(),
+        request_snapshot.registry_fingerprint.as_str(),
+        request_snapshot.effective_trust_identity.as_str(),
+    ]
+    .join("\u{1f}");
+    let binding_materialization = root_admission
+        .resolution_materialization_binding()
+        .map_err(BuildAndLaunchError::Internal)?;
+    let fresh = super::launch_preparation::prepare_runtime_launch_cached(
+        super::launch_preparation::PrepareRuntimeLaunchRequest {
+            engine,
+            runtime: selected_runtime,
+            primary: resolution,
+            ref_bindings: &params.resolved.ref_bindings,
+            product_selections: &params.resolved.product_selections,
+            roots: engine_roots,
+            parsers: &request_snapshot.parser_dispatcher,
+            trust_store: &request_snapshot.trust_store,
+            principal: &params.resolved.plan_context.requested_by,
+            subject_resolution_authority: &subject_resolution_authority,
+            node_policy: Some(&params.state.node_policy),
+            resolution_cache: Some(super::launch_preparation::PreparedResolutionCacheContext {
+                cache: &params.state.resolution_cache,
+                materialization: &binding_materialization,
+                generation_identity: &binding_generation_identity,
+                plan_context_identity: &binding_plan_context_identity,
+            }),
+            ref_binding_resolution_timings: params.launch_timings.as_ref(),
+        },
+        super::launch_preparation::PreparedLaunchSkeletonAuthority {
+            subject_resolution_authority: &subject_resolution_authority,
+            execution_project_authority: params.provenance.project_authority(),
+            lifecycle_authority: &params.lifecycle_authority,
+            protocol: verified_protocol,
+            executor_chain_identity: &executor_chain_identity,
+            request_engine_generation_identity: &request_snapshot
+                .request_engine_generation_identity,
+            effective_trust_identity: &request_snapshot.effective_trust_identity,
+        },
+    )
+    .await
+    .map_err(BuildAndLaunchError::from)?;
+    super::launch_rebind::join_rebound_prepared_launch(
+        &selected_runtime.yaml.launch_contract.runtime_facts,
+        admitted_prepared_launch,
+        fresh,
+        names,
+    )
+    .map_err(BuildAndLaunchError::from)
+}
+
+/// Complete a rebound successor's launch metadata and compare its capsule
+/// with the source's.
+///
+/// The seed's sealed invocation withholds the binding record at each rebound
+/// name; the records launch preparation resolved are installed here, which
+/// makes the successor's capsule well-formed for the first time. That capsule
+/// is then held to the source capsule by the rebind comparison, with the
+/// permission read again from the runtime descriptor the source sealed. This
+/// is the check every other continuation makes before preparation; a rebind
+/// can only make it once the re-prepared launch exists.
+fn seal_rebound_launch_metadata(
+    mut metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata,
+    source_capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
+    prepared_launch: &super::launch_preparation::PreparedRuntimeLaunch,
+    names: &BTreeSet<String>,
+) -> Result<ryeos_app::launch_metadata::RuntimeLaunchMetadata, BuildAndLaunchError> {
+    let seed = metadata.sealed_root_request.clone().ok_or_else(|| {
+        BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "operator rebind successor has no sealed invocation seed"
+        ))
+    })?;
+    let sealed = seed
+        .seal_rebound_ref_bindings(names, &sealed_ref_binding_records(prepared_launch)?)
+        .map_err(BuildAndLaunchError::Internal)?;
+    metadata.set_sealed_root_request(sealed);
+    let successor_capsule = metadata
+        .admitted_launch_capsule()
+        .map_err(BuildAndLaunchError::Internal)?
+        .ok_or_else(|| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "operator rebind successor produced no admitted launch capsule"
+            ))
+        })?;
+    ryeos_app::state_store::require_operator_rebindable(source_capsule, names).map_err(
+        |error| {
+            BuildAndLaunchError::from(super::launch_rebind::rebind_refusal(
+                super::launch_rebind::REBIND_NOT_PERMITTED,
+                format!("{error:#}"),
+                names,
+            ))
+        },
+    )?;
+    if !source_capsule
+        .same_rebound_continuation_admission(&successor_capsule, names)
+        .map_err(BuildAndLaunchError::Internal)?
+    {
+        return Err(BuildAndLaunchError::from(
+            super::launch_rebind::rebind_refusal(
+                super::launch_rebind::REBIND_CHANGES_SEALED_LAUNCH,
+                "the rebound launch differs from its admitted source outside the rebound ref bindings",
+                names,
+            ),
+        ));
+    }
+    Ok(metadata)
 }
 
 /// Drop guard that finalizes a created thread as `failed` if `build_and_launch`
@@ -7332,12 +7737,9 @@ async fn run_claimed_thread_row_inner(
         if let Some(authority) = prepared_launch.financial_authority.as_ref()
             && !authority.spend_bound.hard_spend_eligible()
         {
-            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-                "hard spend limit {} requires a mechanically proven spend bound; this \
-                 route's sealed financial authority is `{}` and is ineligible for hard \
-                 spend",
-                hard_limits.spend_usd.to_canonical_string(),
-                authority.spend_bound.as_str()
+            return Err(BuildAndLaunchError::from(hard_spend_bound_ineligible(
+                &hard_limits.spend_usd.to_canonical_string(),
+                authority.spend_bound.as_str(),
             )));
         }
         if accounting_scope.is_none() || state.accounting.is_none() {
@@ -8965,9 +9367,40 @@ struct PreparedSuccessorLaunch {
 
 pub struct PreparedOperatorSuccessorLaunch {
     prepared: PreparedSuccessorLaunch,
+    /// Set only by the first preparation of an operator rebind successor.
+    /// A re-driven successor is prepared from its own capsule and carries
+    /// nothing here, whatever its birth was.
+    rebound: Option<super::launch_rebind::ReboundLaunch>,
 }
 
 impl PreparedOperatorSuccessorLaunch {
+    /// The operator transition this successor must be born through: a plain
+    /// follow-up, or a rebind naming exactly the ref bindings it replaced.
+    pub fn continuation_transition(
+        &self,
+    ) -> ryeos_app::launch_metadata::ContinuationAuthorityTransitionKind {
+        match &self.rebound {
+            Some(rebound) => {
+                ryeos_app::launch_metadata::ContinuationAuthorityTransitionKind::OperatorRebind {
+                    names: rebound
+                        .changes
+                        .iter()
+                        .map(|change| change.name.clone())
+                        .collect(),
+                }
+            }
+            None => {
+                ryeos_app::launch_metadata::ContinuationAuthorityTransitionKind::OperatorFollowUp
+            }
+        }
+    }
+
+    /// What this successor rebound, when it is a rebind: the replaced and
+    /// replacing item at each name, and the runtime facts before and after.
+    pub fn rebound(&self) -> Option<&super::launch_rebind::ReboundLaunch> {
+        self.rebound.as_ref()
+    }
+
     pub fn initial_audit_events(
         &self,
     ) -> Result<Vec<ryeos_app::state_store::NewEventRecord>, BuildAndLaunchError> {
@@ -9444,6 +9877,33 @@ async fn prepare_successor_launch(
     metadata_template: Option<&ryeos_app::launch_metadata::RuntimeLaunchMetadata>,
     transferred_continuation_capsule: Option<&ryeos_state::objects::AdmittedLaunchCapsule>,
 ) -> Result<PreparedSuccessorLaunch, BuildAndLaunchError> {
+    Box::pin(prepare_successor_launch_in_mode(
+        state,
+        successor_thread_id,
+        resume,
+        mode,
+        previous_thread_id,
+        metadata_template,
+        transferred_continuation_capsule,
+        None,
+    ))
+    .await
+}
+
+/// Successor preparation with the managed pass's explicit re-prepare mode.
+/// `rebind_names` is set only for the first preparation of an operator
+/// rebind successor.
+#[allow(clippy::too_many_arguments)]
+async fn prepare_successor_launch_in_mode(
+    state: &AppState,
+    successor_thread_id: &str,
+    resume: &ryeos_app::launch_metadata::ResumeContext,
+    mode: SuccessorMode,
+    previous_thread_id: Option<&str>,
+    metadata_template: Option<&ryeos_app::launch_metadata::RuntimeLaunchMetadata>,
+    transferred_continuation_capsule: Option<&ryeos_state::objects::AdmittedLaunchCapsule>,
+    rebind_names: Option<&BTreeSet<String>>,
+) -> Result<PreparedSuccessorLaunch, BuildAndLaunchError> {
     let sealed_request = metadata_template
         .and_then(|metadata| metadata.sealed_root_request.as_ref())
         .ok_or_else(|| {
@@ -9492,7 +9952,7 @@ async fn prepare_successor_launch(
             )));
         }
     };
-    let mut authority = prepare_managed_launch_authority(
+    let mut authority = prepare_managed_launch_authority_in_mode(
         &BuildAndLaunchParams {
             state,
             lifecycle_authority: resume.lifecycle_authority,
@@ -9520,6 +9980,7 @@ async fn prepare_successor_launch(
         successor_thread_id,
         metadata_template,
         transferred_continuation_capsule,
+        rebind_names,
     )
     .await?;
     let mut launch_metadata = authority
@@ -9527,6 +9988,11 @@ async fn prepare_successor_launch(
         .as_ref()
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("successor authority produced no launch metadata"))?;
+    if rebind_names.is_some() && previous_thread_id.is_none() {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "an operator rebind successor is prepared against its continuation source"
+        )));
+    }
     if let Some(source_thread_id) = previous_thread_id {
         let source_metadata = state
             .state_store
@@ -9534,11 +10000,34 @@ async fn prepare_successor_launch(
             .ok_or_else(|| {
                 anyhow::anyhow!("continuation source {source_thread_id} has no launch metadata")
             })?;
-        let realization = super::execution_realization::transition_continuation_project_authority(
-            state,
-            &source_metadata,
-            &launch_metadata,
-        )?;
+        // A rebound successor's realization commits its own closure digest
+        // as well as its launch authority; every other continuation moves
+        // the launch authority alone.
+        let realization = match rebind_names {
+            Some(names) => {
+                // The realization is copied from the capsule the state store
+                // rooted for the source, not from its operational metadata.
+                let source_capsule = state
+                    .state_store
+                    .admitted_launch_capsule(source_thread_id)?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "continuation source {source_thread_id} has no admitted launch capsule"
+                        )
+                    })?;
+                super::execution_realization::transition_rebound_continuation_authority(
+                    state,
+                    &source_capsule,
+                    &launch_metadata,
+                    names,
+                )?
+            }
+            None => super::execution_realization::transition_continuation_project_authority(
+                state,
+                &source_metadata,
+                &launch_metadata,
+            )?,
+        };
         if authority.pending_external_realization.is_some() && realization.publication.is_some() {
             return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
                 "continuation preparation produced two independent execution-realization publications"
@@ -9643,7 +10132,159 @@ pub async fn prepare_operator_successor_launch(
         ThreadLaunchClaim::acquire_fresh(state, successor_thread_id)
             .map_err(BuildAndLaunchError::Internal)?,
     );
-    Ok(PreparedOperatorSuccessorLaunch { prepared })
+    Ok(PreparedOperatorSuccessorLaunch {
+        prepared,
+        rebound: None,
+    })
+}
+
+/// The ref bindings an operator continuation of `source_thread_id` would
+/// actually change.
+///
+/// `requested` is what the operator asked to bind. An entry that names the
+/// item the source launch already runs with is not a change, whether the
+/// source bound it explicitly or took it from its primary, and is left out.
+/// A name the source launch does not bind is kept, so the rebind preparation
+/// refuses it against the admitted runtime contract. An empty result means
+/// the ordinary operator continuation applies unchanged.
+pub fn operator_rebind_changes(
+    state: &AppState,
+    source_thread_id: &str,
+    requested: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>, BuildAndLaunchError> {
+    if requested.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    super::launch_preparation::validate_ref_bindings(requested)
+        .map_err(BuildAndLaunchError::from)?;
+    let sealed = match state
+        .state_store
+        .admitted_launch_capsule(source_thread_id)?
+    {
+        Some(capsule) => admitted_prepared_runtime_launch(&capsule)?.binding_records,
+        None => BTreeMap::new(),
+    };
+    let mut changes = BTreeMap::new();
+    for (name, value) in requested {
+        let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(value)
+            .map_err(|error| {
+                BuildAndLaunchError::from(DispatchError::InvalidRef(
+                    value.clone(),
+                    error.to_string(),
+                ))
+            })?
+            .to_string();
+        if sealed
+            .get(name)
+            .is_some_and(|record| record.canonical_ref == canonical)
+        {
+            continue;
+        }
+        changes.insert(name.clone(), canonical);
+    }
+    Ok(changes)
+}
+
+/// Prepare an operator successor that binds a different item at each ref
+/// binding in `names`; `resume` states the new bindings.
+///
+/// The successor keeps the admitted program, runtime, protocol, executor,
+/// capabilities, accounting scope and project lineage of its source. Launch
+/// preparation runs again for what the bindings determine, under current
+/// signed configuration, and the result is sealed with the new binding
+/// records. The rebind is refused, before any successor exists, when:
+/// - the runtime contract sealed in the source capsule does not let an
+///   operator rebind a name;
+/// - the source is a qualification launch or carries product selections;
+/// - the principal may not execute a bound item, or it does not resolve or is
+///   not trusted, or the launch preparer refuses it;
+/// - a secret the re-prepared launch requires is missing;
+/// - the source's operational launch metadata no longer matches its rooted
+///   capsule, or the runtime it was admitted with is no longer installed;
+/// - re-preparation changes a part of the launch a continuation must keep,
+///   changes the external effect class or raises the unknown-outcome retry
+///   ceiling, or states a runtime fact below the minimum the runtime
+///   contract signs for a rebind.
+pub async fn prepare_operator_rebind_successor_launch(
+    state: &AppState,
+    successor_thread_id: &str,
+    resume: &ryeos_app::launch_metadata::ResumeContext,
+    source_thread_id: &str,
+    handler_context: &ryeos_app::handler_context::HandlerContext,
+    names: &BTreeSet<String>,
+) -> Result<PreparedOperatorSuccessorLaunch, BuildAndLaunchError> {
+    let rebind_refused = |code: &'static str| {
+        move |error: anyhow::Error| {
+            BuildAndLaunchError::from(super::launch_rebind::rebind_refusal(
+                code,
+                format!("{error:#}"),
+                names,
+            ))
+        }
+    };
+    let source_metadata = state
+        .state_store
+        .get_launch_metadata(source_thread_id)?
+        .ok_or_else(|| anyhow::anyhow!("source {source_thread_id} has no launch metadata"))?;
+    let source_capsule = state
+        .state_store
+        .admitted_launch_capsule(source_thread_id)?
+        .ok_or_else(|| anyhow::anyhow!("source {source_thread_id} has no admitted launch capsule"))
+        .map_err(rebind_refused(super::launch_rebind::REBIND_NOT_PERMITTED))?;
+    ryeos_app::state_store::require_operator_rebindable(&source_capsule, names)
+        .map_err(rebind_refused(super::launch_rebind::REBIND_NOT_PERMITTED))?;
+    // The seed comes from the runtime database's working copy. It must still
+    // describe the capsule the state store rooted, or nothing is derived from
+    // it: launch preparation and secret delivery both run from the seed.
+    source_metadata
+        .require_admitted_by(&source_capsule)
+        .map_err(rebind_refused(
+            super::launch_rebind::REBIND_SOURCE_NOT_ADMITTED,
+        ))?;
+    let source_prepared_launch = admitted_prepared_runtime_launch(&source_capsule)?;
+    let rebound_runtime_facts = admitted_runtime_fact_contract(&source_capsule)?;
+    let successor_metadata = source_metadata
+        .operator_rebind_successor_seed(
+            source_thread_id,
+            &source_capsule,
+            resume.clone(),
+            handler_context,
+            names,
+        )
+        .map_err(rebind_refused(
+            super::launch_rebind::REBIND_INVOCATION_REFUSED,
+        ))?
+        .with_covering_authority(covering_authority_for(
+            &handler_context.fingerprint,
+            Some(handler_context),
+        ));
+    let mut prepared = Box::pin(prepare_successor_launch_in_mode(
+        state,
+        successor_thread_id,
+        resume,
+        SuccessorMode::Operator,
+        Some(source_thread_id),
+        Some(&successor_metadata),
+        None,
+        Some(names),
+    ))
+    .await?;
+    let rebound = super::launch_rebind::ReboundLaunch::between(
+        source_thread_id,
+        &rebound_runtime_facts,
+        &source_prepared_launch,
+        &prepared.authority.prepared_launch,
+        names,
+    )
+    .map_err(BuildAndLaunchError::Internal)?;
+    prepared.launch_claim = Some(
+        ThreadLaunchClaim::acquire_fresh(state, successor_thread_id)
+            .map_err(BuildAndLaunchError::Internal)?,
+    );
+    Ok(PreparedOperatorSuccessorLaunch {
+        prepared,
+        rebound: Some(rebound),
+    })
 }
 
 /// Reprepare a stranded operator successor against its actual durable ID and
@@ -9668,6 +10309,9 @@ pub async fn prepare_existing_operator_successor_launch(
             None,
         )
         .await?,
+        // The successor already exists: it is prepared from the capsule its
+        // birth rooted, and nothing is prepared again.
+        rebound: None,
     })
 }
 
@@ -12669,6 +13313,39 @@ fn prompt_inputs_from_parameters(parameters: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn operator_reachable_financial_refusals_are_typed_launch_policy_refusals() {
+        // A paid thread continued on a node with no accounting ledger, and a
+        // finite hard spend limit meeting an unproven spend bound: both can
+        // follow an operator's continuation, so both carry a stable code and
+        // a forbidden status instead of an internal fault.
+        for (error, code, expected) in [
+            (
+                accounting_ledger_unavailable(&"a".repeat(64)),
+                ACCOUNTING_LEDGER_UNAVAILABLE,
+                "accounting ledger is unavailable",
+            ),
+            (
+                hard_spend_bound_ineligible("5", "advisory_only"),
+                HARD_SPEND_BOUND_INELIGIBLE,
+                "ineligible for hard spend",
+            ),
+        ] {
+            assert_eq!(error.code(), code);
+            assert_eq!(error.http_status(), axum::http::StatusCode::FORBIDDEN);
+            assert!(error.to_string().contains(expected), "{error}");
+            match BuildAndLaunchError::from(error) {
+                BuildAndLaunchError::LaunchPreparation(inner) => {
+                    assert!(matches!(
+                        *inner,
+                        DispatchError::LaunchPolicyForbidden { .. }
+                    ));
+                }
+                other => panic!("expected a typed launch refusal, got {other}"),
+            }
+        }
+    }
     use crate::execution::limits::{LimitCaps, LimitValues};
 
     fn grant_backed_context(digest: &str) -> ryeos_app::handler_context::HandlerContext {
