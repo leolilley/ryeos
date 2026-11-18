@@ -237,11 +237,11 @@ async fn a_request_carries_only_the_newest_images_and_notes_the_older_ones_in_pl
         image_urls(last),
         vec![data_url(&sent[1]), data_url(&sent[2])]
     );
+    // The note stands alone in its message, so it is plain text there.
+    let note = "[earlier image omitted: image/png 1x1]";
     let notes = messages(last)
         .iter()
-        .filter_map(|message| message["content"].as_array())
-        .flatten()
-        .filter(|block| block["text"] == "[earlier image omitted: image/png 1x1]")
+        .filter(|message| message["role"] == "user" && message["content"] == note)
         .count();
     assert_eq!(notes, 1);
     // All three were stored and recorded; only the request is bounded.
