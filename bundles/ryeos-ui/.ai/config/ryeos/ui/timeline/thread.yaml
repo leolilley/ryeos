@@ -54,8 +54,6 @@ events:
   command_completed: [{drop: true}]  # command-queue plumbing
   launch_augmentation_cache_hit: [{drop: true}]  # cache evidence for the launch
   thread_facet_set: [{drop: true}]  # tag metadata, shown by the thread header rather than the flow
-  thread_reconciled: [{drop: true}]  # reserved daemon bookkeeping; the terminal event draws the outcome
-  orphan_process_killed: [{drop: true}]  # reserved daemon bookkeeping; the terminal event draws the outcome
   subprocess_output_observed: [{drop: true}]  # raw output frames; tool results draw what was returned
   observation: [{drop: true}]  # journal-only runtime observation, not part of the story
   hook_observation_recorded: [{drop: true}]  # hook result evidence, hashes only

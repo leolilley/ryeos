@@ -622,8 +622,6 @@ pub enum RuntimeEventType {
     /// identity, e.g. `fleet`/`game`). Event-backed so it survives a projection
     /// rebuild, unlike a bare facet-table write.
     ThreadFacetSet,
-    ThreadReconciled,
-    OrphanProcessKilled,
 
     // ── Cognition / replay transcript ───────────────────────────
     CognitionIn,
@@ -709,8 +707,6 @@ impl RuntimeEventType {
             Self::LaunchAugmentationCacheHit => wire::LAUNCH_AUGMENTATION_CACHE_HIT,
             Self::ProcessInputRootSelected => wire::PROCESS_INPUT_ROOT_SELECTED,
             Self::ThreadFacetSet => wire::THREAD_FACET_SET,
-            Self::ThreadReconciled => wire::THREAD_RECONCILED,
-            Self::OrphanProcessKilled => wire::ORPHAN_PROCESS_KILLED,
             Self::CognitionIn => wire::COGNITION_IN,
             Self::CognitionOut => wire::COGNITION_OUT,
             Self::CognitionReasoning => wire::COGNITION_REASONING,
@@ -770,8 +766,6 @@ impl RuntimeEventType {
             wire::LAUNCH_AUGMENTATION_CACHE_HIT => Ok(Self::LaunchAugmentationCacheHit),
             wire::PROCESS_INPUT_ROOT_SELECTED => Ok(Self::ProcessInputRootSelected),
             wire::THREAD_FACET_SET => Ok(Self::ThreadFacetSet),
-            wire::THREAD_RECONCILED => Ok(Self::ThreadReconciled),
-            wire::ORPHAN_PROCESS_KILLED => Ok(Self::OrphanProcessKilled),
             wire::COGNITION_IN => Ok(Self::CognitionIn),
             wire::COGNITION_OUT => Ok(Self::CognitionOut),
             wire::COGNITION_REASONING => Ok(Self::CognitionReasoning),
@@ -879,8 +873,6 @@ impl RuntimeEventType {
             | Self::LaunchAugmentationCacheHit
             | Self::ProcessInputRootSelected
             | Self::ThreadFacetSet
-            | Self::ThreadReconciled
-            | Self::OrphanProcessKilled
             | Self::CognitionIn
             | Self::CognitionOut
             | Self::CognitionFrame
@@ -955,8 +947,6 @@ impl RuntimeEventType {
             | Self::LaunchAugmentationCacheHit
             | Self::ProcessInputRootSelected
             | Self::ThreadFacetSet
-            | Self::ThreadReconciled
-            | Self::OrphanProcessKilled
             | Self::CognitionIn
             | Self::CognitionOut
             | Self::CognitionFrame
@@ -1168,8 +1158,6 @@ mod tests {
             RuntimeEventType::LaunchAugmentationCacheHit,
             RuntimeEventType::ProcessInputRootSelected,
             RuntimeEventType::ThreadFacetSet,
-            RuntimeEventType::ThreadReconciled,
-            RuntimeEventType::OrphanProcessKilled,
             RuntimeEventType::CognitionIn,
             RuntimeEventType::CognitionOut,
             RuntimeEventType::CognitionReasoning,
@@ -1290,8 +1278,6 @@ mod tests {
             wire::LAUNCH_AUGMENTATION_CACHE_HIT,
             wire::PROCESS_INPUT_ROOT_SELECTED,
             wire::THREAD_FACET_SET,
-            wire::THREAD_RECONCILED,
-            wire::ORPHAN_PROCESS_KILLED,
             wire::COGNITION_IN,
             wire::COGNITION_OUT,
             wire::COGNITION_REASONING,

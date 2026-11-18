@@ -68,8 +68,6 @@ event_types! {
     /// inputs were laid out in (`live`, `sparse_private`, `pinned`, ...). Names no path.
     PROCESS_INPUT_ROOT_SELECTED = "process_input_root_selected";
     THREAD_FACET_SET = "thread_facet_set";
-    THREAD_RECONCILED = "thread_reconciled";
-    ORPHAN_PROCESS_KILLED = "orphan_process_killed";
 
     COGNITION_IN = "cognition_in";
     COGNITION_OUT = "cognition_out";
