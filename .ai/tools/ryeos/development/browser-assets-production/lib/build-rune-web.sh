@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-18T04:15:43Z:c9e7399a104fb0254d0cdf2eff1db5bd09583a51dd1f52f41be54459702cd675:G9zURS3Av9XsHacZlI7LDmBepOb0XVUWcMTGtCOcCrWDx7wB9KTC1R2hfuwkepq23w2Sfx9e1FZ1it8w2nkPCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T05:22:28Z:f7f09cd03a1aabdc8adcb9781db9f2e32aa68ec0882c17928b8731d1d20cc828:bE1FR7iGNumf0YJA9ub9ZIzO1PFyDe8yqT6Nd9NQNjni2By//eALxrbf+95++QjcVWGDyQPmVUy5dJMQAjoCCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Externally invoked host helper in the development bundle; lib/ is excluded
 # from Tool resolution, so this is signed source, not an admitted Tool. It
 # grants no RyeOS authority. Run it from a checkout of this repository.
@@ -17,13 +17,27 @@
 # --out DIR writes the same files into DIR instead and leaves pkg/ and the registry alone
 # (the signed browser-assets-production tool checks and publishes through it).
 #
-# Environment: CARGO (default cargo), CARGO_TARGET_DIR (default <repo>/target),
+# The renderer is its own Cargo workspace (crates/clients/rune, with its own Cargo.lock), so
+# it builds through that manifest and its wasm-bindgen version comes from that lock. Cargo
+# hashes a path package outside the building workspace (the shared client crates and
+# ryeos-timeline) by its absolute path, and that hash reaches the wasm bytes, so the build
+# goes through one fixed path, /tmp/ryeos-rune-web/src, a symlink to this checkout taken
+# under a lock. Cargo keeps the symlinked path as written. The path is fixed so the output
+# is byte-identical across checkouts and machines. Because it sits in a world-writable
+# directory, the script creates /tmp/ryeos-rune-web itself (mode 0700) and refuses to build
+# unless it is a real directory, not a symlink, owned by the current user with no group or
+# other write. It only ever replaces its own `src` link inside it. Otherwise another local
+# user could point the build at their own tree and get it into the signed, checked-in
+# package.
+#
+# Environment: CARGO (default cargo), CARGO_TARGET_DIR (default <repo>/crates/clients/rune/target),
 # WASM_BINDGEN (default wasm-bindgen; must match the locked wasm-bindgen crate).
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../../../../../.." && pwd)
 cargo=${CARGO:-cargo}
-target_dir=${CARGO_TARGET_DIR:-$root/target}
+renderer=$root/crates/clients/rune
+target_dir=${CARGO_TARGET_DIR:-$renderer/target}
 bindgen=${WASM_BINDGEN:-wasm-bindgen}
 pkg=$root/crates/clients/rune/pkg
 out=
@@ -38,15 +52,30 @@ fi
 
 snippet_list=$(dirname "$0")/rune-snippets.toml
 
-locked=$(python3 -I -c 'import sys, tomllib; print(next(p["version"] for p in tomllib.load(open(sys.argv[1], "rb"))["package"] if p["name"] == "wasm-bindgen"))' "$root/Cargo.lock")
+locked=$(python3 -I -c 'import sys, tomllib; print(next(p["version"] for p in tomllib.load(open(sys.argv[1], "rb"))["package"] if p["name"] == "wasm-bindgen"))' "$renderer/Cargo.lock")
 if [[ $("$bindgen" --version) != "wasm-bindgen $locked" ]]; then
     echo "wasm-bindgen CLI must be $locked (set WASM_BINDGEN): $("$bindgen" --version)" >&2
     exit 1
 fi
 
+fixed_parent=/tmp/ryeos-rune-web
+fixed=$fixed_parent/src
+if [[ ! -e $fixed_parent && ! -L $fixed_parent ]]; then
+    mkdir -m 0700 "$fixed_parent" 2>/dev/null || true
+fi
+# stat without -L reports the entry itself, never a symlink's target.
+read -r owner mode kind < <(stat -c '%u %a %F' "$fixed_parent")
+if [[ $kind != directory || $owner != "$(id -u)" || $(( 8#$mode & 8#022 )) -ne 0 ]]; then
+    echo "$fixed_parent must be a directory owned by $(id -u) with no group or other write (found: $kind, uid $owner, mode $mode)" >&2
+    exit 1
+fi
+exec 9>"$fixed_parent/lock"
+flock 9
+ln -sfn "$root" "$fixed"
+
 cargo_home=${CARGO_HOME:-$HOME/.cargo}
-export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$root=/ryeos --remap-path-prefix=$HOME=/home --remap-path-prefix=$cargo_home=/cargo"
-"$cargo" build --locked --profile web -p ryeos-client-rune --target wasm32-unknown-unknown
+export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME=/home --remap-path-prefix=$cargo_home=/cargo --remap-path-prefix=$root=/ryeos --remap-path-prefix=$fixed=/ryeos"
+"$cargo" build --locked --profile web --manifest-path "$fixed/crates/clients/rune/Cargo.toml" --target wasm32-unknown-unknown
 artifact=$target_dir/wasm32-unknown-unknown/web/ryeos_client_rune.wasm
 [[ -f $artifact ]] || { echo "build produced no $artifact" >&2; exit 1; }
 

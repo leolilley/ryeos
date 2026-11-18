@@ -1,7 +1,7 @@
 {
   "category": "development/ryeos",
   "name": "repository-validation",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "schema": "ryeos.development.repository-validation.v1",
   "limits": {
     "max_file_bytes": 16777216,
@@ -11,7 +11,7 @@
     "max_depth": 32
   },
   "dependency_layers": {
-    "workspace_manifest": "Cargo.toml",
+    "workspace_manifests": ["Cargo.toml", "crates/clients/rune/Cargo.toml"],
     "forbidden_edges": {
       "lillux": [
         "ryeos-external-execution-contract",
