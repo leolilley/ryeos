@@ -7365,6 +7365,9 @@ async fn run_claimed_thread_row_inner(
     // callbacks require it and terminal fencing closes it atomically.
     // This execution's absolute end: the tree deadline minus its hold-back.
     let mut run_end_at_ms = None;
+    // The end of a continuation, resume or follow successor, so a refusal at
+    // the spawn boundary that finds it passed settles as a deadline stop.
+    let mut successor_end_at_ms = None;
     if let (Some(scope), Some(accounting)) = (accounting_scope.as_ref(), state.accounting.as_ref())
     {
         let account_limit = (!hard_limits.spend_usd.is_zero()).then_some(hard_limits.spend_usd);
@@ -7471,6 +7474,9 @@ async fn run_claimed_thread_row_inner(
             ));
         }
         run_end_at_ms = end_at_ms;
+        if successor_launch {
+            successor_end_at_ms = end_at_ms;
+        }
         accounting
             .activate_account(
                 &scope.execution_budget_id,
@@ -8055,8 +8061,21 @@ async fn run_claimed_thread_row_inner(
             // which is dropped. Without this the operator only ever sees a bare
             // "failed" and is locked out of why the thread died. `{err:#}` keeps
             // the full cause chain (e.g. "missing required secret …").
-            let _ = state.threads.finalize_thread_owned(
-                &ThreadFinalizeParams {
+            // A successor whose end passed between the launch admission and
+            // the spawn (the spawn waits for a blocking worker, which load
+            // lengthens) is a deadline stop like one found elapsed at
+            // admission, not a failed launch.
+            let now_ms = lillux::time::timestamp_millis();
+            let elapsed_end_at_ms = successor_end_at_ms
+                .filter(|end| terminal_code == "budget_exhausted" && now_ms >= *end);
+            let finalize_params = match elapsed_end_at_ms {
+                Some(end_at_ms) => ryeos_app::run_deadline::elapsed_finalize_params(
+                    &thread_id,
+                    ryeos_app::run_deadline::REASON_ELAPSED_BEFORE_LAUNCH,
+                    end_at_ms,
+                    now_ms,
+                ),
+                None => ThreadFinalizeParams {
                     thread_id: thread_id.clone(),
                     status: "failed".to_string(),
                     outcome_code: Some(terminal_code.to_string()),
@@ -8070,10 +8089,13 @@ async fn run_claimed_thread_row_inner(
                     final_cost: None,
                     summary_json: None,
                 },
-                launch_owner,
-            );
+            };
+            let settled_status = finalize_params.status.clone();
+            let _ = state
+                .threads
+                .finalize_thread_owned(&finalize_params, launch_owner);
             let failed_meta = ThreadMeta {
-                status: "failed".to_string(),
+                status: settled_status,
                 completed_at: Some(lillux::time::iso8601_now()),
                 ..meta
             };
