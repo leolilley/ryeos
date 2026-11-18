@@ -401,6 +401,12 @@ async fn two_nodes_on_one_host_are_one_group_and_an_unreachable_remote_did_not_a
             .iter()
             .find(|member| member.id == hosted_site)
             .unwrap();
+        assert!(together.this_computer);
+        assert_eq!(
+            hosted.facts[RELATION_BOOT].shared_with,
+            [origin_site.as_str()]
+        );
+        assert!(!hosted.disagrees);
         assert_eq!(hosted.name, HOSTED_REMOTE);
         assert_eq!(hosted.kind, MemberKind::Remote);
         assert!(matches!(hosted.answer, MemberAnswer::Answered { .. }));
@@ -417,6 +423,7 @@ async fn two_nodes_on_one_host_are_one_group_and_an_unreachable_remote_did_not_a
     let ghost_site = format!("site:{}", fingerprint(&ghost_node_key()));
     let ghost = group_of(&groups, &ghost_site);
     assert_eq!(ghost.state, GroupState::CannotTell);
+    assert!(!ghost.this_computer);
     assert_eq!(ghost.members.len(), 1);
     assert_eq!(ghost.members[0].name, GHOST_REMOTE);
     match &ghost.members[0].answer {

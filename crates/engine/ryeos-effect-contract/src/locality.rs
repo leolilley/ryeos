@@ -6,6 +6,10 @@
 //! declarations, into groups. The comparison is pure: it reads no clock, file
 //! or socket.
 //!
+//! Every `as_of` is RFC 3339 in the millisecond `Z` form that
+//! [`crate::rfc3339::now_millis`] and `format_unix_millis` produce, for example
+//! `2026-11-18T02:30:00.123Z`.
+//!
 //! Rules this module holds:
 //!
 //! - Evidence only. Nothing here is admission, a grant or a chain identity.
@@ -250,6 +254,11 @@ pub struct MemberFact {
     pub grade: LocalityGrade,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// The ids of the OTHER members that report the same measured digest for
+    /// this relation. Empty when none, and always empty for an `unknown` fact.
+    /// It never disagrees with the group's measured [`RelationRow`]s.
+    #[serde(default)]
+    pub shared_with: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -260,6 +269,9 @@ pub struct MemberRow {
     pub kind: MemberKind,
     /// Whether the operator's declaration names this member.
     pub declared: bool,
+    /// Whether this member's id is in the group's `disagreeing`.
+    #[serde(default)]
+    pub disagrees: bool,
     pub answer: MemberAnswer,
     pub facts: BTreeMap<String, MemberFact>,
 }
@@ -287,6 +299,10 @@ pub struct LocalityGroup {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     pub state: GroupState,
+    /// Whether the group holds the member of kind `this`: the node doing the
+    /// comparing.
+    #[serde(default)]
+    pub this_computer: bool,
     /// Members whose boot disagrees with the rest. Empty unless the state is
     /// `declared_contradicted`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -389,10 +405,12 @@ fn member_row(node: &NodeInput, declared: bool) -> MemberRow {
                         RelationFact::Measured { .. } => MemberFact {
                             grade: LocalityGrade::Measured,
                             reason: None,
+                            shared_with: Vec::new(),
                         },
                         RelationFact::Unknown { reason } => MemberFact {
                             grade: LocalityGrade::Unknown,
                             reason: Some(reason.clone()),
+                            shared_with: Vec::new(),
                         },
                     };
                     (relation.clone(), member)
@@ -419,6 +437,7 @@ fn member_row(node: &NodeInput, declared: bool) -> MemberRow {
         name: node.name.clone(),
         kind: node.kind,
         declared,
+        disagrees: false,
         answer,
         facts,
     }
@@ -555,6 +574,53 @@ fn declared_state(members: &[&NodeInput]) -> (GroupState, Vec<String>) {
     }
 }
 
+/// One group's rows, with the shapes a view draws directly: who shares what,
+/// who disagrees, and whether this node is in it.
+fn assemble_group(
+    key: String,
+    label: Option<String>,
+    state: GroupState,
+    disagreeing: Vec<String>,
+    declared_missing: Vec<String>,
+    members: &[&NodeInput],
+    declared: bool,
+) -> LocalityGroup {
+    let relations = relation_rows(members);
+    let mut rows: Vec<MemberRow> = members
+        .iter()
+        .map(|node| member_row(node, declared))
+        .collect();
+    for row in &mut rows {
+        row.disagrees = disagreeing.contains(&row.id);
+        // `shared_with` is read off the measured relation rows, so the two can
+        // never disagree.
+        for relation in relations
+            .iter()
+            .filter(|relation| relation.grade == LocalityGrade::Measured)
+            .filter(|relation| relation.members.contains(&row.id))
+        {
+            if let Some(fact) = row.facts.get_mut(&relation.relation) {
+                fact.shared_with = relation
+                    .members
+                    .iter()
+                    .filter(|id| **id != row.id)
+                    .cloned()
+                    .collect();
+            }
+        }
+    }
+    LocalityGroup {
+        key,
+        label,
+        state,
+        this_computer: members.iter().any(|node| node.kind == MemberKind::This),
+        disagreeing,
+        declared_missing,
+        members: rows,
+        relations,
+    }
+}
+
 /// Compare the nodes' answers with the operator's declarations.
 ///
 /// Declared groups come first, by label, each holding the declared members
@@ -637,15 +703,15 @@ pub fn compare_locality(
             .map(|id| (*id).to_owned())
             .collect();
         let (state, disagreeing) = declared_state(&present);
-        groups.push(LocalityGroup {
-            key: format!("machine:{label}"),
-            label: Some((*label).to_owned()),
+        groups.push(assemble_group(
+            format!("machine:{label}"),
+            Some((*label).to_owned()),
             state,
             disagreeing,
             declared_missing,
-            members: present.iter().map(|node| member_row(node, true)).collect(),
-            relations: relation_rows(&present),
-        });
+            &present,
+            true,
+        ));
     }
 
     // Everything undeclared: components by measured equal boot.
@@ -676,15 +742,15 @@ pub fn compare_locality(
         .into_iter()
         .map(|(state, mut members)| {
             members.sort_by(|a, b| a.id.cmp(&b.id));
-            LocalityGroup {
-                key: format!("node:{}", members[0].id),
-                label: None,
+            assemble_group(
+                format!("node:{}", members[0].id),
+                None,
                 state,
-                disagreeing: Vec::new(),
-                declared_missing: Vec::new(),
-                members: members.iter().map(|node| member_row(node, false)).collect(),
-                relations: relation_rows(&members),
-            }
+                Vec::new(),
+                Vec::new(),
+                &members,
+                false,
+            )
         })
         .collect();
     undeclared.sort_by(|a, b| a.key.cmp(&b.key));
@@ -758,6 +824,13 @@ mod tests {
 
     fn compare(nodes: &[NodeInput], declarations: &[MachineDeclaration]) -> Vec<LocalityGroup> {
         compare_locality(AS_OF, nodes, declarations).unwrap().groups
+    }
+
+    fn group_of<'a>(groups: &'a [LocalityGroup], id: &str) -> &'a LocalityGroup {
+        groups
+            .iter()
+            .find(|g| g.members.iter().any(|m| m.id == id))
+            .unwrap()
     }
 
     fn ids(group: &LocalityGroup) -> Vec<&str> {
@@ -1020,6 +1093,7 @@ mod tests {
             MemberFact {
                 grade: LocalityGrade::Unknown,
                 reason: Some(REASON_EMULATED_KERNEL.to_owned()),
+                shared_with: Vec::new(),
             }
         );
         let native = groups.iter().find(|g| ids(g) == ["native"]).unwrap();
@@ -1279,6 +1353,118 @@ mod tests {
         );
         let back: LocalityGroups = serde_json::from_value(value).unwrap();
         assert_eq!(back, groups);
+    }
+
+    #[test]
+    fn rows_say_who_shares_who_disagrees_and_which_group_is_this_computer() {
+        let mut this = answered(
+            "a",
+            &[("boot", measured("boot-1")), ("account", measured("uid"))],
+        );
+        this.kind = MemberKind::This;
+        let groups = compare(
+            &[
+                this,
+                answered(
+                    "b",
+                    &[("boot", measured("boot-1")), ("account", measured("other"))],
+                ),
+                answered(
+                    "c",
+                    &[("boot", measured("boot-1")), ("account", measured("uid"))],
+                ),
+                answered("d", &[("boot", measured("boot-2"))]),
+                answered("e", &[("boot", unknown(REASON_NOT_MEASURABLE))]),
+            ],
+            &[],
+        );
+        let observed = group_of(&groups, "a");
+        assert!(observed.this_computer);
+        assert_eq!(observed.state, GroupState::Observed);
+        let row = |id: &str| observed.members.iter().find(|m| m.id == id).unwrap();
+        assert_eq!(row("a").facts["boot"].shared_with, ["b", "c"]);
+        assert_eq!(row("a").facts["account"].shared_with, ["c"]);
+        assert_eq!(row("b").facts["boot"].shared_with, ["a", "c"]);
+        assert!(row("b").facts["account"].shared_with.is_empty());
+        assert!(observed.members.iter().all(|m| !m.disagrees));
+        // The other groups are not this computer.
+        for other in ["d", "e"] {
+            let group = group_of(&groups, other);
+            assert!(!group.this_computer, "{other}");
+            assert!(group.members[0].facts["boot"].shared_with.is_empty());
+        }
+    }
+
+    #[test]
+    fn shared_with_and_the_measured_relation_rows_never_disagree() {
+        let groups = compare(
+            &[
+                answered(
+                    "a",
+                    &[
+                        ("boot", measured("b1")),
+                        ("account", measured("x")),
+                        ("rack", measured("r")),
+                    ],
+                ),
+                answered(
+                    "b",
+                    &[
+                        ("boot", measured("b1")),
+                        ("account", measured("x")),
+                        ("rack", unknown(REASON_NOT_MEASURABLE)),
+                    ],
+                ),
+                answered(
+                    "c",
+                    &[
+                        ("boot", measured("b1")),
+                        ("account", measured("y")),
+                        ("rack", measured("r")),
+                    ],
+                ),
+            ],
+            &[],
+        );
+        for group in &groups {
+            for member in &group.members {
+                for (relation, fact) in &member.facts {
+                    let from_rows: Vec<String> = group
+                        .relations
+                        .iter()
+                        .filter(|row| {
+                            row.grade == LocalityGrade::Measured
+                                && row.relation == *relation
+                                && row.members.contains(&member.id)
+                        })
+                        .flat_map(|row| row.members.iter().filter(|id| **id != member.id).cloned())
+                        .collect();
+                    assert_eq!(fact.shared_with, from_rows, "{} {relation}", member.id);
+                    if fact.grade == LocalityGrade::Unknown {
+                        assert!(fact.shared_with.is_empty());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_member_in_the_disagreeing_list_says_so() {
+        let groups = compare(
+            &[
+                answered("a", &[("boot", measured("boot-1"))]),
+                answered("b", &[("boot", measured("boot-1"))]),
+                answered("c", &[("boot", measured("boot-2"))]),
+            ],
+            &[declaration("workstation", &["a", "b", "c"])],
+        );
+        let flags: Vec<(&str, bool)> = groups[0]
+            .members
+            .iter()
+            .map(|m| (m.id.as_str(), m.disagrees))
+            .collect();
+        assert_eq!(flags, [("a", false), ("b", false), ("c", true)]);
+        assert!(!groups[0].this_computer);
     }
 
     #[test]
