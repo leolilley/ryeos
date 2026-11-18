@@ -1039,6 +1039,9 @@ jobs:
 
       - name: Exercise the browser client
         env:
+          # The node's app root must be on durable block storage
+          # (storage:durable_root); /tmp on the runner is not.
+          TMPDIR: ${{ runner.temp }}
           RYEOS_SMOKE_TRUST_FILE: ${{ env.RYEOS_SMOKE_PREFIX }}/share/ryeos/.ai/PUBLISHER_TRUST.toml
           RYEOS_SMOKE_BUNDLE_SOURCE: ${{ env.RYEOS_SMOKE_PREFIX }}/share/ryeos
           RYEOS_SMOKE_SHOTS: ${{ runner.temp }}/browser-smoke
