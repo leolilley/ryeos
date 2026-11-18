@@ -1606,6 +1606,9 @@ pub struct TimelineTextLine {
     /// What the line is: its entry type, or `cluster` / `recap` for the line
     /// that heads a group (the lead lines are `summary` and `older`).
     pub role: String,
+    /// The entry's text is carried by the live event stream (the item's
+    /// `text_streamed` flag); false for lines that are not entries.
+    pub text_streamed: bool,
 }
 
 /// A timeline response drawn as plain text.
@@ -1631,16 +1634,21 @@ impl RyeOsTimelineEntryVm {
 /// [`merge_timeline_window`]) as plain text lines.
 pub fn timeline_text(response: &Value) -> TimelineText {
     let line =
-        |id: &str, entry: &RyeOsTimelineEntryVm, indent: u8, role: String| TimelineTextLine {
+        |id: &str,
+         entry: &RyeOsTimelineEntryVm,
+         indent: u8,
+         role: String,
+         text_streamed: bool| TimelineTextLine {
             id: id.to_string(),
             indent,
             text: entry.label(),
             tone: entry.tone(),
             role,
+            text_streamed,
         };
     let mut lead = Vec::new();
     if let Some(entry) = summary_entry(response) {
-        lead.push(line("summary", &entry, 0, "summary".to_string()));
+        lead.push(line("summary", &entry, 0, "summary".to_string(), false));
     }
     let older = response.get("older").and_then(Value::as_u64).unwrap_or(0);
     if older > 0 {
@@ -1649,6 +1657,7 @@ pub fn timeline_text(response: &Value) -> TimelineText {
             &older_entry(older, None),
             0,
             "older".to_string(),
+            false,
         ));
     }
     let items = response
@@ -1674,7 +1683,14 @@ pub fn timeline_text(response: &Value) -> TimelineText {
         let role = layout.sources[index]
             .as_ref()
             .map_or_else(|| "entry".to_string(), |source| item_role(&source.raw));
-        lines.push(line(&id, entry, layout.indents[index], role));
+        let text_streamed = layout.sources[index].as_ref().is_some_and(|source| {
+            source
+                .raw
+                .get("text_streamed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        });
+        lines.push(line(&id, entry, layout.indents[index], role, text_streamed));
     }
     TimelineText { lead, lines }
 }

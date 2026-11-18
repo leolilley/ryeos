@@ -377,6 +377,7 @@ impl State {
             if emission.counts_as.is_some() {
                 entry.counts_as = emission.counts_as.clone();
             }
+            entry.text_streamed |= emission.text_streamed;
             entry.seq.1 = seq;
             entry.ts.1 = ts;
             return;
@@ -395,6 +396,7 @@ impl State {
             parent,
             exchange: self.exchange.clone(),
             counts_as: emission.counts_as.clone(),
+            text_streamed: emission.text_streamed,
             slots,
             seq: (seq, seq),
             ts: (ts.clone(), ts),
