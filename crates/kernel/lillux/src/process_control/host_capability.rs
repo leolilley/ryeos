@@ -818,6 +818,55 @@ impl RootStorageFacts {
     }
 }
 
+/// What this process can measure about who it shares a host with. Raw values
+/// that identify a boot, an account and a backing filesystem: they stay in
+/// the process and are only ever digested by the caller, never served.
+///
+/// Every field that could not be measured is `None`; nothing here is a guess.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalityObservation {
+    /// `native` or `gvisor`, as in [`HostFacts::kernel_kind`]. `unknown` on an
+    /// OS where the kernel version text is unreadable.
+    pub kernel_kind: String,
+    /// The kernel's boot id, when it reads as a UUID.
+    pub boot_id: Option<String>,
+    /// The effective uid, when this process is in the initial user namespace.
+    /// Inside a nested user namespace a uid names an account only relative to
+    /// that namespace, so two such nodes could share a uid and not an account.
+    pub account_uid: Option<u32>,
+    /// `Some(false)` when the process is in a nested user namespace, `None`
+    /// when that could not be read.
+    pub initial_user_namespace: Option<bool>,
+    /// The device number of the filesystem holding the app root. The kernel
+    /// numbers each live superblock once, across every mount namespace, so
+    /// two roots on the same superblock report the same number and roots on
+    /// different superblocks report different ones. It is not a statement
+    /// that different numbers are different disks: two overlay mounts over one
+    /// disk, or two btrfs subvolumes, report different numbers.
+    pub storage_device: Option<u64>,
+}
+
+impl LocalityObservation {
+    /// Observe this host for a node whose app root is `app_root`. Never fails.
+    pub fn observe(app_root: &std::path::Path) -> Self {
+        #[cfg(target_os = "linux")]
+        {
+            linux::observe_locality(app_root)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = app_root;
+            Self {
+                kernel_kind: "unknown".to_owned(),
+                boot_id: None,
+                account_uid: None,
+                initial_user_namespace: None,
+                storage_device: None,
+            }
+        }
+    }
+}
+
 // Firmware vendor and product names that only virtual machines report.
 const VIRTUAL_MACHINE_FIRMWARE: [&str; 10] = [
     "QEMU",
@@ -3006,6 +3055,28 @@ mod linux {
         })
     }
 
+    pub(super) fn observe_locality(app_root: &Path) -> super::LocalityObservation {
+        use std::os::unix::fs::MetadataExt as _;
+        let initial_user_namespace = read_small("/proc/self/uid_map")
+            .ok()
+            .map(|_| identity_uid_map());
+        super::LocalityObservation {
+            kernel_kind: kernel_kind(&read_small("/proc/version").unwrap_or_default()).to_owned(),
+            boot_id: super::super::linux::read_boot_id().ok().filter(|id| {
+                id.len() == 36 && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+            }),
+            account_uid: (initial_user_namespace == Some(true)).then(|| {
+                // SAFETY: geteuid has no pointer arguments or caller-owned memory.
+                unsafe { libc::geteuid() }
+            }),
+            initial_user_namespace,
+            storage_device: std::fs::metadata(app_root)
+                .ok()
+                .map(|metadata| metadata.dev())
+                .filter(|device| *device != 0),
+        }
+    }
+
     pub(super) fn observe_root_storage(path: &Path) -> super::RootStorageFacts {
         let opened = open_path(path);
         let mount_id = opened.as_ref().and_then(mount_identity);
@@ -3310,6 +3381,33 @@ mod linux {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn locality_storage_device_is_shared_by_one_filesystem_and_absent_when_unreadable() {
+        let root = tempfile::tempdir().unwrap();
+        let inner = root.path().join("inner");
+        std::fs::create_dir(&inner).unwrap();
+        let outer = LocalityObservation::observe(root.path());
+        let nested = LocalityObservation::observe(&inner);
+        assert!(outer.storage_device.is_some());
+        assert_eq!(outer.storage_device, nested.storage_device);
+        let missing = LocalityObservation::observe(&root.path().join("missing"));
+        assert_eq!(missing.storage_device, None);
+        // The boot is the kernel's, so it is the same for every root.
+        assert_eq!(outer.boot_id, missing.boot_id);
+        assert_eq!(outer.kernel_kind, missing.kernel_kind);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn locality_account_is_reported_only_from_the_initial_user_namespace() {
+        let observed = LocalityObservation::observe(std::path::Path::new("/"));
+        assert_eq!(
+            observed.account_uid.is_some(),
+            observed.initial_user_namespace == Some(true)
+        );
+    }
 
     fn facts(
         enclosure_exit: Result<CapabilityEvidence, String>,
