@@ -64,6 +64,12 @@ pub struct CompiledUiSource {
     pub dynamic_parameters: Vec<String>,
     pub activation: ryeos_client_base::ui::content::SourceActivation,
     pub requires_project: bool,
+    /// The source was declared by an item with a project-space member, or
+    /// under a project-authored Surface. Dispatch carries this to the
+    /// service's authorization, which then admits only data of the session's
+    /// own live project.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub project_authored: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -432,6 +438,8 @@ impl SessionCompiledUiBinding {
                                             dynamic_parameters: Vec::new(),
                                             activation: Default::default(),
                                             requires_project: false,
+                                            project_authored: view_grant.authority
+                                                == Authority::Project,
                                         },
                                     );
                                 continue;
@@ -678,6 +686,7 @@ fn compile_sources(
                             dynamic_parameters: dynamic_parameters.into_iter().collect(),
                             activation: authored.activation,
                             requires_project: authored.requires_project,
+                            project_authored: grant.authority == Authority::Project,
                         },
                     );
                     continue;
@@ -2305,7 +2314,10 @@ mod tests {
     #[test]
     fn shipped_project_source_ceiling_names_each_service_exactly() {
         let shipped = shipped_project_source_ceiling();
-        assert_eq!(shipped, ceiling(&[FIELD_PROJECT]));
+        assert_eq!(
+            shipped,
+            ceiling(&[FIELD_PROJECT, FIELD_DEFINITION, FIELD_RUNS, FIELD_EXECUTION])
+        );
         for widened in [
             "ryeos.execute.service.*",
             "ryeos.execute.service.ui/ryeos-ui/field/*",
@@ -2322,12 +2334,13 @@ mod tests {
         }
     }
 
-    /// Every real project file compiles under the shipped list. Each view's
-    /// selection affordance and each `field/project` source are kept; a
-    /// source reading a service the node does not list is refused by name,
-    /// and nothing else is refused.
+    /// Every real project file compiles whole under the shipped list: each
+    /// view keeps every source it declares and its selection affordance,
+    /// nothing is refused, and every kept source is marked as declared by a
+    /// project-authored item, which is what holds its reads to the session's
+    /// own project.
     #[test]
-    fn real_project_files_compile_against_the_shipped_ceiling() {
+    fn real_project_files_compile_whole_against_the_shipped_ceiling() {
         let shipped = shipped_project_source_ceiling();
         for (project, surface) in [
             ("kaggriculture", "farm/ui/campaign-terminal"),
@@ -2336,26 +2349,17 @@ mod tests {
         ] {
             let body = project_surface_fixture(project, surface);
             let compiled = compile_project_fixture(&body, &shipped);
+            assert!(
+                compiled.binding.attenuated.is_empty(),
+                "{surface}: {:?}",
+                compiled.binding.attenuated
+            );
             let views = body["views"].as_object().expect("embedded views");
             assert!(!views.is_empty(), "{surface} binds views");
             for (view_ref, view) in views {
-                for (channel, source) in view["sources"].as_object().expect("view sources") {
-                    let target = source["ref"].as_str().expect("source ref");
-                    let compiled_source = compiled
-                        .binding
-                        .sources
-                        .get(view_ref)
-                        .and_then(|sources| sources.get(channel));
-                    if target == FIELD_PROJECT {
-                        assert!(compiled_source.is_some(), "{view_ref}:{channel}");
-                    } else {
-                        assert!(compiled_source.is_none(), "{view_ref}:{channel}");
-                        refused_as(
-                            &compiled,
-                            &format!("source:{view_ref}:{channel}"),
-                            REFUSAL_PROJECT_SOURCE_OUTSIDE_CEILING,
-                        );
-                    }
+                for channel in view["sources"].as_object().expect("view sources").keys() {
+                    let source = &compiled.binding.sources[view_ref][channel];
+                    assert!(source.project_authored, "{view_ref}:{channel}");
                 }
                 assert!(
                     matches!(
@@ -2365,13 +2369,55 @@ mod tests {
                     "{view_ref}"
                 );
             }
-            assert!(
-                compiled.binding.attenuated.iter().all(|entry| entry
-                    .reason
-                    .starts_with(REFUSAL_PROJECT_SOURCE_OUTSIDE_CEILING)),
-                "{surface}: {:?}",
-                compiled.binding.attenuated
-            );
         }
     }
+
+    /// The provenance of a source follows its author. A source a
+    /// project-authored view declares is marked; the bundle surface's own
+    /// source beside it is not, and neither is the same view's source when a
+    /// bundle authored the view. A bundle view's source under a
+    /// project-authored surface is marked, because that surface composed it.
+    #[test]
+    fn a_source_is_marked_project_authored_by_its_author_and_its_surface() {
+        let authored = surface_with_listed_source_and_selection();
+        let project_view = compile_authored_by(
+            TrustClass::TrustedBundle,
+            TrustClass::TrustedProject,
+            &["cap.read", "cap.write"],
+            &ceiling(&[FIELD_PROJECT]),
+            &authored,
+            bundle_service_target,
+        );
+        assert!(project_view.binding.sources[VIEW_REF]["project"].project_authored);
+        assert!(!project_view.binding.sources[SURFACE_REF]["shell"].project_authored);
+
+        let bundle_view = compile_authored_by(
+            TrustClass::TrustedBundle,
+            TrustClass::TrustedBundle,
+            &["cap.read", "cap.write"],
+            &ceiling(&[FIELD_PROJECT]),
+            &authored,
+            bundle_service_target,
+        );
+        assert!(!bundle_view.binding.sources[VIEW_REF]["project"].project_authored);
+        assert!(!bundle_view.binding.sources[VIEW_REF]["default"].project_authored);
+        // A node-authored source serializes without the field.
+        assert!(
+            serde_json::to_value(&bundle_view.binding.sources[VIEW_REF]["project"])
+                .unwrap()
+                .get("project_authored")
+                .is_none()
+        );
+
+        let project_surface = compile_authored_by(
+            TrustClass::TrustedProject,
+            TrustClass::TrustedBundle,
+            &["cap.read", "cap.write"],
+            &ceiling(&[FIELD_PROJECT]),
+            &authored,
+            bundle_service_target,
+        );
+        assert!(project_surface.binding.sources[VIEW_REF]["project"].project_authored);
+    }
+
 }

@@ -67,6 +67,214 @@ fn create_project_thread(state: &AppState, thread_id: &str, project_root: &std::
         .expect("mark fixture thread running");
 }
 
+/// A thread the fixture principal launched outside any live project.
+fn create_outside_thread(
+    state: &AppState,
+    thread_id: &str,
+    project_authority: ExecutionProjectAuthority,
+) {
+    state
+        .state_store
+        .create_thread_for_test(&NewThreadRecord {
+            thread_id: thread_id.to_string(),
+            chain_root_id: thread_id.to_string(),
+            kind: "directive".to_string(),
+            item_ref: "directive:test/project-authority".to_string(),
+            executor_ref: "test/executor".to_string(),
+            launch_mode: "wait".to_string(),
+            current_site_id: "site:test".to_string(),
+            origin_site_id: "site:test".to_string(),
+            upstream_thread_id: None,
+            requested_by: Some("fp:test".to_string()),
+            project_root: None,
+            project_authority,
+            base_project_snapshot_hash: None,
+            usage_subject: None,
+            usage_subject_asserted_by: None,
+            captured_history_policy: Some(captured_policy()),
+        })
+        .expect("create outside fixture thread");
+    state
+        .state_store
+        .mark_thread_running(thread_id, None)
+        .expect("mark outside fixture thread running");
+}
+
+fn pinned_generation_authority() -> ExecutionProjectAuthority {
+    ExecutionProjectAuthority::PinnedGeneration {
+        stable_project_identity: "project".to_string(),
+        display_path: None,
+        base_snapshot_hash: "a".repeat(64),
+        snapshot_hash: "b".repeat(64),
+        realization: ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+        workspace_outputs: None,
+        environment: EnvironmentAuthority::None,
+        capability_ceiling: Vec::new(),
+        child_policy: ryeos_state::objects::ChildProjectAuthorityPolicy::Inherit,
+    }
+}
+
+fn root_attachment(
+    session: &ryeos_ui::browser_session::BrowserSession,
+) -> Arc<ryeos_ui::browser_session::AdmittedBindingAttachment> {
+    session
+        .attachments
+        .get(&session.root_attachment_id)
+        .expect("surface attachment")
+        .clone()
+}
+
+async fn expect_not_found(
+    handler: ryeos_app::service_registry::RawHandlerFn,
+    params: serde_json::Value,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+    what: &str,
+) {
+    match handler(params, ctx, state).await {
+        Ok(value) => panic!("{what} must not be readable, got {value}"),
+        Err(error) => assert!(
+            matches!(
+                error.downcast_ref::<ryeos_app::handler_error::HandlerError>(),
+                Some(ryeos_app::handler_error::HandlerError::NotFound)
+            ),
+            "{what}: {error:#}"
+        ),
+    }
+}
+
+/// A source a project-authored view declared cannot read the definition of a
+/// thread outside the session's live project: not another project's thread,
+/// and not a projectless thread the session's own principal launched.
+#[tokio::test]
+async fn project_authored_field_definition_source_refuses_threads_outside_the_session_project() {
+    let (_state_dir, _state_owner, state) = test_state::build_test_state();
+    let (_projects, session, ctx) = two_project_session(&state);
+    create_outside_thread(&state, "T-projectless", ExecutionProjectAuthority::PROJECTLESS);
+    let state = Arc::new(state);
+    ryeos_ui::seat_auth::with_project_authored_compiled_ui_source(
+        root_attachment(&session),
+        async {
+            for thread_id in ["T-second", "T-projectless"] {
+                expect_not_found(
+                    ryeos_ui::handlers::ui_field_definition::DESCRIPTOR.handler,
+                    serde_json::json!({ "thread_id": thread_id }),
+                    ctx.clone(),
+                    state.clone(),
+                    thread_id,
+                )
+                .await;
+            }
+        },
+    )
+    .await;
+}
+
+/// The same for the execution source, which would otherwise return the
+/// thread's events, results and artifacts.
+#[tokio::test]
+async fn project_authored_field_execution_source_refuses_threads_outside_the_session_project() {
+    let (_state_dir, _state_owner, state) = test_state::build_test_state();
+    let (_projects, session, ctx) = two_project_session(&state);
+    create_outside_thread(&state, "T-projectless", ExecutionProjectAuthority::PROJECTLESS);
+    let state = Arc::new(state);
+    ryeos_ui::seat_auth::with_project_authored_compiled_ui_source(
+        root_attachment(&session),
+        async {
+            for thread_id in ["T-second", "T-projectless"] {
+                expect_not_found(
+                    ryeos_ui::handlers::ui_field_execution::DESCRIPTOR.handler,
+                    serde_json::json!({ "thread_id": thread_id }),
+                    ctx.clone(),
+                    state.clone(),
+                    thread_id,
+                )
+                .await;
+            }
+        },
+    )
+    .await;
+}
+
+/// The runs source lists a projectless thread of the session's principal to
+/// a node-authored source, as it always has, and never to a source a
+/// project-authored view declared. Another project's thread is in neither.
+#[tokio::test]
+async fn project_authored_field_runs_source_lists_only_the_session_project() {
+    let (_state_dir, _state_owner, state) = test_state::build_test_state();
+    let (_projects, session, ctx) = two_project_session(&state);
+    create_outside_thread(&state, "T-projectless", ExecutionProjectAuthority::PROJECTLESS);
+    let state = Arc::new(state);
+    let list = |ctx: HandlerContext, state: Arc<AppState>| async move {
+        let runs = (ryeos_ui::handlers::ui_field_runs::DESCRIPTOR.handler)(
+            serde_json::json!({ "limit": 1000 }),
+            ctx,
+            state,
+        )
+        .await
+        .expect("field runs source");
+        serde_json::to_string(&runs).expect("encode field runs")
+    };
+
+    let node_authored = ryeos_ui::seat_auth::with_compiled_ui_attachment(
+        root_attachment(&session),
+        list(ctx.clone(), state.clone()),
+    )
+    .await;
+    assert!(node_authored.contains("T-first"));
+    assert!(node_authored.contains("T-projectless"));
+    assert!(!node_authored.contains("T-second"));
+
+    let project_authored = ryeos_ui::seat_auth::with_project_authored_compiled_ui_source(
+        root_attachment(&session),
+        list(ctx, state),
+    )
+    .await;
+    assert!(project_authored.contains("T-first"));
+    assert!(!project_authored.contains("T-projectless"));
+    assert!(!project_authored.contains("T-second"));
+}
+
+/// A pinned-generation thread the session's principal launched is outside
+/// the live project too. A project-authored source of each thread-reading
+/// field service is refused it or does not list it.
+#[tokio::test]
+async fn project_authored_field_sources_never_read_a_pinned_generation_thread() {
+    let (_state_dir, _state_owner, state) = test_state::build_test_state();
+    let (_projects, session, ctx) = two_project_session(&state);
+    create_outside_thread(&state, "T-pinned", pinned_generation_authority());
+    let state = Arc::new(state);
+    ryeos_ui::seat_auth::with_project_authored_compiled_ui_source(
+        root_attachment(&session),
+        async {
+            for handler in [
+                ryeos_ui::handlers::ui_field_definition::DESCRIPTOR.handler,
+                ryeos_ui::handlers::ui_field_execution::DESCRIPTOR.handler,
+            ] {
+                expect_not_found(
+                    handler,
+                    serde_json::json!({ "thread_id": "T-pinned" }),
+                    ctx.clone(),
+                    state.clone(),
+                    "a pinned-generation thread",
+                )
+                .await;
+            }
+            let runs = (ryeos_ui::handlers::ui_field_runs::DESCRIPTOR.handler)(
+                serde_json::json!({ "limit": 1000 }),
+                ctx.clone(),
+                state.clone(),
+            )
+            .await
+            .expect("field runs source");
+            let encoded = serde_json::to_string(&runs).expect("encode field runs");
+            assert!(encoded.contains("T-first"));
+            assert!(!encoded.contains("T-pinned"));
+        },
+    )
+    .await;
+}
+
 fn compiled_project_session(
     state: &AppState,
     project_root: &std::path::Path,

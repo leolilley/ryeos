@@ -198,6 +198,9 @@ struct CompiledUiDispatchContext {
     attachment: std::sync::Arc<AdmittedBindingAttachment>,
     browser_session_id: Option<String>,
     producer: Option<ryeos_client_base::ui::UiPresentationProducer>,
+    /// Whether this dispatch runs a source that a project-authored view or
+    /// Surface declared. Set by dispatch from the retained compiled binding.
+    project_authored_source: bool,
 }
 
 pub async fn with_compiled_ui_attachment<F>(
@@ -213,10 +216,42 @@ where
                 attachment,
                 browser_session_id: None,
                 producer: None,
+                project_authored_source: false,
             },
             future,
         )
         .await
+}
+
+/// Run `future` as the dispatch of a source that a project-authored item
+/// declared on `attachment`. Reads made inside it are held to the session's
+/// own live project.
+pub async fn with_project_authored_compiled_ui_source<F>(
+    attachment: std::sync::Arc<AdmittedBindingAttachment>,
+    future: F,
+) -> F::Output
+where
+    F: std::future::Future,
+{
+    COMPILED_UI_DISPATCH
+        .scope(
+            CompiledUiDispatchContext {
+                attachment,
+                browser_session_id: None,
+                producer: None,
+                project_authored_source: true,
+            },
+            future,
+        )
+        .await
+}
+
+/// Whether the current task is the dispatch of a source that a
+/// project-authored item declared. False outside a compiled UI dispatch.
+pub(crate) fn compiled_ui_source_is_project_authored() -> bool {
+    COMPILED_UI_DISPATCH
+        .try_with(|context| context.project_authored_source)
+        .unwrap_or(false)
 }
 
 pub fn compiled_ui_attachment() -> Option<std::sync::Arc<AdmittedBindingAttachment>> {
@@ -237,12 +272,29 @@ pub(crate) async fn with_compiled_ui_session<F>(
 where
     F: std::future::Future,
 {
+    with_compiled_ui_source_session(session, attachment, producer, false, future).await
+}
+
+/// [`with_compiled_ui_session`] for a dispatch whose bound entry may be a
+/// source a project-authored item declared. `project_authored_source` comes
+/// from the retained compiled binding.
+pub(crate) async fn with_compiled_ui_source_session<F>(
+    session: &crate::browser_session::BrowserSession,
+    attachment: std::sync::Arc<AdmittedBindingAttachment>,
+    producer: Option<ryeos_client_base::ui::UiPresentationProducer>,
+    project_authored_source: bool,
+    future: F,
+) -> F::Output
+where
+    F: std::future::Future,
+{
     COMPILED_UI_DISPATCH
         .scope(
             CompiledUiDispatchContext {
                 attachment,
                 browser_session_id: Some(session.session_id.clone()),
                 producer,
+                project_authored_source,
             },
             future,
         )

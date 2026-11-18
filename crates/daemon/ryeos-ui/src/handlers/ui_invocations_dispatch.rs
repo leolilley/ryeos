@@ -36,6 +36,9 @@ use crate::{seat_auth::SeatCaller, thread_authorization::authorize_exact_thread_
 struct BoundInvocation {
     target: CompiledUiTarget,
     params: Value,
+    /// Whether the bound entry is a source a project-authored item declared.
+    /// Read from the retained compiled binding, never from the request.
+    project_authored_source: bool,
 }
 
 pub(crate) fn validate_prepared_operation_binding(
@@ -372,10 +375,11 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
         } else {
             None
         };
-    let mut result = crate::seat_auth::with_compiled_ui_session(
+    let mut result = crate::seat_auth::with_compiled_ui_source_session(
         &session,
         attachment.clone(),
         Some(producer.clone()),
+        bound.project_authored_source,
         async {
             if bound.target.source_safe {
                 execute_read_only_service(
@@ -1134,6 +1138,7 @@ fn resolve_binding_request(
                 }
             }
             Ok(BoundInvocation {
+                project_authored_source: false,
                 target: surface_route.target.clone(),
                 params: Value::Object(params.clone()),
             })
@@ -1154,6 +1159,7 @@ fn resolve_binding_request(
                     )
                 })?;
             Ok(BoundInvocation {
+                project_authored_source: source.project_authored,
                 target: source.target.clone(),
                 params: bind_source_parameters(source, params, project_root)?,
             })
@@ -1270,6 +1276,7 @@ fn resolve_binding_request(
             };
             let params = resolve_session_markers(&params, project_root)?;
             Ok(BoundInvocation {
+                project_authored_source: false,
                 target: target.clone(),
                 params,
             })
