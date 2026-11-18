@@ -939,11 +939,21 @@ fn hidden_health_dot(vm: &RyeOsViewModel) -> Option<El> {
     if vm.presentation.chrome.status_bar.visible {
         return None;
     }
+    // The dot is the node's health while the bar is hidden: it carries the
+    // same key, role and label as the bar's health, so assistive tech and
+    // tests still find it (Rune leaves zero-size elements out of the tree).
     Some(
         el().size(6.0, 6.0)
             .radius(3.0)
             .fill(health_color(vm))
-            .pin(None, None, Some(14.0), Some(14.0)),
+            .pin(None, None, Some(14.0), Some(14.0))
+            .key("shell:health")
+            .role("status")
+            .label(format!(
+                "{} · {}",
+                vm.chrome.health_label,
+                freshness_label(vm.transport.freshness)
+            )),
     )
 }
 
@@ -951,13 +961,8 @@ fn status_bar(vm: &RyeOsViewModel) -> El {
     let t = Tokens::get();
     let model = &vm.presentation.chrome.status_bar;
     if !model.visible {
-        // The node's health stays in the tree for assistive tech when the bar
-        // is hidden: a zero-size element with the same role and label.
-        return el().w(0.0).h(0.0).role("status").label(format!(
-            "{} · {}",
-            vm.chrome.health_label,
-            freshness_label(vm.transport.freshness)
-        ));
+        // Hidden: the health dot drawn by `hidden_health_dot` stands in.
+        return el().h(0.0);
     }
     let working = model.energy > 0.05;
     let island = || {

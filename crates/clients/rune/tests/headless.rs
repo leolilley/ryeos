@@ -598,10 +598,11 @@ fn the_switcher_holds_the_left_edge_and_the_status_islands_float() {
     );
 }
 
-/// With the status bar hidden (Alt+B), the zero-size `status` element stays
-/// and nothing draws the launch control.
+/// With the status bar hidden (Alt+B), nothing draws the launch control and
+/// the node's health remains as a 6-point dot at the bottom-right, keyed
+/// `shell:health`.
 #[test]
-fn a_hidden_status_bar_keeps_only_its_zero_size_status_element() {
+fn a_hidden_status_bar_keeps_only_the_health_dot() {
     let mut rt = shell("", (1280.0, 800.0));
     rt.key(KeyEvent {
         key: Key::Text("b".to_owned()),
@@ -618,10 +619,9 @@ fn a_hidden_status_bar_keeps_only_its_zero_size_status_element() {
         "Alt+B hid the status bar"
     );
     assert!(keyed(&rt, "shell:launch").is_none(), "no launch control");
-    assert!(
-        rt.elements()
-            .into_iter()
-            .any(|e| e.role == "status" && e.rect[2] == 0.0 && e.rect[3] == 0.0),
-        "a zero-size status element remains"
-    );
+    let [x, y, w, h] = keyed(&rt, "shell:health").expect("the health dot remains");
+    assert!((w - 6.0).abs() < 0.5 && (h - 6.0).abs() < 0.5, "a 6-point dot, not {w}x{h}");
+    // pinned 14 from the right and bottom of a 1280 x 800 window
+    assert!((x + w - (1280.0 - 14.0)).abs() < 1.0, "dot right edge at {}", x + w);
+    assert!((y + h - (800.0 - 14.0)).abs() < 1.0, "dot bottom edge at {}", y + h);
 }
