@@ -811,7 +811,7 @@ impl SealedRootExecutionRequest {
     pub fn process_containment_for_qualification(
         &self,
     ) -> Result<super::ProcessContainmentRequirement> {
-        self.process_containment_for_qualification_under(None)
+        self.process_containment_for_qualification_under(None, false)
     }
 
     /// The containment a qualification verifier must run under, given the
@@ -819,9 +819,15 @@ impl SealedRootExecutionRequest {
     /// the selected holding's root settlement each name a requirement; the
     /// stricter stands, so neither can weaken the other. A policy with no
     /// minimum is held to the holding alone, and is refused without one.
+    ///
+    /// A policy minimum is a floor. On an enforced node the node's own
+    /// retained containment always answers, so the requirement is at least
+    /// any qualified containment whatever the minimum (including
+    /// `trusted_process_group_absent`); the signed policy is not rewritten.
     pub fn process_containment_for_qualification_under(
         &self,
         selected_holding: Option<&ryeos_engine::protocols::ProtocolHolding>,
+        enforced: bool,
     ) -> Result<super::ProcessContainmentRequirement> {
         use super::ProcessContainmentRequirement as Requirement;
         self.validate_qualification_purpose()?;
@@ -830,20 +836,21 @@ impl SealedRootExecutionRequest {
         };
         let from_holding =
             selected_holding.map(|holding| Requirement::for_settlement(holding.root_settlement));
-        match (
+        let requirement = match (
             purpose
                 .policy_source
                 .policy
                 .minimum_verifier_process_settlement,
             from_holding,
         ) {
-            (Some(minimum), from_holding) => Ok(Requirement::for_settlement(minimum)
-                .at_least(from_holding.unwrap_or(Requirement::None))),
-            (None, Some(from_holding)) => Ok(from_holding),
+            (Some(minimum), from_holding) => Requirement::for_settlement(minimum)
+                .at_least(from_holding.unwrap_or(Requirement::None)),
+            (None, Some(from_holding)) => from_holding,
             (None, None) => bail!(
                 "a qualification policy that names no minimum settlement takes its containment from the selected protocol's holding, and none was supplied"
             ),
-        }
+        };
+        Ok(requirement.with_enforced_floor(enforced))
     }
 
     /// Whether the sealed root demands any retained containment.
@@ -1314,6 +1321,82 @@ impl SealedRootExecutionRequest {
         handler_context: &crate::handler_context::HandlerContext,
     ) -> Result<Self> {
         self.rebind_continuation_invocation(resume, Some(handler_context.clone()))
+    }
+
+    /// Rebind an operator continuation that also names a different item at
+    /// each ref binding in `names`. Every check of the ordinary operator
+    /// continuation applies unchanged; the one difference is that the stated
+    /// `ref_bindings` may differ from the sealed ones at exactly those names.
+    ///
+    /// The result is a preparation seed, not a sealable invocation: the
+    /// resolved binding record at each rebound name is removed, because the
+    /// source's record describes the item that is being replaced. No capsule
+    /// validates until launch preparation has resolved the new items and
+    /// [`Self::seal_rebound_ref_bindings`] installs their records.
+    ///
+    /// The caller separately proves that the admitted runtime contract lets
+    /// an operator rebind each name.
+    pub fn for_operator_rebind_invocation(
+        &self,
+        resume: &crate::launch_metadata::ResumeContext,
+        handler_context: &crate::handler_context::HandlerContext,
+        names: &std::collections::BTreeSet<String>,
+    ) -> Result<Self> {
+        if names.is_empty() {
+            bail!("an operator rebind continuation names no ref binding");
+        }
+        let mut rebased = self.clone();
+        for name in names {
+            let rebound = resume.ref_bindings.get(name).ok_or_else(|| {
+                anyhow!("operator rebind continuation states no ref binding `{name}`")
+            })?;
+            if !self.resolved_ref_bindings.contains_key(name) {
+                bail!(
+                    "operator rebind continuation names ref binding `{name}`, which the admitted program does not bind"
+                );
+            }
+            if self.ref_bindings.get(name) == Some(rebound) {
+                bail!("operator rebind continuation leaves ref binding `{name}` unchanged");
+            }
+            rebased.ref_bindings.insert(name.clone(), rebound.clone());
+            rebased.resolved_ref_bindings.remove(name);
+        }
+        // With the named entries moved to the stated values, the ordinary
+        // rebind holds every other binding and every other field of the
+        // admitted program equal, and refuses a qualification purpose or
+        // product selections exactly as it does for any continuation.
+        rebased.rebind_continuation_invocation(resume, Some(handler_context.clone()))
+    }
+
+    /// Install the binding records launch preparation resolved for a rebound
+    /// continuation seed. `records` is the complete record set of the
+    /// re-prepared launch: it must supply each rebound name, and agree exactly
+    /// with every record this invocation already seals.
+    pub fn seal_rebound_ref_bindings(
+        mut self,
+        names: &std::collections::BTreeSet<String>,
+        records: &BTreeMap<String, Value>,
+    ) -> Result<Self> {
+        if names.is_empty() {
+            bail!("an operator rebind continuation names no ref binding");
+        }
+        for name in names {
+            if !self.ref_bindings.contains_key(name) {
+                bail!("rebound invocation states no ref binding `{name}`");
+            }
+            if self.resolved_ref_bindings.contains_key(name) {
+                bail!("rebound invocation already seals a record for ref binding `{name}`");
+            }
+            let record = records.get(name).ok_or_else(|| {
+                anyhow!("launch preparation resolved no record for rebound ref binding `{name}`")
+            })?;
+            self.resolved_ref_bindings
+                .insert(name.clone(), record.clone());
+        }
+        if &self.resolved_ref_bindings != records {
+            bail!("launch preparation changed a ref binding record outside the rebound names");
+        }
+        Ok(self)
     }
 
     fn rebind_continuation_invocation(
@@ -2594,6 +2677,35 @@ mod authority_tests {
     }
 
     #[test]
+    fn enforced_node_raises_a_trusted_process_group_floor_to_containment() {
+        use crate::thread_lifecycle::ProcessContainmentRequirement as Requirement;
+        use ryeos_state::external_content::products::qualification::VerifierProcessSettlementAuthority as Settlement;
+        let mut sealed = qualified_product_sealed_fixture();
+        sealed
+            .qualification
+            .as_mut()
+            .unwrap()
+            .policy_source
+            .policy
+            .minimum_verifier_process_settlement = Some(Settlement::TrustedProcessGroupAbsent);
+        let under = |sealed: &SealedRootExecutionRequest, enforced| {
+            sealed
+                .process_containment_for_qualification_under(None, enforced)
+                .unwrap()
+        };
+        assert_eq!(under(&sealed, false), Requirement::None);
+        assert_eq!(under(&sealed, true), Requirement::AnyQualifiedContainment);
+        sealed
+            .qualification
+            .as_mut()
+            .unwrap()
+            .policy_source
+            .policy
+            .minimum_verifier_process_settlement = Some(Settlement::ScopeEmpty);
+        assert_eq!(under(&sealed, true), Requirement::CgroupScope);
+    }
+
+    #[test]
     fn selected_holding_cannot_weaken_the_signed_minimum_and_can_strengthen_it() {
         use crate::thread_lifecycle::ProcessContainmentRequirement as Requirement;
         use ryeos_state::external_content::products::qualification::VerifierProcessSettlementAuthority as Settlement;
@@ -2638,7 +2750,7 @@ mod authority_tests {
                 .minimum_verifier_process_settlement = Some(minimum);
             assert_eq!(
                 sealed
-                    .process_containment_for_qualification_under(Some(&holding(selected)))
+                    .process_containment_for_qualification_under(Some(&holding(selected)), false)
                     .unwrap(),
                 expected,
                 "{minimum:?} under {selected}"
@@ -3229,6 +3341,387 @@ mod authority_tests {
                 fingerprint: "session:operator".to_string(),
                 scopes: vec!["threads.execute".to_string()],
             }
+        );
+    }
+
+    /// A sealed fixture that binds `model` and `guard`, the operator resume
+    /// that rebinds `model` to a second item, and the operator's handler.
+    fn operator_rebind_fixture() -> (
+        SealedRootExecutionRequest,
+        crate::launch_metadata::ResumeContext,
+        crate::handler_context::HandlerContext,
+    ) {
+        let bindings = |model: &str| {
+            BTreeMap::from([
+                ("guard".to_string(), "directive:test/guard".to_string()),
+                ("model".to_string(), model.to_string()),
+            ])
+        };
+        let records = |model: &str| {
+            BTreeMap::from([
+                (
+                    "guard".to_string(),
+                    json!({"canonical_ref": "directive:test/guard"}),
+                ),
+                ("model".to_string(), json!({"canonical_ref": model})),
+            ])
+        };
+        let fixture = SealedRootExecutionRequest::storage_test_fixture()
+            .with_storage_test_ref_bindings(
+                bindings("directive:test/models/first"),
+                records("directive:test/models/first"),
+            );
+        let mut resume = continuation_resume(
+            "/unused",
+            ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS,
+        );
+        resume.project_context = ProjectContext::None;
+        resume.ref_bindings = bindings("directive:test/models/second");
+        resume.requested_by = EffectivePrincipal::Local(Principal {
+            fingerprint: "session:operator".to_string(),
+            scopes: vec!["threads.execute".to_string()],
+        });
+        let handler = crate::handler_context::HandlerContext::new_with_authority(
+            "session:operator".to_string(),
+            vec!["threads.execute".to_string()],
+            true,
+            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient),
+            None,
+        );
+        (fixture, resume, handler)
+    }
+
+    fn rebound_names(names: &[&str]) -> std::collections::BTreeSet<String> {
+        names.iter().map(|name| (*name).to_string()).collect()
+    }
+
+    #[test]
+    fn operator_rebind_changes_the_named_binding_and_withholds_its_stale_record() {
+        let (fixture, resume, handler) = operator_rebind_fixture();
+        let model = rebound_names(&["model"]);
+
+        // The ordinary operator continuation still refuses the changed binding.
+        assert!(
+            fixture
+                .for_operator_continuation_invocation(&resume, &handler)
+                .unwrap_err()
+                .to_string()
+                .contains("program identity")
+        );
+
+        let seed = fixture
+            .for_operator_rebind_invocation(&resume, &handler, &model)
+            .unwrap();
+        assert_eq!(seed.ref_bindings, resume.ref_bindings);
+        assert_eq!(seed.handler_context(), Some(&handler));
+        assert_eq!(seed.requested_by.as_deref(), Some("session:operator"));
+        // The replaced item's record is gone; the untouched binding keeps its own.
+        assert!(!seed.resolved_ref_bindings.contains_key("model"));
+        assert_eq!(
+            seed.resolved_ref_bindings.get("guard"),
+            fixture.resolved_ref_bindings.get("guard")
+        );
+
+        let prepared = BTreeMap::from([
+            (
+                "guard".to_string(),
+                json!({"canonical_ref": "directive:test/guard"}),
+            ),
+            (
+                "model".to_string(),
+                json!({"canonical_ref": "directive:test/models/second"}),
+            ),
+        ]);
+        let sealed = seed
+            .clone()
+            .seal_rebound_ref_bindings(&model, &prepared)
+            .unwrap();
+        assert_eq!(sealed.resolved_ref_bindings, prepared);
+
+        // Preparation that also moved an untouched binding's record, or that
+        // resolved nothing at the rebound name, cannot be sealed.
+        let mut moved = prepared.clone();
+        moved.insert(
+            "guard".to_string(),
+            json!({"canonical_ref": "directive:test/other-guard"}),
+        );
+        assert!(
+            seed.clone()
+                .seal_rebound_ref_bindings(&model, &moved)
+                .unwrap_err()
+                .to_string()
+                .contains("outside the rebound names")
+        );
+        let mut missing = prepared.clone();
+        missing.remove("model");
+        assert!(
+            seed.clone()
+                .seal_rebound_ref_bindings(&model, &missing)
+                .is_err()
+        );
+        // A record can be installed once only.
+        assert!(
+            sealed
+                .seal_rebound_ref_bindings(&model, &prepared)
+                .unwrap_err()
+                .to_string()
+                .contains("already seals")
+        );
+    }
+
+    /// Launch metadata whose capsule validates and binds `model` and `guard`,
+    /// with the operator resume that rebinds `model` and the operator's handler.
+    fn admitted_rebind_source() -> (
+        crate::launch_metadata::RuntimeLaunchMetadata,
+        crate::launch_metadata::ResumeContext,
+        crate::handler_context::HandlerContext,
+    ) {
+        let project = ryeos_state::objects::ExecutionProjectAuthority::pinned(
+            "project:rebind-seed".into(),
+            None,
+            "b".repeat(64),
+            ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+            ryeos_state::objects::EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        let mut source = crate::state_store::external_fixture_launch_metadata(
+            project,
+            json!({"binding_records": {
+                "guard": {"canonical_ref": "directive:test/guard"},
+                "model": {"canonical_ref": "directive:test/models/first"},
+            }}),
+            json!({}),
+        );
+        source.accounting_scope = Some(ryeos_state::objects::AdmittedAccountingScope {
+            budget_authority_site_id: "S-test".to_string(),
+            ledger_epoch: 1,
+            execution_budget_id: "B-source".to_string(),
+            directive_budget_id: Some("D-source".to_string()),
+        });
+        source.deadline_hold_back_ms = Some(40_000);
+        source.validate().expect("admitted rebind source fixture");
+
+        let mut resume = source.resume_context.clone().unwrap();
+        resume.parameters = json!({"input": "continue"});
+        resume.ref_bindings.insert(
+            "model".to_string(),
+            "directive:test/models/second".to_string(),
+        );
+        resume.requested_by = EffectivePrincipal::Local(Principal {
+            fingerprint: "session:operator".to_string(),
+            scopes: vec!["threads.execute".to_string()],
+        });
+        let handler = crate::handler_context::HandlerContext::new_with_authority(
+            "session:operator".to_string(),
+            vec!["threads.execute".to_string()],
+            true,
+            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient),
+            None,
+        );
+        (source, resume, handler)
+    }
+
+    #[test]
+    fn operator_rebind_successor_seed_copies_what_every_continuation_copies() {
+        let (source, resume, handler) = admitted_rebind_source();
+        let capsule = source.admitted_launch_capsule().unwrap().unwrap();
+        let model = rebound_names(&["model"]);
+
+        let seed = source
+            .operator_rebind_successor_seed("T-source", &capsule, resume.clone(), &handler, &model)
+            .unwrap();
+        // A rebound successor is another segment of the same execution: it
+        // keeps the budget scope and the deadline window its source sealed.
+        assert_eq!(seed.deadline_hold_back_ms, Some(40_000));
+        assert_eq!(seed.accounting_scope, source.accounting_scope);
+        assert!(seed.accounting_scope.is_some());
+        assert_eq!(
+            seed.execution_realization_hash,
+            source.execution_realization_hash
+        );
+        assert_eq!(seed.launch_driver, source.launch_driver);
+        assert_eq!(
+            seed.admitted_execution_closure.is_some(),
+            source.admitted_execution_closure.is_some()
+        );
+        assert_eq!(
+            seed.continuation_source_thread_id.as_deref(),
+            Some("T-source")
+        );
+        assert_eq!(seed.resume_context.as_ref(), Some(&resume));
+        let sealed = seed.sealed_root_request.as_ref().unwrap();
+        assert_eq!(sealed.ref_bindings, resume.ref_bindings);
+        assert!(!sealed.resolved_ref_bindings.contains_key("model"));
+        assert!(sealed.resolved_ref_bindings.contains_key("guard"));
+    }
+
+    #[test]
+    fn operator_rebind_derives_no_seed_from_metadata_its_capsule_did_not_admit() {
+        let (source, resume, handler) = admitted_rebind_source();
+        let capsule = source.admitted_launch_capsule().unwrap().unwrap();
+        let model = rebound_names(&["model"]);
+        source.require_admitted_by(&capsule).unwrap();
+
+        // Operational metadata that drifted from the rooted capsule: wider
+        // capabilities, another budget scope, another realization, or a
+        // binding the capsule never sealed. Nothing downstream of the seed
+        // (launch preparation, secret delivery) can run, because there is
+        // no seed.
+        let mut wider_caps = source.clone();
+        wider_caps
+            .resume_context
+            .as_mut()
+            .unwrap()
+            .effective_caps
+            .push("ryeos.execute.tool.test/other".to_string());
+        let mut other_scope = source.clone();
+        other_scope
+            .accounting_scope
+            .as_mut()
+            .unwrap()
+            .execution_budget_id = "B-other".to_string();
+        let mut other_realization = source.clone();
+        other_realization.execution_realization_hash = Some("c".repeat(64));
+        let mut other_binding = crate::state_store::external_fixture_launch_metadata(
+            capsule.project_authority.clone(),
+            json!({"binding_records": {
+                "guard": {"canonical_ref": "directive:test/guard"},
+                "model": {"canonical_ref": "directive:test/models/planted"},
+            }}),
+            json!({}),
+        );
+        other_binding.accounting_scope = source.accounting_scope.clone();
+        for (label, drifted) in [
+            ("capabilities", wider_caps),
+            ("accounting scope", other_scope),
+            ("realization", other_realization),
+            ("binding", other_binding),
+        ] {
+            let mut drifted_resume = resume.clone();
+            drifted_resume.effective_caps = drifted
+                .resume_context
+                .as_ref()
+                .unwrap()
+                .effective_caps
+                .clone();
+            assert!(
+                drifted.require_admitted_by(&capsule).is_err(),
+                "{label}: drifted metadata must not pass for the admitted capsule"
+            );
+            let error = drifted
+                .operator_rebind_successor_seed(
+                    "T-source",
+                    &capsule,
+                    drifted_resume,
+                    &handler,
+                    &model,
+                )
+                .expect_err("no seed is derived from drifted metadata");
+            if matches!(label, "accounting scope" | "realization") {
+                assert!(
+                    format!("{error:#}").contains("authoritative CAS admission"),
+                    "{label}: {error:#}"
+                );
+            }
+        }
+
+        // A source with no sealed request has nothing to rebase.
+        assert!(
+            crate::launch_metadata::RuntimeLaunchMetadata::default()
+                .operator_rebind_successor_seed("T-source", &capsule, resume, &handler, &model)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn operator_rebind_keeps_every_other_continuation_check() {
+        let (fixture, resume, handler) = operator_rebind_fixture();
+        let model = rebound_names(&["model"]);
+
+        // Naming nothing, an unchanged binding, or a binding the admitted
+        // program does not bind.
+        for (names, expected) in [
+            (&[][..], "names no ref binding"),
+            (&["guard"][..], "unchanged"),
+            (&["guard", "model"][..], "unchanged"),
+            (&["absent"][..], "states no ref binding"),
+        ] {
+            let error = fixture
+                .for_operator_rebind_invocation(&resume, &handler, &rebound_names(names))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{names:?}: {error}");
+        }
+        let mut unbound = resume.clone();
+        unbound.ref_bindings.insert(
+            "extra".to_string(),
+            "directive:test/models/second".to_string(),
+        );
+        assert!(
+            fixture
+                .for_operator_rebind_invocation(&unbound, &handler, &rebound_names(&["extra"]))
+                .unwrap_err()
+                .to_string()
+                .contains("does not bind")
+        );
+
+        // A binding outside the named set, or any other identity field,
+        // cannot change with the rebind.
+        let mut widened = resume.clone();
+        widened.ref_bindings.insert(
+            "guard".to_string(),
+            "directive:test/other-guard".to_string(),
+        );
+        let mut other_item = resume.clone();
+        other_item.item_ref = "graph:test/other".to_string();
+        let mut other_mode = resume.clone();
+        other_mode.launch_mode = "wait".to_string();
+        let mut other_runtime = resume.clone();
+        other_runtime.runtime_ref = Some("runtime:other".to_string());
+        for changed in [widened, other_item, other_mode, other_runtime] {
+            assert!(
+                fixture
+                    .for_operator_rebind_invocation(&changed, &handler, &model)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("program identity")
+            );
+        }
+
+        // A qualification purpose cannot continue, rebound or not.
+        let mut qualification = fixture.clone();
+        qualification.qualification = qualified_product_sealed_fixture().qualification;
+        assert!(
+            qualification
+                .for_operator_rebind_invocation(&resume, &handler, &model)
+                .unwrap_err()
+                .to_string()
+                .contains("qualification verifier purpose cannot continue")
+        );
+
+        // Nor can a thread that carries product selections.
+        let selections: ryeos_state::external_content::products::composition::ProductSelectionInputs =
+            serde_json::from_value(serde_json::json!([{
+                "target": {"kind": "root"},
+                "selection": {
+                    "declaration_id": "runtime",
+                    "witness_hash": "a".repeat(64),
+                    "witness_source": {"kind": "local_capture"},
+                    "qualification_hash": null, "remote_testimony": null,
+                }
+            }]))
+            .unwrap();
+        let mut selected = fixture.clone();
+        selected.product_selections = selections.clone();
+        let mut selected_resume = resume.clone();
+        selected_resume.product_selections = selections;
+        assert!(
+            selected
+                .for_operator_rebind_invocation(&selected_resume, &handler, &model)
+                .unwrap_err()
+                .to_string()
+                .contains("cannot carry product selectors")
         );
     }
 

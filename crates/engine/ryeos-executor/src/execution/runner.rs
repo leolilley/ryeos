@@ -3165,12 +3165,13 @@ fn promoted_scoped_producer_commands(
 /// selects again.
 fn admitted_root_requires_process_scope(
     metadata: &ryeos_app::launch_metadata::RuntimeLaunchMetadata,
+    enforced: bool,
 ) -> Result<ryeos_app::thread_lifecycle::ProcessContainmentRequirement> {
     let Some(sealed) = metadata.sealed_root_request.as_ref() else {
         return Ok(ryeos_app::thread_lifecycle::ProcessContainmentRequirement::None);
     };
     let holding = retained_protocol_holding(metadata)?;
-    sealed.process_containment_for_qualification_under(holding.as_ref())
+    sealed.process_containment_for_qualification_under(holding.as_ref(), enforced)
 }
 
 /// The holding declared by the signed protocol descriptor retained in the
@@ -5355,7 +5356,7 @@ pub async fn run_and_wait(
         protocol,
     )?;
     let wait_requires_process_scope = with_host_access_containment(
-        admitted_root_requires_process_scope(&wait_launch_metadata)?,
+        admitted_root_requires_process_scope(&wait_launch_metadata, state.isolation.is_enforced())?,
         params.host_access.as_ref(),
     );
     let dispatch_effect_identity = if let Some(prepared) = params.effect_authority.as_ref() {
@@ -7054,6 +7055,7 @@ async fn dispatch_detached_bg_task(
     };
     let bg_requires_process_scope = match admitted_root_requires_process_scope(
         &admitted_launch_metadata,
+        bg_state.isolation.is_enforced(),
     ) {
         Ok(required) => with_host_access_containment(required, bg_host_access.as_ref()),
         Err(error) => {
