@@ -26,6 +26,23 @@ use super::event::RyeOsUiIntent;
 use super::model::RyeOsCore;
 use super::view_model::{RyeOsTone, tone_from_name};
 
+pub use ryeos_timeline::TIMELINE_CONTRACT_VERSION;
+
+/// Refuses a timeline response that is not the contract version this client
+/// speaks. There is no reader for any other version: a mismatch is a failed
+/// source with this message, never a best-effort drawing.
+pub fn require_timeline_contract(response: &Value) -> Result<(), String> {
+    match response.get("timeline_contract").and_then(Value::as_str) {
+        Some(TIMELINE_CONTRACT_VERSION) => Ok(()),
+        Some(other) => Err(format!(
+            "timeline contract mismatch: the daemon speaks '{other}', this client requires '{TIMELINE_CONTRACT_VERSION}'"
+        )),
+        None => Err(format!(
+            "timeline contract mismatch: the response names no contract version, this client requires '{TIMELINE_CONTRACT_VERSION}'"
+        )),
+    }
+}
+
 /// Detail source for one rendered timeline entry: the service item it came
 /// from, so the view-model layer can apply a content-declared
 /// `projections.expand.fields` block without teaching the entry enum about row
@@ -1011,13 +1028,26 @@ pub(crate) fn timeline_layout_for(
 /// The window to store after a source response arrives. A response carrying
 /// `order` is an incremental update: its `items` are upserted by id into the
 /// stored window, and the result holds the window's items in `order`. `None`
-/// means an id in `order` is in neither the update nor the stored window, so
-/// the stored window cannot be brought current from this update and the caller
-/// refetches the whole window. A response without `order` is a whole window.
+/// means an id in `order` is in neither the update nor the stored window, or
+/// the stored window was folded by a different definition (another
+/// `definition_digest`), so the stored window cannot be brought current from
+/// this update and the caller refetches the whole window. A response without
+/// `order` is a whole window.
 pub(crate) fn merge_window(stored: Option<&Value>, mut update: Value) -> Option<Value> {
     let Some(order) = update.get("order").and_then(Value::as_array).cloned() else {
         return Some(update);
     };
+    // An upsert is only meaningful against a window folded by the same
+    // definition: a changed definition re-folds every entry.
+    let digest = |response: &Value| {
+        response
+            .get("definition_digest")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    if stored.is_some_and(|held| digest(held) != digest(&update)) {
+        return None;
+    }
     let id_of = |item: &Value| item.get("id").and_then(Value::as_str).map(str::to_string);
     let mut window: HashMap<String, Value> = HashMap::new();
     let held = stored
@@ -2906,5 +2936,31 @@ mod tests {
         assert_eq!(item_seq_range(&cluster), Some((7, 12)));
         let recap = json!({"item": "recap", "id": "r", "exchange": "x", "work": 1});
         assert_eq!(item_seq_range(&recap), None);
+    }
+
+    #[test]
+    fn only_the_contract_version_this_client_speaks_is_accepted() {
+        let current = json!({ "timeline_contract": TIMELINE_CONTRACT_VERSION });
+        assert_eq!(require_timeline_contract(&current), Ok(()));
+        let older = json!({ "timeline_contract": "ryeos.timeline.v0" });
+        let refusal = require_timeline_contract(&older).unwrap_err();
+        assert!(refusal.contains("'ryeos.timeline.v0'"));
+        assert!(refusal.contains(TIMELINE_CONTRACT_VERSION));
+        let unnamed = json!({ "items": [] });
+        let refusal = require_timeline_contract(&unnamed).unwrap_err();
+        assert!(refusal.contains("names no contract version"));
+        let wrong_type = json!({ "timeline_contract": 1 });
+        assert!(require_timeline_contract(&wrong_type).is_err());
+    }
+
+    fn upsert_of(digest: &str) -> Value {
+        json!({"definition_digest": digest, "order": ["a"], "items": []})
+    }
+
+    #[test]
+    fn an_upsert_merges_only_into_a_window_of_the_same_definition() {
+        let held = json!({"definition_digest": "d1", "items": [{"id": "a"}]});
+        assert!(merge_window(Some(&held), upsert_of("d1")).is_some());
+        assert!(merge_window(Some(&held), upsert_of("d2")).is_none());
     }
 }

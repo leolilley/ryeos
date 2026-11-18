@@ -706,6 +706,13 @@ impl RyeOsCore {
                     let stored = self.data.source_stored_epoch.get(tile_id).copied();
                     let mut data = data;
                     if result_id >= floor && stored.is_none_or(|s| result_id >= s) {
+                        // A timeline response of another contract version is
+                        // refused whole; there is no reader for it.
+                        if let Some(message) = self.timeline_refusal(tile_id, &data) {
+                            self.refuse_timeline_source(tile_id, result_id, message);
+                            self.bump_generation();
+                            return Vec::new();
+                        }
                         // An incremental window update is applied to the
                         // stored window; one the window cannot absorb is
                         // replaced by a full refetch.
@@ -1766,7 +1773,18 @@ mod tests {
         (effect.id, params.clone())
     }
 
-    fn deliver_window(core: &mut RyeOsCore, id: u64, data: serde_json::Value) -> Vec<RyeOsEffect> {
+    /// Deliver a timeline response of the contract version this client speaks.
+    fn deliver_window(
+        core: &mut RyeOsCore,
+        id: u64,
+        mut data: serde_json::Value,
+    ) -> Vec<RyeOsEffect> {
+        data["timeline_contract"] = crate::ui::timeline::TIMELINE_CONTRACT_VERSION.into();
+        deliver_raw(core, id, data)
+    }
+
+    /// Deliver a response exactly as given.
+    fn deliver_raw(core: &mut RyeOsCore, id: u64, data: serde_json::Value) -> Vec<RyeOsEffect> {
         core.dispatch(RyeOsEvent::EffectResult {
             result: RyeOsEffectResult {
                 id,
@@ -1820,6 +1838,73 @@ mod tests {
         assert_eq!(item_ids(&core), ["a", "b", "c"]);
         let (_, params) = fetch(&mut core);
         assert_eq!(params["since_chain_seq"], "7");
+    }
+
+    #[test]
+    fn a_response_of_another_contract_version_is_refused_with_a_failed_source() {
+        let mut core = window_core();
+        let (id, _) = fetch(&mut core);
+        deliver_window(
+            &mut core,
+            id,
+            serde_json::json!({"highest_chain_seq": 5, "items": [{"id": "a"}]}),
+        );
+        assert_eq!(item_ids(&core), ["a"]);
+
+        for (label, contract) in [
+            ("another version", Some("ryeos.timeline.v0")),
+            ("none named", None),
+        ] {
+            let (id, _) = fetch(&mut core);
+            let mut data = serde_json::json!({"highest_chain_seq": 9, "items": [{"id": "z"}]});
+            if let Some(contract) = contract {
+                data["timeline_contract"] = contract.into();
+            }
+            deliver_raw(&mut core, id, data);
+            let key = test_source_key();
+            assert!(
+                !core.data.sources.contains_key(&key),
+                "{label}: nothing of a refused response, or of the window before it, stays"
+            );
+            let error = core.data.source_errors.get(&key).expect(label);
+            assert_eq!(error.code, "timeline_contract_mismatch", "{label}");
+            assert!(
+                error
+                    .message
+                    .contains(crate::ui::timeline::TIMELINE_CONTRACT_VERSION),
+                "{label}: the message names the version the client requires"
+            );
+        }
+    }
+
+    #[test]
+    fn an_upsert_folded_by_another_definition_refetches_the_whole_window() {
+        let mut core = window_core();
+        let (id, _) = fetch(&mut core);
+        deliver_window(
+            &mut core,
+            id,
+            serde_json::json!({"definition_digest": "d1", "highest_chain_seq": 5,
+                "items": [{"id": "a"}]}),
+        );
+        let (id, _) = fetch(&mut core);
+        let effects = deliver_window(
+            &mut core,
+            id,
+            serde_json::json!({"definition_digest": "d2", "highest_chain_seq": 6,
+                "order": ["a"], "items": []}),
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchSource { .. })),
+            "a whole-window refetch is issued"
+        );
+        assert_eq!(
+            core.data.sources[&test_source_key()]["definition_digest"],
+            "d1",
+            "the update is not applied to the window held"
+        );
     }
 
     #[test]

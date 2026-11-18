@@ -124,7 +124,7 @@ fn flush(run: &mut Vec<Entry>, kind: Option<Run>, items: &mut Vec<Item>, definit
         return;
     }
     items.push(Item::Cluster(Cluster {
-        id: format!("cl:{}", members[0].id),
+        id: format!("{}:{}", crate::CLUSTER_ID_PREFIX, members[0].id),
         headline: headline(&members, kind, definition),
         members,
     }));
@@ -291,7 +291,7 @@ fn close(stretch: &mut Vec<Item>, out: &mut Vec<Item>, exchanges: &HashMap<Strin
     let exchange = first.exchange.clone().unwrap_or_default();
     let settled = exchanges.get(&exchange).map_or(0, |info| info.settled);
     out.push(Item::Recap(Recap {
-        id: format!("rc:{}", first.id),
+        id: format!("{}:{}", crate::RECAP_ID_PREFIX, first.id),
         exchange,
         work,
         duration_s: end.checked_sub(start),

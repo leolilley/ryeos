@@ -20,6 +20,7 @@ use ryeos_client_base::ui::presentation_initialization::{
     UiPresentationInitializationRecord,
 };
 use ryeos_client_base::ui::seat::{SeatEvent, SeatEventKind};
+use ryeos_client_base::ui::timeline::TIMELINE_CONTRACT_VERSION;
 use ryeos_client_base::ui::{
     RyeOsEvent, RyeOsUiEvent, UiBindingAttachment, UiBindingRequestBounds, UiBindingSubject,
 };
@@ -58,7 +59,7 @@ fn response(view_ref: &str, long: bool) -> Option<Value> {
               "project": { "name": "ryeos-next" }, "status": "failed", "created_at": "2026-11-12T07:03:00Z" }
         ], "coverage": { "complete": false, "returned": 3 } }),
         "view:ryeos/development/execution" => serde_json::from_str(BUILD_DEPLOY).ok()?,
-        "view:ryeos/chain/timeline" => json!({ "older": 0, "items": [
+        "view:ryeos/chain/timeline" => json!({ "timeline_contract": TIMELINE_CONTRACT_VERSION, "older": 0, "items": [
             fixture_entry("m1", "message", "x1", json!({ "body": "Review the layout module." })),
             fixture_entry("p1", "prose", "x1", json!({ "body": "Reading the layout module first." })),
             with_state(fixture_entry("a1", "activity", "x1", json!({ "headline": "read_file", "badge": "4.0 KiB" })), "done"),
@@ -110,7 +111,7 @@ fn long_response(view_ref: &str) -> Option<Value> {
                     )
                 })
                 .collect();
-            json!({ "older": 0, "items": items })
+            json!({ "timeline_contract": TIMELINE_CONTRACT_VERSION, "older": 0, "items": items })
         }
         _ => return None,
     })
