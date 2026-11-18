@@ -155,8 +155,14 @@ mod tests {
     fn an_image_counts_by_the_declared_cost_and_only_the_newest_count() {
         let message = tool_result_with_images(4, 10, 10);
         // 10x10 pixels at 100 per token is one token each.
-        assert_eq!(estimate_tokens(&[message.clone()], Some(&accepts(10))), 4);
-        assert_eq!(estimate_tokens(&[message.clone()], Some(&accepts(2))), 2);
+        assert_eq!(
+            estimate_tokens(std::slice::from_ref(&message), Some(&accepts(10))),
+            4
+        );
+        assert_eq!(
+            estimate_tokens(std::slice::from_ref(&message), Some(&accepts(2))),
+            2
+        );
         // Dimensions past the cap count the cap.
         let big = tool_result_with_images(1, 1000, 1000);
         assert_eq!(estimate_tokens(&[big], Some(&accepts(10))), 50);

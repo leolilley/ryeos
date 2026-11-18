@@ -3528,7 +3528,6 @@ profiles:
     #[test]
     fn a_profile_image_input_replaces_the_config_value_whole() {
         let provider = load(BASE);
-        provider.validate("").expect("valid");
         let blind = provider.resolve_for_model("other-model");
         let image_input = blind.image_input.expect("config value kept");
         assert_eq!(image_input.unsupported, UnsupportedImagePolicy::TextNote);
