@@ -379,6 +379,41 @@ pub fn drawable(text: &str, face: Face) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(out)
 }
 
+// ---- The shell look (part 5) ----
+
+/// The tabs band's height.
+pub const TABS_HEIGHT: f32 = 50.0;
+/// The floating status bar's row: its 30 high islands and the 10 beneath.
+pub const STATUS_BAR_HEIGHT: f32 = 40.0;
+/// An island of the status bar.
+pub const ISLAND_HEIGHT: f32 = 30.0;
+/// The Surfaces switcher: its width, its chips and its inset from the edges.
+pub const SWITCHER_WIDTH: f32 = 40.0;
+/// The switcher while a Surface is being renamed.
+pub const SWITCHER_RENAME_WIDTH: f32 = 260.0;
+pub const SWITCHER_CHIP: f32 = 28.0;
+pub const SWITCHER_INSET: f32 = 10.0;
+/// Room the frame leaves at the left of the body (the body adds its own 18).
+pub const SWITCHER_ROOM: f32 = 44.0;
+pub const RADIUS_SWITCHER: f32 = 14.0;
+/// `radius.sheet`: the overlay sheet.
+pub const RADIUS_SHEET: f32 = 22.0;
+/// The switcher and the status islands: `bg` at this opacity.
+pub const BAR_FILL: f32 = 0.50;
+/// Their border: `ink` at this opacity.
+pub const BAR_BORDER: f32 = 0.10;
+/// The overlay scrim: `bg` at this opacity.
+pub const SCRIM_FILL: f32 = 0.62;
+/// The overlay sheet's fill: `bg` mixed this far toward `ink`.
+pub const SHEET_MIX: f32 = 0.035;
+
+impl Tokens {
+    /// A sheet's solid fill: `bg` mixed toward `ink`.
+    pub fn sheet_solid(&self) -> Color {
+        self.bg.mix(self.ink, SHEET_MIX)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
