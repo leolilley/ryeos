@@ -5,6 +5,7 @@
 
 mod accounting;
 mod authority;
+mod cron;
 mod execution;
 mod expression;
 mod maintenance;
@@ -16,6 +17,7 @@ mod vocabulary;
 
 pub use accounting::{SchedulerFireHistoryAccounting, SchedulerFireHistoryDiscardReport};
 pub use authority::{ScheduledAuthorityRefusal, ScheduledAuthorityRefusalKind};
+pub use cron::{Boundaries, CronSchedule, ScheduleZone};
 pub use execution::{
     SCHEDULE_MAX_FIRES_LIMIT, ScheduleExecution, ScheduleExecutionAuthority,
     validate_schedule_bounds, validate_schedule_execution, validate_schedule_ref_bindings,

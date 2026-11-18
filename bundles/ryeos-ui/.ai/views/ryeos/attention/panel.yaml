@@ -1,0 +1,46 @@
+# ryeos:signed:2026-11-17T22:59:57Z:c8899dca1716cfd1957d099e74334ff35d5393257ecb31f42a5f00cb50cadb7d:tdCmHX/CyQtb7J/CwjXnEgFFSHH2/2M+EN6/sF3M6UW06xXfVylUrt6IY9P/u4/l4icMwLIjpeOPcmZwLad2AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: attention-panel
+title: Attention
+version: "1.0.0"
+description: The principal's attention queue as a panel. Enter acknowledges the selected item, which hides it until it has new activity; decisions stay in the Work and Review views.
+
+widget: table
+sources:
+  default:
+    ref: service:ui/ryeos-ui/work/attention
+    params: { limit: 200 }
+    collection: attention
+
+projections:
+  columns:
+    - { label: kind, field: kind, present: words }
+    - { label: item, field: title }
+    - { label: detail, field: detail.summary, present: words }
+    - { label: state, field: state, present: words }
+  expand:
+    fields: [subject.chain_root_id, subject.thread_id, since_ms, expires_at_ms, detail, actions]
+  tone:
+    field: tone
+    map: { warn: warn, danger: danger }
+    default: neutral
+
+selection:
+  activate: acknowledge
+
+affordances:
+  - id: acknowledge
+    label: Acknowledge
+    category: Triage
+    producer: selection
+    enabled_when: { field: actions.acknowledge, equals: true }
+    disabled_reason: This kind of item is decided, not hidden; open it from Review.
+    invoke:
+      plane: rye
+      ref: service:ui/ryeos-ui/work/acknowledge
+      args:
+        item_id: "{record.id}"
+      notice: Acknowledged. It returns if it has new activity.
+
+refresh:
+  on_hint: [thread, activity]
+  after_invoke: true

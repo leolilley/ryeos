@@ -1,11 +1,10 @@
 //! Cron expression parsing and next-fire computation.
 //!
-//! Uses the `cron` crate (v0.16.0) for cron expressions.
+//! Cron expressions are evaluated by `ryeos_scheduler_contract::CronSchedule`.
 //! Interval and at types are handled directly.
 
 use anyhow::{Context, Result, bail};
-use ryeos_scheduler_contract::parse_iso_ts;
-use std::str::FromStr;
+use ryeos_scheduler_contract::{CronSchedule, ScheduleZone, parse_iso_ts};
 
 /// Compute the next fire time (millis since epoch) after `after_ms`.
 ///
@@ -65,21 +64,10 @@ pub fn compute_scheduled_at(
 // ── Cron ────────────────────────────────────────────────────────────
 
 fn next_cron_fire(expression: &str, timezone: &str, after_ms: i64) -> Result<Option<i64>> {
-    let schedule = cron::Schedule::from_str(expression)
+    let schedule = CronSchedule::parse(expression)
         .with_context(|| format!("invalid cron expression: {}", expression))?;
-
-    let after = chrono::DateTime::from_timestamp_millis(after_ms).unwrap_or_else(chrono::Utc::now);
-
-    let tz: chrono_tz::Tz = timezone
-        .parse()
-        .with_context(|| format!("invalid IANA timezone: {}", timezone))?;
-
-    let after_with_tz = after.with_timezone(&tz);
-
-    match schedule.after(&after_with_tz).next() {
-        Some(dt) => Ok(Some(dt.timestamp_millis())),
-        None => Ok(None),
-    }
+    let zone = ScheduleZone::parse(timezone)?;
+    Ok(schedule.next_after(&zone, after_ms))
 }
 
 /// Walk cron fire times between `start_ms` and `end_ms` and return
@@ -93,14 +81,12 @@ fn find_most_recent_cron(
     start_ms: i64,
     end_ms: i64,
 ) -> Option<i64> {
-    let schedule = cron::Schedule::from_str(expression).ok()?;
-    let tz: chrono_tz::Tz = timezone.parse().ok()?;
-    let start = chrono::DateTime::from_timestamp_millis(start_ms)?;
-    let start_with_tz = start.with_timezone(&tz);
+    let schedule = CronSchedule::parse(expression).ok()?;
+    let zone = ScheduleZone::parse(timezone).ok()?;
 
     let mut most_recent: Option<i64> = None;
     const MAX_ITERATIONS: usize = 10_000;
-    for (i, dt) in schedule.after(&start_with_tz).enumerate() {
+    for (i, ms) in schedule.boundaries_after(&zone, start_ms).enumerate() {
         if i >= MAX_ITERATIONS {
             tracing::warn!(
                 expression = %expression,
@@ -108,7 +94,6 @@ fn find_most_recent_cron(
             );
             break;
         }
-        let ms = dt.timestamp_millis();
         if ms > end_ms {
             break;
         }
@@ -128,13 +113,9 @@ pub fn nth_cron_boundary_after(
     n: u32,
 ) -> Option<i64> {
     let index = usize::try_from(n.checked_sub(1)?).ok()?;
-    let schedule = cron::Schedule::from_str(expression).ok()?;
-    let tz: chrono_tz::Tz = timezone.parse().ok()?;
-    let start = chrono::DateTime::from_timestamp_millis(start_ms)?.with_timezone(&tz);
-    schedule
-        .after(&start)
-        .nth(index)
-        .map(|boundary| boundary.timestamp_millis())
+    let schedule = CronSchedule::parse(expression).ok()?;
+    let zone = ScheduleZone::parse(timezone).ok()?;
+    schedule.boundaries_after(&zone, start_ms).nth(index)
 }
 
 // ── Interval ────────────────────────────────────────────────────────

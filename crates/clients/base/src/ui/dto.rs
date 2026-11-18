@@ -223,6 +223,35 @@ pub struct RyeOsDimensionDto {
     pub gc: RyeOsGcSummaryDto,
 }
 
+/// The attention queue as the daemon reports it. The counts are the daemon's
+/// own; a client never derives them from the items.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RyeOsAttentionDto {
+    #[serde(default)]
+    pub counts: RyeOsAttentionCountsDto,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RyeOsAttentionCountsDto {
+    #[serde(default)]
+    pub total: usize,
+    #[serde(default)]
+    pub by_kind: Vec<RyeOsAttentionKindCountDto>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RyeOsAttentionKindCountDto {
+    #[serde(default)]
+    pub kind: String,
+    /// The noun the bars show beside the count.
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub tone: String,
+    #[serde(default)]
+    pub count: usize,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct RyeOsSessionDto {
     #[serde(default)]

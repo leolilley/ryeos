@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-16T21:46:28Z:47a7085263c392ad81b53708dd83922e23da54c12bb3d653ddde8841c4796d03:PEmP/fzWdojuuiLQp6OS5W+muKy+0W234N+ZexiIqdlDqrsxwFztu0yPXKqtOxMGI+4NRvnCu14IFBDJ46L/Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T22:59:57Z:08a308d2149b1e7b9da182e2afa93b42181f0e536979d1f552a2f4dea26d2f5b:O506EdwfAUnOFQ3O8FTr8MPj0IkTUIyAOPlctC0f+VPBTLQg3ivc1hGL6S0THQF6ffa1EOZndZn1sVRV/L7zBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: assistant-review
 title: Review
 version: "1.0.0"
@@ -28,6 +28,7 @@ projections:
 affordances:
   - id: inspect_work
     label: Open work
+    category: Open
     producer: selection
     visible_when: { field: actions.open, equals: true }
     invoke:
@@ -41,6 +42,7 @@ affordances:
       drill: true
   - id: accept
     label: Approve
+    category: Decide
     producer: selection
     visible_when:
       all:
@@ -59,6 +61,7 @@ affordances:
       notice: Approval accepted
   - id: decline
     label: Decline
+    category: Decide
     producer: selection
     visible_when:
       all:
@@ -74,6 +77,18 @@ affordances:
         request_digest: "{record.detail.request_digest}"
         accept: false
       notice: Approval declined
+  - id: acknowledge
+    label: Acknowledge
+    category: Triage
+    producer: selection
+    visible_when: { field: actions.acknowledge, equals: true }
+    invoke:
+      plane: rye
+      ref: service:ui/ryeos-ui/work/acknowledge
+      args:
+        item_id: "{record.id}"
+      notice: Acknowledged. It returns if it has new activity.
 
 refresh:
   on_hint: [thread, activity]
+  after_invoke: true
