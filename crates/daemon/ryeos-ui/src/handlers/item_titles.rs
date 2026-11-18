@@ -68,7 +68,11 @@ impl ItemTitleConfig {
         if config.limits.heading_scan_bytes == 0 || config.limits.max_chars == 0 {
             return Err("item-titles limits must be positive".into());
         }
-        for rule in config.kinds.values().chain(std::iter::once(&config.default)) {
+        for rule in config
+            .kinds
+            .values()
+            .chain(std::iter::once(&config.default))
+        {
             if rule.authored.iter().any(|key| key.trim().is_empty()) {
                 return Err("item-titles authored keys must be non-empty".into());
             }
@@ -79,7 +83,8 @@ impl ItemTitleConfig {
     /// Resolve and verify the signed config; missing or untrusted refuses.
     pub fn load(state: &AppState) -> Result<Self> {
         let value = super::ui_attention::load_signed_config(state, CONFIG_PATH, CONFIG_REF)?;
-        Ok(Self::from_value(value).map_err(|e| HandlerError::Internal(format!("{CONFIG_REF}: {e}")))?)
+        Ok(Self::from_value(value)
+            .map_err(|e| HandlerError::Internal(format!("{CONFIG_REF}: {e}")))?)
     }
 
     fn rule(&self, kind: &str) -> &TitleRule {
@@ -89,8 +94,9 @@ impl ItemTitleConfig {
     /// The name and its source for one item. `trusted` is the item's
     /// effective trust class already decided by the caller. `read` returns the
     /// item's whole source and is called only when a name may be read from it;
-    /// `parse` parses that source with the kind's parser. A read or parse
-    /// failure yields the derived name.
+    /// `parse` parses that source with the kind's parser, and is called only
+    /// when an authored key occurs in the text. A read or parse failure yields
+    /// the derived name.
     pub fn title(
         &self,
         kind: &str,
@@ -103,10 +109,13 @@ impl ItemTitleConfig {
         let rule = self.rule(kind);
         let readable = (trusted || !self.authored_requires_trust)
             && (!rule.authored.is_empty() || rule.heading);
-        if readable
-            && let Some(source) = read()
-        {
-            if !rule.authored.is_empty()
+        if readable && let Some(source) = read() {
+            // A parse can launch the kind's parser, so it runs only when one of
+            // the keys appears in the text at all; otherwise it cannot yield.
+            if rule
+                .authored
+                .iter()
+                .any(|key| source.contains(key.as_str()))
                 && let Some(Value::Object(document)) = parse(&source)
             {
                 for key in &rule.authored {
@@ -253,7 +262,12 @@ mod tests {
         }
     }
 
-    fn yaml_title(config: &ItemTitleConfig, kind: &str, trusted: bool, text: &str) -> (String, &'static str) {
+    fn yaml_title(
+        config: &ItemTitleConfig,
+        kind: &str,
+        trusted: bool,
+        text: &str,
+    ) -> (String, &'static str) {
         config.title(
             kind,
             "ryeos/ui/my-fancy_item",
@@ -273,6 +287,25 @@ mod tests {
     }
 
     #[test]
+    fn parser_is_not_launched_when_no_authored_key_occurs() {
+        let config = shipped();
+        let mut parsed = false;
+        let (title, source) = config.title(
+            "graph",
+            "ryeos/ui/my-fancy_item",
+            true,
+            Some(&yaml_envelope()),
+            || Some("name: x\ndescription: nothing here\n".to_string()),
+            |_| {
+                parsed = true;
+                None
+            },
+        );
+        assert!(!parsed);
+        assert_eq!((title.as_str(), source), ("my fancy item", SOURCE_DERIVED));
+    }
+
+    #[test]
     fn trusted_bundle_item_shows_its_authored_title() {
         let config = shipped();
         let (title, source) = yaml_title(&config, "graph", true, "title: Nightly build\nname: x\n");
@@ -289,7 +322,8 @@ mod tests {
         };
         assert!(is_trusted(Some(&trust)));
         let config = shipped();
-        let (title, source) = yaml_title(&config, "tool", is_trusted(Some(&trust)), "title: Mine\n");
+        let (title, source) =
+            yaml_title(&config, "tool", is_trusted(Some(&trust)), "title: Mine\n");
         assert_eq!((title.as_str(), source), ("Mine", SOURCE_AUTHORED));
     }
 
@@ -324,7 +358,10 @@ mod tests {
             || Some(text.to_string()),
             |_| Some(serde_json::json!({"title": ""})),
         );
-        assert_eq!((title.as_str(), source), ("The real heading", SOURCE_HEADING));
+        assert_eq!(
+            (title.as_str(), source),
+            ("The real heading", SOURCE_HEADING)
+        );
         // A kind whose rule has no heading ignores the same text.
         let (_, source) = config.title(
             "graph",
@@ -373,7 +410,9 @@ mod tests {
         let parse = |text: &str| ItemTitleConfig::from_value(serde_yaml::from_str(text).unwrap());
         assert!(parse(good).is_ok());
         assert!(parse(&format!("{good}extra: 1\n")).is_err());
-        assert!(parse(&good.replace("{authored: [title]}", "{authored: [title], oops: 1}")).is_err());
+        assert!(
+            parse(&good.replace("{authored: [title]}", "{authored: [title], oops: 1}")).is_err()
+        );
         assert!(parse(&good.replace("max_chars: 10", "max_chars: 0")).is_err());
     }
 }
