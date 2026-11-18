@@ -992,6 +992,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.browser_smoke }}
+    env:
+      RYEOS_SMOKE_PREFIX: /ryeos-ci
     steps:
       - name: Show package namespace ownership
         run: |
@@ -1019,7 +1021,12 @@ jobs:
 
       - name: Build and install standard distribution
         run: |
+          # The runner makes /usr/share and /opt world-writable (mode 777), so
+          # Lillux rightly refuses them as a package namespace. Install under a
+          # prefix at the filesystem root, which stays root-owned and 0755.
+          mkdir -p "$RUNNER_TEMP/ryeos-node"
           CARGO="$CARGO_HOME/bin/cargo" sudo --preserve-env=CARGO ./scripts/pkg/install-local-direct.sh \
+            --prefix "$RYEOS_SMOKE_PREFIX" --app-root "$RUNNER_TEMP/ryeos-node" \
             --populate --all --bundle-set standard --no-init --no-daemon-restart
 
       - name: Install headless Chromium for the smoke driver
@@ -1029,10 +1036,12 @@ jobs:
 
       - name: Exercise the browser client
         env:
-          RYEOS_SMOKE_TRUST_FILE: /usr/share/ryeos/.ai/PUBLISHER_TRUST.toml
+          RYEOS_SMOKE_TRUST_FILE: ${{ env.RYEOS_SMOKE_PREFIX }}/share/ryeos/.ai/PUBLISHER_TRUST.toml
+          RYEOS_SMOKE_BUNDLE_SOURCE: ${{ env.RYEOS_SMOKE_PREFIX }}/share/ryeos
           RYEOS_SMOKE_SHOTS: ${{ runner.temp }}/browser-smoke
           PLAYWRIGHT_ROOT: ${{ runner.temp }}/playwright
-        run: ./tests/e2e/browser-smoke/smoke.sh
+        run: |
+          PATH="$RYEOS_SMOKE_PREFIX/bin:$PATH" ./tests/e2e/browser-smoke/smoke.sh
 
       - name: Keep the smoke screenshots
         if: always()
