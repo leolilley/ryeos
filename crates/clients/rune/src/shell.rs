@@ -187,7 +187,6 @@ fn system_bar(vm: &RyeOsViewModel, local: &Local) -> El {
     // 11, "Bar, open") is not built; the bar stays the narrow chip column.
     // look: the switcher and the sheet carry no shadow; no shadow call is used
     // in this crate.
-    // look: the current chip is not scrolled into view when the list scrolls.
     let mut chips = col()
         .w_full()
         .gap(6.0)
@@ -261,7 +260,7 @@ fn system_bar(vm: &RyeOsViewModel, local: &Local) -> El {
                     .hover(t.select_fill())
                     .child(crate::icons::glyph(
                         &crate::icons::PLUS,
-                        12.0,
+                        14.0,
                         t.ink_at(0.40),
                     ))
                     .on_press(|app: &mut App| app.ui(RyeOsUiEvent::OpenLauncher)),
@@ -931,10 +930,16 @@ pub(crate) fn menu_intents<'a>(
 /// whatever the health says.
 fn health_color(vm: &RyeOsViewModel) -> rune::Color {
     let t = Tokens::get();
-    if vm.transport.freshness == RyeOsTransportFreshness::Current {
-        t.tone(vm.chrome.health_tone).unwrap_or(t.ink_dim())
-    } else {
-        t.warn
+    // A node the client cannot reach (the feed lost, or the session expired or
+    // revoked) is danger; a feed still connecting or catching up is warn.
+    match vm.transport.freshness {
+        RyeOsTransportFreshness::Current => t.tone(vm.chrome.health_tone).unwrap_or(t.ink_dim()),
+        RyeOsTransportFreshness::Reconnecting | RyeOsTransportFreshness::ExpiredOrRevoked => {
+            t.danger
+        }
+        RyeOsTransportFreshness::Connecting | RyeOsTransportFreshness::GapResnapshotRequired => {
+            t.warn
+        }
     }
 }
 

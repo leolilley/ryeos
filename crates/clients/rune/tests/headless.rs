@@ -636,3 +636,60 @@ fn a_hidden_status_bar_keeps_only_the_health_dot() {
         y + h
     );
 }
+
+fn exactly_keyed(rt: &Runtime<App>, key: &str) -> Option<[f32; 4]> {
+    rt.elements()
+        .into_iter()
+        .find(|element| element.key.as_deref() == Some(key))
+        .map(|element| element.rect)
+}
+
+#[test]
+fn the_current_view_set_tab_stays_in_view_when_the_tabs_scroll() {
+    let (width, height) = (900.0, 800.0);
+    let rt = shell("tabs", (width, height));
+    let vm = model(&rt);
+    let tabs = &vm.presentation.chrome.top_bar.tabs;
+    assert!(
+        vm.presentation.chrome.top_bar.visible,
+        "the tab band is shown"
+    );
+    assert_eq!(tabs.len(), 15, "the scene declares fifteen view sets");
+    let current = tabs
+        .iter()
+        .find(|tab| tab.active)
+        .expect("a view set is current");
+    assert_eq!(
+        current.view_set_id,
+        tabs.last().unwrap().view_set_id,
+        "the newest view set is current"
+    );
+    let rects: Vec<[f32; 4]> = tabs
+        .iter()
+        .filter_map(|tab| exactly_keyed(&rt, &format!("view-set:{}", tab.view_set_id)))
+        .collect();
+    let left = rects.iter().map(|r| r[0]).fold(f32::INFINITY, f32::min);
+    let right = rects
+        .iter()
+        .map(|r| r[0] + r[2])
+        .fold(f32::NEG_INFINITY, f32::max);
+    let drawn: Vec<String> = rt
+        .elements()
+        .into_iter()
+        .filter_map(|element| element.key)
+        .filter(|key| key.contains("view-set"))
+        .collect();
+    assert!(
+        right - left > width,
+        "the tabs overflow the band ({left}..{right} in {width}); band visible: {}; tabs: {}; drawn: {drawn:?}",
+        vm.presentation.chrome.top_bar.visible,
+        tabs.len()
+    );
+    let [x, _, w, _] = exactly_keyed(&rt, &format!("view-set:{}", current.view_set_id))
+        .expect("the current tab is drawn");
+    assert!(
+        x >= 0.0 && x + w <= width,
+        "the current tab is in view: {x}..{} in {width}",
+        x + w
+    );
+}
