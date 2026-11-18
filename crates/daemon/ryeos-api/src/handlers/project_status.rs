@@ -69,7 +69,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
             )
         })?;
     let policy = ProjectSnapshotPolicy::from_value(&policy_obj)?;
-    ryeos_state::project_sync::validate_project_tree_paths(&tree, &policy)?;
+    ryeos_state::project_sync::validate_stored_project_tree_paths(&tree, &policy)?;
     ryeos_state::project_sync::validate_captured_policy_source(cas, &tree, &policy)?;
 
     Ok(serde_json::json!({

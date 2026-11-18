@@ -345,6 +345,11 @@ fn preflight_verify_bundle_in_context_inner(
         }
         .context("preflight: bundle manifest verification")?;
         refuse_overlapping_owned_namespaces(source_path, dependency_bundle_roots, &trust_store)?;
+        // No kind schema is in scope, so a `{kind}` declaration cannot resolve
+        // and is refused as an unknown kind; explicit roots are still checked.
+        refuse_invalid_sync_include(source_path, dependency_bundle_roots, &trust_store, &|_| {
+            None
+        })?;
         validate_manifest_only_control_tree(&ai_dir)?;
         return Ok(PreflightReport::default());
     }
@@ -572,6 +577,12 @@ fn preflight_verify_bundle_in_context_inner(
     }
     .context("preflight: bundle manifest verification")?;
     refuse_overlapping_owned_namespaces(source_path, dependency_bundle_roots, &trust_store)?;
+    refuse_invalid_sync_include(
+        source_path,
+        dependency_bundle_roots,
+        &trust_store,
+        &|kind| kinds.directory(kind).map(str::to_owned),
+    )?;
 
     if !warnings.is_empty() {
         tracing::info!(
@@ -623,6 +634,46 @@ fn refuse_overlapping_owned_namespaces(
     }
     ryeos_engine::item_resolution::check_owned_namespace_claims(&claims)
         .map_err(|error| anyhow::anyhow!("preflight: {error}"))
+}
+
+/// Refuse a candidate bundle whose signed `sync_include` declarations are not
+/// legal against the floors, name an unknown kind, or overlap a declaration of
+/// an installed bundle (one of `dependency_bundle_roots`). The candidate's own
+/// earlier version, if installed, is replaced rather than conflicted with.
+fn refuse_invalid_sync_include(
+    candidate_root: &Path,
+    dependency_bundle_roots: &[PathBuf],
+    trust_store: &TrustStore,
+    kind_directory: &dyn Fn(&str) -> Option<String>,
+) -> Result<()> {
+    let (candidate, decls) = crate::manifest::verified_sync_include(candidate_root, trust_store)
+        .context("preflight: read candidate sync_include")?;
+    if decls.is_empty() {
+        return Ok(());
+    }
+    let mut bundles = vec![(candidate.clone(), decls)];
+    for root in dependency_bundle_roots {
+        if !root
+            .join(ryeos_engine::AI_DIR)
+            .join("manifest.yaml")
+            .is_file()
+        {
+            continue;
+        }
+        let (name, decls) = crate::manifest::verified_sync_include(root, trust_store)
+            .with_context(|| {
+                format!(
+                    "preflight: read sync_include of installed bundle at {}",
+                    root.display()
+                )
+            })?;
+        if name != candidate {
+            bundles.push((name, decls));
+        }
+    }
+    ryeos_state::project_sync::SyncInclude::compose(&bundles, kind_directory)
+        .map(|_| ())
+        .map_err(|error| anyhow::anyhow!("preflight: {error:#}"))
 }
 
 fn validate_manifest_only_control_tree(ai_dir: &Path) -> Result<()> {

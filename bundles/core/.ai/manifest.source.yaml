@@ -4,6 +4,42 @@ description: "Engine foundation: kind schemas, handlers, parsers, services, tool
 requires_kinds: []
 owns_namespaces:
   - ryeos/core
+# What AI-only project sync carries from a project's `.ai` tree. Item kinds
+# core ships are declared by kind (the root is that kind's location.directory);
+# the rest are explicit roots. Every node composes the union of its installed
+# bundles' declarations; floors (secrets, node-owned state) are enforced in
+# code and a declaration that touches one is refused at preflight.
+sync_include:
+  - kind: tool
+  - kind: parser
+  - kind: handler
+  - kind: protocol
+  - root: .ai/manifest.source.yaml
+    shape: file
+  - root: .ai/manifest.yaml
+    shape: file
+  - root: .ai/directives
+    shape: directory
+  - root: .ai/graphs
+    shape: directory
+  - root: .ai/knowledge
+    shape: directory
+  - root: .ai/node/engine/kinds
+    shape: directory
+  - root: .ai/node/commands
+    shape: directory
+  - root: .ai/config/agent
+    shape: directory
+  - root: .ai/config/execution
+    shape: directory
+  - root: .ai/config/directive-runtime
+    shape: directory
+  - root: .ai/config/ryeos-runtime
+    shape: directory
+  - root: .ai/config/development
+    shape: directory
+  - root: .ai/config/schedules
+    shape: directory
 runtime_authority:
   project_snapshots: [status, log, show, create]
 isolation_backends:

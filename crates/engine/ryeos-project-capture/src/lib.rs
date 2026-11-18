@@ -427,6 +427,10 @@ fn transfer_closure_digest(snapshot_hash: &str, entries: &[serde_json::Value]) -
 
 /// Capture one complete project tree with descriptor-relative traversal and
 /// streaming blob ingestion. The policy is immutable input to this capture.
+///
+/// This and the other `ingest_project_tree*` functions capture FULL-PROJECT
+/// policies only; an AI-only policy is refused because its capture filter is
+/// the node's `sync_include` table. Use [`ingest_project_tree_ai_only`].
 pub fn ingest_project_tree(
     authority: &ryeos_state::PinnedStateAuthority,
     guard: &ryeos_state::CasMutationGuard,
@@ -454,6 +458,28 @@ pub fn ingest_project_tree_with_operational_exclusions(
         policy,
         operational_exclusions,
         None,
+        None,
+    )
+}
+
+/// Capture an AI-only project tree: only paths inside `include` are admitted,
+/// judged against the capturing node's current table. This is a production
+/// point (sender capture), so it takes the table explicitly.
+pub fn ingest_project_tree_ai_only(
+    authority: &ryeos_state::PinnedStateAuthority,
+    guard: &ryeos_state::CasMutationGuard,
+    project_root: &lillux::PinnedDirectory,
+    policy: &ProjectSnapshotPolicy,
+    include: &ryeos_state::project_sync::SyncInclude,
+) -> Result<ProjectTree> {
+    ingest_project_tree_inner(
+        authority,
+        guard,
+        project_root,
+        policy,
+        &[],
+        None,
+        Some(include),
     )
 }
 
@@ -483,7 +509,15 @@ pub fn ingest_project_tree_bounded(
     policy: &ProjectSnapshotPolicy,
     budget: ProjectCaptureBudget,
 ) -> Result<ProjectTree> {
-    ingest_project_tree_inner(authority, guard, project_root, policy, &[], Some(budget))
+    ingest_project_tree_inner(
+        authority,
+        guard,
+        project_root,
+        policy,
+        &[],
+        Some(budget),
+        None,
+    )
 }
 
 pub fn ingest_project_tree_bounded_with_exclusions(
@@ -501,6 +535,7 @@ pub fn ingest_project_tree_bounded_with_exclusions(
         policy,
         operational_exclusions,
         Some(budget),
+        None,
     )
 }
 
@@ -511,12 +546,19 @@ fn ingest_project_tree_inner(
     policy: &ProjectSnapshotPolicy,
     operational_exclusions: &[String],
     budget: Option<ProjectCaptureBudget>,
+    include: Option<&ryeos_state::project_sync::SyncInclude>,
 ) -> Result<ProjectTree> {
     if let Some(budget) = budget {
         budget.check()?;
     }
     authority.ensure_guard(guard)?;
     policy.validate()?;
+    if policy.sync_scope == ryeos_state::project_sync::ProjectSyncScope::AiOnly && include.is_none()
+    {
+        anyhow::bail!(
+            "AI-only project capture requires the node's sync_include table; this entry point captures full_project policies only"
+        );
+    }
     validate_operational_exclusions(operational_exclusions)?;
     let matcher = policy.matcher()?;
     let cas = authority.cas_store()?;
@@ -539,9 +581,15 @@ fn ingest_project_tree_inner(
             {
                 return Ok(true);
             }
-            if policy.sync_scope == ryeos_state::project_sync::ProjectSyncScope::AiOnly {
+            if let Some(include) = include
+                && policy.sync_scope == ryeos_state::project_sync::ProjectSyncScope::AiOnly
+            {
                 return Ok(!matches!(
-                    ryeos_state::project_sync::classify_project_ai_path(&rel, Some(&matcher)),
+                    ryeos_state::project_sync::classify_project_ai_path(
+                        &rel,
+                        Some(&matcher),
+                        include
+                    ),
                     ryeos_state::project_sync::ProjectAiPathClass::Deployable(_)
                 ));
             }
@@ -559,11 +607,19 @@ fn ingest_project_tree_inner(
                 );
             }
             let rel = canonical_relative_path(relative)?;
-            ryeos_state::project_sync::validate_project_manifest_path(
-                &rel,
-                policy.sync_scope,
-                Some(&matcher),
-            )?;
+            match include {
+                Some(include) => ryeos_state::project_sync::validate_project_manifest_path(
+                    &rel,
+                    policy.sync_scope,
+                    Some(&matcher),
+                    include,
+                )?,
+                None => ryeos_state::project_sync::validate_stored_project_manifest_path(
+                    &rel,
+                    policy.sync_scope,
+                    Some(&matcher),
+                )?,
+            }
             let streamed = if let Some(budget) = budget {
                 cas.put_blob_from_open_regular_with_deadline(
                     file,
@@ -607,7 +663,12 @@ fn ingest_project_tree_inner(
         },
     )?;
     let tree = ProjectTree { files };
-    ryeos_state::project_sync::validate_project_tree_paths(&tree, policy)?;
+    match include {
+        Some(include) => {
+            ryeos_state::project_sync::validate_project_tree_paths(&tree, policy, include)?
+        }
+        None => ryeos_state::project_sync::validate_stored_project_tree_paths(&tree, policy)?,
+    }
     if let Some(budget) = budget {
         budget.check()?;
     }

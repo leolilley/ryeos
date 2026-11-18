@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-17T22:09:14Z:2459c47ef365d81cccc3fbea9090783a1087a974f742054b7f02b183ce86e186:izIzPQprDkal10uLEETPRMjkKe/Znvumcd7/nwDLq2QEb7/pv7c1TV9zkej15BXuQzmdr7Qfaa8x+NJUuqWpDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T07:27:02Z:5da0abce5bbc84e3b324c0cdb8bd1427638fdcc3aa254d3b392fed7b52f394a8:DKEBDG7lD+FQoOEmofH3MHhYhiv5nGahiudiJ4KJsR0f38QW3Ki9ga3ZDM/G3j+lzjeG1bxK37SqHyzRX1QiBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-project
 title: Project
 version: "1.0.0"
@@ -38,6 +38,9 @@ library:
     views:
       - view:ryeos/project/files
       - view:ryeos/project/items
+      - view:ryeos/project/directives
+      - view:ryeos/project/graphs
+      - view:ryeos/project/knowledge
       - view:ryeos/project/schedules
       - view:ryeos/items/space
 

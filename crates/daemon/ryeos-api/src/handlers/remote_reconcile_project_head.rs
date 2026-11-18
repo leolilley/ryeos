@@ -832,7 +832,7 @@ fn validate_project_generation(state: &AppState, snapshot_hash: &str) -> Result<
     if policy.sync_scope != ProjectSyncScope::FullProject {
         bail!("project-head reconciliation requires full_project generations");
     }
-    ryeos_state::project_sync::validate_project_tree_paths(&tree, &policy)?;
+    ryeos_state::project_sync::validate_stored_project_tree_paths(&tree, &policy)?;
     let target_ignore = state
         .node_policy
         .require::<ryeos_node_runtime::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy>()?;
