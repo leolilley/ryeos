@@ -513,6 +513,7 @@ fn validate_event_type(event_type: &str) -> Result<()> {
             | ryeos_state::event_types::PROJECT_OBSERVATION_RECORDED
             | ryeos_state::event_types::PROVIDER_CALL_OBSERVATION_RECORDED
             | ryeos_state::event_types::ATTENTION_ACKNOWLEDGED
+            | ryeos_state::event_types::LAUNCH_BINDING_REBOUND
     ) {
         bail!(
             "event append refused: `{event_type}` is daemon-authored and cannot be appended by a runtime"
@@ -826,6 +827,7 @@ mod tests {
             ryeos_state::event_types::PROJECT_OBSERVATION_RECORDED,
             ryeos_state::event_types::PROVIDER_CALL_OBSERVATION_RECORDED,
             ryeos_state::event_types::ATTENTION_ACKNOWLEDGED,
+            ryeos_state::event_types::LAUNCH_BINDING_REBOUND,
         ] {
             let error = validate_event_type(event_type).unwrap_err();
             assert!(

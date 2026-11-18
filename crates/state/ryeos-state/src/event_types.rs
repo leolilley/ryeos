@@ -67,6 +67,10 @@ event_types! {
     /// Daemon-authored, once per launch attempt: the kind of root the process's
     /// inputs were laid out in (`live`, `sparse_private`, `pinned`, ...). Names no path.
     PROCESS_INPUT_ROOT_SELECTED = "process_input_root_selected";
+    /// Daemon-authored, once in the birth batch of an operator rebind
+    /// successor: the source thread, each replaced ref binding (`from`, `to`)
+    /// and the launch's runtime facts before and after.
+    LAUNCH_BINDING_REBOUND = "launch_binding_rebound";
     THREAD_FACET_SET = "thread_facet_set";
 
     COGNITION_IN = "cognition_in";
