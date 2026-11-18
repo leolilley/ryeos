@@ -2,7 +2,7 @@
 //! set, status bar, notices and dialogs. Layout and metrics follow the
 //! browser shell's stylesheet.
 
-use rune::{El, Key, KeyEvent, col, el, row, text, text_input};
+use rune::{El, Key, KeyEvent, ScrollSpec, col, el, row, text, text_input};
 use ryeos_client_base::layout::SplitBranch;
 use ryeos_client_base::ui::event::{RyeOsInputAction, RyeOsTransportFreshness};
 use ryeos_client_base::ui::view_model::{
@@ -14,7 +14,7 @@ use ryeos_client_base::ui::{RyeOsUiEvent, RyeOsUiIntent};
 
 use ryeos_client_runtime::documents::{DocumentOffer, DocumentState};
 
-use crate::theme::{self, Palette, STATUS_HEIGHT, Tokens};
+use crate::theme::{self, Palette, Tokens};
 use crate::views;
 use crate::{App, Local, RenameTarget};
 
@@ -163,30 +163,50 @@ fn system_bar(vm: &RyeOsViewModel, local: &Local) -> El {
     // look: the chip would show the Surface's picture or mark, and carry a
     // warn or accent dot for work needing you or running; the view model has
     // neither, so the chip shows the ordinal.
-    let mut switcher = col()
-        .pin(
-            Some(theme::SWITCHER_INSET),
-            Some(theme::SWITCHER_INSET),
-            None,
-            None,
-        )
-        .w(if renaming {
-            theme::SWITCHER_RENAME_WIDTH
-        } else {
-            theme::SWITCHER_WIDTH
-        })
+    // look: the switcher's open state with the Surfaces' names (spec section
+    // 11, "Bar, open") is not built; the bar stays the narrow chip column.
+    // look: the switcher and the sheet carry no shadow; no shadow call is used
+    // in this crate.
+    // look: the current chip is not scrolled into view when the list scrolls.
+    let mut chips = col()
+        .w_full()
+        .gap(6.0)
+        .min_h(0.0)
+        .role("tablist")
+        .label("Open Surfaces")
+        .scroll(ScrollSpec {
+            stick_bottom: false,
+        });
+    for surface in &session.surfaces {
+        chips = chips.child(surface_entry(surface, local));
+    }
+    // The column is bounded by a pin on top and bottom (clear of the status
+    // bar), so a long list scrolls instead of growing over the body.
+    let switcher = col()
+        .w_full()
+        .shrink()
+        .min_h(0.0)
         .px(6.0)
         .py(3.0)
         .gap(6.0)
         .radius(theme::RADIUS_SWITCHER)
         .fill(t.bg_at(theme::BAR_FILL))
         .border(1.0, t.ink_at(theme::BAR_BORDER))
-        .role("tablist")
-        .label("Open Surfaces");
-    for surface in &session.surfaces {
-        switcher = switcher.child(surface_entry(surface, local));
-    }
-    switcher.child(
+        .child(chips);
+    col()
+        .pin(
+            Some(theme::SWITCHER_INSET),
+            Some(theme::SWITCHER_INSET),
+            None,
+            Some(theme::STATUS_BAR_HEIGHT + theme::SWITCHER_INSET),
+        )
+        .w(if renaming {
+            theme::SWITCHER_RENAME_WIDTH
+        } else {
+            theme::SWITCHER_WIDTH
+        })
+        .min_h(0.0)
+        .child(switcher.child(
         col()
             .size(theme::SWITCHER_CHIP, 30.0)
             .center()
@@ -196,7 +216,7 @@ fn system_bar(vm: &RyeOsViewModel, local: &Local) -> El {
             .hover(t.select_fill())
             .child(crate::icons::glyph(&crate::icons::PLUS, 12.0, t.ink_at(0.40)))
             .on_press(|app: &mut App| app.ui(RyeOsUiEvent::OpenLauncher)),
-    )
+    ))
 }
 
 /// One open Surface as a chip in the switcher. The current one has the strong
@@ -313,6 +333,7 @@ fn view_set_strip(top_bar: &RyeOsTopBarVm, local: &Local) -> El {
         .gap(28.0)
         .center_y()
         .scroll_x();
+    // look: the plus does not stay fixed at the right while the tabs scroll.
     for tab in &top_bar.tabs {
         let view_set_id = tab.view_set_id;
         let renaming = tab.active
@@ -853,7 +874,13 @@ fn status_bar(vm: &RyeOsViewModel) -> El {
     let t = Tokens::get();
     let model = &vm.presentation.chrome.status_bar;
     if !model.visible {
-        return el().h(0.0);
+        // The node's health stays in the tree for assistive tech when the bar
+        // is hidden: a zero-size element with the same role and label.
+        return el().w(0.0).h(0.0).role("status").label(format!(
+            "{} · {}",
+            vm.chrome.health_label,
+            freshness_label(vm.transport.freshness)
+        ));
     }
     let working = model.energy > 0.05;
     let island = || {
@@ -967,7 +994,7 @@ fn status_bar(vm: &RyeOsViewModel) -> El {
 fn notices(notices: &[RyeOsNoticeVm], documents: &[(DocumentOffer, Option<String>)]) -> El {
     let p = Palette::get();
     let mut stack = col()
-        .pin(None, None, Some(20.0), Some(STATUS_HEIGHT + 18.0))
+        .pin(None, None, Some(20.0), Some(theme::STATUS_BAR_HEIGHT + 18.0))
         .w(390.0)
         .gap(8.0);
     for (offer, link) in documents {
@@ -1156,7 +1183,7 @@ fn dialog_layer(dialog: &RyeOsDialogVm, local: &Local) -> El {
     col()
         .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
         .items_center()
-        .pt(if local.narrow() { 36.0 } else { 150.0 })
+        .pt(if local.narrow() { 36.0 } else { 120.0 })
         .px(if local.narrow() { 8.0 } else { 18.0 })
         .pb(if local.narrow() { 8.0 } else { 18.0 })
         .fill(t.bg_at(theme::SCRIM_FILL))

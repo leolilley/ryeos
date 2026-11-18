@@ -304,8 +304,19 @@ fn texts_in_band(rt: &Runtime<App>, top: f32, bottom: f32) -> Vec<String> {
         .collect()
 }
 
+/// Every drawn text with its rectangle.
+fn drawn_texts(rt: &Runtime<App>) -> Vec<(String, [f32; 4])> {
+    rt.elements()
+        .into_iter()
+        .filter_map(|element| element.text.map(|text| (text, element.rect)))
+        .collect()
+}
+
+/// The chrome never shows the project's filesystem path. The chrome is the
+/// Surfaces switcher down the left edge (x under 50) and the tabs band (the top
+/// 50 points); it must draw something, and none of it carries the path.
 #[test]
-fn the_system_bar_never_shows_the_project_path() {
+fn the_chrome_never_shows_the_project_path() {
     for scene in ["", "field", "launcher"] {
         let rt = shell(scene, (1280.0, 800.0));
         let vm = model(&rt);
@@ -314,13 +325,16 @@ fn the_system_bar_never_shows_the_project_path() {
             .project_path
             .clone()
             .expect("the fixture session has a project path to hide");
-        // The system bar is the first 28 points of the page.
-        let bar = texts_in_band(&rt, 0.0, 28.0);
-        assert!(!bar.is_empty(), "{scene}: the system bar says something");
-        for text in &bar {
+        let chrome: Vec<String> = drawn_texts(&rt)
+            .into_iter()
+            .filter(|(_, [x, y, _, h])| *x < 50.0 || y + h / 2.0 <= 50.0)
+            .map(|(text, _)| text)
+            .collect();
+        assert!(!chrome.is_empty(), "{scene}: the chrome says something");
+        for text in &chrome {
             assert!(
                 !text.contains(&path) && !text.contains("/home/"),
-                "{scene}: the system bar shows {text:?}"
+                "{scene}: the chrome shows {text:?}"
             );
         }
     }
@@ -343,37 +357,44 @@ fn the_status_bar_shows_only_its_segments() {
         return;
     };
     assert!(status.visible);
-    let expected: Vec<String> = status
-        .segments
-        .iter()
-        .map(
-            |segment| match segment.label.as_deref().filter(|label| !label.is_empty()) {
-                Some(label) => format!("{label} {}", segment.value),
-                None => segment.value.clone(),
-            },
-        )
-        .collect();
+    let [launch_x, launch_y, launch_w, launch_h] =
+        keyed(&rt, "shell:launch").expect("the launch control");
+    let launch_right = launch_x + launch_w;
     // The islands share one row; read the whole band the launcher sits in.
     let shown = texts_in_band(&rt, top, top + height);
     assert!(
         shown.contains(&"Launch".to_owned()),
         "the launch control's name in {shown:?}"
     );
-    for segment in &expected {
-        // A segment's label and value are separate texts beside a dot.
-        let mut words = segment.splitn(2, ' ');
-        let first = words.next().unwrap_or_default();
-        assert!(
-            shown.iter().any(|text| text == segment || text == first),
-            "segment {segment:?} in {shown:?}"
-        );
-        if let Some(rest) = words.next() {
+    // A text is in the right island when it is right of the launch control and
+    // its vertical centre is within the launch control's top..bottom band.
+    let in_right_island = |wanted: &str| {
+        drawn_texts(&rt).into_iter().any(|(text, [x, y, _, h])| {
+            let middle = y + h / 2.0;
+            text == wanted
+                && x >= launch_right
+                && middle >= launch_y
+                && middle <= launch_y + launch_h
+        })
+    };
+    for segment in &status.segments {
+        if let Some(label) = segment.label.as_deref().filter(|label| !label.is_empty()) {
             assert!(
-                shown.iter().any(|text| text == segment || text == rest),
-                "segment {segment:?} in {shown:?}"
+                in_right_island(label),
+                "segment label {label:?} in the right island, saw {shown:?}"
             );
         }
+        assert!(
+            in_right_island(&segment.value),
+            "segment value {:?} in the right island, saw {shown:?}",
+            segment.value
+        );
     }
+    assert!(
+        in_right_island(&vm.chrome.health_label),
+        "the node health {:?} in the right island, saw {shown:?}",
+        vm.chrome.health_label
+    );
     assert!(
         !shown.iter().any(|text| text.eq_ignore_ascii_case("RYEOS")),
         "the status bar carries no product name, found {shown:?}"
@@ -484,20 +505,20 @@ fn long_lists_build_only_the_rows_in_view_and_the_feed_opens_at_its_end() {
 #[test]
 fn the_switcher_holds_the_left_edge_and_the_status_islands_float() {
     let (width, height) = (1280.0, 800.0);
-    // The islands and the switcher sit about 10 in from the edges, plus their
-    // own padding.
-    let near = 24.0;
     let rt = shell("", (width, height));
+    let close = |value: f32, wanted: f32, what: &str| {
+        assert!(
+            (value - wanted).abs() <= 2.0,
+            "{what}: {value}, wanted about {wanted}"
+        );
+    };
+    // The status row has a 10 inset at the sides and the bottom and each island
+    // pads 12, so the launch control sits at x = 10 + 12. The row is 40 high
+    // with 10 beneath; its 30 high island holds the 20 high launch control
+    // centred, leaving 5 below it: bottom = height - 10 - (30 - 20) / 2.
     let [x, y, _, tall] = keyed(&rt, "shell:launch").expect("the launch control is drawn");
-    assert!(
-        x > 0.0 && x <= near,
-        "the launch control is inset from the left edge, at {x}"
-    );
-    let gap = height - (y + tall);
-    assert!(
-        gap > 0.0 && gap <= near,
-        "the island floats just above the bottom edge, {gap} away"
-    );
+    close(x, 10.0 + 12.0, "the launch control's x");
+    close(y + tall, height - 10.0 - (30.0 - 20.0) / 2.0, "the launch control's bottom");
     let vm = model(&rt);
     let current = vm
         .session
@@ -505,21 +526,45 @@ fn the_switcher_holds_the_left_edge_and_the_status_islands_float() {
         .iter()
         .find(|surface| surface.active)
         .expect("the fixture has a current Surface");
+    // The chip has no key of its own; its entry holds it. The switcher is 10
+    // in from the corner, then 6 (x) and 3 (y) of padding.
     let [sx, sy, sw, _] = keyed(&rt, &format!("surface:{:?}", current.surface_instance_id))
         .expect("the current Surface is a chip in the switcher");
-    assert!(
-        sx > 0.0 && sx <= near && sy > 0.0 && sy <= near,
-        "the switcher is pinned in from the top-left corner, at ({sx}, {sy})"
-    );
+    close(sx, 10.0 + 6.0, "the Surface chip's x");
+    close(sy, 10.0 + 3.0, "the Surface chip's y");
     assert!(sw <= 40.0, "the Surface chip is narrow, {sw} wide");
+    // The first tile is the first thing the body draws (keys `tile:`); the
+    // frame reserves 44 and the body 18, so it starts at 62 or later.
+    let mut tiles: Vec<[f32; 4]> = rt
+        .elements()
+        .into_iter()
+        .filter(|element| {
+            element
+                .key
+                .as_deref()
+                .is_some_and(|key| key.starts_with("tile:"))
+        })
+        .map(|element| element.rect)
+        .collect();
+    assert!(!tiles.is_empty(), "the body draws a tile");
+    tiles.sort_by(|a, b| a[0].total_cmp(&b[0]));
+    assert!(
+        tiles[0][0] >= 62.0 - 0.01,
+        "the first tile starts clear of the switcher, at {}",
+        tiles[0][0]
+    );
+    let body_bottom = tiles
+        .iter()
+        .map(|[_, ty, _, th]| ty + th)
+        .fold(0.0_f32, f32::max);
     let status = rt
         .elements()
         .into_iter()
         .find(|element| element.role == "status")
         .expect("the node's status is in the status bar");
     assert!(
-        status.rect[1] > height / 2.0,
-        "the node's status sits in the bottom band, not at {}",
+        status.rect[1] >= body_bottom - 0.5,
+        "the node's status at {} sits below the body, which ends at {body_bottom}",
         status.rect[1]
     );
 }

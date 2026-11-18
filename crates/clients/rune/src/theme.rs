@@ -331,9 +331,6 @@ pub const fn data(size: f32) -> TextStyle {
     TextStyle::new(size, 400.0).family(DATA)
 }
 
-/// Fixed shell metrics, in points.
-pub const STATUS_HEIGHT: f32 = 28.0;
-
 /// Which embedded face a string is set in.
 #[derive(Clone, Copy, PartialEq)]
 pub enum Face {
