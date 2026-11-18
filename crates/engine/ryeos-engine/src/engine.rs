@@ -973,6 +973,9 @@ pub struct Engine {
 pub struct CheckedEngineGeneration<'a> {
     engine: &'a Engine,
     request_engine_generation_identity: String,
+    /// Token of the enclosing guarded operation. Worker threads started by
+    /// this view's batch methods run under it.
+    verified: &'a crate::isolation::VerifiedGeneration,
 }
 
 /// Signed Bundle item bytes captured only for controller-owned source
@@ -1057,6 +1060,17 @@ impl CheckedEngineGeneration<'_> {
     /// registered paths.
     pub fn request_engine_generation_identity(&self) -> &str {
         &self.request_engine_generation_identity
+    }
+
+    /// Verify every installed bundle now, in addition to the verification
+    /// before and after this guarded operation. An operation that commits an
+    /// effect it cannot undo calls this immediately before the commit, so the
+    /// effect is never committed on a generation last verified before the
+    /// operation's own reads.
+    pub fn verify_before_commit(&self) -> Result<(), EngineError> {
+        self.engine
+            .isolation_generation
+            .verify_registered_generation_now()
     }
 
     pub fn resolve(
@@ -1385,7 +1399,8 @@ impl CheckedEngineGeneration<'_> {
         item_refs: &[CanonicalRef],
     ) -> Vec<Result<ResolvedItem, EngineError>> {
         parallel_map_ordered(item_refs, |item_ref| {
-            self.engine.resolve_current(ctx, item_ref)
+            self.verified
+                .cover_current_thread(|| self.engine.resolve_current(ctx, item_ref))
         })
     }
 
@@ -1396,7 +1411,8 @@ impl CheckedEngineGeneration<'_> {
         requests: &[EffectiveItemRequest],
     ) -> Vec<Result<EffectiveItem, EngineError>> {
         parallel_map_ordered(requests, |request| {
-            self.engine.effective_item_current(request.clone())
+            self.verified
+                .cover_current_thread(|| self.engine.effective_item_current(request.clone()))
         })
     }
 
@@ -1712,6 +1728,13 @@ impl Engine {
     /// Run a coherent read batch against one verified installed-bundle
     /// generation. Supported bundle mutations are excluded for the duration;
     /// concurrent read batches remain independent.
+    ///
+    /// The generation is verified once before `operation` and once after it,
+    /// and a failed after-verification refuses the result. Guarded engine
+    /// calls and handler launches that `operation` makes for the same
+    /// generation are covered by those two verifications and do not verify
+    /// again. A guarded call nested inside another for the same generation
+    /// therefore adds none; the outermost call keeps both of its own.
     pub fn with_checked_bundle_generation<T, E>(
         &self,
         operation: impl FnOnce(&CheckedEngineGeneration<'_>) -> Result<T, E>,
@@ -1724,17 +1747,14 @@ impl Engine {
             .begin_registered_generation_operation()
             .map_err(E::from)?;
         self.isolation_generation
-            .ensure_registered_generation_current()
-            .map_err(E::from)?;
-        let generation = CheckedEngineGeneration {
-            engine: self,
-            request_engine_generation_identity: self.request_engine_generation_identity(),
-        };
-        let value = operation(&generation)?;
-        self.isolation_generation
-            .ensure_registered_generation_current()
-            .map_err(E::from)?;
-        Ok(value)
+            .with_verified_generation(|verified| {
+                let generation = CheckedEngineGeneration {
+                    engine: self,
+                    request_engine_generation_identity: self.request_engine_generation_identity(),
+                    verified,
+                };
+                operation(&generation)
+            })
     }
 
     pub fn with_trust_store(mut self, trust_store: TrustStore) -> Self {
@@ -4657,6 +4677,24 @@ mod tests {
     struct CountingGenerationLifeline {
         begins: AtomicUsize,
         checks: AtomicUsize,
+        /// Set by a test to stand for installed bundles that changed.
+        changed: std::sync::atomic::AtomicBool,
+    }
+
+    /// A test engine retaining its own registered generation, with the
+    /// lifeline that counts its verifications.
+    fn engine_with_counted_generation() -> (
+        Engine,
+        std::sync::Arc<CountingGenerationLifeline>,
+        std::sync::Arc<crate::isolation::IsolationRuntime>,
+    ) {
+        let lifeline = std::sync::Arc::new(CountingGenerationLifeline::default());
+        let isolation = std::sync::Arc::new(
+            crate::isolation::IsolationRuntime::disabled_for_authoring()
+                .retain_registered_generation(lifeline.clone(), TrustStore::empty(), vec![]),
+        );
+        let engine = test_engine().with_isolation_generation(isolation.clone());
+        (engine, lifeline, isolation)
     }
 
     #[test]
@@ -4735,6 +4773,9 @@ mod tests {
 
         fn ensure_current(&self) -> Result<(), String> {
             self.checks.fetch_add(1, Ordering::SeqCst);
+            if self.changed.load(Ordering::SeqCst) {
+                return Err("installed bundles changed".to_string());
+            }
             Ok(())
         }
     }
@@ -5379,6 +5420,217 @@ formats:
             .unwrap();
 
         assert_eq!(lifeline.begins.load(Ordering::SeqCst), 1);
+        assert_eq!(lifeline.checks.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn nested_guarded_call_is_covered_by_the_enclosing_verification() {
+        let (engine, lifeline, isolation) = engine_with_counted_generation();
+
+        engine
+            .with_checked_bundle_generation(|_| -> Result<(), EngineError> {
+                assert_eq!(lifeline.checks.load(Ordering::SeqCst), 1);
+                // A guarded engine call, a guarded call on a clone of the
+                // engine, and a bare verification point of the same retained
+                // generation: none verifies again.
+                engine.with_checked_bundle_generation(|_| -> Result<(), EngineError> {
+                    engine
+                        .clone()
+                        .with_checked_bundle_generation(|_| -> Result<(), EngineError> { Ok(()) })
+                })?;
+                isolation.ensure_registered_generation_current()?;
+                assert_eq!(lifeline.checks.load(Ordering::SeqCst), 1);
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(
+            lifeline.checks.load(Ordering::SeqCst),
+            2,
+            "once before and once after the outermost operation"
+        );
+        assert_eq!(
+            lifeline.begins.load(Ordering::SeqCst),
+            3,
+            "each guarded call still holds the generation operation lock"
+        );
+    }
+
+    #[test]
+    fn verification_outside_a_guarded_operation_always_verifies() {
+        let (engine, lifeline, isolation) = engine_with_counted_generation();
+
+        isolation.ensure_registered_generation_current().unwrap();
+        assert_eq!(lifeline.checks.load(Ordering::SeqCst), 1);
+
+        engine
+            .with_checked_bundle_generation(|_| -> Result<(), EngineError> { Ok(()) })
+            .unwrap();
+        assert_eq!(lifeline.checks.load(Ordering::SeqCst), 3);
+
+        // The operation has ended: nothing it verified covers a later call.
+        isolation.ensure_registered_generation_current().unwrap();
+        engine
+            .with_checked_bundle_generation(|_| -> Result<(), EngineError> { Ok(()) })
+            .unwrap();
+        assert_eq!(lifeline.checks.load(Ordering::SeqCst), 6);
+
+        // A failed operation also ends its coverage.
+        let failed = engine.with_checked_bundle_generation(|_| -> Result<(), EngineError> {
+            Err(EngineError::Internal("operation failed".into()))
+        });
+        assert!(failed.is_err());
+        assert_eq!(lifeline.checks.load(Ordering::SeqCst), 7);
+        isolation.ensure_registered_generation_current().unwrap();
+        assert_eq!(lifeline.checks.load(Ordering::SeqCst), 8);
+    }
+
+    #[test]
+    fn guarded_call_for_another_generation_verifies_for_itself() {
+        let (outer, outer_lifeline, _) = engine_with_counted_generation();
+        let (inner, inner_lifeline, inner_isolation) = engine_with_counted_generation();
+
+        outer
+            .with_checked_bundle_generation(|_| -> Result<(), EngineError> {
+                // The enclosing operation verified `outer`'s generation only.
+                inner_isolation.ensure_registered_generation_current()?;
+                assert_eq!(inner_lifeline.checks.load(Ordering::SeqCst), 1);
+                inner.with_checked_bundle_generation(|_| -> Result<(), EngineError> { Ok(()) })?;
+                assert_eq!(inner_lifeline.checks.load(Ordering::SeqCst), 3);
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(outer_lifeline.checks.load(Ordering::SeqCst), 2);
+        assert_eq!(inner_lifeline.checks.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn bundle_change_during_a_guarded_operation_refuses_its_result() {
+        let (engine, lifeline, isolation) = engine_with_counted_generation();
+        let committed = std::cell::Cell::new(false);
+
+        let result = engine.with_checked_bundle_generation(|generation| {
+            // The bundles change while the operation runs. Nested calls are
+            // covered and do not notice.
+            lifeline.changed.store(true, Ordering::SeqCst);
+            engine.with_checked_bundle_generation(|_| -> Result<(), EngineError> { Ok(()) })?;
+            isolation.ensure_registered_generation_current()?;
+            assert_eq!(lifeline.checks.load(Ordering::SeqCst), 1);
+
+            // A commit point verifies for itself and refuses before the effect.
+            let before_commit = generation.verify_before_commit();
+            assert!(matches!(
+                before_commit,
+                Err(EngineError::IsolationPolicyRefused { .. })
+            ));
+            assert_eq!(lifeline.checks.load(Ordering::SeqCst), 2);
+            if before_commit.is_ok() {
+                committed.set(true);
+            }
+            Ok::<_, EngineError>("value computed on changed bundles")
+        });
+
+        // The operation itself returned a value; the after-verification
+        // refuses it.
+        assert!(
+            matches!(result, Err(EngineError::IsolationPolicyRefused { ref reason })
+                if reason.contains("registered bundle generation changed")),
+            "{result:?}"
+        );
+        assert!(!committed.get());
+        assert_eq!(lifeline.checks.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn bundle_change_before_a_guarded_operation_never_runs_it() {
+        let (engine, lifeline, _) = engine_with_counted_generation();
+        lifeline.changed.store(true, Ordering::SeqCst);
+        let ran = std::cell::Cell::new(false);
+
+        let result = engine.with_checked_bundle_generation(|_| -> Result<(), EngineError> {
+            ran.set(true);
+            Ok(())
+        });
+
+        assert!(matches!(
+            result,
+            Err(EngineError::IsolationPolicyRefused { .. })
+        ));
+        assert!(!ran.get());
+        assert_eq!(lifeline.checks.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn concurrent_operations_on_other_threads_share_no_coverage() {
+        let (engine, lifeline, isolation) = engine_with_counted_generation();
+        let (inside, wait_inside) = std::sync::mpsc::channel::<()>();
+        let (release, wait_release) = std::sync::mpsc::channel::<()>();
+
+        let (engine, isolation) = (&engine, &isolation);
+        std::thread::scope(|scope| {
+            // One thread sits inside a guarded operation.
+            let holder = scope.spawn(move || {
+                engine
+                    .with_checked_bundle_generation(|_| -> Result<(), EngineError> {
+                        inside.send(()).unwrap();
+                        wait_release.recv().unwrap();
+                        isolation.ensure_registered_generation_current()?;
+                        Ok(())
+                    })
+                    .unwrap();
+            });
+            wait_inside.recv().unwrap();
+            assert_eq!(lifeline.checks.load(Ordering::SeqCst), 1);
+
+            // Meanwhile this thread, and a second operation on a third thread,
+            // verify for themselves although the generation is the same.
+            isolation.ensure_registered_generation_current().unwrap();
+            assert_eq!(lifeline.checks.load(Ordering::SeqCst), 2);
+            scope
+                .spawn(|| {
+                    engine
+                        .with_checked_bundle_generation(|_| -> Result<(), EngineError> {
+                            isolation.ensure_registered_generation_current()
+                        })
+                        .unwrap();
+                })
+                .join()
+                .unwrap();
+            assert_eq!(lifeline.checks.load(Ordering::SeqCst), 4);
+
+            release.send(()).unwrap();
+            holder.join().unwrap();
+        });
+
+        // The holder's covered verification point added nothing; its
+        // after-verification added one.
+        assert_eq!(lifeline.checks.load(Ordering::SeqCst), 5);
+    }
+
+    #[test]
+    fn batch_workers_run_under_the_enclosing_verification() {
+        let (engine, lifeline, _) = engine_with_counted_generation();
+        let ctx = test_plan_context();
+        let item_refs: Vec<CanonicalRef> = (0..4)
+            .map(|index| CanonicalRef::parse(&format!("tool:missing-{index}")).unwrap())
+            .collect();
+
+        engine
+            .with_checked_bundle_generation(|generation| -> Result<(), EngineError> {
+                let covered = super::parallel_map_ordered(&item_refs, |_| {
+                    generation.verified.cover_current_thread(|| {
+                        engine
+                            .isolation_generation
+                            .ensure_registered_generation_current()
+                    })
+                });
+                assert!(covered.into_iter().all(|outcome| outcome.is_ok()));
+                assert_eq!(generation.resolve_many(&ctx, &item_refs).len(), 4);
+                Ok(())
+            })
+            .unwrap();
+
         assert_eq!(lifeline.checks.load(Ordering::SeqCst), 2);
     }
 

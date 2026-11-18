@@ -1608,6 +1608,11 @@ pub async fn handle_open(
                                         attachment.project_authority.as_deref(),
                                     )?;
                                 }
+                                // Publishing the membership is the commit of this
+                                // admission: verify the installed bundles once more
+                                // after every closure was re-resolved, so a membership
+                                // is never published from bundles that have changed.
+                                generation.verify_before_commit()?;
                                 // The store checks root/policy/principal/project identity,
                                 // every capacity and counter before committing ANY seed.
                                 ui.browser_sessions

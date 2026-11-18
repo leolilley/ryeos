@@ -217,7 +217,7 @@ pub(super) fn ensure(
         .engine
         .with_checked_bundle_generation(|generation| -> anyhow::Result<()> {
             revalidate_current_admission(generation, state, &session.session_id, membership)?;
-            ensure_current(state, session, membership, detail).map_err(Into::into)
+            ensure_current(generation, state, session, membership, detail).map_err(Into::into)
         })
         .map_err(|error| HandlerError::Conflict(format!("{error:#}")))
 }
@@ -298,6 +298,7 @@ pub(super) fn revalidate_current_admission(
 }
 
 fn ensure_current(
+    generation: &ryeos_engine::engine::CheckedEngineGeneration<'_>,
     state: &AppState,
     session: &BrowserSession,
     membership: &PresentationMembership,
@@ -317,6 +318,13 @@ fn ensure_current(
     let payload = serde_json::to_value(record(membership))
         .map_err(|error| HandlerError::Internal(error.to_string()))?;
     let owner = super::seat_owner(session);
+    // The initialization record is durable and is never withdrawn. Verify the
+    // installed bundles once more here, after the admission was re-resolved
+    // and immediately before the append, so the record is never written from
+    // an admission resolved on bundles that have since changed.
+    generation
+        .verify_before_commit()
+        .map_err(|error| HandlerError::Conflict(error.to_string()))?;
     let written = state
         .state_store
         .append_seat_events_and_renew_if_anchor(
