@@ -396,6 +396,7 @@ impl State {
             exchange: self.exchange.clone(),
             counts_as: emission.counts_as.clone(),
             slots,
+            blocks: Vec::new(),
             seq: (seq, seq),
             ts: (ts.clone(), ts),
         });

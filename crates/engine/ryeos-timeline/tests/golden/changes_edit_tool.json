@@ -1,0 +1,50 @@
+{
+  "id": "act:0000000000000000000000000000000000000000000000000000000000000007",
+  "type": "activity",
+  "state": "done",
+  "tone": "good",
+  "thread": "T-1",
+  "parent": null,
+  "exchange": "msg:1/0",
+  "counts_as": "other",
+  "slots": {
+    "badge": "16 B",
+    "detail": "{\"new_string\":\"fn a() {\\n    b();\\n}\\n\",\"old_string\":\"fn a() {}\\n\",\"path\":\"src/lib.rs\"}",
+    "headline": "src/lib.rs",
+    "tool": "edit_file"
+  },
+  "blocks": [
+    {
+      "block": "changes",
+      "basis": "requested",
+      "files": [
+        {
+          "path": "src/lib.rs",
+          "op": "modify",
+          "added": 3,
+          "removed": 1,
+          "binary": false,
+          "hunks": [
+            {
+              "lines": [
+                "-fn a() {}",
+                "+fn a() {",
+                "+    b();",
+                "+}"
+              ]
+            }
+          ]
+        }
+      ],
+      "omitted_files": 0
+    }
+  ],
+  "seq": [
+    3,
+    5
+  ],
+  "ts": [
+    "2026-11-16T00:00:03Z",
+    "2026-11-16T00:00:05Z"
+  ]
+}

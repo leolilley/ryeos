@@ -9,6 +9,7 @@
 
 use std::collections::BTreeMap;
 
+use ryeos_changeset::{Caps, ChangeSet};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -235,11 +236,18 @@ pub struct Adopt {
 /// How a subject's `presentation` block may shape an entry.
 ///
 /// The block is a mapping from slot name to an ordered list of paths, plus an
-/// optional `counts_as` key. Paths read the entry's `inputs` roots
-/// (`arguments.url`); the first path that yields text fills the slot, and a
-/// slot with no text keeps what the definition's rules projected. A
-/// `counts_as` key applies only when the definition's vocabulary has it.
-/// Presentation never touches an entry's kind, state, tone, id or parent.
+/// optional `counts_as` key and an optional `changes` key. Paths read the
+/// entry's `inputs` roots (`arguments.url`); the first path that yields text
+/// fills the slot, and a slot with no text keeps what the definition's rules
+/// projected. A `counts_as` key applies only when the definition's vocabulary
+/// has it. Presentation never touches an entry's kind, state, tone, id or
+/// parent.
+///
+/// `changes` declares where the subject's file change is, in exactly one of
+/// two forms: `{patch: <path>}` (unified diff text) or `{edit: {path, before,
+/// after}}` (three paths; the engine computes the line diff). Its paths may
+/// read only the `arguments` and `result` roots. It yields a
+/// [`Block::Changes`] only when the definition admits one under `blocks`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Present {
@@ -251,6 +259,32 @@ pub struct Present {
     /// to the slot named here (when that slot is free), so it stays drawn.
     #[serde(default)]
     pub displace: BTreeMap<String, String>,
+    /// The typed blocks a subject may add, each with its caps. A block kind
+    /// that is not listed is never produced, whatever the subject declares.
+    #[serde(default)]
+    pub blocks: PresentBlocks,
+}
+
+/// Which block kinds a subject may add to an entry, and how far each may grow.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PresentBlocks {
+    /// Admits a change block, bounded by these caps (and by the change set's
+    /// own ceilings, whatever the caps say).
+    #[serde(default)]
+    pub changes: Option<Caps>,
+}
+
+/// Most blocks one entry carries.
+pub const MAX_ENTRY_BLOCKS: usize = 4;
+
+/// A typed body an entry carries beside its text slots. The set is closed: a
+/// client draws the kinds it knows and nothing else can arrive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "block", rename_all = "snake_case")]
+pub enum Block {
+    /// A change to files, already sanitised and bounded.
+    Changes(ChangeSet),
 }
 
 /// The closed set of entries a rule can create. `cluster` and `recap` are
@@ -401,6 +435,10 @@ pub struct Entry {
     pub exchange: Option<String>,
     pub counts_as: Option<String>,
     pub slots: BTreeMap<String, String>,
+    /// Typed bodies, in order; at most [`MAX_ENTRY_BLOCKS`]. Absent from the
+    /// serialised entry when there are none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blocks: Vec<Block>,
     pub seq: (i64, i64),
     pub ts: (String, String),
 }

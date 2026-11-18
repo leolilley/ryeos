@@ -1,0 +1,68 @@
+{
+  "id": "act:0000000000000000000000000000000000000000000000000000000000000007",
+  "type": "activity",
+  "state": "done",
+  "tone": "good",
+  "thread": "T-1",
+  "parent": null,
+  "exchange": "msg:1/0",
+  "counts_as": "other",
+  "slots": {
+    "badge": "16 B",
+    "detail": "{\"patch\":\"--- a/src/lib.rs\\n+++ b/src/lib.rs\\n@@ -1,3 +1,3 @@ mod a\\n fn a() {\\n-    old();\\n+    new();\\n }\\n--- /dev/null\\n+++ b/notes.txt\\n@@ -0,0 +1 @@\\n+remember\\n\"}",
+    "headline": "apply_patch"
+  },
+  "blocks": [
+    {
+      "block": "changes",
+      "basis": "requested",
+      "files": [
+        {
+          "path": "src/lib.rs",
+          "op": "modify",
+          "added": 1,
+          "removed": 1,
+          "binary": false,
+          "hunks": [
+            {
+              "old_start": 1,
+              "new_start": 1,
+              "section": "mod a",
+              "lines": [
+                " fn a() {",
+                "-    old();",
+                "+    new();",
+                " }"
+              ]
+            }
+          ]
+        },
+        {
+          "path": "notes.txt",
+          "op": "add",
+          "added": 1,
+          "removed": 0,
+          "binary": false,
+          "hunks": [
+            {
+              "old_start": 0,
+              "new_start": 1,
+              "lines": [
+                "+remember"
+              ]
+            }
+          ]
+        }
+      ],
+      "omitted_files": 0
+    }
+  ],
+  "seq": [
+    3,
+    5
+  ],
+  "ts": [
+    "2026-11-16T00:00:03Z",
+    "2026-11-16T00:00:05Z"
+  ]
+}

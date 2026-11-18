@@ -6,6 +6,7 @@ description = "Pure projection of a thread log into timeline entries, driven by 
 license.workspace = true
 
 [dependencies]
+ryeos-changeset = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }

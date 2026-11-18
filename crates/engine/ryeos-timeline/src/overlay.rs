@@ -1,14 +1,16 @@
 //! Presentation: a subject's display hints laid over an entry.
 //!
 //! A subject is a bounded JSON object the host supplies for a thread. Its
-//! `presentation` block says which of the entry's inputs fill which slots; the
-//! definition's [`Present`] says which slots may be filled and how far text may
-//! grow. Text from a subject is untrusted, so it is stripped and capped here,
-//! once, whatever draws it.
+//! `presentation` block says which of the entry's inputs fill which slots and
+//! where a file change is; the definition's [`Present`] says which slots may
+//! be filled, which blocks may be added and how far each may grow. Text from a
+//! subject is untrusted, so it is stripped and capped here, once, whatever
+//! draws it.
 
+use ryeos_changeset::{Basis, Caps, ChangeSet};
 use serde_json::{Map, Value};
 
-use crate::{Entry, Noun, Present, path};
+use crate::{Block, Entry, MAX_ENTRY_BLOCKS, Noun, Present, path};
 
 /// Lays `subject`'s presentation over `entry`, reading `inputs` as roots.
 pub(crate) fn present(
@@ -48,6 +50,58 @@ pub(crate) fn present(
     {
         entry.counts_as = Some(key.to_string());
     }
+    if let Some(caps) = &present.blocks.changes
+        && entry.blocks.len() < MAX_ENTRY_BLOCKS
+        && let Some(set) = block
+            .get("changes")
+            .and_then(|declared| changes(declared, &roots, caps))
+    {
+        entry.blocks.push(Block::Changes(set));
+    }
+}
+
+/// The change set a subject's `changes` declaration yields, or `None` when the
+/// declaration is not exactly one well-formed source, a path leaves the
+/// `arguments` and `result` roots, a value is missing or not text, or the
+/// text is not a change the change-set builder accepts.
+fn changes(declared: &Value, roots: &Value, caps: &Caps) -> Option<ChangeSet> {
+    let declared = declared.as_object()?;
+    if declared.len() != 1 {
+        return None;
+    }
+    if let Some(source) = declared.get("patch") {
+        let (basis, text) = sourced(source, roots)?;
+        return ChangeSet::from_patch(text, basis, caps);
+    }
+    let edit = declared.get("edit")?.as_object()?;
+    if edit.len() != 3 {
+        return None;
+    }
+    let (path_basis, path) = sourced(edit.get("path")?, roots)?;
+    let (before_basis, before) = sourced(edit.get("before")?, roots)?;
+    let (after_basis, after) = sourced(edit.get("after")?, roots)?;
+    // Only a change read wholly from the result is the subject's own report.
+    let reported = [path_basis, before_basis, after_basis]
+        .iter()
+        .all(|basis| *basis == Basis::Reported);
+    let basis = if reported {
+        Basis::Reported
+    } else {
+        Basis::Requested
+    };
+    ChangeSet::from_edit(path, before, after, basis, caps)
+}
+
+/// The text at a declared source path and what reading that root is evidence
+/// of: the call's arguments are a request, its result is a report.
+fn sourced<'a>(source: &Value, roots: &'a Value) -> Option<(Basis, &'a str)> {
+    let source = source.as_str()?;
+    let basis = match source.split('.').next()? {
+        "arguments" => Basis::Requested,
+        "result" => Basis::Reported,
+        _ => return None,
+    };
+    Some((basis, path::get(roots, source)?.as_str()?))
 }
 
 fn scalar(value: &Value) -> Option<String> {
