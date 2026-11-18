@@ -247,6 +247,17 @@ fn declarations() -> Vec<MachineDeclaration> {
 }
 
 pub async fn handle(_req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
+    Ok(serde_json::to_value(compare_groups(ctx, state).await?)?)
+}
+
+/// The compared groups. The caller has already been checked for
+/// [`CAPABILITY`]; this asks every configured remote under the caller's own
+/// outbound principal, so a second reader of the groups sees what the node
+/// service shows and nothing more.
+pub async fn compare_groups(
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<ryeos_effect_contract::locality::LocalityGroups> {
     ctx.require_verified()?;
     let own_site_id = state.threads.site_id().to_string();
     let app_root = state.config.app_root.clone();
@@ -306,7 +317,7 @@ pub async fn handle(_req: Request, ctx: HandlerContext, state: Arc<AppState>) ->
 
     let groups = compare_locality(&now_millis(), &nodes, &declarations())
         .map_err(|error: LocalityError| HandlerError::Conflict(error.to_string()))?;
-    Ok(serde_json::to_value(groups)?)
+    Ok(groups)
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

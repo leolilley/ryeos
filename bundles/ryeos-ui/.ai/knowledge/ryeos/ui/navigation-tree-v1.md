@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-18T01:18:54Z:af5381bf1f400f2af70a4dbef3b623cbab955b48d67421ca2084232f72e22df4:9AmpCp2jLxwZ17H6TxOqtYI/MC2xZTNRf7gGDnC3X3r6TiCBnB7L7TTos4JUgRlHHYdqGv6GTWtq5FhOINGoBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-18T06:38:05Z:4d821ea8c8c98941357388eeae27386681c7434d66e7682bcff2f4d3cbb0ce66:0ZSF1RDEW884FK17Oyah8QT67akW8j6x5Us4dOvtfgCUEkuvZ4kECgKLBhGQsfZxjV/XoCrriDihORW4RKlkBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "navigation-tree-v1"
@@ -324,6 +324,7 @@ view:ryeos/node/threads/history
 view:ryeos/node/events
 view:ryeos/node/usage
 view:ryeos/node/remotes
+view:ryeos/node/machines
 view:ryeos/node/bundles
 view:ryeos/node/gc
 ```
