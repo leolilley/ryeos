@@ -993,6 +993,11 @@ jobs:
     timeout-minutes: 120
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.browser_smoke }}
     steps:
+      - name: Show package namespace ownership
+        run: |
+          stat -c '%U:%G %a %n' / /usr /usr/share /opt
+          getfacl -p /usr/share /opt || true
+          id
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
