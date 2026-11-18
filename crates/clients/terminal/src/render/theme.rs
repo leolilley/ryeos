@@ -1,20 +1,27 @@
-//! The terminal palette: gruvbox dark per style.md, and the tone →
-//! style mapping. This is the ONLY color authority in the renderer —
-//! tone semantics come from the VM; draw sites take styles from here
-//! and never invent colors.
+//! The terminal palette: the terminal's own. Default foreground and
+//! background, and the named ANSI colours for tones, so the client follows
+//! however the operator's terminal is themed. This is the ONLY color authority
+//! in the renderer — tone semantics come from the VM; draw sites take styles
+//! from here and never invent colors.
 
 use ryeos_client_base::text_surface::{Border, Color, Style};
 use ryeos_client_base::ui::view_model::RyeOsTone;
 
-pub const BG: Color = Color::Rgb(0x1d, 0x20, 0x21);
-pub const PANEL: Color = Color::Rgb(0x28, 0x28, 0x28);
-pub const FG: Color = Color::Rgb(0xeb, 0xdb, 0xb2);
-pub const FG_SOFT: Color = Color::Rgb(0xd5, 0xc4, 0xa1);
-pub const MUTED: Color = Color::Rgb(0xa8, 0x99, 0x84);
-pub const ACCENT: Color = Color::Rgb(0xd6, 0x5d, 0x0e);
-pub const WARN: Color = Color::Rgb(0xfa, 0xbd, 0x2f);
-pub const GOOD: Color = Color::Rgb(0x8e, 0xc0, 0x7c);
-pub const DANGER: Color = Color::Rgb(0xfb, 0x49, 0x34);
+pub const BG: Color = Color::Default;
+/// The highlighted-row ground: bright black.
+pub const PANEL: Color = Color::Index(8);
+pub const FG: Color = Color::Default;
+pub const FG_SOFT: Color = Color::Default;
+/// Dim ink: bright black.
+pub const MUTED: Color = Color::Index(8);
+/// Tone `accent`: bright yellow, the nearest named colour to an accent.
+pub const ACCENT: Color = Color::Index(11);
+/// Tone `warn`: yellow.
+pub const WARN: Color = Color::Index(3);
+/// Tone `good`: green.
+pub const GOOD: Color = Color::Index(2);
+/// Tone `danger`: red.
+pub const DANGER: Color = Color::Index(1);
 
 // Content renders on the page background (BG), separated by borders —
 // consistent across the input box, and tiles. There
@@ -49,7 +56,8 @@ pub fn style_muted() -> Style {
 }
 
 pub fn style_selected() -> Style {
-    Style::new().fg(FG).bg(ACCENT)
+    // Black on the accent reads on any terminal theme.
+    Style::new().fg(Color::Index(0)).bg(ACCENT)
 }
 
 /// Blend `from` toward `to` by `t` (0 = untouched, 1 = fully `to`). Theme
@@ -133,6 +141,19 @@ pub fn border_for(name: &str) -> Option<Border> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tone_takes_the_terminals_named_colours() {
+        let fg = |tone| tone_style(tone).fg;
+        assert_eq!(fg(RyeOsTone::Accent), ACCENT);
+        assert_eq!(fg(RyeOsTone::Good), Color::Index(2));
+        assert_eq!(fg(RyeOsTone::Warn), Color::Index(3));
+        assert_eq!(fg(RyeOsTone::Danger), Color::Index(1));
+        // No tone: the default ink, not a fifth colour.
+        assert_eq!(fg(RyeOsTone::Neutral), Color::Default);
+        assert_eq!(BG, Color::Default);
+        assert_eq!(FG, Color::Default);
+    }
 
     #[test]
     fn border_for_maps_names_and_degrades_to_thin() {
