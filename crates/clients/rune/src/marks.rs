@@ -122,7 +122,7 @@ pub(crate) fn chip_dot(dot: WorkDot, key: String) -> El {
         .size(6.0, 6.0)
         .radius(3.0)
         .fill(dot.color())
-        .pin(Some(1.0), None, Some(1.0), None)
+        .pin(None, Some(1.0), Some(1.0), None)
         .role("status")
         .label(dot.label())
 }

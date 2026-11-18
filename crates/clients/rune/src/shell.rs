@@ -295,7 +295,7 @@ fn system_bar(vm: &RyeOsViewModel, local: &Local, edges: Edges) -> El {
         (Some(theme::SWITCHER_INSET), None)
     };
     col()
-        .pin(Some(top), left, right, Some(bottom))
+        .pin(left, Some(top), right, Some(bottom))
         .w(if renaming {
             theme::SWITCHER_RENAME_WIDTH
         } else {

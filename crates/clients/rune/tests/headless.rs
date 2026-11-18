@@ -394,7 +394,7 @@ fn the_status_bar_shows_only_its_segments() {
         "the open hint as its key then its word, saw {left:?}"
     );
     assert!(
-        left.len() <= 2 * status.key_hints.len() && left.len() % 2 == 0,
+        left.len() <= 2 * status.key_hints.len() && left.len().is_multiple_of(2),
         "only the key hints in the left island, saw {left:?}"
     );
     // A text is in the right island when it is right of the launch control and
