@@ -22,6 +22,182 @@ pub const CONTROLLER_MEMLOCK_CEILING_BYTES: u64 = 256 * 1024 * 1024;
 /// still bounds it, and no host-wide maximum is raised.
 pub const CONTROLLER_NOFILE_SOFT_CEILING: u64 = 65_536;
 mod host_capability;
+
+/// Whether a numeric process group still has members.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupPresence {
+    /// A member that has not finished exiting, or a finished member this
+    /// process still owes a wait for, remains in the group.
+    Present,
+    /// No member remains except finished members whose parent is another
+    /// process; that parent, or init, reaps them.
+    Absent,
+    /// The pid namespace could not be read or a member's record could not be
+    /// parsed, so neither answer is proved. Callers must fail closed.
+    Undecidable,
+}
+
+/// One process-group member as read from `/proc/<pid>/stat`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GroupMember {
+    pid: u32,
+    parent_pid: u32,
+    state: char,
+}
+
+/// Parse `/proc/<pid>/stat` text into `(state, parent pid, process group)`.
+fn parse_proc_stat(raw: &str) -> Result<(char, u32, i64), String> {
+    let close = raw.rfind(')').ok_or("malformed stat comm")?;
+    let mut fields = raw[close + 1..].split_whitespace();
+    let state = fields
+        .next()
+        .and_then(|value| value.chars().next())
+        .ok_or("missing stat state")?;
+    let parent_pid = fields
+        .next()
+        .ok_or("missing stat parent pid")?
+        .parse::<u32>()
+        .map_err(|error| format!("invalid stat parent pid: {error}"))?;
+    let process_group = fields
+        .next()
+        .ok_or("missing stat process group")?
+        .parse::<i64>()
+        .map_err(|error| format!("invalid stat process group: {error}"))?;
+    Ok((state, parent_pid, process_group))
+}
+
+fn is_finished_state(state: char) -> bool {
+    matches!(state, 'Z' | 'X')
+}
+
+/// Members of `pgid` other than `ignored`. `None` means the namespace or a
+/// member record could not be read or parsed. A member that vanishes while
+/// being read is gone and is not reported.
+#[cfg(target_os = "linux")]
+fn scan_group_members(pgid: i64, ignored: Option<u32>) -> Option<Vec<GroupMember>> {
+    let entries = std::fs::read_dir("/proc").ok()?;
+    let mut members = Vec::new();
+    for entry in entries {
+        let entry = entry.ok()?;
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if Some(pid) == ignored {
+            continue;
+        }
+        let raw = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(raw) => raw,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(libc::ESRCH) =>
+            {
+                continue;
+            }
+            Err(_) => return None,
+        };
+        let (state, parent_pid, process_group) = parse_proc_stat(&raw).ok()?;
+        if process_group == pgid {
+            members.push(GroupMember {
+                pid,
+                parent_pid,
+                state,
+            });
+        }
+    }
+    Some(members)
+}
+
+/// Finished members this process may reap: parented by the checker, not the
+/// group leader, and not a pid the caller still owns.
+fn reapable_members(
+    members: &[GroupMember],
+    pgid: i64,
+    checker_pid: u32,
+    owned: &[u32],
+) -> Vec<u32> {
+    members
+        .iter()
+        .filter(|member| {
+            member.state == 'Z'
+                && member.parent_pid == checker_pid
+                && i64::from(member.pid) != pgid
+                && !owned.contains(&member.pid)
+        })
+        .map(|member| member.pid)
+        .collect()
+}
+
+fn decide_group_presence(members: &[GroupMember], checker_pid: u32) -> GroupPresence {
+    let present = members
+        .iter()
+        .any(|member| !is_finished_state(member.state) || member.parent_pid == checker_pid);
+    if present {
+        GroupPresence::Present
+    } else {
+        GroupPresence::Absent
+    }
+}
+
+/// Decide whether process group `pgid` still has members.
+///
+/// 1. Scan `/proc` for members of the group.
+/// 2. Reap, by exact pid with `waitpid(pid, WNOHANG)`, every zombie member
+///    whose parent is this process, then rescan. Only such a zombie can be an
+///    orphan this process adopted. Never `waitpid(-1)`. This process never
+///    reaps the group leader (`pid == pgid`), which is the owner's wrapper
+///    and the fence on the numeric group, nor any pid in `owned`, which the
+///    caller still intends to wait on. A zombie leader or owned zombie parented
+///    by this process therefore counts as present.
+/// 3. Present when any member is in a state other than zombie or dead, or
+///    is a zombie still parented by this process. Absent when only zombies
+///    parented elsewhere remain, or no member does. Undecidable when `/proc`
+///    or a member's record cannot be read or parsed.
+///
+/// `retained_leader` is a wrapper the caller keeps unreaped on purpose as the
+/// group fence and reaps itself afterwards: it is excluded from the scan
+/// entirely, neither reaped nor counted. Callers obtain `owned` from the child
+/// handles they hold; a caller that holds none passes an empty slice.
+///
+/// Every spawn starts a new group; no spawn joins an existing process group
+/// (setpgid 0 or setsid). The group leader is therefore the spawner's own
+/// direct child, which is why it is never reaped here.
+///
+/// Invariant: once a group settles absent, its record is retired and nothing
+/// signals that pgid again, so a later reuse of the number cannot be hit.
+#[cfg(target_os = "linux")]
+pub fn group_presence(pgid: i64, retained_leader: Option<u32>, owned: &[u32]) -> GroupPresence {
+    let checker_pid = std::process::id();
+    let Some(mut members) = scan_group_members(pgid, retained_leader) else {
+        return GroupPresence::Undecidable;
+    };
+    let reapable = reapable_members(&members, pgid, checker_pid, owned);
+    if !reapable.is_empty() {
+        for pid in reapable {
+            let Ok(pid) = libc::pid_t::try_from(pid) else {
+                continue;
+            };
+            let mut status = 0;
+            // SAFETY: exact pid, non-blocking; a pid that is not our child
+            // or is already reaped fails harmlessly with ECHILD.
+            unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        }
+        match scan_group_members(pgid, retained_leader) {
+            Some(rescanned) => members = rescanned,
+            None => return GroupPresence::Undecidable,
+        }
+    }
+    decide_group_presence(&members, checker_pid)
+}
+
+/// Group presence is only decidable through the Linux pid namespace.
+#[cfg(not(target_os = "linux"))]
+pub fn group_presence(_pgid: i64, _retained_leader: Option<u32>, _owned: &[u32]) -> GroupPresence {
+    GroupPresence::Undecidable
+}
 mod oci_lifecycle;
 // Descendant containment by retained PID-namespace init: termination,
 // recovery and settlement without a cgroup, and explicitly no quiescence.
@@ -1878,5 +2054,260 @@ mod fixed_current_identity_controls {
         let mut foreign = original;
         foreign.boot_id = "foreign-boot".into();
         assert!(super::require_current_process_identity_fixed(&foreign).is_err());
+    }
+}
+
+#[cfg(test)]
+mod group_spawn_guard;
+
+#[cfg(all(test, target_os = "linux"))]
+mod group_presence_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn member(pid: u32, parent_pid: u32, state: char) -> GroupMember {
+        GroupMember {
+            pid,
+            parent_pid,
+            state,
+        }
+    }
+
+    /// Fork a child that moves into its own group and runs `body`.
+    fn fork_group_member(body: fn()) -> libc::pid_t {
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            unsafe { libc::setpgid(0, 0) };
+            body();
+            unsafe { libc::_exit(0) };
+        }
+        pid
+    }
+
+    fn pause_forever() {
+        loop {
+            unsafe { libc::pause() };
+        }
+    }
+
+    fn wait_for_state(pgid: libc::pid_t, pid: libc::pid_t, state: char) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let members = scan_group_members(i64::from(pgid), None).expect("scan");
+            if members
+                .iter()
+                .any(|m| m.pid == pid as u32 && m.state == state)
+            {
+                return;
+            }
+            assert!(Instant::now() < deadline, "pid {pid} never reached {state}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn reap(pid: libc::pid_t) -> libc::pid_t {
+        let mut status = 0;
+        unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) }
+    }
+
+    #[test]
+    fn zombie_parented_elsewhere_is_absent() {
+        // The intermediate child makes a grandchild that leads its own group
+        // and exits at once. The intermediate never reaps it, so the zombie
+        // stays parented by the intermediate, not by this process.
+        let (reader, writer) = {
+            let mut fds = [0; 2];
+            assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+            (fds[0], fds[1])
+        };
+        let helper = unsafe { libc::fork() };
+        assert!(helper >= 0);
+        if helper == 0 {
+            let grandchild = unsafe { libc::fork() };
+            if grandchild == 0 {
+                unsafe {
+                    libc::setpgid(0, 0);
+                    libc::_exit(0);
+                }
+            }
+            let bytes = grandchild.to_ne_bytes();
+            unsafe { libc::write(writer, bytes.as_ptr().cast(), bytes.len()) };
+            pause_forever();
+        }
+        unsafe { libc::close(writer) };
+        let mut bytes = [0_u8; 4];
+        assert_eq!(
+            unsafe { libc::read(reader, bytes.as_mut_ptr().cast(), 4) },
+            4
+        );
+        unsafe { libc::close(reader) };
+        let grandchild = libc::pid_t::from_ne_bytes(bytes);
+        wait_for_state(grandchild, grandchild, 'Z');
+        assert_eq!(
+            group_presence(i64::from(grandchild), None, &[]),
+            GroupPresence::Absent
+        );
+        unsafe { libc::kill(helper, libc::SIGKILL) };
+        reap(helper);
+    }
+
+    #[test]
+    fn leader_zombie_child_is_present_and_stays_waitable() {
+        let child = fork_group_member(|| {});
+        wait_for_state(child, child, 'Z');
+        assert_eq!(
+            group_presence(i64::from(child), None, &[]),
+            GroupPresence::Present
+        );
+        assert_eq!(reap(child), child, "owner's wait must still succeed");
+    }
+
+    /// Run in a forked subreaper `S`. A group leader `L` forks a member `M`
+    /// that inherits `L`'s group; once `L` dies and is reaped, `M` is adopted
+    /// by `S` and exits, leaving a non-leader zombie parented by `S`. Returns
+    /// 0 when the presence check behaves as expected.
+    fn subreaper_scenario(owned: bool) -> i32 {
+        unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) };
+        let mut fds = [0; 2];
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            return 1;
+        }
+        let (read_end, write_end) = (fds[0], fds[1]);
+        let leader = unsafe { libc::fork() };
+        if leader < 0 {
+            return 1;
+        }
+        if leader == 0 {
+            unsafe { libc::setpgid(0, 0) };
+            let member_pid = unsafe { libc::fork() };
+            if member_pid == 0 {
+                unsafe { libc::close(write_end) };
+                let mut byte = 0_u8;
+                while unsafe { libc::read(read_end, (&mut byte as *mut u8).cast(), 1) } > 0 {}
+                unsafe { libc::_exit(0) };
+            }
+            unsafe { libc::_exit(0) };
+        }
+        let mut status = 0;
+        unsafe { libc::waitpid(leader, &mut status, 0) };
+        unsafe { libc::close(write_end) };
+        let me = std::process::id();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let member_pid = loop {
+            let members = scan_group_members(i64::from(leader), None).unwrap_or_default();
+            if let [only] = members.as_slice()
+                && only.state == 'Z'
+                && only.parent_pid == me
+            {
+                break only.pid;
+            }
+            if Instant::now() >= deadline {
+                return 2;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let skip: Vec<u32> = if owned { vec![member_pid] } else { Vec::new() };
+        let presence = group_presence(i64::from(leader), None, &skip);
+        let reaped = reap(member_pid as libc::pid_t);
+        match (owned, presence, reaped) {
+            (true, GroupPresence::Present, pid) if pid == member_pid as libc::pid_t => 0,
+            (true, _, _) => 3,
+            (false, GroupPresence::Absent, -1) => 0,
+            (false, _, _) => 4,
+        }
+    }
+
+    fn run_subreaper_scenario(owned: bool) {
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            let code = subreaper_scenario(owned);
+            unsafe { libc::_exit(code) };
+        }
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        assert!(libc::WIFEXITED(status));
+        assert_eq!(libc::WEXITSTATUS(status), 0, "scenario failure code");
+    }
+
+    #[test]
+    fn owned_zombie_is_not_reaped_and_counts_present() {
+        run_subreaper_scenario(true);
+    }
+
+    #[test]
+    fn adopted_non_leader_zombie_is_reaped_then_absent() {
+        run_subreaper_scenario(false);
+    }
+
+    fn reap_blocking(pid: libc::pid_t) {
+        let mut status = 0;
+        unsafe { libc::waitpid(pid, &mut status, 0) };
+    }
+
+    #[test]
+    fn stopped_member_is_present() {
+        let child = fork_group_member(pause_forever);
+        assert_eq!(unsafe { libc::kill(child, libc::SIGSTOP) }, 0);
+        wait_for_state(child, child, 'T');
+        assert_eq!(
+            group_presence(i64::from(child), None, &[]),
+            GroupPresence::Present
+        );
+        unsafe { libc::kill(child, libc::SIGKILL) };
+        reap_blocking(child);
+    }
+
+    #[test]
+    fn retained_leader_is_neither_counted_nor_reaped() {
+        let child = fork_group_member(|| {});
+        wait_for_state(child, child, 'Z');
+        assert_eq!(
+            group_presence(i64::from(child), Some(child as u32), &[]),
+            GroupPresence::Absent
+        );
+        assert_eq!(reap(child), child);
+    }
+
+    #[test]
+    fn garbled_stat_is_unparseable() {
+        assert!(parse_proc_stat("garbage").is_err());
+        assert!(parse_proc_stat("1 (x) Z").is_err());
+        assert!(parse_proc_stat("1 (x) Z notanumber 5").is_err());
+        assert_eq!(parse_proc_stat("1 (a b) Z 7 9 9"), Ok(('Z', 7, 9)));
+    }
+
+    #[test]
+    fn decision_follows_state_and_parent() {
+        let me = 100;
+        assert_eq!(decide_group_presence(&[], me), GroupPresence::Absent);
+        for state in ['R', 'S', 'D', 'T', 't', 'I'] {
+            assert_eq!(
+                decide_group_presence(&[member(5, 1, state)], me),
+                GroupPresence::Present
+            );
+        }
+        assert_eq!(
+            decide_group_presence(&[member(5, 1, 'Z'), member(6, 1, 'X')], me),
+            GroupPresence::Absent
+        );
+        assert_eq!(
+            decide_group_presence(&[member(5, me, 'Z')], me),
+            GroupPresence::Present
+        );
+    }
+
+    #[test]
+    fn reapable_excludes_leader_owned_and_foreign_parents() {
+        let me = 100;
+        let members = [
+            member(10, me, 'Z'),
+            member(11, me, 'Z'),
+            member(12, me, 'Z'),
+            member(13, 1, 'Z'),
+            member(14, me, 'S'),
+        ];
+        assert_eq!(reapable_members(&members, 10, me, &[11]), vec![12]);
     }
 }

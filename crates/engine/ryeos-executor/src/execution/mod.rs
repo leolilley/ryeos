@@ -2391,16 +2391,16 @@ pub(crate) fn assert_workspace_capture_processes_settled(
         .get_thread(root)?
         .ok_or_else(|| anyhow::anyhow!("terminal workspace capture root disappeared"))?;
     if let Some(identity) = thread.runtime.process_identity.as_ref() {
-        ryeos_app::process::assert_reaped_process_group_absent(identity)?;
+        ryeos_app::process::assert_reaped_process_group_absent_as(identity, "root runtime")?;
     } else if thread.runtime.pid.is_some() || thread.runtime.pgid.is_some() {
         anyhow::bail!("terminal workspace capture root has incomplete process identity");
     }
     if let Some(encoded) = record.process_identity.as_deref() {
         let identity = serde_json::from_str(encoded).context("decode workspace process owner")?;
-        ryeos_app::process::assert_reaped_process_group_absent(&identity)?;
+        ryeos_app::process::assert_reaped_process_group_absent_as(&identity, "workspace owner")?;
     }
     if let Some(identity) = worker_identity.as_ref() {
-        ryeos_app::process::assert_reaped_process_group_absent(identity)?;
+        ryeos_app::process::assert_reaped_process_group_absent_as(identity, "dedicated worker")?;
     }
     Ok(())
 }

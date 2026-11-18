@@ -8430,6 +8430,7 @@ impl RunningProcess {
                     // owned group has been revalidated and signalled. Its PID
                     // cannot be recycled during this window.
                     self.kill_supervised_processes();
+                    self.wait_group_quiescent_before_reap();
                     match self.child.wait() {
                         Ok(status) => {
                             self.wrapper_reaped = true;
@@ -8601,10 +8602,35 @@ impl RunningProcess {
         self.groups_terminated = true;
     }
 
+    /// Wait, bounded, for the owned group to drain after its kill and before
+    /// the wrapper is reaped. The unreaped wrapper stays the group fence
+    /// throughout. A group that does not drain in time is left for the durable
+    /// owner's own settlement proof; this never delays the result further.
+    fn wait_group_quiescent_before_reap(&mut self) {
+        #[cfg(target_os = "linux")]
+        {
+            if self.wrapper_reaped
+                || self.scope_cleanup_error.is_some()
+                || self
+                    .process_scope
+                    .as_ref()
+                    .is_some_and(crate::ProcessScope::contains_launcher)
+            {
+                return;
+            }
+            let _ = wait_owned_process_group_quiescent(
+                self.wrapper_pgid,
+                self.wrapper_pid,
+                ATTACHMENT_ABORT_SETTLE_TIMEOUT,
+            );
+        }
+    }
+
     fn reap_wrapper(&mut self) {
         if self.wrapper_reaped || self.scope_cleanup_error.is_some() {
             return;
         }
+        self.wait_group_quiescent_before_reap();
         if self.child.wait().is_ok() {
             self.wrapper_reaped = true;
         }
@@ -11816,51 +11842,25 @@ fn wait_owned_process_group_quiescent(
     retained_leader_pid: u32,
     timeout: Duration,
 ) -> Result<(), String> {
+    use crate::process_control::{GroupPresence, group_presence};
     let deadline = Instant::now()
         .checked_add(timeout)
         .ok_or_else(|| "process-group quiescence deadline overflow".to_string())?;
     loop {
-        let mut live_member = None;
-        let entries = std::fs::read_dir("/proc")
-            .map_err(|error| format!("enumerate /proc for process-group cleanup: {error}"))?;
-        for entry in entries {
-            let entry = entry.map_err(|error| format!("enumerate /proc process entry: {error}"))?;
-            let Some(pid) = entry
-                .file_name()
-                .to_str()
-                .and_then(|name| name.parse::<u32>().ok())
-            else {
-                continue;
-            };
-            if pid == retained_leader_pid {
-                continue;
+        // The retained leader is the caller's unreaped group fence: it is
+        // neither counted nor reaped here, and the caller reaps it last.
+        match group_presence(pgid, Some(retained_leader_pid), &[]) {
+            GroupPresence::Absent => return Ok(()),
+            GroupPresence::Undecidable => {
+                return Err(format!(
+                    "process group {pgid} membership could not be read during cleanup"
+                ));
             }
-            match read_linux_process_birth(pid) {
-                Ok(stat) if stat.process_group == pgid && !matches!(stat.state, 'Z' | 'X') => {
-                    live_member = Some(pid);
-                    break;
-                }
-                Ok(_) => {}
-                // A member that exits while /proc/<pid>/stat is being read
-                // surfaces as ESRCH ("No such process"), not ENOENT. Either
-                // way the member is gone, which is what cleanup wants.
-                Err(error)
-                    if error.contains("No such file or directory")
-                        || error.contains("No such process") => {}
-                Err(error) => {
-                    return Err(format!(
-                        "inspect process-group member {pid} during cleanup: {error}"
-                    ));
-                }
-            }
-        }
-        if live_member.is_none() {
-            return Ok(());
+            GroupPresence::Present => {}
         }
         if Instant::now() >= deadline {
             return Err(format!(
-                "process group {pgid} retained live member {} after termination",
-                live_member.expect("checked Some")
+                "process group {pgid} retained live member after termination"
             ));
         }
         thread::sleep(PROCESS_POLL_INTERVAL);
@@ -12724,6 +12724,43 @@ pub(crate) mod fork_creation_custody_tests {
         drop(creator_witness);
         drop(lease_within(5).expect("hang-up reopens the window"));
         assert!(writer_closed(&mut reader));
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod natural_exit_group_settlement_tests {
+    use super::*;
+    use crate::process_control::{GroupPresence, group_presence};
+
+    #[test]
+    fn natural_exit_waits_for_killed_grandchildren_within_the_deadline() {
+        let request = SubprocessRequest {
+            cmd: "/bin/sh".into(),
+            argv0: None,
+            // The wrapper exits at once, leaving background members that the
+            // group kill turns into zombies parented elsewhere.
+            args: vec!["-c".into(), "sleep 60 & sleep 60 & exit 0".into()],
+            cwd: None,
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 30.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
+            supervised_status: None,
+        };
+        let started = Instant::now();
+        let result = lib_run(request);
+        assert!(result.success, "{}", result.stderr);
+        assert!(
+            started.elapsed() < ATTACHMENT_ABORT_SETTLE_TIMEOUT + Duration::from_secs(5),
+            "settlement exceeded its bound: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            group_presence(i64::from(result.pid), None, &[]),
+            GroupPresence::Absent
+        );
     }
 }
 
