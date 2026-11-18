@@ -29,6 +29,14 @@ pub enum ProjectSourceError {
     /// went wrong (snapshot not in CAS, materialization race, etc.).
     #[error("project source checkout failed: {0}")]
     CheckoutFailed(String),
+    /// A mutable (writable-workspace) run was asked of an `ai_only` snapshot.
+    /// An AI-only head carries only the node's `sync_include` roots, so a run
+    /// that folds its workspace back cannot be captured against it. Read-only
+    /// pinned runs on such a head are unaffected. Mapped to 409.
+    #[error(
+        "snapshot {snapshot_hash} is an ai_only project head and cannot back a mutable run; execute it read-only or push a full_project snapshot"
+    )]
+    AiOnlyBaseNotMutable { snapshot_hash: String },
     /// Anything else that goes wrong while resolving the project
     /// source — internal state-store errors, manifest parsing failures,
     /// etc. Mapped to HTTP 500 by the API layer.
@@ -739,6 +747,22 @@ struct PinnedSnapshotContextParams<'a> {
     realization: PinnedContextRealization,
 }
 
+/// Refuse an `ai_only` base for a mutable (copy-on-write) realization.
+fn refuse_ai_only_mutable_base(
+    scope: ryeos_state::project_sync::ProjectSyncScope,
+    realization: PinnedContextRealization,
+    snapshot_hash: &str,
+) -> Result<(), ProjectSourceError> {
+    if scope == ryeos_state::project_sync::ProjectSyncScope::AiOnly
+        && matches!(realization, PinnedContextRealization::Cow)
+    {
+        return Err(ProjectSourceError::AiOnlyBaseNotMutable {
+            snapshot_hash: snapshot_hash.to_owned(),
+        });
+    }
+    Ok(())
+}
+
 fn resolve_pinned_snapshot_context_admitted(
     params: PinnedSnapshotContextParams<'_>,
 ) -> Result<ResolvedProjectContext, ProjectSourceError> {
@@ -761,14 +785,32 @@ fn resolve_pinned_snapshot_context_admitted(
         recovery_stage = "snapshot-validation",
         "pinned project resolution stage"
     );
-    ryeos_state::project_materialization::load_project_snapshot_bounded(&cas, snapshot_hash)
+    let snapshot =
+        ryeos_state::project_materialization::load_project_snapshot_bounded(&cas, snapshot_hash)
+            .map_err(|e| ProjectSourceError::CheckoutFailed(format!("{e:#}")))?
+            .ok_or_else(|| {
+                ProjectSourceError::CheckoutFailed(format!(
+                    "snapshot {} not found in CAS",
+                    snapshot_hash
+                ))
+            })?;
+    // A mutable run folds its workspace back against the base policy, and an
+    // ai_only policy's capture filter is the node's sync_include table, which
+    // fold-back does not hold. Refuse before anything is realized or run.
+    if matches!(realization, PinnedContextRealization::Cow) {
+        let policy = ryeos_state::project_materialization::load_project_policy_bounded(
+            &cas,
+            &snapshot.effective_policy_hash,
+        )
         .map_err(|e| ProjectSourceError::CheckoutFailed(format!("{e:#}")))?
         .ok_or_else(|| {
             ProjectSourceError::CheckoutFailed(format!(
-                "snapshot {} not found in CAS",
-                snapshot_hash
+                "project snapshot policy {} not found in CAS",
+                snapshot.effective_policy_hash
             ))
         })?;
+        refuse_ai_only_mutable_base(policy.sync_scope, realization, snapshot_hash)?;
+    }
     tracing::debug!(
         checkout_id,
         recovery_stage = "snapshot-validated",
@@ -1268,5 +1310,40 @@ mod canonical_project_ref_tests {
         .unwrap();
 
         assert!(Arc::ptr_eq(&ctx.request_engine, &engine));
+    }
+}
+
+#[cfg(test)]
+mod ai_only_base_tests {
+    use super::*;
+    use ryeos_state::project_sync::ProjectSyncScope;
+
+    #[test]
+    fn a_mutable_run_on_an_ai_only_base_is_refused_with_a_typed_error() {
+        let error = refuse_ai_only_mutable_base(
+            ProjectSyncScope::AiOnly,
+            PinnedContextRealization::Cow,
+            "abc",
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ProjectSourceError::AiOnlyBaseNotMutable { ref snapshot_hash } if snapshot_hash == "abc"
+        ));
+        assert!(error.to_string().contains("ai_only"));
+    }
+
+    #[test]
+    fn read_only_runs_and_full_project_bases_are_unaffected() {
+        for (scope, realization) in [
+            (ProjectSyncScope::AiOnly, PinnedContextRealization::ReadOnly),
+            (ProjectSyncScope::FullProject, PinnedContextRealization::Cow),
+            (
+                ProjectSyncScope::FullProject,
+                PinnedContextRealization::ReadOnly,
+            ),
+        ] {
+            refuse_ai_only_mutable_base(scope, realization, "abc").unwrap();
+        }
     }
 }
