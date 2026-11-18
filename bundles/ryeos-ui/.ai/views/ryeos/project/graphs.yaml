@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-18T07:27:02Z:9441ffaa99223f44562efc6f5bba165eb0d4ad2e6a61aa49dffefc619cdeb4cf:Q5Psd4cvsZOTylu0gzN5WWb3tCG/PQ6ILanoCjKpq3LqE4fGi7xz7ubOLclCIJilff2gYIyHT+GxUv63IPqDCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T07:27:32Z:f916d9aa951e2505013ae1d7522ad77e1a4c363b45c1442feba081bbe84b6904:jUdSmgKc7IGzAgU/ysJ2lNSelkeS1yn3wcvPstF+TafYqNBmb0VP00B5wYG/9c2ktSJrUgD/UVUNfVLVMSV4DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: project-graphs
 title: Graphs
 version: "1.0.0"
@@ -43,3 +43,11 @@ affordances:
         item: "{record.canonical_ref}"
       open_view: view:ryeos/item/inspector
       drill: true
+  - id: explain
+    label: Explain
+    invoke:
+      plane: ui
+      facet: selection
+      value:
+        item: "{record.canonical_ref}"
+      open_view: view:ryeos/item/explain

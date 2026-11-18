@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-18T07:27:02Z:4cdfbf74b75c55b760b6b51d8e2e3469dbf1b668d390bd7bbea0b14003a40745:GZMDc9VkLyS6+UIsvvglwGLB0HSN1xFljt7/jem3UYz06fHt7XKo00pjQmXLimPk4/he2j2sdQOui6eAjqmcCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T07:27:32Z:669f83fba1e98e1492c59be290debafaaa971c786f61539c5454d6beeeb7470a:Fk+79qWGJfWeb2w2+s8D3pnmas9en30bdcsHQ/nhIiNFMF/1V8dp22mV3iBjWeh0PGB4EzoQ1aq+0IdnAeGKAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: project-directives
 title: Directives
 version: "1.0.0"
@@ -43,3 +43,11 @@ affordances:
         item: "{record.canonical_ref}"
       open_view: view:ryeos/item/inspector
       drill: true
+  - id: explain
+    label: Explain
+    invoke:
+      plane: ui
+      facet: selection
+      value:
+        item: "{record.canonical_ref}"
+      open_view: view:ryeos/item/explain
