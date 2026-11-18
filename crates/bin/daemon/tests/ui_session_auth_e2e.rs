@@ -27,6 +27,16 @@ use common::DaemonHarness;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 
+/// Await one request and print its wall time to stderr as
+/// `timing <step> <ms>ms`. The line is hidden on a pass unless the test binary
+/// runs with `--nocapture`; it is shown on a failure either way.
+async fn timed<T>(step: &str, request: impl std::future::Future<Output = T>) -> T {
+    let started = std::time::Instant::now();
+    let answer = request.await;
+    eprintln!("timing {step} {}ms", started.elapsed().as_millis());
+    answer
+}
+
 /// Send a JSON request authenticated only by the session cookie.
 async fn cookie_request(
     harness: &DaemonHarness,
@@ -38,12 +48,24 @@ async fn cookie_request(
     let mut request = reqwest::Client::new()
         .request(method, format!("http://{}{path}", harness.bind))
         .header("cookie", format!("ryeos_session={session_id}"));
+    let body_action = body
+        .as_ref()
+        .and_then(|body| body["action"].as_str())
+        .map(str::to_owned);
     if let Some(body) = body {
         request = request.json(&body);
     }
-    let response = request.send().await?;
-    let status = response.status();
-    let body = response.json().await.unwrap_or(Value::Null);
+    let step = match body_action.as_deref() {
+        Some(action) => format!("{path} {action}"),
+        None => path.to_owned(),
+    };
+    let (status, body) = timed(&step, async {
+        let response = request.send().await?;
+        let status = response.status();
+        let body = response.json().await.unwrap_or(Value::Null);
+        anyhow::Ok((status, body))
+    })
+    .await?;
     Ok((status, body))
 }
 
@@ -53,7 +75,7 @@ async fn activate_launch(launch_url: &str) -> anyhow::Result<String> {
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
-    let response = client.get(launch_url).send().await?;
+    let response = timed("launch activate", client.get(launch_url).send()).await?;
     anyhow::ensure!(
         response.status() == StatusCode::SEE_OTHER,
         "launch activation must redirect, got {}",
@@ -143,18 +165,94 @@ fn dispatch_body(root: &Value, producer: &Value, view_ref: &str) -> Value {
 
 #[tokio::test]
 async fn browser_session_authority_lifecycle_over_http() -> anyhow::Result<()> {
-    let (harness, _fixture) = DaemonHarness::start_fast_with(|_, _, _| Ok(()), |_| {}).await?;
+    let (harness, _fixture) = timed(
+        "daemon start",
+        DaemonHarness::start_fast_with(
+            |_, _, _| Ok(()),
+            |cmd| {
+                // The daemon's per-phase timing lines for mint and seat open.
+                cmd.env("RUST_LOG", "info,ryeos_ui::timing=debug");
+            },
+        ),
+    )
+    .await?;
+    let outcome = lifecycle(&harness).await;
 
-    // The configured operator mints a launch for the shipped presentation.
-    let (status, minted) = harness
-        .post_json(
+    // The same daemon once more with a fresh session, so the timing lines show
+    // a warm open next to the cold one.
+    eprintln!("timing --- repeat: mint, activate, prepare, observe, claim");
+    let repeat = fresh_session_claim(&harness).await;
+
+    // The daemon's stderr goes to a file the harness reads back. Its phase
+    // timing lines say where each mint and seat open spent its time.
+    let log = harness.stderr_so_far();
+    for line in log
+        .lines()
+        .filter(|line| line.contains("request phase timing"))
+    {
+        eprintln!("daemon {line}");
+    }
+    if outcome.is_err() || repeat.is_err() {
+        // Show the tail so a failed request can be matched with what the
+        // daemon logged.
+        let lines: Vec<&str> = log.lines().collect();
+        let tail = &lines[lines.len().saturating_sub(200)..];
+        eprintln!(
+            "daemon stderr, last {} of {} lines:\n{}",
+            tail.len(),
+            lines.len(),
+            tail.join("\n")
+        );
+    }
+    outcome.and(repeat)
+}
+
+/// Mint, activate and claim a producer for a new session on a running daemon.
+async fn fresh_session_claim(harness: &DaemonHarness) -> anyhow::Result<()> {
+    let (status, minted) = timed(
+        "mint",
+        harness.post_json(
             "/ui/api/launch/mint",
             json!({
                 "ui_binding_contract_revision": ryeos_ui::UI_BINDING_CONTRACT_REVISION,
                 "root_ref": "config:ryeos/ui/presentation",
             }),
-        )
-        .await?;
+        ),
+    )
+    .await?;
+    anyhow::ensure!(status == StatusCode::OK, "mint: {minted}");
+    let session_id = minted["session_id"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("mint returned no session id"))?
+        .to_owned();
+    let root = json!({
+        "binding_attachment_id": minted["attachment"]["binding_attachment_id"],
+        "binding_generation": minted["attachment"]["binding_generation"],
+        "binding_digest": minted["attachment"]["binding_digest"],
+    });
+    activate_launch(
+        minted["launch_url"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("mint returned no launch url"))?,
+    )
+    .await?;
+    claim_producer(harness, &session_id, &root).await?;
+    Ok(())
+}
+
+async fn lifecycle(harness: &DaemonHarness) -> anyhow::Result<()> {
+    // The configured operator mints a launch for the shipped presentation.
+    let (status, minted) = timed(
+        "mint",
+        harness.post_json(
+            "/ui/api/launch/mint",
+            json!({
+                "ui_binding_contract_revision": ryeos_ui::UI_BINDING_CONTRACT_REVISION,
+                "root_ref": "config:ryeos/ui/presentation",
+            }),
+        ),
+    )
+    .await?;
     assert_eq!(status, StatusCode::OK, "mint: {minted}");
     let session_id = minted["session_id"]
         .as_str()
@@ -173,7 +271,7 @@ async fn browser_session_authority_lifecycle_over_http() -> anyhow::Result<()> {
     assert_eq!(cookie_session, session_id, "the cookie names the session");
 
     let (status, current) = cookie_request(
-        &harness,
+        harness,
         reqwest::Method::GET,
         "/ui/api/session/current",
         &session_id,
@@ -186,13 +284,13 @@ async fn browser_session_authority_lifecycle_over_http() -> anyhow::Result<()> {
         "live session authenticates: {current}"
     );
 
-    let producer = claim_producer(&harness, &session_id, &root).await?;
+    let producer = claim_producer(harness, &session_id, &root).await?;
 
     // In-binding dispatch: the root binding's closure is the presentation's
     // dialog Views (initial Surfaces bind separately), and the Node details
     // dialog names this source.
     let (status, admitted) = cookie_request(
-        &harness,
+        harness,
         reqwest::Method::POST,
         "/ui/api/invocations/dispatch",
         &session_id,
@@ -204,7 +302,7 @@ async fn browser_session_authority_lifecycle_over_http() -> anyhow::Result<()> {
     // Out-of-binding dispatch: the same session and producer, a source the
     // compiled binding does not contain.
     let (status, refused) = cookie_request(
-        &harness,
+        harness,
         reqwest::Method::POST,
         "/ui/api/invocations/dispatch",
         &session_id,
@@ -218,12 +316,14 @@ async fn browser_session_authority_lifecycle_over_http() -> anyhow::Result<()> {
     );
 
     // The operator revokes the session.
-    let (status, revoked) = harness
-        .post_json(
+    let (status, revoked) = timed(
+        "revoke",
+        harness.post_json(
             "/ui/api/sessions/revoke",
             json!({ "session_id": session_id }),
-        )
-        .await?;
+        ),
+    )
+    .await?;
     assert_eq!(status, StatusCode::OK, "revoke: {revoked}");
     assert_eq!(revoked["revoked"], true);
 
@@ -237,7 +337,7 @@ async fn browser_session_authority_lifecycle_over_http() -> anyhow::Result<()> {
             Some(dispatch_body(&root, &producer, "view:ryeos/node/status")),
         ),
     ] {
-        let (status, answer) = cookie_request(&harness, method, path, &session_id, body).await?;
+        let (status, answer) = cookie_request(harness, method, path, &session_id, body).await?;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}: {answer}");
         assert_eq!(answer["error_code"], "browser_session_revoked", "{path}");
     }
@@ -245,7 +345,7 @@ async fn browser_session_authority_lifecycle_over_http() -> anyhow::Result<()> {
     // A cookie that never named a session stays the plain unauthorized
     // answer, so the revoked code is not an oracle for arbitrary ids.
     let (status, unknown) = cookie_request(
-        &harness,
+        harness,
         reqwest::Method::GET,
         "/ui/api/session/current",
         "no-such-session",

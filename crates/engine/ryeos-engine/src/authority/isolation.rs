@@ -363,6 +363,59 @@ impl HeldIsolationLaunchWithLoopbackIngress {
     }
 }
 
+/// Process-wide tally of registered-generation verifications: how many ran and
+/// how long they took in total. Diagnostic only. A request handler reads it
+/// before and after its work and logs the difference, so the figure for one
+/// request also includes verifications run by any concurrent request.
+struct GenerationVerificationTally {
+    count: std::sync::atomic::AtomicU64,
+    nanos: std::sync::atomic::AtomicU64,
+}
+
+static GENERATION_VERIFICATIONS: GenerationVerificationTally = GenerationVerificationTally {
+    count: std::sync::atomic::AtomicU64::new(0),
+    nanos: std::sync::atomic::AtomicU64::new(0),
+};
+
+impl GenerationVerificationTally {
+    fn record(&self, elapsed: std::time::Duration) {
+        use std::sync::atomic::Ordering;
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.nanos.fetch_add(
+            u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+    }
+}
+
+/// Snapshot of the process-wide generation-verification tally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GenerationVerificationTotals {
+    pub count: u64,
+    pub elapsed: std::time::Duration,
+}
+
+impl GenerationVerificationTotals {
+    /// Verifications run since `earlier` was taken.
+    pub fn since(self, earlier: Self) -> Self {
+        Self {
+            count: self.count.saturating_sub(earlier.count),
+            elapsed: self.elapsed.saturating_sub(earlier.elapsed),
+        }
+    }
+}
+
+/// Read the process-wide generation-verification tally.
+pub fn generation_verification_totals() -> GenerationVerificationTotals {
+    use std::sync::atomic::Ordering;
+    GenerationVerificationTotals {
+        count: GENERATION_VERIFICATIONS.count.load(Ordering::Relaxed),
+        elapsed: std::time::Duration::from_nanos(
+            GENERATION_VERIFICATIONS.nanos.load(Ordering::Relaxed),
+        ),
+    }
+}
+
 /// Higher-level guard that binds a composed runtime to the exact registered
 /// bundle generation from which it was built.
 pub trait IsolationGenerationLifeline: Send + Sync {
@@ -2173,11 +2226,12 @@ impl IsolationRuntime {
     pub fn ensure_registered_generation_current(&self) -> Result<(), EngineError> {
         match &self._generation_lifeline {
             Some(lifeline) => {
-                lifeline
-                    .ensure_current()
-                    .map_err(|reason| EngineError::IsolationPolicyRefused {
-                        reason: format!("registered bundle generation changed: {reason}"),
-                    })
+                let started = std::time::Instant::now();
+                let outcome = lifeline.ensure_current();
+                GENERATION_VERIFICATIONS.record(started.elapsed());
+                outcome.map_err(|reason| EngineError::IsolationPolicyRefused {
+                    reason: format!("registered bundle generation changed: {reason}"),
+                })
             }
             None => Ok(()),
         }

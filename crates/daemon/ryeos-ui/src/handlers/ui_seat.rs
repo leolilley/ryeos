@@ -1463,6 +1463,7 @@ pub async fn handle_open(
             binding_generation,
             binding_digest,
         } => {
+            let _timing = crate::phase_timing::PhaseTimer::start("seat_open_prepare", "total");
             let root = BindingAttachmentCoordinate {
                 binding_attachment_id,
                 binding_generation,
@@ -1488,6 +1489,10 @@ pub async fn handle_open(
                     .map_err(|error| HandlerError::Conflict(error.to_string()))?
                 {
                     Some(membership) => {
+                        let _timing = crate::phase_timing::PhaseTimer::start(
+                            "seat_open_prepare",
+                            "revalidate_and_admit",
+                        );
                         state
                             .engine
                             .with_checked_bundle_generation(|generation| -> Result<_> {
@@ -1534,13 +1539,18 @@ pub async fn handle_open(
                                 user_principal_id: None,
                                 scopes: None,
                             };
-                            let (compiled_binding, presentation) =
+                            let (compiled_binding, presentation) = {
+                                let _timing = crate::phase_timing::PhaseTimer::start(
+                                    "seat_open_prepare",
+                                    "binding_compile",
+                                );
                                 super::ui_launch_mint::compile_session_binding(
                                     &request,
                                     &compile_context,
                                     &state,
                                     attachment.project_authority.as_deref(),
-                                )?;
+                                )?
+                            };
                             candidates.push(crate::browser_session::InitialSurfaceCandidate {
                                 seed,
                                 candidate: crate::browser_session::BindingAttachmentCandidate {
@@ -1556,6 +1566,10 @@ pub async fn handle_open(
                             .as_ref()
                             .map(|authority| authority.descriptor_path())
                             .transpose()?;
+                        let _timing = crate::phase_timing::PhaseTimer::start(
+                            "seat_open_prepare",
+                            "revalidate_and_admit",
+                        );
                         state
                             .engine
                             .with_checked_bundle_generation(|generation| -> Result<_> {
@@ -1616,7 +1630,13 @@ pub async fn handle_open(
                             })?
                     }
                 };
-            membership = initialization::materialize_unclaimed(&state, &session, membership)?;
+            membership = {
+                let _timing = crate::phase_timing::PhaseTimer::start(
+                    "seat_open_prepare",
+                    "materialize_unclaimed",
+                );
+                initialization::materialize_unclaimed(&state, &session, membership)?
+            };
             Ok(
                 json!({"presentation_id":membership.presentation_id,"thread_id":membership.thread_id,"chain_root_id":membership.chain_root_id,"root_binding":root}),
             )
