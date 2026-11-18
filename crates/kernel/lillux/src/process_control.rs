@@ -2304,7 +2304,7 @@ mod group_presence_tests {
     #[test]
     fn non_utf8_command_name_does_not_make_the_scan_undecidable() {
         let child = fork_group_member(|| {
-            unsafe { libc::prctl(libc::PR_SET_NAME, b"\xff\xfe\0".as_ptr()) };
+            unsafe { libc::prctl(libc::PR_SET_NAME, c"\xff\xfe".as_ptr()) };
             pause_forever();
         });
         let deadline = Instant::now() + Duration::from_secs(5);
