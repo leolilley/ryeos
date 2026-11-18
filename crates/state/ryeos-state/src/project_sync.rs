@@ -225,7 +225,8 @@ fn hex_sha256(bytes: &[u8]) -> String {
 }
 
 /// Namespace shape owned by one project sync-include entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SyncIncludeShape {
     /// One exact regular file.
     File,
@@ -337,19 +338,78 @@ impl SyncInclude {
         Ok(Self { entries })
     }
 
-    /// The node's current built-in table. Behaviour is identical to the
-    /// former `PROJECT_AI_SURFACES` constant.
-    pub fn builtin() -> Self {
+    /// Compose the node's table from the `sync_include` declarations of the
+    /// installed bundles' signed manifests, each tagged with its bundle name.
+    ///
+    /// A `{kind}` declaration resolves through `kind_directory` (a kind's
+    /// `location.directory`); an unknown kind is refused. Every resolved root
+    /// is validated against the floors, and no two declarations from any
+    /// bundles may overlap. The result is ordered by root, so the table does
+    /// not depend on bundle install order.
+    pub fn compose(
+        bundles: &[(String, Vec<SyncIncludeDecl>)],
+        kind_directory: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<Self> {
+        let mut resolved: Vec<(&str, SyncIncludeEntry)> = Vec::new();
+        for (bundle, decls) in bundles {
+            for decl in decls {
+                let entry = decl.resolve(kind_directory).map_err(|error| {
+                    anyhow::anyhow!("bundle `{bundle}` sync_include: {error:#}")
+                })?;
+                resolved.push((bundle.as_str(), entry));
+            }
+        }
+        for (index, (left_bundle, left)) in resolved.iter().enumerate() {
+            for (right_bundle, right) in &resolved[index + 1..] {
+                if path_contains(&left.root, &right.root) || path_contains(&right.root, &left.root)
+                {
+                    anyhow::bail!(
+                        "sync_include roots overlap: bundle `{left_bundle}` declares '{}' and bundle `{right_bundle}` declares '{}'",
+                        left.root,
+                        right.root
+                    );
+                }
+            }
+        }
+        let mut entries = resolved
+            .into_iter()
+            .map(|(_, entry)| entry)
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.root.cmp(&right.root));
+        Self::new(entries)
+    }
+
+    /// The 17 rows of the former `PROJECT_AI_SURFACES` constant, for tests that
+    /// need a populated table without composing one from bundles.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_tests() -> Self {
         let mut entries = vec![
             SyncIncludeEntry::file(".ai/manifest.source.yaml"),
             SyncIncludeEntry::file(".ai/manifest.yaml"),
         ];
         entries.extend(
-            BUILTIN_SYNC_INCLUDE_DIRECTORIES
-                .iter()
-                .map(|root| SyncIncludeEntry::directory(*root)),
+            [
+                ".ai/directives",
+                ".ai/tools",
+                ".ai/graphs",
+                ".ai/knowledge",
+                ".ai/parsers",
+                ".ai/handlers",
+                ".ai/protocols",
+                ".ai/node/engine/kinds",
+                ".ai/node/commands",
+                ".ai/config/agent",
+                ".ai/config/execution",
+                ".ai/config/directive-runtime",
+                ".ai/config/ryeos-runtime",
+                ".ai/config/development",
+                ".ai/config/schedules",
+            ]
+            .into_iter()
+            .map(SyncIncludeEntry::directory),
         );
-        Self::new(entries).expect("built-in sync_include table is valid")
+        entries.sort_by(|left, right| left.root.cmp(&right.root));
+        Self::new(entries).expect("test sync_include table is valid")
     }
 
     pub fn entries(&self) -> &[SyncIncludeEntry] {
@@ -384,23 +444,112 @@ impl SyncInclude {
     }
 }
 
-const BUILTIN_SYNC_INCLUDE_DIRECTORIES: &[&str] = &[
-    ".ai/directives",
-    ".ai/tools",
-    ".ai/graphs",
-    ".ai/knowledge",
-    ".ai/parsers",
-    ".ai/handlers",
-    ".ai/protocols",
-    ".ai/node/engine/kinds",
-    ".ai/node/commands",
-    ".ai/config/agent",
-    ".ai/config/execution",
-    ".ai/config/directive-runtime",
-    ".ai/config/ryeos-runtime",
-    ".ai/config/development",
-    ".ai/config/schedules",
-];
+/// One `sync_include` entry as a bundle declares it in its signed manifest:
+/// either `{kind: <item kind>}` (the root is that kind's `location.directory`
+/// under `.ai`, a directory) or `{root: <path>, shape: file|directory}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncIncludeDecl {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<SyncIncludeShape>,
+    #[serde(
+        default = "default_materialize_to_project",
+        skip_serializing_if = "is_true"
+    )]
+    pub materialize_to_project: bool,
+}
+
+fn default_materialize_to_project() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
+impl SyncIncludeDecl {
+    /// The form rules that need no kind registry: exactly one of `kind` or
+    /// `root` + `shape`, and a legal root. Unknown kinds are caught when the
+    /// declaration is resolved against the installed kind registry.
+    pub fn validate_form(&self) -> Result<()> {
+        match (&self.kind, &self.root, &self.shape) {
+            (Some(kind), None, None) => {
+                if kind.is_empty()
+                    || !kind
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+                {
+                    anyhow::bail!("kind name '{kind}' is not a valid item kind");
+                }
+                Ok(())
+            }
+            (None, Some(root), Some(shape)) => validate_sync_include_entry(&SyncIncludeEntry {
+                root: root.clone(),
+                shape: *shape,
+                materialize_to_project: self.materialize_to_project,
+            }),
+            _ => anyhow::bail!(
+                "a declaration is either `kind: <item kind>` or `root: <path>` with `shape: file|directory`, not both and not neither"
+            ),
+        }
+    }
+
+    /// Resolve to a validated entry. `kind_directory` maps a kind to its
+    /// `location.directory`.
+    pub fn resolve(
+        &self,
+        kind_directory: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<SyncIncludeEntry> {
+        self.validate_form()?;
+        let entry = match (&self.kind, &self.root, &self.shape) {
+            (Some(kind), _, _) => {
+                let directory =
+                    kind_directory(kind).ok_or_else(|| anyhow::anyhow!("unknown kind '{kind}'"))?;
+                SyncIncludeEntry {
+                    root: format!(".ai/{directory}"),
+                    shape: SyncIncludeShape::Directory,
+                    materialize_to_project: self.materialize_to_project,
+                }
+            }
+            (None, Some(root), Some(shape)) => SyncIncludeEntry {
+                root: root.clone(),
+                shape: *shape,
+                materialize_to_project: self.materialize_to_project,
+            },
+            _ => unreachable!("validate_form admitted only the two declared forms"),
+        };
+        validate_sync_include_entry(&entry).map_err(|error| match &self.kind {
+            Some(kind) => anyhow::anyhow!("kind '{kind}' resolves to a refused root: {error:#}"),
+            None => error,
+        })?;
+        Ok(entry)
+    }
+}
+
+/// Validate one bundle's own declarations: each well formed, and no two of its
+/// explicit roots overlapping. Kinds are resolved later, against the installed
+/// registry.
+pub fn validate_sync_include_decls(decls: &[SyncIncludeDecl]) -> Result<()> {
+    for decl in decls {
+        decl.validate_form()?;
+    }
+    let roots = decls
+        .iter()
+        .filter_map(|decl| decl.root.as_deref())
+        .collect::<Vec<_>>();
+    for (index, left) in roots.iter().enumerate() {
+        for right in &roots[index + 1..] {
+            if path_contains(left, right) || path_contains(right, left) {
+                anyhow::bail!("sync_include roots '{left}' and '{right}' overlap");
+            }
+        }
+    }
+    Ok(())
+}
 
 /// RyeOS-owned credential roots that must never leave the machine.
 /// **Code-enforced structural floor**: this is independent from configurable
@@ -862,7 +1011,7 @@ mod tests {
     use std::collections::HashMap;
 
     fn inc() -> SyncInclude {
-        SyncInclude::builtin()
+        SyncInclude::for_tests()
     }
 
     fn manifest(paths: &[&str]) -> SourceManifest {
@@ -1189,8 +1338,8 @@ mod tests {
     }
 
     #[test]
-    fn builtin_table_is_exactly_the_former_const_list() {
-        let expected: Vec<(&str, SyncIncludeShape)> = vec![
+    fn test_table_is_exactly_the_former_const_rows() {
+        let mut expected: Vec<(&str, SyncIncludeShape)> = vec![
             (".ai/manifest.source.yaml", SyncIncludeShape::File),
             (".ai/manifest.yaml", SyncIncludeShape::File),
             (".ai/directives", SyncIncludeShape::Directory),
@@ -1209,13 +1358,14 @@ mod tests {
             (".ai/config/development", SyncIncludeShape::Directory),
             (".ai/config/schedules", SyncIncludeShape::Directory),
         ];
+        expected.sort();
         let table = inc();
         let actual: Vec<(&str, SyncIncludeShape)> = table
             .entries()
             .iter()
             .map(|entry| (entry.root.as_str(), entry.shape))
             .collect();
-        assert_eq!(actual, expected);
+        assert_eq!(actual, expected, "the table is ordered by root");
         assert!(table.entries().iter().all(|e| e.materialize_to_project));
         assert_eq!(table.materialized().count(), 17);
     }
@@ -1341,5 +1491,101 @@ mod tests {
             validate_stored_project_manifest_path(path, ProjectSyncScope::AiOnly, None)
                 .expect_err(path);
         }
+    }
+
+    fn kinds(kind: &str) -> Option<String> {
+        match kind {
+            "tool" => Some("tools".to_owned()),
+            "view" => Some("views".to_owned()),
+            "config" => Some("config".to_owned()),
+            "node" => Some("node".to_owned()),
+            _ => None,
+        }
+    }
+
+    fn decls(yaml: &str) -> Vec<SyncIncludeDecl> {
+        serde_yaml::from_str(yaml).expect("declarations parse")
+    }
+
+    #[test]
+    fn declarations_resolve_kinds_and_explicit_roots() {
+        let table = SyncInclude::compose(
+            &[(
+                "core".to_owned(),
+                decls(
+                    "- kind: tool\n- root: .ai/manifest.yaml\n  shape: file\n- root: .ai/config/agent\n  shape: directory\n  materialize_to_project: false\n",
+                ),
+            )],
+            &kinds,
+        )
+        .unwrap();
+        let roots: Vec<_> = table
+            .entries()
+            .iter()
+            .map(|e| (e.root.as_str(), e.shape, e.materialize_to_project))
+            .collect();
+        assert_eq!(
+            roots,
+            vec![
+                (".ai/config/agent", SyncIncludeShape::Directory, false),
+                (".ai/manifest.yaml", SyncIncludeShape::File, true),
+                (".ai/tools", SyncIncludeShape::Directory, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn declarations_refuse_unknown_kinds_malformed_forms_and_floor_kinds() {
+        let one = |yaml: &str| {
+            format!(
+                "{:#}",
+                SyncInclude::compose(&[("b".to_owned(), decls(yaml))], &kinds)
+                    .expect_err("declaration must be refused")
+            )
+        };
+        assert!(one("- kind: nope\n").contains("unknown kind 'nope'"));
+        assert!(one("- kind: tool\n  root: .ai/tools\n  shape: directory\n").contains("not both"));
+        assert!(one("- root: .ai/tools\n").contains("not both and not neither"));
+        assert!(one("- shape: file\n").contains("neither"));
+        // A kind whose directory is wider than what may travel is refused by the
+        // floor rules, not by a special case.
+        assert!(one("- kind: config\n").contains("contains"));
+        assert!(one("- kind: node\n").contains("contains"));
+        assert!(
+            one("- root: .ai/node/trust\n  shape: directory\n").contains("live-execution-denied")
+        );
+        assert!(
+            serde_yaml::from_str::<Vec<SyncIncludeDecl>>("- kind: tool\n  surprise: 1\n").is_err(),
+            "unknown fields are refused"
+        );
+    }
+
+    #[test]
+    fn composing_refuses_overlap_across_bundles_and_names_both() {
+        let error = SyncInclude::compose(
+            &[
+                ("one".to_owned(), decls("- kind: tool\n")),
+                (
+                    "two".to_owned(),
+                    decls("- root: .ai/tools/extra\n  shape: directory\n"),
+                ),
+            ],
+            &kinds,
+        )
+        .expect_err("overlap");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("`one`") && message.contains("`two`"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn bundle_local_validation_catches_overlap_without_a_registry() {
+        validate_sync_include_decls(&decls("- kind: tool\n- kind: view\n")).unwrap();
+        validate_sync_include_decls(&decls(
+            "- root: .ai/a\n  shape: directory\n- root: .ai/a/b\n  shape: directory\n",
+        ))
+        .expect_err("overlap");
     }
 }

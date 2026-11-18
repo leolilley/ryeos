@@ -2465,11 +2465,16 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 
 #[cfg(test)]
 mod tests {
+    /// The test table with the two manifest files first, the order the apply
+    /// tests' phase prefixes were written against.
     fn test_entries() -> Vec<SyncIncludeEntry> {
-        ryeos_state::project_sync::SyncInclude::builtin()
-            .materialized()
-            .cloned()
-            .collect()
+        let (mut files, directories): (Vec<_>, Vec<_>) =
+            ryeos_state::project_sync::SyncInclude::for_tests()
+                .materialized()
+                .cloned()
+                .partition(|entry| entry.shape == SyncIncludeShape::File);
+        files.extend(directories);
+        files
     }
 
     use super::*;

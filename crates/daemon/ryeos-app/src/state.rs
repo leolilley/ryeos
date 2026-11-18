@@ -606,7 +606,7 @@ pub mod test_support {
                     patterns: Vec::new(),
                 },
             )?),
-            sync_include: Arc::new(ryeos_state::project_sync::SyncInclude::builtin()),
+            sync_include: Arc::new(ryeos_state::project_sync::SyncInclude::for_tests()),
             vault_fingerprint: None,
             accounting: None,
             persistent_sessions: Arc::new(crate::persistent_session::PersistentSessionPool::new()),

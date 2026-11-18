@@ -4925,6 +4925,17 @@ async fn run(
                     execution_policy.resource_authority.as_ref(),
                 )
                 .context("observe node execution resources")?;
+            // The sync_include table is composed once, from the signed
+            // manifests of the installed bundles, against the installed kinds.
+            // A declaration the floors or the kind registry refuse stops boot.
+            let sync_include = Arc::new(
+                ryeos_bundle::manifest::compose_sync_include(
+                    &engine.bundle_roots,
+                    &engine.node_trust_store,
+                    &engine.kinds,
+                )
+                .context("compose the node's sync_include table from installed bundles")?,
+            );
             let ignore_matcher = Arc::new(
                 node_policy_snapshot
                     .require::<ryeos_node_runtime::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy>()?
@@ -5060,7 +5071,7 @@ async fn run(
                 command_registry,
                 authorizer,
                 ignore_matcher,
-                sync_include: std::sync::Arc::new(ryeos_state::project_sync::SyncInclude::builtin()),
+                sync_include,
                 vault_fingerprint: {
                     let vault_pk_path = config
                         .app_root
@@ -8424,6 +8435,14 @@ async fn run_service_standalone(
         ryeos_app::vault::SealedEnvelopeVault::load(&config.app_root)
             .context("load sealed-envelope vault — did `ryeos init` run?")?,
     );
+    let standalone_sync_include = Arc::new(
+        ryeos_bundle::manifest::compose_sync_include(
+            &engine.bundle_roots,
+            &engine.node_trust_store,
+            &engine.kinds,
+        )
+        .context("compose the node's sync_include table from installed bundles")?,
+    );
     let standalone_ignore_matcher = Arc::new(
         node_policy_snapshot
             .require::<ryeos_node_runtime::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy>()?
@@ -8684,7 +8703,7 @@ async fn run_service_standalone(
         command_registry: standalone_command_registry,
         authorizer: standalone_auth,
         ignore_matcher: standalone_ignore_matcher,
-        sync_include: std::sync::Arc::new(ryeos_state::project_sync::SyncInclude::builtin()),
+        sync_include: standalone_sync_include,
         vault_fingerprint: None,
         // Standalone service invocations perform no paid launches; hard
         // admission is uniformly unavailable here.

@@ -116,7 +116,7 @@ mod tests {
         let paths = NodeDerivedViewPaths::under(root.path());
         materialize_node_derived_views(
             root.path(),
-            &ryeos_state::project_sync::SyncInclude::builtin(),
+            &ryeos_state::project_sync::SyncInclude::for_tests(),
         )
         .unwrap();
 

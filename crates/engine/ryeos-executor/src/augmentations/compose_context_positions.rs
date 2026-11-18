@@ -2559,7 +2559,7 @@ pub(crate) mod tests {
                 })
                 .unwrap(),
             ),
-            sync_include: std::sync::Arc::new(ryeos_state::project_sync::SyncInclude::builtin()),
+            sync_include: std::sync::Arc::new(ryeos_state::project_sync::SyncInclude::for_tests()),
             vault_fingerprint: None,
             accounting: None,
             persistent_sessions: Arc::new(
