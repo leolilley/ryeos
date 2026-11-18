@@ -125,12 +125,15 @@ async fn ask_remote(
         }
         Err(_) => return did_not_answer(REASON_REMOTE_ERROR, now_millis()),
     };
+    let no_bindings = BTreeMap::new();
+    let no_parameters = serde_json::json!({});
+    let policy = ExecutionPolicy::projectless(ExecutionResponse::Wait);
     let call = client.execute_service_result(
         LOCALITY_SERVICE,
-        &BTreeMap::new(),
+        &no_bindings,
         None,
-        &serde_json::json!({}),
-        &ExecutionPolicy::projectless(ExecutionResponse::Wait),
+        &no_parameters,
+        &policy,
     );
     match tokio::time::timeout(PER_REMOTE_TIMEOUT, call).await {
         Err(_) => did_not_answer(REASON_TIMEOUT, now_millis()),

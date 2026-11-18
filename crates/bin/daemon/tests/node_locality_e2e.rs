@@ -306,6 +306,14 @@ async fn a_node_serves_digests_and_never_a_raw_fact() -> Result<()> {
     assert!(boot_id.is_empty() || !text.contains(&boot_id), "{text}");
     let root = h.state_path.display().to_string();
     assert!(!text.contains(&root), "{text}");
+    let storage = lillux::process_control::RootStorageFacts::observe(&h.state_path);
+    for forbidden in [storage.mount_point, storage.mount_source]
+        .into_iter()
+        .flatten()
+        .filter(|value| value.len() > 1)
+    {
+        assert!(!text.contains(&forbidden), "{forbidden} in {text}");
+    }
     assert!(
         !text.contains("boot_id") && !text.contains("mount"),
         "{text}"

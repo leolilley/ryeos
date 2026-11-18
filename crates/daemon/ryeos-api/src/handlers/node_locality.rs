@@ -342,6 +342,24 @@ mod tests {
         }
     }
 
+    /// The real observation of a real app root: its path and its mount point
+    /// never appear in what is served.
+    #[test]
+    fn a_real_observation_never_carries_the_app_root_or_its_mount_point() {
+        let root = tempfile::tempdir().unwrap();
+        let text = serde_json::to_string(&local_facts(root.path())).unwrap();
+        let path = root.path().display().to_string();
+        assert!(!text.contains(&path), "{text}");
+        let storage = lillux::process_control::RootStorageFacts::observe(root.path());
+        for forbidden in [storage.mount_point, storage.mount_source]
+            .into_iter()
+            .flatten()
+            .filter(|value| value.len() > 1)
+        {
+            assert!(!text.contains(&forbidden), "{forbidden} in {text}");
+        }
+    }
+
     #[test]
     fn the_signed_item_and_the_descriptor_name_one_capability() {
         assert_eq!(DESCRIPTOR.required_caps, &[CAPABILITY]);
