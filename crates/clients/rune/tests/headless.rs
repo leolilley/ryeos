@@ -647,24 +647,14 @@ fn exactly_keyed(rt: &Runtime<App>, key: &str) -> Option<[f32; 4]> {
 #[test]
 fn the_current_view_set_tab_stays_in_view_when_the_tabs_scroll() {
     let (width, height) = (900.0, 800.0);
-    let mut rt = shell("", (width, height));
-    // Alt+N opens a new view set and makes it current, so after enough of
-    // them the tabs overflow the band and the current one is the last.
-    for _ in 0..14 {
-        rt.key(KeyEvent {
-            key: Key::Text("n".into()),
-            mods: Mods {
-                alt: true,
-                ..Mods::default()
-            },
-        });
-        rt.frame(FRAME);
-    }
-    for _ in 0..60 {
-        rt.frame(FRAME);
-    }
+    let rt = shell("tabs", (width, height));
     let vm = model(&rt);
     let tabs = &vm.presentation.chrome.top_bar.tabs;
+    assert!(
+        vm.presentation.chrome.top_bar.visible,
+        "the tab band is shown"
+    );
+    assert_eq!(tabs.len(), 15, "the scene opens fourteen more view sets");
     let current = tabs
         .iter()
         .find(|tab| tab.active)

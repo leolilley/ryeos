@@ -617,6 +617,22 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
                 });
             }
         }
+        "tabs" => {
+            // The tab band shown and more view sets than fit, the newest
+            // current, as Alt+T and fourteen Alt+N leave it.
+            let intents =
+                std::iter::once(ryeos_client_base::ui::event::RyeOsUiIntent::ToggleTopStatusBar)
+                    .chain(std::iter::repeat_n(
+                        ryeos_client_base::ui::event::RyeOsUiIntent::NewViewSet,
+                        14,
+                    ));
+            for intent in intents {
+                let effects = core.dispatch(RyeOsEvent::Ui {
+                    event: RyeOsUiEvent::Activate { intent },
+                });
+                answered += answer(&mut core, effects, scene);
+            }
+        }
         "launcher" => {
             let effects = core.dispatch(RyeOsEvent::Ui {
                 event: RyeOsUiEvent::OpenLauncher,
