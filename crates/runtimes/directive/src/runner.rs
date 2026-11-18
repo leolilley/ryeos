@@ -355,6 +355,34 @@ fn tool_interrupted_envelope() -> String {
     .expect("fixed interrupted-tool envelope serializes")
 }
 
+/// The runtime's result for its own deadline stop. The status is `TimedOut`
+/// whether or not the callback finalize landed: when it did not (an older
+/// daemon rejects the status, or the callback failed), the daemon settles the
+/// thread from this stdout result, and a deadline stop must not turn into a
+/// failure on that route. The finalize error rides as a warning.
+fn deadline_stop_result(
+    thread_id: &str,
+    result: Value,
+    cost: ryeos_runtime::envelope::RuntimeCost,
+    finalized: Result<(), String>,
+    warnings: &mut Vec<String>,
+) -> RuntimeResult {
+    if let Err(error) = finalized {
+        warnings.push(format!(
+            "callback finalize_thread for the deadline stop failed: {error}"
+        ));
+    }
+    RuntimeResult {
+        success: false,
+        status: RuntimeResultStatus::TimedOut,
+        thread_id: thread_id.to_string(),
+        result: Some(result),
+        outputs: json!({}),
+        cost: Some(cost),
+        warnings: Vec::new(),
+    }
+}
+
 /// The error envelope the model reads when a tool result is refused for a
 /// stable reason.
 fn tool_error_body(code: &str, message: &str) -> String {
@@ -4294,30 +4322,18 @@ impl Runner {
                         outputs: json!({}),
                         warnings: warnings.clone(),
                     };
-                    let runtime_result = match self.callback.finalize_thread(completion).await {
-                        Ok(()) => RuntimeResult {
-                            success: false,
-                            status: RuntimeResultStatus::TimedOut,
-                            thread_id: self.thread_id.clone(),
-                            result: Some(result),
-                            outputs: json!({}),
-                            cost: Some(cost),
-                            warnings: Vec::new(),
-                        },
-                        // Not settled over the callback: report the failure
-                        // so the daemon's own settlement stays authoritative.
-                        Err(e) => RuntimeResult {
-                            success: false,
-                            status: RuntimeResultStatus::Failed,
-                            thread_id: self.thread_id.clone(),
-                            result: Some(json!(format!(
-                                "resume-critical callback finalize_thread failed: {e}"
-                            ))),
-                            outputs: json!({}),
-                            cost: Some(cost),
-                            warnings: Vec::new(),
-                        },
-                    };
+                    let finalized = self
+                        .callback
+                        .finalize_thread(completion)
+                        .await
+                        .map_err(|error| error.to_string());
+                    let runtime_result = deadline_stop_result(
+                        &self.thread_id,
+                        result,
+                        cost,
+                        finalized,
+                        &mut warnings,
+                    );
                     guard.finalized = true;
                     return Ok(Self::attach_warnings(runtime_result, &mut warnings));
                 }
@@ -5933,6 +5949,30 @@ mod tests {
         assert!(lillux::valid_hash(
             parsed["error"]["response_digest"].as_str().unwrap()
         ));
+    }
+
+    #[test]
+    fn a_failed_callback_finalize_keeps_the_deadline_stop_timed_out() {
+        let result = json!({"outcome": "deadline", "phase": "hard_stop"});
+        let cost = || provider_reported_spend_runtime_cost(usd("0.125"));
+        let mut warnings = vec!["earlier".to_string()];
+        let stopped = deadline_stop_result(
+            "T-1",
+            result.clone(),
+            cost(),
+            Err("unknown variant `timed_out`".to_string()),
+            &mut warnings,
+        );
+        assert_eq!(stopped.status, RuntimeResultStatus::TimedOut);
+        assert!(!stopped.success);
+        assert_eq!(stopped.result, Some(result.clone()));
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings[1].contains("unknown variant `timed_out`"));
+        // A landed finalize adds no warning and reports the same status.
+        let mut clean = Vec::new();
+        let landed = deadline_stop_result("T-1", result, cost(), Ok(()), &mut clean);
+        assert_eq!(landed.status, RuntimeResultStatus::TimedOut);
+        assert!(clean.is_empty());
     }
 
     #[test]
