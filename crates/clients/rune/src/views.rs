@@ -219,10 +219,16 @@ fn frame_header(spec: &FrameSpec<'_>, local: &crate::Local) -> El {
     }
     let tile_id = tile.tile_id.to_owned();
     let maximized = tile.maximized;
+    // The tools sit at the mute step until their tile is focused.
+    let tool_ink = if spec.focused {
+        t.ink_dim()
+    } else {
+        t.ink_at(theme::INK_MUTE)
+    };
     tools = tools.child(
         text(if maximized { "↙" } else { "↗" })
             .font(theme::TYPE_LINE)
-            .color(t.ink_dim())
+            .color(tool_ink)
             .padding(2.0)
             .role("button")
             .label(if maximized {
@@ -248,7 +254,7 @@ fn frame_header(spec: &FrameSpec<'_>, local: &crate::Local) -> El {
                 .child(crate::icons::glyph(
                     &crate::icons::MORE,
                     14.0,
-                    if open { t.accent } else { t.ink_dim() },
+                    if open { t.accent } else { tool_ink },
                 ))
                 .padding(5.0)
                 .role("button")
