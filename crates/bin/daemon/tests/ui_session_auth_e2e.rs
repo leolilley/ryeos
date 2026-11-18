@@ -244,14 +244,14 @@ async fn browser_session_authority_lifecycle_over_http() -> anyhow::Result<()> {
     }
     outcome.and(repeat)?;
 
-    // One prepare verifies the installed bundles 18 times: before and after
+    // One prepare verifies the installed bundles 10 times: before and after
     // the Surface compile (2); before and after the admission block plus once
-    // before it publishes the membership (3); before and after each of the
-    // five guarded engine calls of the seat-root admission (10); before and
-    // after the initialization step plus once before it appends the record
-    // (3). Work inside a guarded operation adds none. The bound leaves room
-    // for an unrelated daemon task verifying while the prepare runs; a guard
-    // that stopped covering nested work would show several hundred.
+    // before it publishes the membership (3); before and after the seat-root
+    // admission (2); before and after the initialization step plus once
+    // before it appends the record (3). Work inside a guarded operation adds
+    // none. The bound leaves room for an unrelated daemon task verifying
+    // while the prepare runs; a guard that stopped covering nested work would
+    // show several hundred.
     let verification_counts = verification_counts?;
     anyhow::ensure!(
         verification_counts.len() == 2,
@@ -260,8 +260,8 @@ async fn browser_session_authority_lifecycle_over_http() -> anyhow::Result<()> {
     );
     for verifications in verification_counts {
         anyhow::ensure!(
-            (18..=30).contains(&verifications),
-            "one prepare ran {verifications} bundle-generation verifications; 18 are expected"
+            (10..=22).contains(&verifications),
+            "one prepare ran {verifications} bundle-generation verifications; 10 are expected"
         );
     }
     Ok(())

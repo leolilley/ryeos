@@ -358,23 +358,30 @@ pub fn admit_seat_root(
         origin_site_id: state.threads.site_id(),
         thread_profile: seat_kind(state)?,
     };
-    match project_access {
-        Some(access) => {
-            ryeos_app::thread_lifecycle::admit_non_execution_root_under_project_authority(
+    // The admission resolves, verifies and seals one subject through several
+    // guarded engine calls. They run as one guarded operation, so the
+    // installed bundles are verified once before and once after the whole
+    // admission, and a change during it refuses the admission. Nothing is
+    // written here; the caller creates the seat thread from the result.
+    state
+        .engine
+        .with_checked_bundle_generation(|_| match project_access {
+            Some(access) => {
+                ryeos_app::thread_lifecycle::admit_non_execution_root_under_project_authority(
+                    &state.engine,
+                    node_history_policy,
+                    access.directory(),
+                    request,
+                )
+            }
+            None => ryeos_app::thread_lifecycle::admit_non_execution_root(
                 &state.engine,
                 node_history_policy,
-                access.directory(),
+                &state.config.app_root,
                 request,
-            )
-        }
-        None => ryeos_app::thread_lifecycle::admit_non_execution_root(
-            &state.engine,
-            node_history_policy,
-            &state.config.app_root,
-            request,
-        ),
-    }
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))
+            ),
+        })
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))
 }
 
 fn presentation_executor_ref(presentation_id: &str, root: &BindingAttachmentCoordinate) -> String {
