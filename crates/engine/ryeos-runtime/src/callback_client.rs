@@ -2124,8 +2124,6 @@ mod tests {
             "stream_snapshot",
             "stream_closed",
             "artifact_published",
-            "thread_reconciled",
-            "orphan_process_killed",
             "cognition_in",
             "cognition_out",
             "cognition_reasoning",

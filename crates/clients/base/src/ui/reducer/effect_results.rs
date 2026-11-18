@@ -801,6 +801,13 @@ impl RyeOsCore {
                     self.data.dimension = Some(value);
                 }
             }
+            // The queue is the principal's, not a project's, so any admitted
+            // Surface may report it.
+            Some("attention") => {
+                if let Ok(value) = serde_json::from_value(data.clone()) {
+                    self.data.attention = Some(value);
+                }
+            }
             Some("projects") => {
                 if let Ok(value) = serde_json::from_value(data.clone()) {
                     self.data.projects = Some(value);
@@ -1396,6 +1403,66 @@ mod tests {
                 .values()
                 .any(|data| data == &serde_json::json!({"version":1,"projects":[]}))
         );
+    }
+
+    #[test]
+    fn attention_surface_source_feeds_the_counts_and_refetches_on_a_thread_hint() {
+        let mut session = writable_session();
+        let crate::presentation::UiCompositionDefinition::Surface { surface } =
+            &mut session.binding_attachments[0].presentation.definition
+        else {
+            panic!("Surface fixture required")
+        };
+        surface.sources = serde_json::from_value(serde_json::json!({
+            "attention": {
+                "ref": "service:ui/ryeos-ui/work/attention",
+                "role": "attention",
+                "params": {"limit": 1},
+                "refresh": {"on_hint": ["thread", "activity"]}
+            }
+        }))
+        .unwrap();
+        let mut core = core(session);
+        let attention_fetch = |effects: &[RyeOsEffect]| {
+            effects
+                .iter()
+                .find(|effect| {
+                    matches!(
+                        &effect.kind,
+                        RyeOsEffectKind::FetchSource { request, .. }
+                            if matches!(
+                                &request.coordinate,
+                                crate::ui::binding::UiBindingCoordinate::Source { channel, .. }
+                                    if channel == "attention"
+                            )
+                    )
+                })
+                .map(|effect| effect.id)
+        };
+        let id = attention_fetch(&core.initial_effects()).expect("surface source fetch");
+        assert!(core.data.attention.is_none());
+        core.dispatch(RyeOsEvent::EffectResult {
+            result: RyeOsEffectResult {
+                id,
+                ok: true,
+                kind: RyeOsEffectResultKind::SourceData,
+                data: Some(serde_json::json!({
+                    "attention": [],
+                    "counts": {"total": 3, "by_kind": [
+                        {"kind": "approval", "label": "approvals", "tone": "warn", "count": 3}
+                    ]},
+                })),
+                error: None,
+            },
+        });
+        let counts = &core.data.attention.as_ref().expect("counts arrive").counts;
+        assert_eq!(counts.total, 3);
+        assert_eq!(counts.by_kind[0].label, "approvals");
+
+        // The signed `refresh.on_hint` of the source decides what refetches it.
+        assert!(attention_fetch(&core.effects_for_hint("thread")).is_some());
+        assert!(attention_fetch(&core.effects_for_hint("activity")).is_some());
+        assert!(attention_fetch(&core.effects_for_hint("project")).is_none());
     }
 
     #[test]
