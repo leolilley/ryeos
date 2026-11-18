@@ -433,7 +433,11 @@ where
         .browser_sessions
         .get_session(session_id)
         .expect("live browser session");
-    crate::seat_auth::with_compiled_ui_session(&session, attachment, None, future).await
+    // The helper enters the dispatch scope the way dispatch does, with the
+    // provenance of the source stated: it runs the handler as a source a
+    // bundle item declared, so no project-authored restriction applies.
+    crate::seat_auth::with_compiled_ui_source_session(&session, attachment, None, false, future)
+        .await
 }
 
 fn service_descriptors() -> &'static [ryeos_app::service_registry::ServiceDescriptor] {
