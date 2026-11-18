@@ -77,11 +77,16 @@ pub fn plant_provider_with(
     paid: bool,
     schemas_extra: &str,
 ) -> anyhow::Result<()> {
-    plant_provider_full(root, base_url, signer, paid, schemas_extra, "")
+    plant_provider_full(root, base_url, signer, paid, schemas_extra, "", "", false)
 }
 
 /// As `plant_provider_with`, plus `top_extra`: YAML spliced at the top level
-/// of the provider entry, for example an `image_input:` declaration.
+/// of the provider entry, for example an `image_input:` declaration;
+/// `usage_extra`: the lines of the streaming `metadata.usage` schema (empty
+/// declares none, which leaves the built-in Chat Completions usage parser);
+/// and `cache_tariff`: with `paid`, a tariff that also bills the cache read
+/// and write dimensions.
+#[allow(clippy::too_many_arguments)]
 pub fn plant_provider_full(
     root: &Path,
     base_url: &str,
@@ -89,13 +94,42 @@ pub fn plant_provider_full(
     paid: bool,
     schemas_extra: &str,
     top_extra: &str,
+    usage_extra: &str,
+    cache_tariff: bool,
 ) -> anyhow::Result<()> {
+    let usage_metadata: String = if usage_extra.trim().is_empty() {
+        String::new()
+    } else {
+        let lines: String = usage_extra
+            .lines()
+            .map(|line| format!("        {line}\n"))
+            .collect();
+        format!("    metadata:\n      usage:\n{lines}")
+    };
     let schemas_extra: String = schemas_extra
         .lines()
         .map(|line| format!("  {line}\n"))
         .collect();
     let top_extra: String = top_extra.lines().map(|line| format!("{line}\n")).collect();
-    let pricing = if paid {
+    let pricing = if paid && cache_tariff {
+        r#"pricing:
+  input_per_million: "2"
+  output_per_million: "10"
+spend_authority:
+  billing_principal: e2e-stub
+  credential_authority_generation: gen-1
+  pricing_contract_subject: e2e-stub-2026-11
+  tariff:
+    schema_version: 1
+    currency: usd
+    pricing_generation: e2e-2026-11
+    input_per_million: "2"
+    output_per_million: "10"
+    cache_read_per_million: "0.2"
+    cache_write_per_million: "2.5"
+    covered_dimensions: [input_tokens, output_tokens, cache_read_tokens, cache_write_tokens]
+"#
+    } else if paid {
         r#"pricing:
   input_per_million: "2"
   output_per_million: "10"
@@ -135,7 +169,7 @@ headers: {{}}
 schemas:
   streaming:
     mode: delta_merge
-  output_limit: {{path: max_tokens, semantics: provider_native_output_tokens}}
+{usage_metadata}  output_limit: {{path: max_tokens, semantics: provider_native_output_tokens}}
 {schemas_extra}{top_extra}{pricing}"#
     );
     let signed = lillux::signature::sign_content(&body, signer, "#", None);
@@ -349,6 +383,11 @@ pub struct RigOptions {
     /// YAML spliced at the top level of the provider entry, for example an
     /// `image_input:` declaration. Empty declares none.
     pub provider_top_extra: String,
+    /// The lines of the provider's streaming `metadata.usage` schema (see
+    /// `plant_provider_full`). Empty declares none.
+    pub provider_usage_extra: String,
+    /// With `paid_provider`, a tariff that also bills cache read and write.
+    pub provider_cache_tariff: bool,
     /// Plant the image-returning tools `shot`, `shot_bad` and `shot_big`.
     pub image_tools: bool,
     /// Lines under the directive's `model.reasoning:`, when it sets a
@@ -369,6 +408,8 @@ impl Default for RigOptions {
             graph_vault: false,
             provider_schemas_extra: String::new(),
             provider_top_extra: String::new(),
+            provider_usage_extra: String::new(),
+            provider_cache_tariff: false,
             image_tools: false,
             directive_reasoning: None,
         }
@@ -416,6 +457,8 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
     let graph_vault = opts.graph_vault;
     let schemas_extra = opts.provider_schemas_extra.clone();
     let top_extra = opts.provider_top_extra.clone();
+    let usage_extra = opts.provider_usage_extra.clone();
+    let cache_tariff = opts.provider_cache_tariff;
     let spawn_cell: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
     let spawn_cell_tweak = spawn_cell.clone();
     let started_at = Instant::now();
@@ -437,6 +480,8 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
                         paid_provider,
                         &schemas_extra,
                         &top_extra,
+                        &usage_extra,
+                        cache_tariff,
                     )
                 },
             )

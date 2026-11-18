@@ -51,7 +51,9 @@
 //!   passed through). Defaults to `tool_calls` when calls are present,
 //!   otherwise `stop`.
 //! - `usage`: `{prompt_tokens, completion_tokens, ...}` (defaults 10 and
-//!   5); extra keys are copied into the usage object verbatim.
+//!   5); extra keys are copied into the usage object verbatim, so a step
+//!   can report cache counts at any depth (for example a top-level
+//!   `cache_read_input_tokens` or a nested `prompt_tokens_details`).
 //! - `stream`: how a streamed reply is cut into SSE events:
 //!   `text_chunk_bytes`, `argument_chunk_bytes` (split text and tool-call
 //!   arguments over several events), `thinking_chunk_bytes` (split each
