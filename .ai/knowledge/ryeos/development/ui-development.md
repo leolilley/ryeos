@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T01:55:23Z:f10c74e90539188b7eb036c9b75630f09a0e4a5cfdeed68d487781c18ef49e7e:E2y2HniMoaN+MC1c0eaaEXasTLh7MYkvQlifrlWZiBy/mGC4IkUgXNQIN0TWst1J1/bCUzKHKNNppiOZ4DngDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-18T04:15:43Z:0251070b91841a08b69fc0ae2d9abf3577e99533a7a36b5a2286f1464b259cd1:n5rFlZH334G9BbjUED0NO1fd7fDax3Af30v4Ayq3i2mrNcIihcC/hbGLdN7vrNYXKgrf3/O+qKPw+h3AHXihCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-development"
@@ -480,7 +480,8 @@ The browser is a renderer, not a second application model:
 - `crates/daemon/ryeos-ui/src/assets.rs` serves only that registered closure.
 
 The installed closure is exactly `index.html`, `ryeos_boot.js`, `ryeos_rune.js`,
-`ryeos_rune_bg.wasm`, `rune_bridge.js`, `rune_platform.js`, `ryeos-cjk.ttf` and
+`ryeos_rune_bg.wasm`, Rune's flattened snippet modules (`rune_<name>.js`, the set
+declared in `browser-assets-production/lib/rune-snippets.toml`), `ryeos-cjk.ttf` and
 `ryeos-emoji.ttf`. The renderer and the two fonts are stored gzip-encoded
 (`.gz` in `pkg/`) and served that way; a client that does not accept gzip gets
 them decoded. There is no alternate browser renderer, compatibility bootstrap

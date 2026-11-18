@@ -1,14 +1,20 @@
-<!-- ryeos:signed:2026-11-16T07:56:53Z:f2c9caa833c5b5d3f96bf5ee8cf10bba7c5c6db2d32de05a30f8f527ba4d805d:q5SNl+ohGlDPh8GUIF4XrnEh8NbpN3sq/19QNnWyeEwcHiQgW4YkAvPjR3Lyi2FtN9o32WJgqJvWtDgatcolBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-18T01:18:54Z:0aca88d749ce22b3c05d392605ebe63b6ac3f53a24d90939e338447479446c1a:TcuoavDRHevXGql1sHgrVuyo2kck2GyKZZ4ktI4Qx99h/UBtzsItmpfgQUBmoWbP3APS07JJqQVvBChVpUdVDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
-name: "frame-v1"
-title: "RyeOS UI Frame Contract v1"
+name: "frame-v2"
+title: "RyeOS UI Frame Contract v2"
 description: "The closed widget-primitive set and view-binding schema renderers implement; content composes against this, never against client source"
 entry_type: reference
-version: "1.1.0"
+version: "2.0.0"
 ```
 
-# RyeOS UI Frame Contract v1
+# RyeOS UI Frame Contract v2
+
+Frame contract version `2.0.0`, implemented with UI binding contract
+`ryeos.ui.binding.v13` and timeline contract `ryeos.timeline.v1` (the
+`timeline-v1` document). A renderer and the daemon cut over together: the
+frame, the binding contract and the timeline contract each have exactly one
+version in force, and there is no reader for an earlier one.
 
 A renderer implementing this contract is a full seat. Content (`view:`
 items) composes against this contract; nothing semantic lives in client
@@ -29,7 +35,7 @@ mode flag.
 | `rows` | selectable list | `{primary, meta?, tone?, raw}` |
 | `key_value` | field/value detail | `[(key, value)]` |
 | `text` | text body | string/detail fallback |
-| `timeline` | folded timeline items | `{item: entry\|cluster\|recap, ...}` per item |
+| `timeline` | the daemon-folded timeline | items of the timeline contract: `{item: entry\|cluster\|recap, ...}` |
 | `field` | multi-source entity/relation evidence field | `ryeos.ui.field.facts.v1` documents |
 
 Engine chrome (not content-targetable in v1): notice, tile chrome.
@@ -72,6 +78,9 @@ affordances:
   - id: <id>
     label: <label>
     producer: selection | input | tokens # OPTIONAL when unambiguous from the view binding
+    visible_when: <condition>  # OPTIONAL; see "Affordance eligibility"
+    enabled_when: <condition>  # OPTIONAL; see "Affordance eligibility"
+    disabled_reason: <string>  # OPTIONAL; shown when visible but not enabled
     requires_project: true     # OPTIONAL; daemon omits this coordinate when projectless
     invoke:
       plane: ui | rye
@@ -103,6 +112,18 @@ identifiers, subject bindings are bounded and unique, and peer declarations for
 one ID must have exactly the same subject list. A non-field declaration, a
 scope with no participating `@field:cursor` source, or divergent peers fails
 content validation/degrades visibly rather than creating independent cursors.
+
+### Affordance eligibility
+
+`visible_when` and `enabled_when` are presentation eligibility over the
+affordance's record, never authority: an affordance the surface does not admit
+is absent from the compiled binding whatever they say. A condition is
+`{field: <path>, equals: <scalar>}` (the record's field at the path equals a
+JSON scalar) or `{all: [<condition>, ...]}` of one to eight such comparisons,
+nested at most one level. An affordance with no `visible_when` is always
+visible; one that is visible with no `enabled_when` is enabled. A visible,
+disabled affordance is drawn disabled with its `disabled_reason` (at most 256
+characters). A renderer never decides eligibility itself.
 
 ### Selection (row activation)
 
@@ -192,12 +213,45 @@ palette; content never names colors). A tone map's optional `missing` tone is
 used when the configured field is absent; `default` is used when the field is
 present but unmapped.
 
+### Timeline widget
+
 A `timeline` view reads the daemon timeline service
-(`service:ui/ryeos-ui/timeline/thread`, `collection: items`). The service folds
-a chain's events into typed items by a signed definition; the client only maps
-items (entries, clusters, recaps) to the renderer entries and offers
-`projections.expand.fields` over the item for detail. A view's `limit` source
-param bounds how many top-level items the service returns.
+(`service:ui/ryeos-ui/timeline/thread`, `collection: items`). The response, its
+entry types, ids, paging, upserts, status lane and the states a client draws
+are the timeline contract, `ryeos.timeline.v1`, and are not restated here. A
+source response that does not carry exactly that version is refused: the
+source fails with the code `timeline_contract_mismatch` and nothing of the
+response is drawn.
+
+A view's `limit` source param bounds how many top-level items the service
+returns; a source that declares `since_chain_seq` among its
+`dynamic_parameters` asks only for what changed since the window it holds. A
+view may bind `selection.activate` to an affordance that widens the window; it
+receives `{older, next_limit}` as its record.
+
+The renderer receives a `Timeline` view model, not the response. Besides
+`title`, `source_status`, `provenance` and `affordance_hints`, it carries:
+
+- `entries`: the visible entries, each one of `block`, `line`, `pair` or
+  `separator`, with `entry_ids`, `entry_roles` (the entry type, `cluster`,
+  `recap`, or `status` for lines the client adds), `entry_indents`,
+  `entry_cursors`, `entry_arrived_at_ms`, `selected` and `fold_section`;
+- `entry_expandable`, `entry_expanded` and `entry_details`, the detail fields
+  a view's `projections.expand.fields` names for an entry's item;
+- `lane`: `{label, tone}`, what the thread is doing now, from the response's
+  `lane`; absent when idle. A renderer reserves the lane's height whether or
+  not it is present, so the transcript does not jump;
+- `dock`: the pending asks (entries of type `ask` whose state is `pending`),
+  each `{id, entry, actions}`, drawn at the tail of the tile directly above the
+  composer. An ask also keeps its summary row in the flow. `actions` are the
+  view's affordances that declare `visible_when` and are visible for the
+  ask, other than the `selection.activate` affordance; each is
+  `{label, intent?, disabled_reason?}`, with `intent` absent when the
+  affordance is not enabled for the ask. The record an action reads holds
+  `type`, `state`, `chain_root_id`, and from the ask's slots `approval_id`,
+  `request_digest` and `accept_allowed`; an ask without `approval_id` and
+  `request_digest` has no actions, and a surface that admits no affordance
+  shows the ask without buttons.
 
 ## Backdrop
 

@@ -2281,6 +2281,47 @@ impl RyeOsCore {
         self.notice(message, tone);
     }
 
+    /// Why a source response is not a timeline response this client can read:
+    /// set only for the primary channel of a mounted timeline view, whose
+    /// responses must carry the contract version this client speaks.
+    pub(crate) fn timeline_refusal(
+        &self,
+        source_key: &str,
+        response: &serde_json::Value,
+    ) -> Option<String> {
+        let key = super::source_key::RyeOsSourceInstanceKey::decode(source_key)?;
+        let view_ref = self.mounted_view_ref(&key.view_instance)?;
+        let binding = self.binding_for_instance(&key.view_instance, view_ref)?;
+        let primary = binding.widget == "timeline"
+            && binding.primary_source().is_some_and(|(channel, _)| {
+                key.channel == super::source_key::RyeOsSourceChannel::Named(channel.into())
+            });
+        if !primary {
+            return None;
+        }
+        super::timeline::require_timeline_contract(response).err()
+    }
+
+    /// A timeline response this client cannot read: nothing of it is stored,
+    /// the window held before is dropped, and the source reads as failed with
+    /// the reason, so every renderer shows the refusal in the feed's own place.
+    pub(crate) fn refuse_timeline_source(
+        &mut self,
+        source_key: &str,
+        result_id: u64,
+        message: String,
+    ) {
+        self.data.sources.remove(source_key);
+        self.data.timeline_sources.remove(source_key);
+        self.data
+            .source_stored_epoch
+            .insert(source_key.to_string(), result_id);
+        self.data.source_errors.insert(
+            source_key.to_string(),
+            super::effect::RyeOsUiError::definite("timeline_contract_mismatch", message),
+        );
+    }
+
     pub(crate) fn rebuild_timeline_source_cache(&mut self, source_key: &str) {
         let previous = self.data.timeline_sources.remove(source_key);
         let Some(instance) = super::source_key::RyeOsSourceInstanceKey::decode(source_key)
