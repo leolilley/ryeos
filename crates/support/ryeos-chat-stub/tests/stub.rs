@@ -211,3 +211,148 @@ fn checked_in_example_script_parses() {
     let script = Script::from_yaml_str(include_str!("../examples/failure-menu.yaml")).unwrap();
     assert_eq!(script.steps.last().unwrap().repeat, 100);
 }
+
+fn thinking_items(frames: &[Value]) -> Vec<Value> {
+    frames
+        .iter()
+        .filter_map(|f| f["choices"][0]["delta"]["thinking_blocks"].get(0).cloned())
+        .collect()
+}
+
+#[tokio::test]
+async fn reasoning_field_names_the_delta_key() {
+    let stub = serve(
+        "steps:\n  - { reasoning: why, reasoning_field: reasoning, text: ok }\n  - { reasoning: why, text: ok }\n  - { reasoning: why, reasoning_field: reasoning }\n",
+    )
+    .await;
+    let frames = data_frames(&post(&stub, json!({"stream": true})).await);
+    assert_eq!(frames[0]["choices"][0]["delta"]["reasoning"], "why");
+    assert!(
+        frames[0]["choices"][0]["delta"]
+            .get("reasoning_content")
+            .is_none()
+    );
+    let frames = data_frames(&post(&stub, json!({"stream": true})).await);
+    assert_eq!(frames[0]["choices"][0]["delta"]["reasoning_content"], "why");
+    let body = json_body(&post(&stub, json!({})).await);
+    assert_eq!(body["choices"][0]["message"]["reasoning"], "why");
+}
+
+#[tokio::test]
+async fn thinking_block_signature_rides_the_last_piece_or_its_own_chunk() {
+    let stub = serve(
+        "steps:\n  - thinking_blocks: [{ thinking: abcd, signature: sig }]\n    stream: { thinking_chunk_bytes: 2 }\n  - thinking_blocks: [{ thinking: abcd, signature: sig }]\n    stream: { thinking_chunk_bytes: 2, signature_last: true }\n",
+    )
+    .await;
+    let items = thinking_items(&data_frames(&post(&stub, json!({"stream": true})).await));
+    assert_eq!(
+        items,
+        vec![
+            json!({"type": "thinking", "thinking": "ab"}),
+            json!({"type": "thinking", "thinking": "cd", "signature": "sig"}),
+        ]
+    );
+    let items = thinking_items(&data_frames(&post(&stub, json!({"stream": true})).await));
+    assert_eq!(
+        items,
+        vec![
+            json!({"type": "thinking", "thinking": "ab"}),
+            json!({"type": "thinking", "thinking": "cd"}),
+            json!({"type": "thinking", "thinking": "", "signature": "sig"}),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn unsigned_and_redacted_blocks_have_their_own_shapes() {
+    let stub = serve(
+        "steps:\n  - thinking_blocks: [{ thinking: open }, { redacted: 'zz==' }]\n  - thinking_blocks: [{ thinking: t, signature: s }, { redacted: 'zz==' }]\n",
+    )
+    .await;
+    let items = thinking_items(&data_frames(&post(&stub, json!({"stream": true})).await));
+    assert_eq!(
+        items,
+        vec![
+            json!({"type": "thinking", "thinking": "open"}),
+            json!({"type": "redacted_thinking", "data": "zz=="}),
+        ]
+    );
+    let body = json_body(&post(&stub, json!({})).await);
+    assert_eq!(
+        body["choices"][0]["message"]["thinking_blocks"],
+        json!([
+            {"type": "thinking", "thinking": "t", "signature": "s"},
+            {"type": "redacted_thinking", "data": "zz=="}
+        ])
+    );
+}
+
+#[tokio::test]
+async fn tool_call_fields_ride_the_first_streamed_entry_only() {
+    let stub = serve(
+        "steps:\n  - tool_calls:\n      - { name: a, arguments: { k: 1 }, fields: { extra_content: { sig: abc } } }\n      - { name: b }\n    stream: { argument_chunk_bytes: 3 }\n",
+    )
+    .await;
+    let frames = data_frames(&post(&stub, json!({"stream": true})).await);
+    let entries: Vec<&Value> = frames
+        .iter()
+        .filter_map(|f| f["choices"][0]["delta"]["tool_calls"].get(0))
+        .collect();
+    let with_extra: Vec<&&Value> = entries
+        .iter()
+        .filter(|e| e.get("extra_content").is_some())
+        .collect();
+    assert_eq!(with_extra.len(), 1);
+    assert_eq!(with_extra[0]["function"]["name"], "a");
+    assert_eq!(with_extra[0]["extra_content"], json!({"sig": "abc"}));
+}
+
+#[tokio::test]
+async fn a_violated_requirement_is_a_recorded_400() {
+    let stub = serve(
+        "steps:\n  - { text: a, require: { assistant_tool_turn_has: [thinking_blocks] } }\n  - { text: b, require: { assistant_tool_turn_has: [thinking_blocks] } }\n  - { text: c, require: { assistant_lacks: [reasoning_content] } }\n  - { text: d, require: { tool_call_has: [extra_content] } }\n",
+    )
+    .await;
+    let tool_turn = |extra: Value| {
+        let mut message = json!({
+            "role": "assistant",
+            "tool_calls": [{"id": "c", "type": "function", "function": {"name": "n", "arguments": "{}"}}]
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            message[k] = v.clone();
+        }
+        message
+    };
+    let request =
+        |assistant: Value| json!({"messages": [{"role": "user", "content": "go"}, assistant]});
+    let raw = post(&stub, request(tool_turn(json!({})))).await;
+    assert!(raw.starts_with("HTTP/1.1 400"), "{raw}");
+    assert!(raw.contains("thinking_blocks"));
+    let raw = post(&stub, request(tool_turn(json!({"thinking_blocks": []})))).await;
+    assert!(raw.starts_with("HTTP/1.1 200"), "{raw}");
+    let raw = post(&stub, request(tool_turn(json!({"reasoning_content": "x"})))).await;
+    assert!(raw.starts_with("HTTP/1.1 400") && raw.contains("reasoning_content"));
+    let raw = post(&stub, request(tool_turn(json!({})))).await;
+    assert!(raw.starts_with("HTTP/1.1 400") && raw.contains("extra_content"));
+    let recorded = stub.requests().await;
+    assert!(recorded[0].rejected.is_some() && recorded[1].rejected.is_none());
+}
+
+#[tokio::test]
+async fn requirements_check_only_the_open_loop_unless_asked() {
+    let stub = serve(
+        "steps:\n  - { text: a, require: { assistant_tool_turn_has: [thinking_blocks] } }\n  - { text: b, require: { assistant_tool_turn_has: [thinking_blocks], all_history: true } }\n",
+    )
+    .await;
+    let old_turn = json!({
+        "role": "assistant",
+        "tool_calls": [{"id": "c", "type": "function", "function": {"name": "n", "arguments": "{}"}}]
+    });
+    let request = json!({"messages": [old_turn, {"role": "user", "content": "next"}]});
+    assert!(
+        post(&stub, request.clone())
+            .await
+            .starts_with("HTTP/1.1 200")
+    );
+    assert!(post(&stub, request).await.starts_with("HTTP/1.1 400"));
+}
