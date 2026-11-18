@@ -241,6 +241,8 @@ fn draw_view(surface: &mut TextSurface, mut rect: Rect, view: &RyeOsViewVm, now_
     }
     if let RyeOsViewVm::Timeline {
         entries,
+        lane,
+        dock,
         entry_indents,
         entry_arrived_at_ms,
         selected,
@@ -250,6 +252,20 @@ fn draw_view(surface: &mut TextSurface, mut rect: Rect, view: &RyeOsViewVm, now_
         ..
     } = view
     {
+        // The status lane and the docked asks close the feed; the lane's row
+        // is reserved whether or not it has text.
+        let foot = widgets::timeline::foot_rows(rect.h, dock.len());
+        widgets::timeline::draw_foot(
+            surface,
+            Rect {
+                y: rect.y + (rect.h - foot),
+                h: foot,
+                ..rect
+            },
+            lane.as_ref(),
+            dock,
+        );
+        rect.h -= foot;
         widgets::timeline::draw_timeline(
             surface,
             rect,

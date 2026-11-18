@@ -285,6 +285,7 @@ fn validate_contract(request: &ValidateLaunchPreparerConfigRequest) -> Result<()
             != (RefBindingSourceWire::PrimaryField {
                 path: vec![PRODUCT_RECIPE_BINDING.to_owned()],
             })
+        || binding.continuation_rebind != ryeos_handler_protocol::ContinuationRebindWire::Never
         || binding.allowed_kinds != ["config"]
         || binding.allowed_spaces != [ItemSpaceWire::Bundle, ItemSpaceWire::Project]
         || binding.allowed_trust

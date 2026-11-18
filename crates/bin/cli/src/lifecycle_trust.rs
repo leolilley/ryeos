@@ -59,7 +59,7 @@ struct PinArgs {
 #[command(
     name = "ryeos trust scope",
     about = "Narrow or widen the scope of a pinned signer",
-    long_about = "Replaces the spaces, kinds and projects a pinned signer may sign for. Flags left out keep the record's current values; give --project to replace the project list.",
+    long_about = "Replaces the spaces, kinds and projects a pinned signer may sign for. Flags left out keep the record's current values; give --project to replace the project list, or --any-project to clear it so the signer may sign for every project.",
     no_binary_name = true
 )]
 struct ScopeArgs {
@@ -75,11 +75,27 @@ struct ScopeArgs {
     #[arg(long = "project", action = clap::ArgAction::Append)]
     projects: Vec<String>,
 
+    /// Clear the project list: the signer may sign for every project.
+    #[arg(long, conflicts_with = "projects")]
+    any_project: bool,
+
     #[arg(long)]
     app_root: Option<PathBuf>,
 
     #[arg(long)]
     json: bool,
+}
+
+/// The project list a scope change writes: cleared by `--any-project`,
+/// replaced by `--project`, otherwise the record's current list.
+fn scope_projects(args: &ScopeArgs, current: &[String]) -> Vec<String> {
+    if args.any_project {
+        Vec::new()
+    } else if args.projects.is_empty() {
+        current.to_vec()
+    } else {
+        args.projects.clone()
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -245,11 +261,7 @@ fn run_scope(argv: &[String], console: &crate::tty::Console) -> Result<()> {
     } else {
         args.kinds.clone()
     };
-    let projects = if args.projects.is_empty() {
-        current.scope.projects.clone()
-    } else {
-        args.projects.clone()
-    };
+    let projects = scope_projects(&args, &current.scope.projects);
     let arguments = ryeos_node::offline_operation::handlers::TrustScopeArguments {
         fingerprint: args.fingerprint.clone(),
         spaces,
@@ -344,6 +356,23 @@ fn run_succeed(argv: &[String], console: &crate::tty::Console) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trust_scope_keeps_replaces_or_clears_the_project_list() {
+        let parse = |argv: &[&str]| {
+            ScopeArgs::try_parse_from(argv.iter().map(|arg| arg.to_string())).unwrap()
+        };
+        let current = vec!["/srv/alpha".to_owned()];
+        assert_eq!(scope_projects(&parse(&["fp"]), &current), current);
+        assert_eq!(
+            scope_projects(&parse(&["fp", "--project", "/srv/beta"]), &current),
+            vec!["/srv/beta".to_owned()]
+        );
+        assert!(scope_projects(&parse(&["fp", "--any-project"]), &current).is_empty());
+        assert!(
+            ScopeArgs::try_parse_from(["fp", "--any-project", "--project", "/srv/beta"]).is_err()
+        );
+    }
 
     #[test]
     fn trust_pin_refuses_while_node_running() {

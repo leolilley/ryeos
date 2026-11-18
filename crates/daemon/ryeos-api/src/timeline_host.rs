@@ -327,6 +327,8 @@ fn timeline_for(
                 timeline: Arc::new(Timeline {
                     items: Vec::new(),
                     undeclared: Default::default(),
+                    notice_noun: None,
+                    lane_matches: Vec::new(),
                 }),
             }));
             cache.insert(key.clone(), entry.clone());
@@ -374,6 +376,13 @@ fn timeline_for(
     })
 }
 
+/// Whether the chain's root status says no more work is happening in the
+/// chain. A `continued` root hands its work to a successor in the same chain,
+/// so it is not settled.
+fn chain_settled(status: &str) -> bool {
+    status != "continued" && crate::routes::invokers::stream_helpers::is_terminal_status(status)
+}
+
 fn window_response(
     chain_root_id: &str,
     definition_ref: &str,
@@ -384,6 +393,17 @@ fn window_response(
     since: Option<i64>,
 ) -> Result<Value> {
     let timeline = &folded.timeline;
+    // An activity a dead thread left running must not read as work in
+    // progress, so a settled chain has no lane whatever its entries say.
+    let status = summary
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let lane = if chain_settled(status) {
+        None
+    } else {
+        timeline.lane(status)
+    };
     let older = older_count(timeline.items.len(), limit);
     let window = &timeline.items[older..];
     let mut response = json!({
@@ -395,6 +415,8 @@ fn window_response(
         "next_limit": next_limit(older, limit),
         "summary": summary,
         "undeclared": serde_json::to_value(&timeline.undeclared)?,
+        "notice_noun": serde_json::to_value(&timeline.notice_noun)?,
+        "lane": serde_json::to_value(lane)?,
     });
     let Some(since) = since else {
         response["items"] = serde_json::to_value(window)?;
@@ -480,6 +502,8 @@ mod tests {
         Timeline {
             items,
             undeclared: BTreeMap::new(),
+            notice_noun: None,
+            lane_matches: Vec::new(),
         }
     }
 
@@ -517,6 +541,76 @@ mod tests {
                 "turns": 3,
             })
         );
+    }
+
+    fn working_by_entry() -> ryeos_timeline::LaneMatch {
+        ryeos_timeline::LaneMatch {
+            label: "Working".to_string(),
+            entry: Some("act:1".to_string()),
+            status: None,
+        }
+    }
+
+    #[test]
+    fn the_response_carries_the_lane_and_the_notice_noun_beside_the_window() {
+        let mut state = folded(1, 9);
+        let mut timeline = timeline(1);
+        timeline.lane_matches = vec![working_by_entry()];
+        timeline.notice_noun = Some(ryeos_timeline::Noun {
+            key: "system_event".to_string(),
+            one: "system event".to_string(),
+            many: "system events".to_string(),
+        });
+        state.timeline = Arc::new(timeline);
+        let value = window_response("c", "config:x", "d", &state, summary(), 200, None).unwrap();
+        assert_eq!(value["lane"], json!({"label": "Working", "entry": "act:1"}));
+        assert_eq!(
+            value["notice_noun"],
+            json!({"key": "system_event", "one": "system event", "many": "system events"})
+        );
+        let idle =
+            window_response("c", "config:x", "d", &folded(1, 9), summary(), 200, None).unwrap();
+        assert_eq!(idle["lane"], Value::Null);
+    }
+
+    #[test]
+    fn a_settled_chain_has_no_lane_whatever_its_entries_say() {
+        let mut state = folded(1, 9);
+        let mut timeline = timeline(1);
+        timeline.lane_matches = vec![working_by_entry()];
+        state.timeline = Arc::new(timeline);
+        let respond = |status: &str| {
+            let summary = chain_summary(status, &ThreadUsageTotals::default());
+            window_response("c", "config:x", "d", &state, summary, 200, None).unwrap()
+        };
+        for status in ["running", "created", "continued"] {
+            assert_eq!(respond(status)["lane"]["label"], "Working", "{status}");
+        }
+        for status in ["killed", "timed_out", "failed", "cancelled", "completed"] {
+            assert_eq!(respond(status)["lane"], Value::Null, "{status}");
+        }
+    }
+
+    #[test]
+    fn a_status_row_names_a_running_chain_with_no_entry_and_a_settled_one_has_none() {
+        let mut state = folded(0, 9);
+        let mut timeline = timeline(0);
+        timeline.lane_matches = vec![ryeos_timeline::LaneMatch {
+            label: "Working".to_string(),
+            entry: None,
+            status: Some("running".to_string()),
+        }];
+        state.timeline = Arc::new(timeline);
+        let respond = |status: &str| {
+            let summary = chain_summary(status, &ThreadUsageTotals::default());
+            window_response("c", "config:x", "d", &state, summary, 200, None).unwrap()
+        };
+        assert_eq!(
+            respond("running")["lane"],
+            json!({"label": "Working", "entry": null})
+        );
+        assert_eq!(respond("created")["lane"], Value::Null);
+        assert_eq!(respond("killed")["lane"], Value::Null);
     }
 
     #[test]

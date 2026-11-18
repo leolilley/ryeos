@@ -36,7 +36,7 @@ pub use ryeos_accounting::UsdNanos;
 /// and the runtime would have no way to tell which to trust. Now there
 /// is exactly one root snapshot — `resolution.root` — and every consumer
 /// reads `path` / `digest` / `kind` / `item_id` from there.
-pub const MANAGED_LAUNCH_ENVELOPE_SCHEMA_VERSION: u32 = 4;
+pub const MANAGED_LAUNCH_ENVELOPE_SCHEMA_VERSION: u32 = 5;
 
 fn deserialize_required_nullable<'de, D, T>(
     deserializer: D,
@@ -383,6 +383,60 @@ impl AggregateExecutionLimits {
     }
 }
 
+/// One execution's share of the tree-wide run deadline.
+///
+/// The tree deadline itself is the absolute instant the daemon mints into the
+/// execution budget from `aggregate.duration_seconds`. Each level of the tree
+/// holds back the window its ancestors need for their own wrap-up, so a parent
+/// is never stopped in the same instant as its child.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeadlineLimits {
+    /// Time this execution keeps for its own work after its descendants are
+    /// due, in seconds. `0` keeps nothing back.
+    #[serde(default)]
+    pub reserve_seconds: u64,
+    /// How much of the tree deadline this execution leaves to its ancestors,
+    /// in milliseconds. Sealed at first launch and carried unchanged through
+    /// continuations and resumes.
+    #[serde(default)]
+    pub hold_back_ms: u64,
+    /// This execution's effective end (tree deadline minus `hold_back_ms`) as
+    /// Unix milliseconds. The daemon stamps it on the launch envelope only;
+    /// absent when the tree has no deadline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at_ms: Option<i64>,
+}
+
+impl DeadlineLimits {
+    /// This execution's reserve window in milliseconds.
+    pub fn reserve_ms(&self) -> u64 {
+        self.reserve_seconds.saturating_mul(1_000)
+    }
+
+    /// The effective end of an execution that holds back `hold_back_ms` of a
+    /// tree deadline.
+    pub fn effective_at_ms(tree_deadline_at_ms: i64, hold_back_ms: u64) -> i64 {
+        tree_deadline_at_ms.saturating_sub(i64::try_from(hold_back_ms).unwrap_or(i64::MAX))
+    }
+
+    /// The hold-back a child launched at `now_ms` receives from this parent.
+    ///
+    /// A child launched before the parent's reserve window opens ends when the
+    /// window opens, so the parent keeps its whole reserve. A child launched
+    /// inside the window (the parent's own fallback work) may use what remains
+    /// of the parent's share. A child can therefore never end after its parent.
+    pub fn child_hold_back_ms(&self, tree_deadline_at_ms: i64, now_ms: i64) -> u64 {
+        let reserved = self.hold_back_ms.saturating_add(self.reserve_ms());
+        let window_opens_at = Self::effective_at_ms(tree_deadline_at_ms, reserved);
+        if now_ms < window_opens_at {
+            reserved
+        } else {
+            self.hold_back_ms
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HardLimits {
@@ -408,6 +462,9 @@ pub struct HardLimits {
     /// scope.
     #[serde(default)]
     pub aggregate: AggregateExecutionLimits,
+    /// This execution's share of the tree-wide run deadline.
+    #[serde(default)]
+    pub deadline: DeadlineLimits,
     /// Runtime-declared numeric dimensions, keyed by opaque names from the
     /// serving runtime's signed descriptor. `0` is the unlimited sentinel.
     #[serde(default)]
@@ -434,6 +491,7 @@ impl Default for HardLimits {
             depth: 0,
             duration_seconds: 0,
             aggregate: AggregateExecutionLimits::default(),
+            deadline: DeadlineLimits::default(),
             runtime: BTreeMap::new(),
             runtime_contract: None,
         }
@@ -958,6 +1016,62 @@ cost:
         assert_eq!(limits.runtime_limit("example"), 0);
         assert_eq!(limits.tokens, 0);
         assert_eq!(limits.spawns, 0);
+    }
+
+    #[test]
+    fn child_hold_back_keeps_the_parent_reserve_until_its_window_opens() {
+        let parent = DeadlineLimits {
+            reserve_seconds: 30,
+            hold_back_ms: 10_000,
+            at_ms: None,
+        };
+        let tree_deadline = 1_000_000;
+        // Parent window opens at 1_000_000 - 40_000.
+        assert_eq!(parent.child_hold_back_ms(tree_deadline, 900_000), 40_000);
+        assert_eq!(parent.child_hold_back_ms(tree_deadline, 959_999), 40_000);
+        // Inside the window the child may use the parent's remaining share.
+        assert_eq!(parent.child_hold_back_ms(tree_deadline, 960_000), 10_000);
+        assert_eq!(parent.child_hold_back_ms(tree_deadline, 999_000), 10_000);
+    }
+
+    #[test]
+    fn a_child_never_ends_after_its_parent() {
+        let parent = DeadlineLimits {
+            reserve_seconds: 5,
+            hold_back_ms: 2_000,
+            at_ms: None,
+        };
+        let tree_deadline = 500_000;
+        let parent_end = DeadlineLimits::effective_at_ms(tree_deadline, parent.hold_back_ms);
+        for now in [0, 400_000, 492_999, 493_000, 497_999, 499_999] {
+            let child_end = DeadlineLimits::effective_at_ms(
+                tree_deadline,
+                parent.child_hold_back_ms(tree_deadline, now),
+            );
+            assert!(child_end <= parent_end, "now={now}");
+        }
+    }
+
+    #[test]
+    fn zero_reserve_passes_the_hold_back_through_unchanged() {
+        let parent = DeadlineLimits {
+            reserve_seconds: 0,
+            hold_back_ms: 7_000,
+            at_ms: None,
+        };
+        assert_eq!(parent.child_hold_back_ms(100_000, 0), 7_000);
+        assert_eq!(parent.child_hold_back_ms(100_000, 99_999), 7_000);
+    }
+
+    #[test]
+    fn hard_limits_without_a_deadline_share_default_to_none() {
+        let limits: HardLimits = serde_json::from_value(serde_json::json!({
+            "turns": 1
+        }))
+        .unwrap();
+        assert_eq!(limits.deadline, DeadlineLimits::default());
+        let value = serde_json::to_value(&limits).unwrap();
+        assert!(value["deadline"].get("at_ms").is_none());
     }
 
     #[test]

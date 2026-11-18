@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-16T19:12:10Z:cc9278e6e3a2b4bcfab5920d25a4249024b4cee815f2466a9fb5802a387f075d:brB/7QbRejXtFpyqgSRdlCKigF/YQ4IfGxYdVEBFzom26Bd1xL9rwaA2tA6V9cnBlh/Pc5tFJ171BHskMW4mAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-17T21:34:14Z:78904bc5353d8b2cb4a46f4795fcd30d450dfbf5eedfd98602a2111802dd9d1d:2RM7nZvoF+pRAPihQyKumYsYF21wf0ORzv0zp9/F+PJL7aV4eNRztlAReAUqBLD7X5OpbYOg9jiQ6Hfy7wR8Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/graphs
 tags: [graph, follow, authoring, lineage, budget]
@@ -205,6 +205,16 @@ follow's `child_thread_spawned` named), `follow_key`, `node`, `cohort_index`,
 `status`, `outcome_kind` (always present), `result_summary` (at most 2 KiB of
 the result text, cut on a UTF-8 boundary), `truncated` and `cost`. It is
 observation only and never changes follow semantics.
+
+## Following under a run deadline
+
+A graph launched with `run_timeout` can reserve time for its own fallback by
+authoring `limits: {deadline: {reserve_seconds: N}}` at the top of the graph
+file. A followed child is stopped when that reserve window opens, so the graph
+resumes with at least `N` seconds left. A child stopped by the deadline reports
+`outcome_kind: deadline` (the same outcome record a failed worker child
+reports), which a node-level `on_error` target reads as
+`state._outcome.outcome_kind` before running its fallback inside the reserve.
 
 ## What follow does
 

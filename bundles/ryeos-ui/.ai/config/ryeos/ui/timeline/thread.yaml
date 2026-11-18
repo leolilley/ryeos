@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-17T19:59:00Z:b74034e96208f5e4f85b5502af7ab0d6859ea1a23cbd2baa532797b36ef6a402:9Br6LtIKDU1VTXQHd+vJsNkY8A+3ULqgXCpz7kayyPsgS2cN58Ec3ksp8YECuGOYNUVcc/41aYCCCCvFkVKIBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T00:17:54Z:831a98cc615896978b4f3cb9b5a518c5d089c65280b603f2776104c47fcc2937:Vgr4lPysUB8mgAdfVPjA/S7WVGC8lzRcD5fP8pTleQC7NvFJ7zkhVJhb1byzS57VqWNA2YaJZSwxhtSG8fPOBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Thread timeline definition: how a chain's events fold into timeline items.
 # Declarative data read by the timeline service; the fold engine names no event type itself.
 category: ryeos/ui/timeline
@@ -21,6 +21,15 @@ folds:
 spine:
   - {event: thread_continued, from: thread_id, to: payload.successor_thread_id}
   - {event: thread_created, from: payload.continuation_from, to: thread_id}
+
+# The status lane: what the thread is doing now, read from entries' latest
+# states, or from the chain's status. The first matching row wins, so the status
+# row sits last; no match means idle.
+lane:
+  - {type: ask, state: pending, label: Waiting for approval}
+  - {type: activity, state: retrying, label: Retrying}
+  - {type: activity, state: running, label: Working}
+  - {status: running, label: Working}
 
 events:
   # Bookkeeping that contributes no entry, declared deliberately.
@@ -442,7 +451,13 @@ events:
           key: [payload.approval_id]
           state: pending
           tone: [{default: warn}]
-          project: {headline: {join: [{path: payload.observation.operation_class, prefix: "approval requested: "}]}}
+          # The fence a decision must echo: the approval's own id, the digest of
+          # the request that was shown, and whether the contract admits accepting.
+          project:
+            headline: {join: [{path: payload.observation.operation_class, prefix: "approval requested: "}]}
+            approval_id: payload.approval_id
+            request_digest: payload.request_digest
+            accept_allowed: payload.observation.accept_allowed
   hosted_session.approval_expired:
     - emit:
         - {type: ask, key: [payload.approval_id], state: expired, tone: [{default: warn}]}

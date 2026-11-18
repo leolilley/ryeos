@@ -7,10 +7,10 @@
 //! kind / id from `LaunchEnvelope.resolution.root` directly.
 
 pub use ryeos_engine::launch_envelope_types::{
-    AggregateExecutionLimits, COST_BASIS_ROLLUP, EnvelopeAccountingScope, EnvelopeCallback,
-    EnvelopePolicy, EnvelopeRequest, EnvelopeRoots, HardLimits, ItemDescriptor, LaunchEnvelope,
-    LaunchEnvelopeBuilder, RuntimeCost, RuntimeCostError, RuntimeResult, RuntimeResultStatus,
-    UsdNanos,
+    AggregateExecutionLimits, COST_BASIS_ROLLUP, DeadlineLimits, EnvelopeAccountingScope,
+    EnvelopeCallback, EnvelopePolicy, EnvelopeRequest, EnvelopeRoots, HardLimits, ItemDescriptor,
+    LaunchEnvelope, LaunchEnvelopeBuilder, RuntimeCost, RuntimeCostError, RuntimeResult,
+    RuntimeResultStatus, UsdNanos,
 };
 
 /// Canonical managed-runtime result for the provider-neutral dedicated-session
