@@ -469,7 +469,7 @@ pub(crate) async fn execute_pinned_graph(
     let effective_path = project_ctx.effective_path.clone();
     let site_id = state.threads.site_id().to_owned();
     let plan_ctx = ryeos_engine::contracts::PlanContext {
-        logical_project_root: resolved.provenance.logical_project_root(),
+        logical_project_root: resolved.provenance.logical_project_root(&site_id),
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
             ryeos_engine::contracts::Principal {
                 fingerprint: context.fingerprint.clone(),
