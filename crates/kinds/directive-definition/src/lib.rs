@@ -1454,6 +1454,14 @@ impl ProviderConfig {
             cache_marks.validate(context)?;
         }
         for profile in &self.profiles {
+            // A profile can change the route (schemas, spend authority) under
+            // an entry-level declaration, or add its own; the cross-field
+            // rules hold for every resolved profile, not only the one a launch
+            // happens to pick.
+            let resolved = self.merge_profile(profile);
+            let profile_context = format!("{context} profile {}", profile.name);
+            resolved.validate_cache_marks_route(&profile_context)?;
+            resolved.validate_cache_included_in_input_tariff(&profile_context)?;
             if let Some(image_input) = &profile.image_input {
                 image_input.validate(&format!("{context} profile {}", profile.name))?;
             }
@@ -1556,6 +1564,11 @@ impl ProviderConfig {
                 {
                     bail!(
                         "provider config{context}: streaming metadata usage.single_snapshot requires latest_snapshot aggregation"
+                    );
+                }
+                if usage.cache_partition_of_input && usage.cache_included_in_input {
+                    bail!(
+                        "provider config{context}: streaming metadata usage.cache_partition_of_input and usage.cache_included_in_input cannot both be set: one says input is read plus miss, the other that read plus write sit inside input"
                     );
                 }
                 if usage.cache_partition_of_input
@@ -1889,6 +1902,15 @@ impl ProviderConfig {
             {
                 bail!(
                     "provider config{context}: cache_marks requires messages.content_key content"
+                );
+            }
+            if messages
+                .tool_result
+                .as_ref()
+                .is_some_and(|tool| tool.role != "tool")
+            {
+                bail!(
+                    "provider config{context}: cache_marks requires messages.tool_result.role tool"
                 );
             }
             if messages
@@ -4009,6 +4031,61 @@ profiles:
         });
         let error = provider.validate("").unwrap_err().to_string();
         assert!(error.contains("system_message"), "{error}");
+    }
+
+    #[test]
+    fn a_profile_that_breaks_the_marked_route_fails_at_validate_time() {
+        let provider = load(
+            MARKS,
+            r#"    schemas:
+      streaming: {mode: delta_merge}
+      output_limit: {path: max_tokens, semantics: provider_native_output_tokens}
+      messages:
+        role_map: {assistant: model}"#,
+            "",
+        );
+        let error = provider.validate("").unwrap_err().to_string();
+        assert!(error.contains("role_map"), "{error}");
+        assert!(error.contains("profile marked"), "{error}");
+
+        // A profile's own marks over a profile route that renames the role.
+        let provider = load(
+            "",
+            &format!(
+                "{PROFILE_MARKS}    schemas:\n      streaming: {{mode: delta_merge}}\n      output_limit: {{path: max_tokens, semantics: provider_native_output_tokens}}\n      messages:\n        role_map: {{system: instructions}}\n"
+            ),
+            "",
+        );
+        let error = provider.validate("").unwrap_err().to_string();
+        assert!(error.contains("role_map"), "{error}");
+    }
+
+    #[test]
+    fn a_marked_route_must_name_its_tool_role_tool() {
+        let mut provider = load(MARKS, "    extra: {}", "");
+        provider.schemas.as_mut().unwrap().messages = Some(MessageSchemas {
+            tool_result: Some(ToolResultConfig {
+                role: "function".to_string(),
+                wrap_mode: ToolResultWrapMode::Direct,
+                block_template: serde_json::json!({"content": "{content}"}),
+            }),
+            ..Default::default()
+        });
+        let error = provider.validate("").unwrap_err().to_string();
+        assert!(error.contains("tool_result.role"), "{error}");
+    }
+
+    #[test]
+    fn partition_and_included_in_input_cannot_both_be_declared() {
+        let error = load(
+            "",
+            "    extra: {}",
+            "cache_partition_of_input: true\n        cache_read_tokens_path: hit\n        cache_miss_tokens_path: miss\n        cache_included_in_input: true",
+        )
+        .validate("")
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("cannot both be set"), "{error}");
     }
 
     #[test]

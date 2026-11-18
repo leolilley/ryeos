@@ -206,6 +206,24 @@ mod tests {
     }
 
     #[test]
+    fn a_user_message_after_the_tool_results_takes_the_newest_mark() {
+        // A wrap-up input or an operator steer follows the tool results.
+        let mut messages = vec![
+            sys("s"),
+            user("go"),
+            assistant("a"),
+            tool("r"),
+            user("steer"),
+        ];
+        let outcome = apply_cache_marks(&mut messages, &all());
+        assert_eq!(outcome.placed, 3);
+        // system, the message before the assistant, and the newest user.
+        assert_eq!(marked(&messages), vec![0, 1, 4]);
+        assert!(messages[3]["content"].is_array());
+        assert!(!messages[3].to_string().contains("cache_control"));
+    }
+
+    #[test]
     fn no_assistant_message_is_marked_or_rewritten() {
         let original = assistant("a");
         let mut messages = vec![sys("s"), user("u"), original.clone(), tool("t")];

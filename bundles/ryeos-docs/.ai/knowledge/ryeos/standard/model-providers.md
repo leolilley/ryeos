@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-18T08:58:07Z:d88b4fccd0bde6fb7038901127552fd49e8e8f8342a37c91d383e00c640571d0:+1YcxGYTOk2fQO43USUqebYEKLutmBc6VnHIBRsz/Vy3bj7f6l9PKsBCXuS0ZJbV4eWYMM6KfYewVAQX+WeCDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-18T11:24:51Z:79cf91b6e2fb18661101e29e47e23c6e337224bb2fb189591121741bd1af9eb8:RU2M4/qTo9nsFQCbPviokNksBUljAALhtojtiT1EQiVeQ+qt5XwVzwYkfEaMN28hEBUrZteEfses1gf+U7Y7Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/standard
@@ -333,8 +333,12 @@ cache_marks:
 The marks are written after the request's messages are final, so they land only
 on bytes the request really sends. `system` is the system message, `newest` the
 last message, and `previous_tail` the message just before the last assistant
-message: exactly what the previous request marked as its newest, so the cache
-entry written last turn is read at an exact breakpoint. A position with no
+message. When the last request ended on that message (the usual case: a tool
+result or a user input), it is the message the previous request marked as its
+newest, so the cache entry written last turn is read at an exact breakpoint. A
+user message that follows the tool results (a wrap-up input or an operator
+steer) takes the newest mark instead, and the previous tail then marks the
+message before the assistant, not the previous newest. A position with no
 message (no earlier assistant turn yet) costs no mark, and positions past
 `max_marks` are dropped. The mark goes on the last content part of the message
 and never on an assistant message. With `cache_marks` declared, every system,
@@ -343,8 +347,8 @@ not, so a mark moving to a newer message leaves the older message's bytes equal
 apart from the mark key. A selected message with empty content, or content that
 does not end in an object part, takes no mark.
 
-Validation refuses `cache_marks` on a route that renames the system or assistant
-role, extracts the system message, uses another content key or does not wrap
+Validation (of the entry and of every profile resolved from it) refuses `cache_marks` on a route that renames the system or assistant
+role, extracts the system message, uses another content key or tool role, or does not wrap
 tool results directly. A tariff on a marked route must cover `cache_read_tokens`
 and `cache_write_tokens`, because input and output are no longer the complete
 billable set.
@@ -366,7 +370,7 @@ A usage schema also reads cache counts that sit inside the input count. It
 declares `cache_read_tokens_path` and `cache_write_tokens_path` and sets
 `cache_included_in_input: true`; a report whose read plus write exceeds the
 input count is then an anomaly, so the turn's token counts are invalid rather
-than silently over-counted, and a tariff covering `input_tokens` together with a
+than silently over-counted. It cannot be combined with `cache_partition_of_input`, and a tariff covering `input_tokens` together with a
 cache dimension is refused because it would bill the cached part twice. The
 counts are recorded on the turn as `provider_accounting.cache_read_tokens`,
 `cache_write_tokens` and `cache_miss_tokens`; a path the schema does not declare
