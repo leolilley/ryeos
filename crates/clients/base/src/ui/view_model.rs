@@ -4139,9 +4139,15 @@ mod tests {
             crate::surface::SurfaceChipMarkSpec::Initial,
         ] {
             let spec = spec_with_mark(mark);
-            assert_eq!(surface_chip_vm(Some(&spec), Some("fp:abc123")).fingerprint, None);
+            assert_eq!(
+                surface_chip_vm(Some(&spec), Some("fp:abc123")).fingerprint,
+                None
+            );
         }
-        assert_eq!(surface_chip_vm(None, Some("fp:abc123")).mark, RyeOsChipMarkVm::Initial);
+        assert_eq!(
+            surface_chip_vm(None, Some("fp:abc123")).mark,
+            RyeOsChipMarkVm::Initial
+        );
     }
 
     #[test]
@@ -4967,7 +4973,10 @@ mod tests {
         assert!(!key.session.surfaces[0].chip.authored_in_project);
 
         let plain = build_view_model(&core_with_surface_yaml("name: Plain\n"));
-        assert_eq!(plain.session.surfaces[0].chip.mark, RyeOsChipMarkVm::Initial);
+        assert_eq!(
+            plain.session.surfaces[0].chip.mark,
+            RyeOsChipMarkVm::Initial
+        );
 
         let authored = build_view_model(&core_with_surface_yaml(
             "name: Mine\nauthorship:\n  space: project\n  trust_class: untrusted_project\n",
@@ -4978,8 +4987,14 @@ mod tests {
     #[test]
     fn surface_style_edges_reach_the_switcher_and_status_bar() {
         let defaults = build_view_model(&core_with_surface_yaml("name: Plain\n"));
-        assert_eq!(defaults.presentation.chrome.switcher.edge, RyeOsEdgeVm::Left);
-        assert_eq!(defaults.presentation.chrome.status_bar.edge, RyeOsEdgeVm::Bottom);
+        assert_eq!(
+            defaults.presentation.chrome.switcher.edge,
+            RyeOsEdgeVm::Left
+        );
+        assert_eq!(
+            defaults.presentation.chrome.status_bar.edge,
+            RyeOsEdgeVm::Bottom
+        );
 
         let moved = build_view_model(&core_with_surface_yaml(
             "name: Moved\nstyle:\n  switcher: right\n  status_bar: top\n",
@@ -4990,21 +5005,45 @@ mod tests {
         let hidden = build_view_model(&core_with_surface_yaml(
             "name: Hidden\nstyle:\n  switcher: hidden\n  status_bar: hidden\n",
         ));
-        assert_eq!(hidden.presentation.chrome.switcher.edge, RyeOsEdgeVm::Hidden);
-        assert_eq!(hidden.presentation.chrome.status_bar.edge, RyeOsEdgeVm::Hidden);
+        assert_eq!(
+            hidden.presentation.chrome.switcher.edge,
+            RyeOsEdgeVm::Hidden
+        );
+        assert_eq!(
+            hidden.presentation.chrome.status_bar.edge,
+            RyeOsEdgeVm::Hidden
+        );
     }
 
     #[test]
     fn the_bar_toggle_hides_a_status_bar_but_never_reveals_a_hidden_one() {
         let mut shown = core_with_surface_yaml("name: Plain\n");
         shown.ui.bottom_status_visible = true;
-        assert!(build_view_model(&shown).presentation.chrome.status_bar.visible);
+        assert!(
+            build_view_model(&shown)
+                .presentation
+                .chrome
+                .status_bar
+                .visible
+        );
         shown.ui.bottom_status_visible = false;
-        assert!(!build_view_model(&shown).presentation.chrome.status_bar.visible);
+        assert!(
+            !build_view_model(&shown)
+                .presentation
+                .chrome
+                .status_bar
+                .visible
+        );
 
         let mut hidden = core_with_surface_yaml("name: Hidden\nstyle:\n  status_bar: hidden\n");
         hidden.ui.bottom_status_visible = true;
-        assert!(!build_view_model(&hidden).presentation.chrome.status_bar.visible);
+        assert!(
+            !build_view_model(&hidden)
+                .presentation
+                .chrome
+                .status_bar
+                .visible
+        );
     }
 
     #[test]

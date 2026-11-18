@@ -653,9 +653,7 @@ impl SessionCompiledUiBinding {
 /// choose: no chip mark other than the initial, no hidden switcher or status
 /// bar, and the add-tab affordance kept. Layout (`top`, `right`) stays the
 /// project's. Returns one record per value it changed.
-fn clamp_surface_chrome(
-    fields: &mut serde_json::Map<String, Value>,
-) -> Vec<AttenuatedUiBinding> {
+fn clamp_surface_chrome(fields: &mut serde_json::Map<String, Value>) -> Vec<AttenuatedUiBinding> {
     let mut records = Vec::new();
     let mut record = |coordinate: &str, reason: &str| {
         records.push(AttenuatedUiBinding {
@@ -664,7 +662,9 @@ fn clamp_surface_chrome(
         });
     };
     if let Some(chip) = fields.get_mut("chip").and_then(Value::as_object_mut)
-        && chip.get("mark").is_some_and(|mark| mark.as_str() != Some("initial"))
+        && chip
+            .get("mark")
+            .is_some_and(|mark| mark.as_str() != Some("initial"))
     {
         chip.insert("mark".to_string(), Value::from("initial"));
         record(
@@ -680,8 +680,7 @@ fn clamp_surface_chrome(
                 "a project-authored surface cannot hide the switcher",
             );
         }
-        if style.get("status_bar").and_then(Value::as_str) == Some("hidden")
-        {
+        if style.get("status_bar").and_then(Value::as_str) == Some("hidden") {
             style.insert("status_bar".to_string(), Value::from("bottom"));
             record(
                 "surface/style.status_bar",

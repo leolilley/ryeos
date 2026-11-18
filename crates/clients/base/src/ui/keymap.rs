@@ -1176,7 +1176,10 @@ mod tests {
     #[test]
     fn back_hints_appear_only_with_retained_lens_frames() {
         let keys = |retained| -> Vec<String> {
-            key_hints(retained).into_iter().map(|hint| hint.keys).collect()
+            key_hints(retained)
+                .into_iter()
+                .map(|hint| hint.keys)
+                .collect()
         };
         assert_eq!(keys(false), ["ctrl+k", "alt+t/b", "ctrl+←/→", "ctrl+↑/↓"]);
         assert_eq!(&keys(true)[..2], ["⌫", "alt+←"]);
