@@ -88,23 +88,22 @@ pub fn draw_foot(
     let x = rect.x as usize;
     let y = rect.y as usize;
     if let Some(lane) = lane {
+        // The lane: a dot in its tone, then the label at the body ink.
+        surface.draw_text(x, y, "●", tone_style(lane.tone));
         surface.draw_text(
-            x,
+            x + 2,
             y,
-            &truncate(&format!("▸ {}", lane.label), width),
-            tone_style(lane.tone),
+            &truncate(&lane.label, width.saturating_sub(2)),
+            style_fg(),
         );
     }
     for (index, ask) in dock.iter().take(usize::from(rect.h) - 1).enumerate() {
-        let (primary, meta, tone) = match &ask.entry {
-            RyeOsTimelineEntryVm::Line {
-                primary,
-                meta,
-                tone,
-                ..
-            } => (primary.clone(), meta.clone(), *tone),
-            other => (other.label(), None, RyeOsTone::Warn),
+        // A docked ask needs the operator: its title is yellow.
+        let (primary, meta) = match &ask.entry {
+            RyeOsTimelineEntryVm::Line { primary, meta, .. } => (primary.clone(), meta.clone()),
+            other => (other.label(), None),
         };
+        let tone = RyeOsTone::Warn;
         // The answering actions are listed beside the ask; the command
         // overlay runs them.
         let labels: Vec<&str> = ask
@@ -116,7 +115,7 @@ pub fn draw_foot(
         let meta = if labels.is_empty() {
             meta
         } else {
-            Some(labels.join(" · "))
+            Some(labels.join("  "))
         };
         surface.draw_text(
             x,
