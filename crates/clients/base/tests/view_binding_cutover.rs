@@ -114,15 +114,15 @@ const VIEW_BEHAVIOR_GOLDENS: &[(&str, &str)] = &[
     ),
     (
         "view:ryeos/project/directives",
-        "0000000000000000000000000000000000000000000000000000000000000000",
+        "d44aab84cd0dfaba1f2c7f171dcd850919bcb16b4ac747a1101417e1137fc46f",
     ),
     (
         "view:ryeos/project/graphs",
-        "0000000000000000000000000000000000000000000000000000000000000000",
+        "ccf0657429604a1c26da49ad7cf8ef2d1cf1801576e9212ad6e46ddfa3bfadb1",
     ),
     (
         "view:ryeos/project/knowledge",
-        "0000000000000000000000000000000000000000000000000000000000000000",
+        "4dc377142344157eeb5afc239f7ab28dc72b79459b6ec439cbad8ee4d100578c",
     ),
     (
         "view:ryeos/project/schedules",
