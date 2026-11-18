@@ -660,6 +660,17 @@ fn sealed_memfd_fails_closed_off_linux() {
 
 #[cfg(target_os = "linux")]
 fn supervised_launcher_protocol_shell(script: &str, timeout: f64) -> SubprocessRequest {
+    supervised_launcher_protocol_shell_after(script, timeout, "0")
+}
+
+/// Like the protocol shell, but the launcher reports its target PID only
+/// after `report_delay_secs` (a `sleep` argument).
+#[cfg(target_os = "linux")]
+fn supervised_launcher_protocol_shell_after(
+    script: &str,
+    timeout: f64,
+    report_delay_secs: &str,
+) -> SubprocessRequest {
     let status = supervised_launcher_status_pipe().expect("status pipe");
     let status_fd = status.writer_descriptor().unwrap() as i32;
     // Like the real isolation launch, the mock target inherits the retained
@@ -667,7 +678,7 @@ fn supervised_launcher_protocol_shell(script: &str, timeout: f64) -> SubprocessR
     // the target for accounting, while the wrapper keeps the shared PGID owned.
     let wrapper_script = format!(
         "/bin/sh -c 'exec /bin/sh -c \"$1\"' \
-         ryeos-target '{script}' & target=$!; \
+         ryeos-target '{script}' & target=$!; sleep {report_delay_secs}; \
          printf '{{\"child-pid\":%s}}\\n' \"$target\" >&{status_fd}; wait \"$target\""
     );
     let mut request = sh(&["-c", &wrapper_script]);
@@ -676,6 +687,51 @@ fn supervised_launcher_protocol_shell(script: &str, timeout: f64) -> SubprocessR
     request.inherited_fds.push(status.writer);
     request.supervised_status = Some(status.reader);
     request
+}
+
+// A real multi-second sleep is unavoidable here: the old fixed 5 s setup
+// limit can only be shown gone by a launcher that reports later than 5 s.
+#[test]
+#[cfg(target_os = "linux")]
+fn slow_launcher_report_within_request_deadline_succeeds() {
+    let started = std::time::Instant::now();
+    let running = spawn(supervised_launcher_protocol_shell_after(
+        "sleep 30", 8.0, "6",
+    ))
+    .unwrap_or_else(|failure| panic!("slow launcher must succeed: {}", failure.stderr));
+    assert!(started.elapsed() >= std::time::Duration::from_secs(6));
+    assert_ne!(running.pid, 0);
+    // The request deadline (8 s) still ends the run and cleans up.
+    assert!(running.wait().timed_out);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn silent_launcher_fails_at_request_deadline_with_bound_named() {
+    let started = std::time::Instant::now();
+    let failure = match spawn(supervised_launcher_protocol_shell_after(
+        "sleep 30", 1.0, "30",
+    )) {
+        Ok(running) => {
+            drop(running.wait());
+            panic!("launcher that never reports must not spawn");
+        }
+        Err(failure) => failure,
+    };
+    let elapsed = started.elapsed();
+    assert!(elapsed < std::time::Duration::from_secs(5), "{elapsed:?}");
+    assert!(
+        failure
+            .stderr
+            .contains("did not report its target PID after waiting"),
+        "{}",
+        failure.stderr
+    );
+    assert!(
+        failure.stderr.contains("bound: request deadline"),
+        "{}",
+        failure.stderr
+    );
 }
 
 #[test]
