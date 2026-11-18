@@ -1,0 +1,13 @@
+# ryeos:signed:2026-11-18T02:24:20Z:f7aea31a2469e1b7ce7f5003ea66965fddaef1854934e1f2215f1c4674b636e8:/GiIrzJ7ha35gtqGo7LXc8r//tAUmCztGTwwH0MbArVvxu03yyoHmQjPuvFXUKrieOeAe1KY4/7RMFTgEpqQBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- node
+- locality
+description: "Show which of your nodes share a boot, storage or account, and which machine names you declared. --json prints the raw groups."
+help:
+  usage: "ryeos node locality [--json]"
+  examples:
+  - "ryeos node locality"
+  - "ryeos node locality --json"
+dispatch:
+  kind: execute_ref
+  execute: service:node/locality/groups
