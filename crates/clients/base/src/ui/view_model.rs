@@ -5099,7 +5099,7 @@ mod tests {
             actions: vec![RyeOsOverlayActionVm {
                 keys: keys.to_string(),
                 word: "do".to_string(),
-                intent: RyeOsUiIntent::Refresh,
+                intent: RyeOsUiIntent::ToggleBottomStatusBar,
             }],
         }
     }
@@ -5178,8 +5178,9 @@ mod tests {
         ] {
             let mut core = core_with_overlay_rows();
             core.dispatch_ui(RyeOsUiEvent::ToggleOverlay);
-            let effects = core.dispatch_ui(event);
-            assert!(!effects.is_empty(), "Refresh ran");
+            assert!(core.ui.bottom_status_visible);
+            core.dispatch_ui(event);
+            assert!(!core.ui.bottom_status_visible, "the row's intent ran");
             assert!(!overlay_of(&core).open);
         }
         let mut core = core_with_overlay_rows();
@@ -5193,7 +5194,7 @@ mod tests {
         let mut core = core_with_overlay_rows();
         core.dispatch_ui(RyeOsUiEvent::ToggleOverlay);
         core.dispatch_ui(RyeOsUiEvent::Activate {
-            intent: RyeOsUiIntent::Refresh,
+            intent: RyeOsUiIntent::ToggleBottomStatusBar,
         });
         assert!(!overlay_of(&core).open);
     }
@@ -5214,7 +5215,7 @@ mod tests {
         let mut core = core_with_overlay_rows();
         core.dispatch_ui(RyeOsUiEvent::ToggleOverlay);
         core.dispatch_ui(RyeOsUiEvent::Activate {
-            intent: RyeOsUiIntent::ToggleBottomStatusBar,
+            intent: RyeOsUiIntent::ToggleTopStatusBar,
         });
         assert!(overlay_of(&core).open);
     }
