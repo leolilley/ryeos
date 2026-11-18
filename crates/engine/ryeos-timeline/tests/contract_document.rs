@@ -21,13 +21,14 @@ fn read(relative: &str) -> String {
     .unwrap_or_else(|error| panic!("{relative} is part of the repository: {error}"))
 }
 
-/// The rows of the table under `## <heading>`, as trimmed cells.
+/// The rows of the table under the heading `<heading>` (any level), as trimmed
+/// cells, without the header row.
 fn table(document: &str, heading: &str) -> Vec<Vec<String>> {
     let mut in_section = false;
     let mut rows = Vec::new();
     for line in document.lines() {
-        if let Some(title) = line.strip_prefix("## ") {
-            in_section = title.trim() == heading;
+        if line.starts_with('#') {
+            in_section = line.trim_start_matches('#').trim() == heading;
             continue;
         }
         if !in_section || !line.starts_with('|') {
@@ -45,7 +46,7 @@ fn table(document: &str, heading: &str) -> Vec<Vec<String>> {
             rows.push(cells);
         }
     }
-    assert!(!rows.is_empty(), "no table under ## {heading}");
+    assert!(!rows.is_empty(), "no table under the heading {heading}");
     // The first row is the header.
     rows.split_off(1)
 }
