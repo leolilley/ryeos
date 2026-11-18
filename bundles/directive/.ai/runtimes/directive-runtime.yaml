@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-17T22:06:51Z:34539d80f4be3437c24cb68f1bd54453f4b643342fec0c6552e26c34e97f314a:6sBGVy9kmRlFXgnEio5/Fol7cfNkTsBikXMOVkjKLv5Oms+U23SJteuS0pFaGojARqq6FYPd6qYr47ri5O1NDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T01:17:18Z:f1e2f7a3a838663d54c199c923362e5a1fd5d92656bc1cde255817719244ea04:BncPt0OJlXeY/IsOFqWKnqjfwTWLMkEDZxnUNvAHyTSvbPxAIEDMXxK6rJnAHXpzW2d9DEfFc4Gd4QuiJKVYDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: runtime
 serves: directive
 default: true
@@ -139,6 +139,7 @@ limits:
   dimensions:
     tool_calls: 4294967295
     provider_request_body_bytes: 1073741824
+    wrap_up_seconds: 4294967295
 observability:
   child_records:
     latency_profiling_enabled:

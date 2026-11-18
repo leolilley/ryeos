@@ -4105,6 +4105,31 @@ impl AccountingDb {
         })
     }
 
+    /// The aggregate limits an execution budget was minted with. A later
+    /// segment of the same tree reads these back instead of recomputing them,
+    /// because the ledger refuses any difference from the stored limits.
+    pub fn execution_resource_budget_limits(
+        &self,
+        execution_budget_id: &str,
+    ) -> Result<Option<AggregateExecutionLimits>> {
+        self.with_conn(|conn| {
+            let stored: Option<String> = conn
+                .query_row(
+                    "SELECT limits_json FROM execution_resource_budget
+                     WHERE execution_budget_id = ?1",
+                    rusqlite::params![execution_budget_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .context("load aggregate execution limits")?;
+            stored
+                .map(|json| {
+                    serde_json::from_str(&json).context("decode stored aggregate execution limits")
+                })
+                .transpose()
+        })
+    }
+
     /// Read one exact retained claim decision without creating or advancing a
     /// resource coordinate. Recovery uses this to verify a root-chain budget
     /// refusal before repairing its rebuildable command projection.
@@ -13714,6 +13739,34 @@ mod tests {
             .is_err()
         );
         assert_healthy_verify(&db);
+    }
+
+    #[test]
+    fn stored_aggregate_limits_are_readable_and_reproduce_the_ledger_identity() {
+        let (_dir, db) = setup();
+        assert!(db.execution_resource_budget_limits(EXEC).unwrap().is_none());
+        db.create_execution_account_prepared(EXEC, THREAD, None)
+            .unwrap();
+        let limits = AggregateExecutionLimits {
+            duration_seconds: 7_200,
+            worker_executions: 3,
+            provider_contacts: 0,
+        };
+        db.ensure_execution_resource_budget(EXEC, &limits).unwrap();
+        let stored = db
+            .execution_resource_budget_limits(EXEC)
+            .unwrap()
+            .expect("limits were stored");
+        assert_eq!(stored.duration_seconds, 7_200);
+        assert_eq!(stored.worker_executions, 3);
+        // A later segment that presents the stored limits is admitted again
+        // with the same deadline instead of being refused as a different set.
+        let first = db
+            .execution_resource_budget_snapshot(EXEC)
+            .unwrap()
+            .unwrap();
+        let again = db.ensure_execution_resource_budget(EXEC, &stored).unwrap();
+        assert_eq!(again.deadline_at_ms, first.deadline_at_ms);
     }
 
     #[test]

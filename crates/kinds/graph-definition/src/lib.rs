@@ -38,6 +38,11 @@ pub struct GraphFile {
     pub config: GraphConfig,
     #[serde(default)]
     pub requires: Option<ryeos_bundle::runtime_authority::RuntimeRequires>,
+    /// Item-level execution limits (for example the run-deadline reserve). The
+    /// launcher merges and clamps them generically; the graph walker does not
+    /// interpret them, so the strict decode only names the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<Value>,
     /// Item-level external content declaration. Validated, captured, and
     /// realized entirely by the engine's admission path; opaque to graph
     /// semantics, so the strict decode names the field without
