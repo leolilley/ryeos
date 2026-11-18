@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-18T05:28:58Z:19fda54dc840295fb3abffe075df831ae95238499e07ba7ae6674922ca5a35da:J6MxkJPQoB9xC6dCC4qhyg+KU9ZLL72pQiwIZ2EFxHgeOAn9IKzYdf41iq3q2+5hkwneR2thGIdKvhjMVOopCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-18T06:38:05Z:4d821ea8c8c98941357388eeae27386681c7434d66e7682bcff2f4d3cbb0ce66:0ZSF1RDEW884FK17Oyah8QT67akW8j6x5Us4dOvtfgCUEkuvZ4kECgKLBhGQsfZxjV/XoCrriDihORW4RKlkBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "navigation-tree-v1"
@@ -510,7 +510,7 @@ view. It should report RyeOS UI decisions, not renderer wrapper nodes.
 
 ## References
 
-- `bundles/ryeos-ui/.ai/knowledge/ryeos/ui/frame-v1.md`
+- `bundles/ryeos-ui/.ai/knowledge/ryeos/ui/frame-v2.md`
 - `bundles/ryeos-ui/.ai/surfaces/ryeos/ui/assistant.yaml`
 - `bundles/ryeos-ui/.ai/surfaces/ryeos/ui/thread.yaml`
 - `bundles/ryeos-ui/.ai/views/ryeos/projects/list.yaml`

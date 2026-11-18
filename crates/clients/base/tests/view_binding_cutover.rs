@@ -81,6 +81,10 @@ const VIEW_BEHAVIOR_GOLDENS: &[(&str, &str)] = &[
         "2176a0c1e7d2f744bd62aeac898e43eb32cc7bda08c0b2b45d42ab74dbd3bead",
     ),
     (
+        "view:ryeos/node/machines",
+        "c73a89fe95ac0667f95ea023669a0122cb15ae73bb7fa7ff5aefa2b3248c097d",
+    ),
+    (
         "view:ryeos/node/remotes",
         "18c80f4430a192d3fc85c018fdff5b13590d84bfba248f328f8b6e955a7c5758",
     ),
