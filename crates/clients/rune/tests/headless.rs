@@ -683,9 +683,17 @@ fn the_current_view_set_tab_stays_in_view_when_the_tabs_scroll() {
         .iter()
         .map(|r| r[0] + r[2])
         .fold(f32::NEG_INFINITY, f32::max);
+    let drawn: Vec<String> = rt
+        .elements()
+        .into_iter()
+        .filter_map(|element| element.key)
+        .filter(|key| key.contains("view-set"))
+        .collect();
     assert!(
         right - left > width,
-        "the tabs overflow the band ({left}..{right} in {width})"
+        "the tabs overflow the band ({left}..{right} in {width}); band visible: {}; tabs: {}; drawn: {drawn:?}",
+        vm.presentation.chrome.top_bar.visible,
+        tabs.len()
     );
     let [x, _, w, _] = exactly_keyed(&rt, &format!("view-set:{}", current.view_set_id))
         .expect("the current tab is drawn");
