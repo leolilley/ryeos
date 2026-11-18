@@ -38,6 +38,10 @@ pub struct RyeOsSurfaceChoiceVm {
 pub struct RyeOsSurfaceChipVm {
     pub mark: RyeOsChipMarkVm,
     pub authored_in_project: bool,
+    /// The node key fingerprint the Key mark is drawn from; present only
+    /// when the mark is Key and the node's fingerprint is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
 }
 
 /// Which mark a Surface chip draws.

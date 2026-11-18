@@ -2788,7 +2788,36 @@ fn view_vm(core: &RyeOsCore, tile_id: TileId, tile: &TileState) -> RyeOsViewVm {
     bound_view_vm(core, tile_id, &tile.view.view_ref)
 }
 
+/// The switcher chip for one Surface: the declared mark, whether the Surface
+/// is project-authored (the daemon's authorship marker), and the node key
+/// fingerprint when the mark is Key and the fingerprint is known.
+fn surface_chip_vm(
+    spec: Option<&crate::surface::SurfaceSpec>,
+    node_fingerprint: Option<&str>,
+) -> RyeOsSurfaceChipVm {
+    use crate::surface::SurfaceChipMarkSpec;
+    let mark = match spec.map(|spec| spec.chip.mark).unwrap_or_default() {
+        SurfaceChipMarkSpec::Grid => RyeOsChipMarkVm::Grid,
+        SurfaceChipMarkSpec::Key => RyeOsChipMarkVm::Key,
+        SurfaceChipMarkSpec::Initial => RyeOsChipMarkVm::Initial,
+    };
+    RyeOsSurfaceChipVm {
+        mark,
+        authored_in_project: spec.is_some_and(|spec| spec.authorship.is_some()),
+        fingerprint: (mark == RyeOsChipMarkVm::Key)
+            .then_some(node_fingerprint)
+            .flatten()
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+    }
+}
+
 fn session_vm(core: &RyeOsCore) -> RyeOsSessionVm {
+    let fingerprint = core
+        .data
+        .dimension
+        .as_ref()
+        .map(|dimension| dimension.local_node.identity.fingerprint.clone());
     let browser = core.data.session.as_ref();
     let surface = core.binding_attachment(&core.root_attachment_id);
     RyeOsSessionVm {
@@ -2835,10 +2864,11 @@ fn session_vm(core: &RyeOsCore) -> RyeOsSessionVm {
                         binding: surface.binding().clone(),
                     }
                 }),
-                chip: RyeOsSurfaceChipVm {
-                    mark: RyeOsChipMarkVm::Initial,
-                    authored_in_project: false,
-                },
+                chip: surface_chip_vm(
+                    core.binding_attachment(&surface.binding().binding_attachment_id)
+                        .and_then(|attachment| attachment.presentation.definition.surface()),
+                    fingerprint.as_deref(),
+                ),
                 needs_you: None,
                 running: None,
             })
@@ -4059,6 +4089,53 @@ fn tile_id_text(id: TileId) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn spec_with_mark(mark: crate::surface::SurfaceChipMarkSpec) -> crate::surface::SurfaceSpec {
+        let mut spec = crate::surface::builtin_default();
+        spec.chip.mark = mark;
+        spec
+    }
+
+    #[test]
+    fn key_chip_carries_the_node_fingerprint() {
+        let spec = spec_with_mark(crate::surface::SurfaceChipMarkSpec::Key);
+        let chip = surface_chip_vm(Some(&spec), Some("fp:abc123"));
+        assert_eq!(chip.mark, RyeOsChipMarkVm::Key);
+        assert_eq!(chip.fingerprint.as_deref(), Some("fp:abc123"));
+        assert!(!chip.authored_in_project);
+    }
+
+    #[test]
+    fn key_chip_without_a_fingerprint_has_none() {
+        let spec = spec_with_mark(crate::surface::SurfaceChipMarkSpec::Key);
+        assert_eq!(surface_chip_vm(Some(&spec), None).fingerprint, None);
+        assert_eq!(surface_chip_vm(Some(&spec), Some("")).fingerprint, None);
+    }
+
+    #[test]
+    fn non_key_chips_never_carry_a_fingerprint() {
+        for mark in [
+            crate::surface::SurfaceChipMarkSpec::Grid,
+            crate::surface::SurfaceChipMarkSpec::Initial,
+        ] {
+            let spec = spec_with_mark(mark);
+            assert_eq!(surface_chip_vm(Some(&spec), Some("fp:abc123")).fingerprint, None);
+        }
+        assert_eq!(surface_chip_vm(None, Some("fp:abc123")).mark, RyeOsChipMarkVm::Initial);
+    }
+
+    #[test]
+    fn chip_marks_project_authorship_from_the_daemon_marker() {
+        let mut spec = crate::surface::builtin_default();
+        spec.authorship = Some(crate::ui::content::ItemAuthorship {
+            space: "project".into(),
+            trust_class: "untrusted_project".into(),
+            item_ref: None,
+            signer: None,
+            source_refs: Vec::new(),
+        });
+        assert!(surface_chip_vm(Some(&spec), None).authored_in_project);
+    }
     use crate::ui::reducer::test_support::core as test_support_core;
     use crate::ui::reducer::test_support::*;
     use crate::ui::{RyeOsEffect, RyeOsEffectKind, RyeOsEvent, RyeOsUiEvent};
