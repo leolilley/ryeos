@@ -162,8 +162,21 @@ impl SessionCompiledUiBinding {
     pub fn compile(
         context: BindingCompileContext<'_>,
         effective_surface: &Value,
-        mut resolve_target: impl FnMut(&str) -> Result<CompiledUiTarget>,
+        mut resolve: impl FnMut(&str) -> Result<CompiledUiTarget>,
     ) -> Result<Self> {
+        // A target named by several sources, affordances or routes is
+        // resolved once per compile, and every occurrence gets that one
+        // result. A target that failed to resolve is asked for again at its
+        // next occurrence, so each occurrence still reports its own failure.
+        let mut resolved_targets: BTreeMap<String, CompiledUiTarget> = BTreeMap::new();
+        let mut resolve_target = |item_ref: &str| -> Result<CompiledUiTarget> {
+            if let Some(target) = resolved_targets.get(item_ref) {
+                return Ok(target.clone());
+            }
+            let target = resolve(item_ref)?;
+            resolved_targets.insert(item_ref.to_owned(), target.clone());
+            Ok(target)
+        };
         ryeos_client_base::surface::view_sets::validate_effective_view_sets(effective_surface)
             .map_err(anyhow::Error::msg)?;
         // A surface that declares no views carries no embedded mapping; it
@@ -1013,6 +1026,78 @@ mod tests {
                 "params":{}
             }}
         })
+    }
+
+    #[test]
+    fn each_distinct_target_is_resolved_once_with_the_same_binding() {
+        let view_ref = "view:test/input";
+        let scopes: [String; 2] = ["cap.read".into(), "cap.write".into()];
+        let context = || BindingCompileContext {
+            contract_revision: "test.v1",
+            principal_id: "principal:test",
+            caller_scopes: &scopes,
+            project_root: Some("/project"),
+            node_policy_generation_digest: "policy:test",
+            identities: EmbeddedSurfaceIdentity {
+                request_engine_generation_identity: "engine:test".into(),
+                surface: identity("surface:test/root", 'a'),
+                views: BTreeMap::from([(
+                    view_ref.into(),
+                    EmbeddedViewIdentity::Resolved {
+                        identity: identity(view_ref, 'b'),
+                    },
+                )]),
+            },
+        };
+        let target = |item_ref: &str| {
+            let read_only = item_ref.ends_with("/read");
+            CompiledUiTarget {
+                identity: identity(item_ref, if read_only { 'c' } else { 'd' }),
+                required_caps: vec![if read_only { "cap.read" } else { "cap.write" }.into()],
+                source_safe: read_only,
+                dispatch_class: CompiledUiDispatchClass::Verified,
+                result_effect: None,
+                parameter_schema: BTreeMap::from([
+                    ("input".to_string(), "string".to_string()),
+                    ("target".to_string(), "object".to_string()),
+                    ("intent".to_string(), "string?".to_string()),
+                ]),
+            }
+        };
+        // The surface names the read target twice (shell source, view source)
+        // and the write target twice (affordance, input route).
+        let surface = surface(serde_json::json!(["cap.write"]));
+
+        let mut resolutions: BTreeMap<String, usize> = BTreeMap::new();
+        let compiled = SessionCompiledUiBinding::compile(context(), &surface, |item_ref| {
+            *resolutions.entry(item_ref.to_string()).or_default() += 1;
+            Ok(target(item_ref))
+        })
+        .unwrap();
+        assert_eq!(
+            resolutions,
+            BTreeMap::from([
+                ("service:test/read".to_string(), 1),
+                ("service:test/write".to_string(), 1),
+            ])
+        );
+
+        // The binding and its digest are those of the fixture compile used by
+        // every other test here.
+        let reference = compile(surface.clone());
+        assert_eq!(compiled.binding_digest, reference.binding_digest);
+        assert_eq!(compiled.binding, reference.binding);
+
+        // A target that fails is asked for again at each occurrence.
+        let mut failures = 0;
+        let _ = SessionCompiledUiBinding::compile(context(), &surface, |item_ref| {
+            if item_ref.ends_with("/read") {
+                failures += 1;
+                anyhow::bail!("unresolvable");
+            }
+            Ok(target(item_ref))
+        });
+        assert_eq!(failures, 2);
     }
 
     #[test]

@@ -78,6 +78,45 @@ pub(crate) fn run_handler_subprocess_bounded(
     launch: &HandlerLaunchRuntime,
     maximum_stdout_bytes: Option<usize>,
 ) -> Result<HandlerResponse, EngineError> {
+    let started = std::time::Instant::now();
+    let outcome = launch_handler(handler, request, timeout, launch, maximum_stdout_bytes);
+    let elapsed = started.elapsed();
+    crate::work_tally::HANDLER_LAUNCHES.record(elapsed);
+    tracing::debug!(
+        target: "ryeos_engine::timing",
+        work = "handler_launch",
+        handler = %handler.canonical_ref(),
+        operation = handler_operation(request),
+        succeeded = outcome.is_ok(),
+        elapsed_us = elapsed.as_micros() as u64,
+        "engine work timing"
+    );
+    outcome
+}
+
+/// The operation a handler request asks for, as a fixed word for timing lines.
+fn handler_operation(request: &HandlerRequest) -> &'static str {
+    match request {
+        HandlerRequest::Parse(_) => "parse",
+        HandlerRequest::EditSource(_) => "edit_source",
+        HandlerRequest::ValidateParserConfig(_) => "validate_parser_config",
+        HandlerRequest::Compose(_) => "compose",
+        HandlerRequest::ValidateComposerConfig(_) => "validate_composer_config",
+        HandlerRequest::LaunchPrepare(_) => "launch_prepare",
+        HandlerRequest::ValidateLaunchPreparerConfig(_) => "validate_launch_preparer_config",
+        HandlerRequest::EffectiveValidate(_) => "effective_validate",
+        HandlerRequest::ExecutionEvidenceDescribe(_) => "execution_evidence_describe",
+        HandlerRequest::ExecutionEvidenceProject(_) => "execution_evidence_project",
+    }
+}
+
+fn launch_handler(
+    handler: &VerifiedHandler,
+    request: &HandlerRequest,
+    timeout: Duration,
+    launch: &HandlerLaunchRuntime,
+    maximum_stdout_bytes: Option<usize>,
+) -> Result<HandlerResponse, EngineError> {
     let (canonical_ref, binary_path, binary_hash, bundle_root) = match handler {
         VerifiedHandler::Resolved {
             canonical_ref,
@@ -134,7 +173,7 @@ pub(crate) fn run_handler_subprocess_bounded(
         source_path: binary_path,
         content_hash: binary_hash,
     }];
-    let req = launch.isolation.apply(
+    let req = launch.isolation.apply_handler_launch(
         req,
         IsolationLaunchContext {
             immutable_project: None,

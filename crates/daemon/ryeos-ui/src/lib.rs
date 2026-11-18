@@ -10,6 +10,7 @@ pub mod browser_session;
 pub mod compiled_binding;
 pub mod handlers;
 pub mod invokers;
+mod phase_timing;
 pub mod seat_auth;
 pub mod session_authority;
 pub mod session_bus;
