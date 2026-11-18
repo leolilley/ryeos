@@ -1466,6 +1466,94 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_attention_surface_source_is_shown_as_unavailable_on_the_bar() {
+        let mut session = writable_session();
+        let crate::presentation::UiCompositionDefinition::Surface { surface } =
+            &mut session.binding_attachments[0].presentation.definition
+        else {
+            panic!("Surface fixture required")
+        };
+        surface.sources = serde_json::from_value(serde_json::json!({
+            "attention": {
+                "ref": "service:ui/ryeos-ui/work/attention",
+                "role": "attention",
+                "params": {"limit": 1}
+            }
+        }))
+        .unwrap();
+        let mut core = core(session);
+        let segments = |core: &RyeOsCore| {
+            crate::ui::view_model::build_view_model(core)
+                .presentation
+                .chrome
+                .status_bar
+                .segments
+                .into_iter()
+                .map(|segment| (segment.id, segment.value))
+                .collect::<Vec<_>>()
+        };
+        let fetch = |effects: &[RyeOsEffect]| {
+            effects
+                .iter()
+                .find(|effect| {
+                    matches!(
+                        &effect.kind,
+                        RyeOsEffectKind::FetchSource { request, .. }
+                            if matches!(
+                                &request.coordinate,
+                                crate::ui::binding::UiBindingCoordinate::Source { channel, .. }
+                                    if channel == "attention"
+                            )
+                    )
+                })
+                .map(|effect| effect.id)
+                .expect("surface source fetch")
+        };
+        let id = fetch(&core.initial_effects());
+        assert!(
+            segments(&core).is_empty(),
+            "a queue not yet read shows nothing"
+        );
+
+        core.dispatch(RyeOsEvent::EffectResult {
+            result: RyeOsEffectResult {
+                id,
+                ok: false,
+                kind: RyeOsEffectResultKind::SourceData,
+                data: None,
+                error: Some(crate::ui::effect::RyeOsUiError::definite(
+                    "service_refused",
+                    "refused",
+                )),
+            },
+        });
+        assert_eq!(
+            segments(&core),
+            vec![(
+                "attention:unavailable".to_string(),
+                "unavailable".to_string()
+            )],
+            "a refused queue is not drawn as an empty one"
+        );
+
+        // The next answer replaces the state.
+        let id = fetch(&core.initial_effects());
+        core.dispatch(RyeOsEvent::EffectResult {
+            result: RyeOsEffectResult {
+                id,
+                ok: true,
+                kind: RyeOsEffectResultKind::SourceData,
+                data: Some(serde_json::json!({
+                    "attention": [],
+                    "counts": {"total": 0, "by_kind": []},
+                })),
+                error: None,
+            },
+        });
+        assert!(segments(&core).is_empty());
+    }
+
+    #[test]
     fn raw_project_transition_cannot_publish_without_exact_seat_acknowledgement() {
         let mut core = core(writable_session());
         let original_session = core.data.session.as_ref().unwrap().session_id.clone();

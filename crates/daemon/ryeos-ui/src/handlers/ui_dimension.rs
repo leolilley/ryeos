@@ -16,11 +16,8 @@ use serde_json::Value;
 
 use ryeos_api::registry::ServiceDescriptor;
 use ryeos_app::handler_context::HandlerContext;
-use ryeos_app::handler_error::HandlerError;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
-
-use crate::state::get_ui_state;
 
 // ── Response view-model ─────────────────────────────────────────────
 
@@ -146,21 +143,12 @@ pub struct GcSummary {
 
 // ── Handler ────────────────────────────────────────────────────────
 
-fn session_id_from_context(ctx: &HandlerContext) -> Option<String> {
-    ctx.fingerprint.strip_prefix("session:").map(String::from)
-}
-
 pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
-    let attachment = crate::seat_auth::compiled_ui_attachment().ok_or_else(|| {
-        HandlerError::Forbidden("compiled UI attachment required for ryeos-ui dimension".into())
-    })?;
-    let session_id = session_id_from_context(&ctx)
-        .ok_or_else(|| HandlerError::Forbidden("browser session required".into()))?;
-    let session = get_ui_state(&state)
-        .expect("UiState not set")
-        .browser_sessions
-        .get_session(&session_id)
-        .ok_or_else(|| HandlerError::Forbidden("session expired or invalid".into()))?;
+    // The projection names the browser session it was read for. This is a
+    // verified service, so its handler context carries the durable principal,
+    // not the session cookie; the session and its attachment come from the
+    // authority the UI dispatch retained for this call.
+    let (session, attachment) = crate::seat_auth::require_compiled_ui_session(&ctx, &state)?;
 
     let project_access = crate::seat_auth::attachment_project_access(&attachment)?;
     let project_identity = crate::seat_auth::attachment_project_query_identity(&attachment)?;

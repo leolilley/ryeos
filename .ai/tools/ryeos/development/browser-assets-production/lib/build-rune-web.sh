@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-18T05:22:28Z:f7f09cd03a1aabdc8adcb9781db9f2e32aa68ec0882c17928b8731d1d20cc828:bE1FR7iGNumf0YJA9ub9ZIzO1PFyDe8yqT6Nd9NQNjni2By//eALxrbf+95++QjcVWGDyQPmVUy5dJMQAjoCCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T07:43:25Z:22c5d9e1e66072c811730a32d7805d4c6b14331f13fc4a4b898c806b17e8eab8:auOhmU7zGAGf4KvsqC0jIc5Q89j7LKcmBAvREMuUpvkTbiIS82DurikhDUCy2U5XbwL8jOqTHMa2gUdMKvSLDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Externally invoked host helper in the development bundle; lib/ is excluded
 # from Tool resolution, so this is signed source, not an admitted Tool. It
 # grants no RyeOS authority. Run it from a checkout of this repository.
 # Build the Rune browser renderer into the daemon's closed asset set:
 #   crates/clients/rune/pkg/{index.html, ryeos_boot.js, ryeos_rune.js, ryeos_rune_bg.wasm.gz,
-#                             ryeos-cjk.ttf.gz, ryeos-emoji.ttf.gz, rune_<snippet>.js ...}
-# where the snippets are the ones listed in rune-snippets.toml.
+#                             ryeos-cjk.ttf.gz, ryeos-emoji.ttf.gz, rune_<snippet>.js ...,
+#                             <fetched file>.gz ...}
+# where the snippets and the files Rune fetches at runtime are the ones listed in
+# rune-snippets.toml; the fetched files come from the pinned Rune source.
 # then refresh the registry digests. The renderer builds in the size-first `web` profile; it
 # and the coverage fonts (crates/clients/rune/web/fonts, from browser-assets-production/lib/build-rune-fonts.py) are stored
 # gzip-encoded, which the daemon serves as is. Output is byte-identical across checkouts:
@@ -122,8 +124,11 @@ for path in tomllib.loads(pathlib.Path(sys.argv[1]).read_text())["snippets"]:
     print(f"rune_{pathlib.PurePosixPath(path).stem}.js")
 PY
 cp "$root/crates/clients/rune/web/index.html" "$root/crates/clients/rune/web/ryeos_boot.js" "$dest/"
+# The files Rune fetches at runtime (rune-snippets.toml `fetched`), from the pinned Rune source.
+fetched_list=$(CARGO=$cargo python3 -I "$(dirname "$0")/check-rune-snippets.py" --fetched-paths)
+mapfile -t fetched < <(printf '%s' "$fetched_list")
 # Stored gzip-encoded: level 9, no file name, no time.
-python3 -I - "$dest" "$stage/out/ryeos_rune_bg.wasm" \
+python3 -I - "$dest" "$stage/out/ryeos_rune_bg.wasm" "${fetched[@]}" \
     "$root/crates/clients/rune/web/fonts/ryeos-cjk.ttf" "$root/crates/clients/rune/web/fonts/ryeos-emoji.ttf" <<'PY'
 import gzip, pathlib, sys
 dest = pathlib.Path(sys.argv[1])

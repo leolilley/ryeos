@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T05:54:19Z:7e260ea35202739bf486d1bb093a0a1e36664ba779631271def57e5087888f9d:d3D1DqnmqkMHIk2wdrb7qq5fzNjxyc5lrvjPAUSsBNR6uiPOQi40KLIlfmZEUWC6N+2LPTohslNFxr8GH1mqCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-18T12:56:58Z:e6aa50110920da4877a19fefc8b3fe9ee1437810e640758194e4c6d95a244e85:fHxVgoyiM5C36j3X0ginjYMmU5k4Ku4j7MifnFY3E/P6bghhRuJobZlXESRz+gzh/NUYiTsQXgHtzpTOoBTECg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, api, http, routes, remote]
@@ -88,6 +88,21 @@ is admitted, so nothing ran and the same request may be reissued after
 `retry_after_ms`. The body names no holder; the daemon log records the held
 lease sites. A stranded fork window or a missing handler binary is not this
 refusal and is not retryable.
+
+#### Service refusals: `service_cap_denied` and `service_refused`
+
+Both are HTTP 403 and neither is retryable.
+
+- `service_cap_denied` means the caller's scopes do not include the
+  capability the service requires. The body names the required capability and
+  the caller's scopes.
+- `service_refused` means the capability check passed and the service's own
+  handler then refused the request (for example, a session cookie is required
+  or has expired). The body carries the service reference and the handler's
+  own reason; it does not name a capability.
+
+A client should show the handler's reason for `service_refused` and must not
+present it as a missing capability.
 
 ### `POST /execute/stream`
 

@@ -177,6 +177,9 @@ fn is_capability_refusal(status: reqwest::StatusCode, body: &Value) -> bool {
             | "ref_binding_unauthorized"
             | "operator_vault_capability_required"
     ) || body.to_string().contains("missing required capability")
+        // A service handler that checks a capability itself refuses in its
+        // own words, under the service-refusal code.
+        || (code == "service_refused" && body.to_string().contains("capability"))
 }
 
 /// How the operator's requests reach the controller.

@@ -413,6 +413,10 @@ pub struct RyeOsSourceStatusVm {
     pub stale: bool,
 }
 
+/// What the `unresolved` state says: nothing can be read until a subject,
+/// selection or project the view needs is there.
+const UNRESOLVED_MESSAGE: &str = "Source subject or required context is unresolved";
+
 fn source_status(core: &RyeOsCore, key: &str) -> Option<RyeOsSourceStatusVm> {
     let cached = core.data.sources.contains_key(key);
     if core
@@ -424,7 +428,7 @@ fn source_status(core: &RyeOsCore, key: &str) -> Option<RyeOsSourceStatusVm> {
     {
         return Some(RyeOsSourceStatusVm {
             state: "unresolved".into(),
-            message: "Source subject or required context is unresolved".into(),
+            message: UNRESOLVED_MESSAGE.into(),
             stale: cached,
         });
     }
@@ -1010,26 +1014,31 @@ fn status_bar_vm(_chrome: &RyeOsChromeVm, core: &RyeOsCore) -> RyeOsStatusBarVm 
     // Node health belongs to the top line; the foot remains interaction chrome.
     // The one count it carries is the attention queue's, exactly as the daemon
     // counted it: one segment per kind that has items, in the config's order.
-    let segments = core
-        .data
-        .attention
-        .as_ref()
-        .map(|attention| {
-            attention
-                .counts
-                .by_kind
-                .iter()
-                .filter(|kind| kind.count > 0)
-                .map(|kind| RyeOsStatusSegmentVm {
-                    id: format!("attention:{}", kind.kind),
-                    label: Some(kind.label.clone()),
-                    value: kind.count.to_string(),
-                    tone: tone_from_name(Some(&kind.tone)),
-                    grow: false,
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    // A queue that could not be read is said so: no counts would read as an
+    // empty queue. Counts from an earlier answer stay, as stale rows do.
+    let segments = match (&core.data.attention, surface_role_failed(core, "attention")) {
+        (Some(attention), _) => attention
+            .counts
+            .by_kind
+            .iter()
+            .filter(|kind| kind.count > 0)
+            .map(|kind| RyeOsStatusSegmentVm {
+                id: format!("attention:{}", kind.kind),
+                label: Some(kind.label.clone()),
+                value: kind.count.to_string(),
+                tone: tone_from_name(Some(&kind.tone)),
+                grow: false,
+            })
+            .collect(),
+        (None, true) => vec![RyeOsStatusSegmentVm {
+            id: "attention:unavailable".to_string(),
+            label: Some("attention".to_string()),
+            value: "unavailable".to_string(),
+            tone: RyeOsTone::Warn,
+            grow: false,
+        }],
+        (None, false) => Vec::new(),
+    };
     RyeOsStatusBarVm {
         visible: core.ui.bottom_status_visible,
         segments,
@@ -1038,6 +1047,36 @@ fn status_bar_vm(_chrome: &RyeOsChromeVm, core: &RyeOsCore) -> RyeOsStatusBarVm 
         attention: (core.runtime.now_ms < core.runtime.attention_until_ms)
             .then_some(RyeOsTone::Warn),
     }
+}
+
+/// Whether the last fetch of the active Surface's own source with `role`
+/// failed or was refused.
+fn surface_role_failed(core: &RyeOsCore, role: &str) -> bool {
+    let Some(composition) = core.presentation.as_ref() else {
+        return false;
+    };
+    let Some(surface) = composition.active_surface() else {
+        return false;
+    };
+    let Some(attachment) = core
+        .binding_attachments
+        .get(&surface.binding().binding_attachment_id)
+    else {
+        return false;
+    };
+    attachment
+        .surface_sources
+        .iter()
+        .filter(|(_, source)| source.role.as_deref() == Some(role))
+        .any(|(channel, _)| {
+            let key = super::source_key::RyeOsSurfaceSourceKey {
+                presentation_id: composition.id().clone(),
+                surface_instance_id: surface.id().clone(),
+                channel: channel.clone(),
+            }
+            .encode();
+            core.data.source_errors.contains_key(&key)
+        })
 }
 
 fn view_set_vm(core: &RyeOsCore) -> Option<RyeOsViewSetVm> {
@@ -1434,12 +1473,17 @@ fn bound_view_vm_keyed(
         }
         (_, None) => RyeOsViewVm::Placeholder {
             title,
-            message: format!(
-                "loading {} …",
-                primary_source
-                    .map(|(_, source)| source.item_ref.as_str())
-                    .unwrap_or("(no source)")
-            ),
+            message: match primary_source {
+                Some((_, source)) => format!("loading {} …", source.item_ref),
+                // An input line (a text view with no source and no lines of
+                // its own) keeps its body text as it was.
+                None if binding.widget == "text" => "loading (no source) …".to_string(),
+                // Nothing is being fetched: the view reads a selection that
+                // is not made yet, or the session admitted none of its
+                // sources (one that needs a project, in a session without
+                // one). That is unresolved, not loading.
+                None => format!("unresolved: {UNRESOLVED_MESSAGE}"),
+            },
         },
         ("rows", Some(response)) => {
             let activate_affordance = activate_affordance(binding);
@@ -4021,6 +4065,45 @@ mod tests {
                 assert!(!message.contains("loading"));
             }
             other => panic!("expected source error placeholder, got {other:?}"),
+        }
+    }
+
+    /// A view the session admitted no source for (its only source needs a
+    /// project, in a session without one) fetches nothing, so it is not
+    /// drawn as loading.
+    #[test]
+    fn a_view_with_no_admitted_source_is_unresolved_not_loading() {
+        let view_ref = "view:test/needs-project";
+        let core = session_with_views(
+            json!({view_ref:{"widget":"table","sources":{},
+            "projections":{"columns":[{"label":"thread","field":"thread_id"}]}}}),
+            json!([view_ref]),
+        );
+        let tile = core.active_view_set().unwrap().focused_tile;
+        let instance_key = core.active_view_set().unwrap().tiles[&tile]
+            .instance_key
+            .clone();
+        let view = bound_view_vm_keyed(
+            &core,
+            &instance_key,
+            RowLocalState {
+                cursor: None,
+                collapsed: None,
+                timeline_folds: None,
+                expanded_rows: None,
+                collapsed_tree_rows: None,
+                changed_rows: None,
+            },
+            view_ref,
+        );
+        match view {
+            RyeOsViewVm::Placeholder { message, .. } => {
+                assert_eq!(
+                    message,
+                    "unresolved: Source subject or required context is unresolved"
+                );
+            }
+            other => panic!("expected an unresolved placeholder, got {other:?}"),
         }
     }
 

@@ -2665,10 +2665,11 @@ async fn an_executable_admission_the_signed_binding_does_not_declare_is_refused_
         .await
         .expect_err("a preparation the signed binding does not declare must be refused");
     let message = format!("{error:#}");
-    // The validator refuses with Forbidden, which the service dispatch maps
-    // to a capability denial; the retired stopgap refused with a bad request.
+    // The validator refuses with Forbidden, which the service dispatch
+    // reports as the service's own refusal; the retired stopgap refused with
+    // a bad request.
     assert!(
-        message.contains("service_cap_denied"),
+        message.contains("service_refused"),
         "the signed-binding validator must refuse: {message}"
     );
     assert_eq!(

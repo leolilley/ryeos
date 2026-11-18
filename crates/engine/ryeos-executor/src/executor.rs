@@ -1206,11 +1206,13 @@ pub async fn execute_service_verified(
             Some(HandlerError::Conflict(msg)) => {
                 crate::dispatch_error::DispatchError::Conflict(msg)
             }
-            Some(HandlerError::Forbidden(msg)) => {
-                crate::dispatch_error::DispatchError::ServiceCapDenied {
+            // The handler's own refusal, in its own words. The capability
+            // check above already passed, so this is never reported as a
+            // missing capability.
+            Some(HandlerError::Forbidden(reason)) => {
+                crate::dispatch_error::DispatchError::ServiceRefused {
                     service_ref: service_ref.to_string(),
-                    required: msg,
-                    caller_scopes: ctx.caller_scopes.clone(),
+                    reason,
                 }
             }
             Some(HandlerError::BadRequest(msg)) => {

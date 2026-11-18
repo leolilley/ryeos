@@ -20,6 +20,12 @@
 //! The in-process tests in `ryeos-ui` drive the verifier and the handlers
 //! directly; this test is the one that proves the same behaviour through the
 //! HTTP routes, the auth factories and the signed operator surface.
+//!
+//! A second test opens the shipped presentation the way a client does and
+//! dispatches every source its initial Surfaces declare for themselves (the
+//! ones a client fetches at start, before any view), asserting each is
+//! answered. A handler called directly in a test can be handed a context the
+//! dispatch route never builds; only the route shows what a client gets.
 
 use ryeosd::test_support as common;
 
@@ -426,5 +432,132 @@ async fn lifecycle(harness: &DaemonHarness) -> anyhow::Result<()> {
     .await?;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_ne!(unknown["error_code"], "browser_session_revoked");
+    Ok(())
+}
+
+/// Every source the initial Surfaces of the shipped presentation declare for
+/// themselves is answered through the dispatch route, under the context that
+/// route builds for the source's service.
+#[tokio::test]
+async fn initial_surface_sources_are_answered_over_http() -> anyhow::Result<()> {
+    let (harness, _fixture) = DaemonHarness::start_fast_with(|_, _, _| Ok(()), |_| {}).await?;
+
+    let (status, minted) = harness
+        .post_json(
+            "/ui/api/launch/mint",
+            json!({
+                "ui_binding_contract_revision": ryeos_ui::UI_BINDING_CONTRACT_REVISION,
+                "root_ref": "config:ryeos/ui/presentation",
+            }),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK, "mint: {minted}");
+    let launch_url = minted["launch_url"].as_str().expect("mint returns a url");
+    let root = json!({
+        "binding_attachment_id": minted["attachment"]["binding_attachment_id"],
+        "binding_generation": minted["attachment"]["binding_generation"],
+        "binding_digest": minted["attachment"]["binding_digest"],
+    });
+    let session_id = activate_launch(launch_url).await?;
+
+    // The seat's preparation makes the presentation a session membership, so
+    // the session is read after the claim, as a client reads it.
+    let producer = claim_producer(&harness, &session_id, &root).await?;
+    let (status, current) = cookie_request(
+        &harness,
+        reqwest::Method::GET,
+        "/ui/api/session/current",
+        &session_id,
+        None,
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "session: {current}");
+    let current = current.get("result").cloned().unwrap_or(current);
+
+    let presentation = current["presentations"]
+        .as_array()
+        .expect("session lists its presentations")
+        .iter()
+        .find(|membership| membership["presentation_id"] == producer["presentation_id"])
+        .unwrap_or_else(|| panic!("the claimed presentation is a session membership: {current}"));
+    let attachments = current["binding_attachments"]
+        .as_array()
+        .expect("session lists its binding attachments");
+    let surfaces = presentation["surfaces"]
+        .as_array()
+        .expect("presentation lists its initial Surfaces");
+    assert!(!surfaces.is_empty(), "the presentation opens a Surface");
+
+    let mut dispatched = Vec::new();
+    for surface in surfaces {
+        let attachment = attachments
+            .iter()
+            .find(|attachment| {
+                attachment["binding_attachment_id"] == surface["binding"]["binding_attachment_id"]
+            })
+            .expect("an initial Surface names a session attachment");
+        let sources = attachment["presentation"]["definition"]["surface"]["sources"]
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        for (channel, source) in sources {
+            // A client fetches the sources activated at start, and a source
+            // that needs a project only when the attachment has one.
+            if source["activation"] == "on_demand"
+                || (source["requires_project"] == true && attachment["project_path"].is_null())
+            {
+                continue;
+            }
+            let body = json!({
+                "producer": producer,
+                "binding": {
+                    "binding_attachment_id": attachment["binding_attachment_id"],
+                    "binding_generation": attachment["binding_generation"],
+                    "binding_digest": attachment["binding_digest"],
+                    "coordinate": {
+                        "kind": "source",
+                        "view_ref": attachment["root_ref"],
+                        "channel": channel,
+                    },
+                    "payload": {
+                        "kind": "source_parameters",
+                        "params": source.get("params").cloned().unwrap_or_else(|| json!({})),
+                    },
+                },
+            });
+            let (status, answer) = tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                cookie_request(
+                    &harness,
+                    reqwest::Method::POST,
+                    "/ui/api/invocations/dispatch",
+                    &session_id,
+                    Some(body),
+                ),
+            )
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Surface source `{channel}` of {} was not answered",
+                    attachment["root_ref"]
+                )
+            })??;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "Surface source `{channel}` ({}) of {}: {answer}",
+                source["ref"],
+                attachment["root_ref"]
+            );
+            assert_eq!(answer["status"], "executed", "`{channel}`: {answer}");
+            dispatched.push(channel);
+        }
+    }
+    // The shipped Home reads the node summary for its bars and views; a
+    // presentation that stopped declaring it would make this test vacuous.
+    assert!(
+        dispatched.iter().any(|channel| channel == "dimension"),
+        "the initial Surface declares the node summary source: {dispatched:?}"
+    );
     Ok(())
 }

@@ -29,7 +29,7 @@
       "filename": "ryeos_rune.js",
       "mime": "application/javascript; charset=utf-8",
       "cache": "no-cache",
-      "sha256": "240b6a848d6a83f80fbe04d1877df7cd3d900ca15aa369619e35a30f58d46402",
+      "sha256": "03c597cee9cfe4700bd08a0e0a60759bff96ef3b3ad33f711a3040f3eef4985e",
       "imports": [
         "/ui/assets/rune_bridge.js",
         "/ui/assets/rune_health.js",
@@ -37,7 +37,10 @@
         "/ui/assets/rune_platform.js",
         "/ui/assets/rune_platform_text.js",
         "/ui/assets/rune_segmenter.js",
-        "/ui/assets/ryeos_rune_bg.wasm"
+        "/ui/assets/ryeos_rune_bg.wasm",
+        "/ui/assets/Inter-Regular.ttf",
+        "/ui/assets/Inter-Medium.ttf",
+        "/ui/assets/Inter-SemiBold.ttf"
       ]
     },
     {
@@ -93,7 +96,7 @@
       "filename": "ryeos_rune_bg.wasm.gz",
       "mime": "application/wasm",
       "cache": "no-cache",
-      "sha256": "5a129fa1b9a0a6042da62868dabd0a638e5c782e302d1f5fa9873f85e3f11069",
+      "sha256": "e146bd7f634841f58c3932ec131179eb95a48df806c62f50912772c18def0168",
       "imports": [],
       "encoding": "gzip"
     },
@@ -113,6 +116,33 @@
       "mime": "font/ttf",
       "cache": "no-cache",
       "sha256": "2da9fbdc39dfa60745991459a5e4a4298a35af66df15fb3077fcca4143401203",
+      "imports": []
+    },
+    {
+      "route": "/ui/assets/Inter-Regular.ttf",
+      "filename": "Inter-Regular.ttf.gz",
+      "encoding": "gzip",
+      "mime": "font/ttf",
+      "cache": "no-cache",
+      "sha256": "8bc20f364ca84cb6d6bd422f9c6e139f1898dc181890f4e4365fb5541b90e583",
+      "imports": []
+    },
+    {
+      "route": "/ui/assets/Inter-Medium.ttf",
+      "filename": "Inter-Medium.ttf.gz",
+      "encoding": "gzip",
+      "mime": "font/ttf",
+      "cache": "no-cache",
+      "sha256": "66377866c203e4f5ea795f9812b2e2b015bf2bf15a9d6321d6ba54fc7a85bb90",
+      "imports": []
+    },
+    {
+      "route": "/ui/assets/Inter-SemiBold.ttf",
+      "filename": "Inter-SemiBold.ttf.gz",
+      "encoding": "gzip",
+      "mime": "font/ttf",
+      "cache": "no-cache",
+      "sha256": "ece247e56ef12a6cfa6c35abde0ba73da3cb8473465f42265b9453db11561376",
       "imports": []
     }
   ]

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-18T05:02:16Z:ab01099b86a2c34e79af69e174c5e9e95abfc8751e0c0f3842445efb202bd6da:sqfCTQHEADYskSSAsH77XhMpasZdMXpQYBvJy7DIO9W+iMewggTp3SHsMFWHVw+P6HYmfRZIjMmrwLW0awIHBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-18T07:43:25Z:c486cf89b7ee0c30abd57bef68b0b535c1e0cab4a907f1931b80858951832b98:P5lxyvNGYx1iDdZse3SgclRp9nk9KT7tOXYVkvfW6HoD9I0pIowmSbvWoPW+3El9qwEwckuf0Z4PnyMgkAcBBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-development"
@@ -487,14 +487,19 @@ The browser is a renderer, not a second application model:
 
 The installed closure is exactly `index.html`, `ryeos_boot.js`, `ryeos_rune.js`,
 `ryeos_rune_bg.wasm`, Rune's flattened snippet modules (`rune_<name>.js`, the set
-declared in `browser-assets-production/lib/rune-snippets.toml`), `ryeos-cjk.ttf` and
-`ryeos-emoji.ttf`. The renderer and the two fonts are stored gzip-encoded
-(`.gz` in `pkg/`) and served that way; a client that does not accept gzip gets
-them decoded. There is no alternate browser renderer, compatibility bootstrap
+declared in `browser-assets-production/lib/rune-snippets.toml`), `ryeos-cjk.ttf`,
+`ryeos-emoji.ttf` and the files Rune fetches at runtime (the `fetched` list in
+the same file: the full Inter faces). The renderer and the fonts are stored
+gzip-encoded (`.gz` in `pkg/`) and served that way; a client that does not
+accept gzip gets them decoded. There is no alternate browser renderer, compatibility bootstrap
 or runtime fallback.
 
-On the web Rune draws only the faces it is given. Inter and IBM Plex Mono are
-compiled in; `ryeos-cjk.ttf` (common Chinese and Japanese, kana) and
+On the web Rune draws only the faces it is given. IBM Plex Mono and Inter cut to
+Latin, Greek and Cyrillic text are compiled in; after its first frame Rune
+fetches the full Inter faces (`Inter-Regular.ttf`, `Inter-Medium.ttf`,
+`Inter-SemiBold.ttf`) beside its bindings module, and the build packages them
+from the pinned Rune source. `check-rune-snippets.py` fails when the pinned
+Rune fetches a file the `fetched` list lacks. `ryeos-cjk.ttf` (common Chinese and Japanese, kana) and
 `ryeos-emoji.ttf` (monochrome Noto Emoji) cover content in other scripts. The
 boot module fetches them beside the renderer and hands them over (`add_font`)
 before `start`; one that fails to load leaves its characters undrawn and the
