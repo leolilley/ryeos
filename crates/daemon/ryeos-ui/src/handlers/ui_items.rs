@@ -23,6 +23,7 @@ use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::ItemSpace;
 use ryeos_executor::executor::ServiceAvailability;
 
+use super::item_titles::{ItemTitleConfig, is_trusted};
 use super::signed_item_topology::{classify_trust, label_for_bare_id, namespace_for_bare_id};
 
 // ── items.list types ───────────────────────────────────────────────
@@ -76,6 +77,12 @@ pub struct ItemSummary {
     pub item_kind: String,
     pub bare_id: String,
     pub label: String,
+    /// Display name: authored, a heading, or the derived leaf of the id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// `authored`, `heading` or `derived`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title_source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
     pub space: String,
@@ -187,8 +194,11 @@ pub async fn handle_items_list(
             .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?
     };
 
+    // One signed config per request; a missing or untrusted file refuses.
+    let titles = ItemTitleConfig::load(&state)?;
     let response = build_items_list(
         &state,
+        &titles,
         project_path.as_ref(),
         project_access.as_ref(),
         &request,
@@ -199,6 +209,7 @@ pub async fn handle_items_list(
 
 fn build_items_list(
     state: &AppState,
+    titles: &ItemTitleConfig,
     project_path: Option<&PathBuf>,
     project_access: Option<&crate::seat_auth::RetainedProjectAccess>,
     req: &ItemsListRequest,
@@ -282,6 +293,29 @@ fn build_items_list(
                 project_path.map(PathBuf::as_path),
             );
 
+            // Display name, read only from an item whose trust class is trusted.
+            let spec = schema.spec_for(&resolution.matched_ext);
+            let (title, title_source) = titles.title(
+                kind_name,
+                &item_ref.bare_id,
+                is_trusted(trust.as_ref()),
+                spec.map(|spec| &spec.signature),
+                || crate::seat_auth::read_whole_item_source(&resolution.winner_path, project_access),
+                |content| {
+                    let spec = spec?;
+                    state
+                        .engine
+                        .parser_dispatcher
+                        .dispatch(
+                            &spec.parser,
+                            content,
+                            Some(resolution.winner_path.as_path()),
+                            &spec.signature,
+                        )
+                        .ok()
+                },
+            );
+
             // Shadowed candidates
             let shadowed = if req.include_shadowed {
                 resolution
@@ -303,6 +337,8 @@ fn build_items_list(
                 item_kind: kind_name.to_string(),
                 bare_id: item_ref.bare_id.clone(),
                 label: label_for_bare_id(&item_ref.bare_id),
+                title: Some(title),
+                title_source: Some(title_source.to_string()),
                 namespace: namespace_for_bare_id(&item_ref.bare_id),
                 space: space_str,
                 source_path: resolution.winner_path.display().to_string(),
@@ -509,3 +545,53 @@ pub const ITEM_INSPECT_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
         Box::pin(async move { handle_item_inspect(params, ctx, state).await })
     },
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::handlers::signed_item_topology::TrustSummary;
+
+    fn row(space: &str, trust: Option<TrustSummary>, title: Option<&str>) -> Value {
+        serde_json::to_value(ItemSummary {
+            domain: "item",
+            canonical_ref: "tool:a/b".into(),
+            item_kind: "tool".into(),
+            bare_id: "a/b".into(),
+            label: "b".into(),
+            title: title.map(str::to_string),
+            title_source: title.map(|_| "authored".to_string()),
+            namespace: Some("a".into()),
+            space: space.into(),
+            source_path: "/p".into(),
+            executable: true,
+            trust,
+            shadowed: Vec::new(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn project_row_carries_title_space_and_trust_class_together() {
+        let value = row(
+            "project",
+            Some(TrustSummary {
+                class: "trusted".into(),
+                signer: Some("fp".into()),
+            }),
+            Some("Mine"),
+        );
+        assert_eq!(value["title"], "Mine");
+        assert_eq!(value["title_source"], "authored");
+        assert_eq!(value["space"], "project");
+        assert_eq!(value["trust"]["class"], "trusted");
+        assert_eq!(value["label"], "b");
+    }
+
+    #[test]
+    fn row_without_a_title_serialises_as_before() {
+        let value = row("bundle", None, None);
+        let object = value.as_object().unwrap();
+        assert!(!object.contains_key("title"));
+        assert!(!object.contains_key("title_source"));
+    }
+}
