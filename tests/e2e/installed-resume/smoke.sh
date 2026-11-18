@@ -105,6 +105,7 @@ cat >"$PROJECT_ROOT/.ai/tools/smoke/resume.yaml" <<'YAML'
 category: smoke
 version: "1.0.0"
 executor_id: "@subprocess"
+execution_protocol: "protocol:ryeos/core/opaque"
 description: Deterministic long-running fixture for installed resume smoke tests
 config:
   command: /bin/sh
