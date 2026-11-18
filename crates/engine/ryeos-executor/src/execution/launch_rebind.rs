@@ -28,6 +28,9 @@ pub(crate) const REBIND_CHANGES_SEALED_LAUNCH: &str = "ref_binding_rebind_change
 /// let more retries follow an outcome that leaves the effect unknown.
 pub(crate) const REBIND_CHANGES_EFFECT_AUTHORITY: &str =
     "ref_binding_rebind_changes_effect_authority";
+/// The rebound launch would gain or lose its financial authority.
+pub(crate) const REBIND_CHANGES_FINANCIAL_AUTHORITY: &str =
+    "ref_binding_rebind_changes_financial_authority";
 /// The source's operational launch metadata no longer matches the capsule
 /// rooted for it.
 pub(crate) const REBIND_SOURCE_NOT_ADMITTED: &str = "ref_binding_rebind_source_not_admitted";
@@ -230,6 +233,29 @@ fn effect_authority_unchanged(
     }
 }
 
+/// A rebound launch carries financial authority exactly when its source did.
+///
+/// The accounting scope a thread charges is minted with its first launch and
+/// copied to every successor. A source with no financial authority minted no
+/// item-level budget, so a successor that gained one would have nothing to
+/// reserve against and fail inside its run; a successor that lost one would
+/// keep running with no accounting at all. Which authority it is (the tariff
+/// and spend bound of the bound provider) is the binding's to change.
+fn financial_authority_presence_held(
+    source_has_authority: bool,
+    rebound_has_authority: bool,
+) -> Result<(), &'static str> {
+    match (source_has_authority, rebound_has_authority) {
+        (true, true) | (false, false) => Ok(()),
+        (false, true) => Err(
+            "rebinding would give the thread financial authority it was not admitted with; it has no budget to charge",
+        ),
+        (true, false) => Err(
+            "rebinding would remove the financial authority the thread was admitted with; its spend would no longer be accounted",
+        ),
+    }
+}
+
 /// Join a fresh launch preparation onto the prepared launch a source capsule
 /// admitted, for a continuation that rebinds the ref bindings at `names`.
 ///
@@ -252,8 +278,9 @@ fn effect_authority_unchanged(
 /// field a continuation must keep (the project-result and target
 /// requirements, execution, content and environment dependencies, or the
 /// record of a binding that was not named), a changed external effect class
-/// or a higher unknown-outcome retry ceiling, and a runtime fact below the
-/// minimum its contract signs for a rebind.
+/// or a higher unknown-outcome retry ceiling, financial authority appearing
+/// or disappearing, and a runtime fact below the minimum its contract signs
+/// for a rebind.
 pub(crate) fn join_rebound_prepared_launch(
     runtime_facts: &BTreeMap<String, RuntimeFactDecl>,
     admitted: &PreparedRuntimeLaunch,
@@ -344,6 +371,17 @@ pub(crate) fn join_rebound_prepared_launch(
     ) {
         return Err(rebind_refusal(
             REBIND_CHANGES_EFFECT_AUTHORITY,
+            reason,
+            names,
+        ));
+    }
+
+    if let Err(reason) = financial_authority_presence_held(
+        admitted.financial_authority.is_some(),
+        financial_authority.is_some(),
+    ) {
+        return Err(rebind_refusal(
+            REBIND_CHANGES_FINANCIAL_AUTHORITY,
             reason,
             names,
         ));
@@ -745,6 +783,50 @@ mod tests {
             rebound.external_effect_authority,
             Some(authority(Some(Recorded), 0, "other_family"))
         );
+    }
+
+    #[test]
+    fn a_rebind_neither_adds_nor_removes_financial_authority() {
+        assert!(financial_authority_presence_held(true, true).is_ok());
+        assert!(financial_authority_presence_held(false, false).is_ok());
+        assert!(financial_authority_presence_held(false, true).is_err());
+        assert!(financial_authority_presence_held(true, false).is_err());
+
+        let authority = |digest: &str| ryeos_accounting::AdmittedFinancialAuthority {
+            kind: "accounting".to_owned(),
+            authority: serde_json::json!({"tariff": digest}),
+            authority_digest: digest.repeat(64),
+            spend_bound: ryeos_accounting::SpendBoundClass::Paid,
+        };
+        let model = names(&["model"]);
+        let join = |source: Option<&str>, rebound: Option<&str>| {
+            let mut admitted = prepared(FIRST, 200_000);
+            admitted.financial_authority = source.map(authority);
+            let mut fresh = prepared(SECOND, 200_000);
+            fresh.financial_authority = rebound.map(authority);
+            join_rebound_prepared_launch(&fact_contract(None), &admitted, fresh, &model)
+        };
+
+        // A source with no financial authority minted no item budget: a
+        // rebound launch that gained one would have nothing to reserve against.
+        assert_eq!(
+            refusal_code(join(None, Some("a")).unwrap_err()),
+            REBIND_CHANGES_FINANCIAL_AUTHORITY
+        );
+        // A rebound launch that lost it would run unaccounted.
+        assert_eq!(
+            refusal_code(join(Some("a"), None).unwrap_err()),
+            REBIND_CHANGES_FINANCIAL_AUTHORITY
+        );
+        // Which authority it is follows the bound provider.
+        let rebound = join(Some("a"), Some("b")).unwrap();
+        assert_eq!(
+            rebound
+                .financial_authority
+                .map(|authority| authority.authority_digest),
+            Some("b".repeat(64))
+        );
+        assert!(join(None, None).unwrap().financial_authority.is_none());
     }
 
     #[test]

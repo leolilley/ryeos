@@ -4156,6 +4156,38 @@ fn mint_budget_id(prefix: &str) -> String {
     format!("{prefix}-{}", &hex[..16])
 }
 
+/// A continuation or recovery that carries financial authority cannot be
+/// admitted on a node whose accounting ledger is unavailable. An operator can
+/// reach this by continuing a paid thread, so it is a typed refusal.
+pub(crate) const ACCOUNTING_LEDGER_UNAVAILABLE: &str = "accounting_ledger_unavailable";
+/// A finite hard spend limit needs a mechanically proven spend bound.
+pub(crate) const HARD_SPEND_BOUND_INELIGIBLE: &str = "hard_spend_bound_ineligible";
+
+fn accounting_ledger_unavailable(authority_digest: &str) -> DispatchError {
+    DispatchError::LaunchPolicyForbidden {
+        code: ACCOUNTING_LEDGER_UNAVAILABLE.to_owned(),
+        message: format!(
+            "accounting ledger is unavailable; a recovered launch carrying financial \
+             authority {authority_digest} cannot be admitted"
+        ),
+        binding: None,
+    }
+}
+
+/// The refusal of a launch whose finite hard spend limit meets a sealed
+/// financial authority with no proven spend bound.
+fn hard_spend_bound_ineligible(spend_limit: &str, spend_bound: &str) -> DispatchError {
+    DispatchError::LaunchPolicyForbidden {
+        code: HARD_SPEND_BOUND_INELIGIBLE.to_owned(),
+        message: format!(
+            "hard spend limit {spend_limit} requires a mechanically proven spend bound; this \
+             route's sealed financial authority is `{spend_bound}` and is ineligible for hard \
+             spend"
+        ),
+        binding: None,
+    }
+}
+
 /// Resolve the immutable accounting scope for a launch whose runtime declares
 /// a financial authority.
 ///
@@ -4186,10 +4218,8 @@ fn resolve_accounting_scope(
             params.state.accounting.as_ref(),
             prepared_launch.financial_authority.as_ref(),
         ) {
-            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-                "accounting ledger is unavailable; a recovered launch carrying financial \
-                 authority {} cannot be admitted",
-                financial_authority.authority_digest
+            return Err(BuildAndLaunchError::from(accounting_ledger_unavailable(
+                &financial_authority.authority_digest,
             )));
         }
         return Ok((Some(existing), false));
@@ -5721,44 +5751,13 @@ async fn prepare_managed_launch_authority_in_mode(
         };
     // Credentials are read only after the installed runtime closure has been
     // matched to the authoritative capsule. A failed recovery attempt cannot
-    // obtain secrets for substituted code.
-    let mut secret_requirements = build_secret_requirements(params.metadata_required_secrets);
-    merge_prepared_secret_requirements(
-        &mut secret_requirements,
-        &prepared_launch.required_secrets,
-    )?;
-    let secret_names: Vec<String> = secret_requirements
-        .iter()
-        .map(|requirement| requirement.name.clone())
-        .collect();
-    let secret_env = ryeos_app::vault::authorize_secret_delivery(
-        &params.state.secret_sources(),
-        ryeos_app::vault::SecretRecipient {
-            principal: params.acting_principal,
-        },
-        &secret_names,
-        params.provenance.project_authority(),
-    )
-    .map_err(|error| match error {
-        VaultReadError::MissingSecrets { names, .. } => BuildAndLaunchError::MissingSecrets {
-            item_ref: params.resolved.item_ref.clone(),
-            secrets: missing_secrets_from_requirements(&names, &secret_requirements),
-        },
-        // An authorization refusal carrying the ceiling's own code.
-        VaultReadError::NameRefused(refusal) => {
-            BuildAndLaunchError::LaunchPreparation(Box::new(DispatchError::LaunchPolicyForbidden {
-                code: refusal.code().to_owned(),
-                message: refusal.to_string(),
-                binding: None,
-            }))
-        }
-        error @ VaultReadError::AuthorityViolation(_) => {
-            BuildAndLaunchError::Internal(anyhow::anyhow!("vault read refused: {error}"))
-        }
-        VaultReadError::Internal(error) => {
-            BuildAndLaunchError::Internal(anyhow::anyhow!("vault read failed: {error:#}"))
-        }
-    })?;
+    // obtain secrets for substituted code. A rebound successor's capsule is
+    // compared with its source only once its metadata is complete, so its
+    // credentials are read after that comparison, further down.
+    let secret_env_before_metadata = match rebind_names {
+        None => Some(read_launch_secret_env(params, &prepared_launch)?),
+        Some(_) => None,
+    };
     let native_resume = selected_runtime.yaml.native_resume.clone();
     let (checkpoint_dir, checkpoint_authority) = if native_resume.is_some() {
         let thread_state = ryeos_app::launch_metadata::daemon_thread_state_dir(
@@ -6047,6 +6046,12 @@ async fn prepare_managed_launch_authority_in_mode(
         }
         Some(metadata)
     };
+    // In rebind mode the comparison with the source capsule has just passed;
+    // only now are the re-prepared launch's credentials read.
+    let secret_env = match secret_env_before_metadata {
+        Some(secret_env) => secret_env,
+        None => read_launch_secret_env(params, &prepared_launch)?,
+    };
     Ok(PreparedManagedLaunchAuthority {
         effective_program,
         prepared_launch,
@@ -6067,6 +6072,53 @@ async fn prepare_managed_launch_authority_in_mode(
         node_requirements_met_by,
         freshly_minted_accounting_scope,
         selected_resources: None,
+    })
+}
+
+/// Read the secrets a managed launch delivers to its runtime: the item's
+/// declared secrets and the ones launch preparation requires. The caller
+/// decides when; this must not run before the launch's closure has been
+/// matched to the capsule that admits it.
+fn read_launch_secret_env(
+    params: &BuildAndLaunchParams<'_>,
+    prepared_launch: &super::launch_preparation::PreparedRuntimeLaunch,
+) -> Result<ryeos_engine::contracts::DeliveredSecretEnv, BuildAndLaunchError> {
+    let mut secret_requirements = build_secret_requirements(params.metadata_required_secrets);
+    merge_prepared_secret_requirements(
+        &mut secret_requirements,
+        &prepared_launch.required_secrets,
+    )?;
+    let secret_names: Vec<String> = secret_requirements
+        .iter()
+        .map(|requirement| requirement.name.clone())
+        .collect();
+    ryeos_app::vault::authorize_secret_delivery(
+        &params.state.secret_sources(),
+        ryeos_app::vault::SecretRecipient {
+            principal: params.acting_principal,
+        },
+        &secret_names,
+        params.provenance.project_authority(),
+    )
+    .map_err(|error| match error {
+        VaultReadError::MissingSecrets { names, .. } => BuildAndLaunchError::MissingSecrets {
+            item_ref: params.resolved.item_ref.clone(),
+            secrets: missing_secrets_from_requirements(&names, &secret_requirements),
+        },
+        // An authorization refusal carrying the ceiling's own code.
+        VaultReadError::NameRefused(refusal) => {
+            BuildAndLaunchError::LaunchPreparation(Box::new(DispatchError::LaunchPolicyForbidden {
+                code: refusal.code().to_owned(),
+                message: refusal.to_string(),
+                binding: None,
+            }))
+        }
+        error @ VaultReadError::AuthorityViolation(_) => {
+            BuildAndLaunchError::Internal(anyhow::anyhow!("vault read refused: {error}"))
+        }
+        VaultReadError::Internal(error) => {
+            BuildAndLaunchError::Internal(anyhow::anyhow!("vault read failed: {error:#}"))
+        }
     })
 }
 
@@ -7685,12 +7737,9 @@ async fn run_claimed_thread_row_inner(
         if let Some(authority) = prepared_launch.financial_authority.as_ref()
             && !authority.spend_bound.hard_spend_eligible()
         {
-            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-                "hard spend limit {} requires a mechanically proven spend bound; this \
-                 route's sealed financial authority is `{}` and is ineligible for hard \
-                 spend",
-                hard_limits.spend_usd.to_canonical_string(),
-                authority.spend_bound.as_str()
+            return Err(BuildAndLaunchError::from(hard_spend_bound_ineligible(
+                &hard_limits.spend_usd.to_canonical_string(),
+                authority.spend_bound.as_str(),
             )));
         }
         if accounting_scope.is_none() || state.accounting.is_none() {
@@ -13143,6 +13192,39 @@ fn prompt_inputs_from_parameters(parameters: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn operator_reachable_financial_refusals_are_typed_launch_policy_refusals() {
+        // A paid thread continued on a node with no accounting ledger, and a
+        // finite hard spend limit meeting an unproven spend bound: both can
+        // follow an operator's continuation, so both carry a stable code and
+        // a forbidden status instead of an internal fault.
+        for (error, code, expected) in [
+            (
+                accounting_ledger_unavailable(&"a".repeat(64)),
+                ACCOUNTING_LEDGER_UNAVAILABLE,
+                "accounting ledger is unavailable",
+            ),
+            (
+                hard_spend_bound_ineligible("5", "advisory_only"),
+                HARD_SPEND_BOUND_INELIGIBLE,
+                "ineligible for hard spend",
+            ),
+        ] {
+            assert_eq!(error.code(), code);
+            assert_eq!(error.http_status(), axum::http::StatusCode::FORBIDDEN);
+            assert!(error.to_string().contains(expected), "{error}");
+            match BuildAndLaunchError::from(error) {
+                BuildAndLaunchError::LaunchPreparation(inner) => {
+                    assert!(matches!(
+                        *inner,
+                        DispatchError::LaunchPolicyForbidden { .. }
+                    ));
+                }
+                other => panic!("expected a typed launch refusal, got {other}"),
+            }
+        }
+    }
     use crate::execution::limits::{LimitCaps, LimitValues};
 
     fn grant_backed_context(digest: &str) -> ryeos_app::handler_context::HandlerContext {
