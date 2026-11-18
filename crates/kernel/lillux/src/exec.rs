@@ -9022,7 +9022,7 @@ fn lib_spawn_awaiting_attachment_in_scope_with_deadline(
         (Some(relative), Some(original)) => Some(relative.min(original)),
         (relative, original) => relative.or(original),
     };
-    let relative_setup = supervised_setup_deadline(start, request.timeout);
+    let relative_setup = supervised_barrier_setup_deadline(start, request.timeout);
     let setup_deadline =
         original_expiry.map_or(relative_setup, |expiry| relative_setup.min(expiry));
     let attachment_scope = process_scope
@@ -9884,7 +9884,7 @@ fn lib_spawn_with_stdio(
                 preserved.insert(*source);
                 preserved.insert(*target);
             }
-            let mut deadline = supervised_setup_deadline(start, timeout);
+            let mut deadline = supervised_barrier_setup_deadline(start, timeout);
             if let Some(original) = absolute_deadline {
                 let observed = Instant::now();
                 deadline = deadline.min(
@@ -10313,7 +10313,7 @@ fn lib_spawn_with_stdio(
         };
         running.status_thread = Some(status_thread);
         running.applied_receipt_rx = applied_rx;
-        let (relative_setup, mut setup_bound) = supervised_setup_bound(start, timeout);
+        let (relative_setup, mut setup_bound) = supervised_pid_report_bound(start, timeout);
         let setup_deadline = absolute_deadline.map_or(relative_setup, |original| {
             // Sample on the original worker clock; never restart its expiry.
             start
@@ -11257,8 +11257,7 @@ fn resolve_supervised_identity(
     Err("supervised process identity is unsupported on this platform".to_string())
 }
 
-/// Which bound limits supervised launch setup (target-PID report, fork
-/// custody, attachment boundary).
+/// Which bound limits the wait for a supervised launcher's target-PID report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SupervisedSetupBound {
     /// The caller's own request deadline.
@@ -11279,10 +11278,30 @@ impl SupervisedSetupBound {
     }
 }
 
-/// The setup wait follows the caller's request deadline when one was given;
-/// the fixed default applies only when the caller gave none. Setup time still
-/// counts against the request, so this never extends it.
-fn supervised_setup_bound(start: Instant, timeout: f64) -> (Instant, SupervisedSetupBound) {
+/// Bound for waits that run while the process-wide fork barrier (or a
+/// quiesced fork window) is held: the fork-custody wait before spawn and the
+/// attachment-boundary waits in `spawn_awaiting_attachment`.
+///
+/// This is deliberately `min(request deadline, 5 s)` and must NOT follow a
+/// long request deadline. A custody waiter blocks every new fork-sensitive
+/// lease retainer, and the attachment waits run with the fork window held, so
+/// one hung launch would otherwise stall every other direct fork and lease
+/// acquisition for the whole request timeout (600 s by default for a held
+/// lease supervisor, up to 5400 s).
+fn supervised_barrier_setup_deadline(start: Instant, timeout: f64) -> Instant {
+    let default = start
+        .checked_add(SUPERVISED_STATUS_SETUP_TIMEOUT)
+        .unwrap_or_else(Instant::now);
+    request_timeout_duration(timeout)
+        .and_then(|timeout| start.checked_add(timeout))
+        .map_or(default, |request| request.min(default))
+}
+
+/// Bound for the wait for the launcher's target-PID report, which runs after
+/// the fork barrier is released. It follows the caller's request deadline when
+/// one was given (setup still counts against the request, never extends it);
+/// the fixed default applies only when the caller gave none.
+fn supervised_pid_report_bound(start: Instant, timeout: f64) -> (Instant, SupervisedSetupBound) {
     request_timeout_duration(timeout)
         .and_then(|timeout| start.checked_add(timeout))
         .map(|deadline| (deadline, SupervisedSetupBound::RequestDeadline))
@@ -11292,10 +11311,6 @@ fn supervised_setup_bound(start: Instant, timeout: f64) -> (Instant, SupervisedS
                 .map(|deadline| (deadline, SupervisedSetupBound::DefaultLimit))
         })
         .unwrap_or_else(|| (Instant::now(), SupervisedSetupBound::DefaultLimit))
-}
-
-fn supervised_setup_deadline(start: Instant, timeout: f64) -> Instant {
-    supervised_setup_bound(start, timeout).0
 }
 
 #[cfg(target_os = "linux")]
@@ -14181,7 +14196,7 @@ fn do_stream(
     let guard = match prepare_command_fork_custody(
         &mut command,
         &BTreeSet::from([0, 1, 2]),
-        supervised_setup_deadline(Instant::now(), timeout),
+        supervised_barrier_setup_deadline(Instant::now(), timeout),
     ) {
         Ok(guard) => guard,
         Err(error) => {
@@ -14334,7 +14349,7 @@ fn spawn_detached(
     let guard = prepare_command_fork_custody(
         &mut command,
         &preserved,
-        supervised_setup_deadline(Instant::now(), 0.0),
+        supervised_barrier_setup_deadline(Instant::now(), 0.0),
     )?;
     configure_inherited_fds(&mut command, inherited_fds)?;
     unsafe {
@@ -15442,32 +15457,52 @@ mod supervised_setup_deadline_tests {
     use super::*;
 
     #[test]
-    fn request_deadline_longer_than_default_is_the_setup_deadline() {
+    fn pid_report_follows_a_longer_request_deadline() {
         let start = Instant::now();
-        let (deadline, bound) = supervised_setup_bound(start, 30.0);
+        let (deadline, bound) = supervised_pid_report_bound(start, 30.0);
         assert_eq!(deadline, start + Duration::from_secs(30));
         assert_eq!(bound, SupervisedSetupBound::RequestDeadline);
-        assert_eq!(
-            supervised_setup_deadline(start, 30.0),
-            start + Duration::from_secs(30)
-        );
     }
 
     #[test]
-    fn shorter_request_deadline_is_the_setup_deadline() {
+    fn pid_report_follows_a_shorter_request_deadline() {
         let start = Instant::now();
-        let (deadline, bound) = supervised_setup_bound(start, 1.5);
+        let (deadline, bound) = supervised_pid_report_bound(start, 1.5);
         assert_eq!(deadline, start + Duration::from_millis(1500));
         assert_eq!(bound, SupervisedSetupBound::RequestDeadline);
     }
 
     #[test]
-    fn no_request_deadline_uses_the_named_default() {
+    fn pid_report_without_request_deadline_uses_the_named_default() {
         let start = Instant::now();
         for none in [0.0, -1.0, f64::NAN, f64::INFINITY] {
-            let (deadline, bound) = supervised_setup_bound(start, none);
+            let (deadline, bound) = supervised_pid_report_bound(start, none);
             assert_eq!(deadline, start + SUPERVISED_STATUS_SETUP_TIMEOUT);
             assert_eq!(bound, SupervisedSetupBound::DefaultLimit);
         }
+    }
+
+    #[test]
+    fn barrier_bound_is_capped_at_five_seconds_under_a_long_request() {
+        let start = Instant::now();
+        for long in [30.0, 600.0, 5400.0] {
+            assert_eq!(
+                supervised_barrier_setup_deadline(start, long),
+                start + SUPERVISED_STATUS_SETUP_TIMEOUT
+            );
+        }
+    }
+
+    #[test]
+    fn barrier_bound_keeps_a_shorter_request_and_the_default_without_one() {
+        let start = Instant::now();
+        assert_eq!(
+            supervised_barrier_setup_deadline(start, 1.5),
+            start + Duration::from_millis(1500)
+        );
+        assert_eq!(
+            supervised_barrier_setup_deadline(start, 0.0),
+            start + SUPERVISED_STATUS_SETUP_TIMEOUT
+        );
     }
 }
