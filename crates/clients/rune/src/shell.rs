@@ -110,6 +110,7 @@ pub fn shell(
         .w_full()
         .grow(1.0)
         .min_h(0.0)
+        // look: the switcher's room is always taken; hiding the switcher and its edge setting need a preference the view model does not carry.
         .child(el().w(theme::SWITCHER_ROOM).h_full())
         .child(
             col()
@@ -1147,6 +1148,7 @@ fn dialog_layer(dialog: &RyeOsDialogVm, local: &Local) -> El {
             p.accent_bright,
         )))
         .child(
+            // look: the dialog title keeps its upper case and mark for now; the browser smoke test finds the launcher dialog by this label.
             text(dialog.title.to_uppercase())
                 .font(theme::data(10.0).tracking(0.8))
                 .color(p.text)
