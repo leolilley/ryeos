@@ -101,6 +101,15 @@ impl EventAppendOptions {
     }
 }
 
+/// The wire code of an append whose attachments the node's policy refuses.
+pub const ATTACHMENT_REFUSED_CODE: &str = "attachment_refused";
+
+/// An event append refused because of its attachments: too many, a media type
+/// the node does not accept, or too large. The events were not appended.
+#[derive(Debug, thiserror::Error)]
+#[error("attachment_refused: {0}")]
+pub struct AttachmentRefused(pub String);
+
 #[derive(Debug, thiserror::Error)]
 pub enum CallbackError {
     #[error("{code}: {message}")]
@@ -1030,6 +1039,20 @@ pub trait RuntimeCallbackAPI: Send + Sync {
     /// thread-scoped read filters to one thread. The daemon authorizes the
     /// target against the caller's chain.
     async fn replay_events(&self, params: Value) -> Result<Value, CallbackError>;
+
+    /// One stored attachment named by an event of the caller's chain, as
+    /// `{ media_type, byte_length, bytes_b64 }`. Meaning-blind: any attachment.
+    /// The daemon refuses a hash no event of the chain names.
+    async fn read_attachment(
+        &self,
+        thread_id: &str,
+        attachment: &str,
+    ) -> Result<Value, CallbackError> {
+        let _ = (thread_id, attachment);
+        Err(CallbackError::Transport(anyhow::anyhow!(
+            "this callback client cannot read attachments"
+        )))
+    }
 
     async fn bundle_events_append(
         &self,
