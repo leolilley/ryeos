@@ -542,7 +542,7 @@ fn every_bundled_view_resolves_and_validates_under_the_named_source_contract() {
     let files = yaml_files_below(&views_root);
     assert_eq!(
         files.len(),
-        48,
+        49,
         "authored inventory includes the Surfaces catalogue and session-details View"
     );
 
