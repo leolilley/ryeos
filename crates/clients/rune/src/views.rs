@@ -1571,8 +1571,8 @@ const DOCK_FILL: f32 = 0.05;
 const DOCK_BUTTON_HEIGHT: f32 = 32.0;
 const DOCK_BUTTON_PAD: f32 = 14.0;
 
-/// The status lane, then each pending ask docked below it. The ask keeps its
-/// own summary row in the flow above. Both sit in the timeline's column.
+/// The status lane, then each pending ask docked below it; a pending ask is
+/// drawn here only. Both sit in the timeline's column.
 fn timeline_foot(
     instance: &RyeOsViewInstanceKey,
     lane: Option<&RyeOsTimelineLaneVm>,
