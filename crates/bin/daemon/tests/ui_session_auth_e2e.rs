@@ -288,6 +288,9 @@ async fn initial_surface_sources_are_answered_over_http() -> anyhow::Result<()> 
     });
     let session_id = activate_launch(launch_url).await?;
 
+    // The seat's preparation makes the presentation a session membership, so
+    // the session is read after the claim, as a client reads it.
+    let producer = claim_producer(&harness, &session_id, &root).await?;
     let (status, current) = cookie_request(
         &harness,
         reqwest::Method::GET,
@@ -299,14 +302,12 @@ async fn initial_surface_sources_are_answered_over_http() -> anyhow::Result<()> 
     assert_eq!(status, StatusCode::OK, "session: {current}");
     let current = current.get("result").cloned().unwrap_or(current);
 
-    let producer = claim_producer(&harness, &session_id, &root).await?;
-
     let presentation = current["presentations"]
         .as_array()
         .expect("session lists its presentations")
         .iter()
         .find(|membership| membership["presentation_id"] == producer["presentation_id"])
-        .expect("the claimed presentation is a session membership");
+        .unwrap_or_else(|| panic!("the claimed presentation is a session membership: {current}"));
     let attachments = current["binding_attachments"]
         .as_array()
         .expect("session lists its binding attachments");

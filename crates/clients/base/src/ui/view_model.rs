@@ -1472,6 +1472,9 @@ fn bound_view_vm_keyed(
             title,
             message: match primary_source {
                 Some((_, source)) => format!("loading {} …", source.item_ref),
+                // An input line (a text view with no source and no lines of
+                // its own) keeps its body text as it was.
+                None if binding.widget == "text" => "loading (no source) …".to_string(),
                 // Nothing is being fetched: the view reads a selection that
                 // is not made yet, or the session admitted none of its
                 // sources (one that needs a project, in a session without
