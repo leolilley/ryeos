@@ -11,6 +11,9 @@ use serde_json::Value;
 /// tool exposure, lifecycle detection, event recording, and replay cannot
 /// silently diverge.
 pub(crate) const DIRECTIVE_RETURN_TOOL: &str = "directive_return";
+/// The built-in read-only tool that reports the run deadline's clock. The
+/// runner answers it in process; it never reaches the daemon.
+pub(crate) const TIME_LEFT_TOOL: &str = "time_left";
 
 /// Directive-runtime continuation *behavior* config, loaded by the runtime from
 /// `ryeos-runtime/continuation` (defaults if absent) — the same mechanism as
