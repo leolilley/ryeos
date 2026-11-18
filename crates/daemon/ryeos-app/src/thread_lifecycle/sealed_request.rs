@@ -843,13 +843,13 @@ impl SealedRootExecutionRequest {
                 .minimum_verifier_process_settlement,
             from_holding,
         ) {
-            (Some(minimum), from_holding) => Ok(Requirement::for_settlement(minimum)
-                .at_least(from_holding.unwrap_or(Requirement::None))),
-            (None, Some(from_holding)) => Ok(from_holding),
+            (Some(minimum), from_holding) => Requirement::for_settlement(minimum)
+                .at_least(from_holding.unwrap_or(Requirement::None)),
+            (None, Some(from_holding)) => from_holding,
             (None, None) => bail!(
                 "a qualification policy that names no minimum settlement takes its containment from the selected protocol's holding, and none was supplied"
             ),
-        }?;
+        };
         Ok(requirement.with_enforced_floor(enforced))
     }
 
