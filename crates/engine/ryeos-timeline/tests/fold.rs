@@ -89,6 +89,8 @@ fn entry_ids(timeline: &Timeline) -> Vec<(String, String)> {
             Item::Recap(r) => ids.extend(entry_ids(&Timeline {
                 items: r.members.clone(),
                 undeclared: Default::default(),
+                notice_noun: None,
+                lane_matches: Vec::new(),
             })),
         }
     }
@@ -1078,6 +1080,123 @@ fn a_settled_child_gives_its_link_the_outcome_and_summary() {
         assert_eq!(link.state.as_deref(), Some(state), "{kind}");
         assert_eq!(link.tone.as_deref(), Some(tone), "{kind}");
     }
+}
+
+fn lane_label(events: &[Value]) -> Option<String> {
+    lane_for(events, "running").map(|lane| lane.label)
+}
+
+fn lane_for(events: &[Value], status: &str) -> Option<ryeos_timeline::Lane> {
+    fold(events, &definition()).unwrap().lane(status)
+}
+fn running_call(seq: i64) -> Value {
+    ev(
+        seq,
+        "2026-11-16T00:00:00Z",
+        "T-1",
+        "tool_call_start",
+        json!({"operation_id": "op-1", "call_id": "c", "tool": "t"}),
+    )
+}
+
+fn approval_requested(seq: i64) -> Value {
+    ev(
+        seq,
+        "2026-11-16T00:00:01Z",
+        "T-1",
+        "hosted_session.approval_requested",
+        json!({"approval_id": "ap-1", "observation": {"operation_class": "write"}}),
+    )
+}
+
+#[test]
+fn a_running_chain_with_no_entries_is_working_by_status_with_no_entry() {
+    let lane = lane_for(&[], "running").expect("the status row matches");
+    assert_eq!(lane.label, "Working");
+    assert_eq!(lane.entry, None);
+    // Other statuses name nothing, and an entry row outranks the status row.
+    assert_eq!(lane_for(&[], "completed"), None);
+    let events = [approval_requested(1)];
+    assert_eq!(
+        lane_for(&events, "running")
+            .map(|lane| lane.label)
+            .as_deref(),
+        Some("Waiting for approval")
+    );
+}
+
+#[test]
+fn an_idle_thread_has_no_lane() {
+    let mut seq = 1;
+    let mut events = vec![ask(&mut seq, "2026-11-16T00:00:00Z", "hello")];
+    events.extend(op(
+        &mut seq,
+        1,
+        "2026-11-16T00:00:01Z",
+        "2026-11-16T00:00:02Z",
+        false,
+    ));
+    events.push(say(&mut seq, "2026-11-16T00:00:03Z", "done"));
+    // Nothing is running and the chain has finished.
+    assert_eq!(lane_for(&events, "completed"), None);
+}
+
+#[test]
+fn a_running_operation_is_working_and_names_its_entry() {
+    let lane = lane_for(&[running_call(1)], "running").expect("a running call is working");
+    assert_eq!(lane.label, "Working");
+    assert_eq!(lane.entry.as_deref(), Some("act:op-1"));
+}
+
+#[test]
+fn a_pending_ask_beats_working() {
+    let events = [running_call(1), approval_requested(2)];
+    let lane = lane_for(&events, "running").expect("the ask is pending");
+    assert_eq!(lane.label, "Waiting for approval");
+    assert_eq!(lane.entry.as_deref(), Some("ask:ap-1"));
+}
+
+#[test]
+fn the_latest_state_of_an_entry_decides_the_lane() {
+    // The ask is answered: its latest state is no longer pending, so the
+    // running call shows again.
+    let mut events = vec![running_call(1), approval_requested(2)];
+    events.push(ev(
+        3,
+        "2026-11-16T00:00:02Z",
+        "T-1",
+        "hosted_approval.decision_reserved",
+        json!({"approval_id": "ap-1", "decision": "approve"}),
+    ));
+    assert_eq!(lane_label(&events).as_deref(), Some("Working"));
+
+    // A retry outranks plain work, and the step's completion clears both.
+    let step = json!({"graph_run_id": "gr-1", "node": "flaky", "step": 2});
+    let graph = |seq: i64, event_type: &str, extra: Value| {
+        let mut payload = step.clone();
+        for (key, value) in extra.as_object().unwrap() {
+            payload[key] = value.clone();
+        }
+        ev(seq, "2026-11-16T00:00:03Z", "T-1", event_type, payload)
+    };
+    let mut events = vec![running_call(1), graph(2, "graph_step_started", json!({}))];
+    assert_eq!(lane_label(&events).as_deref(), Some("Working"));
+    events.push(graph(
+        3,
+        "graph_node_retry",
+        json!({"attempt": 1, "attempts": 2}),
+    ));
+    assert_eq!(lane_label(&events).as_deref(), Some("Retrying"));
+    events.push(graph(4, "graph_step_completed", json!({"status": "ok"})));
+    assert_eq!(lane_label(&events).as_deref(), Some("Working"));
+}
+
+#[test]
+fn the_lane_comes_only_from_the_definition_table() {
+    let mut def = definition();
+    def.lane.clear();
+    let timeline = fold(&[running_call(1), approval_requested(2)], &def).unwrap();
+    assert_eq!(timeline.lane("running"), None);
 }
 
 /// A reasoning part that holds only an opaque artefact draws nothing; the
