@@ -71,6 +71,31 @@ mod tests {
     }
 
     #[test]
+    fn artefacts_count_by_their_compact_json_on_reasoning_parts_and_calls() {
+        let artefact = ryeos_provider_contract::Artefact(json!({"k": "0123456789"}));
+        let len = artefact.0.to_string().len();
+        let message = ProviderMessage::new(
+            ryeos_provider_contract::Role::Assistant,
+            vec![
+                Part::Reasoning(ryeos_provider_contract::ReasoningPart {
+                    text: None,
+                    artefact: Some(artefact.clone()),
+                }),
+                Part::ToolCall(ryeos_provider_contract::ToolCallPart {
+                    call_id: "c".to_string(),
+                    name: "t".to_string(),
+                    arguments: json!({}),
+                    artefact: Some(artefact),
+                }),
+            ],
+        );
+        assert_eq!(
+            estimate_tokens(&[message]),
+            ((len + 1 + 2 + len) / 4) as u64
+        );
+    }
+
+    #[test]
     fn text_is_counted_by_length_not_by_its_json_encoding() {
         let messages = vec![
             ProviderMessage::user("a".repeat(400)),
