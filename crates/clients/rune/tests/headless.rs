@@ -917,10 +917,6 @@ fn the_overlay_draws_its_sections_rows_and_the_selected_rows_actions() {
         "the selected row shows actions, not age"
     );
     for hint in &vm.overlay.key_hints {
-        assert!(
-            texts.iter().any(|text| *text == hint.word),
-            "footer hint {:?}",
-            hint.word
-        );
+        assert!(texts.contains(&hint.word), "footer hint {:?}", hint.word);
     }
 }
