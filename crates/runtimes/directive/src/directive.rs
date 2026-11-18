@@ -157,6 +157,92 @@ pub struct ExecutionConfig {
     /// in the signed provider schema; budget/failure behavior belongs here.
     #[serde(default)]
     pub accounting: AttemptAccountingConfig,
+    /// Limits on the images tools return, in addition to the node's attachment
+    /// policy and the model's own limits.
+    #[serde(default)]
+    pub tool_images: ToolImagesConfig,
+}
+
+/// Signed ceilings on the images a run's tools may return. The per-run
+/// counters are restored from the record on resume.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ToolImagesConfig {
+    /// Most bytes one image may hold; keep it within the node's
+    /// `thread_attachments` limit, which refuses a larger append.
+    #[serde(default = "default_tool_image_max_bytes")]
+    pub max_bytes_per_image: u64,
+    #[serde(default = "default_tool_images_per_result")]
+    pub max_images_per_result: u32,
+    /// Most image bytes one result may hold, kept under the 4 MiB a tool's
+    /// stored result may take once base64 inflates them.
+    #[serde(default = "default_tool_image_bytes_per_result")]
+    pub max_bytes_per_result: u64,
+    #[serde(default = "default_tool_images_per_run")]
+    pub max_images_per_run: u32,
+    /// Most distinct image bytes a run may store.
+    #[serde(default = "default_tool_image_bytes_per_run")]
+    pub max_bytes_per_run: u64,
+    /// Most pixels on either side of one image, read from its header. A
+    /// truncated body is not detectable without decoding, so this bounds what
+    /// the header claims, not what the bytes hold.
+    #[serde(default = "default_tool_image_dimension")]
+    pub max_image_dimension: u32,
+}
+
+fn default_tool_image_dimension() -> u32 {
+    8000
+}
+
+fn default_tool_image_max_bytes() -> u64 {
+    2 * 1024 * 1024
+}
+
+fn default_tool_images_per_result() -> u32 {
+    4
+}
+
+/// A subprocess tool's whole result is stored in the thread's result, which
+/// holds at most 4 MiB of compact JSON; base64 makes an image a third larger,
+/// so 3 MB of image bytes leaves about 190 KB for the text and wrapper.
+fn default_tool_image_bytes_per_result() -> u64 {
+    3_000_000
+}
+
+fn default_tool_images_per_run() -> u32 {
+    256
+}
+
+fn default_tool_image_bytes_per_run() -> u64 {
+    48 * 1024 * 1024
+}
+
+impl Default for ToolImagesConfig {
+    fn default() -> Self {
+        Self {
+            max_bytes_per_image: default_tool_image_max_bytes(),
+            max_images_per_result: default_tool_images_per_result(),
+            max_bytes_per_result: default_tool_image_bytes_per_result(),
+            max_images_per_run: default_tool_images_per_run(),
+            max_bytes_per_run: default_tool_image_bytes_per_run(),
+            max_image_dimension: default_tool_image_dimension(),
+        }
+    }
+}
+
+impl ToolImagesConfig {
+    fn validate(&self) -> anyhow::Result<()> {
+        if self.max_bytes_per_image == 0
+            || self.max_images_per_result == 0
+            || self.max_bytes_per_result == 0
+            || self.max_images_per_run == 0
+            || self.max_bytes_per_run == 0
+            || self.max_image_dimension == 0
+        {
+            anyhow::bail!("execution.tool_images limits must all be positive");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -263,6 +349,7 @@ impl Default for ExecutionConfig {
             unknown_outcome_retry: None,
             on_output_limit: None,
             accounting: AttemptAccountingConfig::default(),
+            tool_images: ToolImagesConfig::default(),
         }
     }
 }
@@ -301,6 +388,7 @@ impl ExecutionConfig {
                 );
             }
         }
+        self.tool_images.validate()?;
         // `budget_mode: hard` is structurally valid configuration; whether the
         // route is ledger-eligible (Paid/ExplicitlyFree sealed authority) is a
         // launch fact and is enforced at runtime start, not here.
@@ -845,6 +933,26 @@ mod tests {
                 .expect_err("removed key must not deserialize");
             assert!(error.to_string().contains("unknown field"));
         }
+    }
+
+    #[test]
+    fn tool_image_limits_default_parse_and_validate() {
+        let defaults: ExecutionConfig = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(defaults.tool_images, ToolImagesConfig::default());
+        let tight: ExecutionConfig = serde_yaml::from_str(
+            "tool_images:\n  max_images_per_result: 1\n  max_images_per_run: 2\n",
+        )
+        .unwrap();
+        tight.validate().unwrap();
+        assert_eq!(tight.tool_images.max_images_per_result, 1);
+        assert_eq!(
+            tight.tool_images.max_bytes_per_run,
+            default_tool_image_bytes_per_run()
+        );
+        let zero: ExecutionConfig =
+            serde_yaml::from_str("tool_images:\n  max_images_per_run: 0\n").unwrap();
+        assert!(zero.validate().is_err());
+        assert!(serde_yaml::from_str::<ExecutionConfig>("tool_images:\n  unknown: 1\n").is_err());
     }
 
     #[test]

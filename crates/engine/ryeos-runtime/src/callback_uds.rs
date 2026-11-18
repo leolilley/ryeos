@@ -716,6 +716,19 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
             .map_err(Self::map_rpc_error)
     }
 
+    async fn read_attachment(
+        &self,
+        thread_id: &str,
+        attachment: &str,
+    ) -> Result<Value, CallbackError> {
+        let mut params = json!({"thread_id": thread_id, "attachment": attachment});
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request("runtime.read_attachment", params)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
     async fn provider_attempt_prepare(
         &self,
         _thread_id: &str,

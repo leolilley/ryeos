@@ -20,12 +20,17 @@ use ryeos_accounting::{
 };
 
 mod effective;
+mod image_input;
 
 pub use effective::{
     ContinuationConfig, ContinuationEnabled, DIRECTIVE_EFFECTIVE_HEADER_KEYS, DeadlineSpec,
     DirectiveEffectClass, DirectiveHeader, LimitsSpec, OutputSpec, ProviderContact, ReturnNudge,
     UnknownOutcomeClass, UnknownOutcomeRetryPolicy, parse_effective_header,
     resolve_external_effect_authority, unknown_outcome_retry_ceiling,
+};
+pub use image_input::{
+    ImageAcceptConfig, ImageCostConfig, ImageInputConfig, ToolResultImagePlacement,
+    UnsupportedImagePolicy, render_note,
 };
 
 pub const MODEL_BINDING: &str = "model";
@@ -128,6 +133,10 @@ pub struct ProviderConfig {
     pub body_template: Option<Value>,
     #[serde(default)]
     pub body_extra: Option<Value>,
+    /// Which models take images and in what form. A top-level field, not part
+    /// of `schemas`, because a profile's `schemas` replaces the whole block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_input: Option<ImageInputConfig>,
     #[serde(default)]
     pub profiles: Vec<ProviderProfile>,
 }
@@ -155,6 +164,9 @@ pub struct ProviderProfile {
     pub body_template: Option<Value>,
     #[serde(default)]
     pub body_extra: Option<Value>,
+    /// Replaces the config's `image_input` whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_input: Option<ImageInputConfig>,
 }
 
 /// Provider-domain transport selection. The remote and admitted-worker paths
@@ -1418,6 +1430,14 @@ impl ProviderConfig {
 
     pub fn validate(&self, context: &str) -> Result<()> {
         self.transport.validate(context)?;
+        if let Some(image_input) = &self.image_input {
+            image_input.validate(context)?;
+        }
+        for profile in &self.profiles {
+            if let Some(image_input) = &profile.image_input {
+                image_input.validate(&format!("{context} profile {}", profile.name))?;
+            }
+        }
         if self.body_template.is_none() {
             bail!("provider config{context} has no body_template");
         }
@@ -1838,6 +1858,9 @@ impl ProviderConfig {
                 Some(existing) => deep_merge(existing, body_extra),
                 None => resolved.body_extra = Some(body_extra.clone()),
             }
+        }
+        if let Some(image_input) = &profile.image_input {
+            resolved.image_input = Some(image_input.clone());
         }
         resolved.profiles.clear();
         resolved
@@ -2919,6 +2942,7 @@ mod reasoning_tests {
             extra: HashMap::new(),
             body_template: None,
             body_extra: None,
+            image_input: None,
             profiles: Vec::new(),
         };
         ResolvedProviderSnapshot {
@@ -3669,5 +3693,62 @@ mod reasoning_capture_config_tests {
             )
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod image_input_profile_tests {
+    use super::*;
+
+    fn load(yaml: &str) -> ProviderConfig {
+        serde_json::from_value(serde_yaml::from_str::<Value>(yaml).expect("yaml"))
+            .expect("provider config")
+    }
+
+    const BASE: &str = r#"
+family: chat_completions
+transport: {kind: remote_http, base_url: "https://example.invalid"}
+body_template: {model: "{model}"}
+image_input:
+  unsupported: text_note
+profiles:
+  - name: sees
+    match: ["seeing-*"]
+    image_input:
+      accepts:
+        media_types: [image/png]
+        max_bytes_per_image: 100
+        max_images_per_request: 3
+        text_part_template: {type: text, text: "{text}"}
+        image_part_template: {type: image_url, image_url: {url: "{data_url}"}}
+        tool_result_note: "[{count} image(s) follow]"
+        deferred_label: "Image {index} from {call_id}:"
+        omitted_note: "[omitted {media_type}]"
+        cost: {pixels_per_token: 750, max_tokens: 1600, unknown_dimensions_tokens: 1600}
+"#;
+
+    #[test]
+    fn a_profile_image_input_replaces_the_config_value_whole() {
+        let provider = load(BASE);
+        let blind = provider.resolve_for_model("other-model");
+        let image_input = blind.image_input.expect("config value kept");
+        assert_eq!(image_input.unsupported, UnsupportedImagePolicy::TextNote);
+        assert!(image_input.accepts.is_none());
+        let seeing = provider.resolve_for_model("seeing-1");
+        let image_input = seeing.image_input.expect("profile value");
+        // Replaced whole: the profile did not restate `unsupported`.
+        assert_eq!(image_input.unsupported, UnsupportedImagePolicy::Refuse);
+        assert_eq!(
+            image_input.accepts.expect("accepts").max_images_per_request,
+            3
+        );
+    }
+
+    #[test]
+    fn an_invalid_profile_image_input_fails_config_validation() {
+        let provider =
+            load(&BASE.replace("max_images_per_request: 3", "max_images_per_request: 0"));
+        let error = provider.validate("").unwrap_err().to_string();
+        assert!(error.contains("max_images_per_request"), "{error}");
     }
 }

@@ -104,22 +104,133 @@ struct RenderedToolResult {
     duplicate_of: Option<String>,
     truncated_reason: Option<&'static str>,
     status: ToolResultStatus,
+    /// The images the result carries, after the checks of `tool_images`.
+    images: Vec<RenderedImage>,
+    /// The images dropped by those checks; the content ends with a note for
+    /// each.
+    dropped: Vec<ryeos_runtime::DroppedImage>,
+}
+
+/// One image of a rendered tool result.
+#[derive(Debug)]
+struct RenderedImage {
+    part: ryeos_provider_contract::ImagePart,
+    bytes: Vec<u8>,
+    /// The upload, absent when the node already stores these bytes.
+    upload: Option<ryeos_runtime::callback::EventAttachment>,
 }
 
 impl RenderedToolResult {
-    /// The recorded `tool_call_result` for this rendering.
+    /// This result with every image it carries dropped under `code`, each
+    /// noted after the guarded text like any other dropped image. Positions
+    /// stay the images' places among the tool's parts: the admitted images
+    /// took the places the earlier drops left free.
+    fn without_images(mut self, code: &'static str) -> Self {
+        let total = self.images.len() + self.dropped.len();
+        let prior: Vec<(usize, &str)> = self
+            .dropped
+            .iter()
+            .map(|image| (image.position as usize, image.code.as_str()))
+            .collect();
+        let guarded = if prior.is_empty() {
+            self.content.clone()
+        } else {
+            crate::tool_images::strip_drop_notes(&self.content, &prior)
+                .unwrap_or_default()
+                .to_string()
+        };
+        let mut free = (1..=total as u32).filter(|position| {
+            !self
+                .dropped
+                .iter()
+                .any(|dropped| dropped.position == *position)
+        });
+        let refused: Vec<ryeos_runtime::DroppedImage> = self
+            .images
+            .iter()
+            .filter_map(|_| free.next())
+            .map(|position| ryeos_runtime::DroppedImage {
+                position,
+                code: code.to_string(),
+            })
+            .collect();
+        self.dropped.extend(refused);
+        self.dropped.sort_by_key(|image| image.position);
+        let all: Vec<(usize, &str)> = self
+            .dropped
+            .iter()
+            .map(|image| (image.position as usize, image.code.as_str()))
+            .collect();
+        self.content = crate::tool_images::with_drop_notes(&guarded, &all);
+        self.images.clear();
+        self
+    }
+
+    /// The rendering of a result whose parts passed the image checks: the
+    /// guard sees the tool's text alone, then a note for each dropped image
+    /// follows it, so truncation and duplicate collapse never remove a note.
+    fn from_settled(
+        tool_name: &str,
+        raw_size: u64,
+        settled: crate::tool_images::Settled,
+        result_guard: &mut ResultGuard,
+    ) -> Self {
+        let guarded = result_guard.process_bytes(settled.guarded_input().as_bytes());
+        let content = crate::tool_images::with_drop_notes(
+            &String::from_utf8_lossy(&guarded.bytes),
+            &settled.dropped,
+        );
+        let dropped = settled
+            .dropped
+            .iter()
+            .map(|(position, code)| ryeos_runtime::DroppedImage {
+                position: *position as u32,
+                code: (*code).to_string(),
+            })
+            .collect();
+        Self {
+            tool: tool_name.to_string(),
+            content,
+            raw_size,
+            truncated: guarded.truncated,
+            duplicate_of: guarded.duplicate_of,
+            truncated_reason: guarded.truncated.then_some("result_guard"),
+            status: ToolResultStatus::Ok,
+            images: settled
+                .images
+                .into_iter()
+                .map(|admitted| RenderedImage {
+                    part: admitted.part,
+                    bytes: admitted.bytes,
+                    upload: admitted.upload,
+                })
+                .collect(),
+            dropped,
+        }
+    }
+
+    /// The recorded `tool_call_result` for this rendering: one leading text
+    /// part, then the images in order.
     fn payload(&self, operation_id: &str, call_id: &str) -> ryeos_runtime::ToolResultPayload {
+        let mut parts = vec![Part::text(self.content.clone())];
+        parts.extend(
+            self.images
+                .iter()
+                .map(|image| Part::Image(image.part.clone())),
+        );
         ryeos_runtime::ToolResultPayload {
             operation_id: operation_id.to_string(),
             call_id: call_id.to_string(),
             tool: self.tool.clone(),
             status: self.status,
-            parts: vec![Part::text(self.content.clone())],
+            attachment_refs: ryeos_runtime::ToolResultPayload::image_attachment_hashes(&parts),
+            parts,
             guard: ryeos_runtime::ToolResultGuard {
                 result_size_bytes: self.raw_size,
                 truncated: self.truncated,
                 truncated_reason: self.truncated_reason.map(str::to_string),
                 duplicate_of: self.duplicate_of.clone(),
+                dropped_images: self.dropped.clone(),
             },
         }
     }
@@ -222,6 +333,12 @@ fn tool_call_limit_error() -> String {
 /// error message (which can contain filesystem, credential, or policy detail)
 /// into the provider transcript.
 const MAX_ERROR_ENVELOPE_BYTES: usize = 32 * 1024;
+
+/// The error envelope the model reads when a tool result is refused for a
+/// stable reason.
+fn tool_error_body(code: &str, message: &str) -> String {
+    json!({"error": {"code": code, "message": message}}).to_string()
+}
 
 fn callback_error_envelope(error: &ryeos_runtime::callback::CallbackError) -> String {
     let (code, retryable) = match error {
@@ -416,6 +533,10 @@ pub struct Runner {
     callback: CallbackClient,
     continuation: ContinuationCheck,
     result_guard: ResultGuard,
+    /// The bytes of the images requests carry, by attachment hash.
+    image_store: crate::provider_adapter::images::ImageStore,
+    /// What this run has stored of tool images, against the signed limits.
+    image_run: crate::tool_images::ImageRunState,
     provider_config: ProviderConfig,
     provider_id: String,
     /// Profile name that matched during daemon preflight.
@@ -1193,8 +1314,16 @@ impl Runner {
             harness,
             budget,
             callback,
-            continuation: ContinuationCheck::new(context_window, context_threshold_ratio),
+            continuation: ContinuationCheck::new(context_window, context_threshold_ratio)
+                .with_images(
+                    provider_config
+                        .image_input
+                        .as_ref()
+                        .and_then(|image_input| image_input.accepts.clone()),
+                ),
             result_guard: ResultGuard::new(),
+            image_store: crate::provider_adapter::images::ImageStore::default(),
+            image_run: crate::tool_images::ImageRunState::default(),
             provider_config,
             provider_id,
             matched_profile,
@@ -1279,6 +1408,7 @@ impl Runner {
             .reseed(input_tokens, output_tokens, spend_usd)
             .map_err(|error| anyhow::anyhow!("invalid resume budget: {error}"))?;
         let result_guard = resume.result_guard;
+        let image_run = resume.images;
         config.messages = resume.messages;
         let mut pending_tools = resume.pending_tools;
         let started_tool_occurrences = resume.started_tool_occurrences;
@@ -1303,6 +1433,7 @@ impl Runner {
         }
         let mut runner = Self::new(config);
         runner.result_guard = result_guard;
+        runner.image_run = image_run;
         if let ResumeDisposition::FinalizeDirectiveReturn { outputs } = &resume_disposition
             && let Some(error) =
                 directive_output_validation_error(runner.directive_outputs.as_deref(), outputs)
@@ -1701,12 +1832,16 @@ impl Runner {
                         };
                         last_attempt_id =
                             Some(format!("{}:{turn}:{attempt_number}", self.thread_id));
+                        if let Err(error) = self.load_request_images().await {
+                            break Err(error);
+                        }
                         let call_input = crate::provider_adapter::StreamingCallInput {
                             client: &self.http_client,
                             provider: &self.provider_config,
                             provider_id: &self.provider_id,
                             matched_profile: self.matched_profile.as_deref(),
                             config_hash: &self.config_hash,
+                            images: &self.image_store,
                             execution: &self.execution,
                             model: &self.model_name,
                             messages: &self.messages,
@@ -3657,6 +3792,8 @@ impl Runner {
                                     duplicate_of: None,
                                     truncated_reason: None,
                                     status: ToolResultStatus::Ok,
+                                    images: Vec::new(),
+                                    dropped: Vec::new(),
                                 };
                                 if let Err(e) = self
                                     .callback
@@ -3697,6 +3834,8 @@ impl Runner {
                         duplicate_of: None,
                         truncated_reason: None,
                         status: ToolResultStatus::Error,
+                        images: Vec::new(),
+                        dropped: Vec::new(),
                     };
                     if let Err(e) = self
                         .callback
@@ -4228,6 +4367,55 @@ impl Runner {
         }
     }
 
+    /// Reads into the image store the bytes of the images the next request
+    /// carries that it does not hold: after a resume or a continuation, or
+    /// when memory pressure dropped them. A live run records its images into
+    /// the store as they happen, so this reads nothing then.
+    async fn load_request_images(&mut self) -> anyhow::Result<()> {
+        let Some(accepts) = self
+            .provider_config
+            .image_input
+            .as_ref()
+            .and_then(|image_input| image_input.accepts.as_ref())
+        else {
+            return Ok(());
+        };
+        // An image the entry cannot take by size is replaced by a note in
+        // the conversation, never read back, and the run goes on.
+        crate::provider_adapter::images::replace_unsendable_images(
+            &mut self.messages,
+            accepts,
+            crate::tool_images::IMAGE_OVERSIZE,
+        );
+        let retained: Vec<String> = crate::provider_adapter::images::retained_images(
+            &self.messages,
+            accepts.max_images_per_request,
+        )
+        .into_iter()
+        .map(|image| image.attachment.clone())
+        .collect();
+        // Pin the window before loading so reading one image back cannot
+        // evict another the request needs.
+        self.image_store.pin(retained.iter().cloned());
+        let missing: std::collections::BTreeSet<String> = retained
+            .into_iter()
+            .filter(|attachment| !self.image_store.contains(attachment))
+            .collect();
+        for attachment in missing {
+            let (media_type, bytes) = self
+                .callback
+                .read_attachment(&attachment)
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "image_attachment_missing: could not read the bytes of image {attachment}: {error:#}"
+                    )
+                })?;
+            self.image_store.insert(&attachment, &media_type, &bytes);
+        }
+        Ok(())
+    }
+
     /// Render a successful dispatch response into the model-visible result.
     /// Applies the cross-result guard (truncation + duplicate collapse), so it
     /// MUST be called in call order — the guard is ordering-sensitive state.
@@ -4241,15 +4429,45 @@ impl Runner {
             Vec::new()
         });
         let raw_size = raw_bytes.len() as u64;
-        let guarded = self.result_guard.process_bytes(&raw_bytes);
-        RenderedToolResult {
-            tool: tool_name.to_string(),
-            content: String::from_utf8_lossy(&guarded.bytes).to_string(),
-            raw_size,
-            truncated: guarded.truncated,
-            duplicate_of: guarded.duplicate_of,
-            truncated_reason: guarded.truncated.then_some("result_guard"),
-            status: ToolResultStatus::Ok,
+        let parts = match crate::tool_images::parse_envelope(response_result) {
+            crate::tool_images::Envelope::NotParts => None,
+            crate::tool_images::Envelope::Invalid(message) => {
+                return Self::rendered_error_envelope(
+                    tool_name,
+                    tool_error_body(crate::tool_images::ENVELOPE_INVALID, &message),
+                );
+            }
+            crate::tool_images::Envelope::Parts(parts) => Some(parts),
+        };
+        let Some(parts) = parts else {
+            let guarded = self.result_guard.process_bytes(&raw_bytes);
+            return RenderedToolResult {
+                tool: tool_name.to_string(),
+                content: String::from_utf8_lossy(&guarded.bytes).to_string(),
+                raw_size,
+                truncated: guarded.truncated,
+                duplicate_of: guarded.duplicate_of,
+                truncated_reason: guarded.truncated.then_some("result_guard"),
+                status: ToolResultStatus::Ok,
+                images: Vec::new(),
+                dropped: Vec::new(),
+            };
+        };
+        match crate::tool_images::admit_parts(
+            parts,
+            self.provider_config.image_input.as_ref(),
+            &self.execution.tool_images,
+            &mut self.image_run,
+        ) {
+            crate::tool_images::Verdict::Refused { code, message } => {
+                Self::rendered_error_envelope(tool_name, tool_error_body(code, &message))
+            }
+            crate::tool_images::Verdict::Settled(settled) => RenderedToolResult::from_settled(
+                tool_name,
+                raw_size,
+                settled,
+                &mut self.result_guard,
+            ),
         }
     }
 
@@ -4281,6 +4499,8 @@ impl Runner {
             duplicate_of: None,
             truncated_reason: truncated.then_some("oversized_error"),
             status: ToolResultStatus::Error,
+            images: Vec::new(),
+            dropped: Vec::new(),
         }
     }
 
@@ -4294,16 +4514,52 @@ impl Runner {
         call_id: String,
         rendered: RenderedToolResult,
     ) -> Result<(), String> {
-        self.callback
-            .emit_tool_result(&rendered.payload(&operation_id, &call_id))
+        let mut rendered = rendered;
+        let mut payload = rendered.payload(&operation_id, &call_id);
+        let uploads = rendered
+            .images
+            .iter()
+            .filter_map(|image| image.upload.clone())
+            .collect();
+        if let Err(error) = self
+            .callback
+            .emit_tool_result_with_attachments(&payload, uploads)
             .await
-            .map_err(|e| format!("resume-critical callback emit_tool_result failed: {e}"))?;
+        {
+            // The node's attachment policy can be tighter than the signed
+            // image limits. Its refusal appended nothing, so the result goes
+            // in again without its images and the run goes on.
+            if rendered.images.is_empty()
+                || error
+                    .downcast_ref::<ryeos_runtime::callback::AttachmentRefused>()
+                    .is_none()
+            {
+                return Err(format!(
+                    "resume-critical callback emit_tool_result failed: {error}"
+                ));
+            }
+            tracing::warn!(%error, "node refused a tool result's attachments; dropping its images");
+            for image in &rendered.images {
+                self.image_run.images = self.image_run.images.saturating_sub(1);
+                if image.upload.is_some() {
+                    self.image_run.bytes =
+                        self.image_run.bytes.saturating_sub(image.part.byte_length);
+                    self.image_run.stored.remove(&image.part.attachment);
+                }
+            }
+            rendered = rendered.without_images(crate::tool_images::IMAGE_LIMIT);
+            payload = rendered.payload(&operation_id, &call_id);
+            self.callback
+                .emit_tool_result(&payload)
+                .await
+                .map_err(|e| format!("resume-critical callback emit_tool_result failed: {e}"))?;
+        }
+        for image in &rendered.images {
+            self.image_store
+                .insert(&image.part.attachment, &image.part.media_type, &image.bytes);
+        }
         block_at_directive_recovery_test_cut(&self.callback, "tool_observation_recorded").await;
-        self.messages.push(ProviderMessage::tool_result_with_status(
-            call_id,
-            rendered.content,
-            rendered.status,
-        ));
+        self.messages.push(payload.message());
         Ok(())
     }
 
@@ -5519,6 +5775,77 @@ mod tests {
     }
 
     #[test]
+    fn a_dropped_image_note_survives_truncation_and_duplicate_collapse() {
+        let settled = |text: String| crate::tool_images::Settled {
+            text,
+            images: Vec::new(),
+            dropped: vec![(1, crate::tool_images::IMAGE_OVERSIZE)],
+        };
+        let note = "[image 1 not used: image_oversize]";
+        let mut guard = ResultGuard::new();
+        // Over the guard's ceiling: the text is cut, the note is not.
+        let big = "x".repeat(150 * 1024);
+        let first = RenderedToolResult::from_settled("t", 1, settled(big.clone()), &mut guard);
+        assert!(first.truncated);
+        assert_eq!(first.truncated_reason, Some("result_guard"));
+        assert!(
+            first.content.ends_with(&format!("\n{note}")),
+            "{}",
+            first.content.len()
+        );
+        assert!(first.content.contains("[...truncated at 100KB]"));
+        // The same text again collapses to the duplicate marker, and the note
+        // still follows it.
+        let second = RenderedToolResult::from_settled("t", 1, settled(big), &mut guard);
+        assert!(second.duplicate_of.is_some());
+        assert!(second.content.starts_with("[duplicate result omitted"));
+        assert!(second.content.ends_with(&format!("\n{note}")));
+        // The drop is recorded in its own field, not as a truncation.
+        let small = RenderedToolResult::from_settled("t", 1, settled("hi".into()), &mut guard);
+        assert!(!small.truncated);
+        assert_eq!(small.truncated_reason, None);
+        let payload = small.payload(&"a".repeat(64), "call-1");
+        payload.validate().unwrap();
+        assert_eq!(payload.guard.dropped_images.len(), 1);
+        assert_eq!(payload.guard.dropped_images[0].code, "image_oversize");
+        assert_eq!(payload.text(), format!("hi\n{note}"));
+    }
+
+    #[test]
+    fn dropping_a_results_images_notes_each_at_its_own_position() {
+        let image = |seed: u8| RenderedImage {
+            part: ryeos_provider_contract::ImagePart {
+                media_type: "image/png".to_string(),
+                attachment: format!("{seed:02x}").repeat(32),
+                byte_length: 4,
+                width: Some(1),
+                height: Some(1),
+            },
+            bytes: vec![seed],
+            upload: None,
+        };
+        let settled = crate::tool_images::Settled {
+            text: "shot".to_string(),
+            images: Vec::new(),
+            dropped: vec![(2, crate::tool_images::IMAGE_OVERSIZE)],
+        };
+        let mut rendered =
+            RenderedToolResult::from_settled("t", 1, settled, &mut ResultGuard::new());
+        // Positions 1 and 3 were admitted around the dropped second image.
+        rendered.images = vec![image(1), image(3)];
+        let dropped = rendered.without_images(crate::tool_images::IMAGE_LIMIT);
+        assert!(dropped.images.is_empty());
+        assert_eq!(
+            dropped.content,
+            "shot\n[image 1 not used: image_limit]\n[image 2 not used: image_oversize]\n[image 3 not used: image_limit]"
+        );
+        let payload = dropped.payload(&"a".repeat(64), "call-1");
+        payload.validate().unwrap();
+        assert!(payload.attachment_refs.is_empty());
+        assert_eq!(payload.guard.dropped_images.len(), 3);
+    }
+
+    #[test]
     fn error_envelopes_are_bounded_and_retain_honest_metadata() {
         let small = Runner::rendered_error_envelope("t", "{\"error\":\"no\"}".to_string());
         assert!(!small.truncated);
@@ -5695,6 +6022,7 @@ mod tests {
             body_template: None,
             body_extra: None,
             spend_authority: None,
+            image_input: None,
             profiles: vec![],
         };
 
@@ -5774,6 +6102,7 @@ mod tests {
             body_template: None,
             body_extra: None,
             spend_authority: None,
+            image_input: None,
             profiles: vec![],
         };
 
@@ -5829,6 +6158,7 @@ mod tests {
             body_template: None,
             body_extra: None,
             spend_authority: None,
+            image_input: None,
             profiles: vec![],
         };
 
@@ -5883,6 +6213,7 @@ mod tests {
             body_template: None,
             body_extra: None,
             spend_authority: None,
+            image_input: None,
             profiles: vec![],
         };
         let outputs = Some(vec![OutputSpec {
@@ -5952,6 +6283,7 @@ mod tests {
             body_template: None,
             body_extra: None,
             spend_authority: None,
+            image_input: None,
             profiles: vec![],
         };
         let mut budget = BudgetTracker::new(usd("1"));
@@ -6126,6 +6458,7 @@ mod tests {
             body_template: None,
             body_extra: None,
             spend_authority: None,
+            image_input: None,
             profiles: vec![],
         };
 
@@ -6200,6 +6533,7 @@ mod tests {
             body_template: None,
             body_extra: None,
             spend_authority: None,
+            image_input: None,
             profiles: vec![],
         };
 
@@ -6271,6 +6605,7 @@ mod tests {
             body_template: None,
             body_extra: None,
             spend_authority: None,
+            image_input: None,
             profiles: vec![],
         };
 
@@ -6326,6 +6661,7 @@ mod tests {
             body_template: None,
             body_extra: None,
             spend_authority: None,
+            image_input: None,
             profiles: vec![],
         };
 
@@ -7254,6 +7590,7 @@ mod tests {
             body_template: None,
             body_extra: None,
             spend_authority: None,
+            image_input: None,
             profiles: vec![],
         };
         Runner::new(RunnerConfig {

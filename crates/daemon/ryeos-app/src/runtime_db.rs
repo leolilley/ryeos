@@ -12710,10 +12710,19 @@ impl RuntimeDb {
               WHERE placement_thread_id=?1 AND command_sequence=?2 AND worker_boot_epoch=?3 AND state='dispatched'",
                 params![placement_thread_id, i64::try_from(command_sequence)?, i64::try_from(worker_boot_epoch)?, state, result_json, now],
             )?;
+            // The response's own observations apply first under the same
+            // transition gate, so a reattach that reports its upstream
+            // conversation uncertain has already moved the session to
+            // `outcome_unknown`. The command still settles; the session keeps
+            // the (outcome_unknown, outcome_unknown) pair every other writer
+            // of that state produces and every no-worker consumer accepts,
+            // and the state stays for the runtime's next status read.
             let session_changed = tx.execute(
-                "UPDATE dedicated_session SET send_boundary='settled', updated_at_ms=?3
+                "UPDATE dedicated_session
+                SET send_boundary=CASE WHEN state='outcome_unknown' THEN 'outcome_unknown' ELSE 'settled' END,
+                    updated_at_ms=?3
               WHERE placement_thread_id=?1 AND worker_boot_epoch=?2
-                AND state IN ('idle','turn_running','awaiting_approval','recovering')
+                AND state IN ('idle','turn_running','awaiting_approval','recovering','outcome_unknown')
                 AND send_boundary='contacted'",
                 params![placement_thread_id, i64::try_from(worker_boot_epoch)?, now],
             )?;
@@ -24227,6 +24236,34 @@ fn parse_json_blob(blob: Option<Vec<u8>>) -> rusqlite::Result<Option<Value>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_dedicated_session_state_is_classified_for_early_retirement() {
+        let marker = "CREATE TABLE IF NOT EXISTS dedicated_session (";
+        let table = SCHEMA_SQL
+            .find(marker)
+            .map(|at| &SCHEMA_SQL[at..])
+            .expect("dedicated_session table in schema");
+        let check = table
+            .split("state TEXT NOT NULL CHECK (state IN (")
+            .nth(1)
+            .expect("dedicated_session state CHECK");
+        let list = check.split("))").next().expect("state CHECK list");
+        let schema_states: std::collections::BTreeSet<&str> = list
+            .split(',')
+            .map(|s| s.trim().trim_matches('\''))
+            .collect();
+        let classified: std::collections::BTreeSet<&str> =
+            crate::dedicated_session_service::DEDICATED_SESSION_STATE_RETIRES_BEFORE_CAPTURE
+                .iter()
+                .map(|(state, _)| *state)
+                .collect();
+        assert_eq!(
+            schema_states, classified,
+            "a dedicated-session state was added or removed without classifying it"
+        );
+        assert!(!crate::dedicated_session_service::session_state_retires_before_capture("novel"));
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn inspection_copy_retains_original_role_receipts_and_same_lease() {
@@ -26687,6 +26724,163 @@ mod tests {
             "{error:#}"
         );
         assert!(db.dedicated_session("T-rival").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_reattach_that_reports_its_upstream_uncertain_still_settles_its_command() {
+        let (_tmp, db) = fresh_db();
+        create_locked_profile(&db, "P-recover", "worker-recover-1");
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO execution_workspace (
+                    workspace_id, thread_id, launch_owner, backend_id,
+                    base_snapshot, root_path, state, created_at_ms, updated_at_ms
+                 ) VALUES ('W-recover', 'T-recover', 'owner', 'backend',
+                           'a', '/tmp/workspace-recover', 'ready', 1, 1)",
+                    [],
+                )?)
+            })
+            .unwrap();
+        db.admit_dedicated_session(NewDedicatedSession {
+            placement_thread_id: "T-recover",
+            chain_root_id: "T-recover",
+            owner_principal: "fp:operator",
+            admitted_capsule_hash: &"a".repeat(64),
+            workspace_id: "W-recover",
+            candidate_required: false,
+            candidate_disposition: DedicatedCandidateDisposition::OwnerDecision,
+            credential_profile_id: "P-recover",
+            credential_generation: 1,
+            credential_lock_owner: "worker-recover-1",
+        })
+        .unwrap();
+        let first = WorkerProcessRecord {
+            worker_instance_id: "worker-recover-1".to_owned(),
+            boot_identity_hash: "b".repeat(64),
+            session_capsule_hash: "a".repeat(64),
+            boot_epoch: 1,
+            lifecycle_generation: 1,
+            process_identity: fake_process_identity(131, 131),
+            control_channel_identity: "fd:recover-1".to_owned(),
+            state: WorkerProcessState::Attached,
+            daemon_generation_id: "daemon-one".to_owned(),
+            placement_thread_id: "T-recover".to_owned(),
+            cleanup_state: "owned".to_owned(),
+            created_at_ms: 2,
+            updated_at_ms: 2,
+        };
+        db.attach_worker_process(&first).unwrap();
+        db.complete_worker_binding("worker-recover-1", "T-recover", 1)
+            .unwrap();
+        db.bind_dedicated_remote_thread("T-recover", "worker-recover-1", 1, "remote-recover")
+            .unwrap();
+        db.fence_abandoned_worker_process("worker-recover-1", "T-recover", 1, "reaped")
+            .unwrap();
+
+        db.acquire_credential_profile("P-recover", "fp:operator", "worker-recover-2")
+            .unwrap();
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO execution_workspace (
+                workspace_id, thread_id, launch_owner, backend_id,
+                base_snapshot, root_path, state, created_at_ms, updated_at_ms
+             ) VALUES ('W-recover-next', 'T-recover', 'owner-next', 'backend',
+                       'a', '/tmp/workspace-recover-next', 'ready', 1, 1)",
+                    [],
+                )?)
+            })
+            .unwrap();
+        assert_eq!(
+            db.prepare_dedicated_session_recovery(
+                "T-recover",
+                1,
+                "worker-recover-2",
+                "W-recover-next"
+            )
+            .unwrap(),
+            2
+        );
+        assert_eq!(
+            db.dedicated_session("T-recover")
+                .unwrap()
+                .unwrap()
+                .workspace_id,
+            "W-recover-next"
+        );
+        let second = WorkerProcessRecord {
+            worker_instance_id: "worker-recover-2".to_owned(),
+            boot_identity_hash: "c".repeat(64),
+            boot_epoch: 2,
+            process_identity: fake_process_identity(132, 132),
+            control_channel_identity: "fd:recover-2".to_owned(),
+            daemon_generation_id: "daemon-two".to_owned(),
+            created_at_ms: 3,
+            updated_at_ms: 3,
+            ..first.clone()
+        };
+        db.attach_worker_process(&second).unwrap();
+        db.complete_worker_binding("worker-recover-2", "T-recover", 2)
+            .unwrap();
+
+        let payload = serde_json::json!({"upstream_session_id":"upstream-recover"});
+        let reattach = db
+            .reserve_dedicated_session_command(NewDedicatedSessionCommand {
+                placement_thread_id: "T-recover",
+                idempotency_key: "reattach-uncertain",
+                worker_boot_epoch: 2,
+                command_kind: "reattach",
+                request_digest: &"d".repeat(64),
+                payload: &payload,
+            })
+            .unwrap();
+        db.mark_dedicated_command_contacted("T-recover", reattach.command_sequence, 2)
+            .unwrap();
+        // The response's observations apply before the command settles: the
+        // upstream conversation could not be resumed.
+        db.observe_dedicated_remote_reattach("T-recover", 2, "remote-recover")
+            .unwrap();
+        db.settle_dedicated_remote_recovery_status("T-recover", 2, "remote-recover", "uncertain")
+            .unwrap();
+        db.settle_dedicated_command(
+            "T-recover",
+            reattach.command_sequence,
+            2,
+            true,
+            &serde_json::json!({"redacted":true}),
+        )
+        .unwrap();
+        let session = db.dedicated_session("T-recover").unwrap().unwrap();
+        assert_eq!(session.state, "outcome_unknown");
+        assert_eq!(session.send_boundary, "outcome_unknown");
+        let command_state: String = db
+            .conn
+            .with_sql(|connection| {
+                Ok(connection.query_row(
+                    "SELECT state FROM dedicated_session_command
+                  WHERE placement_thread_id='T-recover' AND command_sequence=?1",
+                    params![i64::try_from(reattach.command_sequence).unwrap()],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(command_state, "completed");
+
+        // Reaping that worker leaves a worker-less session in a pair the
+        // workspace capture and scope retirement consumers accept.
+        db.fence_abandoned_worker_process("worker-recover-2", "T-recover", 2, "reaped")
+            .unwrap();
+        let retired = db.dedicated_session("T-recover").unwrap().unwrap();
+        assert!(retired.worker_instance_id.is_none());
+        assert!(
+            matches!(
+                (retired.state.as_str(), retired.send_boundary.as_str()),
+                ("recovering", "none") | ("outcome_unknown", "outcome_unknown")
+            ),
+            "{:?}",
+            (retired.state, retired.send_boundary)
+        );
     }
 
     #[test]
