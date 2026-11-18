@@ -229,6 +229,10 @@ pub struct Emission {
     /// Adjacent flow emissions merge into one entry.
     #[serde(default)]
     pub flow: bool,
+    /// The entry's text is also carried by the live event stream, so a
+    /// consumer that prints that stream need not print the entry's text again.
+    #[serde(default)]
+    pub text_streamed: bool,
 }
 
 /// The entity an entry nests under. Membership is by key, not by position, so
@@ -526,6 +530,9 @@ pub struct Entry {
     pub parent: Option<String>,
     pub exchange: Option<String>,
     pub counts_as: Option<String>,
+    /// The entry's text is carried by the live event stream. Omitted when false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub text_streamed: bool,
     pub slots: BTreeMap<String, String>,
     /// Typed bodies, in order; at most [`MAX_ENTRY_BLOCKS`]. Absent from the
     /// serialised entry when there are none.

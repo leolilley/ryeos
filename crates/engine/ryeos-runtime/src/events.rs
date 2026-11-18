@@ -622,8 +622,6 @@ pub enum RuntimeEventType {
     /// identity, e.g. `fleet`/`game`). Event-backed so it survives a projection
     /// rebuild, unlike a bare facet-table write.
     ThreadFacetSet,
-    ThreadReconciled,
-    OrphanProcessKilled,
 
     // ── Cognition / replay transcript ───────────────────────────
     CognitionIn,
@@ -671,6 +669,9 @@ pub enum RuntimeEventType {
 
     // ── Usage settlement (O3) ───────────────────────────────────
     ThreadUsage,
+    /// Operator-authored triage record: one attention item was acknowledged.
+    /// Daemon-authored through the attention service; a runtime cannot append it.
+    AttentionAcknowledged,
 }
 
 impl RuntimeEventType {
@@ -709,8 +710,6 @@ impl RuntimeEventType {
             Self::LaunchAugmentationCacheHit => wire::LAUNCH_AUGMENTATION_CACHE_HIT,
             Self::ProcessInputRootSelected => wire::PROCESS_INPUT_ROOT_SELECTED,
             Self::ThreadFacetSet => wire::THREAD_FACET_SET,
-            Self::ThreadReconciled => wire::THREAD_RECONCILED,
-            Self::OrphanProcessKilled => wire::ORPHAN_PROCESS_KILLED,
             Self::CognitionIn => wire::COGNITION_IN,
             Self::CognitionOut => wire::COGNITION_OUT,
             Self::CognitionReasoning => wire::COGNITION_REASONING,
@@ -732,6 +731,7 @@ impl RuntimeEventType {
             Self::CostUntracked => wire::COST_UNTRACKED,
             Self::Milestone => wire::MILESTONE,
             Self::ThreadUsage => wire::THREAD_USAGE,
+            Self::AttentionAcknowledged => wire::ATTENTION_ACKNOWLEDGED,
         }
     }
 
@@ -770,8 +770,6 @@ impl RuntimeEventType {
             wire::LAUNCH_AUGMENTATION_CACHE_HIT => Ok(Self::LaunchAugmentationCacheHit),
             wire::PROCESS_INPUT_ROOT_SELECTED => Ok(Self::ProcessInputRootSelected),
             wire::THREAD_FACET_SET => Ok(Self::ThreadFacetSet),
-            wire::THREAD_RECONCILED => Ok(Self::ThreadReconciled),
-            wire::ORPHAN_PROCESS_KILLED => Ok(Self::OrphanProcessKilled),
             wire::COGNITION_IN => Ok(Self::CognitionIn),
             wire::COGNITION_OUT => Ok(Self::CognitionOut),
             wire::COGNITION_REASONING => Ok(Self::CognitionReasoning),
@@ -795,6 +793,7 @@ impl RuntimeEventType {
             wire::COST_UNTRACKED => Ok(Self::CostUntracked),
             wire::MILESTONE => Ok(Self::Milestone),
             wire::THREAD_USAGE => Ok(Self::ThreadUsage),
+            wire::ATTENTION_ACKNOWLEDGED => Ok(Self::AttentionAcknowledged),
             other if other.trim().is_empty() => bail!("event_type must not be empty"),
             other => bail!("invalid event_type: {other}"),
         }
@@ -879,8 +878,6 @@ impl RuntimeEventType {
             | Self::LaunchAugmentationCacheHit
             | Self::ProcessInputRootSelected
             | Self::ThreadFacetSet
-            | Self::ThreadReconciled
-            | Self::OrphanProcessKilled
             | Self::CognitionIn
             | Self::CognitionOut
             | Self::CognitionFrame
@@ -899,7 +896,8 @@ impl RuntimeEventType {
             | Self::ProviderAttemptBudgetTransitionV1
             | Self::CostUntracked
             | Self::Milestone
-            | Self::ThreadUsage => false,
+            | Self::ThreadUsage
+            | Self::AttentionAcknowledged => false,
         }
     }
 
@@ -955,8 +953,6 @@ impl RuntimeEventType {
             | Self::LaunchAugmentationCacheHit
             | Self::ProcessInputRootSelected
             | Self::ThreadFacetSet
-            | Self::ThreadReconciled
-            | Self::OrphanProcessKilled
             | Self::CognitionIn
             | Self::CognitionOut
             | Self::CognitionFrame
@@ -975,7 +971,8 @@ impl RuntimeEventType {
             | Self::ProviderAttemptBudgetTransitionV1
             | Self::CostUntracked
             | Self::Milestone
-            | Self::ThreadUsage => StorageClass::Indexed,
+            | Self::ThreadUsage
+            | Self::AttentionAcknowledged => StorageClass::Indexed,
         }
     }
 }
@@ -1168,8 +1165,6 @@ mod tests {
             RuntimeEventType::LaunchAugmentationCacheHit,
             RuntimeEventType::ProcessInputRootSelected,
             RuntimeEventType::ThreadFacetSet,
-            RuntimeEventType::ThreadReconciled,
-            RuntimeEventType::OrphanProcessKilled,
             RuntimeEventType::CognitionIn,
             RuntimeEventType::CognitionOut,
             RuntimeEventType::CognitionReasoning,
@@ -1191,6 +1186,7 @@ mod tests {
             RuntimeEventType::CostUntracked,
             RuntimeEventType::Milestone,
             RuntimeEventType::ThreadUsage,
+            RuntimeEventType::AttentionAcknowledged,
         ];
         for v in variants {
             let s = v.as_str();
@@ -1254,69 +1250,34 @@ mod tests {
         assert!(RuntimeEventType::parse("not_a_real_event").is_err());
     }
 
-    /// Every variant, for whole-vocabulary storage-class assertions.
+    /// Registered wire types the runtime enum deliberately does not carry:
+    /// they are authored by the daemon and never appended through the runtime.
+    const DAEMON_ONLY_WIRE_TYPES: &[&str] = &[
+        wire::SUBPROCESS_OUTPUT_OBSERVED,
+        wire::RESOURCE_BUDGET_TRANSITION_V1,
+        wire::RESOURCE_PRECONTACT_BUDGET_TRANSITION_V1,
+    ];
+
+    /// Every variant, for whole-vocabulary storage-class assertions: the single
+    /// registered list, minus the daemon-only types named above.
     fn every_event_type() -> Vec<RuntimeEventType> {
-        [
-            wire::THREAD_CREATED,
-            wire::THREAD_STARTED,
-            wire::THREAD_COMPLETED,
-            wire::THREAD_FAILED,
-            wire::THREAD_CANCELLED,
-            wire::THREAD_KILLED,
-            wire::THREAD_TIMED_OUT,
-            wire::THREAD_CONTINUED,
-            wire::EDGE_RECORDED,
-            wire::CHILD_THREAD_SPAWNED,
-            wire::CHILD_THREAD_SETTLED,
-            wire::WORKER_CONTINUATION_ADMITTED,
-            wire::CONTINUATION_REQUESTED,
-            wire::CONTINUATION_ACCEPTED,
-            wire::COMMAND_SUBMITTED,
-            wire::COMMAND_CLAIMED,
-            wire::COMMAND_COMPLETED,
-            wire::STREAM_OPENED,
-            wire::TOKEN_DELTA,
-            wire::STREAM_SNAPSHOT,
-            wire::STREAM_CLOSED,
-            wire::OBSERVATION,
-            wire::HOOK_OBSERVATION_RECORDED,
-            wire::HOOK_FAILED,
-            wire::PROJECT_OBSERVATION_RECORDED,
-            wire::PROVIDER_CALL_OBSERVATION_RECORDED,
-            wire::ARTIFACT_PUBLISHED,
-            wire::AS_LAUNCHED_RESOLUTION,
-            wire::AS_LAUNCHED_REF_BINDINGS,
-            wire::RUNTIME_LAUNCH_FACTS,
-            wire::LAUNCH_AUGMENTATION_CACHE_HIT,
-            wire::PROCESS_INPUT_ROOT_SELECTED,
-            wire::THREAD_FACET_SET,
-            wire::THREAD_RECONCILED,
-            wire::ORPHAN_PROCESS_KILLED,
-            wire::COGNITION_IN,
-            wire::COGNITION_OUT,
-            wire::COGNITION_REASONING,
-            wire::COGNITION_FRAME,
-            wire::COGNITION_COMPACTION,
-            wire::TOOL_CALL_START,
-            wire::TOOL_CALL_RESULT,
-            wire::GRAPH_STARTED,
-            wire::GRAPH_COMPLETED,
-            wire::GRAPH_STEP_STARTED,
-            wire::GRAPH_STEP_COMPLETED,
-            wire::GRAPH_BRANCH_TAKEN,
-            wire::GRAPH_FOREACH_STARTED,
-            wire::GRAPH_FOREACH_ITERATION,
-            wire::GRAPH_FOLLOW_SUSPENDED,
-            wire::GRAPH_NODE_RETRY,
-            wire::PROVIDER_RETRY,
-            wire::PROVIDER_ATTEMPT_BUDGET_TRANSITION_V1,
-            wire::COST_UNTRACKED,
-            wire::MILESTONE,
-            wire::THREAD_USAGE,
-        ]
-        .into_iter()
-        .map(|name| RuntimeEventType::parse(name).unwrap())
-        .collect()
+        wire::ALL
+            .iter()
+            .filter(|name| !DAEMON_ONLY_WIRE_TYPES.contains(name))
+            .map(|name| {
+                RuntimeEventType::parse(name).unwrap_or_else(|_| panic!("no variant for {name}"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn daemon_only_wire_types_are_exactly_the_unparsed_registered_types() {
+        let unparsed: Vec<&str> = wire::ALL
+            .iter()
+            .copied()
+            .filter(|name| RuntimeEventType::parse(name).is_err())
+            .collect();
+        assert_eq!(unparsed, DAEMON_ONLY_WIRE_TYPES);
     }
 
     fn event_types_of_class(class: StorageClass) -> Vec<&'static str> {

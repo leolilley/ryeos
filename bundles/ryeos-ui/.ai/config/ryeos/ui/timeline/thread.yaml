@@ -1,4 +1,5 @@
-# ryeos:signed:2026-11-18T01:31:45Z:388e9d36bfefa453ef92bad0e94e53bc887a2cf10e68cc45ad98e3274cf32e5b:DKw50VQ5zKf3wmjuQspRcFbBz2aLD6OZIl5Ey8Iti/ZlLYMZqbwejSZXI5SilM7F91eWo9LD+agWYM9PAaP3Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T04:31:42Z:99a5f1bb915a094cad8f44dd3bbf38b8c50e64821b05c53e0a933cd16056e0b8:+h5S/xqrYuIPSNyW0d16L7ApRi78tGoEDaKa8lTJxfJGxjeo8Gv0QFGrHooNxnopv4EvLTbqk3dvSoHkqYllCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+||||||| 0cdf2e7da
 # Thread timeline definition: how a chain's events fold into timeline items.
 # Declarative data read by the timeline service; the fold engine names no event type itself.
 category: ryeos/ui/timeline
@@ -60,8 +61,6 @@ events:
   command_completed: [{drop: true}]  # command-queue plumbing
   launch_augmentation_cache_hit: [{drop: true}]  # cache evidence for the launch
   thread_facet_set: [{drop: true}]  # tag metadata, shown by the thread header rather than the flow
-  thread_reconciled: [{drop: true}]  # reserved daemon bookkeeping; the terminal event draws the outcome
-  orphan_process_killed: [{drop: true}]  # reserved daemon bookkeeping; the terminal event draws the outcome
   subprocess_output_observed: [{drop: true}]  # raw output frames; tool results draw what was returned
   observation: [{drop: true}]  # journal-only runtime observation, not part of the story
   hook_observation_recorded: [{drop: true}]  # hook result evidence, hashes only
@@ -69,6 +68,7 @@ events:
   provider_call_observation_recorded: [{drop: true}]  # provider call evidence
   resource_budget_transition_v1: [{drop: true}]  # accounting evidence
   resource_precontact_budget_transition_v1: [{drop: true}]  # accounting evidence
+  attention_acknowledged: [{drop: true}]  # triage record for the attention queue, not part of the run's story
   # Live stream fragments: the finished cognition_out and tool events carry the content.
   token_delta: [{drop: true}]
   stream_snapshot: [{drop: true}]
@@ -77,6 +77,9 @@ events:
   graph_foreach_iteration: [{drop: true}]  # journal-only; graph_foreach_started and the step activity draw the loop
   graph_branch_taken: [{drop: true}]  # routing between steps; each step draws its own activity
 
+  # An entry marked text_streamed has its text in the live event stream (the
+  # event's text parts), so a consumer printing that stream does not print it
+  # again. A chunked input's chunks are not text parts and so are not marked.
   # Input the model is given. An operator or launch input opens an exchange with
   # its first text part; later text parts continue it and images draw a line.
   # Harness input is a notice, a compaction input a divider; context and the
@@ -97,6 +100,7 @@ events:
         - type: message
           when: {eq: [item_index, 0], has: item.text}
           starts_exchange: true
+          text_streamed: true
           project: {body: item.text}
         # An input that opens with an image still opens the exchange.
         - type: marker
@@ -111,6 +115,7 @@ events:
                 - {path: item.height, prefix: "h "}
         - type: prose
           when: {eq: [item.type, text], ne: [item_index, 0]}
+          text_streamed: true
           project: {body: item.text}
         - type: marker
           when: {eq: [item.type, image], ne: [item_index, 0]}
@@ -145,6 +150,7 @@ events:
           project: {body: item.text}
         - type: prose
           flow: true
+          text_streamed: true
           when: {eq: [item.type, text]}
           project: {body: item.text}
         - type: marker

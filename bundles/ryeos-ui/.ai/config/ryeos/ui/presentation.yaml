@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-14T01:55:23Z:90d1d418f6163782d2a7c6097b82e53d0ee367f5d038fd939664254fe690cb11:w2FNMRwcHkKekcp24Ypx/H0NJ6R6mBzZ0vwk28daVpgkCwNdOoL2/mKym3KZw987iLOpYvIP6VEpFcShxJx6CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T22:59:57Z:5c3a2fae3a6babd43d9bed5378d50653289a3e8dbc1170bf8b6142422e1b6856:b3RVPlbuaJkWNbAkJ9CcrQcOH7SWrBMqHMmSrmucthn67JOzFL/7dSNu1HLUwClNOdfoNC1RINbMH3NxN2haCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/ui
 version: "1.0.0"
 description: Shared RyeOS browser presentation; Surface contents retain their own independent admission.
@@ -14,6 +14,7 @@ shared_presentation:
     - { id: surfaces, title: Surfaces, view: "view:ryeos/surfaces/list" }
     - { id: projects, title: Projects and Surfaces, view: "view:ryeos/projects/list" }
     - { id: view-sets, title: Saved view sets, view: "view:ryeos/view-sets/library" }
+    - { id: attention, title: Attention, view: "view:ryeos/attention/panel" }
   initial_surfaces:
     - { id: home, title: Home, surface: "surface:ryeos/ui/base-observe" }
   capabilities:
@@ -22,6 +23,7 @@ shared_presentation:
       - ryeos.execute.service.projects/list
       - ryeos.execute.service.ui/ryeos-ui/config/get
       - ryeos.execute.service.ui/ryeos-ui/items/list
+      - ryeos.execute.service.ui/ryeos-ui/work/attention
     affordances:
       - ryeos.execute.service.projects/open
       - ryeos.execute.service.projects/add
@@ -29,3 +31,4 @@ shared_presentation:
       - ryeos.execute.service.ui/ryeos-ui/view-sets/resume
       - ryeos.execute.service.ui/session/surfaces/open
       - ryeos.execute.service.ui/ryeos-ui/surfaces/resume
+      - ryeos.execute.service.ui/ryeos-ui/work/acknowledge

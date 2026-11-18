@@ -74,19 +74,14 @@ pub(crate) enum Applied {
 /// The timeline a running command has shown so far: the held window, the text
 /// each entry was last printed with, and the `chain_seq` it is current to.
 ///
-/// Conversation text (the user's message and the assistant's answer) is
-/// printed inline from the event stream, so those entries are not repeated
-/// here. A group's header changes as members arrive; its members are printed
+/// An entry whose text the event stream carries (its `text_streamed` flag) is
+/// printed inline from that stream, so it is not repeated here. A group's header changes as members arrive; its members are printed
 /// as they appear, so only entries report an update.
 #[derive(Default)]
 pub(crate) struct LiveView {
     window: Option<Value>,
     shown: HashMap<String, String>,
     highest: Option<i64>,
-}
-
-fn printed_inline(role: &str) -> bool {
-    matches!(role, "prose" | "message")
 }
 
 fn is_group(role: &str) -> bool {
@@ -109,7 +104,7 @@ impl LiveView {
         let text = timeline_text(&window);
         let mut out = Vec::new();
         for line in text.lines {
-            if printed_inline(&line.role) {
+            if line.text_streamed {
                 continue;
             }
             match self.shown.get(&line.id) {
@@ -262,14 +257,19 @@ mod tests {
     }
 
     #[test]
-    fn conversation_entries_are_left_to_the_inline_stream() {
+    fn entries_flagged_as_streamed_are_left_to_the_inline_stream() {
         let mut view = LiveView::default();
-        let mut prose = entry("p", "", json!({"body": "done"}));
-        prose["type"] = json!("prose");
-        let Applied::Lines(lines) = view.apply(response(vec![prose], 2)) else {
+        let mut streamed = entry("p", "", json!({"body": "done"}));
+        streamed["type"] = json!("prose");
+        streamed["text_streamed"] = json!(true);
+        let mut unflagged = entry("q", "", json!({"body": "chunked"}));
+        unflagged["type"] = json!("message");
+        let Applied::Lines(lines) = view.apply(response(vec![streamed, unflagged], 2)) else {
             panic!("a whole window applies");
         };
-        assert!(lines.is_empty());
+        let ids: Vec<&str> = lines.iter().map(|l| l.line.id.as_str()).collect();
+        assert_eq!(ids.len(), 1, "only the unflagged entry prints: {ids:?}");
+        assert!(ids[0].contains('q'));
     }
 
     #[test]

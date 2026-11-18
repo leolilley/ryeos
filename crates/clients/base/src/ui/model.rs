@@ -464,6 +464,10 @@ fn default_true() -> bool {
 pub struct RyeOsDataState {
     pub session: Option<BrowserSession>,
     pub dimension: Option<RyeOsDimensionDto>,
+    /// The attention queue's counts for the bars, from the surface source with
+    /// the `attention` role.
+    #[serde(default)]
+    pub attention: Option<super::dto::RyeOsAttentionDto>,
     pub projects: Option<RyeOsProjectsDto>,
     pub threads: Option<RyeOsThreadsDto>,
     pub files: Option<RyeOsFilesDto>,
@@ -1619,7 +1623,7 @@ impl RyeOsCore {
                 targets.insert((instance_key.clone(), view_ref.clone(), channel));
             }
         }
-        targets
+        let mut effects = targets
             .into_iter()
             .flat_map(|(instance_key, view_ref, channel)| {
                 self.emit_fetch_source_for_instance_policy(
@@ -1627,6 +1631,71 @@ impl RyeOsCore {
                     &view_ref,
                     true,
                     Some(&channel),
+                )
+            })
+            .collect::<Vec<_>>();
+        effects.extend(self.surface_source_hint_effects(kinds));
+        effects
+    }
+
+    /// Refetch the active Surface's own sources (the ones a Surface declares
+    /// for shell chrome, such as the attention counts) whose signed
+    /// `refresh.on_hint` names one of `kinds`.
+    fn surface_source_hint_effects(&mut self, kinds: &[String]) -> Vec<RyeOsEffect> {
+        let Some(composition) = self.presentation.as_ref() else {
+            return Vec::new();
+        };
+        let Some(surface) = composition.active_surface() else {
+            return Vec::new();
+        };
+        let presentation_id = composition.id().clone();
+        let surface_instance_id = surface.id().clone();
+        let coordinate = surface.binding().clone();
+        let Some(attachment) = self
+            .binding_attachments
+            .get(&coordinate.binding_attachment_id)
+        else {
+            return Vec::new();
+        };
+        if attachment.descriptor.binding_generation != coordinate.binding_generation
+            || attachment.descriptor.binding_digest != coordinate.binding_digest
+            || attachment
+                .descriptor
+                .presentation
+                .definition
+                .surface()
+                .is_none()
+        {
+            return Vec::new();
+        }
+        let surface_ref = attachment.descriptor.root_ref.clone();
+        let attachment_id = attachment.descriptor.binding_attachment_id.clone();
+        let due = attachment
+            .surface_sources
+            .iter()
+            .filter(|(_, source)| {
+                source.activation == super::content::SourceActivation::Initial
+                    && kinds
+                        .iter()
+                        .any(|kind| refresh_matches_hint(source.refresh.get("on_hint"), kind))
+            })
+            .map(|(channel, source)| (channel.clone(), source.clone()))
+            .collect::<Vec<_>>();
+        due.into_iter()
+            .filter_map(|(channel, source)| {
+                self.build_fetch_source(
+                    &attachment_id,
+                    super::source_key::RyeOsSurfaceSourceKey {
+                        presentation_id: presentation_id.clone(),
+                        surface_instance_id: surface_instance_id.clone(),
+                        channel: channel.clone(),
+                    }
+                    .encode(),
+                    &surface_ref,
+                    &channel,
+                    &source,
+                    source.params.clone(),
+                    false,
                 )
             })
             .collect()
