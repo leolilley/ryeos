@@ -9,15 +9,6 @@ ignore = [
     # advisory reports no vulnerability. The migration off serde_yaml is a
     # tracked item; until it lands this advisory is acknowledged, not fixed.
     "RUSTSEC-2024-0449",
-    # chrono and chrono-tz are unmaintained; the advisory reports no
-    # vulnerability. Nine workspace crates (state, scheduler, executor, API,
-    # effect and scheduler contracts, the Render adapter) use chrono and the
-    # scheduler uses chrono-tz for named time zones. Moving to a maintained
-    # time crate is a tracked migration; until it lands this is acknowledged,
-    # not fixed.
-    "RUSTSEC-2026-0543",
-    # chrono-tz, same reason (its own advisory).
-    "RUSTSEC-2026-0555",
 ]
 
 [licenses]

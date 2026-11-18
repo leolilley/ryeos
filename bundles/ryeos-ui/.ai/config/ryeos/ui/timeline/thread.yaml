@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-18T01:19:09Z:17cda94eac10d0167f2a363610b7636aa4cf9b5b7370e2a0e6609e517f3fcdb9:gPBG5ixxaFkaKDfGA4V+y4yEXCOzFkMaH5A62688QsC+T8AqvqMIeRs4F6OFz/nRrXX2pp/7cEyQSVd3CulhDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T02:47:17Z:26efbc6285965eaa930b5084647e696e7f0584b332eb92af88a9f8b6ec39349f:FI8Wx11h6fr5dafymI62e8WoXMCKd/8l62pJl2QSBq7KTvhGuFKVHKpqgJ7pnV2tBJyotrypHAkWGyd4x+y+DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Thread timeline definition: how a chain's events fold into timeline items.
 # Declarative data read by the timeline service; the fold engine names no event type itself.
 category: ryeos/ui/timeline
@@ -54,8 +54,6 @@ events:
   command_completed: [{drop: true}]  # command-queue plumbing
   launch_augmentation_cache_hit: [{drop: true}]  # cache evidence for the launch
   thread_facet_set: [{drop: true}]  # tag metadata, shown by the thread header rather than the flow
-  thread_reconciled: [{drop: true}]  # reserved daemon bookkeeping; the terminal event draws the outcome
-  orphan_process_killed: [{drop: true}]  # reserved daemon bookkeeping; the terminal event draws the outcome
   subprocess_output_observed: [{drop: true}]  # raw output frames; tool results draw what was returned
   observation: [{drop: true}]  # journal-only runtime observation, not part of the story
   hook_observation_recorded: [{drop: true}]  # hook result evidence, hashes only
@@ -72,6 +70,9 @@ events:
   graph_foreach_iteration: [{drop: true}]  # journal-only; graph_foreach_started and the step activity draw the loop
   graph_branch_taken: [{drop: true}]  # routing between steps; each step draws its own activity
 
+  # An entry marked text_streamed has its text in the live event stream (the
+  # event's text parts), so a consumer printing that stream does not print it
+  # again. A chunked input's chunks are not text parts and so are not marked.
   # Input the model is given. An operator or launch input opens an exchange with
   # its first text part; later text parts continue it and images draw a line.
   # Harness input is a notice, a compaction input a divider; context and the
@@ -92,6 +93,7 @@ events:
         - type: message
           when: {eq: [item_index, 0], has: item.text}
           starts_exchange: true
+          text_streamed: true
           project: {body: item.text}
         # An input that opens with an image still opens the exchange.
         - type: marker
@@ -106,6 +108,7 @@ events:
                 - {path: item.height, prefix: "h "}
         - type: prose
           when: {eq: [item.type, text], ne: [item_index, 0]}
+          text_streamed: true
           project: {body: item.text}
         - type: marker
           when: {eq: [item.type, image], ne: [item_index, 0]}
@@ -140,6 +143,7 @@ events:
           project: {body: item.text}
         - type: prose
           flow: true
+          text_streamed: true
           when: {eq: [item.type, text]}
           project: {body: item.text}
         - type: marker
