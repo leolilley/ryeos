@@ -346,6 +346,27 @@ fn write_graph(project: &Path, signer: &SigningKey, name: &str, body: &str) -> R
     Ok(())
 }
 
+/// `text` without ANSI CSI sequences (`ESC [ ... final-byte`), such as the
+/// colour codes on the daemon's log level column.
+fn strip_ansi_escapes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            if chars.next() == Some('[') {
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// The first value anywhere under `value` stored at key `name`.
 fn find_key<'a>(value: &'a Value, name: &str) -> Option<&'a Value> {
     match value {
@@ -486,8 +507,9 @@ async fn run_graph(
         eprintln!("--- worker execution {child} ---\n{session:#?}");
     }
     // The whole daemon log, filtered to the lines that explain a failed
-    // worker: warnings, errors and dedicated-session activity.
-    let log = daemon.stderr_so_far();
+    // worker: warnings, errors and dedicated-session activity. The daemon
+    // colours its level column, so match on the text with the escapes removed.
+    let log = strip_ansi_escapes(&daemon.stderr_so_far());
     let relevant = log
         .lines()
         .filter(|line| {
@@ -573,7 +595,7 @@ fn plant_short_turn(state_path: &Path, fixture: &FastFixture) -> Result<()> {
 }
 
 async fn start_node() -> Result<(DaemonHarness, FastFixture)> {
-    DaemonHarness::start_fast_development_with(
+    DaemonHarness::start_fast_development_hosted_with(
         |state_path: &Path, _user: &Path, fixture: &FastFixture| {
             plant_claude_code(state_path, fixture)
         },
@@ -584,7 +606,7 @@ async fn start_node() -> Result<(DaemonHarness, FastFixture)> {
 
 /// [`start_node`] plus the short-turn fixture bundle.
 async fn start_node_with_short_turn() -> Result<(DaemonHarness, FastFixture)> {
-    DaemonHarness::start_fast_development_with(
+    DaemonHarness::start_fast_development_hosted_with(
         |state_path: &Path, _user: &Path, fixture: &FastFixture| {
             plant_claude_code(state_path, fixture)?;
             plant_short_turn(state_path, fixture)

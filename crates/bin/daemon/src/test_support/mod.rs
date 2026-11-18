@@ -805,6 +805,7 @@ enum FastBundleSelection {
     Standard,
     StandardCentralAuth,
     Development,
+    DevelopmentHosted,
 }
 
 impl DaemonHarness {
@@ -1061,6 +1062,31 @@ impl DaemonHarness {
         .await
     }
 
+    /// [`start_fast_development_with`] under the Development profile's
+    /// `hosted` host class: the trusted process-group lane a hosting
+    /// provider runs, where `sessions:trusted_process_group` is provided
+    /// (the default Development class, `local`, enforces isolation and
+    /// refuses it). The fixture drops only the two enclosure-init floor
+    /// entries a direct child cannot prove; see
+    /// `fast_fixture::hosted_host_enclosure_floor`.
+    pub async fn start_fast_development_hosted_with<S, F>(
+        plant: S,
+        tweak: F,
+    ) -> anyhow::Result<(Self, fast_fixture::FastFixture)>
+    where
+        S: FnOnce(&Path, &Path, &fast_fixture::FastFixture) -> anyhow::Result<()>,
+        F: FnOnce(&mut Command),
+    {
+        Self::start_fast_with_optional_identities(
+            None,
+            None,
+            FastBundleSelection::DevelopmentHosted,
+            plant,
+            tweak,
+        )
+        .await
+    }
+
     /// Like [`start_fast_with`], but initializes the daemon with an explicit
     /// node identity. This is required by cross-site tests: two daemons using
     /// the ordinary deterministic fixture would authenticate as one node.
@@ -1136,11 +1162,13 @@ impl DaemonHarness {
                     .exact_bundles()
                     .expect("Standard-central-auth profile has an exact bundle inventory"),
             )?,
-            FastBundleSelection::Development => copy_core_to_temp_prepared(
-                fast_fixture::FastFixtureProfile::Development
-                    .exact_bundles()
-                    .expect("Development profile has an exact bundle inventory"),
-            )?,
+            FastBundleSelection::Development | FastBundleSelection::DevelopmentHosted => {
+                copy_core_to_temp_prepared(
+                    fast_fixture::FastFixtureProfile::Development
+                        .exact_bundles()
+                        .expect("Development profile has an exact bundle inventory"),
+                )?
+            }
         };
 
         let selected_profile = match bundle_selection {
@@ -1151,6 +1179,9 @@ impl DaemonHarness {
                 fast_fixture::FastFixtureProfile::StandardCentralAuth
             }
             FastBundleSelection::Development => fast_fixture::FastFixtureProfile::Development,
+            FastBundleSelection::DevelopmentHosted => {
+                fast_fixture::FastFixtureProfile::DevelopmentHosted
+            }
         };
         let fixture = match (node_key, user_key) {
             (Some(node_key), Some(user_key)) => {
@@ -1190,7 +1221,7 @@ impl DaemonHarness {
             FastBundleSelection::StandardCentralAuth => {
                 fast_fixture::register_standard_central_auth_composition(&state_path, &fixture)?
             }
-            FastBundleSelection::Development => {
+            FastBundleSelection::Development | FastBundleSelection::DevelopmentHosted => {
                 fast_fixture::register_development_composition(&state_path, &fixture)?
             }
             FastBundleSelection::CoreOnly | FastBundleSelection::CoreScheduling => {}

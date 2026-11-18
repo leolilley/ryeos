@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-17T05:02:43Z:9e2f8d89707ebaf50534057bb83da7eeb0cb09a4342199c8c9e25a7f89c128a7:/fCYdVioTKPpvszuurfhWkSl5iGPoB/fqKVnlV7ZQKHk9gGOb2Hhhhjs8aS4gC0/wanMkwrIl/cOYX4laWjiBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-18T01:04:43Z:3a8478e83ceb443a7c6572140d5f2579209a2fea384323a808a5122cc29d3ac3:7BJtjqASPgcg9/KQ+nuym/eXBR00313gTopy3WVSI2+xJVAjO3xhDtIuMfgmg0Gw8B6egjwoVzSe4/jPPryjAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/protocols
 tags: [callbacks, auth, uds, runtime, tokens, capabilities, audit, boundary]
@@ -52,6 +52,7 @@ requests already past token validation still meet the locked lifecycle check.
 | `runtime.get_thread` | chain-read | Rehydrate a predecessor within the same chain. Returns the slim thread + result shape; artifacts and facets are not embedded. |
 | `runtime.replay_events` | chain-read | Accepts `thread_id` or `chain_root_id`; both resolve to a chain root. An optional `event_types` list of event type names limits the replay to those types; the names are checked and an unknown one is refused. Paging and the cursor are unchanged. |
 | `runtime.get_thread_events` | chain-read | Alias of the replay handler. |
+| `runtime.read_attachment` | chain-read | `{thread_id, attachment}` returns `{media_type, byte_length, bytes_b64}` for one stored attachment. The hash must be named in `attachment_refs` by an indexed event of the caller's chain, so another chain's attachment cannot be read by guessing its hash. Meaning-blind; the runtime uses it to rebuild images on resume and continuation. |
 | `runtime.append_event` | exact-thread write | The event is `{event_type, payload}`; the daemon stores it under the node's signed `event_storage` policy, and an event that sends `storage_class` is refused. |
 | `runtime.append_events` | exact-thread write | Atomic ordered batch append. The directive runtime uses this for hash-bound multipart `cognition_in` stimuli that exceed one event's payload ceiling, and to record a launch (the `cognition_frame`, then the inputs) as one batch. The optional `attachments` list (`media_type`, `bytes_b64`) stores bytes beside the batch; an event names one by its object hash in `attachment_refs`, and an upload no event names is refused. The optional `idempotency_key` names the whole batch: a retry that repeats the key and the batch is answered without appending twice. |
 | `runtime.bundle_events_append` | exact-thread write | Handler receives the capability and enforces the bundle scope. |

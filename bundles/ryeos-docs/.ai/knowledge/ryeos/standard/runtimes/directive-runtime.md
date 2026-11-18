@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-17T17:48:41Z:e752c1a05126491d6e9260ab9d4fbbdb01ef7a8b071f1c1269ba79e2abeb07f4:jlHTpOd4/KsBya+oXMUioxXvidRxi0OFpEDpcBz64eBTFxXymd08TrV6YtXypwAxBlLvp1pU7gBSM/67pUGbBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-18T06:12:01Z:c3b482b3c7d0e263d9d5a773b33c92e00e41408aeb41f3a6c554e743e93ac3b0:Q2MdRzRyqhDBXYxDppL0E2UGf/vXSniEvBJV/8BMniQKwYuL460u11aph5qRpHg+ag2LCACI2QFwe5fdEczyCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/runtimes
 tags: [runtime, directive, llm, callbacks]
@@ -27,7 +27,7 @@ The events carry them:
 | `cognition_in` | One input: `origin`, `parts`, and optionally `kind`, `ack` and `pinned`; or a turn marker `{ turn, tools_offered? }`. An input too large for one event is split into hash-bound chunks that fold back into one input. |
 | `cognition_out` | One assistant turn: `turn`, `parts` in stream order, `finish` (the normalised finish reason, or `interrupted`), optional `usage`, `provider_accounting` and `malformed_calls` (`{call_index, raw_len, sha256}` for each tool call whose streamed arguments were not valid JSON; `call_index` counts `tool_call` parts). An interrupted turn carries no tool calls. Streaming fragments (`delta`, `tool_use_partial`) stay ephemeral. |
 | `tool_call_start` | `operation_id`, `call_id`, `tool`, `turn`, `call_index`, `effective_caps`, and `item_ref` when the call resolves to an item. |
-| `tool_call_result` | `operation_id`, `call_id`, `tool`, `status`, `parts` (the exact model-visible result) and `guard` (`result_size_bytes`, `truncated`, optional `truncated_reason`, optional `duplicate_of`). |
+| `tool_call_result` | `operation_id`, `call_id`, `tool`, `status`, `parts` (the exact model-visible result) and `guard` (`result_size_bytes`, `truncated`, optional `truncated_reason`, optional `duplicate_of`, optional `dropped_images`: a `position` and `code` for each tool image that was not used). |
 
 The frame, the context inputs and the launch input are appended as one batch
 under an idempotency key. A rebuild of the conversation reads these events and

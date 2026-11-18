@@ -1352,6 +1352,9 @@ pub struct StreamingCallInput<'a> {
     pub execution: &'a ExecutionConfig,
     pub model: &'a str,
     pub messages: &'a [ProviderMessage],
+    /// The bytes of the images the request carries, loaded by the caller
+    /// before the request is prepared.
+    pub images: &'a super::images::ImageStore,
     pub tools: &'a [ToolSchema],
     pub callback: &'a CallbackClient,
     pub turn: u32,
@@ -4609,6 +4612,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             })),
             body_extra: None,
             spend_authority: None,
+            image_input: None,
             profiles: vec![],
         };
         let msgs = vec![json!({"role": "user", "parts": [{"text": "hi"}]})];
@@ -4644,6 +4648,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             body_template: Some(json!({"contents": "{messages}"})),
             body_extra: Some(json!({"generationConfig": {"maxOutputTokens": 1024}})),
             spend_authority: None,
+            image_input: None,
             profiles: vec![],
         };
         let body = super::build_request_body(
@@ -4689,6 +4694,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             })),
             body_extra: None,
             spend_authority: None,
+            image_input: None,
             profiles: vec![],
         };
 
@@ -4779,6 +4785,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             body_template: None,
             body_extra: None,
             spend_authority: None,
+            image_input: None,
             profiles: vec![],
         };
         let _ =
@@ -4806,6 +4813,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             })),
             body_extra: None,
             spend_authority: None,
+            image_input: None,
             profiles: vec![],
         };
         let msgs = vec![json!({"role": "user", "parts": [{"text": "hi"}]})];
@@ -4854,6 +4862,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             body_template: None,
             body_extra: None,
             spend_authority: None,
+            image_input: None,
             profiles: vec![],
         };
         let mut body = json!({});
@@ -4902,6 +4911,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             body_template: None,
             body_extra: None,
             spend_authority: None,
+            image_input: None,
             profiles: vec![],
         };
         let mut body = json!({"contents": []});
@@ -5341,6 +5351,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
                     .schemas
                     .as_ref()
                     .and_then(|schemas| schemas.reasoning.as_ref()),
+                images: None,
             },
         );
         let tool_schema = snapshot
@@ -5726,6 +5737,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             provider_id: "qwen3-0.6b-cpu-4096",
             matched_profile: None,
             config_hash: "fixture",
+            images: &crate::provider_adapter::images::ImageStore::default(),
             execution: &execution,
             model: "qwen3-0.6b",
             messages: &messages,
@@ -5997,6 +6009,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             provider_id: "opaque-test-route",
             matched_profile: snapshot.matched_profile.as_deref(),
             config_hash: &snapshot.config_hash,
+            images: &crate::provider_adapter::images::ImageStore::default(),
             execution: &execution,
             model: &snapshot.model_name,
             messages: &messages,
@@ -6118,6 +6131,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             provider_id: "opaque-test-route",
             matched_profile: snapshot.matched_profile.as_deref(),
             config_hash: &snapshot.config_hash,
+            images: &crate::provider_adapter::images::ImageStore::default(),
             execution: &ExecutionConfig {
                 timeout_seconds: 5,
                 ..ExecutionConfig::default()

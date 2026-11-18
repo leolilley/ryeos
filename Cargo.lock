@@ -3814,6 +3814,7 @@ dependencies = [
  "ryeos-api",
  "ryeos-app",
  "ryeos-client-base",
+ "ryeos-effect-contract",
  "ryeos-engine",
  "ryeos-executor",
  "ryeos-node-runtime",
