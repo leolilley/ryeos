@@ -1,0 +1,15 @@
+# ryeos:signed:2026-11-18T04:15:43Z:86684ca29f7a81ec34a71ade7e0f0f83ca5ecbcb220c9c82de62e7f22c79f6e4:oLGrKmLwjdUlryqgXQK1oyK/pVnQbpfYynlWSiizHhd0kOvqpLlux+NKzA3vrRYGQlWHF9i/Q2upLFBkfaIzBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# The JavaScript snippet modules the pinned Rune renderer emits, as paths relative to the
+# Rune crate root. This is the one declared list: build-rune-web.sh refuses any snippet
+# outside it and flattens each to rune_<file stem>.js, check-rune-snippets.py compares it
+# with the pinned Rune source, publish.sh derives its inventory from the registry built
+# from it, and generate_asset_registry.py requires the registry to carry exactly these.
+# A Rune pin bump that adds or drops a snippet changes this list and nothing else by hand.
+snippets = [
+  "src/platform/web/bridge.js",
+  "src/platform/web/health.js",
+  "src/platform/web/pipelines.js",
+  "src/platform/web/platform.js",
+  "src/platform/web/platform_text.js",
+  "src/platform/web/segmenter.js",
+]

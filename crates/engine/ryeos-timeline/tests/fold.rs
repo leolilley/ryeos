@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use ryeos_timeline::{Definition, Folder, Item, Timeline, fold};
+use ryeos_timeline::{Definition, EntryKind, Folder, Item, Timeline, fold};
 use serde_json::{Value, json};
 
 fn dir() -> PathBuf {
@@ -959,6 +959,11 @@ fn chunks_image_first_inputs_and_retry_read_only_the_latest_input() {
     assert_eq!(at(2).len(), 1, "the first chunk draws the message");
     assert_eq!(at(2)[0].slots["body"], "hello ");
     assert!(
+        !at(2)[0].text_streamed,
+        "a chunk is not a text part, so the stream does not carry it"
+    );
+    assert!(at(1)[0].text_streamed, "an inline text part is streamed");
+    assert!(
         at(3).is_empty() && at(4).is_empty(),
         "later and context chunks draw nothing"
     );
@@ -975,6 +980,39 @@ fn chunks_image_first_inputs_and_retry_read_only_the_latest_input() {
         !outcome.slots.contains_key("retry_input"),
         "an image-only latest input offers no retry, not an older text"
     );
+}
+
+/// The text the live stream carries is marked on its entries: every text part
+/// of an input and of a turn, but not an image marker.
+#[test]
+fn entries_whose_text_the_live_stream_carries_are_marked() {
+    let def = definition();
+    let mut seq = 2;
+    let evs = vec![
+        synthetic(
+            1,
+            "2026-11-17T00:00:00Z",
+            "cognition_in",
+            json!({"origin": "operator", "parts": [
+                {"type": "text", "text": "one"},
+                {"type": "text", "text": "two"},
+                {"type": "image", "media_type": "image/png", "attachment": "a", "byte_length": 10}
+            ]}),
+        ),
+        say(&mut seq, "2026-11-17T00:00:01Z", "answer"),
+    ];
+    let timeline = fold(&evs, &def).unwrap();
+    let entries = all_entries(&timeline.items);
+    let flagged = |kind: EntryKind| -> Vec<bool> {
+        entries
+            .iter()
+            .filter(|e| e.kind == kind)
+            .map(|e| e.text_streamed)
+            .collect()
+    };
+    assert_eq!(flagged(EntryKind::Message), vec![true]);
+    assert_eq!(flagged(EntryKind::Prose), vec![true, true]);
+    assert_eq!(flagged(EntryKind::Marker), vec![false]);
 }
 
 #[test]

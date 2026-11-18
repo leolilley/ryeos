@@ -6,13 +6,19 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import string
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 MANIFEST = ROOT / "web-assets.json"
 PACKAGE = ROOT / "../../clients/rune/pkg"
 GENERATED = ROOT / "src/generated_web_assets.rs"
+SNIPPETS = (
+    ROOT
+    / "../../../.ai/tools/ryeos/development/browser-assets-production/lib/rune-snippets.toml"
+)
 
 
 def load_manifest() -> dict:
@@ -66,6 +72,18 @@ def validate(manifest: dict) -> None:
         for imported in asset["imports"]:
             if imported not in known_routes:
                 raise SystemExit(f"{route} imports unregistered asset {imported}")
+
+    # Rune's flattened snippet modules are exactly the declared list.
+    declared = {
+        f"rune_{Path(path).stem}.js"
+        for path in tomllib.loads(SNIPPETS.read_text())["snippets"]
+    }
+    registered = {name for name in filenames if re.fullmatch(r"rune_.+\.js", name)}
+    if registered != declared:
+        raise SystemExit(
+            "registered Rune snippets differ from rune-snippets.toml: "
+            f"unregistered={sorted(declared - registered)} stale={sorted(registered - declared)}"
+        )
 
     packaged = {
         path.name

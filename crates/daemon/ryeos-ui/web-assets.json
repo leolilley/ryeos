@@ -1,6 +1,6 @@
 {
   "schema_version": "ryeos.ui.asset-manifest.v1",
-  "ui_binding_revision": "ryeos.ui.binding.v12",
+  "ui_binding_revision": "ryeos.ui.binding.v13",
   "assets": [
     {
       "route": "/ui",
@@ -29,10 +29,14 @@
       "filename": "ryeos_rune.js",
       "mime": "application/javascript; charset=utf-8",
       "cache": "no-cache",
-      "sha256": "a61ced9c20afc3dab7d4820e39976672bab1b756d36fe6ecc218c57704cfa1a9",
+      "sha256": "9dbeb8ed87653cb255c85acc3c68679253efb8b86329fae105d11cfc59c6fa72",
       "imports": [
         "/ui/assets/rune_bridge.js",
+        "/ui/assets/rune_health.js",
+        "/ui/assets/rune_pipelines.js",
         "/ui/assets/rune_platform.js",
+        "/ui/assets/rune_platform_text.js",
+        "/ui/assets/rune_segmenter.js",
         "/ui/assets/ryeos_rune_bg.wasm"
       ]
     },
@@ -41,7 +45,7 @@
       "filename": "rune_bridge.js",
       "mime": "application/javascript; charset=utf-8",
       "cache": "no-cache",
-      "sha256": "3de3a13536f230ade7b4d7b0a50fa6517a516bbbf7dab74fd24501a3a494960d",
+      "sha256": "7a8c564d52086b435ef0462dce4c9b4794da67b81b5fca127b77362b06a04dbf",
       "imports": []
     },
     {
@@ -49,7 +53,39 @@
       "filename": "rune_platform.js",
       "mime": "application/javascript; charset=utf-8",
       "cache": "no-cache",
-      "sha256": "694c9913bbbba7419de03c85f2542e33f150a7200f59669cca7c4623abc37a4c",
+      "sha256": "950dd6bad4250596d3a627a7cd4cc35213f2c4d4d4bafe45ae9de78772a32894",
+      "imports": []
+    },
+    {
+      "route": "/ui/assets/rune_health.js",
+      "filename": "rune_health.js",
+      "mime": "application/javascript; charset=utf-8",
+      "cache": "no-cache",
+      "sha256": "cbdf8d80031a536afa01fcf14453d992ba81e9822d05ae967d29fb82e62d0581",
+      "imports": []
+    },
+    {
+      "route": "/ui/assets/rune_pipelines.js",
+      "filename": "rune_pipelines.js",
+      "mime": "application/javascript; charset=utf-8",
+      "cache": "no-cache",
+      "sha256": "f1eb5a6faa24dc55f5b5db2bff60149c43a6fbd16e192f52a957b88e385d3e91",
+      "imports": []
+    },
+    {
+      "route": "/ui/assets/rune_platform_text.js",
+      "filename": "rune_platform_text.js",
+      "mime": "application/javascript; charset=utf-8",
+      "cache": "no-cache",
+      "sha256": "e2d39ad694699c3eb18204fae9509ac1abaaeac7c977059873d4619462d7c3b9",
+      "imports": []
+    },
+    {
+      "route": "/ui/assets/rune_segmenter.js",
+      "filename": "rune_segmenter.js",
+      "mime": "application/javascript; charset=utf-8",
+      "cache": "no-cache",
+      "sha256": "972800315f80c01e4069f80642e848f31b29b732082e282500b1294179538b99",
       "imports": []
     },
     {
@@ -57,7 +93,7 @@
       "filename": "ryeos_rune_bg.wasm.gz",
       "mime": "application/wasm",
       "cache": "no-cache",
-      "sha256": "d368cd2ae499cec5bb5d541d5f1cf8436de72963217fcd48abc80e85a889f0ce",
+      "sha256": "de4f4dd2cdb59f9fc6c8b0cf6af13c93a0989e81c119cfe5fe5dbb79c0e8a84b",
       "imports": [],
       "encoding": "gzip"
     },

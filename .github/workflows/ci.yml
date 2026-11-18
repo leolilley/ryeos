@@ -337,6 +337,11 @@ jobs:
       - name: Check browser renderer Clippy policy
         run: cargo clippy --locked -p ryeos-client-rune --target wasm32-unknown-unknown -- -D warnings
 
+      # Rune's JS snippets are declared once (rune-snippets.toml); a pin bump that adds or
+      # drops one fails here instead of at the next manual package build.
+      - name: Check Rune JS snippets match the declared list
+        run: python3 -I .ai/tools/ryeos/development/browser-assets-production/lib/check-rune-snippets.py
+
       - name: Check dependency advisories, licenses, and sources
         run: cargo deny check
 

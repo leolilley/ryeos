@@ -73,6 +73,8 @@ pub mod launch_status;
 pub mod maintenance_gc;
 #[cfg(feature = "model-provider-setup")]
 pub mod model_providers_validate;
+pub mod node_locality;
+pub mod node_locality_groups;
 pub mod node_status;
 pub mod objects_closure_describe;
 pub mod objects_closure_get;
@@ -179,6 +181,8 @@ pub const ALL: &[ServiceDescriptor] = &[
     health_status::DESCRIPTOR,
     identity_public_key::DESCRIPTOR,
     node_status::DESCRIPTOR,
+    node_locality::DESCRIPTOR,
+    node_locality_groups::DESCRIPTOR,
     #[cfg(feature = "model-provider-setup")]
     model_providers_validate::DESCRIPTOR,
     system_routes::DESCRIPTOR,
