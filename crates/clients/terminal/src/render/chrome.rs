@@ -3,174 +3,184 @@
 //! truth (provenance, focus) — it is load-bearing, not decoration.
 
 use ryeos_client_base::layout::Rect;
-use ryeos_client_base::text_surface::{Border, Color, Style, TextSurface};
-use ryeos_client_base::ui::view_model::{RyeOsInputVm, RyeOsViewModel, RyeOsViewVm};
+use ryeos_client_base::text_surface::{Border, Style, TextSurface};
+use ryeos_client_base::ui::event::RyeOsTransportFreshness;
+use ryeos_client_base::ui::view_model::{RyeOsInputVm, RyeOsTone, RyeOsViewModel, RyeOsViewVm};
 
 use super::input::draw_input_tile;
 use super::primitives::{fill_line, fill_rect};
-use super::text::{display_width, letterspace, truncate};
+use super::text::{display_width, truncate};
 use super::theme::{ACCENT, BG, FG, MUTED, WARN, mix_toward, style_fg, style_muted, tone_style};
 
-pub fn draw_top_bar(surface: &mut TextSurface, vm: &RyeOsViewModel) {
-    let tabs = &vm.presentation.chrome.top_bar.tabs;
-    let title = vm
-        .session
-        .surface_ordinal
-        .map(|ordinal| format!("{ordinal:02} {}", vm.session.title))
-        .unwrap_or_else(|| vm.session.title.clone());
-    let show_status = surface.width >= 36;
-    let status = if show_status {
-        truncate(
-            &format!(" {} ", vm.chrome.health_label),
-            (surface.width / 4).min(18),
-        )
-    } else {
-        String::new()
-    };
-    // The native client uses the same projected view-set strip as the web
-    // client. Keep authored order when it fits; on narrow widths start at the
-    // active set so its identity remains visible without reordering the
-    // displayed subsequence or inventing a second navigation owner.
-    draw_bar(surface, 0, "", MUTED);
-    let status_start = if show_status {
-        surface.width.saturating_sub(display_width(&status))
-    } else {
-        surface.width
-    };
-    let title_budget = if tabs.is_empty() {
-        status_start
-    } else {
-        (status_start / 3).min(24)
-    };
-    let title = truncate(&title, title_budget);
-    let mut x = surface.draw_text(0, 0, &title, Style::new().fg(MUTED).bg(BG));
-    if !tabs.is_empty() && x + 3 < status_start {
-        x += surface.draw_text(x, 0, " │ ", Style::new().fg(MUTED).bg(BG));
-        let tab_budget = status_start.saturating_sub(x);
-        let full_width = tabs
-            .iter()
-            .map(|tab| display_width(&format!(" {:02} {} ", tab.number, tab.title)))
-            .fold(0usize, usize::saturating_add)
-            .saturating_add(tabs.len().saturating_sub(1).saturating_mul(3));
-        let start = if full_width <= tab_budget {
-            0
-        } else {
-            tabs.iter().position(|tab| tab.active).unwrap_or(0)
-        };
-        for tab in tabs.iter().skip(start) {
-            let available = status_start.saturating_sub(x);
-            if available < 4 {
-                break;
-            }
-            let label = format!(" {:02} {} ", tab.number, tab.title);
-            let width = display_width(&label);
-            if !tab.active && width > available {
-                break;
-            }
-            let style = if tab.active {
-                Style::new().fg(BG).bg(ACCENT)
-            } else {
-                Style::new().fg(FG).bg(BG)
-            };
-            let rendered = if tab.active {
-                truncate(&label, available)
-            } else {
-                label
-            };
-            x += surface.draw_text(x, 0, &rendered, style);
-            if x + 2 < status_start {
-                x += surface.draw_text(x, 0, " · ", Style::new().fg(MUTED).bg(BG));
-            }
-        }
-    }
-    if show_status {
+/// The Surfaces switcher as the top line: each open Surface by its number and
+/// name, the current one reversed, then `+`. With no open Surface the
+/// session's title stands in.
+pub fn draw_switcher(surface: &mut TextSurface, y: usize, vm: &RyeOsViewModel) {
+    fill_line(surface, 0, y, surface.width, Style::new().fg(FG).bg(BG));
+    let surfaces = &vm.session.surfaces;
+    if surfaces.is_empty() {
         surface.draw_text(
-            status_start,
-            0,
-            &status,
-            tone_style(vm.chrome.health_tone).bg(BG),
+            1,
+            y,
+            &truncate(&vm.session.title, surface.width.saturating_sub(1)),
+            style_muted(),
         );
+        return;
+    }
+    let entries: Vec<(String, bool)> = surfaces
+        .iter()
+        .map(|choice| {
+            (
+                format!(" {} {} ", choice.ordinal, choice.title),
+                choice.active,
+            )
+        })
+        .collect();
+    draw_strip(surface, y, &entries);
+}
+
+/// The view-set tabs as one line: bare words, the current one reversed, then
+/// `+`. When they do not fit, the line starts at the current tab so it stays
+/// in view.
+pub fn draw_tab_band(surface: &mut TextSurface, y: usize, vm: &RyeOsViewModel) {
+    fill_line(surface, 0, y, surface.width, Style::new().fg(FG).bg(BG));
+    let entries: Vec<(String, bool)> = vm
+        .presentation
+        .chrome
+        .top_bar
+        .tabs
+        .iter()
+        .map(|tab| (format!(" {} ", tab.title), tab.active))
+        .collect();
+    draw_strip(surface, y, &entries);
+}
+
+/// One strip of entries with two spaces between them and `+` after the last.
+/// The `+` keeps its two columns at the right edge; when the entries overflow
+/// what is left, the strip starts at the current entry.
+fn draw_strip(surface: &mut TextSurface, y: usize, entries: &[(String, bool)]) {
+    const GAP: usize = 1;
+    const PLUS: &str = " + ";
+    let end = surface.width.saturating_sub(display_width(PLUS));
+    let full = entries
+        .iter()
+        .map(|(label, _)| display_width(label) + GAP)
+        .sum::<usize>();
+    let start = if full < end {
+        0
+    } else {
+        entries.iter().position(|(_, active)| *active).unwrap_or(0)
+    };
+    let mut x = 1usize;
+    for (label, active) in entries.iter().skip(start) {
+        let available = end.saturating_sub(x);
+        if available < 2 {
+            break;
+        }
+        let width = display_width(label);
+        if !*active && width > available {
+            break;
+        }
+        let style = if *active {
+            Style::new().fg(FG).bg(BG).reverse()
+        } else {
+            style_muted()
+        };
+        x += surface.draw_text(x, y, &truncate(label, available), style) + GAP;
+    }
+    if x + display_width(PLUS) <= surface.width {
+        surface.draw_text(x, y, PLUS, style_muted());
     }
 }
 
+/// The node's tone as the bars show it: a node the client cannot reach is
+/// danger, a feed still connecting or catching up is warn.
+fn node_tone(vm: &RyeOsViewModel) -> RyeOsTone {
+    match vm.transport.freshness {
+        RyeOsTransportFreshness::Current => vm.chrome.health_tone,
+        RyeOsTransportFreshness::Reconnecting | RyeOsTransportFreshness::ExpiredOrRevoked => {
+            RyeOsTone::Danger
+        }
+        RyeOsTransportFreshness::Connecting | RyeOsTransportFreshness::GapResnapshotRequired => {
+            RyeOsTone::Warn
+        }
+    }
+}
+
+/// The bottom line: the keys at the left, then the status parts separated by
+/// ` | ` at the right, ending with the node. No product name.
 pub fn draw_status_bar(surface: &mut TextSurface, vm: &RyeOsViewModel) {
     let y = surface.height.saturating_sub(1);
-    let energy = vm.presentation.chrome.status_bar.energy.clamp(0.0, 1.0);
+    let model = &vm.presentation.chrome.status_bar;
+    let energy = model.energy.clamp(0.0, 1.0);
     let mut bg = mix_toward(BG, ACCENT, 0.12 * energy);
-    if vm.presentation.chrome.status_bar.attention.is_some() {
+    if model.attention.is_some() {
         bg = mix_toward(bg, WARN, 0.18);
     }
-    let base = Style::new().fg(MUTED).bg(bg);
-    fill_line(surface, 0, y, surface.width, base);
-    let mut x = 1usize;
-    // Wall-clock stepped (144ms/step) so the pulse holds a steady rate no
-    // matter how many events folded this frame.
-    let heartbeat = if energy > 0.05 {
-        ["⋄", "◇", "◈", "◆"][(vm.now_ms as usize / 144) % 4]
-    } else {
-        "⋄"
-    };
-    surface.draw_text(
-        x,
-        y,
-        heartbeat,
-        Style::new().fg(mix_toward(MUTED, ACCENT, energy)).bg(bg),
-    );
-    x += 2;
+    fill_line(surface, 0, y, surface.width, Style::new().fg(MUTED).bg(bg));
 
-    // The key hint is the affordance the operator relies on to know what's
-    // available — reserve its width (plus the "· " separator) up front so
-    // the segment loop degrades into whatever budget remains instead of
-    // squeezing the hint out entirely when the bar is tight.
-    let key_hint = &vm.presentation.chrome.status_bar.key_hint;
-    let hint_width = display_width(key_hint);
-    let badge_start = if surface.width >= 7 {
-        surface.width - 7
-    } else {
-        surface.width
+    // The status parts, right-aligned: each segment, then the node.
+    let mut parts: Vec<(Option<String>, String, RyeOsTone)> = model
+        .segments
+        .iter()
+        .map(|segment| {
+            (
+                segment.label.clone().filter(|label| !label.is_empty()),
+                segment.value.clone(),
+                segment.tone,
+            )
+        })
+        .collect();
+    parts.push((None, format!("● {}", vm.chrome.health_label), node_tone(vm)));
+    let part_width = |(label, value, _): &(Option<String>, String, RyeOsTone)| {
+        label.as_ref().map_or(0, |label| display_width(label) + 1) + display_width(value)
     };
-    let hint_reserve = if hint_width > 0 && hint_width + 3 < badge_start {
-        hint_width + 3
-    } else {
-        0
-    };
-    let segments_end = badge_start.saturating_sub(hint_reserve);
-
-    for segment in &vm.presentation.chrome.status_bar.segments {
-        if x >= segments_end {
+    const SEP: &str = " | ";
+    // The node always shows; other parts drop from the left when the line is
+    // short, and the keys take what is left.
+    let budget = surface.width.saturating_sub(2);
+    let mut shown = 1;
+    let mut width = part_width(&parts[parts.len() - 1]);
+    for part in parts.iter().rev().skip(1) {
+        let wanted = width + display_width(SEP) + part_width(part);
+        if wanted > budget / 2 {
             break;
         }
-        if let Some(label) = &segment.label {
-            let label = format!("{}: ", letterspace(label));
+        width = wanted;
+        shown += 1;
+    }
+    let width = width.min(budget);
+    let status_start = surface.width.saturating_sub(width + 1);
+
+    // The keys: as much of the hint as fits before the status.
+    let keys_end = status_start.saturating_sub(2);
+    if keys_end > 1 {
+        surface.draw_text(
+            1,
+            y,
+            &truncate(&model.key_hint, keys_end - 1),
+            style_muted().bg(bg),
+        );
+    }
+
+    let mut x = status_start;
+    for (index, (label, value, tone)) in parts.iter().skip(parts.len() - shown).enumerate() {
+        if index > 0 {
+            x += surface.draw_text(x, y, SEP, style_muted().bg(bg));
+        }
+        let room = surface.width.saturating_sub(x + 1);
+        if let Some(label) = label {
             x += surface.draw_text(
                 x,
                 y,
-                &truncate(&label, segments_end - x),
+                &truncate(&format!("{label} "), room),
                 style_muted().bg(bg),
             );
         }
-        let value = truncate(&segment.value, segments_end.saturating_sub(x));
-        x += surface.draw_text(x, y, &value, tone_style(segment.tone).bg(bg)) + 2;
+        let room = surface.width.saturating_sub(x + 1);
+        surface.draw_text(x, y, &truncate(value, room), tone_style(*tone).bg(bg));
+        x += display_width(value).min(room);
     }
-
-    if hint_reserve > 0 && x + 2 + hint_width <= badge_start {
-        surface.draw_text(x, y, "·", style_muted().bg(bg));
-        x += 2;
-        surface.draw_text(x, y, key_hint, style_muted().bg(bg));
-    }
-    if surface.width >= 7 {
-        surface.draw_text(badge_start, y, " RyeOS ", Style::new().fg(BG).bg(ACCENT));
-    }
-}
-
-fn draw_bar(surface: &mut TextSurface, y: usize, text: &str, fg: Color) {
-    fill_line(surface, 0, y, surface.width, Style::new().fg(fg).bg(BG));
-    surface.draw_text(
-        0,
-        y,
-        &truncate(text, surface.width),
-        Style::new().fg(fg).bg(BG),
-    );
 }
 
 pub fn draw_tile(

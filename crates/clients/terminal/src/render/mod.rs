@@ -63,12 +63,17 @@ fn build_surface(vm: &RyeOsViewModel, width: usize, height: usize) -> TextSurfac
     surface.fill(Style::new().fg(FG).bg(BG));
 
     // There is no "home" mode. Bars and dialogs render in every state.
-    let top_h = if vm.presentation.chrome.top_bar.visible && height >= 3 {
-        chrome::draw_top_bar(&mut surface, vm);
-        1
-    } else {
-        0
-    };
+    // The switcher is the top line; the tabs, when shown, the line beneath.
+    // On a very short terminal the switcher gives its line to the body first.
+    let mut top_h = 0;
+    if height >= 4 {
+        chrome::draw_switcher(&mut surface, 0, vm);
+        top_h += 1;
+    }
+    if vm.presentation.chrome.top_bar.visible && height >= 3 + top_h {
+        chrome::draw_tab_band(&mut surface, top_h, vm);
+        top_h += 1;
+    }
     let bottom_h = if vm.presentation.chrome.status_bar.visible && height >= 3 {
         chrome::draw_status_bar(&mut surface, vm);
         1
@@ -395,6 +400,7 @@ fn draw_text_view(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryeos_client_base::text_surface::Attr;
     use ryeos_client_base::ui::model::{BrowserSession, BrowserViewport, RyeOsCore};
     use ryeos_client_base::ui::view_model::build_view_model;
     use serde_json::json;
@@ -478,7 +484,7 @@ mod tests {
     }
 
     #[test]
-    fn native_top_bar_shows_projected_view_sets_and_keeps_active_set_on_narrow_widths() {
+    fn the_tab_band_shows_words_with_the_current_one_reversed_and_kept_in_view() {
         let mut vm = build_view_model(&empty_center_core());
         let mut development = vm.presentation.chrome.top_bar.tabs[0].clone();
         development.number = 1;
@@ -492,39 +498,52 @@ mod tests {
         vm.presentation.chrome.top_bar.tabs = vec![development, review];
 
         let mut wide = TextSurface::new(90, 1);
-        chrome::draw_top_bar(&mut wide, &vm);
+        chrome::draw_tab_band(&mut wide, 0, &vm);
         let text = surface_text(&wide);
-        assert!(text.contains("02 Review"));
-        assert!(text.contains("01 Development"));
-        assert!(text.find("01 Development") < text.find("02 Review"));
+        assert!(text.contains("Development"));
+        assert!(text.contains("Review"));
+        assert!(!text.contains("01"), "tabs are bare words: {text}");
+        assert!(text.find("Development") < text.find("Review"));
+        assert!(text.trim_end().ends_with('+'), "the plus follows: {text}");
+        let review_at = text.find("Review").unwrap();
         assert!(
-            wide.cells
-                .iter()
-                .any(|cell| cell.rune == 'R' && cell.bg == theme::ACCENT)
+            wide.get(review_at, 0).attr.contains(Attr::REVERSE),
+            "the current tab is reversed"
         );
 
-        for width in [1, 4, 9, 20] {
+        for width in [1, 4, 9, 14] {
             let mut narrow = TextSurface::new(width, 1);
-            chrome::draw_top_bar(&mut narrow, &vm);
+            chrome::draw_tab_band(&mut narrow, 0, &vm);
             assert_eq!(narrow.cells.len(), width);
-            if width == 20 {
+            if width == 14 {
                 assert!(
-                    surface_text(&narrow).contains("02"),
-                    "active tab remains visible"
+                    surface_text(&narrow).contains("Review"),
+                    "the current tab stays in view"
                 );
             }
         }
-        vm.chrome.health_label = "H".repeat(200);
-        let mut long_health = TextSurface::new(40, 1);
-        chrome::draw_top_bar(&mut long_health, &vm);
-        assert!(surface_text(&long_health).contains("02 Review"));
-        assert!(surface_text(&long_health).contains('…'));
     }
 
     #[test]
-    fn status_bar_reserves_badge_and_complete_key_hint() {
+    fn the_switcher_line_numbers_the_open_surfaces_and_reverses_the_current_one() {
+        let vm = build_view_model(&empty_center_core());
+        let mut line = TextSurface::new(80, 1);
+        chrome::draw_switcher(&mut line, 0, &vm);
+        let text = surface_text(&line);
+        if let Some(current) = vm.session.surfaces.iter().find(|choice| choice.active) {
+            let label = format!("{} {}", current.ordinal, current.title);
+            let at = text.find(&label).expect("the current Surface is listed");
+            assert!(line.get(at, 0).attr.contains(Attr::REVERSE));
+            assert!(text.trim_end().ends_with('+'));
+        } else {
+            assert!(text.contains(&vm.session.title));
+        }
+    }
+
+    #[test]
+    fn the_status_line_keeps_the_keys_and_the_node_and_names_no_product() {
         let mut vm = build_view_model(&empty_center_core());
-        vm.presentation.chrome.status_bar.key_hint.clear();
+        vm.chrome.health_label = "rye".into();
         vm.presentation.chrome.status_bar.segments =
             vec![ryeos_client_base::ui::view_model::RyeOsStatusSegmentVm {
                 id: "long".into(),
@@ -533,17 +552,20 @@ mod tests {
                 tone: ryeos_client_base::ui::view_model::RyeOsTone::Neutral,
                 grow: false,
             }];
+        vm.presentation.chrome.status_bar.key_hint = "KEY".into();
         let mut long = TextSurface::new(40, 1);
         chrome::draw_status_bar(&mut long, &vm);
-        assert_eq!(long.get(32, 0).rune, '…');
-        assert!(surface_text(&long).contains(" RyeOS "));
+        let text = surface_text(&long);
+        assert!(text.contains("KEY"), "{text}");
+        assert!(text.contains("● rye"), "{text}");
+        assert!(!text.contains("RyeOS"), "{text}");
 
-        vm.presentation.chrome.status_bar.segments.clear();
-        vm.presentation.chrome.status_bar.key_hint = "KEY".into();
-        let mut hint = TextSurface::new(20, 1);
-        chrome::draw_status_bar(&mut hint, &vm);
-        assert!(surface_text(&hint).contains("KEY"));
-        assert!(surface_text(&hint).contains(" RyeOS "));
+        vm.presentation.chrome.status_bar.segments[0].value = "3".into();
+        vm.presentation.chrome.status_bar.segments[0].label = Some("need you".into());
+        let mut wide = TextSurface::new(80, 1);
+        chrome::draw_status_bar(&mut wide, &vm);
+        let text = surface_text(&wide);
+        assert!(text.contains("need you 3 | ● rye"), "{text}");
     }
 
     /// An admitted Surface with an empty center; a separate Shared Config
