@@ -117,6 +117,7 @@ fn entry() -> Entry {
         parent: None,
         exchange: None,
         counts_as: None,
+        text_streamed: true,
         slots: BTreeMap::new(),
         seq: (1, 2),
         ts: ("a".to_string(), "b".to_string()),

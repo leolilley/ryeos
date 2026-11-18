@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-18T01:18:54Z:07d9345c098787cfb6e041bf167bb130b234df38ecefe654e2abe8b10ca2411c:4gQ4N7W6ll/7xguzSmJImXxqYPMqptzNrkJ6VXYjLlPKYLYf4eyIZjcTZCj+fsqELPyUnPqeGa6TLNtfiHMMCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-18T03:53:17Z:0f73f0cfe66c020edb963b98ec1677d50af9de36f5baae3d32cbe6484de09a36:yE6PckWPyyzhXLulnPL0Vy1zs30lu6O1w4Gtxf+oHZN1/aPLDaLsHEHIGKjc71gX49BPcNc9DJhpJ/39GY7gAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "timeline-v1"
@@ -98,6 +98,7 @@ An entry is one drawable unit.
 | `parent` | the id of the entry this one nests under, or null |
 | `exchange` | the id of the entry that opened the exchange this entry belongs to, or null before the first exchange |
 | `counts_as` | the vocabulary noun key the entry counts under in a cluster headline, or null |
+| `text_streamed` | true when the entry's text is also carried by the live event stream, so a consumer that prints that stream need not print it again; omitted when false |
 | `slots` | an object of named text, name to string; the names are the definition's |
 | `seq` | `[first, last]` `chain_seq` of the events behind the entry |
 | `ts` | `[first, last]` timestamps of those events |
