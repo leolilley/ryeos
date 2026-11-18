@@ -7,6 +7,7 @@ use ryeos_directive_definition::{
 };
 use ryeos_provider_contract::Part;
 
+use super::images::{ImageRender, lower_images, user_holds_image};
 use super::reasoning_replay::ReplayPlan;
 
 /// What the request builder is told beyond the history and the message
@@ -16,6 +17,9 @@ pub struct ConvertOptions<'a> {
     /// The entry's reasoning schema, whose `replay` placements say what
     /// captured reasoning goes back on assistant messages. `None` sends none.
     pub reasoning: Option<&'a ReasoningSchemaConfig>,
+    /// The entry's image form and the bytes of the images the request
+    /// carries; `None` when the history holds no image.
+    pub images: Option<&'a ImageRender<'a>>,
 }
 
 #[tracing::instrument(level = "debug", name = "provider:build_messages", skip(messages, schemas, options), fields(count = messages.len()))]
@@ -39,24 +43,31 @@ pub fn convert_messages(
     let plan = options
         .reasoning
         .and_then(|reasoning| ReplayPlan::new(&sendable, reasoning));
+    // The plan reads the history as recorded: the open loop ends at the last
+    // real user message, not at the one that carries moved images.
+    let lowered = lower_images(&sendable, options.images);
     match schemas {
-        None => convert_openai(&sendable, plan.as_ref()),
-        Some(s) => convert_with_schemas(&sendable, s, plan.as_ref()),
+        None => convert_openai(&lowered, plan.as_ref(), options.images),
+        Some(s) => convert_with_schemas(&lowered, s, plan.as_ref(), options.images),
     }
 }
 
 fn convert_openai(
-    messages: &[ProviderMessage],
+    messages: &[(usize, ProviderMessage)],
     plan: Option<&ReplayPlan<'_>>,
+    images: Option<&ImageRender<'_>>,
 ) -> (Vec<Value>, Option<String>) {
     let converted: Vec<Value> = messages
         .iter()
-        .enumerate()
         .map(|(index, msg)| {
+            let index = *index;
             let mut obj = json!({ "role": msg.role() });
-            match msg.content_value() {
-                Some(content) => obj["content"] = content,
-                None => obj["content"] = Value::Null,
+            match (images, user_holds_image(msg)) {
+                (Some(render), true) => obj["content"] = render.user_content(msg),
+                _ => match msg.content_value() {
+                    Some(content) => obj["content"] = content,
+                    None => obj["content"] = Value::Null,
+                },
             }
             if msg.has_tool_calls() {
                 let mut calls = msg
@@ -93,9 +104,10 @@ fn convert_openai(
 }
 
 fn convert_with_schemas(
-    messages: &[ProviderMessage],
+    messages: &[(usize, ProviderMessage)],
     schemas: &MessageSchemas,
     plan: Option<&ReplayPlan<'_>>,
+    images: Option<&ImageRender<'_>>,
 ) -> (Vec<Value>, Option<String>) {
     use std::collections::HashMap;
 
@@ -132,7 +144,7 @@ fn convert_with_schemas(
     // (Gemini's functionResponse.name needs this; Gemini doesn't
     // return tool_call IDs so it identifies tool results by name).
     let mut tc_id_to_name: HashMap<String, String> = HashMap::new();
-    for msg in messages {
+    for (_, msg) in messages {
         for tc in msg.calls() {
             if let Some(id) = tc.id {
                 tc_id_to_name.insert(id, tc.name);
@@ -144,7 +156,7 @@ fn convert_with_schemas(
     let mut converted = Vec::new();
     let mut pending_tool_results: Vec<Value> = Vec::new();
 
-    for (msg_index, msg) in messages.iter().enumerate() {
+    for (msg_index, msg) in messages.iter().map(|(index, msg)| (*index, msg)) {
         // Extract system messages whenever they are NOT meant to ride
         // inline as a message-role entry. Both `body_field` (Anthropic)
         // and `body_inject` (Gemini) need extraction so the adapter can
@@ -238,6 +250,10 @@ fn convert_with_schemas(
                     continue;
                 }
             }
+        } else if let (Some(render), true) = (images, user_holds_image(msg)) {
+            // A user message with images is a content array of the entry's
+            // text and image parts, whatever its text placement.
+            obj[content_key] = render.user_content(msg);
         } else {
             let nested_content = msg.content_value().unwrap_or(Value::Null);
             match schemas.text_placement {

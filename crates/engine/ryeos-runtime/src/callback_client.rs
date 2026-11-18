@@ -334,7 +334,14 @@ impl CallbackClient {
                 client
                     .append_events(&self.thread_id, events, options)
                     .await
-                    .map_err(|error| anyhow::anyhow!("{error}"))?;
+                    .map_err(|error| match error {
+                        CallbackError::ActionFailed { code, message, .. }
+                            if code == crate::callback::ATTACHMENT_REFUSED_CODE =>
+                        {
+                            anyhow::Error::new(crate::callback::AttachmentRefused(message))
+                        }
+                        other => anyhow::anyhow!("{other}"),
+                    })?;
                 Ok(())
             }
             None if contains_transcript => Err(anyhow::anyhow!(
@@ -1268,6 +1275,18 @@ impl CallbackClient {
         &self,
         result: &crate::cognition::ToolResultPayload,
     ) -> Result<()> {
+        self.emit_tool_result_with_attachments(result, Vec::new())
+            .await
+    }
+
+    /// [`Self::emit_tool_result`] storing `attachments` beside the event: the
+    /// bytes of images the result names that the node does not hold yet. Every
+    /// upload must be named by the result's `attachment_refs`.
+    pub async fn emit_tool_result_with_attachments(
+        &self,
+        result: &crate::cognition::ToolResultPayload,
+        attachments: Vec<crate::callback::EventAttachment>,
+    ) -> Result<()> {
         result.validate()?;
         let text_bytes: usize = result
             .parts
@@ -1282,11 +1301,67 @@ impl CallbackClient {
                 "tool result model content is {text_bytes} bytes; maximum is {TOOL_RESULT_INLINE_MAX_BYTES}"
             );
         }
-        self.append_runtime_event(
-            RuntimeEventType::ToolCallResult,
-            crate::cognition::to_payload(result)?,
+        for attachment in &attachments {
+            if !result
+                .attachment_refs
+                .iter()
+                .any(|named| named == attachment.object_hash())
+            {
+                anyhow::bail!(
+                    "tool result uploads attachment {} that it does not name",
+                    attachment.object_hash()
+                );
+            }
+        }
+        let payload = crate::cognition::to_payload(result)?;
+        if attachments.is_empty() {
+            return self
+                .append_runtime_event(RuntimeEventType::ToolCallResult, payload)
+                .await;
+        }
+        self.append_runtime_events_with(
+            vec![(RuntimeEventType::ToolCallResult, payload)],
+            EventAppendOptions {
+                attachments,
+                idempotency_key: None,
+            },
         )
         .await
+    }
+
+    /// The media type and bytes of one stored attachment named by an event of
+    /// this thread's chain. The bytes are checked against the hash asked for,
+    /// so a store that returned other bytes is an error, not an image.
+    pub async fn read_attachment(&self, attachment: &str) -> Result<(String, Vec<u8>)> {
+        use base64::Engine as _;
+        let client = self.inner.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "callback read_attachment called without an inner UDS client \
+                 (socket missing); runtime cannot read stored bytes"
+            )
+        })?;
+        let raw = client
+            .read_attachment(&self.thread_id, attachment)
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let media_type = raw
+            .get("media_type")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("read_attachment answer has no media_type"))?
+            .to_owned();
+        let encoded = raw
+            .get("bytes_b64")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("read_attachment answer has no bytes_b64"))?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .context("read_attachment bytes are not valid base64")?;
+        let actual = ryeos_state::objects::ThreadAttachment::for_bytes(&media_type, &bytes)?
+            .object_hash()?;
+        if actual != attachment {
+            anyhow::bail!("read_attachment returned bytes that hash to {actual}, not {attachment}");
+        }
+        Ok((media_type, bytes))
     }
 
     /// Advisory: warn-and-continue OK when disconnected.
@@ -1409,6 +1484,9 @@ mod tests {
         events: Mutex<Vec<(String, Value)>>,
         /// The options of every batch append, in order.
         options: Mutex<Vec<crate::callback::EventAppendOptions>>,
+        /// Answers an append that carries attachments with the node's
+        /// attachment refusal.
+        refuse_attachments: std::sync::atomic::AtomicBool,
     }
 
     impl EventRecorder {
@@ -1416,6 +1494,7 @@ mod tests {
             Self {
                 events: Mutex::new(Vec::new()),
                 options: Mutex::new(Vec::new()),
+                refuse_attachments: std::sync::atomic::AtomicBool::new(false),
             }
         }
 
@@ -1479,6 +1558,17 @@ mod tests {
             events: Vec<Value>,
             options: crate::callback::EventAppendOptions,
         ) -> Result<Value, CallbackError> {
+            if !options.attachments.is_empty()
+                && self
+                    .refuse_attachments
+                    .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(CallbackError::ActionFailed {
+                    code: crate::callback::ATTACHMENT_REFUSED_CODE.to_string(),
+                    message: "attachment is too large".to_string(),
+                    retryable: false,
+                });
+            }
             self.options.lock().unwrap().push(options);
             let mut recorded = self.events.lock().unwrap();
             for event in events {
@@ -1693,8 +1783,111 @@ mod tests {
                 truncated,
                 truncated_reason: reason.map(str::to_string),
                 duplicate_of: duplicate_of.map(str::to_string),
+                dropped_images: Vec::new(),
             },
+            attachment_refs: Vec::new(),
         }
+    }
+
+    fn image_tool_result(
+        bytes: &[u8],
+    ) -> (
+        crate::cognition::ToolResultPayload,
+        crate::callback::EventAttachment,
+    ) {
+        let attachment =
+            crate::callback::EventAttachment::new("image/png", bytes.to_vec()).unwrap();
+        let mut result = tool_result(
+            TEST_OPERATION_ID,
+            "call_1",
+            "test/shot",
+            "one image",
+            false,
+            None,
+            9,
+            None,
+        );
+        result
+            .parts
+            .push(Part::Image(ryeos_provider_contract::ImagePart {
+                media_type: "image/png".to_string(),
+                attachment: attachment.object_hash().to_string(),
+                byte_length: bytes.len() as u64,
+                width: Some(1),
+                height: Some(1),
+            }));
+        result.attachment_refs = vec![attachment.object_hash().to_string()];
+        (result, attachment)
+    }
+
+    #[tokio::test]
+    async fn a_tool_result_with_an_image_stores_its_bytes_beside_the_event() {
+        let (cb, recorder) = make_recorder_client();
+        let (result, attachment) = image_tool_result(b"pixels");
+        cb.emit_tool_result_with_attachments(&result, vec![attachment.clone()])
+            .await
+            .unwrap();
+        let evt = recorder.last("tool_call_result").unwrap();
+        assert_eq!(evt["attachment_refs"][0], attachment.object_hash());
+        assert_eq!(evt["parts"][1]["type"], "image");
+        assert_eq!(evt["parts"][1]["attachment"], attachment.object_hash());
+        assert!(
+            evt.to_string().find("cGl4ZWxz").is_none(),
+            "no base64 in the event"
+        );
+        let options = recorder.options.lock().unwrap();
+        assert_eq!(options[0].attachments, vec![attachment]);
+    }
+
+    #[tokio::test]
+    async fn a_node_attachment_refusal_reaches_the_caller_as_a_typed_error() {
+        let (cb, recorder) = make_recorder_client();
+        recorder
+            .refuse_attachments
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let (result, attachment) = image_tool_result(b"pixels");
+        let error = cb
+            .emit_tool_result_with_attachments(&result, vec![attachment])
+            .await
+            .unwrap_err();
+        let refused = error
+            .downcast_ref::<crate::callback::AttachmentRefused>()
+            .expect("a typed refusal");
+        assert!(refused.0.contains("too large"), "{refused}");
+        assert!(recorder.last("tool_call_result").is_none());
+        // Without images the same result still appends.
+        let mut plain = result.clone();
+        plain.parts.truncate(1);
+        plain.attachment_refs.clear();
+        cb.emit_tool_result(&plain).await.unwrap();
+        assert!(recorder.last("tool_call_result").is_some());
+    }
+
+    #[tokio::test]
+    async fn an_upload_the_result_does_not_name_is_refused_before_any_append() {
+        let (cb, recorder) = make_recorder_client();
+        let (result, _) = image_tool_result(b"pixels");
+        let stray = crate::callback::EventAttachment::new("image/png", b"other".to_vec()).unwrap();
+        let error = cb
+            .emit_tool_result_with_attachments(&result, vec![stray])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("does not name"), "{error}");
+        assert!(recorder.last("tool_call_result").is_none());
+    }
+
+    #[test]
+    fn attachment_refs_must_match_the_image_parts() {
+        let (mut result, _) = image_tool_result(b"pixels");
+        result.validate().unwrap();
+        result.attachment_refs.clear();
+        assert!(result.validate().is_err());
+        let (mut result, _) = image_tool_result(b"pixels");
+        result
+            .attachment_refs
+            .push(result.attachment_refs[0].clone());
+        assert!(result.validate().is_err());
     }
 
     // ── New emit_tool_result tests ───────────────────────────────────

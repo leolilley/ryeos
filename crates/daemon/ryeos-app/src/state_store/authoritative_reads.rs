@@ -16,6 +16,29 @@ pub enum RecordedThreadPlacement {
 }
 
 impl StateStore {
+    /// The media type and verified bytes of one stored thread attachment, by
+    /// the hash of its object. `None` when no such object is stored.
+    pub fn read_thread_attachment(
+        &self,
+        attachment_hash: &str,
+    ) -> Result<Option<(String, Vec<u8>)>> {
+        let cas = self.state_authority.cas_store()?;
+        let Some(value) = cas.get_object(attachment_hash)? else {
+            return Ok(None);
+        };
+        let object = ryeos_state::objects::ThreadAttachment::from_value(&value)
+            .with_context(|| format!("read attachment {attachment_hash}"))?;
+        let bytes = cas
+            .get_blob_bounded(&object.blob_hash, object.byte_length)?
+            .ok_or_else(|| {
+                anyhow!("attachment {attachment_hash} names a blob that is not stored")
+            })?;
+        if bytes.len() as u64 != object.byte_length {
+            bail!("attachment {attachment_hash} blob length differs from its object");
+        }
+        Ok(Some((object.media_type, bytes)))
+    }
+
     /// Read an in-process handler thread's authoritative snapshot at the chain
     /// its reservation was born into: its own id for a direct invocation
     /// root, its parent's chain for an inline in-process child. `None` when

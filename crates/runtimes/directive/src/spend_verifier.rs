@@ -349,6 +349,7 @@ mod tests {
             extra: Default::default(),
             body_template: None,
             body_extra: None,
+            image_input: None,
             profiles: vec![],
         }
     }
