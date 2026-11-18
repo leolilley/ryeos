@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-15T02:27:40Z:44eee3853f0a305bdb17b6e3344a8f564e1365dedd962bb13cb6a36521e5ef03:wL7Ol5GFpkSOdb6/p62+VflsXYg4O1zpnFpnepslUXoIzoCUQxWmLOHy5Wq0Gyg2HFH1/r0SgNnNqdkDnZAxBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-18T01:04:08Z:0ed685d990d0efd68ed062193c9cf8358716a5028a529811eae7259f7d67f9bc:Lz3WrYFyKD7RVkpZetYatgQztjs+TIRd53LaIWkS550ZzZHUXcun+0s9zJGIwLzIYoMWU6lEB+rbhPHqEN7nAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "build-and-test"
@@ -166,6 +166,44 @@ explicitly:
 Use `--populate --crates "<Cargo package ...>"` when only selected packages
 need rebuilding. This also covers node-only packages such as `ryeosd`; every
 unselected bundle payload retains its existing exact artifact generation.
+
+### Install build on GitHub (no local compile)
+
+`.github/workflows/remote-node-build.yml` runs `scripts/populate-bundles.sh
+--all` (the installer's default dev key and owner, release profile) for the
+dispatched ref and bundle set, and uploads one artifact (kept 3 days):
+`ryeos-node-<set>-<sha12>.tar.zst` holding `manifest.json` (commit, bundle set,
+sha256 of each binary), `target/release/` (the binaries the installer copies)
+and `bundle-state.tar.zst` (the populated bundle state). Dispatch only works
+once the workflow file is on `main`. Dispatch, then find the run id:
+
+```bash
+gh workflow run remote-node-build.yml --repo leolilley/ryeos \
+  --ref work/<branch> -f bundle_set=standard -f label=<thread>
+gh run list --repo leolilley/ryeos --workflow remote-node-build.yml -L 3
+```
+
+Download and unpack into a fresh directory (the job summary prints these with
+the real run id and name):
+
+```bash
+d=$(mktemp -d)
+gh run download <run-id> --repo leolilley/ryeos -n <artifact-name> -D "$d"
+tar --zstd -xf "$d/<artifact-name>.tar.zst" -C "$d"
+```
+
+Install from a checkout of exactly the manifest commit (the installer reads
+`bundles/` and `scripts/` from its own checkout), without `--populate`:
+
+```bash
+git worktree add --detach "$d/src" <commit-from-manifest>
+cd "$d/src" && ./scripts/ci/unpack-bundle-state.sh "$d/bundle-state.tar.zst"
+./scripts/pkg/install-local-direct.sh --bundle-set <set> \
+  --cargo-target-dir "$d/target" --trust-source-publishers
+```
+
+Add the usual `--app-root`, `--host-class`, `--prefix` and
+`--reset-node-policy-generation` flags exactly as for a local install.
 
 ### Clean-cut execution-state upgrades
 
