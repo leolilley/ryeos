@@ -1062,6 +1062,14 @@ impl CheckedEngineGeneration<'_> {
         self.engine.signer_label(fingerprint)
     }
 
+    /// See [`Engine::load_trusted_bundle_config`].
+    pub fn load_trusted_bundle_config(
+        &self,
+        relative_path: &str,
+    ) -> Result<Option<Value>, EngineError> {
+        self.engine.load_trusted_bundle_config(relative_path)
+    }
+
     pub fn request_engine_generation_identity(&self) -> &str {
         &self.request_engine_generation_identity
     }
@@ -1565,6 +1573,39 @@ impl Engine {
     /// Return the exact retained content root for a named bundle in this
     /// engine generation. Callers must obtain `name` from typed resolution
     /// provenance; a matching source pathname is not authority.
+    /// Load one config file from installed bundles only and verify it as
+    /// trusted. `relative_path` is the path under a bundle's `config`
+    /// directory. The resolution roots carry no project, so a project file
+    /// of the same path is never a candidate. `Ok(None)` means no installed
+    /// bundle ships the file.
+    pub fn load_trusted_bundle_config(
+        &self,
+        relative_path: &str,
+    ) -> Result<Option<Value>, EngineError> {
+        use crate::config_loading::{ConfigLoadContext, ConfigSpec, ResolveMode};
+
+        let roots = self.resolution_roots(None);
+        let load_context = ConfigLoadContext {
+            roots: &roots,
+            parsers: &self.parser_dispatcher,
+            kinds: &self.kinds,
+            trust_store: &self.trust_store,
+            project_authority: None,
+        };
+        let resolved = crate::config_loading::resolve_config_spec(
+            &ConfigSpec {
+                path: relative_path.to_string(),
+                mode: ResolveMode::FirstMatch,
+            },
+            &load_context,
+        )?;
+        let Some(layer) = resolved.layers.first() else {
+            return Ok(None);
+        };
+        crate::config_loading::load_and_verify_trusted_config_file(&layer.path, &load_context)
+            .map(Some)
+    }
+
     /// The label the node's trust registry records for a signer, when it
     /// records the signer at all. A display name only: it grants nothing.
     pub fn signer_label(&self, fingerprint: &str) -> Option<String> {

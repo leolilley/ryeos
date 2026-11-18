@@ -931,3 +931,68 @@ async fn project_file_shadowing_a_shipped_surface_fails_the_open_with_the_named_
         other => panic!("expected the named shadow conflict, got {other:?}: {error:#}"),
     }
 }
+
+/// Revalidation holds a binding to the project-authoring list it was compiled
+/// under. A binding that records the digest of the installed list is still
+/// valid; one that records the digest of any other list, as a binding minted
+/// before the list changed would, is stale and must be minted again.
+#[tokio::test]
+async fn binding_compiled_under_another_project_authoring_list_is_stale() {
+    let (_state_dir, _state_owner, state) = test_state::build_test_state_with_live_bundles();
+    let (session_id, _context, _producer, coordinate) =
+        test_state::live_shipped_presentation(&state).await;
+    let session = get_ui_state(&state)
+        .expect("UI state")
+        .browser_sessions
+        .get_session(&session_id)
+        .expect("active session");
+    let minted = session
+        .attachments
+        .get(&coordinate.binding_attachment_id)
+        .expect("root attachment")
+        .compiled_binding
+        .as_ref()
+        .clone();
+    assert_eq!(
+        minted.binding.project_source_ceiling_digest, "",
+        "a binding of bundle items records no list"
+    );
+
+    state
+        .engine
+        .with_checked_bundle_generation(|generation| -> anyhow::Result<()> {
+            let revalidate = |binding: &ryeos_ui::compiled_binding::SessionCompiledUiBinding| {
+                ryeos_ui::handlers::ui_launch_mint::revalidate_binding_authority(
+                    generation, binding, None, None,
+                )
+            };
+            revalidate(&minted)?;
+
+            let installed =
+                ryeos_ui::handlers::ui_launch_mint::load_project_authoring_config(generation)?;
+            assert_eq!(installed.sources.len(), 4, "{:?}", installed.sources);
+            let mut current = minted.clone();
+            current.binding.project_source_ceiling_digest =
+                ryeos_ui::compiled_binding::project_source_ceiling_digest(&installed.sources)?;
+            revalidate(&current)?;
+
+            let mut outdated = minted.clone();
+            outdated.binding.project_source_ceiling_digest =
+                ryeos_ui::compiled_binding::project_source_ceiling_digest(&installed.sources[..1])?;
+            let error = revalidate(&outdated).expect_err("a changed list stales the binding");
+            match ryeos_app::handler_error::extract_handler_error(&error) {
+                Some(ryeos_app::handler_error::HandlerError::Structured { code, body, .. }) => {
+                    assert_eq!(code, "ui_binding_stale");
+                    assert!(
+                        body["error"]
+                            .as_str()
+                            .is_some_and(|message| message.contains("project-authoring")),
+                        "{body}"
+                    );
+                }
+                other => panic!("expected a stale binding, got {other:?}"),
+            }
+            Ok(())
+        })
+        .expect("revalidate under the installed list");
+}

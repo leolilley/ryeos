@@ -482,6 +482,7 @@ mod tests {
                     affordances: Default::default(),
                     surface_route: None,
                     attenuated: Vec::new(),
+                    project_source_ceiling_digest: String::new(),
                 },
             }),
             presentation:

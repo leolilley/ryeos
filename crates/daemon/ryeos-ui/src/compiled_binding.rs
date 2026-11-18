@@ -134,6 +134,21 @@ pub struct CompiledUiBinding {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub surface_route: Option<CompiledUiRoute>,
     pub attenuated: Vec<AttenuatedUiBinding>,
+    /// Digest of the node's project-authoring source list this binding was
+    /// compiled under, when its surface or any view it binds has a
+    /// project-space member. Empty for a binding of bundle items only, which
+    /// the list does not shape. Revalidation compares it with the list then
+    /// installed.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub project_source_ceiling_digest: String,
+}
+
+/// Digest of a project-authoring source list, independent of its order.
+pub fn project_source_ceiling_digest(sources: &[String]) -> Result<String> {
+    let sorted: BTreeSet<&str> = sources.iter().map(String::as_str).collect();
+    ryeos_state::objects::canonical_value_digest(&serde_json::json!({
+        "project_authoring_sources": sorted,
+    }))
 }
 
 impl CompiledUiBinding {
@@ -498,7 +513,21 @@ impl SessionCompiledUiBinding {
             &mut resolve_target,
             &mut attenuated,
         );
+        let shaped_by_project_ceiling = surface_authority != Authority::Node
+            || context.identities.views.values().any(|view| {
+                matches!(
+                    view,
+                    EmbeddedViewIdentity::Resolved { identity }
+                        if Authority::of(identity) != Authority::Node
+                )
+            });
+        let project_source_ceiling_digest = if shaped_by_project_ceiling {
+            project_source_ceiling_digest(context.project_source_ceiling)?
+        } else {
+            String::new()
+        };
         let binding = CompiledUiBinding {
+            project_source_ceiling_digest,
             contract_revision: context.contract_revision.to_string(),
             principal_id: context.principal_id.to_string(),
             project_root: context.project_root.map(str::to_string),
@@ -2420,4 +2449,38 @@ mod tests {
         assert!(project_surface.binding.sources[VIEW_REF]["project"].project_authored);
     }
 
+    /// A binding with a project-authored member records the digest of the
+    /// list it was compiled under, so a changed or removed list is detected
+    /// at revalidation. The digest ignores order, changes with the list, and
+    /// is absent from a binding of bundle items, which the list never shapes.
+    #[test]
+    fn binding_with_a_project_member_records_the_project_ceiling_digest() {
+        let authored = surface_with_listed_source_and_selection();
+        let compile_under = |view_trust, list: &[String]| {
+            compile_authored_by(
+                TrustClass::TrustedBundle,
+                view_trust,
+                &["cap.read", "cap.write"],
+                list,
+                &authored,
+                bundle_service_target,
+            )
+            .binding
+            .project_source_ceiling_digest
+        };
+        let one = ceiling(&[FIELD_PROJECT]);
+        let two = ceiling(&[FIELD_PROJECT, FIELD_RUNS]);
+        let two_reordered = ceiling(&[FIELD_RUNS, FIELD_PROJECT]);
+
+        let recorded = compile_under(TrustClass::TrustedProject, &one);
+        assert_eq!(recorded, project_source_ceiling_digest(&one).unwrap());
+        assert_ne!(recorded, compile_under(TrustClass::TrustedProject, &two));
+        assert_ne!(recorded, compile_under(TrustClass::TrustedProject, &[]));
+        assert_eq!(
+            compile_under(TrustClass::TrustedProject, &two),
+            compile_under(TrustClass::TrustedProject, &two_reordered)
+        );
+        assert_eq!(compile_under(TrustClass::UntrustedProject, &one), recorded);
+        assert_eq!(compile_under(TrustClass::TrustedBundle, &one), "");
+    }
 }

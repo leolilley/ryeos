@@ -269,7 +269,6 @@ pub(crate) fn compile_session_binding(
     let root_ref = CanonicalRef::parse(&req.root_ref)
         .map_err(|error| HandlerError::BadRequest(format!("invalid root ref: {error}")))?;
     let project_subject = project_authority.map(|_| project_path.as_path());
-    let project_authoring = load_project_authoring_config(state)?;
 
     prepared
         .exec_ctx
@@ -291,6 +290,7 @@ pub(crate) fn compile_session_binding(
                 project_subject,
                 project_authority,
             )?;
+            let project_authoring = load_project_authoring_config(generation)?;
             let binding = SessionCompiledUiBinding::compile(
                 BindingCompileContext {
                     contract_revision: crate::UI_BINDING_CONTRACT_REVISION,
@@ -511,7 +511,7 @@ fn resolve_composition(
     }
 }
 
-pub(crate) fn revalidate_binding_authority(
+pub fn revalidate_binding_authority(
     generation: &ryeos_engine::engine::CheckedEngineGeneration<'_>,
     compiled: &SessionCompiledUiBinding,
     resolution_root: Option<&std::path::Path>,
@@ -534,6 +534,26 @@ pub(crate) fn revalidate_binding_authority(
     };
     let current =
         resolve_composition(generation, None, request, project_root, project_content)?.identities;
+    // A binding with a project-authored member was compiled under the node's
+    // project-authoring list. A list that has since changed, or gone, makes
+    // that binding stale exactly as a changed surface or view does.
+    let ceiling_changed = !compiled.binding.project_source_ceiling_digest.is_empty()
+        && crate::compiled_binding::project_source_ceiling_digest(
+            &load_project_authoring_config(generation)?.sources,
+        )? != compiled.binding.project_source_ceiling_digest;
+    if ceiling_changed {
+        return Err(HandlerError::Structured {
+            code: "ui_binding_stale".to_string(),
+            status: 409,
+            body: serde_json::json!({
+                "code": "ui_binding_stale",
+                "error": "the node's project-authoring source list changed after session mint",
+                "retryable": false,
+                "remediation": "mint a new UI session"
+            }),
+        }
+        .into());
+    }
     if current.surface != compiled.binding.surface || current.views != compiled.binding.views {
         return Err(HandlerError::Structured {
             code: "ui_binding_stale".to_string(),
@@ -607,51 +627,28 @@ impl ProjectAuthoringConfig {
     }
 }
 
-/// Resolve and verify the project-authoring ceiling. The resolution roots
-/// carry no project, so only installed bundles can supply the config, and it
-/// must verify as trusted; a project file of the same path is never read.
-pub fn load_project_authoring_config(state: &AppState) -> Result<ProjectAuthoringConfig> {
-    use ryeos_engine::config_loading::{ConfigLoadContext, ConfigSpec, ResolveMode};
-
-    let engine = &state.engine;
-    let roots = engine.resolution_roots(None);
-    let load_context = ConfigLoadContext {
-        roots: &roots,
-        parsers: &engine.parser_dispatcher,
-        kinds: &engine.kinds,
-        trust_store: &engine.trust_store,
-        project_authority: None,
-    };
-    let resolved = ryeos_engine::config_loading::resolve_config_spec(
-        &ConfigSpec {
-            path: PROJECT_AUTHORING_CONFIG_PATH.to_string(),
-            mode: ResolveMode::FirstMatch,
-        },
-        &load_context,
-    )
-    .map_err(|error| {
-        HandlerError::Internal(format!("resolve {PROJECT_AUTHORING_CONFIG_REF}: {error}"))
-    })?;
-    // A node with no such config installed lists nothing, so project-authored
-    // UI there binds no source at all. Absence never widens.
-    let Some(layer) = resolved.layers.first() else {
-        return Ok(ProjectAuthoringConfig {
+/// Resolve and verify the project-authoring ceiling inside one checked
+/// generation. Only installed bundles can supply the config and it must
+/// verify as trusted; a project file of the same path is never read. A node
+/// with no such config installed lists nothing, so project-authored UI there
+/// binds no source at all: absence never widens.
+pub fn load_project_authoring_config(
+    generation: &ryeos_engine::engine::CheckedEngineGeneration<'_>,
+) -> Result<ProjectAuthoringConfig> {
+    let value = generation
+        .load_trusted_bundle_config(PROJECT_AUTHORING_CONFIG_PATH)
+        .map_err(|error| {
+            HandlerError::Internal(format!("load {PROJECT_AUTHORING_CONFIG_REF}: {error}"))
+        })?;
+    match value {
+        Some(value) => Ok(ProjectAuthoringConfig::from_value(value).map_err(HandlerError::Internal)?),
+        None => Ok(ProjectAuthoringConfig {
             category: None,
             version: None,
             description: None,
             sources: Vec::new(),
-        });
-    };
-    let value = ryeos_engine::config_loading::load_and_verify_trusted_config_file(
-        &layer.path,
-        &load_context,
-    )
-    .map_err(|error| {
-        HandlerError::Internal(format!(
-            "{PROJECT_AUTHORING_CONFIG_REF} is untrusted: {error}"
-        ))
-    })?;
-    Ok(ProjectAuthoringConfig::from_value(value).map_err(HandlerError::Internal)?)
+        }),
+    }
 }
 
 pub(crate) fn compile_target(
