@@ -452,6 +452,7 @@ async fn run_graph_midflight_stop(rollover: bool) {
     })
     .await
     .expect("start daemon with the workflow bundles");
+    let daemon_started = Instant::now();
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_chain_graph(project.path(), &fixture.publisher).expect("plant chain graph");
@@ -521,15 +522,24 @@ async fn run_graph_midflight_stop(rollover: bool) {
     .await;
 
     if rollover {
-        let status = tokio::time::timeout(Duration::from_secs(300), h.child.wait())
-            .await
-            .expect("the service window ends within its bound")
-            .expect("wait for daemon exit");
+        // The window opens when the daemon starts and the rollover begins 180 s
+        // later, so the bound is measured from the window start, not from the
+        // moment this wait begins.
+        let rollover_deadline = daemon_started + Duration::from_secs(180 + 240);
+        let remaining = rollover_deadline.saturating_duration_since(Instant::now());
+        let waited = tokio::time::timeout(remaining, h.child.wait()).await;
+        let status = match waited {
+            Ok(status) => status.expect("wait for daemon exit"),
+            Err(_) => panic!(
+                "the service window did not end within its bound\n--- daemon stderr tail (last 200 lines) ---\n{}",
+                h.stderr_tail(200)
+            ),
+        };
         assert_eq!(
             status.code(),
             Some(75),
-            "a planned rollover with a graph in flight exits 75: {status:?}\n--- daemon stderr ---\n{}",
-            h.stderr_so_far()
+            "a planned rollover with a graph in flight exits 75: {status:?}\n--- daemon stderr tail (last 200 lines) ---\n{}",
+            h.stderr_tail(200)
         );
     } else {
         h.stop_gracefully()

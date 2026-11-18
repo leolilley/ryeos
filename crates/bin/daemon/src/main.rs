@@ -3312,18 +3312,36 @@ fn shutdown_drain_disposition(
     }
 }
 
-async fn hold_shutdown_owners<T>(owners: T) -> ! {
+/// Holds the custody owners for the life of the process. The hold never
+/// exits and never releases the owners; the periodic log only reports what is
+/// still held so a hung shutdown is visible in the daemon's stderr.
+async fn hold_shutdown_owners<T>(
+    owners: T,
+    drain_error: &str,
+    describe_held: impl Fn(&T) -> String,
+) -> ! {
     // The awaited future owns this tuple forever. This intentionally has no
-    // retry, timer, or endpoint contact.
+    // retry or endpoint contact; the interval only logs.
     let _retained_owners = owners;
-    std::future::pending::<()>().await;
-    unreachable!("pending custody hold cannot complete")
+    let held_since = Instant::now();
+    let mut interval = tokio::time::interval(Duration::from_secs(5));
+    loop {
+        interval.tick().await;
+        tracing::warn!(
+            shutdown_outcome = "cleanup_unproved_holding",
+            held_for_secs = held_since.elapsed().as_secs(),
+            drain_error = %drain_error,
+            held = %describe_held(&_retained_owners),
+            "daemon still holding shutdown custody owners"
+        );
+    }
 }
 
 async fn complete_shutdown_drain<T>(
     drain: std::result::Result<DrainOutcome, String>,
     prior_daemon_result: &Result<()>,
     custody: &mut Option<T>,
+    describe_held: impl Fn(&T) -> String,
 ) {
     match shutdown_drain_disposition(drain, prior_daemon_result) {
         ShutdownDrainDisposition::Drained => {
@@ -3366,6 +3384,8 @@ async fn complete_shutdown_drain<T>(
                 custody
                     .take()
                     .expect("shutdown custody owner remains present until drain disposition"),
+                &drain_error,
+                describe_held,
             )
             .await;
         }
@@ -5659,7 +5679,23 @@ async fn run(
             let drain_result = map_shutdown_drain_join(drain_task.await)
                 .map(|outcome| composition.record_latched_drain_facts(outcome));
             let mut custody = Some((held_state, &*composition));
-            complete_shutdown_drain(drain_result, &result, &mut custody).await;
+            complete_shutdown_drain(drain_result, &result, &mut custody, |(state, _)| {
+                let attached = state.state_store.attached_process_snapshot();
+                let in_process = state
+                    .state_store
+                    .active_in_process_handler_controls()
+                    .map(|handlers| handlers.len().to_string())
+                    .unwrap_or_else(|error| format!("unreadable: {error}"));
+                format!(
+                    "launch_owners={} attached_thread_ids={:?} in_process_handlers={in_process}",
+                    attached.len(),
+                    attached
+                        .iter()
+                        .map(|a| a.thread_id.as_str())
+                        .collect::<Vec<_>>()
+                )
+            })
+            .await;
             drop(custody);
             #[cfg(feature = "scheduling")]
             {
@@ -9453,8 +9489,8 @@ mod shutdown_custody_tests {
         fn wake(self: Arc<Self>) {}
     }
 
-    #[test]
-    fn unresolved_drain_keeps_real_owner_pending_despite_prior_listener_error() {
+    #[tokio::test]
+    async fn unresolved_drain_keeps_real_owner_pending_despite_prior_listener_error() {
         let prior = Err(anyhow::anyhow!("listener failed first"));
         let dropped = Arc::new(AtomicBool::new(false));
         let mut custody = Some(DropObserved(Arc::clone(&dropped)));
@@ -9462,6 +9498,7 @@ mod shutdown_custody_tests {
             Ok(DrainOutcome::Unproved),
             &prior,
             &mut custody,
+            |_| String::new(),
         ));
         let waker = Waker::from(Arc::new(NoopWake));
         let mut context = Context::from_waker(&waker);
@@ -9478,7 +9515,12 @@ mod shutdown_custody_tests {
         let prior = Ok(());
         let dropped = Arc::new(AtomicBool::new(false));
         let mut custody = Some(DropObserved(Arc::clone(&dropped)));
-        let mut future = Box::pin(complete_shutdown_drain(task_result, &prior, &mut custody));
+        let mut future = Box::pin(complete_shutdown_drain(
+            task_result,
+            &prior,
+            &mut custody,
+            |_| String::new(),
+        ));
         let waker = Waker::from(Arc::new(NoopWake));
         let mut context = Context::from_waker(&waker);
         assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
@@ -9492,7 +9534,10 @@ mod shutdown_custody_tests {
         let prior = Err(anyhow::anyhow!("listener failed first"));
         let dropped = Arc::new(AtomicBool::new(false));
         let mut custody = Some(DropObserved(Arc::clone(&dropped)));
-        complete_shutdown_drain(Ok(DrainOutcome::Clean), &prior, &mut custody).await;
+        complete_shutdown_drain(Ok(DrainOutcome::Clean), &prior, &mut custody, |_| {
+            String::new()
+        })
+        .await;
         assert!(custody.is_none());
         assert!(dropped.load(Ordering::Acquire));
     }
