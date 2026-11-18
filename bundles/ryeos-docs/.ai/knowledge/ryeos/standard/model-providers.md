@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-18T01:04:43Z:f3af60ccfbf58a3fdeaeaceb9c3b754609a8a8002fb27167a95bcb1a95f818fc:eTpCvG3onQMQLtIX65uZJmQHrrIhZw9B9xfIIjJZfd0d0CiQxrAE2eocmmqoaqTQvzyhzTrp/JlZbOGSKNTjDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-18T06:12:01Z:0a13112ce3d3a745641898c75db60ed0e620d2d920418e876f22e2d166736fc4:c2FvqCQ5hR1ZAjTNoChQdLYNdjMEV0lQxoBFl4Rdi0O60tWVcXIWy+mc0GZiYrcYVf3p8/Nv8KSZspFnik3tBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/standard
@@ -309,7 +309,11 @@ same for every model, and each tool message keeps a note saying so. A request
 carries only the newest `max_images_per_request` images; older ones become the
 `omitted_note` text in place. The estimate counts the same images by `cost`.
 A history that holds an image the entry cannot send fails the attempt with
-`image_input_unsupported` before any provider request.
+`image_input_unsupported` before any provider request. An image larger than the
+entry's `max_bytes_per_image` (or too large to read back in one callback frame)
+is not read back: it stands in the conversation as `[image not used:
+image_oversize]` and the run goes on. Images the next request carries are held
+in memory and are never evicted while that request is built.
 
 ## Provider cache usage
 
