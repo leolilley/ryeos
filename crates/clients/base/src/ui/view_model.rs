@@ -18,7 +18,7 @@ pub use super::timeline::{RyeOsTimelineDockActionVm, RyeOsTimelineDockVm, RyeOsT
 pub use dialogs::{RyeOsCommandChoice, RyeOsDialogVm, RyeOsShortcutEntryVm, RyeOsTileIntentVm};
 pub use execution::RyeOsTimelineEntryVm;
 use execution::{facet_backed_response, focused_timeline_entry, retry_intent_for_focused_row};
-pub use session::{RyeOsSessionVm, RyeOsSurfaceChoiceVm};
+pub use session::{RyeOsChipMarkVm, RyeOsSessionVm, RyeOsSurfaceChipVm, RyeOsSurfaceChoiceVm};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsViewModel {
@@ -41,6 +41,59 @@ pub struct RyeOsViewModel {
     pub transport: RyeOsTransportVm,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effect_failures: Vec<RyeOsEffectFailureVm>,
+    /// The attention overlay: what needs the user and what is running.
+    #[serde(default)]
+    pub overlay: RyeOsOverlayVm,
+}
+
+/// The attention overlay lists: rows that need the user and rows that are
+/// running, each list with the full count when the rows shown are a subset.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct RyeOsOverlayVm {
+    pub needs_you: Vec<RyeOsOverlayRowVm>,
+    pub running: Vec<RyeOsOverlayRowVm>,
+    pub needs_you_count: Option<usize>,
+    pub running_count: Option<usize>,
+}
+
+/// One overlay row: what it is, where it lives, how urgent, how long it has
+/// been waiting, and the actions offered on it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RyeOsOverlayRowVm {
+    pub id: String,
+    pub title: String,
+    #[serde(rename = "where")]
+    pub where_: String,
+    pub tone: RyeOsTone,
+    pub since_ms: i64,
+    pub actions: Vec<RyeOsOverlayActionVm>,
+}
+
+/// One action on an overlay row: the key to show, its word, and the intent
+/// the action dispatches.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RyeOsOverlayActionVm {
+    pub keys: String,
+    pub word: String,
+    pub intent: RyeOsUiIntent,
+}
+
+/// Which edge of the shell a bar sits on, or that it is hidden.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RyeOsEdgeVm {
+    #[default]
+    Left,
+    Top,
+    Right,
+    Bottom,
+    Hidden,
+}
+
+/// Where the Surface switcher is placed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RyeOsSwitcherVm {
+    pub edge: RyeOsEdgeVm,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -117,6 +170,8 @@ pub struct RyeOsPresentationChromeVm {
     pub border: String,
     pub top_bar: RyeOsTopBarVm,
     pub status_bar: RyeOsStatusBarVm,
+    #[serde(default)]
+    pub switcher: RyeOsSwitcherVm,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -134,17 +189,48 @@ pub struct RyeOsViewSetTabVm {
     pub title: String,
     pub active: bool,
     pub tile_count: usize,
+    /// Whether any of this view set's work needs the user; None when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_you: Option<bool>,
+    /// Whether any of this view set's work is running; None when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsStatusBarVm {
     pub visible: bool,
     pub segments: Vec<RyeOsStatusSegmentVm>,
-    pub key_hint: String,
+    /// Key hints for the focused context, in priority order, at most 7.
+    pub key_hints: Vec<RyeOsKeyHintVm>,
+    #[serde(default)]
+    pub edge: RyeOsEdgeVm,
+    /// Whether this is the user's first run (a fixture-set signal for now).
+    #[serde(default)]
+    pub first_run: bool,
     #[serde(default)]
     pub energy: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attention: Option<RyeOsTone>,
+}
+
+impl RyeOsStatusBarVm {
+    /// The hints as one line of text: `keys word` pieces joined by ` · `.
+    pub fn key_hint_text(&self) -> String {
+        self.key_hints
+            .iter()
+            .map(|hint| format!("{} {}", hint.keys, hint.word).trim().to_string())
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
+}
+
+/// One key hint: the keys in the shell's display notation and the word that
+/// says what they do.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RyeOsKeyHintVm {
+    pub keys: String,
+    pub word: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -775,7 +861,7 @@ pub fn build_view_model(core: &RyeOsCore) -> RyeOsViewModel {
         .as_ref()
         .map(|root| format!("/ui/events/chain/{root}"));
     RyeOsViewModel {
-        schema_version: "ryeos.ui.vm.v2".to_string(),
+        schema_version: "ryeos.ui.vm.v3".to_string(),
         generation: core.generation,
         now_ms: core.runtime.now_ms,
         tail_thread_id: route.thread,
@@ -789,6 +875,7 @@ pub fn build_view_model(core: &RyeOsCore) -> RyeOsViewModel {
         notices: core.notices_vm(),
         transport: transport_vm(core),
         effect_failures: effect_failures_vm(core),
+        overlay: RyeOsOverlayVm::default(),
     }
 }
 
@@ -847,6 +934,7 @@ fn presentation_vm(
             border: border.name().to_string(),
             top_bar: top_bar_vm(core),
             status_bar: status_bar_vm(chrome, core),
+            switcher: RyeOsSwitcherVm::default(),
         },
         metrics: presentation_metrics_vm(core, view_set),
         frame: RyeOsFrameVm {
@@ -865,8 +953,7 @@ fn top_bar_vm(core: &RyeOsCore) -> RyeOsTopBarVm {
         .and_then(|attachment| attachment.presentation.definition.surface())
         .is_some_and(|surface| surface.style.view_set_tabs);
     RyeOsTopBarVm {
-        visible: core.active_surface().is_some()
-            && (view_set_tabs || core.ui.top_status_visible),
+        visible: core.active_surface().is_some() && (view_set_tabs || core.ui.top_status_visible),
         tabs: core
             .active_surface_view_sets()
             .unwrap_or(&[])
@@ -880,6 +967,8 @@ fn top_bar_vm(core: &RyeOsCore) -> RyeOsTopBarVm {
                     .active_view_set()
                     .is_some_and(|active| active.id == view_set.id),
                 tile_count: view_set.tile_ids().len(),
+                needs_you: None,
+                running: None,
             })
             .collect(),
         focused_title: focused_tile_title(core),
@@ -1002,16 +1091,23 @@ fn presentation_activity_level(
 }
 
 fn status_bar_vm(_chrome: &RyeOsChromeVm, core: &RyeOsCore) -> RyeOsStatusBarVm {
-    let key_hint = if core
+    let hint = |keys: &str, word: &str| RyeOsKeyHintVm {
+        keys: keys.to_string(),
+        word: word.to_string(),
+    };
+    let mut key_hints = Vec::new();
+    if core
         .focused_view_instance_key()
         .and_then(|instance| core.retained_lens_frames.get(&instance))
-        .is_none_or(|frames| frames.is_empty())
+        .is_some_and(|frames| !frames.is_empty())
     {
-        "ctrl+k open · alt+t/b bars · ctrl+←/→ tab · ctrl+↑/↓ move".to_string()
-    } else {
-        "⌫ back · alt+← back · ctrl+k open · alt+t/b bars · ctrl+←/→ tab · ctrl+↑/↓ move"
-            .to_string()
-    };
+        key_hints.push(hint("⌫", "back"));
+        key_hints.push(hint("alt+←", "back"));
+    }
+    key_hints.push(hint("ctrl+k", "open"));
+    key_hints.push(hint("alt+t/b", "bars"));
+    key_hints.push(hint("ctrl+←/→", "tab"));
+    key_hints.push(hint("ctrl+↑/↓", "move"));
     // This is quiet interaction chrome, not a second diagnostics dashboard.
     // Root-session project and execution counters become actively misleading
     // once exact mounted attachments span projects.
@@ -1046,7 +1142,9 @@ fn status_bar_vm(_chrome: &RyeOsChromeVm, core: &RyeOsCore) -> RyeOsStatusBarVm 
     RyeOsStatusBarVm {
         visible: core.ui.bottom_status_visible,
         segments,
-        key_hint,
+        key_hints,
+        edge: RyeOsEdgeVm::Bottom,
+        first_run: false,
         energy: core.runtime.activity_pulse.clamp(0.0, 1.0),
         attention: (core.runtime.now_ms < core.runtime.attention_until_ms)
             .then_some(RyeOsTone::Warn),
@@ -2737,6 +2835,12 @@ fn session_vm(core: &RyeOsCore) -> RyeOsSessionVm {
                         binding: surface.binding().clone(),
                     }
                 }),
+                chip: RyeOsSurfaceChipVm {
+                    mark: RyeOsChipMarkVm::Initial,
+                    authored_in_project: false,
+                },
+                needs_you: None,
+                running: None,
             })
             .collect(),
         user_principal_id: browser.and_then(|session| session.user_principal_id.clone()),
@@ -4730,9 +4834,8 @@ mod tests {
 
     #[test]
     fn surface_style_view_set_tabs_reaches_top_bar_visibility() {
-        let yaml_surface = |yaml: &str| -> serde_json::Value {
-            serde_yaml::from_str(yaml).unwrap()
-        };
+        let yaml_surface =
+            |yaml: &str| -> serde_json::Value { serde_yaml::from_str(yaml).unwrap() };
         let with_tabs = test_support_core(session_with_surface(yaml_surface(
             "name: Tabs\nstyle:\n  view_set_tabs: true\n",
         )));

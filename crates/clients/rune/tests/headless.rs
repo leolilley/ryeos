@@ -380,7 +380,7 @@ fn the_status_bar_shows_only_its_segments() {
         })
         .collect();
     assert!(
-        status.key_hint.contains("ctrl+k open"),
+        status.key_hint_text().contains("ctrl+k open"),
         "the fixture's hint keeps its ASCII core"
     );
     assert!(

@@ -1020,7 +1020,7 @@ fn status_bar(vm: &RyeOsViewModel) -> El {
         .child(chip)
         .on_press(|app: &mut App| app.ui(RyeOsUiEvent::OpenLauncher));
     let keys = island().min_w(0.0).gap(6.0).child(launcher).child(
-        text(theme::drawable(&model.key_hint, theme::Face::Ui).into_owned())
+        text(theme::drawable(&model.key_hint_text(), theme::Face::Ui).into_owned())
             .font(theme::TYPE_MICRO)
             .color(t.ink_at(0.55))
             .truncate()

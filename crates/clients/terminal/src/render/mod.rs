@@ -562,7 +562,11 @@ mod tests {
                 tone: ryeos_client_base::ui::view_model::RyeOsTone::Neutral,
                 grow: false,
             }];
-        vm.presentation.chrome.status_bar.key_hint = "KEY".into();
+        vm.presentation.chrome.status_bar.key_hints =
+            vec![ryeos_client_base::ui::view_model::RyeOsKeyHintVm {
+                keys: "KEY".into(),
+                word: String::new(),
+            }];
         let mut long = TextSurface::new(40, 1);
         chrome::draw_status_bar(&mut long, &vm);
         let text = surface_text(&long);
@@ -604,7 +608,11 @@ mod tests {
     #[test]
     fn the_bars_fit_any_width_and_the_plus_survives_an_exact_fill() {
         let mut vm = build_view_model(&empty_center_core());
-        vm.presentation.chrome.status_bar.key_hint = "ctrl+k open".into();
+        vm.presentation.chrome.status_bar.key_hints =
+            vec![ryeos_client_base::ui::view_model::RyeOsKeyHintVm {
+                keys: "ctrl+k".into(),
+                word: "open".into(),
+            }];
         for width in [1, 2, 4, 9, 20, 40] {
             for draw in [
                 chrome::draw_switcher as fn(&mut TextSurface, usize, &RyeOsViewModel),

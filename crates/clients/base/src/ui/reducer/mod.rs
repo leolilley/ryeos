@@ -1986,7 +1986,7 @@ mod tests {
                 .presentation
                 .chrome
                 .status_bar
-                .key_hint
+                .key_hint_text()
                 .contains("ctrl+k")
         );
     }

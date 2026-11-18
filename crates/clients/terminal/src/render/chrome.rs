@@ -171,7 +171,7 @@ pub fn draw_status_bar(surface: &mut TextSurface, vm: &RyeOsViewModel) {
         surface.draw_text(
             1,
             y,
-            &truncate(&model.key_hint, keys_end - 1),
+            &truncate(&model.key_hint_text(), keys_end - 1),
             style_muted().bg(bg),
         );
     }
