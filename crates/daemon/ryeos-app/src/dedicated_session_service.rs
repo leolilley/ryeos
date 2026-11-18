@@ -2818,7 +2818,8 @@ fn validate_approval_request_fact(
             .as_deref()
             .ok_or_else(|| anyhow!("pending approval has no authoritative event timestamp"))?,
     )?
-    .timestamp_millis();
+    .checked_mul(1_000)
+    .ok_or_else(|| anyhow!("pending approval timestamp exceeds range"))?;
     accepted_at_ms
         .checked_add(APPROVAL_REQUEST_TTL_MS)
         .ok_or_else(|| anyhow!("pending approval expiry exceeds timestamp range"))

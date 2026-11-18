@@ -53,7 +53,10 @@ fn scheduled_project(h: &DaemonHarness, name: &str, signer: Option<&SigningKey>)
 /// narrowed to this tool, so the scheduler's pre-authorization admits the
 /// fire and only the trust gate is left to refuse it.
 async fn schedule_gap_echo(h: &DaemonHarness, schedule_id: &str, project_root: &str) {
-    let fire_at = chrono::Utc::now() + chrono::Duration::seconds(6);
+    let fire_at = ryeos_effect_contract::rfc3339::format_unix_millis(
+        lillux::time::timestamp_millis() + 6_000,
+    )
+    .unwrap();
     let (status, body) = h
         .post_execute(
             "service:scheduler/register",
@@ -63,7 +66,7 @@ async fn schedule_gap_echo(h: &DaemonHarness, schedule_id: &str, project_root: &
                 "item_ref": "tool:gap/echo",
                 "ref_bindings": {},
                 "schedule_type": "at",
-                "expression": fire_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                "expression": fire_at,
                 "params": {},
                 "timezone": "UTC",
                 "misfire_policy": "skip",

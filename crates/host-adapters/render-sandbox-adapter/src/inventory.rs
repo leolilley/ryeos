@@ -266,7 +266,7 @@ pub(crate) fn scan_page(
         let created_at = match item.get("createdAt") {
             None | Some(Value::Null) => None,
             Some(Value::String(value)) => {
-                chrono::DateTime::parse_from_rfc3339(value)
+                ryeos_effect_contract::rfc3339::parse_unix_nanos(value)
                     .context("provider list entry creation time is not RFC 3339")?;
                 Some(value.clone())
             }

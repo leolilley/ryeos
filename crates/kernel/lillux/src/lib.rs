@@ -4,6 +4,7 @@ pub mod character_device;
 pub mod child_group;
 pub mod crypto;
 pub mod custody;
+pub mod descriptor_budget;
 pub mod environment;
 pub mod exec;
 pub mod guest_account;

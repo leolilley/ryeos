@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-17T22:59:57Z:36fb1bd9b93c45222debaec417aa85d2fc1ab02d83c094939a2f39429020e281:p/+YyINPISqMimoZ96b2/66Vt1g1CH4P3UZEbN+Qt1ZJXz8EJIy3CNRMG1i2XaxBoCsOCXFFxYmSHFp6yMCbBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T02:10:47Z:7e36f50c8a39b9a10b68e261b5844a09945a2e0e3d856c68cc1fa50d390b8b6c:JEmrPRzYqB3Z9PfIwMr9LeybCyJSG53XrG53VDSF24TzdEWixZlHlyiL24KJG1F5zJ6Hh67/HJejtAwrR6MQBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-lens
 title: Lens
 version: "1.0.0"
@@ -96,7 +96,7 @@ input:
         item_ref: directive:ryeos/ops/base
         project_path: "@session:project_root"
         ref_bindings:
-          model: directive:ryeos/ops/base
+          model: directive:ryeos/models/general
 
 affordances:
   - id: view.threads

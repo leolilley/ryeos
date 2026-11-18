@@ -4330,6 +4330,7 @@ impl ThreadLifecycleService {
             reason,
             request_fingerprint,
             Some(launch_metadata),
+            crate::launch_metadata::ContinuationAuthorityTransitionKind::OperatorFollowUp,
             initial_events,
         )?;
 

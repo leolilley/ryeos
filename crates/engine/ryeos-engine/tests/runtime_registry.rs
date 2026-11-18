@@ -294,6 +294,37 @@ fn ref_binding_source_is_explicit_and_closed() {
 }
 
 #[test]
+fn ref_binding_continuation_rebind_defaults_to_never_and_is_closed() {
+    use ryeos_engine::runtime_registry::ContinuationRebind;
+    let field = "      project_result_requirement: none\n";
+
+    let yaml = parse_via_registry(FULL_RUNTIME_YAML).expect("full YAML parses");
+    assert_eq!(
+        yaml.launch_contract.ref_bindings["context"].continuation_rebind,
+        ContinuationRebind::Never,
+    );
+
+    let stated = |word: &str| {
+        FULL_RUNTIME_YAML.replace(
+            field,
+            &format!("{field}      continuation_rebind: {word}\n"),
+        )
+    };
+    let yaml = parse_via_registry(&stated("never")).expect("never parses");
+    assert_eq!(
+        yaml.launch_contract.ref_bindings["context"].continuation_rebind,
+        ContinuationRebind::Never,
+    );
+    let yaml = parse_via_registry(&stated("operator")).expect("operator parses");
+    assert_eq!(
+        yaml.launch_contract.ref_bindings["context"].continuation_rebind,
+        ContinuationRebind::Operator,
+    );
+    assert!(parse_via_registry(&stated("machine")).is_err());
+    assert!(parse_via_registry(&stated("true")).is_err());
+}
+
+#[test]
 fn ref_binding_project_result_requirement_is_explicit_and_closed() {
     let field = "      project_result_requirement: none\n";
     assert!(parse_via_registry(&FULL_RUNTIME_YAML.replace(field, "")).is_err());

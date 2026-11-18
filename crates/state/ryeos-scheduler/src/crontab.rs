@@ -267,9 +267,7 @@ mod tests {
     fn next_at_future() {
         let now = 1_000_000;
         let future = now + 600_000;
-        let ts = chrono::DateTime::from_timestamp_millis(future)
-            .unwrap()
-            .to_rfc3339();
+        let ts = ryeos_effect_contract::rfc3339::format_unix_millis(future).unwrap();
         let result = compute_next_fire("at", &ts, "UTC", now, None).unwrap();
         assert!(result.is_some());
     }
@@ -284,7 +282,7 @@ mod tests {
 
     #[test]
     fn next_cron_basic() {
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = lillux::time::timestamp_millis();
         let result = compute_next_fire("cron", "0 * * * * *", "UTC", now, None).unwrap();
         assert!(result.is_some());
         assert!(result.unwrap() > now);
@@ -348,10 +346,10 @@ mod tests {
 
     #[test]
     fn at_is_not_past_future_timestamp() {
-        let future =
-            chrono::DateTime::from_timestamp_millis(lillux::time::timestamp_millis() + 600_000)
-                .unwrap()
-                .to_rfc3339();
+        let future = ryeos_effect_contract::rfc3339::format_unix_millis(
+            lillux::time::timestamp_millis() + 600_000,
+        )
+        .unwrap();
         assert!(!is_at_past(&future, lillux::time::timestamp_millis()));
     }
 
