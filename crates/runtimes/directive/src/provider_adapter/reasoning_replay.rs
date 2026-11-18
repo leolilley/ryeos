@@ -103,7 +103,9 @@ pub fn owed_missing_in_turn(
 
 /// The bytes of reasoning values a request carries because of the declared
 /// placements: every placement key found on a rendered assistant message or
-/// on one of its rendered tool calls.
+/// on one of its rendered tool calls. Only the latency-profiling metrics read
+/// it, so it is compiled for that feature and for tests.
+#[cfg(any(test, feature = "latency-profiling"))]
 pub fn replayed_bytes(converted: &[Value], config: &ReasoningSchemaConfig) -> u64 {
     let Some(replay) = config.replay.as_ref() else {
         return 0;
