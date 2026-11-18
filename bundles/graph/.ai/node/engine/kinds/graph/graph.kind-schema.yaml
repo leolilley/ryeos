@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-17T05:02:42Z:44f787d4e22dd5bf4088f8349ba77e436376b0a524dec88172b422b24f75d497:1b5TggEc44zvd7QIgzRjgu6wN6AzjcqBoicsY2gIE1rQlARiBUfT/K4ud9ayDe/W9fSQyehL42BFBOW2tPuDAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T17:22:28Z:56caa8258b80e0f0dfd107339f22a63d5ebe0ed3594619ff9db5cd0492e27ea7:kQ3LC5x6xsK67bi1+hrygW8lN0d5ZLAbW1nl8jomwDTP4yv6527qyq2ssgv/D+45YPJZpJyref810/nCW2E6DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/graph"
 inventory_policy:
   admission:
@@ -125,6 +125,11 @@ composer_config:
     - name: requires
       strategy: narrow_requires_capabilities
       expect_value_type: mapping
+    # Execution limits are merged generically by the launcher (the same
+    # nested `deadline` group a directive may author).
+    - name: limits
+      strategy: dict_merge_root_last
+      expect_value_type: mapping
     # Atomic inherit-or-replace: a child's declaration replaces the inherited
     # set entirely; explicit `[]` declares none and is preserved as such.
     - name: external_content
@@ -168,6 +173,9 @@ composed_value_contract:
     # Unified capability requirements narrowed across every direct ancestor
     # edge and finally bounded by the signed manifest at launch.
     requires:
+      type: single
+      prim: mapping
+    limits:
       type: single
       prim: mapping
     external_content:

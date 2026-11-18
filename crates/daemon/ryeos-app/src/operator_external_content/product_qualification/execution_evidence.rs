@@ -645,6 +645,7 @@ fn direct_process_settlement(
             .process_scope_readiness
             .trusted_exclusive_session
             .ready,
+        state.isolation.is_enforced(),
     )?;
     crate::process::assert_reaped_process_group_absent(&settlement.process_identity)
         .context("direct qualification verifier process authority is not settled")?;
@@ -663,6 +664,7 @@ fn verifier_settlement_authority(
     kind: crate::runtime_db::ThreadProcessSettlementKind,
     scope: Option<&lillux::ProcessScopeRecovery>,
     trusted_process_group_admitted: bool,
+    enforced_isolation: bool,
 ) -> anyhow::Result<VerifierProcessSettlementAuthority> {
     match kind {
         crate::runtime_db::ThreadProcessSettlementKind::ReapedScopeEmpty => Ok(
@@ -673,6 +675,12 @@ fn verifier_settlement_authority(
             },
         ),
         crate::runtime_db::ThreadProcessSettlementKind::ReapedGroupAbsent => {
+            if enforced_isolation {
+                bail!(
+                    "the trusted process-group lane is never a substitute under enforcement; \
+                     an enforced node settles direct verifiers by retained containment"
+                );
+            }
             if !trusted_process_group_admitted {
                 bail!("node policy does not admit trusted process-group verifier cleanup");
             }
@@ -1908,7 +1916,7 @@ mod settlement_grading_tests {
                 "namespace": {"device": 1, "inode": 2}}
         }));
         let grade = |kind, scope: Option<&lillux::ProcessScopeRecovery>, trusted| {
-            verifier_settlement_authority(kind, scope, trusted).ok()
+            verifier_settlement_authority(kind, scope, trusted, false).ok()
         };
         assert_eq!(
             grade(Kind::ReapedScopeEmpty, Some(&cgroup), false),
@@ -1925,6 +1933,21 @@ mod settlement_grading_tests {
         // The trusted lane needs the node to admit it; recovery death never grades.
         assert_eq!(grade(Kind::ReapedGroupAbsent, None, false), None);
         assert_eq!(grade(Kind::RecoveryDeath, Some(&namespace), true), None);
+        // Enforcement never admits the trusted lane, whatever the flag says,
+        // and still admits retained-containment settlement.
+        let refusal = verifier_settlement_authority(Kind::ReapedGroupAbsent, None, true, true)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refusal
+                .contains("the trusted process-group lane is never a substitute under enforcement"),
+            "{refusal}"
+        );
+        assert_eq!(
+            verifier_settlement_authority(Kind::ReapedScopeEmpty, Some(&namespace), true, true)
+                .ok(),
+            Some(Authority::ContainmentEmpty)
+        );
         // Against a signed policy: containment_empty accepts a namespace or a
         // cgroup scope settlement, scope_empty only a cgroup scope's.
         let accepted = |observed: Authority, minimum: Authority| observed.satisfies(minimum);

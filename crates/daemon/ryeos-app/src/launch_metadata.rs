@@ -58,7 +58,7 @@ fn validate_canonical_capabilities(label: &str, capabilities: &[String]) -> anyh
 /// authority shape bumps it; a stored record of any other version is refused
 /// before its nested authority is decoded, and the execution-history reset
 /// discards it.
-pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 37;
+pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 38;
 
 /// Per-thread daemon-owned state directory.
 ///
@@ -255,6 +255,14 @@ pub struct RuntimeLaunchMetadata {
     /// grant-bearing caller admitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub covering_authority: Option<CoveringAuthority>,
+
+    /// How much of the execution tree's run deadline this thread leaves to
+    /// its ancestors, in milliseconds. Sealed at the thread's first launch and
+    /// copied unchanged to every continuation, resume and follow successor, so
+    /// a continued child keeps the window its parent reserved. `None` until
+    /// the first launch seals it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_hold_back_ms: Option<u64>,
 }
 
 /// The caller that lent a thread its declared capabilities.
@@ -312,6 +320,7 @@ impl Default for RuntimeLaunchMetadata {
             accounting_scope: None,
             effect_authority: None,
             covering_authority: None,
+            deadline_hold_back_ms: None,
         }
     }
 }
@@ -899,6 +908,11 @@ impl RuntimeLaunchMetadata {
                 &self.covering_authority,
                 &attempt.covering_authority,
             )?,
+            deadline_hold_back_ms: exact(
+                "deadline hold-back",
+                &self.deadline_hold_back_ms,
+                &attempt.deadline_hold_back_ms,
+            )?,
         };
         merged.validate()?;
         Ok(merged)
@@ -941,6 +955,7 @@ impl RuntimeLaunchMetadata {
                 || self.follow_launch_window.is_some()
                 || self.isolation.is_some()
                 || self.effect_authority.is_some()
+                || self.deadline_hold_back_ms.is_some()
             {
                 anyhow::bail!(
                     "in-process handler launch metadata contains subprocess-only authority"
@@ -1086,6 +1101,7 @@ impl RuntimeLaunchMetadata {
             accounting_scope: None,
             effect_authority: None,
             covering_authority: None,
+            deadline_hold_back_ms: None,
         }
     }
 
@@ -1113,6 +1129,7 @@ impl RuntimeLaunchMetadata {
             && self.isolation.is_none()
             && self.accounting_scope.is_none()
             && self.effect_authority.is_none()
+            && self.deadline_hold_back_ms.is_none()
     }
 
     /// Build the immutable CAS launch closure at admission. The runtime ledger
@@ -1348,6 +1365,7 @@ impl RuntimeLaunchMetadata {
             accounting_scope: self.accounting_scope.clone(),
             effect_authority: self.effect_authority.clone(),
             covering_authority: self.covering_authority.clone(),
+            deadline_hold_back_ms: self.deadline_hold_back_ms,
         }
     }
 
@@ -1385,12 +1403,19 @@ impl RuntimeLaunchMetadata {
             accounting_scope: self.accounting_scope.clone(),
             effect_authority: self.effect_authority.clone(),
             covering_authority: self.covering_authority.clone(),
+            deadline_hold_back_ms: self.deadline_hold_back_ms,
             ..Self::default()
         }
     }
 
     /// Record the principal (and grant digest, when grant-backed) that covered
     /// this thread's declared capabilities.
+    /// Seal the share of the run deadline this thread leaves to its ancestors.
+    pub fn with_deadline_hold_back_ms(mut self, hold_back_ms: u64) -> Self {
+        self.deadline_hold_back_ms = Some(hold_back_ms);
+        self
+    }
+
     pub fn with_covering_authority(mut self, authority: CoveringAuthority) -> Self {
         self.covering_authority = Some(authority);
         self
@@ -1971,6 +1996,7 @@ mod tests {
                 principal: "fp:caller".to_string(),
                 grant_digest: Some("a".repeat(64)),
             }),
+            deadline_hold_back_ms: Some(30_000),
         };
         let json = serde_json::to_string(&m).unwrap();
         let back: RuntimeLaunchMetadata = serde_json::from_str(&json).unwrap();
@@ -2050,6 +2076,7 @@ mod tests {
                 directive_budget_id: Some("D-source".to_string()),
             }),
             admitted_execution_closure: Some(execution_closure.clone()),
+            deadline_hold_back_ms: Some(40_000),
             ..RuntimeLaunchMetadata::default()
         };
         let successor_resume = resume_context(ProjectContext::SnapshotHash {
@@ -2083,6 +2110,11 @@ mod tests {
             "continuation must carry the accounting scope forward"
         );
         assert!(successor.accounting_scope.is_some());
+        assert_eq!(
+            successor.deadline_hold_back_ms,
+            Some(40_000),
+            "a continued child keeps the window its parent reserved"
+        );
     }
 
     #[test]

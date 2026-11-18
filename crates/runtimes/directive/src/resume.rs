@@ -5,7 +5,9 @@ use ryeos_runtime::ReplayedEventRecord;
 use ryeos_runtime::callback_client::{CallbackClient, RuntimeReplayBudget};
 use ryeos_state::ThreadUsage;
 
-use crate::directive::{DIRECTIVE_RETURN_TOOL, ProviderMessage, ProviderMessageExt};
+use crate::directive::{
+    DIRECTIVE_RETURN_TOOL, ProviderMessage, ProviderMessageExt, TIME_LEFT_TOOL,
+};
 use crate::result_guard::ResultGuard;
 use crate::runner::ToolOccurrence;
 use ryeos_provider_contract::ToolResultStatus;
@@ -49,6 +51,9 @@ pub struct ResumeState {
     /// The latest frame recorded on the path: what the model was given besides
     /// the conversation. `None` when the path recorded none.
     pub frame: Option<CognitionFramePayload>,
+    /// Whether the run-deadline wrap-up input is already on the path, so a
+    /// recovered or continued segment does not tell the model twice.
+    pub deadline_wrap_up_delivered: bool,
 }
 
 impl ResumeState {
@@ -222,7 +227,25 @@ pub async fn load_resume_state(
         provider_retry_testimony_digests,
         trailing_length_turns,
         frame,
+        deadline_wrap_up_delivered: recover_wrap_up_delivered(&events)?,
     })
+}
+
+/// Whether any input on the path is the run-deadline wrap-up notice.
+fn recover_wrap_up_delivered(events: &[ReplayedEventRecord]) -> Result<bool> {
+    let mut assembler = ryeos_runtime::CognitionInAssembler::default();
+    for event in events
+        .iter()
+        .filter(|event| event.event_type == "cognition_in")
+    {
+        if let ryeos_runtime::CognitionInAssembly::Complete(input) =
+            assembler.push(&event.payload)?
+            && input.kind.as_deref() == Some(ryeos_runtime::cognition::KIND_DEADLINE_WRAP_UP)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Count the final turns, newest first, that ended at the output limit,
@@ -482,7 +505,11 @@ fn recover_tool_state(
                 }
                 validate_replayed_tool_event(event, &open[occurrence_index].occurrence.call)?;
                 open[occurrence_index].occurrence.start_recorded = true;
-                if open[occurrence_index].occurrence.call.name != DIRECTIVE_RETURN_TOOL {
+                // The lifecycle return and the in-process time-left tool take no
+                // tool-call budget, so their starts never count against it.
+                if open[occurrence_index].occurrence.call.name != DIRECTIVE_RETURN_TOOL
+                    && open[occurrence_index].occurrence.call.name != TIME_LEFT_TOOL
+                {
                     started.push(StartedToolOccurrence {
                         operation_id: operation_id.to_string(),
                         call: open[occurrence_index].occurrence.call.clone(),
@@ -2441,6 +2468,32 @@ mod tests {
             format!("{error:#}").contains("cannot be a duplicate"),
             "{error:#}"
         );
+    }
+
+    #[test]
+    fn a_recorded_wrap_up_input_is_found_on_replay_and_nothing_else_is() {
+        let record = |payload: Value| ReplayedEventRecord {
+            event_type: "cognition_in".to_string(),
+            payload,
+        };
+        let operator = vec![
+            record(json!({"turn": 1})),
+            record(input("Deadline notice: about 5 seconds remain")),
+        ];
+        assert!(!recover_wrap_up_delivered(&operator).unwrap());
+
+        let mut with_notice = operator.clone();
+        with_notice.extend(
+            ryeos_runtime::encode_cognition_in_payloads(
+                &ryeos_runtime::CognitionInput::text("harness", "wrap up")
+                    .with_kind(ryeos_runtime::cognition::KIND_DEADLINE_WRAP_UP)
+                    .pinned(),
+            )
+            .unwrap()
+            .into_iter()
+            .map(record),
+        );
+        assert!(recover_wrap_up_delivered(&with_notice).unwrap());
     }
 
     #[test]
