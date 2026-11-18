@@ -24,6 +24,11 @@ use serde_json::Value;
 
 pub use ryeos_effect_contract::{DispatchResultProjection, RetainedEffectResult};
 
+/// Outcome code of a tool call the daemon stopped at its caller's run
+/// deadline. The call was cut mid-run: its outcome is unknown and its side
+/// effects may have partially happened.
+pub const TOOL_INTERRUPTED_AT_DEADLINE_OUTCOME: &str = "tool_interrupted_at_deadline";
+
 /// Runtime-neutral provenance for one callback-dispatched action.
 ///
 /// The daemon owns this statement. Kind runtimes may project it into their

@@ -9133,6 +9133,7 @@ async fn prepare_follow_child_launch_inner(
         effect_authority: None,
         finalized_direct: None,
         host_access: None,
+        deadline_end_at_ms: None,
     };
 
     let project_path = execution.provenance.effective_path().to_path_buf();

@@ -223,6 +223,27 @@ fn tool_call_limit_error() -> String {
 /// into the provider transcript.
 const MAX_ERROR_ENVELOPE_BYTES: usize = 32 * 1024;
 
+/// Outcome code the daemon records for a tool it stopped at the run deadline.
+const TOOL_INTERRUPTED_OUTCOME: &str =
+    ryeos_runtime::callback_contract::TOOL_INTERRUPTED_AT_DEADLINE_OUTCOME;
+
+/// What the model sees for a tool cut at the run deadline: an interrupted call
+/// with an unknown outcome. The call is not retried, and its side effects may
+/// have partially happened.
+fn tool_interrupted_envelope() -> String {
+    serde_json::to_string(&json!({
+        "error": {
+            "code": TOOL_INTERRUPTED_OUTCOME,
+            "outcome": "unknown",
+            "message": "The tool was stopped at the run deadline while it was running. \
+                        Its outcome is unknown and its side effects may have partially \
+                        happened. It was not retried.",
+            "retryable": false,
+        }
+    }))
+    .expect("fixed interrupted-tool envelope serializes")
+}
+
 fn callback_error_envelope(error: &ryeos_runtime::callback::CallbackError) -> String {
     let (code, retryable) = match error {
         ryeos_runtime::callback::CallbackError::ActionFailed {
@@ -4264,6 +4285,14 @@ impl Runner {
     /// Applies the cross-result guard (truncation + duplicate collapse), so it
     /// MUST be called in call order — the guard is ordering-sensitive state.
     fn rendered_success(&mut self, tool_name: &str, response_result: &Value) -> RenderedToolResult {
+        // A tool the daemon stopped at the run deadline did not succeed and did
+        // not plainly fail: it was cut mid-run. The model sees that as an
+        // error whose outcome is unknown, never as a result.
+        if response_result.get("outcome_code").and_then(Value::as_str)
+            == Some(TOOL_INTERRUPTED_OUTCOME)
+        {
+            return Self::rendered_error_envelope(tool_name, tool_interrupted_envelope());
+        }
         // Model-visible bytes are ONLY the leaf dispatcher's `result` — never
         // the wrapping `thread` snapshot. Without this, the LLM saw the whole
         // {thread, result} envelope and the child-thread metadata leaked into
