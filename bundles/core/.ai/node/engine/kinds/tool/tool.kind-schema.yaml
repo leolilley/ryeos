@@ -1,6 +1,6 @@
-# ryeos:signed:2026-11-17T12:51:39Z:13e754d067c91c1a7749b8ae696af3a72dfd2d2d114da0e4308e8ca9b3f25ad2:fIj9Af0RWGO9eEVFcnzQFOVLPVXCt2nhB1mogavkUlePmgW+Lz+aHipiPa3hctk635RwVF+gg5zGx1XQuGtlDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T01:31:45Z:74e6540a640e6af0dd63807d2238af2b46dc614e383a79b234f3f1193de20a10:xP20gufybccMWDOhLaVBPGQ4i22dRFnYxtEA3pTNdOJWi2MuFGfLEURYNR8IzEUGNOdqtMJMyw7QklZAmdDNCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/tool"
-version: "1.6.0"
+version: "1.7.0"
 location:
   directory: tools
   excluded_directories: [lib]
@@ -241,6 +241,11 @@ composed_value_contract:
       prim: string
     # How the timeline draws a call of this tool: ordered paths over the call's
     # arguments and result for the headline, detail and body, and a count key.
+    # An optional `changes` key says where the call's file change is, in
+    # exactly one of two forms: `{patch: <path>}` (unified diff text) or
+    # `{edit: {path: <path>, before: <path>, after: <path>}}`; its paths read
+    # only `arguments` and `result`, and the timeline definition decides
+    # whether a change is drawn at all.
     # It is a hint for display, never authority; the timeline service reads it
     # from the composed value pinned in the call's launch capsule.
     presentation:

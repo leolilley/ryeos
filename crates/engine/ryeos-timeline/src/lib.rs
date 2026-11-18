@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use ryeos_changeset::{Caps, ChangeSet};
+use ryeos_changeset::{Caps, ChangeSet, TruncatedReason};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -44,8 +44,29 @@ pub struct Definition {
     /// some entry's type and latest state names what the thread is doing now.
     #[serde(default)]
     pub lane: Vec<LaneRow>,
+    /// Policy for the typed blocks entries carry, read by whoever serves the
+    /// timeline.
+    #[serde(default)]
+    pub blocks: BlockPolicy,
     /// Rules per event type. The first rule whose `when` holds applies.
     pub events: BTreeMap<String, Vec<Rule>>,
+}
+
+/// Policy for serving entries' blocks.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct BlockPolicy {
+    /// Most serialised block bytes one served window carries; see
+    /// [`bound_blocks`].
+    pub window_bytes: usize,
+}
+
+impl Default for BlockPolicy {
+    fn default() -> Self {
+        Self {
+            window_bytes: 512 * 1024,
+        }
+    }
 }
 
 /// Policy for the passes over entries.
@@ -285,6 +306,77 @@ pub const MAX_ENTRY_BLOCKS: usize = 4;
 pub enum Block {
     /// A change to files, already sanitised and bounded.
     Changes(ChangeSet),
+}
+
+impl Block {
+    /// The block's serialised size.
+    pub fn bytes(&self) -> usize {
+        // These plain data shapes always serialise; a failure would only make
+        // the block count as too large to carry.
+        serde_json::to_vec(self).map_or(usize::MAX, |bytes| bytes.len())
+    }
+
+    /// Reduces the block to its summary (for a change: paths, operations and
+    /// counts), recording that a window had no room for the rest.
+    fn degrade(&mut self) {
+        match self {
+            Block::Changes(set) => set.degrade(TruncatedReason::Window),
+        }
+    }
+}
+
+/// Serialised bytes of every block in `items`, nested members included.
+pub fn block_bytes(items: &[Item]) -> usize {
+    fn of(item: &Item) -> usize {
+        match item {
+            Item::Entry(entry) => entry.blocks.iter().map(Block::bytes).sum(),
+            Item::Cluster(cluster) => cluster
+                .members
+                .iter()
+                .flat_map(|member| &member.blocks)
+                .map(Block::bytes)
+                .sum(),
+            Item::Recap(recap) => recap.members.iter().map(of).sum(),
+        }
+    }
+    items.iter().map(of).fold(0, usize::saturating_add)
+}
+
+/// Keeps the blocks of `items` within `budget` serialised bytes. Items are
+/// oldest first; the newest entries keep their blocks whole, and once the
+/// budget is spent every older block is reduced to its summary. Which blocks
+/// are reduced depends only on `items` and `budget`.
+pub fn bound_blocks(items: &mut [Item], budget: usize) {
+    fn bound_entry(entry: &mut Entry, left: &mut usize, spent: &mut bool) {
+        for block in entry.blocks.iter_mut().rev() {
+            let bytes = block.bytes();
+            if !*spent && bytes <= *left {
+                *left -= bytes;
+            } else {
+                *spent = true;
+                block.degrade();
+            }
+        }
+    }
+    fn bound_item(item: &mut Item, left: &mut usize, spent: &mut bool) {
+        match item {
+            Item::Entry(found) => bound_entry(found, left, spent),
+            Item::Cluster(cluster) => {
+                for member in cluster.members.iter_mut().rev() {
+                    bound_entry(member, left, spent);
+                }
+            }
+            Item::Recap(recap) => {
+                for member in recap.members.iter_mut().rev() {
+                    bound_item(member, left, spent);
+                }
+            }
+        }
+    }
+    let (mut left, mut spent) = (budget, false);
+    for found in items.iter_mut().rev() {
+        bound_item(found, &mut left, &mut spent);
+    }
 }
 
 /// The closed set of entries a rule can create. `cluster` and `recap` are

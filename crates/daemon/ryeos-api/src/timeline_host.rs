@@ -18,6 +18,7 @@
 //! content does, so unchanged items are never resent. A client that lacks an id
 //! in `order` (an older item slid into the window) refetches without `since`.
 
+use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
@@ -31,7 +32,7 @@ use ryeos_app::state::AppState;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::config_loading::{ConfigLoadContext, ConfigSpec, ResolveMode};
 use ryeos_state::queries::ThreadUsageTotals;
-use ryeos_timeline::{Definition, Folder, Timeline};
+use ryeos_timeline::{Definition, Folder, Item, Timeline};
 
 const TIMELINE_CACHE_MAX_ENTRIES: usize = 64;
 const PRESENTATION_CACHE_MAX_ENTRIES: usize = 256;
@@ -86,6 +87,9 @@ const MAX_LIMIT: usize = 2_000;
 const REPLAY_PAGE_EVENTS: usize = 500;
 /// A tool's presentation block larger than this (serialized) is ignored.
 const MAX_PRESENTATION_BYTES: usize = 8 * 1024;
+/// One window carries at most this many bytes of entry blocks, whatever the
+/// definition's `blocks.window_bytes` says.
+const MAX_WINDOW_BLOCK_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -254,6 +258,9 @@ struct Folded {
     /// Set when a push re-derived earlier entries (see `Folder::rewritten_at`).
     rewritten_at: Option<i64>,
     timeline: Arc<Timeline>,
+    /// Most block bytes a window of this timeline carries: the definition's
+    /// budget under the host ceiling.
+    block_budget: usize,
 }
 
 /// The `presentation` block of a tool call's child thread, as the fold's
@@ -373,6 +380,7 @@ fn timeline_for(
         highest: chain.highest,
         rewritten_at: chain.folder.rewritten_at(),
         timeline: chain.timeline.clone(),
+        block_budget: definition.blocks.window_bytes.min(MAX_WINDOW_BLOCK_BYTES),
     })
 }
 
@@ -381,6 +389,20 @@ fn timeline_for(
 /// so it is not settled.
 fn chain_settled(status: &str) -> bool {
     status != "continued" && crate::routes::invokers::stream_helpers::is_terminal_status(status)
+}
+
+/// The window with its blocks inside `budget`. The newest entries keep their
+/// blocks whole; older blocks past the budget keep only their summary, marked
+/// as cut for the window. A window inside the budget is returned as it is. A
+/// client that already holds an entry's whole block keeps it: an entry is
+/// resent only when its own events change it.
+fn budgeted(window: &[Item], budget: usize) -> Cow<'_, [Item]> {
+    if ryeos_timeline::block_bytes(window) <= budget {
+        return Cow::Borrowed(window);
+    }
+    let mut owned = window.to_vec();
+    ryeos_timeline::bound_blocks(&mut owned, budget);
+    Cow::Owned(owned)
 }
 
 fn window_response(
@@ -405,7 +427,7 @@ fn window_response(
         timeline.lane(status)
     };
     let older = older_count(timeline.items.len(), limit);
-    let window = &timeline.items[older..];
+    let window = budgeted(&timeline.items[older..], folded.block_budget);
     let mut response = json!({
         "chain_root_id": chain_root_id,
         "definition_ref": definition_ref,
@@ -419,7 +441,7 @@ fn window_response(
         "lane": serde_json::to_value(lane)?,
     });
     let Some(since) = since else {
-        response["items"] = serde_json::to_value(window)?;
+        response["items"] = serde_json::to_value(&*window)?;
         return Ok(response);
     };
     let resend_all = folded.rewritten_at.is_some_and(|at| since < at);
@@ -512,6 +534,7 @@ mod tests {
             highest,
             rewritten_at: None,
             timeline: Arc::new(timeline(items)),
+            block_budget: MAX_WINDOW_BLOCK_BYTES,
         }
     }
 
@@ -958,5 +981,184 @@ mod tests {
         let big = json!({"exact_program": {"resolution_output": {"composed": {
             "composed": {"presentation": {"body": ["a".repeat(MAX_PRESENTATION_BYTES)]}}}}}});
         assert_eq!(presentation_block(&big), None);
+    }
+
+    /// A directive turn that calls an edit tool whose own thread is `T-2`.
+    fn edit_chain(operation: &str, seq: i64, added: &str) -> Vec<Value> {
+        let ev = |seq: i64, event_type: &str, payload: Value| {
+            json!({"chain_seq": seq, "chain_root_id": "T-1", "thread_id": "T-1",
+                   "ts": format!("2026-11-16T00:00:{:02}Z", seq % 60),
+                   "event_type": event_type, "payload": payload})
+        };
+        let call = format!("c{seq}");
+        vec![
+            ev(
+                seq,
+                "cognition_out",
+                json!({"finish": "tool_calls", "turn": seq, "parts": [
+                    {"type": "tool_call", "call_id": call, "name": "edit_file",
+                     "arguments": {"path": "src/lib.rs", "old_string": "fn a() {}\n",
+                                   "new_string": added}}]}),
+            ),
+            ev(
+                seq + 1,
+                "tool_call_start",
+                json!({"operation_id": operation, "call_id": call, "tool": "edit_file"}),
+            ),
+            ev(
+                seq + 2,
+                "child_thread_spawned",
+                json!({"child_thread_id": format!("T-{operation}"),
+                       "item_id": "tool:example/edit", "operation_id": operation}),
+            ),
+            ev(
+                seq + 3,
+                "tool_call_result",
+                json!({"operation_id": operation, "call_id": call, "tool": "edit_file",
+                       "status": "ok", "guard": {"result_size_bytes": 2, "truncated": false},
+                       "parts": [{"type": "text", "text": "{}"}]}),
+            ),
+        ]
+    }
+
+    /// The subject the host builds from a launch capsule whose tool declares
+    /// an edit.
+    fn edit_subject() -> Value {
+        let capsule = json!({"exact_program": {"resolution_output": {"composed": {
+            "composed": {"presentation": {
+                "headline": ["arguments.path"],
+                "changes": {"edit": {"path": "arguments.path",
+                                     "before": "arguments.old_string",
+                                     "after": "arguments.new_string"}}}}}}}});
+        json!({"presentation": presentation_block(&capsule).unwrap()})
+    }
+
+    /// Every entry of a response, nested members included, by id.
+    fn entries_by_id(value: &Value, out: &mut HashMap<String, Value>) {
+        match value {
+            Value::Array(items) => items.iter().for_each(|item| entries_by_id(item, out)),
+            Value::Object(fields) => {
+                if let (Some(id), Some(_)) = (fields.get("id"), fields.get("slots")) {
+                    out.insert(id.as_str().unwrap().to_string(), value.clone());
+                }
+                if let Some(members) = fields.get("members") {
+                    entries_by_id(members, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn a_capsule_declaring_changes_gives_the_call_a_change_block() {
+        let def = definition();
+        let events = edit_chain("op1", 1, "fn a() {\n    b();\n}\n");
+        let cache = TimelineCache::with_capacity(4);
+        let key = ("chain".to_string(), "digest".to_string());
+        let now = timeline_for(&cache, &key, &def, store(&events, events.len()), |thread| {
+            (thread == "T-op1").then(edit_subject)
+        })
+        .unwrap();
+        let full = window_response("c", "r", "d", &now, summary(), 200, None).unwrap();
+        let mut entries = HashMap::new();
+        entries_by_id(&full["items"], &mut entries);
+        let entry = &entries["act:op1"];
+        assert_eq!(entry["slots"]["headline"], json!("src/lib.rs"));
+        assert_eq!(
+            entry["blocks"],
+            json!([{"block": "changes", "basis": "requested", "omitted_files": 0, "files": [{
+                "path": "src/lib.rs", "op": "modify", "added": 3, "removed": 1, "binary": false,
+                "hunks": [{"lines": ["-fn a() {}", "+fn a() {", "+    b();", "+}"]}]}]}])
+        );
+        // Without the capsule's declaration the same chain carries no block.
+        let cache = TimelineCache::with_capacity(4);
+        let plain =
+            timeline_for(&cache, &key, &def, store(&events, events.len()), |_| None).unwrap();
+        let text = window_response("c", "r", "d", &plain, summary(), 200, None)
+            .unwrap()
+            .to_string();
+        assert!(!text.contains("\"blocks\""));
+    }
+
+    #[test]
+    fn blocks_past_the_window_budget_keep_their_counts_only_oldest_first() {
+        let def = definition();
+        let added: String = (0..40)
+            .map(|line| format!("    call_{line}();\n"))
+            .collect();
+        let mut events = Vec::new();
+        for (index, operation) in ["op1", "op2", "op3"].iter().enumerate() {
+            events.extend(edit_chain(operation, 1 + 4 * index as i64, &added));
+        }
+        let cache = TimelineCache::with_capacity(4);
+        let key = ("chain".to_string(), "digest".to_string());
+        let mut now = timeline_for(&cache, &key, &def, store(&events, events.len()), |thread| {
+            thread.starts_with("T-op").then(edit_subject)
+        })
+        .unwrap();
+        let whole = window_response("c", "r", "d", &now, summary(), 200, None).unwrap();
+        let mut entries = HashMap::new();
+        entries_by_id(&whole["items"], &mut entries);
+        let one = entries["act:op3"]["blocks"][0].to_string().len();
+        for operation in ["op1", "op2", "op3"] {
+            assert_eq!(
+                entries[&format!("act:{operation}")]["blocks"][0]["files"][0]["hunks"][0]["lines"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                41,
+                "{operation} is whole inside the budget"
+            );
+        }
+
+        // Room for the newest block and part of the next: the two older ones
+        // keep path, operation and counts, and say the window cut them.
+        now.block_budget = one + one / 2;
+        let cut = window_response("c", "r", "d", &now, summary(), 200, None).unwrap();
+        let mut entries = HashMap::new();
+        entries_by_id(&cut["items"], &mut entries);
+        assert_eq!(
+            entries["act:op3"]["blocks"],
+            entries_of(&whole)["act:op3"]["blocks"]
+        );
+        for operation in ["op1", "op2"] {
+            assert_eq!(
+                entries[&format!("act:{operation}")]["blocks"][0]["files"][0],
+                json!({"path": "src/lib.rs", "op": "modify", "added": 40, "removed": 1,
+                       "binary": false, "hunks": [],
+                       "truncated": {"reason": "window", "omitted_lines": 41}}),
+                "{operation}"
+            );
+        }
+        // An update is cut by the same rule as the full window.
+        let update = window_response("c", "r", "d", &now, summary(), 200, Some(0)).unwrap();
+        assert_eq!(update["items"], cut["items"]);
+    }
+
+    fn entries_of(response: &Value) -> HashMap<String, Value> {
+        let mut entries = HashMap::new();
+        entries_by_id(&response["items"], &mut entries);
+        entries
+    }
+
+    #[test]
+    fn the_definitions_block_budget_is_held_under_the_host_ceiling() {
+        let text = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../bundles/ryeos-ui/.ai/config/ryeos/ui/timeline/thread.yaml"),
+        )
+        .unwrap();
+        let mut doc: Value = serde_yaml::from_str(&text).unwrap();
+        assert_eq!(doc["blocks"]["window_bytes"], json!(524_288));
+        doc["blocks"]["window_bytes"] = json!(u64::MAX);
+        let def = Definition::from_value(doc).unwrap();
+        let cache = TimelineCache::with_capacity(4);
+        let key = ("chain".to_string(), "digest".to_string());
+        let events = fetch_chain();
+        let now = timeline_for(&cache, &key, &def, store(&events, 6), |_| None).unwrap();
+        assert_eq!(now.block_budget, MAX_WINDOW_BLOCK_BYTES);
+        let shipped =
+            timeline_for(&cache, &key, &definition(), store(&events, 6), |_| None).unwrap();
+        assert_eq!(shipped.block_budget, 524_288);
     }
 }

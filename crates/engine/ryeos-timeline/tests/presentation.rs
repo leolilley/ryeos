@@ -680,3 +680,53 @@ fn an_unknown_block_kind_or_cap_refuses_the_definition() {
         .contains("\"block\":\"changes\"")
     );
 }
+
+/// Bounding a timeline's blocks reduces them to their counts, recorded as a
+/// window cut, and never touches anything else of the entry.
+#[test]
+fn a_spent_block_budget_reduces_blocks_to_their_counts() {
+    let events = tool_call("edit_file", edit_arguments(), "ok", "{\"success\":true}");
+    let mut folder = Folder::new(definition_admitting(Some(default_caps())));
+    folder.provide("T-2", edit_subject());
+    folder.push(&events).unwrap();
+    let whole = folder.timeline();
+    let bytes = ryeos_timeline::block_bytes(&whole.items);
+    assert!(bytes > 0);
+
+    let mut kept = whole.items.clone();
+    ryeos_timeline::bound_blocks(&mut kept, bytes);
+    assert_eq!(kept, whole.items, "a budget that fits changes nothing");
+
+    let mut cut = whole.items.clone();
+    ryeos_timeline::bound_blocks(&mut cut, bytes - 1);
+    assert!(ryeos_timeline::block_bytes(&cut) < bytes);
+    let timeline = Timeline {
+        items: cut,
+        ..whole.clone()
+    };
+    let entry = activity(&timeline);
+    let block = serde_json::to_value(&entry.blocks[0]).unwrap();
+    assert_eq!(
+        block["files"][0],
+        json!({"path": "src/lib.rs", "op": "modify", "added": 3, "removed": 1, "binary": false,
+               "hunks": [], "truncated": {"reason": "window", "omitted_lines": 4}})
+    );
+    let mut without = entry.clone();
+    without.blocks.clear();
+    let mut original = activity(&whole);
+    original.blocks.clear();
+    assert_eq!(without, original);
+}
+
+/// The shipped definition admits a change block on every tool-call adoption
+/// and states the window budget.
+#[test]
+fn the_shipped_definition_admits_changes_and_states_its_budget() {
+    let def = definition();
+    assert_eq!(def.blocks.window_bytes, 512 * 1024);
+    let events = tool_call("edit_file", edit_arguments(), "ok", "{\"success\":true}");
+    let mut folder = Folder::new(def);
+    folder.provide("T-2", edit_subject());
+    folder.push(&events).unwrap();
+    assert_eq!(activity(&folder.timeline()).blocks.len(), 1);
+}
