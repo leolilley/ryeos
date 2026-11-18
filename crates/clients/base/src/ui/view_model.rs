@@ -865,8 +865,7 @@ fn top_bar_vm(core: &RyeOsCore) -> RyeOsTopBarVm {
         .and_then(|attachment| attachment.presentation.definition.surface())
         .is_some_and(|surface| surface.style.view_set_tabs);
     RyeOsTopBarVm {
-        visible: core.active_surface().is_some()
-            && (view_set_tabs || core.ui.top_status_visible),
+        visible: core.active_surface().is_some() && (view_set_tabs || core.ui.top_status_visible),
         tabs: core
             .active_surface_view_sets()
             .unwrap_or(&[])
@@ -4730,9 +4729,8 @@ mod tests {
 
     #[test]
     fn surface_style_view_set_tabs_reaches_top_bar_visibility() {
-        let yaml_surface = |yaml: &str| -> serde_json::Value {
-            serde_yaml::from_str(yaml).unwrap()
-        };
+        let yaml_surface =
+            |yaml: &str| -> serde_json::Value { serde_yaml::from_str(yaml).unwrap() };
         let with_tabs = test_support_core(session_with_surface(yaml_surface(
             "name: Tabs\nstyle:\n  view_set_tabs: true\n",
         )));
