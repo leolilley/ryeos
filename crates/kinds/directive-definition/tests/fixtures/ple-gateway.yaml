@@ -111,71 +111,71 @@ profiles:
       max_marks: 4
       positions: [system, newest, previous_tail]
     schemas:
-    accounting: {require_usage: true}
-    messages:
-      role_map: {user: user, assistant: assistant, system: system, tool: tool}
-      content_key: content
-      system_message: {mode: message_role}
-      tool_result:
-        role: tool
-        wrap_mode: direct
-        block_template:
-          tool_call_id: "{tool_call_id}"
-          content: "{content}"
-      tool_call_block_template:
-        id: "{id}"
-        type: function
-        function:
-          name: "{name}"
-          arguments: "{input_json}"
-    tools:
-      template:
-        type: function
-        function:
-          name: "{name}"
-          description: "{description}"
-          parameters: "{schema}"
-    streaming:
-      mode: delta_merge
-      metadata:
-        usage:
-          path: usage
-          input_tokens_path: prompt_tokens
-          output_tokens_path: completion_tokens
-          reasoning_tokens_path: completion_tokens_details.reasoning_tokens
-          reasoning_included_in_output: true
-          # Cached counts ride at the top level of the final usage chunk and
-          # prompt_tokens already includes them.
-          cache_read_tokens_path: cache_read_input_tokens
-          cache_write_tokens_path: cache_creation_input_tokens
-          cache_included_in_input: true
-          aggregation: latest_snapshot
-          single_snapshot: true
-        finish_reason_path: choices.0.finish_reason
-        response_id_path: id
-        error:
-          path: error
-          message_path: message
-          code_path: code
-    reasoning:
-      # Thinking arrives as blocks: an opening chunk with an empty
-      # signature, then one carrying the signature (which closes the block).
-      # Text is empty on this route, so no text rule: one copy only.
-      capture:
-        - id: blocks
-          kind: blocks
-          field: thinking_blocks
-          merge_keys: [thinking]
-          close_key: signature
-          whole_types: [redacted_thinking]
-      replay:
-        compat_group: claude-thinking-1
-        placements:
-          - from: blocks
-            into: {message_field: thinking_blocks}
-            scope: open_loop
-            on_missing: omit
-    output_limit: {path: max_completion_tokens, semantics: provider_native_output_tokens}
+      accounting: {require_usage: true}
+      messages:
+        role_map: {user: user, assistant: assistant, system: system, tool: tool}
+        content_key: content
+        system_message: {mode: message_role}
+        tool_result:
+          role: tool
+          wrap_mode: direct
+          block_template:
+            tool_call_id: "{tool_call_id}"
+            content: "{content}"
+        tool_call_block_template:
+          id: "{id}"
+          type: function
+          function:
+            name: "{name}"
+            arguments: "{input_json}"
+      tools:
+        template:
+          type: function
+          function:
+            name: "{name}"
+            description: "{description}"
+            parameters: "{schema}"
+      streaming:
+        mode: delta_merge
+        metadata:
+          usage:
+            path: usage
+            input_tokens_path: prompt_tokens
+            output_tokens_path: completion_tokens
+            reasoning_tokens_path: completion_tokens_details.reasoning_tokens
+            reasoning_included_in_output: true
+            # Cached counts ride at the top level of the final usage chunk and
+            # prompt_tokens already includes them.
+            cache_read_tokens_path: cache_read_input_tokens
+            cache_write_tokens_path: cache_creation_input_tokens
+            cache_included_in_input: true
+            aggregation: latest_snapshot
+            single_snapshot: true
+          finish_reason_path: choices.0.finish_reason
+          response_id_path: id
+          error:
+            path: error
+            message_path: message
+            code_path: code
+      reasoning:
+        # Thinking arrives as blocks: an opening chunk with an empty
+        # signature, then one carrying the signature (which closes the block).
+        # Text is empty on this route, so no text rule: one copy only.
+        capture:
+          - id: blocks
+            kind: blocks
+            field: thinking_blocks
+            merge_keys: [thinking]
+            close_key: signature
+            whole_types: [redacted_thinking]
+        replay:
+          compat_group: claude-thinking-1
+          placements:
+            - from: blocks
+              into: {message_field: thinking_blocks}
+              scope: open_loop
+              on_missing: omit
+      output_limit: {path: max_completion_tokens, semantics: provider_native_output_tokens}
   # Gemini and Gemma: images accepted, also inside a tool message (the request
   # builder still moves them into one user message after the tool results).
   # Caching is automatic, so no marks. Argon's signature rides the first
