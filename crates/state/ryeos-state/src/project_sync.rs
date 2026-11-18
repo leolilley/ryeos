@@ -282,6 +282,39 @@ fn path_contains(outer: &str, inner: &str) -> bool {
             .is_some_and(|rest| rest.starts_with('/'))
 }
 
+/// Roots a `sync_include` declaration may never touch, beyond the snapshot
+/// floors: all signing and other key material under `.ai/config/keys`. (The
+/// frozen snapshot floor names only `.ai/config/keys/signing`.)
+pub const SYNC_INCLUDE_PROTECTED: &[&str] = &[".ai/config/keys"];
+
+/// The only places under `.ai/node` a `sync_include` root may be. Everything
+/// else there is node-owned: policies, native capacity, external execution
+/// state, offline-reset and runtime-snapshot records, installed-bundle
+/// registries, trust, identity.
+pub const SYNC_INCLUDE_NODE_ALLOWED: &[&str] = &[".ai/node/engine/kinds", ".ai/node/commands"];
+
+/// Why an AI-only path under `.ai` can never be project content, whatever any
+/// table says: a live-execution-denied root, protected key material, or node
+/// space outside the allowed declaration roots. Used on stored trees, where
+/// table membership is not re-judged.
+fn ai_only_protected_refusal(rel_path: &str) -> Option<String> {
+    if let Some(prefix) = matched_prefix(rel_path, LIVE_EXECUTION_DENIED_ONLY) {
+        return Some(format!("is under live-execution-denied path '{prefix}'"));
+    }
+    if let Some(prefix) = matched_prefix(rel_path, SYNC_INCLUDE_PROTECTED) {
+        return Some(format!("is under protected key path '{prefix}'"));
+    }
+    let in_node = rel_path == ".ai/node" || rel_path.starts_with(".ai/node/");
+    if in_node
+        && !SYNC_INCLUDE_NODE_ALLOWED
+            .iter()
+            .any(|allowed| path_contains(allowed, rel_path))
+    {
+        return Some("is node-owned space under .ai/node".to_owned());
+    }
+    None
+}
+
 /// Refuse a declared root that is not a safe, canonical path below `.ai`, or
 /// that equals, sits below, or sits above any floor path (secrets, node-owned
 /// state) or live-execution-denied path.
@@ -297,6 +330,7 @@ pub fn validate_sync_include_entry(entry: &SyncIncludeEntry) -> Result<()> {
         ("never-deploy secret", NEVER_DEPLOY_SECRETS),
         ("node-owned", NODE_OWNED),
         ("live-execution-denied", LIVE_EXECUTION_DENIED_ONLY),
+        ("protected key", SYNC_INCLUDE_PROTECTED),
     ] {
         for protected in paths {
             if path_contains(protected, root) {
@@ -308,6 +342,15 @@ pub fn validate_sync_include_entry(entry: &SyncIncludeEntry) -> Result<()> {
                 anyhow::bail!("sync_include root '{root}' contains {label} path '{protected}'");
             }
         }
+    }
+    if (root == ".ai/node" || root.starts_with(".ai/node/"))
+        && !SYNC_INCLUDE_NODE_ALLOWED
+            .iter()
+            .any(|allowed| path_contains(allowed, root))
+    {
+        anyhow::bail!(
+            "sync_include root '{root}' is node-owned space under .ai/node; only {SYNC_INCLUDE_NODE_ALLOWED:?} may be declared there"
+        );
     }
     Ok(())
 }
@@ -927,7 +970,11 @@ fn validate_project_manifest_path_inner(
                 );
             }
             // Already admitted here: membership is not re-judged.
-            ProjectAiPathClass::UnknownAiPath if include.is_none() => {}
+            ProjectAiPathClass::UnknownAiPath if include.is_none() => {
+                if let Some(reason) = ai_only_protected_refusal(rel_path) {
+                    anyhow::bail!("AI-only project manifest path '{}' {reason}", rel_path);
+                }
+            }
             ProjectAiPathClass::UnknownAiPath => {
                 anyhow::bail!(
                     "AI-only project manifest path '{}' is under .ai but outside sync_include",
@@ -1587,5 +1634,61 @@ mod tests {
             "- root: .ai/a\n  shape: directory\n- root: .ai/a/b\n  shape: directory\n",
         ))
         .expect_err("overlap");
+    }
+
+    #[test]
+    fn declarations_cannot_reach_node_owned_space_or_key_material() {
+        for root in [
+            ".ai/node/policies",
+            ".ai/node/native-capacity",
+            ".ai/node/external_execution",
+            ".ai/node/offline-reset-1",
+            ".ai/node/runtime_snapshot_x",
+            ".ai/node/engine/bundles",
+            ".ai/node/engine",
+            ".ai/node/sync/policy.yaml",
+            ".ai/config/keys/other",
+            ".ai/config/keys",
+        ] {
+            SyncInclude::new(vec![SyncIncludeEntry::directory(root)])
+                .expect_err(&format!("{root} must be refused"));
+        }
+        // The two allowed node roots, and a path below one, stay legal.
+        SyncInclude::new(vec![
+            SyncIncludeEntry::directory(".ai/node/engine/kinds"),
+            SyncIncludeEntry::directory(".ai/node/commands/extra"),
+        ])
+        .unwrap();
+    }
+
+    #[test]
+    fn stored_ai_only_validation_refuses_protected_and_node_space_but_not_table_membership() {
+        for path in [
+            ".ai/node/trust/x.yaml",
+            ".ai/node/operator/k",
+            ".ai/node/authoring/k",
+            ".ai/node/remotes/r",
+            ".ai/node/policies/p.yaml",
+            ".ai/config/keys/other/k.pem",
+        ] {
+            validate_stored_project_manifest_path(path, ProjectSyncScope::AiOnly, None)
+                .expect_err(path);
+        }
+        // Outside the table but not protected: still not re-judged.
+        validate_stored_project_manifest_path(".ai/views/x.yaml", ProjectSyncScope::AiOnly, None)
+            .unwrap();
+        validate_stored_project_manifest_path(
+            ".ai/node/commands/x.yaml",
+            ProjectSyncScope::AiOnly,
+            None,
+        )
+        .unwrap();
+        // Full-project trees are untouched by the AI-only rule.
+        validate_stored_project_manifest_path(
+            ".ai/node/trust/x.yaml",
+            ProjectSyncScope::FullProject,
+            None,
+        )
+        .unwrap();
     }
 }
