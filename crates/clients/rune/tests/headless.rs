@@ -654,7 +654,7 @@ fn the_current_view_set_tab_stays_in_view_when_the_tabs_scroll() {
         vm.presentation.chrome.top_bar.visible,
         "the tab band is shown"
     );
-    assert_eq!(tabs.len(), 15, "the scene opens fourteen more view sets");
+    assert_eq!(tabs.len(), 15, "the scene declares fifteen view sets");
     let current = tabs
         .iter()
         .find(|tab| tab.active)

@@ -443,6 +443,8 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
         ])
     } else if is_timeline_scene(scene) {
         json!([CONVERSATION_REF])
+    } else if scene == "tabs" {
+        json!([])
     } else if scene == "states" {
         json!([
             "view:ryeos/threads/history",
@@ -452,7 +454,7 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
     } else {
         json!(["view:ryeos/threads/history", "view:ryeos/chain/timeline"])
     };
-    let presentation = UiCompositionPresentation::from_effective_surface(json!({
+    let mut surface_json = json!({
         "name": "workbench", "title": "Workbench", "version": "1.0.0",
         "tiling": { "mode": "master_stack",
             "master": { "side": "left", "arrange": "vertical", "ratio": 0.6, "count": 1 },
@@ -466,8 +468,21 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
             "view:ryeos/schedules/list": view(SCHEDULES)?,
             "view:ryeos/surfaces/list": view(SURFACES)?
         }
-    }))
-    .map_err(|error| format!("surface fixture: {error}"))?;
+    });
+    if scene == "tabs" {
+        // More view sets than the band fits, each empty.
+        surface_json["view_sets"] = (1..=15)
+            .map(|n| {
+                json!({
+                    "schema": ryeos_client_base::surface::view_sets::VIEW_SET_COMPOSITION_SCHEMA,
+                    "id": format!("set_{n}"),
+                    "title": format!("View set {n}"),
+                })
+            })
+            .collect();
+    }
+    let presentation = UiCompositionPresentation::from_effective_surface(surface_json)
+        .map_err(|error| format!("surface fixture: {error}"))?;
     let surface_attachment = UiBindingAttachment {
         binding_attachment_id: "surface-attachment".into(),
         binding_generation: 1,
@@ -524,7 +539,14 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
     let seeds = surface
         .to_mount_seeds()
         .map_err(|error| error.to_string())?;
-    let first = seeds.first().map(|seed| seed.id.to_string());
+    // The tabs scene opens on its last view set, so the current tab is the
+    // one furthest along the band.
+    let first = if scene == "tabs" {
+        seeds.last()
+    } else {
+        seeds.first()
+    }
+    .map(|seed| seed.id.to_string());
     let mount_manifest = UiSurfaceMountManifest::allocate(
         PresentationId::try_new(PRESENTATION).map_err(|error| error.to_string())?,
         SurfaceInstanceId::try_new(SURFACE).map_err(|error| error.to_string())?,
@@ -618,20 +640,12 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
             }
         }
         "tabs" => {
-            // The tab band shown and more view sets than fit, the newest
-            // current, as Alt+T and fourteen Alt+N leave it.
-            let intents =
-                std::iter::once(ryeos_client_base::ui::event::RyeOsUiIntent::ToggleTopStatusBar)
-                    .chain(std::iter::repeat_n(
-                        ryeos_client_base::ui::event::RyeOsUiIntent::NewViewSet,
-                        14,
-                    ));
-            for intent in intents {
-                let effects = core.dispatch(RyeOsEvent::Ui {
-                    event: RyeOsUiEvent::Activate { intent },
-                });
-                answered += answer(&mut core, effects, scene);
-            }
+            // The tab band shown, as Alt+T leaves it.
+            core.dispatch(RyeOsEvent::Ui {
+                event: RyeOsUiEvent::Activate {
+                    intent: ryeos_client_base::ui::event::RyeOsUiIntent::ToggleTopStatusBar,
+                },
+            });
         }
         "launcher" => {
             let effects = core.dispatch(RyeOsEvent::Ui {
