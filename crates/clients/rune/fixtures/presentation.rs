@@ -48,6 +48,12 @@ const SCHEDULES: &str =
     include_str!("../../../../bundles/ryeos-ui/.ai/views/ryeos/schedules/list.yaml");
 const SURFACES: &str =
     include_str!("../../../../bundles/ryeos-ui/.ai/views/ryeos/surfaces/list.yaml");
+const PROJECT_SURFACE: &str =
+    include_str!("../../../../bundles/ryeos-ui/.ai/surfaces/ryeos/ui/project.yaml");
+const THREAD_DETAIL: &str =
+    include_str!("../../../../bundles/ryeos-ui/.ai/views/ryeos/threads/detail.yaml");
+const DETAIL_REF: &str = "view:ryeos/threads/detail";
+const HISTORY_REF: &str = "view:ryeos/threads/history";
 
 fn view(source: &str) -> Result<Value, String> {
     serde_yaml::from_str(source).map_err(|error| format!("bundle view: {error}"))
@@ -58,6 +64,9 @@ fn view(source: &str) -> Result<Value, String> {
 fn response(view_ref: &str, scene: &str) -> Option<Value> {
     if scene == "long" {
         return long_response(view_ref);
+    }
+    if is_project_scene(scene) {
+        return project_response(view_ref);
     }
     if is_timeline_scene(scene) {
         return (view_ref == CONVERSATION_REF).then(|| demo_timeline(scene == "timeline-top"));
@@ -99,6 +108,116 @@ fn fixture_entry(id: &str, kind: &str, exchange: &str, slots: Value) -> Value {
 fn with_state(mut entry: Value, state: &str) -> Value {
     entry["state"] = json!(state);
     entry
+}
+
+/// The `project` scenes mount the project Surface: `project` opens its
+/// Threads tab, `project-review` its Review tab, `project-launcher` the
+/// launcher over the Threads tab.
+fn is_project_scene(scene: &str) -> bool {
+    matches!(scene, "project" | "project-review" | "project-launcher")
+}
+
+/// The thread the Review tab's detail view inspects.
+const REVIEW_THREAD: &str = "T-7f3a";
+
+/// What the project scenes' sources answer: eight threads in mixed states,
+/// the conversation of the first with its pending asks, and that thread's
+/// inspection.
+fn project_response(view_ref: &str) -> Option<Value> {
+    let thread = |id: &str, kind: &str, item: &str, status: &str, created: &str| {
+        json!({
+            "thread_id": id, "kind": kind, "item_ref": item,
+            "project": { "name": "ryeos-next" }, "status": status, "created_at": created
+        })
+    };
+    Some(match view_ref {
+        HISTORY_REF => json!({ "threads": [
+            thread("T-7f3a", "directive_run", "directive:ryeos/ops/base", "running", "2026-11-12T09:12:00Z"),
+            thread("T-9c41", "graph_run", "graph:ryeos/review/loop", "running", "2026-11-12T09:05:00Z"),
+            thread("T-3b82", "worker_run", "worker:claude-code", "created", "2026-11-12T08:58:00Z"),
+            thread("T-61c0", "tool_run", "tool:ryeos/dev/gate", "completed", "2026-11-12T08:40:00Z"),
+            thread("T-5d21", "directive_run", "directive:ryeos/review/diff", "failed", "2026-11-12T07:03:00Z"),
+            thread("T-2e07", "directive_run", "directive:ryeos/ops/plan", "completed", "2026-11-12T06:30:00Z"),
+            thread("T-18d9", "schedule_run", "schedule:nightly-check", "completed", "2026-11-12T03:00:00Z"),
+            thread("T-0a55", "worker_run", "worker:codex", "cancelled", "2026-11-11T22:12:00Z")
+        ], "coverage": { "complete": false, "returned": 8 } }),
+        CONVERSATION_REF => demo_timeline(true),
+        DETAIL_REF => json!({
+            "thread": {
+                "item_ref": "directive:ryeos/ops/base", "status": "running",
+                "project_root": "/home/fixture/ryeos-next", "current_site_id": "site:fixture"
+            },
+            "evidence_coverage": [
+                { "subject": "thread record", "state": "available", "reason": "signed, available" },
+                { "subject": "usage projection", "state": "available", "reason": "available, settled" },
+                { "subject": "audit record", "state": "unavailable", "reason": "unavailable: not yet signed" }
+            ],
+            "execution_coverage": [
+                { "state": "unavailable", "reason": "no node-signed audit record" }
+            ],
+            "execution_meta": [
+                { "label": "executor", "value": "directive-runtime" },
+                { "label": "requested by", "value": "fixture-operator" },
+                { "label": "started", "value": "09:12" }
+            ],
+            "usage": [
+                { "label": "tokens in", "value": "184,220" },
+                { "label": "tokens out", "value": "21,840" },
+                { "label": "cost", "value": "$1.62" },
+                { "label": "turns", "value": "7" }
+            ],
+            "outcome_coverage": [
+                { "state": "unavailable", "reason": "thread still running", "thread_status": "running" }
+            ],
+            "result": { "outcome_code": "none yet", "error": null },
+            "artifacts": []
+        }),
+        _ => return None,
+    })
+}
+
+/// The project Surface as the client receives it: the bundle's own
+/// definition, composed into two view sets (the Surface itself declares only
+/// tiles) so the tab band and the Review tab are drawn.
+fn project_surface() -> Result<Value, String> {
+    let mut surface = view(PROJECT_SURFACE)?;
+    surface["tiles"] = json!([]);
+    surface["style"]["view_set_tabs"] = json!(true);
+    surface["views"] = json!({
+        HISTORY_REF: view(THREADS)?,
+        CONVERSATION_REF: conversation()?,
+        DETAIL_REF: thread_detail()?
+    });
+    let group = |views: Value| json!({ "type": "group", "views": views, "active": 0 });
+    surface["view_sets"] = json!([
+        {
+            "schema": ryeos_client_base::surface::view_sets::VIEW_SET_COMPOSITION_SCHEMA,
+            "id": "threads", "title": "Threads",
+            "root": group(json!([HISTORY_REF]))
+        },
+        {
+            "schema": ryeos_client_base::surface::view_sets::VIEW_SET_COMPOSITION_SCHEMA,
+            "id": "review", "title": "Review",
+            "root": {
+                "type": "split", "axis": "horizontal", "ratio": 0.24,
+                "first": group(json!([HISTORY_REF])),
+                "second": {
+                    "type": "split", "axis": "horizontal", "ratio": 0.68,
+                    "first": group(json!([CONVERSATION_REF])),
+                    "second": group(json!([DETAIL_REF]))
+                }
+            }
+        }
+    ]);
+    Ok(surface)
+}
+
+/// The thread detail view with its thread given directly: the fixture has no
+/// selection facet to resolve it from.
+fn thread_detail() -> Result<Value, String> {
+    let mut definition = view(THREAD_DETAIL)?;
+    definition["sources"]["detail"]["params"]["thread_id"] = json!(REVIEW_THREAD);
+    Ok(definition)
 }
 
 /// Rows past the length at which lists build only what is in view.
@@ -454,7 +573,11 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
     } else {
         json!(["view:ryeos/threads/history", "view:ryeos/chain/timeline"])
     };
-    let mut surface_json = json!({
+    let project = is_project_scene(scene);
+    let mut surface_json = if project {
+        project_surface()?
+    } else {
+        json!({
         "name": "workbench", "title": "Workbench", "version": "1.0.0",
         "tiling": { "mode": "master_stack",
             "master": { "side": "left", "arrange": "vertical", "ratio": 0.6, "count": 1 },
@@ -468,7 +591,8 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
             "view:ryeos/schedules/list": view(SCHEDULES)?,
             "view:ryeos/surfaces/list": view(SURFACES)?
         }
-    });
+        })
+    };
     if scene == "tabs" {
         // More view sets than the band fits, each empty.
         surface_json["view_sets"] = (1..=15)
@@ -487,7 +611,12 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
         binding_attachment_id: "surface-attachment".into(),
         binding_generation: 1,
         binding_digest: "surface-binding".into(),
-        root_ref: "surface:ryeos/ui/workbench".to_string(),
+        root_ref: if project {
+            "surface:ryeos/ui/project"
+        } else {
+            "surface:ryeos/ui/workbench"
+        }
+        .to_string(),
         root_generation: "surface-generation".into(),
         project_path: Some("/home/fixture/ryeos-next".into()),
         subject: UiBindingSubject::UnregisteredProject,
@@ -541,7 +670,7 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
         .map_err(|error| error.to_string())?;
     // The tabs scene opens on its last view set, so the current tab is the
     // one furthest along the band.
-    let first = if scene == "tabs" {
+    let first = if scene == "tabs" || scene == "project-review" {
         seeds.last()
     } else {
         seeds.first()
@@ -573,7 +702,7 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
             saved_surface: None,
             surface_instance_id: SURFACE.into(),
             ordinal: 1,
-            title: "Workbench".into(),
+            title: if project { "Project" } else { "Workbench" }.into(),
             binding: surface_binding,
             mount_manifest,
         }],
@@ -615,6 +744,14 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
     // The scene picks what is open when the frame is drawn.
     match scene {
         "" | "field" | "long" | "states" => {}
+        "project" | "project-review" => {
+            // The tab band shown, so the Threads and Review tabs are drawn.
+            core.dispatch(RyeOsEvent::Ui {
+                event: RyeOsUiEvent::Activate {
+                    intent: ryeos_client_base::ui::event::RyeOsUiIntent::ToggleTopStatusBar,
+                },
+            });
+        }
         "timeline" | "timeline-draft" | "timeline-top" => {
             // The newest group is opened, so an opened group is drawn too.
             if scene != "timeline-top" {
@@ -647,7 +784,14 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
                 },
             });
         }
-        "launcher" => {
+        "launcher" | "project-launcher" => {
+            if scene == "project-launcher" {
+                core.dispatch(RyeOsEvent::Ui {
+                    event: RyeOsUiEvent::Activate {
+                        intent: ryeos_client_base::ui::event::RyeOsUiIntent::ToggleTopStatusBar,
+                    },
+                });
+            }
             let effects = core.dispatch(RyeOsEvent::Ui {
                 event: RyeOsUiEvent::OpenLauncher,
             });
