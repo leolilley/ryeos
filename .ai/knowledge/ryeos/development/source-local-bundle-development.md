@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-15T02:27:40Z:53543af6b36c8f6e7a856a806ef26ccf8bf5fe8212039b6d9f466a43e852f053:4cKNKap3qWFYc5dwmzA99xqC7zB+cGAn0fHC05LtJsVg/n4DYY72T76OQPpLL5z+vnNf4Kw7NIACHjAfaPEkAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-18T05:07:46Z:bd92947401cc0a08a20510731bcfadd6bf76b3dbc71e53d6110d28a49f16722e:XY5PcF84NJa8jg0zQJD7tfN5I/liQmptfHxgFh/a5yHC5V37IrJ53O3sQ5vS386YZZGAPBOyfZsqnPPjugqnAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: source-local-bundle-development
@@ -1494,16 +1494,24 @@ operator must exclusively own the destination during acquisition; this helper
 is not a concurrent no-replace transaction or a replacement for Lillux's
 node-owned filesystem authorities.
 
-Current release-authority acquisition used this entry and the current Cargo.lock
-(414 locked registry entries). The finished tree is retained at
-`/home/leo/.local/share/ryeos-release-authority-imports/development-registry-inputs`.
-Node import under the admitted `release-inputs` root measured 1,129 entries,
-77,004,545 bytes and manifest
-`9de036779fbc33f8e33bc5068a286ac27813e80586d1b766ee7db99a1fa7a2e8`.
-The staging request is `5e5c94d92b13cb477496ae72ed1423852ab0181c1d3f6b7623bef87f851d88d8`
-at `upload-18d78ff65d54bb95-2d30-1`. The signed registry-production Tool now
-pins this measured input; it was bound, executed and captured as recorded in
-the current-node checkpoint above. Its captured product remains unqualified.
+The root `Cargo.lock` must name crates.io sources only: the acquisition
+refuses any other source. The browser renderer, whose Rune dependencies come
+from git, is therefore its own Cargo workspace with its own lock
+(`crates/clients/rune`), outside what the release chain vendors.
+
+Current release-authority acquisition (2026-11-18) used this entry and the
+crates.io-only root lock (437 locked registry entries). The finished tree is
+retained at
+`/home/leo/.local/share/ryeos-release-authority-imports/development-registry-inputs-c4e58a807`.
+Node import under the declared `release-imports` root measured 1,199 entries,
+75,076,744 bytes and manifest
+`103fd314822803558880d093ad1816452976297861af67cb290028019a73d7b8`
+(request `9fb3a6a463b13397785f949f746d9a0874eb63ed10062b8e2886e010d11b5ca3`,
+staging `upload-18e90b5fa3f68e62-7df-25`). The signed registry-production Tool
+pins this measured input. Any change to the root lock's registry packages
+needs a new acquisition, import and pin. The September tree
+(`development-registry-inputs`, manifest `9de03677...`, 414 entries) no longer
+matches the lock.
 
 The signed `registry-production/assemble` Tool takes the same lock and public
 selection Config plus `config:development/ryeos/registry-production` for project
