@@ -811,7 +811,7 @@ impl SealedRootExecutionRequest {
     pub fn process_containment_for_qualification(
         &self,
     ) -> Result<super::ProcessContainmentRequirement> {
-        self.process_containment_for_qualification_under(None)
+        self.process_containment_for_qualification_under(None, false)
     }
 
     /// The containment a qualification verifier must run under, given the
@@ -819,15 +819,33 @@ impl SealedRootExecutionRequest {
     /// the selected holding's root settlement each name a requirement; the
     /// stricter stands, so neither can weaken the other. A policy with no
     /// minimum is held to the holding alone, and is refused without one.
+    ///
+    /// On an enforced node a policy minimum of `trusted_process_group_absent`
+    /// is refused outright rather than raised to a containment: the trusted
+    /// process-group lane belongs to nodes that do not enforce isolation, and
+    /// the requirement is never silently upgraded.
     pub fn process_containment_for_qualification_under(
         &self,
         selected_holding: Option<&ryeos_engine::protocols::ProtocolHolding>,
+        enforced: bool,
     ) -> Result<super::ProcessContainmentRequirement> {
         use super::ProcessContainmentRequirement as Requirement;
+        use ryeos_state::external_content::products::qualification::VerifierProcessSettlementAuthority as Settlement;
         self.validate_qualification_purpose()?;
         let Some(purpose) = self.qualification.as_ref() else {
             return Ok(Requirement::None);
         };
+        if enforced
+            && purpose
+                .policy_source
+                .policy
+                .minimum_verifier_process_settlement
+                == Some(Settlement::TrustedProcessGroupAbsent)
+        {
+            bail!(
+                "the trusted process-group lane is never a substitute under enforcement; an enforced node settles direct verifiers by retained containment, but the signed verifier policy names a `trusted_process_group_absent` minimum"
+            );
+        }
         let from_holding =
             selected_holding.map(|holding| Requirement::for_settlement(holding.root_settlement));
         match (
@@ -2594,6 +2612,45 @@ mod authority_tests {
     }
 
     #[test]
+    fn enforced_node_refuses_a_trusted_process_group_minimum_before_contact() {
+        use crate::thread_lifecycle::ProcessContainmentRequirement as Requirement;
+        use ryeos_state::external_content::products::qualification::VerifierProcessSettlementAuthority as Settlement;
+        let mut sealed = qualified_product_sealed_fixture();
+        let set = |sealed: &mut SealedRootExecutionRequest, minimum| {
+            sealed
+                .qualification
+                .as_mut()
+                .unwrap()
+                .policy_source
+                .policy
+                .minimum_verifier_process_settlement = Some(minimum);
+        };
+        set(&mut sealed, Settlement::TrustedProcessGroupAbsent);
+        let refusal = sealed
+            .process_containment_for_qualification_under(None, true)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refusal
+                .contains("the trusted process-group lane is never a substitute under enforcement"),
+            "{refusal}"
+        );
+        assert_eq!(
+            sealed
+                .process_containment_for_qualification_under(None, false)
+                .unwrap(),
+            Requirement::None
+        );
+        set(&mut sealed, Settlement::ContainmentEmpty);
+        assert_eq!(
+            sealed
+                .process_containment_for_qualification_under(None, true)
+                .unwrap(),
+            Requirement::AnyQualifiedContainment
+        );
+    }
+
+    #[test]
     fn selected_holding_cannot_weaken_the_signed_minimum_and_can_strengthen_it() {
         use crate::thread_lifecycle::ProcessContainmentRequirement as Requirement;
         use ryeos_state::external_content::products::qualification::VerifierProcessSettlementAuthority as Settlement;
@@ -2638,7 +2695,7 @@ mod authority_tests {
                 .minimum_verifier_process_settlement = Some(minimum);
             assert_eq!(
                 sealed
-                    .process_containment_for_qualification_under(Some(&holding(selected)))
+                    .process_containment_for_qualification_under(Some(&holding(selected)), false)
                     .unwrap(),
                 expected,
                 "{minimum:?} under {selected}"
