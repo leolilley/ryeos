@@ -4433,6 +4433,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-changeset"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ryeos-chat-stub"
 version = "0.1.0"
 dependencies = [
