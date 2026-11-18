@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-08T06:41:17Z:7b6ab22a2edfab37018b865b50fa6b2e9f9f90f5c8099b3ea01bf43d5a5f8779:AsQFdxeXaHxGrULW0rBJj/m9+6X4WzxYZFJnlFq3z707pEvUQ7RrLA02wDFifbBcB/3pjc+/oQSl6MC7fdThDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T22:09:14Z:6135aa6e8d34faa0f7cd7b746d6a901ac42f004e869968f2147fd76c2bbdb629:b/fwHve6Q6HwInsjxT8u/HNvNlPw+tbx6n6riU4H293Z0PNvLqwuZ8WuKiuyw3B0WDEaf/jCpSJbB9MRTwGgAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-workbench
 title: Workbench
 version: "1.0.0"
@@ -60,7 +60,7 @@ input:
         item_ref: directive:ryeos/ops/base
         project_path: "@session:project_root"
         ref_bindings:
-          model: directive:ryeos/ops/base
+          model: directive:ryeos/models/general
 
 affordances:
   - id: view.threads

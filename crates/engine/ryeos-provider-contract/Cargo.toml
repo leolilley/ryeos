@@ -11,7 +11,6 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = { workspace = true }
-chrono = { workspace = true }
 lillux = { workspace = true }
 ryeos-effect-contract = { workspace = true }
 serde = { workspace = true }

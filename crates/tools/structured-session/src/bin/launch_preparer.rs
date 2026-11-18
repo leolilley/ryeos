@@ -285,6 +285,7 @@ fn validate(request: ValidateLaunchPreparerConfigRequest) -> ValidateLaunchPrepa
                 !decl.required
                     && decl.source == RefBindingSourceWire::Caller
                     && decl.project_result_requirement == ryeos_handler_protocol::ProjectResultRequirement::None
+                    && decl.continuation_rebind == ryeos_handler_protocol::ContinuationRebindWire::Never
                     && decl.allowed_kinds == ["config"]
                     && decl.allowed_spaces == [ItemSpaceWire::Bundle, ItemSpaceWire::Project]
                     && decl.allowed_trust
@@ -1104,6 +1105,7 @@ mod tests {
                         TrustClassWire::TrustedBundle,
                         TrustClassWire::TrustedProject,
                     ],
+                    continuation_rebind: ryeos_handler_protocol::ContinuationRebindWire::Never,
                 },
             )]),
             config_inputs: BTreeMap::new(),
