@@ -1578,7 +1578,14 @@ fn run_init_under_lock_on_storage(
         .with_context(|| format!("write vault pubkey {}", vault_public_path.display()))?;
 
     // ── 8b. Node-owned default policies ──
-    materialize_node_derived_views(&opts.app_root)?;
+    materialize_node_derived_views(
+        &opts.app_root,
+        &ryeos_bundle::manifest::compose_sync_include_for_roots(
+            &prospective_roots,
+            &seed_trust_store,
+        )
+        .context("compose the node's sync_include table from the bundles being installed")?,
+    )?;
     // The issuance is amended before the generation that needs it is
     // published, as `policy-apply native_capacity` orders it; the completion
     // sealed below then binds the amended issuance.
@@ -5982,6 +5989,7 @@ typo_field: oops
             smoke: vec![],
             shadows: vec![],
             owns_namespaces: vec![],
+            sync_include: vec![],
             isolation_backends: vec![],
             external_providers: vec![],
             external_lifecycle_adapters: vec![],

@@ -35,7 +35,7 @@ impl VerifiedProjectTreeClosure {
             .ok_or_else(|| anyhow::anyhow!("project tree {tree_hash} not found"))?;
         let policy = load_project_policy_bounded(cas, policy_hash)?
             .ok_or_else(|| anyhow::anyhow!("project snapshot policy {policy_hash} not found"))?;
-        crate::project_sync::validate_project_tree_paths(&tree, &policy)?;
+        crate::project_sync::validate_stored_project_tree_paths(&tree, &policy)?;
 
         let mut files = BTreeMap::new();
         let mut descriptor_bytes = tree_object_bytes;

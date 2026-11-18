@@ -3914,6 +3914,7 @@ dependencies = [
  "ryeos-accounting",
  "ryeos-api",
  "ryeos-app",
+ "ryeos-bundle",
  "ryeos-chat-stub",
  "ryeos-client-base",
  "ryeos-codex-runtime-verifier",
