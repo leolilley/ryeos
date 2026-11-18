@@ -363,7 +363,7 @@ jobs:
       - name: Check dependency advisories, licenses, and sources
         run: |
           cargo deny check
-          cargo deny --manifest-path crates/clients/rune/Cargo.toml check --config deny.toml
+          cargo deny --manifest-path crates/clients/rune/Cargo.toml --config deny.toml check
 
       - name: Check client and daemon-side crate layering
         run: python3 .ai/tools/ryeos/development/repository-validation/client-layering.py --project-path "$PWD"
