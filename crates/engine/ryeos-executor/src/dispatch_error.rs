@@ -137,6 +137,11 @@ pub enum DispatchError {
         required: String,
         caller_scopes: Vec<String>,
     },
+    /// The service handler itself refused the call as forbidden, for the
+    /// reason it gives. The caller held the service's declared capabilities
+    /// (that check is `ServiceCapDenied`); this is the handler's own rule.
+    #[error("service '{service_ref}' refused: {reason}")]
+    ServiceRefused { service_ref: String, reason: String },
     /// Service is unavailable in the current execution mode (e.g.
     /// daemon-only service called from offline/standalone mode).
     #[error("service '{service_ref}' is unavailable in {mode} mode (requires {requires})")]
@@ -528,6 +533,7 @@ impl DispatchError {
             Self::RefBindingNotApplicable { .. } => StatusCode::BAD_REQUEST,
             Self::InsufficientCaps { .. }
             | Self::ServiceCapDenied { .. }
+            | Self::ServiceRefused { .. }
             | Self::MissingCap { .. }
             | Self::LaunchPolicyForbidden { .. } => StatusCode::FORBIDDEN,
             Self::NotFound
@@ -636,6 +642,7 @@ impl DispatchError {
             Self::ProjectSource(_) => "project_source",
             Self::ServiceHandlerMissing { .. } => "service_handler_missing",
             Self::ServiceCapDenied { .. } => "service_cap_denied",
+            Self::ServiceRefused { .. } => "service_refused",
             Self::ServiceUnavailable { .. } => "service_unavailable",
             Self::ServiceNotInstalled { .. } => "service_not_installed",
             Self::SubprocessExecutorMissing { .. } => "subprocess_executor_missing",
