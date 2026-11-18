@@ -408,28 +408,37 @@ fn resolve_composition(
             })
         }
         "config" => {
+            // The shell's presentation config decides the mount, the dialogs
+            // and the initial Surfaces, and nothing marks its author. The
+            // config kind lets a project overlay a bundle item, so this root
+            // is resolved with no project in the resolution roots: only an
+            // installed bundle can supply it, at mint and at revalidation
+            // alike. The Views it names still resolve under the project.
+            let request = ryeos_engine::engine::EffectiveItemRequest {
+                project_root: None,
+                subject_resolution_authority:
+                    ryeos_engine::contracts::SubjectResolutionAuthority::for_live_project_root(
+                        None,
+                    ),
+                ..request
+            };
             let root = match admission {
                 Some(state) => {
                     let policy = state.node_policy.require::<
                         ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy,
                     >()?;
                     let maximum = usize::try_from(policy.shared_presentation.max_declaration_bytes)?;
-                    generation.effective_item_with_content_bounds(
-                        request,
-                        project_content.map(|content| {
-                            content as &dyn ryeos_engine::project_content::AuthoritativeProjectContent
-                        }),
-                        maximum,
-                        maximum,
-                    )?
+                    generation.effective_item_with_content_bounds(request, None, maximum, maximum)?
                 }
-                None => match project_content {
-                    Some(content) => {
-                        generation.effective_item_under_project_authority(request, content)?
-                    }
-                    None => generation.effective_item(request)?,
-                },
+                None => generation.effective_item(request)?,
             };
+            if root.trust_class != ryeos_engine::resolution::TrustClass::TrustedBundle {
+                return Err(HandlerError::Forbidden(format!(
+                    "shell presentation config `{}` is not a verified bundle item",
+                    root.canonical_ref
+                ))
+                .into());
+            }
             let config: SharedPresentationConfig =
                 serde_json::from_value(root.composed_value.clone())
                     .context("decode shared presentation Config")?;

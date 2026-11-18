@@ -623,3 +623,103 @@ async fn project_file_shadowing_a_bound_view_leaves_that_view_unavailable_with_i
         binding.attenuated
     );
 }
+
+/// A project file at the ref of the shell's presentation config is never
+/// read, even when it is signed by a key the node trusts. The shell config
+/// is resolved from installed bundles only, so the session's root is the
+/// node's own config, identical to the root of a project that ships no such
+/// file.
+#[tokio::test]
+async fn project_config_at_the_shell_presentation_ref_is_never_read() {
+    let (_state_dir, _state_owner, state) = test_state::build_test_state_with_live_bundles();
+    let projects = tempfile::tempdir().expect("projects tempdir");
+    let plain = projects.path().join("plain");
+    let decoy = projects.path().join("decoy");
+    std::fs::create_dir(&plain).expect("create plain project");
+    std::fs::create_dir(&decoy).expect("create decoy project");
+    let key = lillux::crypto::load_signing_key(
+        &ryeos_engine::test_support::workspace_root().join(".dev-keys/PUBLISHER_DEV.pem"),
+    )
+    .expect("established development publisher key");
+    let body = "category: test\nversion: '1'\nshared_presentation:\n  schema: 2\n  title: Decoy shell\n  launcher: launch\n  dialogs:\n    - id: launch\n      title: Launch\n      view: 'view:ryeos/ui/launcher'\n  capabilities:\n    sources: ['*']\n    affordances: ['*']\n";
+    write_project_file(
+        &decoy,
+        ".ai/config/ryeos/ui/presentation.yaml",
+        &lillux::signature::sign_content(body, &key, "#", None),
+    );
+
+    let mut roots = Vec::new();
+    for project in [&plain, &decoy] {
+        let (session_id, _context, _producer, coordinate) =
+            test_state::live_shipped_presentation_in_project(&state, project).await;
+        let session = get_ui_state(&state)
+            .expect("UI state")
+            .browser_sessions
+            .get_session(&session_id)
+            .expect("active session");
+        let attachment = session
+            .attachments
+            .get(&coordinate.binding_attachment_id)
+            .expect("root attachment");
+        roots.push(attachment.compiled_binding.binding.surface.clone());
+    }
+
+    assert_eq!(roots[0].canonical_ref, "config:ryeos/ui/presentation");
+    assert_eq!(
+        roots[0].effective_trust_class,
+        ryeos_engine::resolution::TrustClass::TrustedBundle
+    );
+    assert_eq!(
+        roots[1], roots[0],
+        "the project's config at the shell's ref must not change the session root"
+    );
+}
+
+/// Opening a session on a shipped Surface fails when the project holds a
+/// file at that Surface's ref. The failure is the named conflict, and it
+/// names the project file and the bundle that ships the Surface.
+#[tokio::test]
+async fn project_file_shadowing_a_shipped_surface_fails_the_open_with_the_named_refusal() {
+    let (_state_dir, _state_owner, state) = test_state::build_test_state_with_live_bundles();
+    let projects = tempfile::tempdir().expect("projects tempdir");
+    let project = projects.path().join("project");
+    std::fs::create_dir(&project).expect("create project");
+    write_project_file(
+        &project,
+        ".ai/surfaces/ryeos/ui/project.yaml",
+        "name: decoy-surface\nversion: \"1.0.0\"\n",
+    );
+    let principal = test_state::register_fixture_project(&state, &project).await;
+
+    let refused = ryeos_ui::handlers::ui_launch_mint::handle(
+        ryeos_ui::handlers::ui_launch_mint::Request {
+            ui_binding_contract_revision: ryeos_ui::UI_BINDING_CONTRACT_REVISION.into(),
+            root_ref: "surface:ryeos/ui/project".into(),
+            project_path: Some(project.display().to_string()),
+            user_principal_id: Some(principal.clone()),
+            scopes: None,
+        },
+        HandlerContext::new(principal, vec!["*".into()], true),
+        Arc::new(state.clone()),
+    )
+    .await;
+    let error = match refused {
+        Ok(_) => panic!("a shadowed Surface must not open"),
+        Err(error) => error,
+    };
+    match ryeos_app::handler_error::extract_handler_error(&error) {
+        Some(ryeos_app::handler_error::HandlerError::Structured { code, status, body }) => {
+            assert_eq!(code, "project_shadows_bundle_item");
+            assert_eq!(status, 409);
+            assert_eq!(body["item_ref"], "surface:ryeos/ui/project");
+            assert_eq!(body["bundle"], "ryeos-ui");
+            assert!(
+                body["project_path"]
+                    .as_str()
+                    .is_some_and(|path| path.ends_with(".ai/surfaces/ryeos/ui/project.yaml")),
+                "{body}"
+            );
+        }
+        other => panic!("expected the named shadow conflict, got {other:?}: {error:#}"),
+    }
+}

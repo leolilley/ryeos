@@ -44,8 +44,8 @@ async fn live_presentation_seeded(
     live_presentation_in_project(state, &root, &root, initial_surface).await
 }
 
-/// The presentation fixture rooted in `project_root`, which holds the signed
-/// shared Config. `spelling` is the path the launch names that project by; it
+/// The presentation fixture bound to `project_root`. Its signed shared
+/// Config is an item of the state's fixture bundle. `spelling` is the path the launch names that project by; it
 /// may be any equivalent path of the canonical root.
 async fn live_presentation_in_project(
     state: &AppState,
@@ -66,22 +66,19 @@ async fn live_presentation_in_project(
         // interpolated into this signed temporary Config fixture.
         body.push_str(&format!("  initial_surfaces:\n    - id: fixture\n      title: Fixture Surface\n      surface: {}\n", serde_json::to_string(surface).unwrap()));
     }
-    let key = lillux::crypto::load_signing_key(
-        &ryeos_engine::test_support::workspace_root().join(".dev-keys/PUBLISHER_DEV.pem"),
-    )
-    .expect("established development publisher key");
-    let config_dir = project_root.join(".ai/config/test");
-    std::fs::create_dir_all(&config_dir).unwrap();
-    std::fs::write(
-        config_dir.join("presentation.yaml"),
-        lillux::signature::sign_content(&body, &key, "#", None),
-    )
-    .unwrap();
+    // The shell's presentation config is read from installed bundles only,
+    // so the fixture Config is a bundle item. Each call writes its own ref:
+    // one state may open several presentations with different Surfaces.
+    static NEXT_FIXTURE_CONFIG: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+    let fixture_id = NEXT_FIXTURE_CONFIG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let config_name = format!("test/presentation-{fixture_id}");
+    write_fixture_bundle_item(state, &format!("config/{config_name}.yaml"), &body);
     let principal = register_fixture_project(state, project_root).await;
     let minted = crate::handlers::ui_launch_mint::handle(
         crate::handlers::ui_launch_mint::Request {
             ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.into(),
-            root_ref: "config:test/presentation".into(),
+            root_ref: format!("config:{config_name}"),
             project_path: Some(spelling.display().to_string()),
             user_principal_id: Some(principal.clone()),
             scopes: None,
@@ -96,7 +93,7 @@ async fn live_presentation_in_project(
 
 /// Register `project_root` as the one project of the verified non-operator
 /// fixture principal, returning that principal.
-async fn register_fixture_project(state: &AppState, project_root: &std::path::Path) -> String {
+pub async fn register_fixture_project(state: &AppState, project_root: &std::path::Path) -> String {
     let principal = format!("fp:{}", "ab".repeat(32));
     let project_root = project_root.canonicalize().unwrap();
     // This verified non-operator principal selects only its private, explicitly
@@ -504,7 +501,9 @@ pub fn build_test_state_with_live_bundles() -> (tempfile::TempDir, TestStateStor
     let state_store = Arc::clone(native.store());
     let (store_owner, node) = native.into_parts();
     let (config, identity, write_barrier) = node.into_parts();
-    let engine = Arc::new(build_live_bundle_engine());
+    let fixture_bundle = tmpdir.path().join(FIXTURE_BUNDLE_DIR);
+    std::fs::create_dir_all(fixture_bundle.join(".ai")).expect("create fixture bundle root");
+    let engine = Arc::new(build_live_bundle_engine(fixture_bundle));
     // The seat profile comes from the signed surface kind, exactly as on a
     // node: nothing is injected here.
     let kind_profiles = Arc::new(ryeos_app::kind_profiles::KindProfileRegistry::build(Some(
@@ -562,7 +561,36 @@ pub fn local_operator_context(
     )
 }
 
-fn build_live_bundle_engine() -> ryeos_engine::engine::Engine {
+/// Directory name of the per-state bundle root that holds fixture items a
+/// test signs with the development publisher key. It is an installed bundle
+/// root of the test engine, so its items are bundle-space items.
+const FIXTURE_BUNDLE_DIR: &str = "fixture-bundle";
+
+/// The fixture bundle root of a state built with live bundles.
+pub fn fixture_bundle_root(state: &AppState) -> std::path::PathBuf {
+    state
+        .engine
+        .bundle_roots
+        .iter()
+        .find(|root| root.file_name().is_some_and(|name| name == FIXTURE_BUNDLE_DIR))
+        .cloned()
+        .expect("state built with live bundles has a fixture bundle root")
+}
+
+/// Write one item into the state's fixture bundle, signed with the
+/// development publisher key. `relative` is the path under the bundle's
+/// `.ai` directory.
+pub fn write_fixture_bundle_item(state: &AppState, relative: &str, body: &str) {
+    let key = lillux::crypto::load_signing_key(
+        &ryeos_engine::test_support::workspace_root().join(".dev-keys/PUBLISHER_DEV.pem"),
+    )
+    .expect("established development publisher key");
+    let path = fixture_bundle_root(state).join(".ai").join(relative);
+    std::fs::create_dir_all(path.parent().expect("fixture item parent")).unwrap();
+    std::fs::write(path, lillux::signature::sign_content(body, &key, "#", None)).unwrap();
+}
+
+fn build_live_bundle_engine(fixture_bundle: std::path::PathBuf) -> ryeos_engine::engine::Engine {
     let trust_store = ryeos_engine::test_support::live_trust_store();
     let core_bundle = ryeos_engine::test_support::core_bundle_root();
     let workflow_bundles = ryeos_engine::test_support::workflow_bundle_roots();
@@ -589,6 +617,7 @@ fn build_live_bundle_engine() -> ryeos_engine::engine::Engine {
         ryeos_engine::parsers::ParserDispatcher::new(parser_tools, Arc::clone(&native_handlers));
     let composers = ryeos_engine::composers::ComposerRegistry::from_kinds(&kinds, &native_handlers)
         .expect("derive live composers");
+    bundle_roots.push(fixture_bundle);
 
     ryeos_engine::engine::Engine::new(kinds, parser_dispatcher, bundle_roots)
         .with_trust_store(trust_store.clone())
