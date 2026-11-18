@@ -417,11 +417,7 @@ fn custody_wait_keeps_five_second_cap_under_a_long_request_timeout() {
             pending.abort_and_reap().expect("abort unexpected target");
             panic!("spawn must refuse while a lease stays held past the 5 s cap");
         }
-        Err(error) => assert!(
-            error.result.stderr.contains("Failed to spawn"),
-            "{}",
-            error.result.stderr
-        ),
+        Err(error) => assert!(error.stderr.contains("Failed to spawn"), "{}", error.stderr),
     }
     assert!(
         elapsed >= Duration::from_secs(4) && elapsed < Duration::from_secs(15),
