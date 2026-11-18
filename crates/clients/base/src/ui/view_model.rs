@@ -4415,7 +4415,6 @@ mod tests {
                 "ryeos.execute.service.projects/list",
                 "ryeos.execute.service.events/chain_replay",
                 "ryeos.execute.service.worker-executions/approvals",
-                "ryeos.execute.service.commands/list",
                 "ryeos.execute.service.bundle/list",
                 "ryeos.execute.service.scheduler/list"
             ])

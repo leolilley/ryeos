@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-18T06:12:58Z:75b328c18b826fdccbcb4164eb8c8ee780c35251c5c140c32f17b031c13e9ee7:Esvqp76aaOLPAuvyHlLLc3n4B44p+qnHr7AxoqWfJlQQLDwnjSdP6emkUXJSvDdOAZONT8rv3Y0FAIs5fAxoDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T09:42:19Z:f3e8e7f9791105289b09b31aca9fd1a3c1ef6cf95d33161745aeed8650fb4fb0:HIg5AoFMkkgkM4N3E7M8pvDIMULxkNQp+azgqWakH3ediJBvwBgKrewEss9q1oInMaoSya+GzVZ0H4ItdGV3Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-base-observe
 title: Home
 version: "2.1.0"
@@ -13,7 +13,6 @@ capabilities:
     - ryeos.execute.service.projects/list
     - ryeos.execute.service.events/chain_replay
     - ryeos.execute.service.worker-executions/approvals
-    - ryeos.execute.service.commands/list
     - ryeos.execute.service.bundle/list
     - ryeos.execute.service.scheduler/list
   affordances: []
