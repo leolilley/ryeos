@@ -1312,6 +1312,7 @@ mod tests {
             caller_scopes: &scopes,
             project_root: Some("/project"),
             node_policy_generation_digest: "policy:test",
+            project_source_ceiling: &[],
             identities: EmbeddedSurfaceIdentity {
                 request_engine_generation_identity: "engine:test".into(),
                 surface: identity("surface:test/root", 'a'),

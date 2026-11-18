@@ -1107,10 +1107,7 @@ async fn prepare_refuses_an_item_edited_in_place_although_composes_are_cached() 
     assert!(after_retry.hits > after_prepare.hits);
 
     // Edit the Config in place: same ref, same signer, different content.
-    let path = state
-        .config
-        .app_root
-        .join(".ai/config/test/presentation.yaml");
+    let path = test_state::fixture_bundle_root(&state).join(".ai/config/test/presentation.yaml");
     let original = std::fs::read_to_string(&path).unwrap();
     let body: String = original
         .lines()
