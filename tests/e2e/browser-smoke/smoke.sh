@@ -48,6 +48,10 @@ trap 'smoke_exit "$?"' EXIT
 
 ryeos_term_info "initializing isolated node"
 init_args=(init --non-interactive --source "$BUNDLE_SOURCE" --node-profile standard --host-class local)
+# A fresh node binds to an explicit substrate identity. This isolated node runs
+# the installed binaries directly, so name the installed ryeos executable.
+substrate_digest="$(sha256sum -- "$(command -v ryeos)")"
+init_args+=(--substrate-image-digest "sha256:${substrate_digest%% *}" --substrate-protocol 1)
 if [[ -n "$TRUST_FILE" ]]; then
   [[ -f "$TRUST_FILE" ]] || {
     ryeos_term_fail "RYEOS_SMOKE_TRUST_FILE does not exist: $TRUST_FILE"
