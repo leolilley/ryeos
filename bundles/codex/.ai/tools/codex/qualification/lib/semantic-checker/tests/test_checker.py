@@ -470,6 +470,17 @@ class CheckerSourceTests(unittest.TestCase):
         self.assertNotIn("eyJhbGci", redacted)
         self.assertIn("[redacted]", redacted)
 
+    def test_cell_excerpt_redacts_url_credentials_key_values_and_split_tokens(self):
+        for secret in ("hunter2", "dXNlcjpwYXNz", "aZ9bY8cX7dW6"):
+            text = checker.cell_excerpt('a "https://user:%s@host/x" b' % secret)
+            self.assertNotIn(secret, text)
+        self.assertNotIn("hunter2", checker.cell_excerpt("password=hunter2 next"))
+        self.assertNotIn("dXNlcjpwYXNz", checker.cell_excerpt("Authorization: Basic dXNlcjpwYXNz"))
+        zero_width = "sk-" + "a" * 10 + "\u200b" + "b" * 10
+        text = checker.cell_excerpt("x " + zero_width + " y")
+        self.assertNotIn("aaaaaaaaaa", text)
+        self.assertNotIn("bbbbbbbbbb", text)
+
     def test_cell_string_reader_decodes_literals_and_skips_comments(self):
         self.assertEqual(checker._js_strings('a("x\\"y", \'z\\n\') // "c"\n/* \'d\' */ `e` "\\u0041\\x42\\u{43}"'),
                          ['x"y', "z\n", "e", "ABC"])
