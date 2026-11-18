@@ -423,10 +423,12 @@ impl ExecutionProjectAuthority {
     /// A live project is its own logical root. A pinned generation is
     /// materialized at a per-generation checkout, so its logical root is the
     /// original project path, but only when the stable project identity says
-    /// the project is local to this node (`local:<path>`). A pinned
-    /// generation whose identity names another site has no logical root here,
-    /// so a signer scoped to specific projects never admits its content.
-    pub fn logical_project_root(&self) -> Option<PathBuf> {
+    /// the project is local to this node: `local:<path>`, or
+    /// `<site_id>:<path>` where `site_id` is this node's own site (the form a
+    /// pinned head launched on this node is stamped with). A pinned generation
+    /// whose identity names another site has no logical root here, so a
+    /// signer scoped to specific projects never admits its content.
+    pub fn logical_project_root(&self, site_id: &str) -> Option<PathBuf> {
         match self {
             Self::Projectless { .. } => None,
             Self::LiveProject { canonical_root, .. } => Some(canonical_root.clone()),
@@ -434,7 +436,9 @@ impl ExecutionProjectAuthority {
                 stable_project_identity,
                 display_path: Some(path),
                 ..
-            } if stable_project_identity == &format!("local:{}", path.display()) => {
+            } if stable_project_identity == &format!("local:{}", path.display())
+                || stable_project_identity == &format!("{site_id}:{}", path.display()) =>
+            {
                 Some(path.clone())
             }
             Self::PinnedGeneration { .. } => None,
@@ -1443,9 +1447,17 @@ mod tests {
 
     #[test]
     fn logical_project_root_is_the_local_project_path() {
+        const HERE: &str = "site:here";
+        // A legacy local identity.
         assert_eq!(
             pinned_for("local:/srv/projects/alpha", Some("/srv/projects/alpha"))
-                .logical_project_root(),
+                .logical_project_root(HERE),
+            Some(PathBuf::from("/srv/projects/alpha"))
+        );
+        // A pinned head launched on this node is stamped with its own site.
+        assert_eq!(
+            pinned_for("site:here:/srv/projects/alpha", Some("/srv/projects/alpha"))
+                .logical_project_root(HERE),
             Some(PathBuf::from("/srv/projects/alpha"))
         );
         // A project another site names is not a project of this node.
@@ -1454,15 +1466,21 @@ mod tests {
                 "site:other:/srv/projects/alpha",
                 Some("/srv/projects/alpha")
             )
-            .logical_project_root(),
+            .logical_project_root(HERE),
+            None
+        );
+        // The site prefix must name the whole site, not a prefix of it.
+        assert_eq!(
+            pinned_for("site:her:/srv/projects/alpha", Some("/srv/projects/alpha"))
+                .logical_project_root(HERE),
             None
         );
         assert_eq!(
-            pinned_for("local:/srv/projects/alpha", None).logical_project_root(),
+            pinned_for("local:/srv/projects/alpha", None).logical_project_root(HERE),
             None
         );
         assert_eq!(
-            ExecutionProjectAuthority::PROJECTLESS.logical_project_root(),
+            ExecutionProjectAuthority::PROJECTLESS.logical_project_root(HERE),
             None
         );
     }
