@@ -42,7 +42,12 @@ pub struct Request {
 const APPLY_OPERATION_TYPE: &str = "project_snapshot_apply";
 const APPLY_OPERATION_SCHEMA: &str = "ryeos.project-snapshot-apply-operation.v1";
 const APPLY_JOURNAL_KIND: &str = "ryeos.project-snapshot-apply-journal";
-const APPLY_JOURNAL_SCHEMA: u32 = 1;
+/// Journal v2 records, for every managed root, the root and its shape as they
+/// were when the apply was prepared. Recovery uses the journal's own list, so a
+/// change to the node's `sync_include` table between a crash and recovery
+/// cannot strand an apply. v1 journals named only the root and relied on the
+/// current table matching in count and order; there is no v1 reader.
+const APPLY_JOURNAL_SCHEMA: u32 = 2;
 const APPLY_JOURNAL_MAX_BYTES: u64 = 8 * 1024 * 1024;
 const SURFACE_CONTENT_SCHEMA: u32 = 1;
 
@@ -77,10 +82,49 @@ struct ApplyOperation {
 #[serde(deny_unknown_fields)]
 struct JournalSurface {
     relative: String,
+    shape: JournalShape,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     prior_content: Option<SurfaceContentIdentity>,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     target_content: Option<SurfaceContentIdentity>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum JournalShape {
+    File,
+    Directory,
+}
+
+impl From<SyncIncludeShape> for JournalShape {
+    fn from(shape: SyncIncludeShape) -> Self {
+        match shape {
+            SyncIncludeShape::File => Self::File,
+            SyncIncludeShape::Directory => Self::Directory,
+        }
+    }
+}
+
+impl From<JournalShape> for SyncIncludeShape {
+    fn from(shape: JournalShape) -> Self {
+        match shape {
+            JournalShape::File => Self::File,
+            JournalShape::Directory => Self::Directory,
+        }
+    }
+}
+
+/// The managed roots a journal was written against, in journal order. Every
+/// recovery step iterates these, never the node's current table.
+fn journal_entries(surfaces: &[JournalSurface]) -> Vec<SyncIncludeEntry> {
+    surfaces
+        .iter()
+        .map(|surface| SyncIncludeEntry {
+            root: surface.relative.clone(),
+            shape: surface.shape.into(),
+            materialize_to_project: true,
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -399,7 +443,6 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
                 &project_directory,
                 &staging,
                 &journal_surfaces,
-                &entries,
                 tree.files.len(),
             ) {
                 Ok(surface_swap) => surface_swap,
@@ -408,7 +451,6 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
                         &project_directory,
                         &staging,
                         &journal_surfaces,
-                        &entries,
                     )?;
                     durable_resolution_complete = true;
                     return Err(error);
@@ -428,7 +470,6 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
                         &project_directory,
                         &staging,
                         &journal_surfaces,
-                        &entries,
                     )?;
                     schedule_restore_required = true;
                     return Err(err);
@@ -439,7 +480,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
 
             let commit_surface_validation = (|| -> Result<()> {
                 project_directory.ensure_path_binding()?;
-                verify_live_journal_surfaces(&project_directory, &journal_surfaces, &entries, true)?;
+                verify_live_journal_surfaces(&project_directory, &journal_surfaces, true)?;
                 // Recheck after the potentially large content walk. The pinned
                 // descriptor remains exact, but the pathname is the subject the
                 // deployed ref names and must still resolve to this inode at the
@@ -453,7 +494,6 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
                 &project_directory,
                 &staging,
                 &journal_surfaces,
-                &entries,
             )
             .context("project apply commit-fence failure also failed surface rollback")?;
             return Err(error);
@@ -518,7 +558,6 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
                     &project_directory,
                     &staging,
                     &journal_surfaces,
-                    &entries,
                 )?;
                 return Err(err);
             }
@@ -535,7 +574,6 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
                 verify_live_journal_surfaces(
                     &project_directory,
                     &journal_surfaces,
-                    &entries,
                     true,
                 )
             })
@@ -938,7 +976,7 @@ fn capture_journal_surfaces(
 ) -> Result<Vec<JournalSurface>> {
     let expected_targets = expected_target_surface_identities(cas, tree, entries)?;
     let surfaces = observe_journal_surfaces(project, staging, entries)?;
-    verify_journal_target_identities(&surfaces, &expected_targets, entries)?;
+    verify_journal_target_identities(&surfaces, &expected_targets)?;
     Ok(surfaces)
 }
 
@@ -954,6 +992,7 @@ fn observe_journal_surfaces(
             let target_content = observe_surface_content(staging, surface)?;
             Ok(JournalSurface {
                 relative: surface.root.clone(),
+                shape: surface.shape.into(),
                 prior_content,
                 target_content,
             })
@@ -1254,23 +1293,33 @@ fn write_apply_journal(
 }
 
 #[cfg(test)]
-fn read_apply_journal(
-    workspace: &StagingDirectory,
-    key: &[u8; 32],
-    entries: &[SyncIncludeEntry],
-) -> Result<ApplyJournal> {
-    read_apply_journal_from_transaction(&workspace.transaction, key, entries)
+fn read_apply_journal(workspace: &StagingDirectory, key: &[u8; 32]) -> Result<ApplyJournal> {
+    read_apply_journal_from_transaction(&workspace.transaction, key)
 }
 
 fn read_apply_journal_from_transaction(
     transaction: &PinnedDirectory,
     key: &[u8; 32],
-    entries: &[SyncIncludeEntry],
 ) -> Result<ApplyJournal> {
     let file = transaction
         .open_pinned_regular(OsStr::new("journal.json"), false)?
         .context("project apply transaction has no authenticated journal")?;
     let bytes = file.read_bounded(APPLY_JOURNAL_MAX_BYTES)?;
+    // Check the contract before the struct shape: a v1 journal lacks fields v2
+    // requires, and the operator must see why, not a missing-field error.
+    let raw: Value = serde_json::from_slice(&bytes)?;
+    if raw.get("kind").and_then(Value::as_str) != Some(APPLY_JOURNAL_KIND) {
+        anyhow::bail!("unsupported project apply journal contract");
+    }
+    match raw.get("schema").and_then(Value::as_u64) {
+        Some(schema) if schema == u64::from(APPLY_JOURNAL_SCHEMA) => {}
+        Some(1) => anyhow::bail!(
+            "project apply journal is schema 1, written by an older node before the sync_include table; this node reads only schema {APPLY_JOURNAL_SCHEMA} and has no schema 1 reader. Roll back or discard the interrupted apply with the node version that wrote it, then re-run project.apply-snapshot"
+        ),
+        other => anyhow::bail!(
+            "unsupported project apply journal schema {other:?}; this node reads only schema {APPLY_JOURNAL_SCHEMA}"
+        ),
+    }
     let journal: ApplyJournal = serde_json::from_slice(&bytes)?;
     if lillux::canonical_json(&serde_json::to_value(&journal)?)?.as_bytes() != bytes {
         anyhow::bail!("project apply journal is not canonical JSON");
@@ -1286,7 +1335,7 @@ fn read_apply_journal_from_transaction(
     mac.verify_slice(&supplied)
         .map_err(|_| anyhow!("project apply journal is not authenticated by this node"))?;
     validate_apply_operation(&journal.operation)?;
-    validate_journal_surfaces(&journal.surfaces, entries)?;
+    validate_journal_surfaces(&journal.surfaces)?;
     Ok(journal)
 }
 
@@ -1599,7 +1648,6 @@ fn replace_managed_surfaces(
     project_root: &PinnedDirectory,
     workspace: &StagingDirectory,
     journal_surfaces: &[JournalSurface],
-    entries: &[SyncIncludeEntry],
     files_materialized: usize,
 ) -> Result<PreparedSurfaceSwap> {
     let mut prepared = PreparedSurfaceSwap {
@@ -1615,13 +1663,8 @@ fn replace_managed_surfaces(
         finalized: false,
     };
     let result = (|| -> Result<()> {
-        if entries.len() != journal_surfaces.len() {
-            anyhow::bail!("project apply journal has the wrong managed-surface count");
-        }
+        let entries = journal_entries(journal_surfaces);
         for (surface, frozen) in entries.iter().zip(journal_surfaces) {
-            if frozen.relative != surface.root.as_str() {
-                anyhow::bail!("project apply journal managed-surface order changed");
-            }
             let live = crate::project_namespace::relative_parent(
                 &prepared.project,
                 surface.root.as_str(),
@@ -1751,17 +1794,13 @@ fn move_exact_child(
     Ok(())
 }
 
-fn validate_journal_surfaces(
-    surfaces: &[JournalSurface],
-    entries: &[SyncIncludeEntry],
-) -> Result<()> {
-    if entries.len() != surfaces.len() {
-        anyhow::bail!("project apply journal has the wrong managed-surface count");
-    }
-    for (surface, frozen) in entries.iter().zip(surfaces) {
-        if surface.root.as_str() != frozen.relative {
-            anyhow::bail!("project apply journal managed-surface order changed");
-        }
+/// Validate a journal's own root list: each root must be a legal sync_include
+/// root and no two may overlap (the same rules a table is built under), and
+/// every recorded content identity must be well formed.
+fn validate_journal_surfaces(surfaces: &[JournalSurface]) -> Result<()> {
+    ryeos_state::project_sync::SyncInclude::new(journal_entries(surfaces))
+        .context("project apply journal records an invalid managed-root list")?;
+    for frozen in surfaces {
         if let Some(identity) = &frozen.prior_content {
             validate_surface_content_identity(identity)?;
         }
@@ -1775,10 +1814,9 @@ fn validate_journal_surfaces(
 fn verify_journal_target_identities(
     surfaces: &[JournalSurface],
     expected_targets: &HashMap<String, Option<SurfaceContentIdentity>>,
-    entries: &[SyncIncludeEntry],
 ) -> Result<()> {
-    validate_journal_surfaces(surfaces, entries)?;
-    if expected_targets.len() != entries.len() {
+    validate_journal_surfaces(surfaces)?;
+    if expected_targets.len() != surfaces.len() {
         anyhow::bail!("project snapshot has the wrong managed-surface identity count");
     }
     for frozen in surfaces {
@@ -1798,11 +1836,10 @@ fn verify_journal_target_identities(
 fn live_journal_surfaces_match(
     project: &PinnedDirectory,
     surfaces: &[JournalSurface],
-    entries: &[SyncIncludeEntry],
     target: bool,
 ) -> Result<bool> {
-    validate_journal_surfaces(surfaces, entries)?;
-    for (surface, frozen) in entries.iter().zip(surfaces) {
+    validate_journal_surfaces(surfaces)?;
+    for (surface, frozen) in journal_entries(surfaces).iter().zip(surfaces) {
         let expected = if target {
             &frozen.target_content
         } else {
@@ -1818,10 +1855,9 @@ fn live_journal_surfaces_match(
 fn verify_live_journal_surfaces(
     project: &PinnedDirectory,
     surfaces: &[JournalSurface],
-    entries: &[SyncIncludeEntry],
     target: bool,
 ) -> Result<()> {
-    if !live_journal_surfaces_match(project, surfaces, entries, target)? {
+    if !live_journal_surfaces_match(project, surfaces, target)? {
         anyhow::bail!(
             "live managed surfaces do not match the authenticated {} content",
             if target { "target" } else { "prior" }
@@ -1856,9 +1892,9 @@ fn rollback_journal_surfaces(
     project: &PinnedDirectory,
     workspace: &StagingDirectory,
     surfaces: &[JournalSurface],
-    entries: &[SyncIncludeEntry],
 ) -> Result<()> {
-    validate_journal_surfaces(surfaces, entries)?;
+    validate_journal_surfaces(surfaces)?;
+    let entries = journal_entries(surfaces);
     for (surface, frozen) in entries.iter().zip(surfaces).rev() {
         let live =
             crate::project_namespace::relative_parent(project, surface.root.as_str(), false)?;
@@ -1925,7 +1961,7 @@ fn rollback_journal_surfaces(
             move_exact_child(live_parent, &discard_parent, name)?;
         }
     }
-    verify_live_journal_surfaces(project, surfaces, entries, false)
+    verify_live_journal_surfaces(project, surfaces, false)
 }
 
 fn validate_job_operation(job: &SyncJobRecord) -> Result<ApplyOperation> {
@@ -2011,7 +2047,6 @@ async fn recover_apply_job(
     try_pending_acquisition: bool,
 ) -> Result<bool> {
     let operation = validate_job_operation(job)?;
-    let entries: Vec<SyncIncludeEntry> = state.sync_include.materialized().cloned().collect();
     let project_path = PathBuf::from(&operation.project_path);
     let project = PinnedDirectory::open(&project_path)?
         .context("project apply recovery cannot open its project root")?;
@@ -2042,7 +2077,7 @@ async fn recover_apply_job(
                 .is_some() =>
         {
             let key = authority.require_recovery()?.workspace_journal_auth_key()?;
-            let journal = read_apply_journal_from_transaction(transaction, &key, &entries)?;
+            let journal = read_apply_journal_from_transaction(transaction, &key)?;
             if journal.operation != operation {
                 anyhow::bail!("project apply journal is bound to another operation");
             }
@@ -2127,13 +2162,22 @@ async fn recover_apply_job(
     let outcome = {
         let _cas_guard = authority.acquire_shared_guard()?;
         let cas = authority.cas_store()?;
+        // The roots to verify are the journal's own list when a journal
+        // exists: the apply was prepared against that table, and recovery must
+        // not depend on the node's table today. With no journal (a settled
+        // commit whose transaction was already retired) there is nothing
+        // recorded, so the node's current table stands in.
+        let recovery_entries = match journal.as_ref() {
+            Some(journal) => journal_entries(&journal.surfaces),
+            None => state.sync_include.materialized().cloned().collect(),
+        };
         let expected_targets = expected_target_surface_identities_for_snapshot(
             &cas,
             &operation.target_snapshot_hash,
-            &entries,
+            &recovery_entries,
         )?;
         if let Some(journal) = journal.as_ref() {
-            verify_journal_target_identities(&journal.surfaces, &expected_targets, &entries)?;
+            verify_journal_target_identities(&journal.surfaces, &expected_targets)?;
         }
         let visible = state
             .state_store
@@ -2152,7 +2196,7 @@ async fn recover_apply_job(
                 if journal.is_none() && settled_resolution.is_none() {
                     anyhow::bail!("committed project apply has no authenticated journal");
                 }
-                verify_live_target_identities(&project, &expected_targets, &entries)?;
+                verify_live_target_identities(&project, &expected_targets, &recovery_entries)?;
                 if journal.is_some() && settled_resolution.is_none() {
                     schedule_owner
                         .session_mut()
@@ -2165,23 +2209,13 @@ async fn recover_apply_job(
             ApplyRecoveryDecision::Rollback => {
                 if let Some((_parent, _transaction, _name)) = transaction.as_ref() {
                     if let Some(journal) = journal.as_ref() {
-                        if !live_journal_surfaces_match(
-                            &project,
-                            &journal.surfaces,
-                            &entries,
-                            false,
-                        )? {
+                        if !live_journal_surfaces_match(&project, &journal.surfaces, false)? {
                             let workspace =
                                 StagingDirectory::open(&project, &operation.transaction_id)?
                                     .context(
                                         "prepared project apply has an incomplete transaction",
                                     )?;
-                            rollback_journal_surfaces(
-                                &project,
-                                &workspace,
-                                &journal.surfaces,
-                                &entries,
-                            )?;
+                            rollback_journal_surfaces(&project, &workspace, &journal.surfaces)?;
                         }
                         // Schedule restoration is independently idempotent and
                         // remains required when a predecessor crashed after
@@ -2193,7 +2227,7 @@ async fn recover_apply_job(
                                 .restore()
                                 .context("restore project schedules inside CAS recovery section")?;
                         }
-                        verify_live_journal_surfaces(&project, &journal.surfaces, &entries, false)?;
+                        verify_live_journal_surfaces(&project, &journal.surfaces, false)?;
                         project.ensure_path_binding()?;
                     } else if settled_resolution.is_none() {
                         // Before journal publication no live surface or schedule
@@ -2842,6 +2876,7 @@ mod tests {
                     .iter()
                     .map(|surface| JournalSurface {
                         relative: surface.root.clone(),
+                        shape: surface.shape.into(),
                         prior_content: None,
                         target_content: None,
                     })
@@ -2857,7 +2892,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            read_apply_journal(&workspace, &key, &test_entries())
+            read_apply_journal(&workspace, &key)
                 .unwrap()
                 .schedule_before_images[0]
                 .signed_yaml
@@ -2869,13 +2904,13 @@ mod tests {
         let mut value: Value = serde_json::from_slice(&bytes).unwrap();
         value["auth_tag"] = Value::String(value["auth_tag"].as_str().unwrap().to_ascii_uppercase());
         std::fs::write(&path, lillux::canonical_json(&value).unwrap()).unwrap();
-        assert!(read_apply_journal(&workspace, &key, &test_entries()).is_err());
+        assert!(read_apply_journal(&workspace, &key).is_err());
 
         let mut value: Value = serde_json::from_slice(&bytes).unwrap();
         value["schedule_before_images"][0]["signed_yaml"] =
             Value::String("signed: changed\n".to_owned());
         std::fs::write(&path, lillux::canonical_json(&value).unwrap()).unwrap();
-        assert!(read_apply_journal(&workspace, &key, &test_entries()).is_err());
+        assert!(read_apply_journal(&workspace, &key).is_err());
     }
 
     fn apply_surface_prefix(
@@ -2953,10 +2988,7 @@ mod tests {
             "changed-old-file",
         )
         .unwrap();
-        assert!(
-            rollback_journal_surfaces(&project_directory, &workspace, &surfaces, &test_entries())
-                .is_err()
-        );
+        assert!(rollback_journal_surfaces(&project_directory, &workspace, &surfaces).is_err());
     }
 
     #[test]
@@ -2989,8 +3021,7 @@ mod tests {
             )
             .unwrap();
             apply_surface_prefix(&project_directory, &workspace, &surfaces, prefix);
-            rollback_journal_surfaces(&project_directory, &workspace, &surfaces, &test_entries())
-                .unwrap();
+            rollback_journal_surfaces(&project_directory, &workspace, &surfaces).unwrap();
             assert_eq!(
                 std::fs::read_to_string(project.path().join(".ai/manifest.yaml")).unwrap(),
                 "old-file"
@@ -3057,8 +3088,7 @@ mod tests {
             observe_journal_surfaces(&project_directory, staging.directory(), &test_entries())
                 .unwrap();
         let mut prepared =
-            replace_managed_surfaces(&project_directory, &staging, &surfaces, &test_entries(), 3)
-                .unwrap();
+            replace_managed_surfaces(&project_directory, &staging, &surfaces, 3).unwrap();
         prepared.finalize();
         let report = prepared.report.clone();
         assert!(report.surfaces_replaced >= 1);
@@ -3737,6 +3767,7 @@ schedules:
                     .iter()
                     .map(|surface| JournalSurface {
                         relative: surface.root.clone(),
+                        shape: surface.shape.into(),
                         prior_content: None,
                         target_content: None,
                     })
@@ -3755,8 +3786,8 @@ schedules:
         host.settle_shared(db);
 
         // Restart: only an authenticated journal may name recovery images.
-        assert!(read_apply_journal(&workspace, &[12_u8; 32], &test_entries()).is_err());
-        let journal = read_apply_journal(&workspace, &key, &test_entries()).unwrap();
+        assert!(read_apply_journal(&workspace, &[12_u8; 32]).is_err());
+        let journal = read_apply_journal(&workspace, &key).unwrap();
         assert_eq!(
             journal.schedule_before_images[0]
                 .signed_yaml
@@ -3835,5 +3866,164 @@ schedules:
         service.close_after_shutdown_drain().unwrap();
         drop(service);
         host.settle_shared(db);
+    }
+
+    #[test]
+    fn recovery_uses_the_journals_own_roots_after_the_table_changes() {
+        // The table at preparation time carries `.ai/views`, which the
+        // built-in table does not. Nothing below consults any table: every
+        // recovery step iterates the journal's roots.
+        let written_against = vec![
+            SyncIncludeEntry::file(".ai/manifest.yaml"),
+            SyncIncludeEntry::directory(".ai/views"),
+            SyncIncludeEntry::directory(".ai/tools"),
+        ];
+        let project = TempDir::new().unwrap();
+        std::fs::create_dir_all(project.path().join(".ai/views")).unwrap();
+        std::fs::create_dir_all(project.path().join(".ai/tools")).unwrap();
+        std::fs::write(project.path().join(".ai/manifest.yaml"), "old-file").unwrap();
+        std::fs::write(project.path().join(".ai/views/old.yaml"), "old-view").unwrap();
+        std::fs::write(project.path().join(".ai/tools/old.sh"), "old-tool").unwrap();
+
+        let project_root = project.path().canonicalize().unwrap();
+        let project_directory = PinnedDirectory::open(&project_root).unwrap().unwrap();
+        let staging =
+            StagingDirectory::create(&project_directory, "test-journal-own-roots").unwrap();
+        std::fs::create_dir_all(staging.directory.path().join(".ai/views")).unwrap();
+        std::fs::write(
+            staging.directory.path().join(".ai/views/new.yaml"),
+            "new-view",
+        )
+        .unwrap();
+
+        let surfaces =
+            observe_journal_surfaces(&project_directory, staging.directory(), &written_against)
+                .unwrap();
+        assert_eq!(
+            surfaces.iter().map(|s| s.shape).collect::<Vec<_>>(),
+            vec![
+                JournalShape::File,
+                JournalShape::Directory,
+                JournalShape::Directory
+            ],
+            "the journal records each root's shape"
+        );
+        assert!(
+            !test_entries().iter().any(|e| e.root == ".ai/views"),
+            "the node's current table no longer matches the journal's list"
+        );
+        assert_eq!(journal_entries(&surfaces), written_against);
+
+        // "Crash" after the swap, then recover with no table in hand.
+        let mut prepared =
+            replace_managed_surfaces(&project_directory, &staging, &surfaces, 1).unwrap();
+        prepared.retain_for_recovery();
+        assert!(!project.path().join(".ai/views/old.yaml").exists());
+        assert!(
+            live_journal_surfaces_match(&project_directory, &surfaces, true).unwrap(),
+            "live content is the journal's target"
+        );
+        rollback_journal_surfaces(&project_directory, &staging, &surfaces).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(project.path().join(".ai/views/old.yaml")).unwrap(),
+            "old-view"
+        );
+        assert_eq!(
+            std::fs::read_to_string(project.path().join(".ai/tools/old.sh")).unwrap(),
+            "old-tool"
+        );
+        assert!(live_journal_surfaces_match(&project_directory, &surfaces, false).unwrap());
+    }
+
+    #[test]
+    fn journal_with_overlapping_or_floor_roots_is_refused_on_read() {
+        let project = TempDir::new().unwrap();
+        let project_path = project.path().canonicalize().unwrap();
+        let project_directory = PinnedDirectory::open(&project_path).unwrap().unwrap();
+        for (label, roots) in [
+            (
+                "overlap",
+                vec![
+                    SyncIncludeEntry::directory(".ai/views"),
+                    SyncIncludeEntry::directory(".ai/views/sub"),
+                ],
+            ),
+            ("floor", vec![SyncIncludeEntry::directory(".ai/node/vault")]),
+        ] {
+            let transaction_id = uuid::Uuid::new_v4().to_string();
+            let workspace = StagingDirectory::create(&project_directory, &transaction_id).unwrap();
+            let key = [9_u8; 32];
+            write_apply_journal(
+                &workspace,
+                &key,
+                ApplyJournal {
+                    kind: APPLY_JOURNAL_KIND.to_owned(),
+                    schema: APPLY_JOURNAL_SCHEMA,
+                    operation: test_operation(&project_path, &transaction_id),
+                    surfaces: roots
+                        .iter()
+                        .map(|root| JournalSurface {
+                            relative: root.root.clone(),
+                            shape: root.shape.into(),
+                            prior_content: None,
+                            target_content: None,
+                        })
+                        .collect(),
+                    schedule_before_images: Vec::new(),
+                    auth_tag: String::new(),
+                },
+            )
+            .unwrap();
+            read_apply_journal(&workspace, &key).expect_err(label);
+        }
+    }
+
+    #[test]
+    fn a_v1_journal_is_refused_with_a_clear_message() {
+        let project = TempDir::new().unwrap();
+        let project_path = project.path().canonicalize().unwrap();
+        let project_directory = PinnedDirectory::open(&project_path).unwrap().unwrap();
+        let transaction_id = "5b0f3f43-7f3c-4a0c-9d57-1f6e3c6f2a11";
+        let workspace = StagingDirectory::create(&project_directory, transaction_id).unwrap();
+        let key = [7_u8; 32];
+        write_apply_journal(
+            &workspace,
+            &key,
+            ApplyJournal {
+                kind: APPLY_JOURNAL_KIND.to_owned(),
+                schema: APPLY_JOURNAL_SCHEMA,
+                operation: test_operation(&project_path, transaction_id),
+                surfaces: test_entries()
+                    .iter()
+                    .map(|surface| JournalSurface {
+                        relative: surface.root.clone(),
+                        shape: surface.shape.into(),
+                        prior_content: None,
+                        target_content: None,
+                    })
+                    .collect(),
+                schedule_before_images: Vec::new(),
+                auth_tag: String::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            read_apply_journal(&workspace, &key).unwrap().schema,
+            2,
+            "the current journal is schema 2"
+        );
+        // Rewrite it as the v1 shape: schema 1, no per-root shape.
+        let path = workspace.transaction.path().join("journal.json");
+        let mut value: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value["schema"] = Value::from(1);
+        for surface in value["surfaces"].as_array_mut().unwrap() {
+            surface.as_object_mut().unwrap().remove("shape");
+        }
+        std::fs::write(&path, lillux::canonical_json(&value).unwrap()).unwrap();
+        let error = format!("{:#}", read_apply_journal(&workspace, &key).unwrap_err());
+        assert!(
+            error.contains("schema 1") && error.contains("no schema 1 reader"),
+            "{error}"
+        );
     }
 }
