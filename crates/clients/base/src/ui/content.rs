@@ -2790,6 +2790,10 @@ mod tests {
                 }
             }
         }
+        // A lane must name the capabilities a listed service itself requires. The machines
+        // view reads a UI service that fans out through the node's locality service, so the
+        // lane carries that capability although no view names the service directly.
+        sources.insert("ryeos.execute.service.node/locality/groups".to_owned());
         for (lane, expected) in [("sources", sources), ("affordances", actions)] {
             let declared: std::collections::BTreeSet<String> = node["capabilities"][lane]
                 .as_array()
