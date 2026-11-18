@@ -34,8 +34,38 @@ if [[ -z "$APP_ROOT" ]]; then
 fi
 export RYEOS_APP_ROOT="$APP_ROOT"
 
+# A directly spawned daemon has no host-backed process-scope delegation, so the
+# standard profile refuses to start it. On a disposable CI VM the operator
+# runs the product's own one-time host setup (`ryeos node host setup`), which
+# provisions a native runit service with a delegated cgroup subtree; start,
+# stop and status then go through that service. Off by default.
+HOST_SERVICE="${RYEOS_SMOKE_HOST_SERVICE:-0}"
+HOST_NODE_MEMORY_BYTES="${RYEOS_SMOKE_NODE_MEMORY_BYTES:-8589934592}"
+HOST_NODE_PROCESSES="${RYEOS_SMOKE_NODE_PROCESSES:-8192}"
+
+host_service_setup() {
+  [[ "$HOST_SERVICE" == "1" ]] || return 0
+  ryeos_term_info "provisioning the host service association"
+  timeout 120 ryeos node host setup --confirm \
+    --node-memory-bytes "$HOST_NODE_MEMORY_BYTES" --node-processes "$HOST_NODE_PROCESSES"
+}
+
+host_service_retire() {
+  [[ "$HOST_SERVICE" == "1" ]] || return 0
+  timeout 60 ryeos node host retire --confirm >/dev/null 2>&1 || true
+}
+
+host_service_diagnostics() {
+  [[ "$HOST_SERVICE" == "1" ]] || return 0
+  echo "--- ryeos node doctor" >&2
+  timeout 60 ryeos node doctor 2>&1 | head -n 120 >&2 || true
+  echo "--- host service logs" >&2
+  sudo -n sh -c 'for f in /var/log/lillux-host-service/*/current; do echo "== $f"; tail -n 80 "$f"; done' >&2 2>&1 || true
+}
+
 cleanup() {
   timeout 15 ryeos stop --force >/dev/null 2>&1 || true
+  host_service_retire
   if [[ "$KEEP" == "1" ]]; then
     ryeos_term_note "retained smoke artifacts at $WORK_ROOT"
   else
@@ -44,6 +74,7 @@ cleanup() {
 }
 smoke_exit() {
   local status="$1"
+  [[ "$status" == "0" ]] || host_service_diagnostics
   ryeos_term_handle_exit "$status"
   cleanup
   return "$status"
@@ -74,6 +105,7 @@ cat >"$PROJECT_ROOT/.ai/tools/smoke/resume.yaml" <<'YAML'
 category: smoke
 version: "1.0.0"
 executor_id: "@subprocess"
+execution_protocol: "protocol:ryeos/core/opaque"
 description: Deterministic long-running fixture for installed resume smoke tests
 config:
   command: /bin/sh
@@ -205,6 +237,10 @@ ryeos_term_info "initializing isolated node"
 # The profile and host class an installed package's post-install message
 # names: the standard profile on a host the operator runs.
 init_args=(init --non-interactive --source "$BUNDLE_SOURCE" --node-profile standard --host-class local)
+# A fresh node binds to an explicit substrate identity. This isolated node runs
+# the installed binaries directly, so name the installed ryeos executable.
+substrate_digest="$(sha256sum -- "$(command -v ryeos)")"
+init_args+=(--substrate-image-digest "sha256:${substrate_digest%% *}" --substrate-protocol 1)
 if [[ -n "$TRUST_FILE" ]]; then
   [[ -f "$TRUST_FILE" ]] || {
     ryeos_term_fail "RYEOS_SMOKE_TRUST_FILE does not exist: $TRUST_FILE"
@@ -213,6 +249,7 @@ if [[ -n "$TRUST_FILE" ]]; then
   init_args+=(--trust-file "$TRUST_FILE")
 fi
 bounded_for "$INIT_TIMEOUT" ryeos "${init_args[@]}"
+host_service_setup
 ryeos_term_info "signing resumable fixture"
 bounded ryeos --project "$PROJECT_ROOT" sign tool:smoke/resume graph:smoke/resume
 bounded ryeos start

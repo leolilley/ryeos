@@ -971,9 +971,13 @@ jobs:
 
   installed-resume-smoke:
     name: Installed restart/resume smoke
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    # Lillux pins /usr/bin/sudo as an exact root-owned regular file; ubuntu-26.04
+    # ships sudo-rs as a symlink, which that pin refuses (ELOOP).
     timeout-minutes: 120
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.installed_resume_smoke }}
+    env:
+      RYEOS_SMOKE_PREFIX: /ryeos-ci
     steps:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -996,23 +1000,48 @@ jobs:
 
       - name: Build and install standard distribution
         run: |
+          # The runner makes /usr/share and /opt world-writable (mode 777), so
+          # Lillux refuses them as a package namespace. Install under a prefix
+          # at the filesystem root, which stays root-owned and 0755.
+          mkdir -p "$RUNNER_TEMP/ryeos-node"
           CARGO="$CARGO_HOME/bin/cargo" sudo --preserve-env=CARGO ./scripts/pkg/install-local-direct.sh \
+            --prefix "$RYEOS_SMOKE_PREFIX" --app-root "$RUNNER_TEMP/ryeos-node" \
             --populate --all --bundle-set standard --no-init --no-daemon-restart
+
+      - name: Prepare the runner
+        # The durable-root probe refuses an app root on the VM's root disk, so
+        # this places TMPDIR on a loop-mounted volume.
+        run: ./scripts/ci/prepare-runner.sh --host-service
 
       - name: Exercise installed restart and resume
         env:
+          RYEOS_SMOKE_HOST_SERVICE: "1"
           # The manual smoke job populates bundles with the repository's dev
           # publisher. Trust that exact document explicitly; release artifacts
           # use the hardcoded official publisher and need no override.
-          RYEOS_SMOKE_TRUST_FILE: /usr/share/ryeos/.ai/PUBLISHER_TRUST.toml
-        run: ./tests/e2e/installed-resume/smoke.sh
+          RYEOS_SMOKE_TRUST_FILE: ${{ env.RYEOS_SMOKE_PREFIX }}/share/ryeos/.ai/PUBLISHER_TRUST.toml
+          RYEOS_SMOKE_BUNDLE_SOURCE: ${{ env.RYEOS_SMOKE_PREFIX }}/share/ryeos
+        run: |
+          PATH="$RYEOS_SMOKE_PREFIX/bin:$PATH" ./tests/e2e/installed-resume/smoke.sh
 
   browser-smoke:
     name: Installed browser client smoke
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    # Lillux pins /usr/bin/sudo as an exact root-owned regular file; ubuntu-26.04
+    # ships sudo-rs as a symlink, which that pin refuses (ELOOP).
     timeout-minutes: 120
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.browser_smoke }}
+    env:
+      RYEOS_SMOKE_PREFIX: /ryeos-ci
+      # Playwright 1.58 refuses ubuntu-26.04 as a host. Resolve its Chromium
+      # and system dependencies as the closest supported release.
+      PLAYWRIGHT_HOST_PLATFORM_OVERRIDE: ubuntu24.04-x64
     steps:
+      - name: Show package namespace ownership
+        run: |
+          stat -c '%U:%G %a %n' / /usr /usr/share /opt
+          getfacl -p /usr/share /opt || true
+          id
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -1034,7 +1063,12 @@ jobs:
 
       - name: Build and install standard distribution
         run: |
+          # The runner makes /usr/share and /opt world-writable (mode 777), so
+          # Lillux rightly refuses them as a package namespace. Install under a
+          # prefix at the filesystem root, which stays root-owned and 0755.
+          mkdir -p "$RUNNER_TEMP/ryeos-node"
           CARGO="$CARGO_HOME/bin/cargo" sudo --preserve-env=CARGO ./scripts/pkg/install-local-direct.sh \
+            --prefix "$RYEOS_SMOKE_PREFIX" --app-root "$RUNNER_TEMP/ryeos-node" \
             --populate --all --bundle-set standard --no-init --no-daemon-restart
 
       - name: Install headless Chromium for the smoke driver
@@ -1042,12 +1076,20 @@ jobs:
           npm install --no-save --prefix "$RUNNER_TEMP/playwright" @playwright/test@1.58.2
           "$RUNNER_TEMP/playwright/node_modules/.bin/playwright" install --with-deps chromium
 
+      - name: Prepare the runner
+        # The durable-root probe refuses an app root on the VM's root disk, so
+        # this places TMPDIR on a loop-mounted volume.
+        run: ./scripts/ci/prepare-runner.sh --host-service
+
       - name: Exercise the browser client
         env:
-          RYEOS_SMOKE_TRUST_FILE: /usr/share/ryeos/.ai/PUBLISHER_TRUST.toml
+          RYEOS_SMOKE_HOST_SERVICE: "1"
+          RYEOS_SMOKE_TRUST_FILE: ${{ env.RYEOS_SMOKE_PREFIX }}/share/ryeos/.ai/PUBLISHER_TRUST.toml
+          RYEOS_SMOKE_BUNDLE_SOURCE: ${{ env.RYEOS_SMOKE_PREFIX }}/share/ryeos
           RYEOS_SMOKE_SHOTS: ${{ runner.temp }}/browser-smoke
           PLAYWRIGHT_ROOT: ${{ runner.temp }}/playwright
-        run: ./tests/e2e/browser-smoke/smoke.sh
+        run: |
+          PATH="$RYEOS_SMOKE_PREFIX/bin:$PATH" ./tests/e2e/browser-smoke/smoke.sh
 
       - name: Keep the smoke screenshots
         if: always()
