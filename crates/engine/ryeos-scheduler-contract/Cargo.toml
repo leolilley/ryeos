@@ -7,9 +7,7 @@ license.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
-chrono = { workspace = true }
-chrono-tz = { workspace = true }
-cron = { workspace = true }
+jiff = { workspace = true }
 lillux = { workspace = true }
 lillux-sqlite = { workspace = true }
 ryeos-effect-contract = { workspace = true }
