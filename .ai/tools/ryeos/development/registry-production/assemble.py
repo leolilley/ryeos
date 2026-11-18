@@ -1,7 +1,7 @@
-# ryeos:signed:2026-09-22T06:18:58Z:2a0b6e4117f0951834f9571bef9c0bf826c9a2bd80a43df652bfaba931204fe3:v61UCkGLZn/2tNm3VHa/AHSFhhw0/qq8iGg9llOd9vWePSGG6oNsggYE2h5RlGRnLNyTNbD5mjI40yCZcj3CAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T05:07:31Z:7ab3a95d3760e9af88a2b726e07421de00f97a52def0c146982bc53980d3147a:h2ExKuM+eqs7gqNKZCgNzgQRzHRC5y+LyrIKc9AZoo17jqUnSreTVXFfKclqdkLyx893tnB22DixGytpnrteAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
 #   category: ryeos/development/registry-production
-#   version: "1.0.3"
+#   version: "1.0.4"
 #   description: Verify locked retained registry inputs and assemble a private local-registry result
 #   executor_id: tool:ryeos/development/authoring-environment-production/runtime
 #   execution_protocol: protocol:ryeos/core/opaque
@@ -30,7 +30,7 @@
 #     - id: registry-inputs
 #       kind: tree
 #       mode: pinned
-#       digest: 9de036779fbc33f8e33bc5068a286ac27813e80586d1b766ee7db99a1fa7a2e8
+#       digest: 103fd314822803558880d093ad1816452976297861af67cb290028019a73d7b8
 #       mount_root: execution_runtime
 #       mount: registry-inputs
 
