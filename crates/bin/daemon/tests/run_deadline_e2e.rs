@@ -358,10 +358,17 @@ async fn continuations_share_one_deadline() {
         .await
         .unwrap_or_else(|| panic!("no deadline result on {last}"));
     assert_eq!(result["deadline_at_ms"], deadlines[0], "{result}");
-    assert!(
-        result["stopped_at_ms"].as_i64().unwrap_or(i64::MAX) <= deadlines[0],
-        "the chain stopped within the one deadline: {result}"
-    );
+    // The last segment either stopped itself inside the deadline, or found its
+    // end already passed at launch and settled as the typed elapsed stop (which
+    // is recorded after the deadline by definition). Both name the one deadline.
+    if result["phase"] == "hard_stop" {
+        assert!(
+            result["stopped_at_ms"].as_i64().unwrap_or(i64::MAX) <= deadlines[0],
+            "the chain stopped within the one deadline: {result}"
+        );
+    } else {
+        assert_eq!(result["phase"], "elapsed_before_launch", "{result}");
+    }
 }
 
 /// `time_left` is offered to a run with a deadline and answers from the clock.
