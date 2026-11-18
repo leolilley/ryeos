@@ -12,10 +12,8 @@ name: Remote node build
 #     --ref work/<branch> -f bundle_set=standard -f label=<thread>
 #
 # The job summary prints the artifact name and the exact download and install
-# commands; the same steps are in .ai/knowledge/ryeos/development/release-process.md.
+# commands; the same steps are in .ai/knowledge/ryeos/development/build-and-test.md.
 on:
-  push:
-    branches: [work/remote-node-build]
   workflow_dispatch:
     inputs:
       bundle_set:
@@ -42,7 +40,7 @@ on:
         default: ""
         type: string
 
-run-name: "remote node build ${{ inputs.bundle_set || 'standard' }} ${{ inputs.label }} (${{ github.ref_name }})"
+run-name: "remote node build ${{ inputs.bundle_set }} ${{ inputs.label }} (${{ github.ref_name }})"
 
 permissions:
   contents: read
@@ -56,7 +54,7 @@ env:
 
 jobs:
   build:
-    name: build ${{ inputs.bundle_set || 'standard' }} ${{ inputs.label }}
+    name: build ${{ inputs.bundle_set }} ${{ inputs.label }}
     runs-on: ubuntu-latest
     timeout-minutes: 150
     steps:
@@ -83,7 +81,7 @@ jobs:
       # development publisher key and owner label, the release profile.
       - name: Populate and sign the bundle set
         env:
-          BUNDLE_SET: ${{ inputs.bundle_set || 'standard' }}
+          BUNDLE_SET: ${{ inputs.bundle_set }}
           CARGO_TARGET_DIR: ${{ runner.temp }}/ryeos-node-target
         run: |
           ./scripts/populate-bundles.sh \
@@ -94,7 +92,7 @@ jobs:
       - name: Pack the install artifact
         id: pack
         env:
-          BUNDLE_SET: ${{ inputs.bundle_set || 'standard' }}
+          BUNDLE_SET: ${{ inputs.bundle_set }}
           CARGO_TARGET_DIR: ${{ runner.temp }}/ryeos-node-target
         run: |
           set -euo pipefail
@@ -154,7 +152,7 @@ jobs:
       - name: Print how to install it
         env:
           NAME: ${{ steps.pack.outputs.name }}
-          BUNDLE_SET: ${{ inputs.bundle_set || 'standard' }}
+          BUNDLE_SET: ${{ inputs.bundle_set }}
           FILE: ${{ steps.pack.outputs.file }}
         run: |
           {
@@ -168,7 +166,7 @@ jobs:
             echo "d=\$(mktemp -d) && gh run download $GITHUB_RUN_ID --repo $GITHUB_REPOSITORY -n $NAME -D \"\$d\" && tar --zstd -xf \"\$d/$NAME.tar.zst\" -C \"\$d\""
             echo '```'
             echo
-            echo "Install from a checkout of that commit (see release-process.md, remote node build):"
+            echo "Install from a checkout of that commit (see build-and-test.md, install build on GitHub):"
             echo
             echo '```sh'
             echo "git worktree add --detach \"\$d/src\" $GITHUB_SHA && cd \"\$d/src\" && ./scripts/ci/unpack-bundle-state.sh \"\$d/bundle-state.tar.zst\""
