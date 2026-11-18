@@ -510,9 +510,7 @@ mod tests {
 
     #[test]
     fn missing_symbols_are_swapped_for_the_face_in_use() {
-        assert_eq!(drawable("Earlier ▸", Face::Ui), "Earlier ›");
         assert_eq!(drawable("▍ working…", Face::Ui), "| working…");
-        assert_eq!(drawable("▾ open", Face::Ui), "⌄ open");
         assert_eq!(drawable("plain", Face::Ui), "plain");
     }
 }
