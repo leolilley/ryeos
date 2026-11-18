@@ -8,7 +8,6 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
-use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::validate_object_kind;
@@ -215,8 +214,9 @@ impl ThreadUsage {
 /// Parse the one canonical timestamp spelling accepted by authoritative state:
 /// whole-second UTC `YYYY-MM-DDTHH:MM:SSZ`, from the Unix epoch through year
 /// 9999 inclusive. Callers compare the returned values for chronology rather
-/// than reparsing timestamps with a broader RFC 3339 grammar.
-pub fn parse_canonical_timestamp(value: &str) -> anyhow::Result<DateTime<Utc>> {
+/// than reparsing timestamps with a broader RFC 3339 grammar. The result is
+/// the instant as Unix seconds.
+pub fn parse_canonical_timestamp(value: &str) -> anyhow::Result<i64> {
     let bytes = value.as_bytes();
     let separators_are_canonical = bytes.len() == 20
         && bytes[4] == b'-'
@@ -237,10 +237,9 @@ pub fn parse_canonical_timestamp(value: &str) -> anyhow::Result<DateTime<Utc>> {
         anyhow::bail!("timestamp seconds must be within 00..=59");
     }
 
-    let naive = NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%SZ").map_err(|error| {
+    let timestamp = ryeos_effect_contract::rfc3339::parse_unix_seconds(value).map_err(|error| {
         anyhow::anyhow!("timestamp is not a valid UTC calendar instant: {error}")
     })?;
-    let timestamp = DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc);
     let year: u16 = value[..4]
         .parse()
         .map_err(|_| anyhow::anyhow!("timestamp year is invalid"))?;
@@ -1620,8 +1619,21 @@ mod tests {
 
     #[test]
     fn canonical_timestamp_accepts_only_whole_second_utc_epoch_domain() {
-        assert!(parse_canonical_timestamp("1970-01-01T00:00:00Z").is_ok());
-        assert!(parse_canonical_timestamp("9999-12-31T23:59:59Z").is_ok());
+        assert_eq!(
+            parse_canonical_timestamp("1970-01-01T00:00:00Z").unwrap(),
+            0
+        );
+        assert_eq!(
+            parse_canonical_timestamp("9999-12-31T23:59:59Z").unwrap(),
+            253_402_300_799
+        );
+        assert_eq!(
+            parse_canonical_timestamp("2026-11-15T00:10:00Z").unwrap(),
+            1_794_701_400
+        );
+        assert!(parse_canonical_timestamp("2026-02-30T00:00:00Z").is_err());
+        assert!(parse_canonical_timestamp("2025-02-29T00:00:00Z").is_err());
+        assert!(parse_canonical_timestamp("2024-02-29T00:00:00Z").is_ok());
         for invalid in [
             "1969-12-31T23:59:59Z",
             "2026-04-21T12:00:00.000Z",

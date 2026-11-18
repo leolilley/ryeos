@@ -20,7 +20,7 @@ use serde_json::Value;
 use tokio::sync::{Mutex, oneshot};
 use tokio::task::JoinHandle;
 
-use crate::render::{non_stream_body, stream_frames};
+use crate::render::{non_stream_body, stream_frames, violated_requirement};
 use crate::script::{Script, Step};
 
 /// One request the stub received.
@@ -33,6 +33,8 @@ pub struct RecordedRequest {
     pub headers: HashMap<String, String>,
     /// The parsed JSON body, or the raw text when it was not JSON.
     pub body: Value,
+    /// Why the stub answered 400, when the step's `require` was violated.
+    pub rejected: Option<String>,
 }
 
 struct Inner {
@@ -159,10 +161,10 @@ async fn handle(
     let body: Value = serde_json::from_slice(&raw)
         .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&raw).into_owned()));
     let streaming = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
-    let (seq, step) = {
+    let (seq, step, rejection) = {
         let mut g = state.lock().await;
         let seq = g.requests.len() as u64;
-        let record = RecordedRequest {
+        let mut record = RecordedRequest {
             seq,
             received_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -170,7 +172,14 @@ async fn handle(
             path: uri.path().to_string(),
             headers: flatten_headers(&headers),
             body,
+            rejected: None,
         };
+        let step = g.next_step();
+        let rejection = step
+            .as_ref()
+            .and_then(|step| step.require.as_ref())
+            .and_then(|require| violated_requirement(require, &record.body));
+        record.rejected = rejection.clone();
         if let Some(path) = &g.record_file
             && let Ok(mut file) = std::fs::OpenOptions::new()
                 .create(true)
@@ -181,7 +190,7 @@ async fn handle(
             let _ = writeln!(file, "{line}");
         }
         g.requests.push(record);
-        (seq, g.next_step())
+        (seq, step, rejection)
     };
     let Some(step) = step else {
         return (
@@ -190,6 +199,15 @@ async fn handle(
         )
             .into_response();
     };
+    if let Some(reason) = rejection {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(
+                serde_json::json!({"error": {"message": reason, "type": "invalid_request_error"}}),
+            ),
+        )
+            .into_response();
+    }
     if step.delay_ms > 0 {
         tokio::time::sleep(Duration::from_millis(step.delay_ms)).await;
     }

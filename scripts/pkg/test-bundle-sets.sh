@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-17T22:20:51Z:e1b264051af049eb60f3dfd2393c40fc46e406f0c56a53c2c76672d9325e31e0:q/p+bE4oDS1lcYAJ80bslS02+SYzhMX0Dpe3n/72/g5Tnh0MN0T9kk4jX47LfgzLIVwrgQ7LwbOCDHo/LjdbCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T02:10:57Z:dc4e61ee84d325c5682f2a85b8c75c9d087d2597e46f803772baf5db53b44ff6:8jF3Vhdz/WFPwWQfBGVlZmROJDbqjgYr3979CnF8Cax8y1SIx92ZIr4GwY4b0FgCOeYKp3t2d1dCBBu9jyDUAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -318,7 +318,7 @@ for profile_name in "${node_init_profiles[@]}"; do
     hosted-node|hosted-workflow)
       [[ "$declared_host_classes" == "hosted " ]] ;;
     development)
-      [[ "$declared_host_classes" == "local local_direct " ]] ;;
+      [[ "$declared_host_classes" == "hosted local local_direct " ]] ;;
     contained-workflow|release-authority)
       [[ "$declared_host_classes" == "local " ]] ;;
     *)
@@ -328,15 +328,15 @@ for profile_name in "${node_init_profiles[@]}"; do
   # workflow profiles and the composition controller admit it on every class,
   # the standard profile only on its `hosted` class (so Codex and opencode
   # exclusive sessions report ready in a hosting provider's container), the
-  # development profile only on its administrator-associated `local` class,
-  # every other profile on none.
+  # development profile likewise only on its `hosted` class, every other
+  # profile on none.
   for host_class in $declared_host_classes; do
     declared_trust="$(
       sed -n "/^        ${host_class}:\$/,/^        [a-z_]*:\$/p" "$node_init_profile" \
         | sed -nE 's/^          trusted_process_group_sessions: (true|false)$/\1/p'
     )"
     case "$profile_name:$host_class" in
-      hosted-workflow:*|hosted-controller:*|standard:hosted|development:local)
+      hosted-workflow:*|hosted-controller:*|standard:hosted|development:hosted)
         [[ "$declared_trust" == true ]] ;;
       *)
         [[ "$declared_trust" == false ]] ;;

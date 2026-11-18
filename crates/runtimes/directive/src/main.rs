@@ -18,6 +18,7 @@ mod provider_adapter;
 mod provider_transport_timing;
 mod result_guard;
 mod resume;
+mod run_clock;
 mod runner;
 mod spend_verifier;
 mod startup_timing;
@@ -486,6 +487,7 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
         &bootstrap_output.config.tools,
         harness.effective_caps(),
         bootstrap_output.config.outputs.as_deref(),
+        harness.run_clock().is_some(),
     );
     let mut launch_frame = launch_records::build_frame(
         1,
@@ -526,6 +528,23 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
         let resume_id = resume_id
             .as_deref()
             .expect("a resume has a thread to resume");
+        // A provider entry may refuse a mid-conversation change of the system
+        // text, the tool inventory or the reasoning policy. That is decided
+        // before the thread is continued or anything is recorded, so a refused
+        // launch leaves the chain exactly as it was.
+        if let Some(recorded) = &resume_state.frame
+            && let Some(refusal) = runner::refuse_frame_change(
+                &callback,
+                &envelope.thread_id,
+                &provider,
+                recorded,
+                &launch_frame.payload,
+                budget.cost(),
+            )
+            .await
+        {
+            return refusal;
+        }
         if !same_thread_resume
             && let Err(e) = callback
                 .append_runtime_event(
@@ -543,8 +562,7 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
 
         // The frame in force: the one the chain recorded, unless this launch
         // gives the model something different, which is recorded as the next
-        // frame. A provider entry that refuses a mid-conversation change would
-        // refuse here; none declares that yet.
+        // frame. A change a provider entry refuses was ruled out above.
         let frame_to_record = match &resume_state.frame {
             Some(recorded) if recorded.same_as(&launch_frame.payload) => None,
             Some(recorded) => {

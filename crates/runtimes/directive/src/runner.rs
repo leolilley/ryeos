@@ -6,12 +6,13 @@ use crate::budget::BudgetTracker;
 use crate::continuation::ContinuationCheck;
 use crate::directive::{
     DIRECTIVE_RETURN_TOOL, ExecutionConfig, FinishReason, ProviderMessage, ProviderMessageExt,
-    StreamEvent, ToolSchema,
+    StreamEvent, TIME_LEFT_TOOL, ToolSchema,
 };
 use crate::dispatcher::{DispatchKind, Dispatcher};
 use crate::harness::{Harness, HookAction};
 use crate::result_guard::ResultGuard;
 use crate::resume::{ResumeDisposition, ResumeState};
+use crate::run_clock::{RunClock, RunPhase};
 use ryeos_accounting::{
     AttemptBudgetState, BillableDimension, ChargeReconciliationAuthority, HexDigest,
     ProviderAccountingAuthority, ProviderAttemptGetParams, ProviderAttemptMarkIssuedParams,
@@ -39,13 +40,15 @@ mod request_context;
 
 /// The tools a launch offers the model on its first turn: the tools its
 /// capabilities admit, plus the lifecycle return tool when outputs are
-/// declared. This is the inventory a frame records.
+/// declared and the in-process `time_left` tool when the run has a deadline.
+/// This is the inventory a frame records.
 pub(crate) fn launch_inventory(
     tools: &[ToolSchema],
     effective_caps: &[String],
     outputs: Option<&[OutputSpec]>,
+    run_deadline: bool,
 ) -> Vec<ToolSchema> {
-    visible_provider_tools(tools, effective_caps, outputs, true)
+    visible_provider_tools(tools, effective_caps, outputs, true, run_deadline)
 }
 
 use request_context::{initial_messages, visible_provider_tools};
@@ -329,6 +332,9 @@ fn state_after_serial_tool_result(
 #[derive(Debug)]
 pub enum State {
     CheckingLimits,
+    /// The run deadline's hard stop: the execution settles as a deadline stop
+    /// without starting another turn or tool call.
+    DeadlineStopped,
     CallingProvider,
     Streaming {
         // The full sequence of streamed events, kept for diagnostic
@@ -449,6 +455,10 @@ pub struct Runner {
     /// Whether the corrective turn has been granted in this segment —
     /// bounds the nudge to exactly one extra turn.
     return_nudge_sent: bool,
+    /// Whether the run-deadline wrap-up input is already in the transcript.
+    /// Rebuilt from the replayed record on resume, so a recovered or
+    /// continued segment never repeats it.
+    wrap_up_delivered: bool,
     /// What to do at the context-window continuation boundary: disabled
     /// (default) → stop with current state; enabled → self-continue.
     continuation_config: ContinuationConfig,
@@ -498,6 +508,69 @@ enum ProviderRetryWaitOutcome {
     DeadlineReached,
     Cancelled,
     Interrupted,
+}
+
+/// What the run deadline decides at the start of a turn.
+enum RunDeadlineBoundary {
+    Proceed,
+    HardStop,
+}
+
+/// The text the model receives when the run enters its wrap-up phase. It is
+/// the only push of time information; the `time_left` tool answers on demand.
+fn wrap_up_message(remaining_ms: u64, outputs_declared: bool) -> String {
+    let seconds = remaining_ms.div_ceil(1_000);
+    let finish = if outputs_declared {
+        "Finish with `directive_return` carrying every declared output."
+    } else {
+        "Finish with your best result."
+    };
+    format!(
+        "Deadline notice: about {seconds} seconds remain before this run is stopped. \
+         Do not start new lines of work. Record what you have, hand off anything \
+         unfinished, and wrap up now. {finish}"
+    )
+}
+
+/// Sets the live-interrupt flag when the run's hard stop arrives, and keeps
+/// setting it until dropped, so a model call that begins at the boundary is
+/// cut too. The run's own limits check decides the stop.
+struct DeadlineInterruptTimer {
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl DeadlineInterruptTimer {
+    fn start(
+        clock: RunClock,
+        interrupt_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        let task = tokio::spawn(async move {
+            // Re-read the wall clock on every wake so a clock step cannot cut a
+            // call before the hard stop: the flag is set only once the clock
+            // itself has reached it.
+            loop {
+                let wait_ms = clock
+                    .hard_stop_at_ms()
+                    .saturating_sub(lillux::time::timestamp_millis());
+                if wait_ms <= 0 {
+                    interrupt_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                } else {
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        u64::try_from(wait_ms).unwrap_or(0).min(1_000),
+                    ))
+                    .await;
+                }
+            }
+        });
+        Self { task }
+    }
+}
+
+impl Drop for DeadlineInterruptTimer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 /// Wait for a daemon-admitted durable retry deadline while retaining live
@@ -1102,11 +1175,15 @@ impl Runner {
 
         let effective_caps = harness.effective_caps().to_vec();
         let dispatcher = Dispatcher::new(tools.clone(), effective_caps);
-        let inventory_tool_names =
-            launch_inventory(&tools, harness.effective_caps(), outputs.as_deref())
-                .into_iter()
-                .map(|tool| tool.name)
-                .collect();
+        let inventory_tool_names = launch_inventory(
+            &tools,
+            harness.effective_caps(),
+            outputs.as_deref(),
+            harness.run_clock().is_some(),
+        )
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
 
         Self {
             messages: initial_messages,
@@ -1137,6 +1214,7 @@ impl Runner {
             directive_outputs: outputs,
             return_nudge,
             return_nudge_sent: false,
+            wrap_up_delivered: false,
             continuation_config: continuation,
             sampling,
             reasoning,
@@ -1207,6 +1285,7 @@ impl Runner {
         let resume_disposition = resume.disposition;
         let resume_active_provider_turn = resume.active_provider_turn;
         let provider_retry_testimony_digests = resume.provider_retry_testimony_digests;
+        let wrap_up_delivered = resume.deadline_wrap_up_delivered;
         let trailing_length_turns = resume.trailing_length_turns;
         let last_turn_coordinate = resume.last_turn_coordinate;
         if let Some(active_turn) = resume_active_provider_turn {
@@ -1283,6 +1362,7 @@ impl Runner {
         runner.resume_disposition = resume_disposition;
         runner.resume_active_provider_turn = resume_active_provider_turn;
         runner.provider_retry_testimony_digests = provider_retry_testimony_digests;
+        runner.wrap_up_delivered = wrap_up_delivered;
         runner.consecutive_length_turns = trailing_length_turns;
         runner.return_nudge_sent = recovered_return_nudge_seen(
             &runner.messages,
@@ -1307,6 +1387,51 @@ impl Runner {
     ///
     /// Drained ONLY at safe turn boundaries (never between an assistant tool-call
     /// message and its tool results), so the folded wire history is well-formed.
+    /// The `time_left` tool's answer, read from the run clock now.
+    fn time_left_report(&self) -> Value {
+        crate::run_clock::time_left_report(
+            self.harness.run_clock().as_ref(),
+            lillux::time::timestamp_millis(),
+        )
+    }
+
+    /// The run deadline's boundary at the start of a turn. At the hard stop
+    /// the run stops; in the wrap-up phase the model is told once, as a
+    /// durable harness input, that time is short. A recovered provider turn
+    /// takes no new input, since its transcript is already fixed.
+    async fn run_deadline_boundary(&mut self) -> Result<RunDeadlineBoundary, String> {
+        let Some(clock) = self.harness.run_clock() else {
+            return Ok(RunDeadlineBoundary::Proceed);
+        };
+        let now_ms = lillux::time::timestamp_millis();
+        match clock.phase_at(now_ms) {
+            RunPhase::HardStop => Ok(RunDeadlineBoundary::HardStop),
+            RunPhase::WrapUp
+                if !self.wrap_up_delivered && self.resume_active_provider_turn.is_none() =>
+            {
+                let text = wrap_up_message(
+                    clock.remaining_ms(now_ms),
+                    self.directive_outputs
+                        .as_deref()
+                        .is_some_and(|outputs| !outputs.is_empty()),
+                );
+                // Pinned so a continuation's trimmed start still carries it.
+                let input = ryeos_runtime::CognitionInput::text("harness", &text)
+                    .with_kind(ryeos_runtime::cognition::KIND_DEADLINE_WRAP_UP);
+                self.callback
+                    .emit_cognition_input(&input)
+                    .await
+                    .map_err(|e| {
+                        format!("resume-critical deadline wrap-up input append failed: {e}")
+                    })?;
+                self.messages.push(ProviderMessage::user(text));
+                self.wrap_up_delivered = true;
+                Ok(RunDeadlineBoundary::Proceed)
+            }
+            RunPhase::WrapUp | RunPhase::Running => Ok(RunDeadlineBoundary::Proceed),
+        }
+    }
+
     async fn poll_pending_input(&mut self) -> Result<bool, String> {
         let inputs = self
             .callback
@@ -1359,6 +1484,12 @@ impl Runner {
 
     pub async fn run(&mut self) -> anyhow::Result<RuntimeResult> {
         let mut guard = RunGuard { finalized: false };
+        // At the run deadline's hard stop this cuts whatever model call is in
+        // flight; the stop itself is decided at the next limits check.
+        let _deadline_timer = self
+            .harness
+            .run_clock()
+            .map(|clock| DeadlineInterruptTimer::start(clock, self.harness.interrupted_flag()));
         // The entrypoint has already attached the process and durably moved
         // the thread to running before it constructs the runner.
         // Ledger routes (Paid / ExplicitlyFree sealed authority): the daemon
@@ -1460,6 +1591,17 @@ impl Runner {
                         state = State::Errored { error: e };
                         continue;
                     }
+                    match self.run_deadline_boundary().await {
+                        Ok(RunDeadlineBoundary::Proceed) => {}
+                        Ok(RunDeadlineBoundary::HardStop) => {
+                            state = State::DeadlineStopped;
+                            continue;
+                        }
+                        Err(error) => {
+                            state = State::RecoveryRequired { error };
+                            continue;
+                        }
+                    }
                     // Steer drain (between-turns boundary): fold any operator
                     // inputs staged since the last cognition before calling the
                     // provider. Also folds the input that accompanied a live
@@ -1487,6 +1629,7 @@ impl Runner {
                         self.harness.effective_caps(),
                         self.directive_outputs.as_deref(),
                         self.harness.tool_calls_available(),
+                        self.harness.run_clock().is_some(),
                     );
                     if let Some(active_turn) = self.resume_active_provider_turn.take() {
                         turn = active_turn;
@@ -2363,6 +2506,28 @@ impl Runner {
                                 };
                                 continue;
                             }
+                            // A turn that owes a replayable reasoning value under
+                            // a `refuse` rule and holds none fails here, after its
+                            // usage is settled and before it is recorded or any
+                            // tool it proposed is dispatched.
+                            if let Some(missing) = self
+                                .provider_config
+                                .schemas
+                                .as_ref()
+                                .and_then(|schemas| schemas.reasoning.as_ref())
+                                .and_then(|reasoning| {
+                                    crate::provider_adapter::reasoning_replay::owed_missing_in_turn(
+                                        &self.messages,
+                                        &resp.message,
+                                        reasoning,
+                                    )
+                                })
+                            {
+                                state = State::Errored {
+                                    error: missing.to_string(),
+                                };
+                                continue;
+                            }
                             let finish = finish_label(crate::directive::normalize_finish_reason(
                                 resp.finish_reason.as_deref(),
                             ));
@@ -2858,6 +3023,13 @@ impl Runner {
                                 reasoning_count += 1;
                                 tracing::trace!(len = text.len(), "reasoning delta received");
                             }
+                            StreamEvent::ReasoningArtefact { capture_id, value } => {
+                                tracing::trace!(
+                                    capture_id = %capture_id,
+                                    bytes = value.to_string().len(),
+                                    "reasoning artefact captured"
+                                );
+                            }
                             StreamEvent::Usage(update) => {
                                 // Mid-stream usage is informational — the
                                 // cumulative total arrives in
@@ -3065,7 +3237,10 @@ impl Runner {
                                 raw_args: tc.arguments.to_string(),
                                 malformed: occurrence.malformed,
                             }
-                        } else if !occurrence.counted && !self.harness.try_record_tool_call() {
+                        } else if tc.name != TIME_LEFT_TOOL
+                            && !occurrence.counted
+                            && !self.harness.try_record_tool_call()
+                        {
                             let call_id = tc.id.clone().unwrap_or_default();
                             let tool_name = tc.name.clone();
                             let rendered =
@@ -3113,40 +3288,47 @@ impl Runner {
                     index,
                     spawn_counted,
                 } => {
-                    let tool_result: RenderedToolResult = match self
-                        .preflight_tool_call(
-                            &operation_id,
-                            &tool_name,
-                            &raw_args,
-                            &call_id,
-                            spawn_counted,
-                            malformed.as_ref(),
-                        )
-                        .await
-                    {
-                        Ok(request) => match self.callback.dispatch_action(*request).await {
-                            Ok(response) => {
-                                block_at_directive_recovery_test_cut(
-                                    &self.callback,
-                                    "tool_settled",
-                                )
-                                .await;
-                                self.rendered_success(&tool_name, &response.result)
-                            }
-                            Err(e) if e.runtime_action_outcome_unknown() => {
-                                state = State::RecoveryRequired {
-                                    error: format!(
-                                        "runtime action {operation_id} outcome is unknown: {e}"
-                                    ),
-                                };
-                                continue;
-                            }
-                            Err(e) => Self::rendered_error_envelope(
+                    // `time_left` is answered in process from the run clock; it
+                    // never reaches the daemon.
+                    let local_report =
+                        (tool_name == TIME_LEFT_TOOL).then(|| self.time_left_report());
+                    let tool_result: RenderedToolResult = match local_report {
+                        Some(report) => self.rendered_success(&tool_name, &report),
+                        None => match self
+                            .preflight_tool_call(
+                                &operation_id,
                                 &tool_name,
-                                callback_error_envelope(&e),
-                            ),
+                                &raw_args,
+                                &call_id,
+                                spawn_counted,
+                                malformed.as_ref(),
+                            )
+                            .await
+                        {
+                            Ok(request) => match self.callback.dispatch_action(*request).await {
+                                Ok(response) => {
+                                    block_at_directive_recovery_test_cut(
+                                        &self.callback,
+                                        "tool_settled",
+                                    )
+                                    .await;
+                                    self.rendered_success(&tool_name, &response.result)
+                                }
+                                Err(e) if e.runtime_action_outcome_unknown() => {
+                                    state = State::RecoveryRequired {
+                                        error: format!(
+                                            "runtime action {operation_id} outcome is unknown: {e}"
+                                        ),
+                                    };
+                                    continue;
+                                }
+                                Err(e) => Self::rendered_error_envelope(
+                                    &tool_name,
+                                    callback_error_envelope(&e),
+                                ),
+                            },
+                            Err(body) => Self::rendered_error_envelope(&tool_name, body),
                         },
-                        Err(body) => Self::rendered_error_envelope(&tool_name, body),
                     };
 
                     if let Err(error) = self
@@ -3183,6 +3365,9 @@ impl Runner {
                         /// Preflight refusal: an error-envelope body that never
                         /// passes the result guard, exactly like the serial path.
                         Immediate(String),
+                        /// Answered in process (`time_left`); folded in call
+                        /// order like a dispatched result.
+                        Local(Value),
                     }
                     let mut prepared: Vec<(String, String, String, BatchWork)> =
                         Vec::with_capacity(pending.len());
@@ -3227,20 +3412,25 @@ impl Runner {
                         }
                         let call_id = tc.id.clone().unwrap_or_default();
                         let raw_args = tc.arguments.to_string();
-                        let work = if occurrence.counted || self.harness.try_record_tool_call() {
-                            match self
-                                .preflight_tool_call(
-                                    &occurrence.operation_id,
-                                    &tc.name,
-                                    &raw_args,
-                                    &call_id,
-                                    occurrence.spawn_counted,
-                                    occurrence.malformed.as_ref(),
-                                )
-                                .await
+                        // `time_left` is free: it neither needs nor takes tool-call budget.
+                        let work = if tc.name == TIME_LEFT_TOOL {
+                            BatchWork::Local(self.time_left_report())
+                        } else if occurrence.counted || self.harness.try_record_tool_call() {
                             {
-                                Ok(request) => BatchWork::Dispatch(Some(request)),
-                                Err(body) => BatchWork::Immediate(body),
+                                match self
+                                    .preflight_tool_call(
+                                        &occurrence.operation_id,
+                                        &tc.name,
+                                        &raw_args,
+                                        &call_id,
+                                        occurrence.spawn_counted,
+                                        occurrence.malformed.as_ref(),
+                                    )
+                                    .await
+                                {
+                                    Ok(request) => BatchWork::Dispatch(Some(request)),
+                                    Err(body) => BatchWork::Immediate(body),
+                                }
                             }
                         } else {
                             BatchWork::Immediate(tool_call_limit_error())
@@ -3295,7 +3485,7 @@ impl Runner {
                                     BatchWork::Dispatch(slot) => {
                                         slot.take().expect("dispatch slot spawns once")
                                     }
-                                    BatchWork::Immediate(_) => {
+                                    BatchWork::Immediate(_) | BatchWork::Local(_) => {
                                         unreachable!("dispatch_indices selects only Dispatch work")
                                     }
                                 };
@@ -3343,6 +3533,7 @@ impl Runner {
                             BatchWork::Immediate(body) => {
                                 Self::rendered_error_envelope(&tool_name, body)
                             }
+                            BatchWork::Local(report) => self.rendered_success(&tool_name, &report),
                             BatchWork::Dispatch(unstarted_request) => match outcomes.remove(&index)
                             {
                                 Some(Ok(response)) => {
@@ -3914,6 +4105,29 @@ impl Runner {
                         )
                         .into(),
                     );
+                }
+
+                State::DeadlineStopped => {
+                    let stopped_at_ms = lillux::time::timestamp_millis();
+                    let result = json!({
+                        "outcome": "deadline",
+                        "phase": "hard_stop",
+                        "deadline_at_ms": self.harness.run_clock().map(|clock| clock.end_at_ms()),
+                        "stopped_at_ms": stopped_at_ms,
+                        "turn": turn,
+                        "wrap_up_delivered": self.wrap_up_delivered,
+                    });
+                    let runtime_result = RuntimeResult {
+                        success: false,
+                        status: RuntimeResultStatus::TimedOut,
+                        thread_id: self.thread_id.clone(),
+                        result: Some(result),
+                        outputs: json!({}),
+                        cost: Some(self.budget.cost()),
+                        warnings: Vec::new(),
+                    };
+                    guard.finalized = true;
+                    return Ok(Self::attach_warnings(runtime_result, &mut warnings));
                 }
 
                 State::Cancelled => {
@@ -5048,6 +5262,70 @@ fn provider_reported_spend_runtime_cost(usd: ryeos_runtime::envelope::UsdNanos) 
     }
 }
 
+/// The frame-stability check of a resume or continuation: when the provider
+/// entry refuses a change of a component in which the launch frame differs
+/// from the recorded one, the launch ends here with `frame_change_refused`
+/// and nothing about the new frame or its inputs is recorded. `None` means the
+/// launch may go on.
+pub(crate) async fn refuse_frame_change(
+    callback: &CallbackClient,
+    thread_id: &str,
+    provider: &ryeos_directive_definition::ProviderConfig,
+    recorded: &ryeos_runtime::cognition::CognitionFramePayload,
+    launch: &ryeos_runtime::cognition::CognitionFramePayload,
+    cost: ryeos_runtime::envelope::RuntimeCost,
+) -> Option<anyhow::Result<RuntimeResult>> {
+    let refused = provider
+        .schemas
+        .as_ref()
+        .and_then(|schemas| schemas.frame_stability.as_ref())
+        .map_or(&[][..], |stability| stability.refuse_change_of.as_slice());
+    let component = crate::launch_records::refused_frame_change(recorded, launch, refused)?;
+    let error = format!(
+        "frame_change_refused: the provider entry refuses a changed {} within one \
+         conversation (recorded frame_seq {})",
+        component.as_str(),
+        recorded.frame_seq
+    );
+    Some(refuse_launch(callback, thread_id, &error, cost).await)
+}
+
+/// Ends a launch that is refused before the runner starts: records the
+/// failure on the thread and returns the terminal result. Used where the
+/// refusal is decided from the recorded chain and the launch alone.
+pub(crate) async fn refuse_launch(
+    callback: &CallbackClient,
+    thread_id: &str,
+    error: &str,
+    cost: ryeos_runtime::envelope::RuntimeCost,
+) -> anyhow::Result<RuntimeResult> {
+    let failure = runtime_failure_payload(error, thread_id, 0, None);
+    callback.emit_error(error).await?;
+    callback
+        .finalize_thread(TerminalCompletion {
+            status: ThreadTerminalStatus::Failed,
+            outcome_code: Some("failed".to_string()),
+            result: None,
+            error: Some(failure.clone()),
+            cost: Some(
+                serde_json::to_value(&cost)
+                    .expect("validated directive cost must serialize for terminal settlement"),
+            ),
+            outputs: json!({}),
+            warnings: Vec::new(),
+        })
+        .await?;
+    Ok(RuntimeResult {
+        success: false,
+        status: RuntimeResultStatus::Failed,
+        thread_id: thread_id.to_string(),
+        result: Some(failure),
+        outputs: json!({}),
+        cost: Some(cost),
+        warnings: Vec::new(),
+    })
+}
+
 fn runtime_failure_payload(
     error: &str,
     thread_id: &str,
@@ -5147,6 +5425,7 @@ mod tests {
                 sha256: sha256.to_string(),
                 raw_len,
             }),
+            artefact: None,
         }
     }
 
@@ -6796,7 +7075,16 @@ mod tests {
         ) -> Result<Value, CallbackError> {
             Ok(Value::Null)
         }
-        async fn append_event(&self, _: &str, _: &str, _: Value) -> Result<Value, CallbackError> {
+        async fn append_event(
+            &self,
+            _: &str,
+            event_type: &str,
+            payload: Value,
+        ) -> Result<Value, CallbackError> {
+            self.record(
+                "append_event",
+                &json!({"event_type": event_type, "payload": payload}),
+            );
             Ok(json!({}))
         }
         async fn append_events(
@@ -6948,6 +7236,10 @@ mod tests {
     }
 
     fn ledger_runner(mock: Arc<ScriptedLedger>) -> Runner {
+        ledger_runner_with_policy(mock, make_policy())
+    }
+
+    fn ledger_runner_with_policy(mock: Arc<ScriptedLedger>, policy: EnvelopePolicy) -> Runner {
         let provider = ProviderConfig {
             category: None,
             family: ProtocolFamily::ChatCompletions,
@@ -6968,7 +7260,7 @@ mod tests {
             messages: vec![],
             tools: vec![],
             system_prompt: None,
-            harness: Harness::new(&make_policy(), 0, None),
+            harness: Harness::new(&policy, 0, None),
             continuation: ContinuationConfig::Flag(true),
             budget: BudgetTracker::new(usd("1")),
             callback: CallbackClient::from_inner(
@@ -7074,6 +7366,139 @@ mod tests {
 
     fn unset_flag() -> Arc<AtomicBool> {
         Arc::new(AtomicBool::new(false))
+    }
+
+    /// A policy whose run ends `end_in_ms` from now, with a 10 s reserve and a
+    /// 20 s wrap-up phase: the hard stop is 10 s before the end and the
+    /// wrap-up notice starts 20 s before that.
+    fn deadline_policy(end_in_ms: i64) -> EnvelopePolicy {
+        let mut limits = HardLimits::default();
+        limits.deadline.reserve_seconds = 10;
+        limits.deadline.at_ms = Some(lillux::time::timestamp_millis() + end_in_ms);
+        limits
+            .runtime
+            .insert(crate::run_clock::WRAP_UP_SECONDS_LIMIT.to_string(), 20);
+        EnvelopePolicy {
+            effective_caps: vec![],
+            hard_limits: limits,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_wrap_up_notice_is_recorded_once_and_only_in_its_phase() {
+        // 100 s left: the wrap-up window opens in 70 s, so nothing is said yet.
+        let mock = Arc::new(ScriptedLedger::new("authority"));
+        let mut runner = ledger_runner_with_policy(mock.clone(), deadline_policy(100_000));
+        assert!(matches!(
+            runner.run_deadline_boundary().await,
+            Ok(RunDeadlineBoundary::Proceed)
+        ));
+        assert!(mock.recorded("append_event").is_empty());
+
+        // 25 s left: the hard stop is 15 s away and the wrap-up window opened 5 s ago.
+        let mock = Arc::new(ScriptedLedger::new("authority"));
+        let mut runner = ledger_runner_with_policy(mock.clone(), deadline_policy(25_000));
+        for _ in 0..3 {
+            assert!(matches!(
+                runner.run_deadline_boundary().await,
+                Ok(RunDeadlineBoundary::Proceed)
+            ));
+        }
+        let appended = mock.recorded("append_event");
+        assert_eq!(appended.len(), 1, "exactly one durable notice");
+        assert_eq!(appended[0]["event_type"], "cognition_in");
+        assert_eq!(appended[0]["payload"]["origin"], "harness");
+        assert_eq!(appended[0]["payload"]["kind"], "deadline_wrap_up");
+        assert!(
+            appended[0]["payload"].get("pinned").is_none(),
+            "the notice is a recent input, not pinned to the front of a successor"
+        );
+        assert_eq!(runner.messages.len(), 1);
+        assert_eq!(runner.messages[0].role(), "user");
+        assert!(
+            runner.messages[0]
+                .text()
+                .unwrap()
+                .starts_with("Deadline notice")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_recovered_run_does_not_repeat_the_wrap_up_notice() {
+        let mock = Arc::new(ScriptedLedger::new("authority"));
+        let mut runner = ledger_runner_with_policy(mock.clone(), deadline_policy(25_000));
+        runner.wrap_up_delivered = true;
+        assert!(matches!(
+            runner.run_deadline_boundary().await,
+            Ok(RunDeadlineBoundary::Proceed)
+        ));
+        assert!(mock.recorded("append_event").is_empty());
+        assert!(runner.messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_hard_stop_and_a_run_without_a_deadline() {
+        let mock = Arc::new(ScriptedLedger::new("authority"));
+        // The end is 5 s away and the reserve is 10 s: the hard stop passed.
+        let mut runner = ledger_runner_with_policy(mock.clone(), deadline_policy(5_000));
+        assert!(matches!(
+            runner.run_deadline_boundary().await,
+            Ok(RunDeadlineBoundary::HardStop)
+        ));
+        assert!(mock.recorded("append_event").is_empty());
+
+        let mut runner = ledger_runner(mock.clone());
+        assert!(matches!(
+            runner.run_deadline_boundary().await,
+            Ok(RunDeadlineBoundary::Proceed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_interrupt_timer_sets_the_flag_at_the_hard_stop_and_stops_with_its_owner() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let mut limits = HardLimits::default();
+        limits.deadline.at_ms = Some(lillux::time::timestamp_millis() + 150);
+        let clock = RunClock::from_limits(&limits).unwrap();
+        let timer = DeadlineInterruptTimer::start(clock, flag.clone());
+        assert!(!flag.load(std::sync::atomic::Ordering::Relaxed));
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(flag.load(std::sync::atomic::Ordering::Relaxed));
+        drop(timer);
+        flag.store(false, std::sync::atomic::Ordering::Relaxed);
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        assert!(
+            !flag.load(std::sync::atomic::Ordering::Relaxed),
+            "a dropped timer stops setting the flag"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_time_left_answer_follows_the_runner_clock() {
+        let mock = Arc::new(ScriptedLedger::new("authority"));
+        let runner = ledger_runner_with_policy(mock.clone(), deadline_policy(25_000));
+        let report = runner.time_left_report();
+        assert_eq!(report["phase"], "wrap_up");
+        let remaining = report["remaining_ms"].as_u64().unwrap();
+        assert!((14_000..=15_000).contains(&remaining), "{remaining}");
+        assert_eq!(
+            report["hard_stop_at_ms"].as_i64().unwrap() - report["now_ms"].as_i64().unwrap(),
+            i64::try_from(remaining).unwrap()
+        );
+
+        let no_deadline = ledger_runner(mock).time_left_report();
+        assert!(no_deadline["phase"].is_null());
+        assert!(no_deadline["now_ms"].is_i64());
+    }
+
+    #[test]
+    fn the_wrap_up_text_names_the_time_and_the_way_to_finish() {
+        let with_outputs = wrap_up_message(12_400, true);
+        assert!(with_outputs.contains("13 seconds"));
+        assert!(with_outputs.contains("directive_return"));
+        let without = wrap_up_message(5_000, false);
+        assert!(without.contains("5 seconds"));
+        assert!(!without.contains("directive_return"));
     }
 
     #[tokio::test]
@@ -7502,5 +7927,217 @@ mod tests {
             error.to_string().contains("unprovable"),
             "expected unprovable settlement, got: {error:#}"
         );
+    }
+}
+
+#[cfg(test)]
+mod frame_refusal_tests {
+    use super::*;
+    use crate::launch_records::{FrameSource, build_frame};
+    use ryeos_directive_definition::{ProviderConfig, ReasoningConfig, ReasoningMode};
+    use ryeos_runtime::callback::{CallbackError, DispatchActionRequest, RuntimeCallbackAPI};
+    use std::sync::{Arc, Mutex};
+
+    /// Records what a refused launch writes: events and the terminal
+    /// completion.
+    #[derive(Default)]
+    struct Recorder {
+        events: Mutex<Vec<(String, Value)>>,
+        finalized: Mutex<Vec<TerminalCompletion>>,
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeCallbackAPI for Recorder {
+        async fn dispatch_action(&self, _: DispatchActionRequest) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn attach_process(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn finalize_thread(
+            &self,
+            _: &str,
+            completion: TerminalCompletion,
+        ) -> Result<Value, CallbackError> {
+            self.finalized.lock().unwrap().push(completion);
+            Ok(json!({}))
+        }
+        async fn get_thread(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(Value::Null)
+        }
+        async fn request_continuation(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: TerminalCompletion,
+        ) -> Result<Value, CallbackError> {
+            Ok(Value::Null)
+        }
+        async fn append_event(
+            &self,
+            _: &str,
+            event_type: &str,
+            payload: Value,
+        ) -> Result<Value, CallbackError> {
+            self.events
+                .lock()
+                .unwrap()
+                .push((event_type.to_string(), payload));
+            Ok(json!({}))
+        }
+        async fn append_events(
+            &self,
+            _: &str,
+            _: Vec<Value>,
+            _: ryeos_runtime::callback::EventAppendOptions,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn replay_events(&self, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({"events": []}))
+        }
+        async fn bundle_events_append(&self, _: &str, r: Value) -> Result<Value, CallbackError> {
+            Ok(r)
+        }
+        async fn bundle_events_read_chain(
+            &self,
+            _: &str,
+            _: Value,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({"events": []}))
+        }
+        async fn bundle_events_scan(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({"events": []}))
+        }
+        async fn vault_put(&self, _: &str, r: Value) -> Result<Value, CallbackError> {
+            Ok(r)
+        }
+        async fn vault_get(&self, _: &str, r: Value) -> Result<Value, CallbackError> {
+            Ok(r)
+        }
+        async fn vault_delete(&self, _: &str, r: Value) -> Result<Value, CallbackError> {
+            Ok(r)
+        }
+        async fn vault_list(&self, _: &str, r: Value) -> Result<Value, CallbackError> {
+            Ok(r)
+        }
+        async fn claim_commands(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn complete_command(
+            &self,
+            _: &str,
+            _: i64,
+            _: &str,
+            _: Value,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn publish_artifact(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn get_facets(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(Value::Null)
+        }
+    }
+
+    fn provider(refuse: Option<Value>) -> ProviderConfig {
+        let mut schemas = json!({
+            "streaming": {"mode": "delta_merge"},
+            "output_limit": {"path": "max_tokens", "semantics": "provider_native_output_tokens"},
+        });
+        if let Some(refuse) = refuse {
+            schemas["frame_stability"] = json!({"refuse_change_of": refuse});
+        }
+        serde_json::from_value(json!({
+            "family": "chat_completions",
+            "transport": {"kind": "remote_http", "base_url": "https://example.invalid"},
+            "schemas": schemas,
+            "pricing": {"explicitly_free": true},
+            "body_template": {"model": "{model}", "messages": "{messages}", "stream": "{stream}"}
+        }))
+        .expect("provider fixture")
+    }
+
+    fn frame(effort: &str) -> ryeos_runtime::cognition::CognitionFramePayload {
+        build_frame(
+            1,
+            &FrameSource {
+                system_prompt: Some("sys"),
+                inventory: &[],
+                model: "m",
+                reasoning: Some(&ReasoningConfig {
+                    mode: ReasoningMode::Enabled,
+                    effort: Some(effort.to_string()),
+                }),
+                sampling: None,
+                max_output_tokens: 0,
+                provider_config_hash: &"ab".repeat(32),
+            },
+        )
+        .unwrap()
+        .payload
+    }
+
+    fn cost() -> ryeos_runtime::envelope::RuntimeCost {
+        BudgetTracker::new(ryeos_accounting::UsdNanos::parse_canonical("1").unwrap()).cost()
+    }
+
+    async fn run(refuse: Option<Value>) -> (Option<anyhow::Result<RuntimeResult>>, Arc<Recorder>) {
+        let recorder = Arc::new(Recorder::default());
+        let callback = CallbackClient::from_inner(recorder.clone(), "T-refuse", "/tmp/p", "tat");
+        let result = refuse_frame_change(
+            &callback,
+            "T-refuse",
+            &provider(refuse),
+            &frame("high"),
+            &frame("low"),
+            cost(),
+        )
+        .await;
+        (result, recorder)
+    }
+
+    #[tokio::test]
+    async fn a_refused_component_ends_the_launch_with_the_stable_code_and_one_failure_record() {
+        let (result, recorder) = run(Some(json!(["reasoning"]))).await;
+        let result = result.expect("refused").expect("terminal result");
+        assert!(!result.success);
+        assert_eq!(result.status, RuntimeResultStatus::Failed);
+        let failure: ryeos_runtime::RuntimeFailure =
+            serde_json::from_value(result.result.expect("failure payload")).unwrap();
+        assert_eq!(failure.code, "frame_change_refused");
+        assert!(failure.summary.contains("reasoning"), "{}", failure.summary);
+        assert!(
+            failure.summary.contains("frame_seq 1"),
+            "{}",
+            failure.summary
+        );
+
+        let events = recorder.events.lock().unwrap();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].0, "thread_failed");
+        assert!(
+            events[0].1["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("frame_change_refused")
+        );
+        let finalized = recorder.finalized.lock().unwrap();
+        assert_eq!(finalized.len(), 1);
+        assert_eq!(finalized[0].status, ThreadTerminalStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn a_change_the_entry_does_not_refuse_records_nothing_and_lets_the_launch_go_on() {
+        for refuse in [None, Some(json!(["system", "tools"]))] {
+            let (result, recorder) = run(refuse).await;
+            assert!(result.is_none());
+            assert!(recorder.events.lock().unwrap().is_empty());
+            assert!(recorder.finalized.lock().unwrap().is_empty());
+        }
     }
 }

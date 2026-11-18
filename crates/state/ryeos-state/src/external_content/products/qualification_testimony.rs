@@ -265,8 +265,7 @@ impl RemoteQualificationEvidence {
 }
 
 fn epoch_seconds(label: &str, value: &str) -> anyhow::Result<i64> {
-    chrono::DateTime::parse_from_rfc3339(value)
-        .map(|time| time.timestamp())
+    ryeos_effect_contract::rfc3339::parse_unix_seconds(value)
         .with_context(|| format!("{label} is not an RFC 3339 time"))
 }
 

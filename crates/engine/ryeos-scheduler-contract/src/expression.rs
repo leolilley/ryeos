@@ -4,16 +4,12 @@ use anyhow::{Context, Result, bail};
 use std::str::FromStr;
 
 pub fn parse_iso_ts(expression: &str) -> Option<i64> {
-    // Try chrono's ISO 8601 parsing
-    chrono::DateTime::parse_from_rfc3339(expression)
+    ryeos_effect_contract::rfc3339::parse_unix_millis(expression)
         .ok()
-        .map(|dt| dt.timestamp_millis())
         .or_else(|| {
             // Try without timezone (assume UTC)
             let with_z = format!("{}Z", expression);
-            chrono::DateTime::parse_from_rfc3339(&with_z)
-                .ok()
-                .map(|dt| dt.timestamp_millis())
+            ryeos_effect_contract::rfc3339::parse_unix_millis(&with_z).ok()
         })
 }
 
@@ -62,6 +58,38 @@ pub fn validate_schedule_id(id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── parse_iso_ts (pinned: `at` expressions are stored and compared) ──
+
+    #[test]
+    fn parse_iso_ts_pins_accepted_spellings() {
+        let base = 1_794_701_400_000_i64; // 2026-11-15T00:10:00Z
+        assert_eq!(parse_iso_ts("2026-11-15T00:10:00Z"), Some(base));
+        assert_eq!(parse_iso_ts("2026-11-15T00:10:00+00:00"), Some(base));
+        assert_eq!(parse_iso_ts("2026-11-15T13:10:00+13:00"), Some(base));
+        assert_eq!(parse_iso_ts("2026-11-15T00:10:00.250Z"), Some(base + 250));
+        assert_eq!(parse_iso_ts("2026-11-15T00:10:00.2509Z"), Some(base + 250));
+        // No offset: UTC is assumed.
+        assert_eq!(parse_iso_ts("2026-11-15T00:10:00"), Some(base));
+        assert_eq!(parse_iso_ts("2026-11-15T00:10:00.5"), Some(base + 500));
+    }
+
+    #[test]
+    fn parse_iso_ts_pins_rejections() {
+        for invalid in [
+            "",
+            "not-a-date",
+            "2026-11-15",
+            "2026-11-15T00:10Z",
+            "2026-11-15T00:10:00+00:00Z",
+            "2026-02-30T00:10:00Z",
+            "2026-11-15T00:10:00+0000",
+            "2026-11-15T25:10:00Z",
+        ] {
+            assert_eq!(parse_iso_ts(invalid), None, "{invalid:?}");
+        }
+    }
+
     // ── validate_expression ──────────────────────────────────────
 
     #[test]

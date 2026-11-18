@@ -5,7 +5,7 @@
 //! the retained product; an independent restored-guest verifier owns that join.
 
 use anyhow::{Context as _, Result, ensure};
-use chrono::DateTime;
+use ryeos_effect_contract::rfc3339;
 use ryeos_external_execution_contract::runtime_snapshot::{
     MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES, RUNTIME_SNAPSHOT_CREATE_RESULT_SCHEMA,
     RUNTIME_SNAPSHOT_RESULT_SCHEMA, RUNTIME_SNAPSHOT_UPLOAD_RECEIPT_SCHEMA,
@@ -722,7 +722,7 @@ fn validate_snapshot_source(
             && source.timeout_seconds > 0
             && source.sandbox_group_id == settings.sandbox_group_id
             && source.provider_attributes_valid()
-            && DateTime::parse_from_rfc3339(&source.created_at).is_ok()
+            && rfc3339::parse_unix_nanos(&source.created_at).is_ok()
             && intent
                 .source_created_at
                 .as_deref()
@@ -1085,15 +1085,17 @@ fn same_instant(left: &str, right: &str) -> bool {
             .min(9)
     }
     let (Ok(left_time), Ok(right_time)) = (
-        DateTime::parse_from_rfc3339(left),
-        DateTime::parse_from_rfc3339(right),
+        rfc3339::parse_unix_nanos(left),
+        rfc3339::parse_unix_nanos(right),
     ) else {
         return false;
     };
     let digits = fractional_digits(left).min(fractional_digits(right));
     let unit = 10_u32.pow(9 - digits);
-    left_time.timestamp() == right_time.timestamp()
-        && left_time.timestamp_subsec_nanos() / unit == right_time.timestamp_subsec_nanos() / unit
+    const NANOS: i128 = 1_000_000_000;
+    left_time.div_euclid(NANOS) == right_time.div_euclid(NANOS)
+        && left_time.rem_euclid(NANOS) / i128::from(unit)
+            == right_time.rem_euclid(NANOS) / i128::from(unit)
 }
 
 /// A provider locator, not an installed-runtime or product qualification.
@@ -1160,8 +1162,8 @@ pub(crate) fn bind_snapshot_create_response(
             && snapshot.ttl_seconds > 0,
         "snapshot create response differs from exact source or filesystem kind"
     );
-    let requested = DateTime::parse_from_rfc3339(&snapshot.requested_at)?;
-    let expires = DateTime::parse_from_rfc3339(&snapshot.expires_at)?;
+    let requested = rfc3339::parse_unix_nanos(&snapshot.requested_at)?;
+    let expires = rfc3339::parse_unix_nanos(&snapshot.expires_at)?;
     ensure!(
         expires > requested,
         "snapshot expiry is not after its request"
@@ -1175,7 +1177,7 @@ pub(crate) fn bind_snapshot_create_response(
             snapshot
                 .captured_at
                 .as_deref()
-                .is_some_and(|value| DateTime::parse_from_rfc3339(value)
+                .is_some_and(|value| rfc3339::parse_unix_nanos(value)
                     .is_ok_and(|captured| captured >= requested && captured < expires))
                 && snapshot.size_bytes.is_some_and(|bytes| bytes > 0),
             "available snapshot lacks complete capture metadata"
@@ -1242,12 +1244,12 @@ pub(crate) fn observe_snapshot_available(
             && same_instant(&snapshot.expires_at, &creation.expires_at),
         "available snapshot differs from its exact creation"
     );
-    let requested = DateTime::parse_from_rfc3339(&snapshot.requested_at)?;
-    let expires = DateTime::parse_from_rfc3339(&snapshot.expires_at)?;
+    let requested = rfc3339::parse_unix_nanos(&snapshot.requested_at)?;
+    let expires = rfc3339::parse_unix_nanos(&snapshot.expires_at)?;
     let captured_at = snapshot
         .captured_at
         .context("available snapshot has no capture timestamp")?;
-    let captured = DateTime::parse_from_rfc3339(&captured_at)?;
+    let captured = rfc3339::parse_unix_nanos(&captured_at)?;
     let size_bytes = snapshot
         .size_bytes
         .context("available snapshot has no byte count")?;

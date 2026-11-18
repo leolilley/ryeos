@@ -1179,8 +1179,15 @@ impl StateStore {
         reason: Option<&str>,
         request_fingerprint: &str,
         launch_metadata: Option<&crate::launch_metadata::RuntimeLaunchMetadata>,
+        transition: crate::launch_metadata::ContinuationAuthorityTransitionKind,
         initial_events: Vec<NewEventRecord>,
     ) -> Result<ContinuationOutcome> {
+        // This is the operator boundary. The caller states which operator
+        // transition it commits; a machine continuation inherits through
+        // `create_running_continuation_successor` and never enters here.
+        if transition == crate::launch_metadata::ContinuationAuthorityTransitionKind::Inherit {
+            bail!("an operator continuation cannot commit a machine inherit transition");
+        }
         let permit = self.acquire_write_permit()?;
         let g = self.lock()?;
         validate_facet_event_admission(&g, &successor.thread_id, &initial_events)?;
@@ -1270,7 +1277,7 @@ impl StateStore {
                 source_thread_id,
                 launch_metadata: effective_launch_metadata.as_ref(),
                 expected_result_generation: None,
-                kind: crate::launch_metadata::ContinuationAuthorityTransitionKind::OperatorFollowUp,
+                kind: transition,
             },
         )?;
         let source_snapshot_updated = !is_terminal_status(&source_row.status);
@@ -1461,6 +1468,7 @@ impl StateStore {
             reason,
             request_fingerprint,
             launch_metadata.as_ref(),
+            crate::launch_metadata::ContinuationAuthorityTransitionKind::OperatorFollowUp,
             Vec::new(),
         )
     }

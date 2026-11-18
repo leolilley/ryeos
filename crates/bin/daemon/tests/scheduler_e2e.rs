@@ -485,8 +485,10 @@ async fn scheduler_at_schedule_fires() {
 
     // Compute a timestamp 6 seconds from now (generous margin for
     // daemon startup + timer loop initialization)
-    let fire_at = chrono::Utc::now() + chrono::Duration::seconds(6);
-    let fire_at_str = fire_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let fire_at_str = ryeos_effect_contract::rfc3339::format_unix_millis(
+        lillux::time::timestamp_millis() + 6_000,
+    )
+    .unwrap();
 
     // Register at-schedule
     let (status, body) = exec(
@@ -669,8 +671,10 @@ async fn scheduler_dispatches_core_doctor_and_records_terminal_fire() {
     let project_root_text = project_root.display().to_string();
     // This is the exact registered Core path under the daemon's selected app root.
     let core_registry_root = h.state_path.join(".ai/bundles/core");
-    let fire_at = chrono::Utc::now() + chrono::Duration::seconds(8);
-    let fire_at_str = fire_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let fire_at_str = ryeos_effect_contract::rfc3339::format_unix_millis(
+        lillux::time::timestamp_millis() + 8_000,
+    )
+    .unwrap();
 
     let (status, body) = exec(
         &h,

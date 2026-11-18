@@ -6,7 +6,7 @@ use ryeos_engine::runtime_registry::RuntimeLimitsDecl;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::launch_envelope::{AggregateExecutionLimits, HardLimits};
+use super::launch_envelope::{AggregateExecutionLimits, DeadlineLimits, HardLimits};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -17,6 +17,21 @@ pub struct AggregateLimitValues {
     pub worker_executions: u32,
     #[serde(default)]
     pub provider_contacts: u32,
+}
+
+/// Authored share of the tree-wide run deadline. Only the reserve is authored;
+/// the hold-back and the absolute end are daemon-derived.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct DeadlineLimitValues {
+    #[serde(default)]
+    pub reserve_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct DeadlineLimitCaps {
+    pub reserve_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -64,6 +79,8 @@ pub struct LimitValues {
     pub duration_seconds: u64,
     #[serde(default)]
     pub aggregate: AggregateLimitValues,
+    #[serde(default)]
+    pub deadline: DeadlineLimitValues,
     /// Runtime-declared dimensions remain flat in authored/config YAML for
     /// compatibility, but are captured generically and validated against the
     /// selected runtime's signed declaration before use.
@@ -81,6 +98,7 @@ impl Default for LimitValues {
             depth: default_depth(),
             duration_seconds: default_duration(),
             aggregate: AggregateLimitValues::default(),
+            deadline: DeadlineLimitValues::default(),
             runtime: BTreeMap::new(),
         }
     }
@@ -105,6 +123,8 @@ pub struct LimitCaps {
     pub duration_seconds: Option<u64>,
     #[serde(default)]
     pub aggregate: AggregateLimitCaps,
+    #[serde(default)]
+    pub deadline: DeadlineLimitCaps,
     #[serde(flatten)]
     pub runtime: BTreeMap<String, u64>,
 }
@@ -195,6 +215,17 @@ pub fn compute_effective_limits(
                 requested.aggregate.provider_contacts,
                 caps.aggregate.provider_contacts.unwrap_or(0),
             ),
+        },
+        // Only the authored reserve is set here. The hold-back and the absolute
+        // end depend on the launch time and the tree deadline, which the
+        // launcher stamps once it has both.
+        deadline: DeadlineLimits {
+            reserve_seconds: sentinel_clamp(
+                requested.deadline.reserve_seconds,
+                caps.deadline.reserve_seconds.unwrap_or(0),
+            ),
+            hold_back_ms: 0,
+            at_ms: None,
         },
         runtime: clamp_runtime_dimensions(
             &requested.runtime,
@@ -315,15 +346,15 @@ pub fn merge_header_limits(
         .as_object_mut()
         .expect("LimitValues always serializes to a JSON object");
     for (k, v) in overlay {
-        if k == "aggregate" {
-            let aggregate = v
+        if k == "aggregate" || k == "deadline" {
+            let nested = v
                 .as_object()
-                .ok_or_else(|| anyhow::anyhow!("`limits.aggregate` must be an object"))?;
+                .ok_or_else(|| anyhow::anyhow!("`limits.{k}` must be an object"))?;
             let target = m
-                .get_mut("aggregate")
+                .get_mut(k)
                 .and_then(Value::as_object_mut)
-                .expect("LimitValues aggregate always serializes to an object");
-            for (name, value) in aggregate {
+                .expect("LimitValues nested groups always serialize to objects");
+            for (name, value) in nested {
                 target.insert(name.clone(), value.clone());
             }
         } else {
@@ -460,10 +491,19 @@ pub fn policy_item_override<T>(value: Option<&Sourced<T>>) -> bool {
     value.is_some_and(|value| value.source.kind == PolicySourceKind::ExecutionYamlItemOverride)
 }
 
+pub use ryeos_runtime::callback::PARAM_RUN_TIMEOUT;
+
 pub fn apply_caller_limit_overrides(
     mut requested: LimitValues,
     parameters: &Value,
 ) -> anyhow::Result<LimitValues> {
+    if let Some(raw) = parameters.get(PARAM_RUN_TIMEOUT) {
+        requested.aggregate.duration_seconds = raw.as_u64().ok_or_else(|| {
+            anyhow::anyhow!(
+                "invalid caller {PARAM_RUN_TIMEOUT}: expected unsigned integer seconds, got {raw}"
+            )
+        })?;
+    }
     if let Some(raw) = parameters.get("timeout") {
         requested.duration_seconds = raw.as_u64().ok_or_else(|| {
             anyhow::anyhow!("invalid caller timeout: expected unsigned integer seconds, got {raw}")
@@ -1008,5 +1048,134 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("exceeds u32"), "got {err}");
+    }
+
+    #[test]
+    fn run_timeout_sets_the_tree_deadline_and_is_clamped_by_the_node_cap() {
+        let requested = apply_caller_limit_overrides(
+            LimitValues::default(),
+            &serde_json::json!({"run_timeout": 7200}),
+        )
+        .unwrap();
+        assert_eq!(requested.aggregate.duration_seconds, 7200);
+        assert_eq!(requested.duration_seconds, 0, "segment timeout untouched");
+        let hard = compute_effective_limits(
+            Some(&requested),
+            &LimitValues::default(),
+            &LimitCaps {
+                aggregate: AggregateLimitCaps {
+                    duration_seconds: Some(3600),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            None,
+            &runtime_declaration(),
+        );
+        assert_eq!(hard.aggregate.duration_seconds, 3600);
+    }
+
+    #[test]
+    fn run_timeout_must_be_unsigned_seconds() {
+        let err = apply_caller_limit_overrides(
+            LimitValues::default(),
+            &serde_json::json!({"run_timeout": -5}),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("run_timeout"), "got {err}");
+    }
+
+    #[test]
+    fn a_child_keeps_the_parent_tree_deadline_whatever_it_requests() {
+        let parent = HardLimits {
+            aggregate: AggregateExecutionLimits {
+                duration_seconds: 600,
+                ..Default::default()
+            },
+            ..HardLimits::default()
+        };
+        let requested = LimitValues {
+            aggregate: AggregateLimitValues {
+                duration_seconds: 9000,
+                ..Default::default()
+            },
+            ..LimitValues::default()
+        };
+        let hard = compute_effective_limits(
+            Some(&requested),
+            &LimitValues::default(),
+            &LimitCaps::default(),
+            Some(&parent),
+            &runtime_declaration(),
+        );
+        assert_eq!(hard.aggregate.duration_seconds, 600);
+    }
+
+    #[test]
+    fn header_deadline_overlay_sets_the_reserve_and_keeps_other_fields() {
+        let base = LimitValues {
+            turns: 12,
+            deadline: DeadlineLimitValues {
+                reserve_seconds: 30,
+            },
+            ..LimitValues::default()
+        };
+        let merged = merge_header_limits(
+            &base,
+            &serde_json::json!({"deadline": {"reserve_seconds": 45}}),
+            &runtime_declaration(),
+        )
+        .unwrap();
+        assert_eq!(merged.deadline.reserve_seconds, 45);
+        assert_eq!(merged.turns, 12);
+        let untouched = merge_header_limits(
+            &base,
+            &serde_json::json!({"turns": 3}),
+            &runtime_declaration(),
+        )
+        .unwrap();
+        assert_eq!(untouched.deadline.reserve_seconds, 30);
+        let err = merge_header_limits(
+            &base,
+            &serde_json::json!({"deadline": 5}),
+            &runtime_declaration(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("limits.deadline"), "got {err}");
+    }
+
+    #[test]
+    fn reserve_is_authored_per_execution_and_clamped_by_the_node_cap() {
+        let parent = HardLimits {
+            deadline: DeadlineLimits {
+                reserve_seconds: 90,
+                hold_back_ms: 5_000,
+                at_ms: None,
+            },
+            ..HardLimits::default()
+        };
+        let requested = LimitValues {
+            deadline: DeadlineLimitValues {
+                reserve_seconds: 120,
+            },
+            ..LimitValues::default()
+        };
+        let hard = compute_effective_limits(
+            Some(&requested),
+            &LimitValues::default(),
+            &LimitCaps {
+                deadline: DeadlineLimitCaps {
+                    reserve_seconds: Some(60),
+                },
+                ..Default::default()
+            },
+            Some(&parent),
+            &runtime_declaration(),
+        );
+        assert_eq!(hard.deadline.reserve_seconds, 60, "own reserve, capped");
+        assert_eq!(
+            hard.deadline.hold_back_ms, 0,
+            "hold-back is stamped at launch"
+        );
     }
 }

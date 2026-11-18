@@ -147,14 +147,16 @@ impl LanePass<'_> {
         let retry_in = delay_after(consecutive_failures);
         if consecutive_failures > 1 {
             // Wall time for the operator only; `retry_in` is at most CAP.
-            let next_attempt_at =
-                chrono::Utc::now() + chrono::Duration::seconds(retry_in.as_secs() as i64);
+            let next_attempt_at = ryeos_effect_contract::rfc3339::format_unix_seconds(
+                (lillux::time::unix_secs_now() as i64).saturating_add(retry_in.as_secs() as i64),
+            )
+            .unwrap_or_default();
             tracing::warn!(
                 lane = self.lane.as_str(),
                 placement,
                 consecutive_failures,
                 retry_in_secs = retry_in.as_secs(),
-                next_attempt_at = %next_attempt_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                next_attempt_at = %next_attempt_at,
                 "retained external cleanup failed identically again; deferring it by back-off"
             );
         }

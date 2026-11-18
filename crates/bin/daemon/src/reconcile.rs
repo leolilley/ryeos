@@ -237,6 +237,10 @@ pub enum ResumeDecision {
     /// Spec declared `native_resume` and a `ResumeContext` is present,
     /// but the retry budget is exhausted — finalize.
     Exhausted { attempts: u32, max: u32 },
+    /// The thread would resume, but its run deadline has already passed (it
+    /// elapsed while the node was down). Settle it as a deadline stop; a
+    /// resumed process could only be killed at once.
+    DeadlineReached { end_at_ms: i64 },
 }
 
 /// Pure mapping from `(launch_metadata, current_attempts)` to a
@@ -245,6 +249,8 @@ pub enum ResumeDecision {
 pub fn decide_resume(
     metadata: Option<&RuntimeLaunchMetadata>,
     current_attempts: u32,
+    run_end_at_ms: Option<i64>,
+    now_ms: i64,
 ) -> ResumeDecision {
     let m = match metadata {
         Some(m) if m.declares_native_resume() => m,
@@ -264,6 +270,9 @@ pub fn decide_resume(
             attempts: current_attempts,
             max: policy.max_auto_resume_attempts,
         };
+    }
+    if let Some(end_at_ms) = run_end_at_ms.filter(|end| now_ms >= *end) {
+        return ResumeDecision::DeadlineReached { end_at_ms };
     }
     ResumeDecision::Resume {
         next_attempt: current_attempts + 1,
@@ -477,6 +486,68 @@ fn finalize_dead(
         summary_json: None,
     })?;
     *reconciled += 1;
+    Ok(())
+}
+
+/// How a thread stopped by its run deadline settles: plainly, or keeping the
+/// frozen result generation of an advance-head run that never advanced HEAD,
+/// exactly as `finalize_dead` keeps it for a failed one.
+#[derive(Debug, PartialEq, Eq)]
+enum DeadlineSettlement {
+    Plain,
+    RetainGeneration(ryeos_state::objects::WorkspaceGenerationPair),
+}
+
+fn plan_deadline_settlement(
+    interrupted: Option<(
+        &'static str,
+        serde_json::Value,
+        ryeos_state::objects::WorkspaceGenerationPair,
+    )>,
+) -> DeadlineSettlement {
+    match interrupted {
+        Some((_, _, generation)) => DeadlineSettlement::RetainGeneration(generation),
+        None => DeadlineSettlement::Plain,
+    }
+}
+
+/// Settle a dead thread whose run deadline passed while the node was down as
+/// a typed deadline stop (`timed_out`, outcome `deadline`). Accounting is
+/// fenced exactly as for any dead thread, and a frozen advance-head generation
+/// stays reachable from the terminal.
+fn finalize_deadline_elapsed(
+    state: &AppState,
+    thread_id: &str,
+    end_at_ms: i64,
+    now_ms: i64,
+) -> Result<()> {
+    crate::accounting_terminal::fence_accounting_for_terminal(
+        state,
+        thread_id,
+        None,
+        ryeos_accounting::ReconciliationReason::OwnerGenerationFenced,
+    )?;
+    let params = ryeos_app::run_deadline::elapsed_finalize_params(
+        thread_id,
+        ryeos_app::run_deadline::REASON_ELAPSED_WHILE_DOWN,
+        end_at_ms,
+        now_ms,
+    );
+    match plan_deadline_settlement(interrupted_head_advance(state, thread_id)) {
+        DeadlineSettlement::RetainGeneration(generation) => {
+            tracing::warn!(
+                thread_id,
+                snapshot_hash = %generation.snapshot_hash,
+                "interrupted advance-head run stopped by its deadline keeps its generation"
+            );
+            state
+                .threads
+                .finalize_thread_retaining_generation(&params, &generation)?;
+        }
+        DeadlineSettlement::Plain => {
+            state.threads.finalize_thread(&params)?;
+        }
+    }
     Ok(())
 }
 
@@ -2188,7 +2259,27 @@ async fn reconcile_active_threads_inner(
                 continue;
             }
         };
-        let decision = decide_resume(thread.runtime.launch_metadata.as_ref(), attempts);
+        let now_ms = lillux::time::timestamp_millis();
+        let run_end_at_ms = match ryeos_app::run_deadline::thread_end_at_ms(
+            state.accounting.as_deref(),
+            thread.runtime.launch_metadata.as_ref(),
+        ) {
+            Ok(end) => end,
+            Err(err) => {
+                tracing::error!(
+                    thread_id = %thread.thread_id,
+                    error = %format!("{err:#}"),
+                    "failed to read the run deadline; recovering without it"
+                );
+                None
+            }
+        };
+        let decision = decide_resume(
+            thread.runtime.launch_metadata.as_ref(),
+            attempts,
+            run_end_at_ms,
+            now_ms,
+        );
 
         match decision {
             ResumeDecision::NoResumePolicy => {
@@ -2239,6 +2330,16 @@ async fn reconcile_active_threads_inner(
                     )),
                     &mut reconciled,
                 )?;
+            }
+            ResumeDecision::DeadlineReached { end_at_ms } => {
+                tracing::warn!(
+                    thread_id = %thread.thread_id,
+                    end_at_ms,
+                    now_ms,
+                    "run deadline elapsed while the node was down — settling as a deadline stop"
+                );
+                finalize_deadline_elapsed(state, &thread.thread_id, end_at_ms, now_ms)?;
+                reconciled += 1;
             }
             ResumeDecision::Exhausted { attempts, max } => {
                 tracing::warn!(
@@ -3865,7 +3966,7 @@ fn should_retain_workspace_for_native_resume(
     };
     let attempts = state.state_store.get_resume_attempts(thread_id)?;
     if !matches!(
-        decide_resume(Some(metadata), attempts),
+        decide_resume(Some(metadata), attempts, None, 0),
         ResumeDecision::Resume { .. }
     ) || metadata.sealed_root_request.is_none()
     {
@@ -4942,13 +5043,19 @@ mod tests {
 
     #[test]
     fn no_metadata_finalizes() {
-        assert_eq!(decide_resume(None, 0), ResumeDecision::NoResumePolicy);
+        assert_eq!(
+            decide_resume(None, 0, None, 0),
+            ResumeDecision::NoResumePolicy
+        );
     }
 
     #[test]
     fn no_native_resume_finalizes() {
         let m = RuntimeLaunchMetadata::default();
-        assert_eq!(decide_resume(Some(&m), 0), ResumeDecision::NoResumePolicy);
+        assert_eq!(
+            decide_resume(Some(&m), 0, None, 0),
+            ResumeDecision::NoResumePolicy
+        );
     }
 
     #[test]
@@ -4961,7 +5068,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            decide_resume(Some(&m), 0),
+            decide_resume(Some(&m), 0, None, 0),
             ResumeDecision::MissingResumeContext
         );
     }
@@ -4977,18 +5084,64 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            decide_resume(Some(&m), 0),
+            decide_resume(Some(&m), 0, None, 0),
             ResumeDecision::Resume {
                 next_attempt: 1,
                 max: 3
             }
         );
         assert_eq!(
-            decide_resume(Some(&m), 2),
+            decide_resume(Some(&m), 2, None, 0),
             ResumeDecision::Resume {
                 next_attempt: 3,
                 max: 3
             }
+        );
+    }
+
+    #[test]
+    fn a_deadline_stop_keeps_a_frozen_advance_head_generation() {
+        let generation = ryeos_state::objects::WorkspaceGenerationPair {
+            snapshot_hash: "a".repeat(64),
+            output_capture_hash: None,
+        };
+        assert_eq!(
+            plan_deadline_settlement(Some((
+                "head_advance_interrupted",
+                serde_json::json!({}),
+                generation.clone()
+            ))),
+            DeadlineSettlement::RetainGeneration(generation)
+        );
+        assert_eq!(plan_deadline_settlement(None), DeadlineSettlement::Plain);
+    }
+
+    #[test]
+    fn a_passed_deadline_beats_resume_and_an_open_one_does_not() {
+        let m = RuntimeLaunchMetadata {
+            native_resume: Some(NativeResumeSpec {
+                checkpoint_interval_secs: 30,
+                max_auto_resume_attempts: 3,
+            }),
+            resume_context: Some(ctx()),
+            ..Default::default()
+        };
+        assert_eq!(
+            decide_resume(Some(&m), 0, Some(1_000), 1_000),
+            ResumeDecision::DeadlineReached { end_at_ms: 1_000 }
+        );
+        assert_eq!(
+            decide_resume(Some(&m), 0, Some(1_000), 999),
+            ResumeDecision::Resume {
+                next_attempt: 1,
+                max: 3
+            }
+        );
+        // A thread that cannot resume is finalized as before, deadline or not.
+        let plain = RuntimeLaunchMetadata::default();
+        assert_eq!(
+            decide_resume(Some(&plain), 0, Some(1_000), 2_000),
+            ResumeDecision::NoResumePolicy
         );
     }
 
@@ -5003,14 +5156,14 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            decide_resume(Some(&m), 2),
+            decide_resume(Some(&m), 2, None, 0),
             ResumeDecision::Exhausted {
                 attempts: 2,
                 max: 2
             }
         );
         assert_eq!(
-            decide_resume(Some(&m), 5),
+            decide_resume(Some(&m), 5, None, 0),
             ResumeDecision::Exhausted {
                 attempts: 5,
                 max: 2

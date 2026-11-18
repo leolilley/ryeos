@@ -23,10 +23,10 @@ use std::thread::JoinHandle;
 
 use anyhow::{Context as _, Result, ensure};
 use base64::Engine as _;
-use chrono::DateTime;
 use lillux::network::{NetworkCancellation, NetworkContext};
 use lillux::time::{Duration, MonotonicDeadline};
 use provider_spec::{PlanValue, ProviderSpec, RouteName, RouteTarget};
+use ryeos_effect_contract::rfc3339;
 use ryeos_external_execution_contract::{
     LIFECYCLE_ADAPTER_EXECUTABLE_FD_ENV, LIFECYCLE_ADAPTER_PROTOCOL, LIFECYCLE_BOOTSTRAP_FD_ENV,
     LIFECYCLE_HOSTS_FD_ENV, LIFECYCLE_HOSTS_SHA256_ENV, LIFECYCLE_NETWORK_POLICY_SHA256_ENV,
@@ -1242,7 +1242,7 @@ fn create_response_matches(
         PlanValue::Pro => RenderSandboxPlan::Pro,
     };
     valid_sandbox_id(&sandbox.id)
-        && DateTime::parse_from_rfc3339(&sandbox.created_at).is_ok()
+        && rfc3339::parse_unix_nanos(&sandbox.created_at).is_ok()
         && sandbox.plan == expected_plan
         && sandbox.network_policy.matches(&projection.network_policy)
         && sandbox.timeout_seconds == projection.timeout_seconds
@@ -1263,7 +1263,7 @@ fn exact_terminal_timestamp<'a>(
     };
     if sandbox.id != occurrence_id
         || sandbox.status != RenderSandboxStatus::Terminated
-        || DateTime::parse_from_rfc3339(&sandbox.created_at).is_err()
+        || rfc3339::parse_unix_nanos(&sandbox.created_at).is_err()
         || sandbox.plan != expected_plan
         || sandbox.region != settings.region
         || !sandbox.network_policy.matches(expected_policy)
@@ -1272,7 +1272,7 @@ fn exact_terminal_timestamp<'a>(
         return None;
     }
     let terminated_at = sandbox.terminated_at.as_deref()?;
-    DateTime::parse_from_rfc3339(terminated_at).ok()?;
+    rfc3339::parse_unix_nanos(terminated_at).ok()?;
     Some(terminated_at)
 }
 

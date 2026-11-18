@@ -5,7 +5,9 @@ use ryeos_runtime::ReplayedEventRecord;
 use ryeos_runtime::callback_client::{CallbackClient, RuntimeReplayBudget};
 use ryeos_state::ThreadUsage;
 
-use crate::directive::{DIRECTIVE_RETURN_TOOL, ProviderMessage, ProviderMessageExt};
+use crate::directive::{
+    DIRECTIVE_RETURN_TOOL, ProviderMessage, ProviderMessageExt, TIME_LEFT_TOOL,
+};
 use crate::result_guard::ResultGuard;
 use crate::runner::ToolOccurrence;
 use ryeos_provider_contract::ToolResultStatus;
@@ -49,6 +51,9 @@ pub struct ResumeState {
     /// The latest frame recorded on the path: what the model was given besides
     /// the conversation. `None` when the path recorded none.
     pub frame: Option<CognitionFramePayload>,
+    /// Whether the run-deadline wrap-up input is already on the path, so a
+    /// recovered or continued segment does not tell the model twice.
+    pub deadline_wrap_up_delivered: bool,
 }
 
 impl ResumeState {
@@ -222,7 +227,25 @@ pub async fn load_resume_state(
         provider_retry_testimony_digests,
         trailing_length_turns,
         frame,
+        deadline_wrap_up_delivered: recover_wrap_up_delivered(&events)?,
     })
+}
+
+/// Whether any input on the path is the run-deadline wrap-up notice.
+fn recover_wrap_up_delivered(events: &[ReplayedEventRecord]) -> Result<bool> {
+    let mut assembler = ryeos_runtime::CognitionInAssembler::default();
+    for event in events
+        .iter()
+        .filter(|event| event.event_type == "cognition_in")
+    {
+        if let ryeos_runtime::CognitionInAssembly::Complete(input) =
+            assembler.push(&event.payload)?
+            && input.kind.as_deref() == Some(ryeos_runtime::cognition::KIND_DEADLINE_WRAP_UP)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Count the final turns, newest first, that ended at the output limit,
@@ -482,7 +505,11 @@ fn recover_tool_state(
                 }
                 validate_replayed_tool_event(event, &open[occurrence_index].occurrence.call)?;
                 open[occurrence_index].occurrence.start_recorded = true;
-                if open[occurrence_index].occurrence.call.name != DIRECTIVE_RETURN_TOOL {
+                // The lifecycle return and the in-process time-left tool take no
+                // tool-call budget, so their starts never count against it.
+                if open[occurrence_index].occurrence.call.name != DIRECTIVE_RETURN_TOOL
+                    && open[occurrence_index].occurrence.call.name != TIME_LEFT_TOOL
+                {
                     started.push(StartedToolOccurrence {
                         operation_id: operation_id.to_string(),
                         call: open[occurrence_index].occurrence.call.clone(),
@@ -2357,7 +2384,11 @@ mod tests {
 
         let messages = reconstruct_messages(&events).unwrap();
         assert_eq!(messages[0].text().as_deref(), Some(exact));
-        let (wire, system) = crate::provider_adapter::messages::convert_messages(&messages, &None);
+        let (wire, system) = crate::provider_adapter::messages::convert_messages(
+            &messages,
+            &None,
+            &Default::default(),
+        );
         assert!(system.is_none());
         assert_eq!(wire[0]["content"].as_str(), Some(exact));
         assert!(wire[0]["content"].is_string());
@@ -2437,6 +2468,32 @@ mod tests {
             format!("{error:#}").contains("cannot be a duplicate"),
             "{error:#}"
         );
+    }
+
+    #[test]
+    fn a_recorded_wrap_up_input_is_found_on_replay_and_nothing_else_is() {
+        let record = |payload: Value| ReplayedEventRecord {
+            event_type: "cognition_in".to_string(),
+            payload,
+        };
+        let operator = vec![
+            record(json!({"turn": 1})),
+            record(input("Deadline notice: about 5 seconds remain")),
+        ];
+        assert!(!recover_wrap_up_delivered(&operator).unwrap());
+
+        let mut with_notice = operator.clone();
+        with_notice.extend(
+            ryeos_runtime::encode_cognition_in_payloads(
+                &ryeos_runtime::CognitionInput::text("harness", "wrap up")
+                    .with_kind(ryeos_runtime::cognition::KIND_DEADLINE_WRAP_UP)
+                    .pinned(),
+            )
+            .unwrap()
+            .into_iter()
+            .map(record),
+        );
+        assert!(recover_wrap_up_delivered(&with_notice).unwrap());
     }
 
     #[test]
@@ -3091,6 +3148,84 @@ mod tests {
         let texts: Vec<String> = carried.iter().filter_map(|m| m.text()).collect();
         assert_eq!(texts, ["launch", "u3", "a3"]);
         assert_eq!(carried[0].role(), "user");
+    }
+
+    fn assistant_with_artefact(text: &str, artefact: Value) -> ProviderMessage {
+        ProviderMessage::new(
+            ryeos_provider_contract::Role::Assistant,
+            vec![
+                ryeos_provider_contract::Part::Reasoning(ryeos_provider_contract::ReasoningPart {
+                    text: None,
+                    artefact: Some(ryeos_provider_contract::Artefact(artefact)),
+                }),
+                ryeos_provider_contract::Part::text(text),
+            ],
+        )
+    }
+
+    fn artefacts_of(messages: &[ProviderMessage]) -> Vec<Value> {
+        messages
+            .iter()
+            .flat_map(|message| message.parts.iter())
+            .filter_map(|part| match part {
+                ryeos_provider_contract::Part::Reasoning(reasoning) => reasoning
+                    .artefact
+                    .as_ref()
+                    .map(|artefact| artefact.0.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_successor_keeps_the_artefacts_of_kept_turns_whole_and_drops_the_rest_with_their_turns() {
+        let envelope = |n: u32| json!({"capture": "blocks", "group": "g", "value": {"n": n, "text": "é\u{1F600}"}});
+        let conversation = vec![
+            folded(ProviderMessage::user("launch"), true),
+            folded(assistant_with_artefact("a1", envelope(1)), false),
+            folded(ProviderMessage::user("u2"), false),
+            folded(assistant_with_artefact("a2", envelope(2)), false),
+        ];
+        let all = carry_into_successor(conversation.clone(), 8).unwrap();
+        assert_eq!(artefacts_of(&all), [envelope(1), envelope(2)]);
+        let recent = carry_into_successor(conversation, 1).unwrap();
+        assert_eq!(artefacts_of(&recent), [envelope(2)]);
+    }
+
+    #[test]
+    fn reconstructed_messages_hold_recorded_artefact_parts_unchanged() {
+        let envelope = json!({"capture": "blocks", "group": "g", "value": {"b": [1, 2.5, null]}});
+        let call_envelope = json!({"capture": "sig", "group": "g", "value": {"s": "x"}});
+        let events = vec![
+            ReplayedEventRecord {
+                event_type: "cognition_in".to_string(),
+                payload: input("go"),
+            },
+            ReplayedEventRecord {
+                event_type: "cognition_out".to_string(),
+                payload: json!({
+                    "turn": 1,
+                    "parts": [
+                        {"type": "reasoning", "text": "shown"},
+                        {"type": "reasoning", "artefact": envelope},
+                        {"type": "tool_call", "call_id": "c1", "name": "t",
+                         "arguments": {}, "artefact": call_envelope},
+                    ],
+                    "finish": "tool_calls",
+                }),
+            },
+        ];
+        let messages = reconstruct_messages(&events).unwrap();
+        assert_eq!(artefacts_of(&messages), [envelope]);
+        let call_artefact = messages[1]
+            .parts
+            .iter()
+            .find_map(|part| match part {
+                ryeos_provider_contract::Part::ToolCall(call) => call.artefact.clone(),
+                _ => None,
+            })
+            .expect("the call keeps its artefact");
+        assert_eq!(call_artefact.0, call_envelope);
     }
 
     #[test]

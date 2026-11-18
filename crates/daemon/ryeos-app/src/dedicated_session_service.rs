@@ -1671,13 +1671,22 @@ pub(crate) fn ensure_hosted_contact_deadline(
         session_lifetime_ceiling(state, session)?,
     )?;
     let aggregate_deadline = if let Some(scope) = launch.accounting_scope.as_ref() {
-        state
+        let tree_deadline = state
             .accounting
             .as_ref()
             .ok_or_else(|| anyhow!("hosted root accounting scope has no live ledger"))?
             .execution_resource_budget_snapshot(&scope.execution_budget_id)?
             .ok_or_else(|| anyhow!("hosted root lost its aggregate budget authority"))?
-            .deadline_at_ms
+            .deadline_at_ms;
+        // The root ends with the hold-back sealed at its launch, which leaves
+        // its ancestors their reserve (the same end `bounded_duration_authority_reached`
+        // reads).
+        let hold_back_ms = state
+            .state_store
+            .get_launch_metadata(&session.placement_thread_id)?
+            .and_then(|metadata| metadata.deadline_hold_back_ms)
+            .unwrap_or(0);
+        crate::run_deadline::effective_end_at_ms(tree_deadline, hold_back_ms)
     } else {
         None
     };
@@ -2809,7 +2818,8 @@ fn validate_approval_request_fact(
             .as_deref()
             .ok_or_else(|| anyhow!("pending approval has no authoritative event timestamp"))?,
     )?
-    .timestamp_millis();
+    .checked_mul(1_000)
+    .ok_or_else(|| anyhow!("pending approval timestamp exceeds range"))?;
     accepted_at_ms
         .checked_add(APPROVAL_REQUEST_TTL_MS)
         .ok_or_else(|| anyhow!("pending approval expiry exceeds timestamp range"))
@@ -5060,12 +5070,23 @@ fn bounded_duration_authority_reached(
     let budget = accounting
         .execution_resource_budget_snapshot(&scope.execution_budget_id)?
         .ok_or_else(|| anyhow!("bounded worker lost its aggregate budget authority"))?;
-    Ok(budget.deadline_at_ms.is_some_and(|deadline| {
-        let terminalization_boundary = deadline
-            .checked_sub(DEDICATED_SESSION_AGGREGATE_TERMINALIZATION_RESERVE_MS)
-            .unwrap_or(i64::MIN);
-        now_ms >= terminalization_boundary
-    }))
+    // The session ends with the thread that placed it, which leaves its
+    // ancestors the hold-back sealed at that thread's launch.
+    let hold_back_ms = state
+        .state_store
+        .get_launch_metadata(&session.placement_thread_id)?
+        .and_then(|metadata| metadata.deadline_hold_back_ms)
+        .unwrap_or(0);
+    Ok(
+        crate::run_deadline::effective_end_at_ms(budget.deadline_at_ms, hold_back_ms).is_some_and(
+            |deadline| {
+                let terminalization_boundary = deadline
+                    .checked_sub(DEDICATED_SESSION_AGGREGATE_TERMINALIZATION_RESERVE_MS)
+                    .unwrap_or(i64::MIN);
+                now_ms >= terminalization_boundary
+            },
+        ),
+    )
 }
 
 fn validate_hosted_approval_fence(

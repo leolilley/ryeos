@@ -419,9 +419,9 @@ pub fn check_settlement_evidence(
                 && match row
                     .created_at
                     .as_deref()
-                    .map(chrono::DateTime::parse_from_rfc3339)
+                    .map(ryeos_effect_contract::rfc3339::parse_unix_millis)
                 {
-                    Some(Ok(at)) => (from..=to).contains(&at.timestamp_millis()),
+                    Some(Ok(at)) => (from..=to).contains(&at),
                     // An unknown sandbox of unknown age cannot be excluded.
                     _ => true,
                 }
@@ -628,12 +628,14 @@ mod tests {
         AllocationWindow {
             backend: "render".into(),
             account: "acct".into(),
-            startup_started_at_ms: chrono::DateTime::parse_from_rfc3339("2026-11-13T00:00:00Z")
-                .unwrap()
-                .timestamp_millis(),
-            contact_deadline_ms: chrono::DateTime::parse_from_rfc3339("2026-11-13T00:01:00Z")
-                .unwrap()
-                .timestamp_millis(),
+            startup_started_at_ms: ryeos_effect_contract::rfc3339::parse_unix_millis(
+                "2026-11-13T00:00:00Z",
+            )
+            .unwrap(),
+            contact_deadline_ms: ryeos_effect_contract::rfc3339::parse_unix_millis(
+                "2026-11-13T00:01:00Z",
+            )
+            .unwrap(),
         }
     }
 
