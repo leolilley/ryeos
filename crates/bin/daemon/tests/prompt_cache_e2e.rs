@@ -149,14 +149,17 @@ async fn marks_sit_at_the_declared_positions_and_the_prefix_stays_byte_equal() {
     assert_eq!(bodies.len(), 4);
     for (turn, body) in bodies.iter().enumerate() {
         let history = messages(body);
-        assert_eq!(history[0]["role"], "system", "turn {turn}");
+        // The probe directive has no system prompt, so the `system` position
+        // selects nothing here; the unit tests cover it.
+        let system = history.iter().filter(|m| m["role"] == "system").count();
+        assert_eq!(system, 0, "turn {turn}");
         let positions = marked(body);
         assert_eq!(positions, expected_marks(body), "turn {turn}: {history:#?}");
         assert!(positions.len() <= 4);
         // The first request has no earlier turn to mark.
         assert_eq!(
             positions.len(),
-            if turn == 0 { 2 } else { 3 },
+            if turn == 0 { 1 } else { 2 },
             "turn {turn}"
         );
         for index in &positions {
@@ -190,9 +193,8 @@ async fn marks_sit_at_the_declared_positions_and_the_prefix_stays_byte_equal() {
                 "message {index} changed between turns"
             );
         }
-        // The system message keeps its mark; the earlier newest message is
-        // read back marked as the previous tail with identical bytes.
-        assert_eq!(earlier[0], later[0]);
+        // The earlier newest message is read back marked as the previous
+        // tail with identical bytes.
         let previous_newest = earlier.len() - 1;
         assert_eq!(earlier[previous_newest], later[previous_newest]);
         assert!(!pair[0]["tools"].as_array().expect("tools").is_empty());
