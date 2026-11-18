@@ -45,7 +45,9 @@ def require(condition, message):
 
 _EXCERPT_BYTES = 400
 _CREDENTIAL_SHAPES = (
-    re.compile(r"\bBearer\s+\S+", re.IGNORECASE),
+    re.compile(r"\b(?:Bearer|Basic)\s+\S+", re.IGNORECASE),
+    re.compile(r"://[^/\s:@]+:[^@\s]+@"),
+    re.compile(r"(?i)\b(?:password|passwd|secret|token|api[_-]?key|authorization)\b\s*[:=]\s*\S+"),
     re.compile(r"\beyJ[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]+)*"),
     re.compile(r"\b(?:sk|pk|rk|rnd|ghp|gho|ghs|xox[abp])[-_][A-Za-z0-9_-]{8,}"),
     re.compile(r"[A-Za-z0-9+/_=-]{32,}"),
@@ -58,7 +60,8 @@ def cell_excerpt(source):
     Length and digest are of the whole cell. The excerpt is the first 400 bytes after anything shaped like a credential
     is replaced, so a refusal can be diagnosed without the cell being retained or a secret being printed."""
     raw = source.encode("utf-8", "replace")
-    cleaned = source
+    # Zero-width characters and compatibility forms must not split a credential shape: normalise before matching.
+    cleaned = re.sub("[\u200b-\u200f\u2060\ufeff]", "", unicodedata.normalize("NFKC", source))
     for shape in _CREDENTIAL_SHAPES:
         cleaned = shape.sub("[redacted]", cleaned)
     head = cleaned.encode("utf-8", "replace")[:_EXCERPT_BYTES].decode("utf-8", "replace")
