@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-18T22:21:29Z:2162c5b98a1715d037efcc586e23333e525c4ab9f10addb15ec1a2441e3d3c82:iNEh52vwYIOls9sNBLalqOTnYDoEDe4Oy7FZD+lfhkwO4+rJIYYd7Bh+kFeG0FAanB1YK3cSQqx/Cbs6PsOxBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-18T23:26:19Z:a0747e83b6e0346d470f516f0caf1e08f8596e51f892a425a3f93eea55021f17:WHdUOQVkvvTje0JF6v2zO5zM+iitHFNzwHeTJ59b0Em5uxp4FWn3YavZxyZKSd2jZE0A2fy3sjK1K/gs55IKBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "frame-v2"
@@ -287,6 +287,29 @@ The view model (`ryeos.ui.vm.v3`) carries the result as the Surface chip on each
 switcher entry (`mark`, `authored_in_project`, `fingerprint`), `chrome.switcher.edge`,
 `status_bar.edge`, and `status_bar.key_hints` (at most seven `{keys, word}` pairs
 for the focused context, replacing the single hint string).
+
+## Attention (`ryeos.ui.attention.v3`)
+
+The `work/attention` service answers one response, which the shell reads whole;
+a response of any other version is refused and its counts and rows are dropped.
+
+- `attention[]` is a page of the needs-you queue, oldest first, in the item shape
+  `ryeos.ui.attention_item.v3`: the v2 fields plus `project_root`, the project
+  the item's work ran in or null. The page length is the source's `limit`.
+- `counts` holds `total`, `by_kind`, `by_project` (`{project_root, count}`, null
+  for projectless) and `chains`, the distinct chain ids of the whole queue
+  (capped at 500, with `chains_truncated`). The daemon counts; a client only
+  tests membership in the id lists.
+- `running` is what the principal launched or follows (never scheduled or child
+  runs): `count`, `label`, `tone`, `by_project`, `chains`, `chains_truncated`
+  and a page of `items` (`id`, `title`, `item_ref`, `project_root`, `subject`,
+  `state`, `since_ms` as the head thread's start). Its statuses are the ones the
+  attention config maps to the `running` category.
+
+The shell fills each Surface chip's counts from `by_project` by the Surface's
+project (a projectless Surface takes the totals), each tab's flags from its
+selected work's chain, and the overlay rows from the two item lists. Counts and
+flags are None when attention is unavailable or a chain list was cut short.
 
 ## Backdrop
 

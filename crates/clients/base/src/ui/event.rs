@@ -17,6 +17,14 @@ pub enum RyeOsFilterField {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RyeOsUiIntent {
     Refresh,
+    /// Bring the open view set that holds this chain's work forward.
+    OpenAttentionItem {
+        chain_root_id: String,
+    },
+    /// Acknowledge one attention item through the mounted affordance that does it.
+    AcknowledgeAttentionItem {
+        item_id: String,
+    },
     /// Ask the presentation host to open a fresh document under the same
     /// authenticated session. Preparation precedes an explicit link; the child
     /// independently claims its seat. No bearer authority enters the link.

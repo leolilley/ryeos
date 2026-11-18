@@ -223,12 +223,98 @@ pub struct RyeOsDimensionDto {
     pub gc: RyeOsGcSummaryDto,
 }
 
+/// The one attention response contract this client reads.
+pub const ATTENTION_CONTRACT: &str = "ryeos.ui.attention.v3";
+
 /// The attention queue as the daemon reports it. The counts are the daemon's
 /// own; a client never derives them from the items.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct RyeOsAttentionDto {
     #[serde(default)]
+    pub schema_version: String,
+    /// One page of the needs-you queue, oldest first.
+    #[serde(default, rename = "attention")]
+    pub items: Vec<RyeOsAttentionItemDto>,
+    #[serde(default)]
     pub counts: RyeOsAttentionCountsDto,
+    #[serde(default)]
+    pub running: RyeOsRunningDto,
+}
+
+impl RyeOsAttentionDto {
+    /// Read a response of the contract this client speaks; any other version
+    /// is refused with the reason, since there is no reader for it.
+    pub fn from_response(value: &serde_json::Value) -> Result<Self, String> {
+        let found = value.get("schema_version").and_then(serde_json::Value::as_str);
+        if found != Some(ATTENTION_CONTRACT) {
+            return Err(format!(
+                "attention response is {}; this client reads {ATTENTION_CONTRACT}",
+                found.unwrap_or("unversioned")
+            ));
+        }
+        serde_json::from_value(value.clone()).map_err(|error| error.to_string())
+    }
+}
+
+/// One attention or running item, as far as the shell reads it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RyeOsAttentionItemDto {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub tone: String,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub since_ms: i64,
+    #[serde(default)]
+    pub project_root: Option<String>,
+    #[serde(default)]
+    pub subject: RyeOsAttentionSubjectDto,
+    /// The actions the item allows, by name.
+    #[serde(default)]
+    pub actions: std::collections::BTreeMap<String, bool>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RyeOsAttentionSubjectDto {
+    #[serde(default)]
+    pub chain_root_id: String,
+    #[serde(default)]
+    pub thread_id: String,
+}
+
+/// The count of one project's items; a null root is a projectless run.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RyeOsProjectCountDto {
+    #[serde(default)]
+    pub project_root: Option<String>,
+    #[serde(default)]
+    pub count: usize,
+}
+
+/// What the principal is running: launched or followed, never scheduled or
+/// child runs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RyeOsRunningDto {
+    #[serde(default)]
+    pub count: usize,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub tone: String,
+    #[serde(default)]
+    pub by_project: Vec<RyeOsProjectCountDto>,
+    #[serde(default)]
+    pub chains: Vec<String>,
+    #[serde(default)]
+    pub chains_truncated: bool,
+    #[serde(default)]
+    pub items: Vec<RyeOsAttentionItemDto>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -237,6 +323,12 @@ pub struct RyeOsAttentionCountsDto {
     pub total: usize,
     #[serde(default)]
     pub by_kind: Vec<RyeOsAttentionKindCountDto>,
+    #[serde(default)]
+    pub by_project: Vec<RyeOsProjectCountDto>,
+    #[serde(default)]
+    pub chains: Vec<String>,
+    #[serde(default)]
+    pub chains_truncated: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]

@@ -985,6 +985,24 @@ fn active_surface_style(core: &RyeOsCore) -> crate::surface::SurfaceStyleSpec {
         .unwrap_or_default()
 }
 
+/// Whether the work selected in a view set is in one of the daemon's chain
+/// lists. None when attention is unavailable, the view set has no selected
+/// work, or the list was cut short (no claim rather than a wrong one).
+fn tab_has_work<'a>(
+    core: &'a RyeOsCore,
+    view_set_id: crate::ids::ViewSetId,
+    list: impl Fn(&'a crate::ui::dto::RyeOsAttentionDto) -> (&'a Vec<String>, bool),
+) -> Option<bool> {
+    let attention = core.data.attention.as_ref()?;
+    let (chains, truncated) = list(attention);
+    if truncated {
+        return None;
+    }
+    let work = core.selection_value_in_view_set(view_set_id, "selection.work")?;
+    let chain = work.get("chain_root")?.as_str()?;
+    Some(chains.iter().any(|candidate| candidate == chain))
+}
+
 fn switcher_vm(core: &RyeOsCore) -> RyeOsSwitcherVm {
     use crate::surface::SwitcherEdgeSpec;
     RyeOsSwitcherVm {
@@ -1026,8 +1044,12 @@ fn top_bar_vm(core: &RyeOsCore) -> RyeOsTopBarVm {
                     .active_view_set()
                     .is_some_and(|active| active.id == view_set.id),
                 tile_count: view_set.tile_ids().len(),
-                needs_you: None,
-                running: None,
+                needs_you: tab_has_work(core, view_set.id, |counts| {
+                    (&counts.counts.chains, counts.counts.chains_truncated)
+                }),
+                running: tab_has_work(core, view_set.id, |counts| {
+                    (&counts.running.chains, counts.running.chains_truncated)
+                }),
             })
             .collect(),
         focused_title: focused_tile_title(core),
@@ -2863,6 +2885,33 @@ fn surface_chip_vm(
     }
 }
 
+/// The needs-you and running counts for one Surface, as the daemon counted
+/// them: the entry for the Surface's project when it has one, the totals when
+/// it has none. None when the attention queue is not available; a project the
+/// daemon lists nothing for has nothing raised, so zero.
+fn surface_attention_counts(
+    core: &RyeOsCore,
+    surface: &crate::ui::presentation_state::SurfaceComposition,
+) -> (Option<usize>, Option<usize>) {
+    let Some(attention) = core.data.attention.as_ref() else {
+        return (None, None);
+    };
+    let project_path = core
+        .binding_attachment(&surface.binding().binding_attachment_id)
+        .and_then(|attachment| attachment.project_path.as_deref());
+    let of = |entries: &[crate::ui::dto::RyeOsProjectCountDto], total: usize| match project_path {
+        None => total,
+        Some(path) => entries
+            .iter()
+            .find(|entry| entry.project_root.as_deref() == Some(path))
+            .map_or(0, |entry| entry.count),
+    };
+    (
+        Some(of(&attention.counts.by_project, attention.counts.total)),
+        Some(of(&attention.running.by_project, attention.running.count)),
+    )
+}
+
 fn session_vm(core: &RyeOsCore) -> RyeOsSessionVm {
     let fingerprint = core
         .data
@@ -2920,8 +2969,8 @@ fn session_vm(core: &RyeOsCore) -> RyeOsSessionVm {
                         .and_then(|attachment| attachment.presentation.definition.surface()),
                     fingerprint.as_deref(),
                 ),
-                needs_you: None,
-                running: None,
+                needs_you: surface_attention_counts(core, surface).0,
+                running: surface_attention_counts(core, surface).1,
             })
             .collect(),
         user_principal_id: browser.and_then(|session| session.user_principal_id.clone()),
@@ -5239,6 +5288,263 @@ mod tests {
         let command = ryeos_key_command(alt_o, core.key_context());
         core.apply_key_command(command);
         assert!(overlay_of(&core).open);
+    }
+
+    fn attention_fixture() -> crate::ui::dto::RyeOsAttentionDto {
+        serde_json::from_value(json!({
+            "schema_version": "ryeos.ui.attention.v3",
+            "attention": [
+                {"id": "approval:A", "kind": "approval", "title": "Approval requested",
+                 "tone": "warn", "state": "pending", "since_ms": 10,
+                 "project_root": "/work/alpha",
+                 "subject": {"chain_root_id": "c-a", "thread_id": "t-a"},
+                 "actions": {"open": true, "accept": true, "decline": true,
+                             "acknowledge": false}},
+                {"id": "failed_run:F", "kind": "failed_run", "title": "Run failed",
+                 "tone": "danger", "state": "failed", "since_ms": 20,
+                 "project_root": null,
+                 "subject": {"chain_root_id": "c-f", "thread_id": "t-f"},
+                 "actions": {"open": true, "acknowledge": true}}
+            ],
+            "counts": {
+                "total": 5, "by_kind": [],
+                "by_project": [
+                    {"project_root": null, "count": 2},
+                    {"project_root": "/work/alpha", "count": 3}
+                ],
+                "chains": ["c-a", "c-f"], "chains_truncated": false
+            },
+            "running": {
+                "count": 4, "label": "running", "tone": "accent",
+                "by_project": [{"project_root": "/work/alpha", "count": 4}],
+                "chains": ["c-run"], "chains_truncated": false,
+                "items": [
+                    {"id": "running:t-run", "title": "directive:x", "tone": "accent",
+                     "state": "running", "since_ms": 5, "project_root": "/work/alpha",
+                     "subject": {"chain_root_id": "c-run", "thread_id": "t-run"}}
+                ]
+            }
+        }))
+        .unwrap()
+    }
+
+    fn core_with_attention() -> RyeOsCore {
+        let mut core = core_with_surface_yaml("name: Plain\n");
+        core.data.attention = Some(attention_fixture());
+        core.rebuild_overlay_rows();
+        core
+    }
+
+    #[test]
+    fn a_projectless_surface_takes_the_attention_totals() {
+        let core = core_with_attention();
+        let surface = &build_view_model(&core).session.surfaces[0];
+        assert_eq!(surface.needs_you, Some(5));
+        assert_eq!(surface.running, Some(4));
+    }
+
+    #[test]
+    fn a_project_surface_takes_its_projects_entry_and_zero_when_unlisted() {
+        let mut core = core_with_attention();
+        let id = core.root_attachment_id.clone();
+        core.binding_attachments
+            .get_mut(&id)
+            .unwrap()
+            .descriptor
+            .project_path = Some("/work/alpha".to_string());
+        let surface = &build_view_model(&core).session.surfaces[0];
+        assert_eq!(surface.needs_you, Some(3));
+        assert_eq!(surface.running, Some(4));
+        core.binding_attachments
+            .get_mut(&id)
+            .unwrap()
+            .descriptor
+            .project_path = Some("/work/beta".to_string());
+        let surface = &build_view_model(&core).session.surfaces[0];
+        assert_eq!(surface.needs_you, Some(0));
+        assert_eq!(surface.running, Some(0));
+    }
+
+    #[test]
+    fn unavailable_attention_leaves_every_count_and_flag_unset() {
+        let core = core_with_surface_yaml("name: Plain\n");
+        let vm = build_view_model(&core);
+        assert_eq!(vm.session.surfaces[0].needs_you, None);
+        assert_eq!(vm.session.surfaces[0].running, None);
+        assert!(
+            vm.presentation
+                .chrome
+                .top_bar
+                .tabs
+                .iter()
+                .all(|tab| tab.needs_you.is_none() && tab.running.is_none())
+        );
+        assert_eq!(vm.overlay.needs_you_count, None);
+        assert!(vm.overlay.needs_you.is_empty());
+    }
+
+    #[test]
+    fn a_tab_flags_work_found_in_the_daemons_chain_lists() {
+        let mut core = core_with_attention();
+        let tab_id = build_view_model(&core).presentation.chrome.top_bar.tabs[0].view_set_id;
+        let flags = |core: &RyeOsCore| {
+            let tab = &build_view_model(core).presentation.chrome.top_bar.tabs[0];
+            (tab.needs_you, tab.running)
+        };
+        assert_eq!(flags(&core), (None, None), "no selected work, no claim");
+
+        core.retained_work_selections
+            .insert(tab_id, json!({"thread": "t-a", "chain_root": "c-a"}));
+        assert_eq!(flags(&core), (Some(true), Some(false)));
+        core.retained_work_selections
+            .insert(tab_id, json!({"thread": "t-run", "chain_root": "c-run"}));
+        assert_eq!(flags(&core), (Some(false), Some(true)));
+        core.retained_work_selections
+            .insert(tab_id, json!({"thread": "t-x", "chain_root": "c-none"}));
+        assert_eq!(flags(&core), (Some(false), Some(false)));
+
+        core.data.attention.as_mut().unwrap().counts.chains_truncated = true;
+        assert_eq!(
+            flags(&core),
+            (None, Some(false)),
+            "a truncated list makes no claim"
+        );
+    }
+
+    #[test]
+    fn overlay_rows_come_from_the_retained_response() {
+        let mut core = core_with_attention();
+        let overlay = overlay_of(&core);
+        assert_eq!(overlay.needs_you_count, Some(5));
+        assert_eq!(overlay.running_count, Some(4));
+        assert_eq!(overlay.needs_you.len(), 2);
+        assert_eq!(overlay.running.len(), 1);
+        let approval = &overlay.needs_you[0];
+        assert_eq!(approval.title, "Approval requested");
+        assert_eq!(approval.tone, RyeOsTone::Warn);
+        assert_eq!(approval.since_ms, 10);
+        assert_eq!(approval.where_, "alpha", "no registered project: the path tail");
+        let actions = |row: &RyeOsOverlayRowVm| {
+            row.actions
+                .iter()
+                .map(|action| (action.keys.clone(), action.word.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(actions(approval), [("enter".to_string(), "open".to_string())]);
+        let failed = &overlay.needs_you[1];
+        assert_eq!(failed.where_, "this node");
+        assert_eq!(
+            actions(failed),
+            [
+                ("enter".to_string(), "open".to_string()),
+                ("a".to_string(), "acknowledge".to_string())
+            ]
+        );
+        assert_eq!(
+            failed.actions[1].intent,
+            RyeOsUiIntent::AcknowledgeAttentionItem {
+                item_id: "failed_run:F".to_string()
+            }
+        );
+        assert_eq!(
+            overlay.running[0].actions[0].intent,
+            RyeOsUiIntent::OpenAttentionItem {
+                chain_root_id: "c-run".to_string()
+            }
+        );
+
+        core.data.projects = Some(
+            serde_json::from_value(json!({
+                "version": 1,
+                "projects": [{"local_id": "p1", "name": "Alpha", "root": "/work/alpha"}]
+            }))
+            .unwrap(),
+        );
+        core.rebuild_overlay_rows();
+        assert_eq!(overlay_of(&core).needs_you[0].where_, "Alpha");
+    }
+
+    #[test]
+    fn the_overlay_selection_stays_valid_when_the_rows_change() {
+        let mut core = core_with_attention();
+        core.dispatch_ui(RyeOsUiEvent::ToggleOverlay);
+        core.dispatch_ui(RyeOsUiEvent::MoveOverlay { delta: 2 });
+        assert_eq!(overlay_of(&core).selected, Some(2));
+
+        let mut shorter = attention_fixture();
+        shorter.items.truncate(1);
+        shorter.running.items.clear();
+        core.data.attention = Some(shorter);
+        core.rebuild_overlay_rows();
+        assert_eq!(overlay_of(&core).selected, Some(0), "clamped onto the last row");
+
+        let mut none = attention_fixture();
+        none.items.clear();
+        none.running.items.clear();
+        core.data.attention = Some(none);
+        core.rebuild_overlay_rows();
+        let overlay = overlay_of(&core);
+        assert!(overlay.open);
+        assert_eq!(overlay.selected, None);
+
+        core.data.attention = Some(attention_fixture());
+        core.rebuild_overlay_rows();
+        assert_eq!(overlay_of(&core).selected, Some(0), "rows arrived under an open sheet");
+    }
+
+    #[test]
+    fn attention_going_unavailable_empties_the_overlay() {
+        let mut core = core_with_attention();
+        core.data.attention = None;
+        core.rebuild_overlay_rows();
+        let overlay = overlay_of(&core);
+        assert!(overlay.needs_you.is_empty() && overlay.running.is_empty());
+        assert_eq!((overlay.needs_you_count, overlay.running_count), (None, None));
+    }
+
+    #[test]
+    fn opening_work_that_is_open_nowhere_says_so_and_changes_nothing_else() {
+        let mut core = core_with_attention();
+        let before = build_view_model(&core).session.surfaces[0].active;
+        let effects = core.dispatch_intent(RyeOsUiIntent::OpenAttentionItem {
+            chain_root_id: "c-nowhere".to_string(),
+        });
+        assert!(effects.is_empty());
+        assert_eq!(build_view_model(&core).session.surfaces[0].active, before);
+        assert!(
+            core.ui
+                .notices
+                .iter()
+                .any(|notice| notice.message.contains("not open in this session"))
+        );
+    }
+
+    #[test]
+    fn opening_work_held_by_a_view_set_brings_that_view_set_forward() {
+        let mut core = core_with_attention();
+        let tab_id = build_view_model(&core).presentation.chrome.top_bar.tabs[0].view_set_id;
+        core.retained_work_selections
+            .insert(tab_id, json!({"thread": "t-a", "chain_root": "c-a"}));
+        core.dispatch_intent(RyeOsUiIntent::OpenAttentionItem {
+            chain_root_id: "c-a".to_string(),
+        });
+        assert_eq!(core.active_view_set().map(|set| set.id), Some(tab_id));
+        assert!(core.ui.notices.is_empty(), "found work raises no notice");
+    }
+
+    #[test]
+    fn acknowledging_with_no_acknowledge_affordance_mounted_says_so() {
+        let mut core = core_with_attention();
+        let effects = core.dispatch_intent(RyeOsUiIntent::AcknowledgeAttentionItem {
+            item_id: "failed_run:F".to_string(),
+        });
+        assert!(effects.is_empty());
+        assert!(
+            core.ui
+                .notices
+                .iter()
+                .any(|notice| notice.message.contains("Attention panel"))
+        );
     }
 
     #[test]

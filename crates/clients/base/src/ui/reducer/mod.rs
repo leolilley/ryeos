@@ -740,6 +740,71 @@ impl RyeOsCore {
                     .any(|action| &action.intent == intent))
     }
 
+    /// Bring forward the open view set whose selected work is `chain_root_id`,
+    /// switching Surface first when it sits in another one. Work that is open
+    /// nowhere in this session is said so; opening it is the Review view's job.
+    fn open_attention_item(&mut self, chain_root_id: &str) -> Vec<RyeOsEffect> {
+        let Some(presentation) = self.presentation.as_ref() else {
+            return Vec::new();
+        };
+        let holder = presentation.view_sets().find_map(|(surface_id, set)| {
+            let work = self.selection_value_in_view_set(set.id, "selection.work")?;
+            (work["chain_root"] == chain_root_id).then(|| (surface_id.clone(), set.id))
+        });
+        let Some((surface_id, view_set_id)) = holder else {
+            self.notice(
+                "That work is not open in this session; open it from Work or Review.",
+                RyeOsTone::Warn,
+            );
+            return Vec::new();
+        };
+        let mut effects = Vec::new();
+        if self
+            .active_surface()
+            .is_none_or(|active| active.id() != &surface_id)
+        {
+            let Some(binding) = self
+                .presentation
+                .as_ref()
+                .and_then(|presentation| presentation.surfaces().get(&surface_id))
+                .map(|surface| surface.binding().clone())
+            else {
+                return Vec::new();
+            };
+            effects.extend(self.select_surface_instance(&surface_id, &binding));
+        }
+        effects.extend(self.dispatch_intent(RyeOsUiIntent::SelectViewSet { view_set_id }));
+        effects
+    }
+
+    /// Acknowledge an attention item by invoking the `acknowledge` affordance
+    /// of a mounted view that declares one; with none mounted there is no
+    /// bound way to do it, and that is said.
+    fn acknowledge_attention_item(&mut self, item_id: &str) -> Vec<RyeOsEffect> {
+        let holder = self.mounted_instances().find_map(|instance| {
+            let view_ref = self.mounted_view_ref(&instance)?.to_owned();
+            let binding = self.binding_for_instance(&instance, &view_ref)?;
+            binding
+                .affordances
+                .iter()
+                .any(|affordance| affordance["id"] == "acknowledge")
+                .then_some((instance, view_ref))
+        });
+        let Some((instance, view_ref)) = holder else {
+            self.notice(
+                "Open the Attention panel to acknowledge this.",
+                RyeOsTone::Warn,
+            );
+            return Vec::new();
+        };
+        self.invoke_affordance(
+            &instance,
+            &view_ref,
+            "acknowledge",
+            &serde_json::json!({ "id": item_id }),
+        )
+    }
+
     pub(crate) fn dispatch_intent(&mut self, intent: RyeOsUiIntent) -> Vec<RyeOsEffect> {
         if self.overlay_offers_intent(&intent) {
             self.ui.overlay.open = false;
@@ -748,6 +813,12 @@ impl RyeOsCore {
         }
         match intent {
             RyeOsUiIntent::Refresh => self.initial_effects(),
+            RyeOsUiIntent::OpenAttentionItem { chain_root_id } => {
+                self.open_attention_item(&chain_root_id)
+            }
+            RyeOsUiIntent::AcknowledgeAttentionItem { item_id } => {
+                self.acknowledge_attention_item(&item_id)
+            }
             RyeOsUiIntent::OpenNewPresentationDocument => self.open_new_presentation_document(),
             RyeOsUiIntent::OpenSurfaceInNewPresentation {
                 surface_instance_id,

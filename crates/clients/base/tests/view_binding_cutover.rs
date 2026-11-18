@@ -433,10 +433,10 @@ fn activity_sections_expose_their_source_coverage_without_executable_activation(
 }
 
 fn attention_items() -> Value {
-    json!({"attention": [
+    json!({"schema_version": "ryeos.ui.attention.v3", "attention": [
         {
             "id": "approval:A-1", "kind": "approval", "title": "Approval requested",
-            "tone": "warn", "state": "pending",
+            "tone": "warn", "state": "pending", "project_root": "/work",
             "subject": {"chain_root_id": "T-chain", "thread_id": "T-place"},
             "detail": {
                 "summary": "command_execution", "approval_id": "A-1",
@@ -446,7 +446,7 @@ fn attention_items() -> Value {
         },
         {
             "id": "failed_run:T-head", "kind": "failed_run", "title": "Run failed",
-            "tone": "danger", "state": "failed",
+            "tone": "danger", "state": "failed", "project_root": null,
             "subject": {"chain_root_id": "T-chain2", "thread_id": "T-head"},
             "detail": {"summary": "directive:x"},
             "actions": {"open": true, "acknowledge": true},
