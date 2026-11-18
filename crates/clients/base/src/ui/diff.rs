@@ -861,7 +861,9 @@ pub(crate) fn apply_action(
                 state.cursor = Some(0);
             }
             RowRef::File(file) => {
-                if !state.closed_files.remove(&file) {
+                if state.closed_files.contains(&file) {
+                    state.closed_files.remove(&file);
+                } else {
                     state.closed_files.insert(file);
                 }
             }
