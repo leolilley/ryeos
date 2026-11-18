@@ -57,6 +57,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_threads::INSPECT_DESCRIPTOR,
     ui_work::DESCRIPTOR,
     ui_work::ATTENTION_DESCRIPTOR,
+    ui_work::ACKNOWLEDGE_DESCRIPTOR,
     ui_work::APPROVAL_HISTORY_DESCRIPTOR,
     ui_work::CANDIDATE_DESCRIPTOR,
     ui_thread_tree::DESCRIPTOR,
