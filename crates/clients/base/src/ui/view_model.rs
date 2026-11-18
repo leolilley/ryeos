@@ -934,7 +934,7 @@ fn presentation_vm(
             border: border.name().to_string(),
             top_bar: top_bar_vm(core),
             status_bar: status_bar_vm(chrome, core),
-            switcher: RyeOsSwitcherVm::default(),
+            switcher: switcher_vm(core),
         },
         metrics: presentation_metrics_vm(core, view_set),
         frame: RyeOsFrameVm {
@@ -944,6 +944,35 @@ fn presentation_vm(
             },
         },
         motion: core.ui.motion.clone(),
+    }
+}
+
+/// The active Surface's declared style, or the defaults when there is none.
+fn active_surface_style(core: &RyeOsCore) -> crate::surface::SurfaceStyleSpec {
+    core.active_surface_attachment()
+        .and_then(|attachment| attachment.presentation.definition.surface())
+        .map(|surface| surface.style)
+        .unwrap_or_default()
+}
+
+fn switcher_vm(core: &RyeOsCore) -> RyeOsSwitcherVm {
+    use crate::surface::SwitcherEdgeSpec;
+    RyeOsSwitcherVm {
+        edge: match active_surface_style(core).switcher {
+            SwitcherEdgeSpec::Left => RyeOsEdgeVm::Left,
+            SwitcherEdgeSpec::Top => RyeOsEdgeVm::Top,
+            SwitcherEdgeSpec::Right => RyeOsEdgeVm::Right,
+            SwitcherEdgeSpec::Hidden => RyeOsEdgeVm::Hidden,
+        },
+    }
+}
+
+fn status_bar_edge(core: &RyeOsCore) -> RyeOsEdgeVm {
+    use crate::surface::StatusBarEdgeSpec;
+    match active_surface_style(core).status_bar {
+        StatusBarEdgeSpec::Bottom => RyeOsEdgeVm::Bottom,
+        StatusBarEdgeSpec::Top => RyeOsEdgeVm::Top,
+        StatusBarEdgeSpec::Hidden => RyeOsEdgeVm::Hidden,
     }
 }
 
@@ -1091,23 +1120,12 @@ fn presentation_activity_level(
 }
 
 fn status_bar_vm(_chrome: &RyeOsChromeVm, core: &RyeOsCore) -> RyeOsStatusBarVm {
-    let hint = |keys: &str, word: &str| RyeOsKeyHintVm {
-        keys: keys.to_string(),
-        word: word.to_string(),
-    };
-    let mut key_hints = Vec::new();
-    if core
-        .focused_view_instance_key()
-        .and_then(|instance| core.retained_lens_frames.get(&instance))
-        .is_some_and(|frames| !frames.is_empty())
-    {
-        key_hints.push(hint("⌫", "back"));
-        key_hints.push(hint("alt+←", "back"));
-    }
-    key_hints.push(hint("ctrl+k", "open"));
-    key_hints.push(hint("alt+t/b", "bars"));
-    key_hints.push(hint("ctrl+←/→", "tab"));
-    key_hints.push(hint("ctrl+↑/↓", "move"));
+    let edge = status_bar_edge(core);
+    let key_hints = super::keymap::key_hints(
+        core.focused_view_instance_key()
+            .and_then(|instance| core.retained_lens_frames.get(&instance))
+            .is_some_and(|frames| !frames.is_empty()),
+    );
     // This is quiet interaction chrome, not a second diagnostics dashboard.
     // Root-session project and execution counters become actively misleading
     // once exact mounted attachments span projects.
@@ -1140,10 +1158,12 @@ fn status_bar_vm(_chrome: &RyeOsChromeVm, core: &RyeOsCore) -> RyeOsStatusBarVm 
         (None, false) => Vec::new(),
     };
     RyeOsStatusBarVm {
-        visible: core.ui.bottom_status_visible,
+        // The operator's toggle can hide the bar; it never reveals one the
+        // Surface hides.
+        visible: core.ui.bottom_status_visible && edge != RyeOsEdgeVm::Hidden,
         segments,
         key_hints,
-        edge: RyeOsEdgeVm::Bottom,
+        edge,
         first_run: false,
         energy: core.runtime.activity_pulse.clamp(0.0, 1.0),
         attention: (core.runtime.now_ms < core.runtime.attention_until_ms)
@@ -4934,6 +4954,57 @@ mod tests {
                 .top_bar
                 .visible
         );
+    }
+
+    fn core_with_surface_yaml(yaml: &str) -> RyeOsCore {
+        test_support_core(session_with_surface(serde_yaml::from_str(yaml).unwrap()))
+    }
+
+    #[test]
+    fn surface_chip_mark_and_authorship_reach_the_session_surfaces() {
+        let key = build_view_model(&core_with_surface_yaml("name: Node\nchip:\n  mark: key\n"));
+        assert_eq!(key.session.surfaces[0].chip.mark, RyeOsChipMarkVm::Key);
+        assert!(!key.session.surfaces[0].chip.authored_in_project);
+
+        let plain = build_view_model(&core_with_surface_yaml("name: Plain\n"));
+        assert_eq!(plain.session.surfaces[0].chip.mark, RyeOsChipMarkVm::Initial);
+
+        let authored = build_view_model(&core_with_surface_yaml(
+            "name: Mine\nauthorship:\n  space: project\n  trust_class: untrusted_project\n",
+        ));
+        assert!(authored.session.surfaces[0].chip.authored_in_project);
+    }
+
+    #[test]
+    fn surface_style_edges_reach_the_switcher_and_status_bar() {
+        let defaults = build_view_model(&core_with_surface_yaml("name: Plain\n"));
+        assert_eq!(defaults.presentation.chrome.switcher.edge, RyeOsEdgeVm::Left);
+        assert_eq!(defaults.presentation.chrome.status_bar.edge, RyeOsEdgeVm::Bottom);
+
+        let moved = build_view_model(&core_with_surface_yaml(
+            "name: Moved\nstyle:\n  switcher: right\n  status_bar: top\n",
+        ));
+        assert_eq!(moved.presentation.chrome.switcher.edge, RyeOsEdgeVm::Right);
+        assert_eq!(moved.presentation.chrome.status_bar.edge, RyeOsEdgeVm::Top);
+
+        let hidden = build_view_model(&core_with_surface_yaml(
+            "name: Hidden\nstyle:\n  switcher: hidden\n  status_bar: hidden\n",
+        ));
+        assert_eq!(hidden.presentation.chrome.switcher.edge, RyeOsEdgeVm::Hidden);
+        assert_eq!(hidden.presentation.chrome.status_bar.edge, RyeOsEdgeVm::Hidden);
+    }
+
+    #[test]
+    fn the_bar_toggle_hides_a_status_bar_but_never_reveals_a_hidden_one() {
+        let mut shown = core_with_surface_yaml("name: Plain\n");
+        shown.ui.bottom_status_visible = true;
+        assert!(build_view_model(&shown).presentation.chrome.status_bar.visible);
+        shown.ui.bottom_status_visible = false;
+        assert!(!build_view_model(&shown).presentation.chrome.status_bar.visible);
+
+        let mut hidden = core_with_surface_yaml("name: Hidden\nstyle:\n  status_bar: hidden\n");
+        hidden.ui.bottom_status_visible = true;
+        assert!(!build_view_model(&hidden).presentation.chrome.status_bar.visible);
     }
 
     #[test]
