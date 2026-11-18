@@ -37,7 +37,10 @@
         "/ui/assets/rune_platform.js",
         "/ui/assets/rune_platform_text.js",
         "/ui/assets/rune_segmenter.js",
-        "/ui/assets/ryeos_rune_bg.wasm"
+        "/ui/assets/ryeos_rune_bg.wasm",
+        "/ui/assets/Inter-Regular.ttf",
+        "/ui/assets/Inter-Medium.ttf",
+        "/ui/assets/Inter-SemiBold.ttf"
       ]
     },
     {
@@ -113,6 +116,33 @@
       "mime": "font/ttf",
       "cache": "no-cache",
       "sha256": "2da9fbdc39dfa60745991459a5e4a4298a35af66df15fb3077fcca4143401203",
+      "imports": []
+    },
+    {
+      "route": "/ui/assets/Inter-Regular.ttf",
+      "filename": "Inter-Regular.ttf.gz",
+      "encoding": "gzip",
+      "mime": "font/ttf",
+      "cache": "no-cache",
+      "sha256": "8bc20f364ca84cb6d6bd422f9c6e139f1898dc181890f4e4365fb5541b90e583",
+      "imports": []
+    },
+    {
+      "route": "/ui/assets/Inter-Medium.ttf",
+      "filename": "Inter-Medium.ttf.gz",
+      "encoding": "gzip",
+      "mime": "font/ttf",
+      "cache": "no-cache",
+      "sha256": "66377866c203e4f5ea795f9812b2e2b015bf2bf15a9d6321d6ba54fc7a85bb90",
+      "imports": []
+    },
+    {
+      "route": "/ui/assets/Inter-SemiBold.ttf",
+      "filename": "Inter-SemiBold.ttf.gz",
+      "encoding": "gzip",
+      "mime": "font/ttf",
+      "cache": "no-cache",
+      "sha256": "ece247e56ef12a6cfa6c35abde0ba73da3cb8473465f42265b9453db11561376",
       "imports": []
     }
   ]

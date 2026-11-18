@@ -198,8 +198,16 @@ mod tests {
         assert!(wasm.content_type.contains("wasm"));
         assert_eq!(wasm.content_encoding, Some("gzip"));
         assert!(wasm.bytes.starts_with(&[0x1f, 0x8b]));
-        for font in ["ui/assets/ryeos-cjk.ttf", "ui/assets/ryeos-emoji.ttf"] {
-            let font = provider.get(font).expect("coverage font must be embedded");
+        // The coverage fonts the boot module hands over, and the full Inter
+        // faces the renderer fetches after its first frame.
+        for font in [
+            "ui/assets/ryeos-cjk.ttf",
+            "ui/assets/ryeos-emoji.ttf",
+            "ui/assets/Inter-Regular.ttf",
+            "ui/assets/Inter-Medium.ttf",
+            "ui/assets/Inter-SemiBold.ttf",
+        ] {
+            let font = provider.get(font).expect("font must be embedded");
             assert_eq!(font.content_type, "font/ttf");
             assert_eq!(font.content_encoding, Some("gzip"));
         }
