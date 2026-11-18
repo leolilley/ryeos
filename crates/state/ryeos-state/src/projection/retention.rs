@@ -1,5 +1,4 @@
 use anyhow::Context;
-use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::OptionalExtension;
 
 use super::ProjectionDb;
@@ -37,7 +36,7 @@ pub(crate) fn derive_terminal_retention(
 ) -> anyhow::Result<DerivedTerminalRetention> {
     let mut count = 0usize;
     let mut all_terminal = true;
-    let mut latest: Option<DateTime<Utc>> = None;
+    let mut latest: Option<i64> = None;
     for member in members {
         count += 1;
         all_terminal &= member.is_terminal;
@@ -47,7 +46,7 @@ pub(crate) fn derive_terminal_retention(
                 member.timestamp
             )
         })?;
-        if latest.as_ref().is_none_or(|current| timestamp > *current) {
+        if latest.is_none_or(|current| timestamp > current) {
             latest = Some(timestamp);
         }
     }
@@ -71,7 +70,6 @@ pub(crate) fn derive_terminal_retention(
             let seconds = i64::try_from(*seconds)
                 .context("captured history retention duration exceeds i64")?;
             let deadline = terminal_at
-                .timestamp()
                 .checked_add(seconds)
                 .ok_or_else(|| anyhow::anyhow!("terminal retention deadline is out of range"))?;
             Some(deadline)
@@ -79,7 +77,9 @@ pub(crate) fn derive_terminal_retention(
         ThreadHistoryRetention::Durable => None,
     };
     Ok(DerivedTerminalRetention {
-        terminal_at: Some(terminal_at.to_rfc3339_opts(SecondsFormat::Secs, true)),
+        terminal_at: Some(ryeos_effect_contract::rfc3339::format_unix_seconds(
+            terminal_at,
+        )?),
         retire_after,
     })
 }
@@ -182,7 +182,7 @@ impl ProjectionDb {
             (1..=MAX_DUE_FENCED_CHAIN_SLICE).contains(&limit),
             "due fenced chain slice exceeds the candidate batch bound"
         );
-        let now = parse_canonical_timestamp(now)?.timestamp();
+        let now = parse_canonical_timestamp(now)?;
         if fenced_kinds.is_empty() {
             return Ok(Vec::new());
         }
@@ -226,7 +226,7 @@ impl ProjectionDb {
     ) -> anyhow::Result<Vec<DueTerminalChain>> {
         self.with_sql(|connection| {
             let limit = i64::try_from(limit).context("due-chain limit exceeds i64")?;
-            let now = parse_canonical_timestamp(now)?.timestamp();
+            let now = parse_canonical_timestamp(now)?;
             let after_deadline = after.map(|cursor| cursor.retire_after);
             let after_root = after.map(|cursor| cursor.chain_root_id.as_str());
             let mut statement = connection.prepare(&format!(

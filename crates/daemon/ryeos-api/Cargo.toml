@@ -30,7 +30,6 @@ async-stream = { workspace = true }
 axum = { workspace = true, features = ["default", "ws"] }
 base64 = { workspace = true }
 bytes = { workspace = true }
-chrono = { workspace = true }
 form_urlencoded = { workspace = true }
 flate2 = { workspace = true }
 glob = { workspace = true }

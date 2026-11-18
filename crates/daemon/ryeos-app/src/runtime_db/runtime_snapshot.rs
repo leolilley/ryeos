@@ -314,13 +314,12 @@ impl RuntimeDb {
                     termination_count == 0,
                     "bootstrap source cleanup already reserved"
                 );
-                let created_ms = chrono::DateTime::parse_from_rfc3339(
+                let created_ms = ryeos_effect_contract::rfc3339::parse_unix_millis(
                     intent
                         .source_created_at
                         .as_deref()
                         .context("snapshot source has no creation time")?,
-                )?
-                .timestamp_millis();
+                )?;
                 let source_expiry_ms = created_ms
                     .checked_add(
                         i64::from(
