@@ -192,6 +192,8 @@ axum = { version = "0.7", default-features = false }
 base64 = "0.22"
 bytes = "1"
 chrono = "0.4"
+# Time library for everything except cron evaluation (see deny.toml).
+jiff = { version = "1.0.0", default-features = false, features = ["std"] }
 chrono-tz = "0.10"
 clap = { version = "4", features = ["derive"] }
 cron = "0.16"

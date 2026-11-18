@@ -172,13 +172,9 @@ impl LocalWorkerObservation {
         if let Some(hash) = &self.observed_execution_realization_hash {
             require_hex64("local worker observed execution realization hash", hash)?;
         }
-        let parsed = chrono::DateTime::parse_from_rfc3339(&self.observed_at)
+        let canonical = ryeos_effect_contract::rfc3339::normalize_millis(&self.observed_at)
             .context("local worker observation has an invalid timestamp")?;
-        if parsed
-            .with_timezone(&chrono::Utc)
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-            != self.observed_at
-        {
+        if canonical != self.observed_at {
             bail!("local worker observation timestamp is not canonical UTC milliseconds");
         }
         if self.terminal.digest()? != self.terminal_digest {
@@ -710,13 +706,9 @@ impl FirstObservation {
             "provider observation response digest",
             &self.response_digest,
         )?;
-        let parsed = chrono::DateTime::parse_from_rfc3339(&self.observed_at)
+        let canonical = ryeos_effect_contract::rfc3339::normalize_millis(&self.observed_at)
             .context("provider observation has an invalid timestamp")?;
-        if parsed
-            .with_timezone(&chrono::Utc)
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-            != self.observed_at
-        {
+        if canonical != self.observed_at {
             bail!("provider observation timestamp is not canonical UTC milliseconds");
         }
         let expected = match coordinate.transport {

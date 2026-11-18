@@ -239,9 +239,16 @@ pub(super) fn attach_continuation_launch_capsule(
         successor_resume.validate_continuation_transition_from(
             source_resume,
             expected_result_generation.or(terminal_generation.as_ref()),
-            kind,
+            kind.clone(),
         )?;
     }
+    let rebound_names = match &kind {
+        crate::launch_metadata::ContinuationAuthorityTransitionKind::OperatorRebind { names } => {
+            Some(names)
+        }
+        crate::launch_metadata::ContinuationAuthorityTransitionKind::Inherit
+        | crate::launch_metadata::ContinuationAuthorityTransitionKind::OperatorFollowUp => None,
+    };
     let source_capsule = source_snapshot
         .admitted_launch_capsule_hash
         .as_deref()
@@ -258,6 +265,13 @@ pub(super) fn attach_continuation_launch_capsule(
         .transpose()?
         .flatten();
     match (&source_capsule, &successor_capsule) {
+        // A rebind re-admits part of an admitted capsule. Without one on both
+        // sides there is nothing to hold the rest of the program equal to.
+        (None, None) if rebound_names.is_some() => bail!(
+            "operator rebind continuation {} requires an admitted launch capsule on source {}",
+            snapshot.thread_id,
+            source_thread_id
+        ),
         (None, None) => {}
         (Some(_), None) => bail!(
             "continuation successor {} dropped source {} admitted program authority",
@@ -270,7 +284,21 @@ pub(super) fn attach_continuation_launch_capsule(
             source_thread_id
         ),
         (Some((source, source_realization)), Some(successor)) => {
-            if !source.same_continuation_program_admission(successor)? {
+            // The comparison is chosen by the typed transition being
+            // committed, never by which capsule fields happen to differ.
+            let admitted = match rebound_names {
+                Some(names) => {
+                    require_operator_rebindable(source, names).with_context(|| {
+                        format!(
+                            "continuation successor {} rebinds source {}",
+                            snapshot.thread_id, source_thread_id
+                        )
+                    })?;
+                    source.same_rebound_continuation_admission(successor, names)?
+                }
+                None => source.same_continuation_program_admission(successor)?,
+            };
+            if !admitted {
                 bail!(
                     "continuation successor {} changed immutable admitted launch capsule from source {}",
                     snapshot.thread_id,
@@ -284,9 +312,11 @@ pub(super) fn attach_continuation_launch_capsule(
                     state_authority.trust_store(),
                 )
                 .context("verify continuation successor execution realization")?;
-            let mut expected_successor_realization = source_realization.clone();
-            expected_successor_realization.launch_authority_digest =
-                successor.launch_authority_digest()?;
+            let expected_successor_realization = expected_continuation_successor_realization(
+                source_realization,
+                successor,
+                rebound_names.is_some(),
+            )?;
             if expected_successor_realization != successor_realization {
                 bail!(
                     "continuation successor {} changed retained execution realization outside its launch authority",
@@ -298,6 +328,69 @@ pub(super) fn attach_continuation_launch_capsule(
     let snapshot =
         attach_admitted_launch_capsule(state_authority, cas_guard, snapshot, launch_metadata)?;
     Ok((snapshot, source_snapshot))
+}
+
+/// The one realization a continuation successor may retain: the source's
+/// verified realization, committed to the successor's launch authority.
+///
+/// A rebound successor replaces part of its execution closure, so its
+/// realization commits the successor's closure digest as well. In either
+/// form the substrate evidence, effective definition, artifact identity,
+/// execution contract, components and properties are the source's exactly;
+/// nothing is re-resolved against the node's current state.
+fn expected_continuation_successor_realization(
+    source_realization: &ryeos_state::objects::AdmittedExecutionRealization,
+    successor: &ryeos_state::objects::AdmittedLaunchCapsule,
+    rebound: bool,
+) -> Result<ryeos_state::objects::AdmittedExecutionRealization> {
+    let successor_authority = successor.launch_authority();
+    let mut expected = source_realization.clone();
+    expected.launch_authority_digest = successor_authority.digest()?;
+    if rebound {
+        expected.execution_closure_digest = successor_authority.execution_closure_digest()?;
+    }
+    Ok(expected)
+}
+
+/// Require that the runtime contract admitted with `source` lets an operator
+/// rebind every name. The contract is read from the signed descriptor sealed
+/// in the source capsule, never from the runtime registry current now, so a
+/// thread admitted under a contract that seals a binding stays sealed.
+pub(super) fn require_operator_rebindable(
+    source: &ryeos_state::objects::AdmittedLaunchCapsule,
+    names: &std::collections::BTreeSet<String>,
+) -> Result<()> {
+    let ryeos_state::objects::AdmittedExecutionClosure::ManagedRuntime {
+        runtime_descriptor_document,
+        ..
+    } = &source.execution_closure
+    else {
+        bail!("only a managed runtime launch declares rebindable ref bindings");
+    };
+    // The capsule's own validation already ties this document's body to the
+    // admitted runtime content hash and signer.
+    let runtime: ryeos_engine::runtime_registry::RuntimeYaml = serde_yaml::from_str(
+        &lillux::signature::strip_signature_lines(runtime_descriptor_document),
+    )
+    .context("decode admitted runtime descriptor")?;
+    if names.is_empty() {
+        bail!("an operator rebind continuation names no ref binding");
+    }
+    for name in names {
+        let rebindable =
+            runtime
+                .launch_contract
+                .ref_bindings
+                .get(name)
+                .is_some_and(|declaration| {
+                    declaration.continuation_rebind
+                        == ryeos_engine::runtime_registry::ContinuationRebind::Operator
+                });
+        if !rebindable {
+            bail!("the admitted runtime contract does not let an operator rebind `{name}`");
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn verify_admitted_launch_capsule(
@@ -495,5 +588,167 @@ impl StateStore {
         placement: &str,
     ) -> Result<Option<runtime_db::external_execution::ExternalAllocationRecord>> {
         self.lock()?.runtime_db.external_allocation(placement)
+    }
+}
+
+#[cfg(test)]
+mod rebind_tests {
+    use super::*;
+    use ryeos_state::objects::{
+        AdmittedExecutionClosure, AdmittedExecutionRealization, AdmittedLaunchArtifactIdentity,
+        AdmittedLaunchCapsule,
+    };
+
+    /// The shipped directive runtime lets an operator rebind `model`; the
+    /// shipped graph runtime declares `product_recipe` and seals it.
+    const REBINDABLE_RUNTIME: &str =
+        include_str!("../../../../../bundles/directive/.ai/runtimes/directive-runtime.yaml");
+    const SEALED_RUNTIME: &str =
+        include_str!("../../../../../bundles/graph/.ai/runtimes/graph-runtime.yaml");
+
+    fn names(names: &[&str]) -> std::collections::BTreeSet<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    fn capsule(runtime_descriptor_document: &str, prepared_marker: &str) -> AdmittedLaunchCapsule {
+        let runtime = lillux::signature::parse_signature_line(
+            runtime_descriptor_document.lines().next().unwrap(),
+            "#",
+            None,
+        )
+        .expect("shipped runtime descriptor signature");
+        let protocol_document = lillux::signature::sign_content(
+            "protocol fixture\n",
+            &lillux::crypto::SigningKey::from_bytes(&[22; 32]),
+            "#",
+            None,
+        );
+        let protocol = lillux::signature::parse_signature_line(
+            protocol_document.lines().next().unwrap(),
+            "#",
+            None,
+        )
+        .expect("protocol descriptor signature");
+        AdmittedLaunchCapsule {
+            schema: ryeos_state::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
+            kind: "admitted_launch_capsule".to_owned(),
+            exact_program: serde_json::json!({}),
+            exact_program_hash: lillux::sha256_hex(prepared_marker.as_bytes()),
+            sealed_invocation: serde_json::json!({}),
+            project_authority: ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS,
+            lifecycle_authority:
+                ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_NON_RECOVERABLE,
+            launch_driver: ryeos_state::objects::ExecutionLaunchDriver::ManagedRuntime,
+            artifact_identity: AdmittedLaunchArtifactIdentity::ManagedRuntime {
+                runtime_ref: "runtime:test/fixture".to_owned(),
+                runtime_content_hash: runtime.content_hash,
+                runtime_signer_fingerprint: runtime.signer_fingerprint,
+                protocol_ref: "protocol:test/fixture".to_owned(),
+                protocol_content_hash: protocol.content_hash,
+                protocol_signer_fingerprint: protocol.signer_fingerprint,
+                executor_ref: "executor:test/fixture".to_owned(),
+                executor_content_hash: "7".repeat(64),
+                executor_bundle_manifest_hash: "8".repeat(64),
+                executor_bundle_signer_fingerprint: "9".repeat(64),
+            },
+            execution_closure: AdmittedExecutionClosure::ManagedRuntime {
+                prepared_runtime_launch: serde_json::json!({
+                    "binding_records": {},
+                    "runtime_facts": {"model_name": prepared_marker},
+                }),
+                runtime_descriptor_document: runtime_descriptor_document.to_owned(),
+                protocol_descriptor_document: protocol_document,
+                executor_blob_hash: "7".repeat(64),
+            },
+            execution_realization_hash: "a".repeat(64),
+            source_binding_hash: None,
+            accounting_scope: None,
+            effective_caps: Vec::new(),
+            parent_delegation_caps: None,
+            runtime_ref: "runtime:test/fixture".to_owned(),
+            executor_ref: "executor:test/fixture".to_owned(),
+        }
+    }
+
+    #[test]
+    fn rebind_permission_is_read_from_the_admitted_runtime_descriptor() {
+        let rebindable = capsule(REBINDABLE_RUNTIME, "first");
+        require_operator_rebindable(&rebindable, &names(&["model"])).unwrap();
+
+        // A name the admitted contract does not declare, or names nothing.
+        for refused in [&["absent"][..], &["model", "absent"][..], &[][..]] {
+            assert!(
+                require_operator_rebindable(&rebindable, &names(refused)).is_err(),
+                "{refused:?}"
+            );
+        }
+        // A declared binding the admitted contract seals.
+        let sealed = capsule(SEALED_RUNTIME, "first");
+        let error = require_operator_rebindable(&sealed, &names(&["product_recipe"]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("does not let an operator rebind"), "{error}");
+        assert!(require_operator_rebindable(&sealed, &names(&["model"])).is_err());
+    }
+
+    #[test]
+    fn only_a_rebound_successor_realization_commits_a_new_execution_closure() {
+        let source = capsule(REBINDABLE_RUNTIME, "first");
+        let successor = capsule(REBINDABLE_RUNTIME, "second");
+        let source_authority = source.launch_authority();
+        let successor_authority = successor.launch_authority();
+        assert_ne!(
+            source_authority.execution_closure_digest().unwrap(),
+            successor_authority.execution_closure_digest().unwrap()
+        );
+        let source_realization = AdmittedExecutionRealization {
+            schema: ryeos_state::objects::EXECUTION_REALIZATION_SCHEMA_VERSION,
+            kind: ryeos_state::objects::ADMITTED_EXECUTION_REALIZATION_KIND.to_owned(),
+            substrate_identity_hash: "1".repeat(64),
+            substrate_attestation_hash: "2".repeat(64),
+            launch_authority_digest: source_authority.digest().unwrap(),
+            effective_definition_digest: "3".repeat(64),
+            artifact_identity_digest: source_authority.artifact_identity_digest().unwrap(),
+            execution_closure_digest: source_authority.execution_closure_digest().unwrap(),
+            contract_ref: "runtime:test/fixture".to_owned(),
+            contract_digest: "4".repeat(64),
+            components: Vec::new(),
+            properties: std::collections::BTreeMap::from([(
+                "isolation_enforced".to_owned(),
+                serde_json::Value::Bool(true),
+            )]),
+        };
+
+        // Every other continuation keeps the one-field rule: the closure
+        // digest stays the source's, so a successor whose closure moved does
+        // not verify against the expected realization.
+        let inherited =
+            expected_continuation_successor_realization(&source_realization, &successor, false)
+                .unwrap();
+        let mut one_field = source_realization.clone();
+        one_field.launch_authority_digest = successor_authority.digest().unwrap();
+        assert_eq!(inherited, one_field);
+
+        // A rebound successor commits its own closure digest and nothing else.
+        let rebound =
+            expected_continuation_successor_realization(&source_realization, &successor, true)
+                .unwrap();
+        let mut two_fields = one_field.clone();
+        two_fields.execution_closure_digest =
+            successor_authority.execution_closure_digest().unwrap();
+        assert_eq!(rebound, two_fields);
+        assert_ne!(rebound, inherited);
+
+        // Fresh substrate evidence, components or properties are not the
+        // source's realization under either rule.
+        let mut fresh = rebound.clone();
+        fresh.substrate_attestation_hash = "5".repeat(64);
+        assert_ne!(fresh, rebound);
+        let mut widened = rebound.clone();
+        widened.properties.insert(
+            "isolation_enforced".to_owned(),
+            serde_json::Value::Bool(false),
+        );
+        assert_ne!(widened, rebound);
     }
 }

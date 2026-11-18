@@ -89,7 +89,10 @@ async fn a_scheduled_live_fire_of_a_source_scoped_tool_is_refused_typed() {
     plant(&project, "py", "py", PYTHON_TOOL, &fixture.user);
     let project = project.canonicalize().expect("canonical project");
 
-    let fire_at = chrono::Utc::now() + chrono::Duration::seconds(8);
+    let fire_at = ryeos_effect_contract::rfc3339::format_unix_millis(
+        lillux::time::timestamp_millis() + 8_000,
+    )
+    .unwrap();
     let (status, body) = h
         .post_execute(
             "service:scheduler/register",
@@ -99,7 +102,7 @@ async fn a_scheduled_live_fire_of_a_source_scoped_tool_is_refused_typed() {
                 "item_ref": "tool:livecheck/py",
                 "ref_bindings": {},
                 "schedule_type": "at",
-                "expression": fire_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                "expression": fire_at,
                 "params": {},
                 "timezone": "UTC",
                 "misfire_policy": "skip",

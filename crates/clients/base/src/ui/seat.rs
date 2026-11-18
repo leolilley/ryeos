@@ -866,7 +866,7 @@ mod tests {
                         "kind": "fresh",
                         "item_ref": "directive:ryeos/ops/base",
                         "project_path": "/tmp/project",
-                        "ref_bindings": { "model": "directive:ryeos/ops/base" }
+                        "ref_bindings": { "model": "directive:ryeos/models/general" }
                     }
                 }
             }

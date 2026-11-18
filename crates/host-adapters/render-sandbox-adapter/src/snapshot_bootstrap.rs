@@ -2,7 +2,7 @@
 //! This is a one-attempt create handler, not Worker allocation authority.
 
 use anyhow::{Context as _, Result, ensure};
-use chrono::DateTime;
+use ryeos_effect_contract::rfc3339;
 use ryeos_external_execution_contract::runtime_snapshot_bootstrap::{
     BootstrapCleanupMode, MAX_BOOTSTRAP_ADAPTER_REQUEST_BYTES,
     RuntimeSnapshotBootstrapAdapterRequest, RuntimeSnapshotBootstrapAdapterResponse,
@@ -531,7 +531,7 @@ fn terminal_timestamp_for_cleanup<'a>(
         return None;
     }
     let at = sandbox.terminated_at.as_deref()?;
-    DateTime::parse_from_rfc3339(at).ok()?;
+    rfc3339::parse_unix_nanos(at).ok()?;
     Some(at)
 }
 
@@ -559,7 +559,7 @@ fn observe_terminated_list(
     request: &RuntimeSnapshotBootstrapTerminationAdapterRequest,
 ) -> Option<RuntimeSnapshotBootstrapTerminationAdapterResponse> {
     let created_at = request.occurrence.provider_creation_observation["created_at"].as_str()?;
-    DateTime::parse_from_rfc3339(created_at).ok()?;
+    rfc3339::parse_unix_nanos(created_at).ok()?;
     let route = spec.bootstrap_terminal_list_route()?;
     let (base, target) = crate::api_url(spec, route, None, settings, None).ok()?;
     crate::validate_api_url(&base, &target.path_segments, None, None).ok()?;
@@ -865,7 +865,7 @@ fn cleanup_created_at(body: &[u8], expected_id: &str) -> Option<String> {
     (parsed.id == expected_id
         && parsed.created_at.len() <= 64
         && parsed.created_at.is_ascii()
-        && DateTime::parse_from_rfc3339(&parsed.created_at).is_ok())
+        && rfc3339::parse_unix_nanos(&parsed.created_at).is_ok())
     .then_some(parsed.created_at)
 }
 
@@ -914,7 +914,7 @@ pub(crate) fn response_matches(
         PlanValue::Pro => RenderSandboxPlan::Pro,
     };
     crate::valid_sandbox_id(&sandbox.id)
-        && DateTime::parse_from_rfc3339(&sandbox.created_at).is_ok()
+        && rfc3339::parse_unix_nanos(&sandbox.created_at).is_ok()
         && matches!(
             sandbox.status,
             RenderSandboxStatus::Creating | RenderSandboxStatus::Running
@@ -933,18 +933,15 @@ fn readiness_running_matches(
     projection: &crate::provider_spec::BootstrapCreateProjection,
     now: i64,
 ) -> bool {
-    let Ok(created) = DateTime::parse_from_rfc3339(&sandbox.created_at) else {
+    let Ok(created) = rfc3339::parse_unix_millis(&sandbox.created_at) else {
         return false;
     };
-    let Some(expires) = created
-        .timestamp_millis()
-        .checked_add(i64::from(projection.timeout_seconds) * 1_000)
-    else {
+    let Some(expires) = created.checked_add(i64::from(projection.timeout_seconds) * 1_000) else {
         return false;
     };
     sandbox.id == occurrence.occurrence_id
         && sandbox.status == RenderSandboxStatus::Running
-        && now >= created.timestamp_millis()
+        && now >= created
         && now < expires
         && occurrence.provider_creation_observation["created_at"] == sandbox.created_at
         && response_matches(sandbox, projection)
@@ -1008,10 +1005,7 @@ mod tests {
         )
         .unwrap();
         running.status = RenderSandboxStatus::Running;
-        let during_lifetime = DateTime::parse_from_rfc3339(&running.created_at)
-            .unwrap()
-            .timestamp_millis()
-            + 60_000;
+        let during_lifetime = rfc3339::parse_unix_millis(&running.created_at).unwrap() + 60_000;
         assert!(readiness_running_matches(
             &running,
             &source,

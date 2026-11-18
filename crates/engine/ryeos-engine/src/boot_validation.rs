@@ -632,6 +632,14 @@ fn launch_preparer_validation_request(
                         .copied()
                         .map(trust_class_wire)
                         .collect(),
+                    continuation_rebind: match binding.continuation_rebind {
+                        crate::runtime_registry::ContinuationRebind::Never => {
+                            ryeos_handler_protocol::ContinuationRebindWire::Never
+                        }
+                        crate::runtime_registry::ContinuationRebind::Operator => {
+                            ryeos_handler_protocol::ContinuationRebindWire::Operator
+                        }
+                    },
                 },
             )
         })
