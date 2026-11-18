@@ -1,0 +1,73 @@
+# ryeos:signed:2026-11-18T01:58:55Z:95e7676856bca7c09c20d7a477ba9f9ecbeae3ec3adb25a799705a231625df57:z9004QL2SHQrdEzGAscnYPijXc5+1W6fu3jZlbvsvTMbVOYTYQ9B7tfO/jZ/v14+V8T4dmnMyUGpdegm7wvwCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: development-change
+title: Change
+version: "1.0.0"
+description: Recorded diff of the changed file chosen in the review's file list, derived by the daemon from the retained candidate of the selected work
+
+widget: diff
+sources:
+  default:
+    ref: service:ui/ryeos-ui/work/candidate/diff
+    params:
+      thread_id: "@facet:selection.work.thread"
+      path: "@facet:selection.change.path"
+
+projections:
+  basis: basis
+  files: files
+  omitted_files: omitted_files
+  # A run of unchanged lines longer than twice fold_after folds; a diff with
+  # more lines than collapse_lines starts closed; lines_shown holds the rest
+  # of a file behind a row that opens it. Every word a row or label carries is
+  # one of these.
+  diff:
+    fold_after: 3
+    collapse_lines: 2000
+    files_shown: 10
+    lines_shown: 400
+    words:
+      basis.requested: Requested
+      basis.reported: Reported
+      basis.recorded: Recorded
+      basis.not_applied: Requested, not applied
+      op.add: added
+      op.modify: modified
+      op.delete: deleted
+      op.rename: renamed
+      renamed_to: renamed to
+      change_to: change to
+      file: file
+      files: files
+      added: added
+      removed: removed
+      hunk: hunk
+      hunks: hunks
+      line: line
+      lines: lines
+      bytes: bytes
+      unchanged_line: unchanged line
+      unchanged_lines: unchanged lines
+      line.added: added
+      line.removed: removed
+      line.unchanged: unchanged
+      line.note: note
+      more_line: more line
+      more_lines: more lines
+      more_file: more file
+      more_files: more files
+      more_row: more row
+      more_rows: more rows
+      not_shown: Not shown
+      binary: Binary file
+      reason.lines: file line limit
+      reason.total: line limit
+      reason.bytes: size limit
+      reason.window: open the raw events for the whole change
+      reason.too_large: file too large
+      reason.files: file limit
+      copy_notice: Copied the bounded display, not the file
+      empty: Choose a changed file to see its diff
+
+refresh:
+  on_facet: selection
+  on_hint: [thread, activity]

@@ -213,6 +213,7 @@ exact `InputAt` addresses; character-level events remain shared keymap paths.
 | [x] `Field` | presentation | presentation | Same field model. |
 | [x] `Text` | presentation | presentation | Same lines, tones and position. |
 | [x] `Document` | presentation | presentation | Same bounded text, path and provenance. |
+| [x] `Diff` | presentation | presentation | Same rows, numbers, marks and labels. |
 | [x] `Rows` | presentation | presentation | Same rows and affordances. |
 | [x] `Timeline` | presentation | presentation | Same entries, folds and details. |
 | [x] `Sections` | presentation | presentation | Same foldable sections. |

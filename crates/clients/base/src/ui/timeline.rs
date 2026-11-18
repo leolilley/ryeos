@@ -1463,7 +1463,8 @@ impl RyeOsCore {
             RyeOsViewVm::Rows { source_status, .. }
             | RyeOsViewVm::Timeline { source_status, .. }
             | RyeOsViewVm::Table { source_status, .. }
-            | RyeOsViewVm::Document { source_status, .. } => source_status.as_ref(),
+            | RyeOsViewVm::Document { source_status, .. }
+            | RyeOsViewVm::Diff { source_status, .. } => source_status.as_ref(),
             _ => None,
         };
         let source_failed = status.is_some_and(|status| status.state == "failed");

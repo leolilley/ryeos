@@ -6,7 +6,7 @@
 
 use ryeos_client_base::layout::Rect;
 use ryeos_client_base::text_surface::{Style, TextSurface};
-use ryeos_client_base::ui::diff::{RyeOsBlockVm, RyeOsDiffRowKind, RyeOsDiffVm};
+use ryeos_client_base::ui::diff::RyeOsBlockVm;
 use ryeos_client_base::ui::view_model::{
     RyeOsRowDetailVm, RyeOsTimelineDockVm, RyeOsTimelineEntryVm, RyeOsTimelineLaneVm, RyeOsTone,
 };
@@ -14,6 +14,7 @@ use ryeos_client_base::ui::view_model::{
 use super::super::primitives::fill_line;
 use super::super::text::{display_width, join_with_right_meta, truncate, wrap_words};
 use super::super::theme::{PANEL, shimmer_style, style_fg, style_muted, tone_glyph, tone_style};
+use super::diff::diff_lines;
 
 /// One rendered line plus the index of the entry it belongs to (None for
 /// structural blanks and the empty-state line — they never take the point).
@@ -68,67 +69,6 @@ pub struct TimelineEntryMeta<'a> {
     pub expanded: &'a [bool],
     pub details: &'a [Vec<RyeOsRowDetailVm>],
     pub bodies: &'a [Vec<RyeOsBlockVm>],
-}
-
-/// Columns a tab in diff text is drawn as.
-const DIFF_TAB: &str = "    ";
-
-/// A diff body as literal lines: per row its text, style and whether the
-/// diff's cursor is on it. Line numbers take a gutter as wide as the largest
-/// number drawn; a diff without numbers has no gutter. Marks are characters,
-/// so the diff reads the same without colour.
-fn diff_lines(diff: &RyeOsDiffVm) -> Vec<(String, Style, bool)> {
-    let gutter = diff
-        .rows
-        .iter()
-        .flat_map(|row| [row.old_no, row.new_no])
-        .flatten()
-        .max()
-        .map(|number| number.to_string().len());
-    let number = |value: Option<usize>| match (gutter, value) {
-        (Some(width), Some(value)) => format!("{value:>width$} "),
-        (Some(width), None) => " ".repeat(width + 1),
-        (None, _) => String::new(),
-    };
-    let mut lines = Vec::with_capacity(diff.rows.len() + 2);
-    if let Some(above) = &diff.above {
-        lines.push((format!("  ⋯ {above}"), style_muted(), false));
-    }
-    for (offset, row) in diff.rows.iter().enumerate() {
-        let focus = diff.cursor == Some(diff.first_row + offset);
-        let pointer = if focus { "› " } else { "  " };
-        let disclosure = match row.collapsed {
-            Some(true) => "▸ ",
-            Some(false) => "▾ ",
-            None => "",
-        };
-        let (body, style) = match row.kind {
-            RyeOsDiffRowKind::Summary => {
-                (format!("{disclosure}{}", row.text), tone_style(row.tone))
-            }
-            RyeOsDiffRowKind::File => (format!("{disclosure}{}", row.text), style_fg()),
-            RyeOsDiffRowKind::Hunk => (format!("@@ {}", row.text), style_muted()),
-            RyeOsDiffRowKind::Line => (
-                format!(
-                    "{}{}{}{}",
-                    number(row.old_no),
-                    number(row.new_no),
-                    row.mark.unwrap_or(' '),
-                    row.text.replace('\t', DIFF_TAB)
-                ),
-                tone_style(row.tone),
-            ),
-            RyeOsDiffRowKind::Fold | RyeOsDiffRowKind::More => {
-                (format!("{disclosure}⋯ {}", row.text), style_muted())
-            }
-            RyeOsDiffRowKind::NotShown => (row.text.clone(), tone_style(row.tone)),
-        };
-        lines.push((format!("{pointer}{body}"), style, focus));
-    }
-    if let Some(below) = &diff.below {
-        lines.push((format!("  ⋯ {below}"), style_muted(), false));
-    }
-    lines
 }
 
 /// Docked asks drawn at most; the rest stay in the flow.
@@ -639,6 +579,7 @@ fn draw_inline(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryeos_client_base::ui::diff::RyeOsDiffVm;
 
     const EMPTY_META: TimelineEntryMeta<'static> = TimelineEntryMeta {
         indents: &[],
@@ -801,7 +742,7 @@ mod tests {
             bodies: &bodies,
             ..EMPTY_META
         };
-        let mut surface = TextSurface::new(60, height);
+        let mut surface = TextSurface::new(60, usize::from(height));
         let rect = Rect {
             x: 0,
             y: 0,

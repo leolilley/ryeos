@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-12T10:40:20Z:2e9bc47f03906bce8d62959f03a696416b3f89ef96762e4352b634a94bcf01be:WQ3j4FOkPLpNxGlgDjFxZ5EWds+4PhBtHWxbxfeUd4q93h0ptj/3jSuI+wl1gSnjtSX0KJ+4Agb9cTDEoccuAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T01:58:55Z:3d3f583fcef2fcc69686c9ccf61a31d6072aed8ad1d331ec1567dd2cf9e9ac05:2e7xoQDSZp0ENLmNzaDIcqemMe7q4wReIk0qrDw/t6VU9/8E1m4MdI/i1KIOq134PJl1L2hVC4L5NRg3MbQHBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-assistant
 title: Assistant
 version: "3.2.0"
@@ -48,7 +48,7 @@ view_sets:
           first:
             type: group
             label: Changes
-            views: ["view:ryeos/development/changes", "view:ryeos/work/candidate", "view:ryeos/work/approvals"]
+            views: ["view:ryeos/development/changes", "view:ryeos/development/change", "view:ryeos/work/candidate", "view:ryeos/work/approvals"]
             active: 0
           second:
             type: group
@@ -105,6 +105,7 @@ library:
       - view:ryeos/work/candidate
       - view:ryeos/development/explorer
       - view:ryeos/development/changes
+      - view:ryeos/development/change
       - view:ryeos/development/execution
       - view:ryeos/development/occurrence
       - view:ryeos/review/pending

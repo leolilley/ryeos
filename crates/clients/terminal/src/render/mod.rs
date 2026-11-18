@@ -218,7 +218,8 @@ fn draw_view(surface: &mut TextSurface, mut rect: Rect, view: &RyeOsViewVm, now_
         RyeOsViewVm::Rows { source_status, .. }
         | RyeOsViewVm::Timeline { source_status, .. }
         | RyeOsViewVm::Table { source_status, .. }
-        | RyeOsViewVm::Document { source_status, .. } => source_status.as_ref(),
+        | RyeOsViewVm::Document { source_status, .. }
+        | RyeOsViewVm::Diff { source_status, .. } => source_status.as_ref(),
         _ => None,
     };
     if let Some(status) = status {
@@ -316,6 +317,10 @@ fn draw_view(surface: &mut TextSurface, mut rect: Rect, view: &RyeOsViewVm, now_
         draw_text_view(surface, rect, lines, *position);
         return;
     }
+    if let RyeOsViewVm::Diff { diff, .. } = view {
+        widgets::diff::draw_diff(surface, rect, diff);
+        return;
+    }
     if let RyeOsViewVm::Document {
         path,
         content,
@@ -336,6 +341,7 @@ fn draw_view(surface: &mut TextSurface, mut rect: Rect, view: &RyeOsViewVm, now_
         RyeOsViewVm::Field { .. } => unreachable!("field views return above"),
         RyeOsViewVm::Text { .. } => unreachable!("text views return above"),
         RyeOsViewVm::Document { .. } => unreachable!("document views return above"),
+        RyeOsViewVm::Diff { .. } => unreachable!("diff views return above"),
         RyeOsViewVm::Rows { .. } => unreachable!("rows views return above"),
         RyeOsViewVm::Timeline { .. } => unreachable!("timeline views return above"),
         RyeOsViewVm::Sections { .. } => unreachable!("sections views return above"),

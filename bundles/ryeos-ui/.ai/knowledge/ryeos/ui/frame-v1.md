@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-11-16T07:56:53Z:f2c9caa833c5b5d3f96bf5ee8cf10bba7c5c6db2d32de05a30f8f527ba4d805d:q5SNl+ohGlDPh8GUIF4XrnEh8NbpN3sq/19QNnWyeEwcHiQgW4YkAvPjR3Lyi2FtN9o32WJgqJvWtDgatcolBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-18T01:58:55Z:c5dd9ab20bf350e17b4b8e10687c86f51e383d399d85b909f1b93d535cd42fff:cz3j8LyIhZf0wSgqGacQVCGxw0G09ETpbef5VRMcartJGWHyk5FVnDJY3/GAVy568wDnzUrPIGaKWLaXPRKSDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "frame-v1"
 title: "RyeOS UI Frame Contract v1"
 description: "The closed widget-primitive set and view-binding schema renderers implement; content composes against this, never against client source"
 entry_type: reference
-version: "1.1.0"
+version: "1.2.0"
 ```
 
 # RyeOS UI Frame Contract v1
@@ -30,7 +30,15 @@ mode flag.
 | `key_value` | field/value detail | `[(key, value)]` |
 | `text` | text body | string/detail fallback |
 | `timeline` | folded timeline items | `{item: entry\|cluster\|recap, ...}` per item |
+| `diff` | a change to files as unified diff rows | `{basis, files: [FileChange], omitted_files?}` |
 | `field` | multi-source entity/relation evidence field | `ryeos.ui.field.facts.v1` documents |
+
+A `diff` draws one closed shape and computes nothing: the daemon sends
+`FileChange` records (path, operation, whole-change added and removed counts,
+hunks of marked lines, and what was cut), already sanitised and bounded. The
+client numbers lines, folds unchanged runs and draws rows; a mark is always a
+character. A `timeline` entry may carry the same shape as a `changes` block in
+its `blocks` list, drawn under the entry when it is opened.
 
 Engine chrome (not content-targetable in v1): notice, tile chrome.
 Navigation is not chrome: a list of destinations is an ordinary view placed in
@@ -42,7 +50,7 @@ block below), and a view's `completion` source drives the suggestion rows.
 ## View binding schema (`view:` items)
 
 ```yaml
-widget: rows | table | sections | key_value | text | timeline | field
+widget: rows | table | sections | key_value | text | timeline | diff | field
 sources:
   default:                    # channel name; multi-source views use additional named channels
     ref: <service ref>        # substrate services; never session-gated wrappers
@@ -59,6 +67,15 @@ projections:
   tone: { field: <path>, missing: <tone>, map: {value: tone}, default: <tone> }
   detail: [<field path>...]   # key_value
   default: { ... }            # fallback projection for rows
+  basis: <field path>         # diff: the change's basis
+  files: <field path>         # diff: the FileChange list
+  omitted_files: <field path> # diff, OPTIONAL: files the source left out
+  diff:                       # diff and timeline, OPTIONAL: how a change is drawn
+    fold_after: <int>         # context lines kept either side of a folded unchanged run
+    collapse_lines: <int>     # a change with more diff lines starts closed
+    files_shown: <int>        # files drawn before a "more files" row
+    lines_shown: <int>        # line rows drawn per file before a "more lines" row
+    words: { <key>: <word> }  # every word a diff row or label carries
 selection:                    # OPTIONAL: explicit row-activation binding (rows widget)
   activate: <affordance_id>   # row activation fires this affordance; reads {record.<field>}
 input:                        # OPTIONAL, SINGULAR: one transient view-local buffer per view

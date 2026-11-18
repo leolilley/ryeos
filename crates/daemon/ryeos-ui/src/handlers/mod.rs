@@ -33,6 +33,7 @@ pub mod ui_timeline;
 pub mod ui_timeline_raw;
 pub mod ui_usage;
 pub mod ui_work;
+pub mod ui_work_candidate_diff;
 
 pub const ALL: &[ServiceDescriptor] = &[
     ui_launch::DESCRIPTOR,
@@ -59,6 +60,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_work::ATTENTION_DESCRIPTOR,
     ui_work::APPROVAL_HISTORY_DESCRIPTOR,
     ui_work::CANDIDATE_DESCRIPTOR,
+    ui_work_candidate_diff::DESCRIPTOR,
     ui_thread_tree::DESCRIPTOR,
     ui_timeline::DESCRIPTOR,
     ui_timeline_raw::DESCRIPTOR,

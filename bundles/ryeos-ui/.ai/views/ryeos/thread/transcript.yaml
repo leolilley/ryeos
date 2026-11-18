@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-17T22:59:58Z:d59cd705f72ca7ccaeb5ed220b6b1fbbe1b0e1394f22c8cccbf4dd11531fc0e7:KM9rD44zxDbJq6GMsX3ucdvs7wRA3LzqdF3DViDI0vSmi+M9sK5VXTupfrOvHCk++K1U3o6CQvtjF0kOFLUOBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T01:58:55Z:d2723ad1f4d33b3c1c4c57082cf0ce55e7e65d6d62f876db45cce0e9f592a781:dQN3rM6E1hJjtx9l2n5vcY1isUgdRDSXOiQVYrU2hqC05e3EpZ+xNHwlR2Bxwk2vqXV4watANC7Y1U4dTQF/Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: thread-transcript
 title: Activity
 version: "1.0.0"
@@ -38,6 +38,57 @@ projections:
       - slots.reason
       - slots.tool
       - slots.target
+  # How a change block under an opened entry is drawn: a run of unchanged
+  # lines longer than twice fold_after folds, a block with more diff lines
+  # than collapse_lines starts closed, and files_shown and lines_shown hold
+  # the rest behind a row that opens it. Every word a diff row or label
+  # carries is one of these.
+  diff:
+    fold_after: 3
+    collapse_lines: 400
+    files_shown: 10
+    lines_shown: 200
+    words:
+      basis.requested: Requested
+      basis.reported: Reported
+      basis.recorded: Recorded
+      basis.not_applied: Requested, not applied
+      op.add: added
+      op.modify: modified
+      op.delete: deleted
+      op.rename: renamed
+      renamed_to: renamed to
+      change_to: change to
+      file: file
+      files: files
+      added: added
+      removed: removed
+      hunk: hunk
+      hunks: hunks
+      line: line
+      lines: lines
+      bytes: bytes
+      unchanged_line: unchanged line
+      unchanged_lines: unchanged lines
+      line.added: added
+      line.removed: removed
+      line.unchanged: unchanged
+      line.note: note
+      more_line: more line
+      more_lines: more lines
+      more_file: more file
+      more_files: more files
+      more_row: more row
+      more_rows: more rows
+      not_shown: Not shown
+      binary: Binary file
+      reason.lines: file line limit
+      reason.total: line limit
+      reason.bytes: size limit
+      reason.window: open the raw events for the whole change
+      reason.too_large: file too large
+      reason.files: file limit
+      copy_notice: Copied the bounded display, not the file
 # Activating the "N older" line widens the window: the service names the wider
 # limit and the affordance writes it to the facet the source reads.
 selection:

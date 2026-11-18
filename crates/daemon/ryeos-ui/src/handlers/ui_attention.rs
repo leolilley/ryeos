@@ -104,6 +104,17 @@ impl AttentionConfig {
 
 /// Resolve and verify the signed attention config.
 pub fn load_config(state: &AppState) -> Result<AttentionConfig> {
+    let value = load_verified_config(state, CONFIG_PATH, CONFIG_REF)?;
+    Ok(AttentionConfig::from_value(value).map_err(HandlerError::Internal)?)
+}
+
+/// The verified body of the signed config item at `path` (named `config_ref`
+/// in errors), from the first installed bundle that carries it.
+pub(crate) fn load_verified_config(
+    state: &AppState,
+    path: &str,
+    config_ref: &str,
+) -> Result<Value> {
     let engine = &state.engine;
     let roots = engine.resolution_roots(None);
     let load_context = ConfigLoadContext {
@@ -115,21 +126,21 @@ pub fn load_config(state: &AppState) -> Result<AttentionConfig> {
     };
     let resolved = ryeos_engine::config_loading::resolve_config_spec(
         &ConfigSpec {
-            path: CONFIG_PATH.to_string(),
+            path: path.to_string(),
             mode: ResolveMode::FirstMatch,
         },
         &load_context,
     )
-    .map_err(|error| HandlerError::Internal(format!("resolve {CONFIG_REF}: {error}")))?;
+    .map_err(|error| HandlerError::Internal(format!("resolve {config_ref}: {error}")))?;
     let Some(layer) = resolved.layers.first() else {
-        return Err(HandlerError::Internal(format!("{CONFIG_REF} is not installed")).into());
+        return Err(HandlerError::Internal(format!("{config_ref} is not installed")).into());
     };
     let value = ryeos_engine::config_loading::load_and_verify_trusted_config_file(
         &layer.path,
         &load_context,
     )
-    .map_err(|error| HandlerError::Internal(format!("{CONFIG_REF} is untrusted: {error}")))?;
-    Ok(AttentionConfig::from_value(value).map_err(HandlerError::Internal)?)
+    .map_err(|error| HandlerError::Internal(format!("{config_ref} is untrusted: {error}")))?;
+    Ok(value)
 }
 
 /// Every attention item for `owner`, oldest first, at most `limit`.

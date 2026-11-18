@@ -23,6 +23,9 @@ use crate::view_set::ViewLocalState;
 /// Rows of one diff materialised around its cursor per frame.
 pub(crate) const DIFF_RENDER_WINDOW: usize = 200;
 
+/// The state key of a view whose whole body is one diff.
+pub(crate) const VIEW_DIFF_KEY: &str = "view";
+
 /// A typed body under a timeline entry.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "block", rename_all = "snake_case")]
@@ -902,6 +905,42 @@ fn block_change_set(block: &Value) -> Option<ChangeSet> {
     serde_json::from_value(Value::Object(fields)).ok()
 }
 
+/// The change set a `diff` view draws: the response fields its projections
+/// name (`basis`, `files`, and optionally `omitted_files`), read as the one
+/// change-set shape. Anything else is not drawn.
+pub(crate) fn view_change_set(projections: &Value, response: &Value) -> Option<ChangeSet> {
+    let field = |name: &str| {
+        projections
+            .get(name)
+            .and_then(Value::as_str)
+            .and_then(|path| super::content::field_path(response, path))
+            .cloned()
+    };
+    serde_json::from_value(serde_json::json!({
+        "basis": field("basis")?,
+        "files": field("files")?,
+        "omitted_files": field("omitted_files").unwrap_or_else(|| Value::from(0)),
+    }))
+    .ok()
+}
+
+/// What a `diff` view says when its source has no change to draw: the view's
+/// `empty` sentence when it gives one, else the source's availability record
+/// as it stands (`state: reason`).
+pub(crate) fn unavailable_message(policy: &DiffPolicy, response: &Value) -> String {
+    if let Some(sentence) = policy.words.sentence("empty") {
+        return sentence.to_string();
+    }
+    let record = response.pointer("/availability/0");
+    let part = |name: &str| {
+        record
+            .and_then(|record| record.get(name))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+    };
+    format!("{}: {}", part("state"), part("reason"))
+}
+
 /// Whether a record carries any typed block, so it can be opened to show one.
 pub(crate) fn has_blocks(entry: &Value) -> bool {
     entry
@@ -925,6 +964,9 @@ struct FocusedDiff {
     set: ChangeSet,
     policy: DiffPolicy,
     state: DiffLocalState,
+    /// The diff sits under a timeline entry and keeps its own cursor. When
+    /// false the view itself is the diff and the tile's cursor is its cursor.
+    nested: bool,
 }
 
 impl RyeOsCore {
@@ -936,6 +978,7 @@ impl RyeOsCore {
         let tile = view_set.tiles.get(&tile_id)?;
         let binding = self.binding_for_instance(&tile.instance_key, &tile.view.view_ref)?;
         let ViewLocalState::GenericList {
+            cursor,
             expanded_rows,
             diffs,
             ..
@@ -943,6 +986,26 @@ impl RyeOsCore {
         else {
             return None;
         };
+        if binding.widget == "diff" {
+            let (channel, _) = binding.primary_source()?;
+            let source_key = super::source_key::RyeOsSourceInstanceKey::named(
+                tile.instance_key.clone(),
+                channel,
+            )
+            .encode();
+            let set = view_change_set(&binding.projections, self.data.sources.get(&source_key)?)
+                .filter(|set| !set.files.is_empty())?;
+            let mut state = diffs.get(VIEW_DIFF_KEY).cloned().unwrap_or_default();
+            state.cursor = Some(*cursor);
+            return Some(FocusedDiff {
+                tile_id,
+                key: VIEW_DIFF_KEY.to_string(),
+                set,
+                policy: DiffPolicy::from_projections(&binding.projections),
+                state,
+                nested: false,
+            });
+        }
         let (key, record) = self.focused_row_key_and_record(tile_id, binding)?;
         if !expanded_rows.contains(&key) {
             return None;
@@ -953,12 +1016,14 @@ impl RyeOsCore {
             policy: DiffPolicy::from_projections(&binding.projections),
             state: diffs.get(&key).cloned().unwrap_or_default(),
             key,
+            nested: true,
         })
     }
 
     pub(crate) fn focused_diff_key_context(&self) -> Option<RyeOsDiffKeyContext> {
         self.focused_diff().map(|focus| RyeOsDiffKeyContext {
             inside: focus.state.cursor.is_some(),
+            nested: focus.nested,
         })
     }
 
@@ -969,13 +1034,19 @@ impl RyeOsCore {
         let Some(mut focus) = self.focused_diff() else {
             return Vec::new();
         };
+        let held = focus.state.cursor;
         let outcome = apply_action(&focus.set, &focus.policy, &mut focus.state, action);
         if outcome.changed {
             if let Some(tile) = self
                 .active_view_set_mut()
                 .and_then(|view_set| view_set.tiles.get_mut(&focus.tile_id))
-                && let ViewLocalState::GenericList { diffs, .. } = &mut tile.local
+                && let ViewLocalState::GenericList { cursor, diffs, .. } = &mut tile.local
             {
+                if !focus.nested {
+                    // The tile's cursor is this diff's cursor: it never
+                    // leaves the diff, and it is stored on the tile.
+                    *cursor = focus.state.cursor.take().or(held).unwrap_or(0);
+                }
                 if focus.state == DiffLocalState::default() {
                     diffs.remove(&focus.key);
                 } else {

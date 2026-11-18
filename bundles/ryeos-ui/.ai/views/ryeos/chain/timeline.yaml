@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-17T22:59:58Z:4837d276601d0a5320f9e0a42ff9d0961532c83c8228c7a448a6a3b9025693fd:MCj+BWpXOSKZBwqCTzE86vjGIMDThgGrWO9GES/Di0szuto4S4weBkm62s95N0roaSkWlBMAfFDTwHOA1zj+Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T01:58:55Z:164bed79c3054fd141bb68031d76fc3d3ef6e0bfb985e0a0e26cf841a9074f96:rwBZmKQo/odFoYv/J13qCGBG2NhGGKQT1NkMhKUwAG30At1IwJR7xIkeqx7LQdWPoB9erobE9FQAih3FI2AXBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: chain-timeline
 version: "1.0.0"
 description: Timeline of the input route's conversation chain, folded by the daemon's timeline service
@@ -34,6 +34,57 @@ projections:
       - slots.reason
       - slots.tool
       - slots.target
+  # How a change block under an opened entry is drawn: a run of unchanged
+  # lines longer than twice fold_after folds, a block with more diff lines
+  # than collapse_lines starts closed, and files_shown and lines_shown hold
+  # the rest behind a row that opens it. Every word a diff row or label
+  # carries is one of these.
+  diff:
+    fold_after: 3
+    collapse_lines: 400
+    files_shown: 10
+    lines_shown: 200
+    words:
+      basis.requested: Requested
+      basis.reported: Reported
+      basis.recorded: Recorded
+      basis.not_applied: Requested, not applied
+      op.add: added
+      op.modify: modified
+      op.delete: deleted
+      op.rename: renamed
+      renamed_to: renamed to
+      change_to: change to
+      file: file
+      files: files
+      added: added
+      removed: removed
+      hunk: hunk
+      hunks: hunks
+      line: line
+      lines: lines
+      bytes: bytes
+      unchanged_line: unchanged line
+      unchanged_lines: unchanged lines
+      line.added: added
+      line.removed: removed
+      line.unchanged: unchanged
+      line.note: note
+      more_line: more line
+      more_lines: more lines
+      more_file: more file
+      more_files: more files
+      more_row: more row
+      more_rows: more rows
+      not_shown: Not shown
+      binary: Binary file
+      reason.lines: file line limit
+      reason.total: line limit
+      reason.bytes: size limit
+      reason.window: open the raw events for the whole change
+      reason.too_large: file too large
+      reason.files: file limit
+      copy_notice: Copied the bounded display, not the file
 # Activating the "N older" line widens the window: the service names the wider
 # limit and the affordance writes it to the facet the source reads.
 selection:

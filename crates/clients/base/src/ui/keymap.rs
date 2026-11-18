@@ -179,8 +179,13 @@ pub struct RyeOsKeyContext {
 /// What the keys of an open diff can do right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct RyeOsDiffKeyContext {
-    /// The cursor is on a row inside the diff, not on the entry carrying it.
+    /// The cursor is on a row of the diff. Always true for a view that is a
+    /// diff; for a diff under a timeline entry, true once the operator has
+    /// stepped in from the entry.
     pub inside: bool,
+    /// The diff sits under a timeline entry and has a cursor of its own. A
+    /// view that is a diff uses the tile's cursor instead.
+    pub nested: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -310,8 +315,9 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
             ui(RyeOsUiEvent::FocusInput)
         }
         // An open diff under the point takes the file and hunk keys; once the
-        // cursor is inside it, the diff also takes the arrows, Enter, Escape
-        // and copy. None of it applies while typing.
+        // cursor is inside it, the diff also takes Enter and copy, and a diff
+        // nested under a timeline entry takes the arrows and Escape for its
+        // own cursor. None of it applies while typing.
         RyeOsKey::Char(c @ (']' | '[' | '}' | '{'))
             if context.diff.is_some()
                 && !context.input_focused
@@ -327,7 +333,7 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
         RyeOsKey::ArrowDown | RyeOsKey::ArrowUp
             if event.modifiers.none()
                 && !context.input_focused
-                && context.diff.is_some_and(|diff| diff.inside) =>
+                && context.diff.is_some_and(|diff| diff.inside && diff.nested) =>
         {
             diff(RyeOsDiffAction::Move {
                 delta: if event.key == RyeOsKey::ArrowDown {
@@ -347,7 +353,7 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
         RyeOsKey::Escape | RyeOsKey::ArrowLeft
             if event.modifiers.none()
                 && !context.input_focused
-                && context.diff.is_some_and(|diff| diff.inside) =>
+                && context.diff.is_some_and(|diff| diff.inside && diff.nested) =>
         {
             diff(RyeOsDiffAction::Leave)
         }
@@ -1118,6 +1124,7 @@ fn selectable_of(view: &super::view_model::RyeOsViewVm) -> (usize, bool) {
             rows, total_rows, ..
         } => ((*total_rows).max(rows.len()), false),
         RyeOsViewVm::Timeline { entries, .. } => (entries.len(), true),
+        RyeOsViewVm::Diff { diff, .. } => (diff.total_rows, false),
         RyeOsViewVm::Field { field } => (field.traversal.len(), false),
         // The point walks a flat top-down list: an expanded section's rows,
         // or a collapsed section's single header (so it stays re-expandable)
@@ -1299,7 +1306,10 @@ mod tests {
         ctx.focused_timeline_entry = true;
         ctx.focused_row_expandable = true;
         ctx.focused_row_expanded = true;
-        ctx.diff = Some(RyeOsDiffKeyContext { inside: false });
+        ctx.diff = Some(RyeOsDiffKeyContext {
+            inside: false,
+            nested: true,
+        });
         assert_eq!(
             diff_command(key(RyeOsKey::Char(']')), ctx),
             Some(RyeOsDiffAction::NextFile)
@@ -1338,7 +1348,10 @@ mod tests {
         ));
 
         // Inside the diff it owns the arrows, Enter, Escape and copy.
-        ctx.diff = Some(RyeOsDiffKeyContext { inside: true });
+        ctx.diff = Some(RyeOsDiffKeyContext {
+            inside: true,
+            nested: true,
+        });
         assert_eq!(
             diff_command(key(RyeOsKey::ArrowDown), ctx),
             Some(RyeOsDiffAction::Move { delta: 1 })
@@ -1370,6 +1383,26 @@ mod tests {
         assert_eq!(
             diff_command(key(RyeOsKey::Char('Y')), ctx),
             Some(RyeOsDiffAction::CopyBlock)
+        );
+        // A view that is a diff keeps the tile's cursor: the arrows and Escape
+        // stay with the tile, the diff keys still act.
+        ctx.diff = Some(RyeOsDiffKeyContext {
+            inside: true,
+            nested: false,
+        });
+        assert_eq!(diff_command(key(RyeOsKey::ArrowDown), ctx), None);
+        assert_eq!(diff_command(key(RyeOsKey::Escape), ctx), None);
+        assert_eq!(
+            diff_command(key(RyeOsKey::Enter), ctx),
+            Some(RyeOsDiffAction::Toggle)
+        );
+        assert_eq!(
+            diff_command(key(RyeOsKey::Char('}')), ctx),
+            Some(RyeOsDiffAction::NextHunk)
+        );
+        assert_eq!(
+            diff_command(key(RyeOsKey::Char('y')), ctx),
+            Some(RyeOsDiffAction::CopyFile)
         );
         // Never while typing.
         ctx.input_focused = true;

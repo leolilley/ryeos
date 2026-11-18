@@ -1,0 +1,10 @@
+# ryeos:signed:2026-11-18T01:54:24Z:df5d85cec22a7542cfb4c475dbee09ac83ecf95b02a8755b1d4519e01d38dfeb:shJrxP2UbQJgVl0VRbcYlVJbsXC5bvADppgWYln0glDd6fqhG28dO2IxgrCXxHo/JmcbmfXZWN3FDP6VKGpBBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: ryeos-ui/work/candidate/diff
+version: "1.0.0"
+description: Bounded, sanitised diff of one changed file of a retained candidate, derived by the daemon from the candidate's own base and candidate snapshots for one exact hosted-work placement.
+endpoint: ui.ryeos.work.candidate.diff
+ui_read_only: true
+state_access: read_only_existing
+record_thread: false
+availability: daemon_only

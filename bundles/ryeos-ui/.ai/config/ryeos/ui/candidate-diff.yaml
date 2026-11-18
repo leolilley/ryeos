@@ -1,0 +1,17 @@
+# ryeos:signed:2026-11-18T01:54:24Z:b550257bbbdb1102f1d3c680da8991f160830f9b1c3ac43b8d708d792bd38e89:hAUgJJaOm6NhIXEqT0FVKWsg1CEgPK4/wJEsnrkE58Y70aNlm/IaeHHqw+U3zBC4Ep7cOgquUwkAK5kNfeS8DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/ui
+version: "1.0.0"
+description: How far the review diff of one retained candidate file may grow.
+
+# A file larger than this on either side is reported by its size and not read.
+# The daemon holds it under the most text it will diff, whatever is set here.
+max_file_bytes: 262144
+
+# Caps of the returned change set: one file per request, its diff lines, and
+# the characters kept of one line before an elision mark. The change set's own
+# byte ceiling applies on top.
+caps:
+  files: 1
+  lines_per_file: 2000
+  total_lines: 2000
+  line_chars: 400

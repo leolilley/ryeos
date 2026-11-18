@@ -289,15 +289,34 @@ pub async fn handle_approval_history(
     }))
 }
 
-/// Read-only candidate evidence for one exact hosted-work placement. This is
-/// a projection of the dedicated-session owner; it neither decides readiness
-/// nor turns a completed model turn into a successful candidate.
-pub async fn handle_candidate(
-    params: Value,
-    ctx: HandlerContext,
-    state: Arc<AppState>,
-) -> Result<Value> {
-    let caller = crate::seat_auth::require_seat_caller(&ctx, &state)?;
+/// The retained candidate of one exact hosted-work placement, as the daemon
+/// holds it for the seat caller.
+pub(crate) enum RetainedCandidate {
+    /// No candidate can be shown, and why.
+    Unavailable {
+        state: &'static str,
+        reason: &'static str,
+    },
+    /// The dedicated session and the base snapshot its workspace was cut
+    /// from. The candidate snapshot hash is the session's.
+    Retained {
+        session: Box<ryeos_app::state_store::DedicatedSessionRecord>,
+        base_snapshot_hash: String,
+        candidate_snapshot_hash: String,
+    },
+}
+
+/// Authorises the seat caller for `params.thread_id` and re-derives that
+/// placement's retained candidate from daemon state: the dedicated session
+/// the caller owns, its candidate snapshot, and the base snapshot of its
+/// workspace checked against the thread's own authority. Nothing but the
+/// thread id is read from the request, so a caller cannot name a snapshot.
+pub(crate) fn retained_candidate(
+    params: &Value,
+    ctx: &HandlerContext,
+    state: &AppState,
+) -> Result<RetainedCandidate> {
+    let caller = crate::seat_auth::require_seat_caller(ctx, state)?;
     let placement_thread_id = params
         .get("thread_id")
         .and_then(Value::as_str)
@@ -306,8 +325,8 @@ pub async fn handle_candidate(
             ryeos_app::handler_error::HandlerError::BadRequest("thread_id is required".into())
         })?;
     let subjects = crate::thread_authorization::authorize_exact_thread_subjects(
-        &ctx,
-        &state,
+        ctx,
+        state,
         &caller,
         &[placement_thread_id],
     )?;
@@ -319,16 +338,19 @@ pub async fn handle_candidate(
         _ => None,
     };
     let Some(session) = state.state_store.dedicated_session(placement_thread_id)? else {
-        return Ok(unavailable_candidate(
-            "unavailable",
-            "not_dedicated_session",
-        ));
+        return Ok(RetainedCandidate::Unavailable {
+            state: "unavailable",
+            reason: "not_dedicated_session",
+        });
     };
     if session.owner_principal != caller.principal_id() {
         return Err(ryeos_app::handler_error::HandlerError::NotFound.into());
     }
-    let Some(candidate_snapshot_hash) = session.candidate_snapshot_hash.as_deref() else {
-        return Ok(unavailable_candidate("pending", "candidate_not_captured"));
+    let Some(candidate_snapshot_hash) = session.candidate_snapshot_hash.clone() else {
+        return Ok(RetainedCandidate::Unavailable {
+            state: "pending",
+            reason: "candidate_not_captured",
+        });
     };
     let workspace = state
         .state_store
@@ -337,7 +359,34 @@ pub async fn handle_candidate(
     if authorized_base_snapshot_hash != Some(workspace.base_snapshot.as_str()) {
         anyhow::bail!("retained candidate workspace base contradicts thread authority");
     }
-    let base_snapshot_hash = workspace.base_snapshot.as_str();
+    Ok(RetainedCandidate::Retained {
+        base_snapshot_hash: workspace.base_snapshot.clone(),
+        candidate_snapshot_hash,
+        session: Box::new(session),
+    })
+}
+
+/// Read-only candidate evidence for one exact hosted-work placement. This is
+/// a projection of the dedicated-session owner; it neither decides readiness
+/// nor turns a completed model turn into a successful candidate.
+pub async fn handle_candidate(
+    params: Value,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    let (session, base_snapshot_hash, candidate_snapshot_hash) =
+        match retained_candidate(&params, &ctx, &state)? {
+            RetainedCandidate::Unavailable { state, reason } => {
+                return Ok(unavailable_candidate(state, reason));
+            }
+            RetainedCandidate::Retained {
+                session,
+                base_snapshot_hash,
+                candidate_snapshot_hash,
+            } => (session, base_snapshot_hash, candidate_snapshot_hash),
+        };
+    let base_snapshot_hash = base_snapshot_hash.as_str();
+    let candidate_snapshot_hash = candidate_snapshot_hash.as_str();
     let evaluation = session.candidate_evaluation.as_ref();
     let changes = candidate_changes(
         &state,
@@ -397,28 +446,41 @@ fn candidate_changes(
     limit: usize,
 ) -> Result<Value> {
     let cas_read = state.acquire_cas_read()?;
+    let (base_tree, candidate_tree) =
+        candidate_trees(cas_read.cas(), base_snapshot_hash, candidate_snapshot_hash)?;
+    candidate_tree_changes(&base_tree, &candidate_tree, limit)
+}
+
+/// The file trees of a retained candidate's base and candidate snapshots.
+pub(crate) fn candidate_trees(
+    cas: &lillux::CasStore,
+    base_snapshot_hash: &str,
+    candidate_snapshot_hash: &str,
+) -> Result<(
+    ryeos_state::objects::ProjectTree,
+    ryeos_state::objects::ProjectTree,
+)> {
     let base = ryeos_state::project_materialization::load_project_snapshot_bounded(
-        cas_read.cas(),
+        cas,
         base_snapshot_hash,
     )?
     .context("retained candidate base snapshot is missing")?;
     let candidate = ryeos_state::project_materialization::load_project_snapshot_bounded(
-        cas_read.cas(),
+        cas,
         candidate_snapshot_hash,
     )?
     .context("retained candidate snapshot is missing")?;
     let base_tree = ryeos_state::project_materialization::load_project_tree_bounded(
-        cas_read.cas(),
+        cas,
         &base.project_tree_hash,
     )?
     .context("retained candidate base tree is missing")?;
     let candidate_tree = ryeos_state::project_materialization::load_project_tree_bounded(
-        cas_read.cas(),
+        cas,
         &candidate.project_tree_hash,
     )?
     .context("retained candidate tree is missing")?;
-
-    candidate_tree_changes(&base_tree, &candidate_tree, limit)
+    Ok((base_tree, candidate_tree))
 }
 
 fn candidate_tree_changes(

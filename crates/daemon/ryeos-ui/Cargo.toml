@@ -24,6 +24,7 @@ async-stream = { workspace = true }
 axum = { workspace = true, features = ["default"] }
 base64 = { workspace = true }
 lillux = { workspace = true }
+ryeos-changeset = { workspace = true }
 rand = { workspace = true }
 ryeos-api = { workspace = true }
 ryeos-app = { workspace = true }

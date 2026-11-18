@@ -517,6 +517,12 @@ pub fn body(view: &RyeOsViewVm, instance: &RyeOsViewInstanceKey, local: &crate::
             content,
             *truncated,
         ),
+        RyeOsViewVm::Diff {
+            title,
+            source_status,
+            diff,
+            ..
+        } => diff_view(instance, title, source_status.as_ref(), diff),
         RyeOsViewVm::Table {
             title,
             source_status,
@@ -962,6 +968,31 @@ fn document_view(
                     .px(20.0)
                     .pb(32.0),
             ),
+    )
+}
+
+/// A view whose body is one diff: the same rows a timeline entry's diff
+/// draws, in a scrolling page.
+fn diff_view(
+    instance: &RyeOsViewInstanceKey,
+    title: &str,
+    status: Option<&RyeOsSourceStatusVm>,
+    diff: &RyeOsDiffVm,
+) -> El {
+    let mut page = col().w_full().shrink().min_h(0.0).label(title.to_owned());
+    if let Some(status) = status {
+        page = page.child(source_status(status));
+    }
+    page.child(
+        col()
+            .key(format!("diff:{instance:?}"))
+            .w_full()
+            .shrink()
+            .min_h(0.0)
+            .scroll(ScrollSpec {
+                stick_bottom: false,
+            })
+            .child(diff_body(diff)),
     )
 }
 

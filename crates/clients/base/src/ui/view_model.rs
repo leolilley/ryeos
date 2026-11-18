@@ -476,6 +476,16 @@ pub enum RyeOsViewVm {
         truncated: bool,
         provenance: String,
     },
+    /// A change to files as unified diff rows, projected from an admitted
+    /// source. The view definition names the response fields; the rows, the
+    /// numbering and the words are the same as a diff under a timeline entry.
+    Diff {
+        title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_status: Option<RyeOsSourceStatusVm>,
+        provenance: String,
+        diff: super::diff::RyeOsDiffVm,
+    },
     /// The generic content widget surface: every bound view renders
     /// through rows (typed widget variants arrive with the render pass).
     Rows {
@@ -1838,6 +1848,37 @@ fn bound_view_vm_keyed(
                 provenance: Some(view_ref.to_string()),
                 affordance_hints: affordance_hints(binding),
                 rows,
+            }
+        }
+        ("diff", Some(response)) => {
+            let policy = super::diff::DiffPolicy::from_projections(&binding.projections);
+            let Some(set) = super::diff::view_change_set(&binding.projections, response)
+                .filter(|set| !set.files.is_empty())
+            else {
+                // Nothing to draw: say why in the view's words, or else with
+                // the source's own availability record.
+                return RyeOsViewVm::Placeholder {
+                    title,
+                    message: super::diff::unavailable_message(&policy, response),
+                };
+            };
+            let mut state = diffs
+                .and_then(|diffs| diffs.get(super::diff::VIEW_DIFF_KEY))
+                .cloned()
+                .unwrap_or_default();
+            // The tile's cursor is the diff's cursor.
+            state.cursor = Some(cursor.unwrap_or(0));
+            RyeOsViewVm::Diff {
+                title,
+                source_status: observation_status,
+                provenance: view_ref.to_string(),
+                diff: super::diff::diff_vm(
+                    &set,
+                    true,
+                    &policy,
+                    &state,
+                    super::diff::DIFF_RENDER_WINDOW,
+                ),
             }
         }
         ("document", Some(response)) => {
@@ -5231,7 +5272,10 @@ mod tests {
         );
         assert_eq!(
             core.key_context().diff,
-            Some(crate::ui::keymap::RyeOsDiffKeyContext { inside: false })
+            Some(crate::ui::keymap::RyeOsDiffKeyContext {
+                inside: false,
+                nested: true
+            })
         );
 
         // Right steps in; the file key and the arrows move the diff's own
@@ -5265,11 +5309,130 @@ mod tests {
         assert_eq!(open_diff(&core).unwrap().cursor, None);
         assert_eq!(
             core.key_context().diff,
-            Some(crate::ui::keymap::RyeOsDiffKeyContext { inside: false })
+            Some(crate::ui::keymap::RyeOsDiffKeyContext {
+                inside: false,
+                nested: true
+            })
         );
         press_key(&mut core, RyeOsKey::ArrowLeft);
         assert!(open_diff(&core).is_none());
         assert_eq!(core.key_context().diff, None);
+    }
+
+    /// A single focused `diff` tile over a candidate-diff response.
+    fn diff_view_core(response: serde_json::Value) -> RyeOsCore {
+        let session = session_with_surface(json!({
+            "name": "t",
+            "tiles": ["view:ryeos/development/change"],
+            "views": {
+                "view:ryeos/development/change": {
+                    "widget": "diff",
+                    "sources": { "default": {
+                        "ref": "service:ui/ryeos-ui/work/candidate/diff"
+                    } },
+                    "projections": {
+                        "basis": "basis", "files": "files", "omitted_files": "omitted_files",
+                        "diff": {"words": {
+                            "basis.recorded": "Recorded", "file": "file",
+                            "op.modify": "modified", "empty": "Choose a changed file",
+                            "copy_notice": "Copied the bounded display, not the file"}}
+                    }
+                }
+            }
+        }));
+        let mut core = test_support_core(session);
+        let key = tile_default_source_key(&core, core.active_view_set().unwrap().focused_tile);
+        core.data.sources.insert(key, response);
+        core
+    }
+
+    fn diff_view(core: &RyeOsCore) -> super::super::diff::RyeOsDiffVm {
+        let instance = core.focused_view_instance_key().unwrap();
+        match view_vm_for_instance(core, &instance).unwrap() {
+            RyeOsViewVm::Diff { diff, .. } => diff,
+            other => panic!("expected a diff, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_diff_view_draws_the_sources_change_and_the_tile_cursor_walks_it() {
+        use crate::ui::RyeOsKey;
+        let mut core = diff_view_core(json!({
+            "availability": [{"state": "available", "reason": "candidate_retained"}],
+            "basis": "recorded", "omitted_files": 0,
+            "files": [{"path": "src/a.rs", "op": "modify", "added": 1, "removed": 1,
+                       "binary": false,
+                       "hunks": [{"old_start": 1, "new_start": 1,
+                                  "lines": [" keep", "-old", "+new"]}]}]
+        }));
+        let diff = diff_view(&core);
+        assert_eq!(diff.total_rows, 5);
+        assert_eq!(diff.cursor, Some(0));
+        assert_eq!(diff.rows[0].text, "Recorded · 1 file · +1 -1");
+        assert_eq!(
+            core.key_context().diff,
+            Some(crate::ui::keymap::RyeOsDiffKeyContext {
+                inside: true,
+                nested: false
+            })
+        );
+
+        // The tile's own cursor is the diff's: the arrows move it and stop at
+        // the ends, and the file key jumps it.
+        press_key(&mut core, RyeOsKey::ArrowDown);
+        press_key(&mut core, RyeOsKey::ArrowDown);
+        assert_eq!(diff_view(&core).cursor, Some(2));
+        press_key(&mut core, RyeOsKey::Char('['));
+        assert_eq!(diff_view(&core).cursor, Some(1));
+        for _ in 0..9 {
+            press_key(&mut core, RyeOsKey::ArrowDown);
+        }
+        assert_eq!(diff_view(&core).cursor, Some(4));
+
+        // Copy says, in the view's words, that it is the bounded display.
+        let effects = press_key(&mut core, RyeOsKey::Char('y'));
+        assert!(
+            matches!(
+                effects.as_slice(),
+                [RyeOsEffect { kind: RyeOsEffectKind::CopyToClipboard { text }, .. }]
+                    if text.starts_with("--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,2 +1,2 @@\n")
+            ),
+            "got {effects:?}"
+        );
+        assert!(
+            core.ui
+                .notices
+                .iter()
+                .any(|notice| notice.message == "Copied the bounded display, not the file")
+        );
+
+        // Enter on the file's header closes it; the cursor stays on it.
+        press_key(&mut core, RyeOsKey::Char('['));
+        press_key(&mut core, RyeOsKey::Enter);
+        let closed = diff_view(&core);
+        assert_eq!((closed.total_rows, closed.cursor), (2, Some(1)));
+        assert_eq!(closed.rows[1].collapsed, Some(true));
+    }
+
+    #[test]
+    fn a_diff_view_with_no_change_says_so_in_the_views_words() {
+        for response in [
+            json!({"availability": [{"state": "unavailable", "reason": "path_not_changed"}],
+                   "basis": "recorded", "files": [], "omitted_files": 0}),
+            // A response that is not the change-set shape draws nothing.
+            json!({"basis": "recorded", "files": [{"path": "a", "op": "chmod"}]}),
+            json!({"files": "x"}),
+        ] {
+            let core = diff_view_core(response);
+            let instance = core.focused_view_instance_key().unwrap();
+            match view_vm_for_instance(&core, &instance).unwrap() {
+                RyeOsViewVm::Placeholder { message, .. } => {
+                    assert_eq!(message, "Choose a changed file");
+                }
+                other => panic!("expected a placeholder, got {other:?}"),
+            }
+            assert_eq!(core.key_context().diff, None);
+        }
     }
 
     #[test]

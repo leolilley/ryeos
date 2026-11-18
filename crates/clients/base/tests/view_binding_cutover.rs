@@ -25,6 +25,10 @@ const VIEW_BEHAVIOR_GOLDENS: &[(&str, &str)] = &[
         "94eb25644ddd5cde641cca0f2d99f22ff6504df29b6518ada9fb8ae174d6b1e6",
     ),
     (
+        "view:ryeos/development/change",
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    ),
+    (
         "view:ryeos/development/changes",
         "a43a841cab0623eabc740ad507a29011b85e6a40d29bd728c844d73c49e26748",
     ),

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T09:43:35Z:1e274cf8db6c1364362069b9479228761719c70708036c0804984eb478ca10e0:BGP8nVp6n8CfdTaxHKnWc945zQQvwU4dHuMzMZv52laLKw8hQ3YHSKesvHvAiLNCaaMeLfb/Wi7tdICnOLG7Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T01:58:55Z:3cb9029110b36fdab2a9b7c6cc6b3157840972fe3a7a15cff451befcd4af5859:SxKd573vqkfra5a9OprR1XZ8fmxVhCpw6U3jRn3Q0e23/4avuSdvsCwSFWWTibBSJRsQBp8sSKv/FVnw490yCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-base-observe
 title: Home
 version: "2.0.0"
@@ -71,7 +71,7 @@ view_sets:
           first:
             type: group
             label: Changes
-            views: ["view:ryeos/development/changes", "view:ryeos/work/candidate", "view:ryeos/work/approvals"]
+            views: ["view:ryeos/development/changes", "view:ryeos/development/change", "view:ryeos/work/candidate", "view:ryeos/work/approvals"]
             active: 0
           second:
             type: group
