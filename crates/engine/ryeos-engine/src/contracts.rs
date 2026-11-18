@@ -3266,6 +3266,10 @@ pub enum ThreadTerminalStatus {
     Cancelled,
     Continued,
     Killed,
+    /// The run deadline stopped the thread. A runtime that reaches its own
+    /// hard stop finalizes with this status; the daemon settles the same
+    /// status when its kill timeout fires first.
+    TimedOut,
 }
 
 impl ThreadTerminalStatus {
@@ -3278,6 +3282,7 @@ impl ThreadTerminalStatus {
             Self::Cancelled => "cancelled",
             Self::Continued => "continued",
             Self::Killed => "killed",
+            Self::TimedOut => "timed_out",
         }
     }
 }

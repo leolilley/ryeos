@@ -4117,14 +4117,46 @@ impl Runner {
                         "turn": turn,
                         "wrap_up_delivered": self.wrap_up_delivered,
                     });
-                    let runtime_result = RuntimeResult {
-                        success: false,
-                        status: RuntimeResultStatus::TimedOut,
-                        thread_id: self.thread_id.clone(),
-                        result: Some(result),
+                    // The runtime settles its own deadline stop over the
+                    // callback, so the thread records the structured result
+                    // as the runtime's testimony rather than a fallback
+                    // wrapper. The callback and stdout carry the identical
+                    // result, cost and warnings, which the daemon cross-checks.
+                    let cost = self.budget.cost();
+                    let completion = TerminalCompletion {
+                        status: ThreadTerminalStatus::TimedOut,
+                        outcome_code: Some("deadline".to_string()),
+                        result: Some(result.clone()),
+                        error: None,
+                        cost: Some(serde_json::to_value(&cost).expect(
+                            "validated directive cost must serialize for terminal settlement",
+                        )),
                         outputs: json!({}),
-                        cost: Some(self.budget.cost()),
-                        warnings: Vec::new(),
+                        warnings: warnings.clone(),
+                    };
+                    let runtime_result = match self.callback.finalize_thread(completion).await {
+                        Ok(()) => RuntimeResult {
+                            success: false,
+                            status: RuntimeResultStatus::TimedOut,
+                            thread_id: self.thread_id.clone(),
+                            result: Some(result),
+                            outputs: json!({}),
+                            cost: Some(cost),
+                            warnings: Vec::new(),
+                        },
+                        // Not settled over the callback: report the failure
+                        // so the daemon's own settlement stays authoritative.
+                        Err(e) => RuntimeResult {
+                            success: false,
+                            status: RuntimeResultStatus::Failed,
+                            thread_id: self.thread_id.clone(),
+                            result: Some(json!(format!(
+                                "resume-critical callback finalize_thread failed: {e}"
+                            ))),
+                            outputs: json!({}),
+                            cost: Some(cost),
+                            warnings: Vec::new(),
+                        },
                     };
                     guard.finalized = true;
                     return Ok(Self::attach_warnings(runtime_result, &mut warnings));

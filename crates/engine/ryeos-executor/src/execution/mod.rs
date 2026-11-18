@@ -1678,7 +1678,12 @@ pub async fn prepare_managed_runtime_terminal_project_result(
     let is_continuation_segment = *reported_status
         == ryeos_engine::contracts::ThreadTerminalStatus::Continued
         || authoritative_status == ryeos_state::objects::ThreadStatus::Continued.as_str();
+    // A run stopped by its deadline keeps its frozen generation without
+    // advancing HEAD, exactly as the daemon's own deadline settlement does.
+    let is_deadline_stop =
+        *reported_status == ryeos_engine::contracts::ThreadTerminalStatus::TimedOut;
     if !is_continuation_segment
+        && !is_deadline_stop
         && let ryeos_state::objects::PinnedTerminalPublication::AdvanceHead {
             head_ref,
             expected_hash,
