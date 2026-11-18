@@ -9,8 +9,8 @@
 //!
 //! An operator may acknowledge an item whose source allows it. The
 //! acknowledgement is a durable `attention_acknowledged` event on the item's
-//! chain. It hides the item until the item has activity newer than the event,
-//! at which point the item is raised again; it never decides the underlying
+//! chain, recording the item's activity time. It hides the item until the item
+//! has later activity, at which point the item is raised again; it never decides the underlying
 //! work.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -280,8 +280,8 @@ fn collect_raised(
     Ok(items)
 }
 
-/// The latest acknowledgement time, in whole seconds, of each acknowledgeable
-/// item of `items` that `owner` acknowledged. Read from the item's chain.
+/// The latest `item_since_ms` each acknowledgeable item of `items` was
+/// acknowledged at by `owner`. Read from the item's chain.
 fn acknowledgements(
     state: &AppState,
     owner: &str,
@@ -310,15 +310,14 @@ fn acknowledgements(
                 if event.payload["principal"] != owner {
                     continue;
                 }
-                let (Some(item_id), Some(secs)) = (
+                let (Some(item_id), Some(since_ms)) = (
                     event.payload["item_id"].as_str(),
-                    lillux::time::unix_secs_from_iso8601(&event.ts),
+                    event.payload["item_since_ms"].as_i64(),
                 ) else {
                     continue;
                 };
-                let secs = i64::try_from(secs).unwrap_or(i64::MAX);
-                let latest = acknowledged.entry(item_id.to_owned()).or_insert(secs);
-                *latest = (*latest).max(secs);
+                let latest = acknowledged.entry(item_id.to_owned()).or_insert(since_ms);
+                *latest = (*latest).max(since_ms);
             }
             if !page.has_more {
                 break;
@@ -328,9 +327,9 @@ fn acknowledgements(
     Ok(acknowledged)
 }
 
-/// An acknowledged item stays hidden while its activity is no newer than its
-/// acknowledgement. Activity newer than the acknowledgement raises it again.
-/// Times compare in whole seconds, the resolution of an event's timestamp.
+/// An acknowledged item stays hidden while its current activity time is no
+/// later than the activity time it was acknowledged at. Any later activity
+/// raises it again.
 fn is_acknowledged(item: &Value, acknowledgements: &BTreeMap<String, i64>) -> bool {
     let (Some(id), Some(since_ms)) = (item["id"].as_str(), item["since_ms"].as_i64()) else {
         return false;
@@ -338,7 +337,7 @@ fn is_acknowledged(item: &Value, acknowledgements: &BTreeMap<String, i64>) -> bo
     item["actions"]["acknowledge"] == true
         && acknowledgements
             .get(id)
-            .is_some_and(|acknowledged_at| since_ms.div_euclid(1000) <= *acknowledged_at)
+            .is_some_and(|acknowledged_since_ms| since_ms <= *acknowledged_since_ms)
 }
 
 /// Acknowledge the item `item_id` for `owner`: record it on the item's chain.
@@ -905,30 +904,31 @@ mod tests {
         acknowledge(&state, &config, OWNER, "failed_run:T-a").unwrap();
         assert!(raised_ids(&state, &config, OWNER).is_empty());
 
-        // The same item, read again after its activity moved past the
-        // acknowledgement, is raised again; the recorded acknowledgement is
+        // The same item, read again after its activity moved even one
+        // millisecond past the acknowledged time, is raised again; the recorded acknowledgement is
         // untouched.
         let mut raised = collect_raised(&state, &config, OWNER, None, 50).unwrap();
         let acknowledgements = acknowledgements(&state, OWNER, &raised).unwrap();
         assert!(is_acknowledged(&raised[0], &acknowledgements));
         let since_ms = raised[0]["since_ms"].as_i64().unwrap();
-        raised[0]["since_ms"] = json!(since_ms + 60_000);
+        raised[0]["since_ms"] = json!(since_ms + 1);
         assert!(!is_acknowledged(&raised[0], &acknowledgements));
     }
 
     #[test]
-    fn acknowledgement_compares_whole_seconds() {
+    fn acknowledgement_compares_exact_milliseconds() {
         let item = |since_ms: i64| json!({"id": "failed_run:T", "since_ms": since_ms, "actions": {"acknowledge": true}});
-        let acknowledged = BTreeMap::from([("failed_run:T".to_owned(), 100)]);
+        let acknowledged = BTreeMap::from([("failed_run:T".to_owned(), 100_500)]);
         assert!(is_acknowledged(&item(99_000), &acknowledged));
-        assert!(is_acknowledged(&item(100_999), &acknowledged));
-        assert!(!is_acknowledged(&item(101_000), &acknowledged));
+        assert!(is_acknowledged(&item(100_500), &acknowledged));
+        // Activity one millisecond later, in the same second, raises it again.
+        assert!(!is_acknowledged(&item(100_501), &acknowledged));
         // An item the source does not allow to be acknowledged is never hidden.
         let mut blocked = item(1);
         blocked["actions"]["acknowledge"] = json!(false);
         assert!(!is_acknowledged(&blocked, &acknowledged));
         // Another item's acknowledgement does not apply.
-        let other = BTreeMap::from([("failed_run:U".to_owned(), 100)]);
+        let other = BTreeMap::from([("failed_run:U".to_owned(), 100_500)]);
         assert!(!is_acknowledged(&item(1), &other));
     }
 
