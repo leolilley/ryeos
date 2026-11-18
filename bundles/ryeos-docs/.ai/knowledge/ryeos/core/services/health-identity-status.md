@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-11T02:28:34Z:0d4aa8023c179c136e820cc953c174e5b96b79b82eddbaeeb47be4324eb40725:+mnVLcnYZefESDEJRiCrAjq01XdN7GBa6Q+gXsYcNX1lHHpF4A1h6CZlRiFaLvytuEYYwxFntPusSksHujOxBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-18T04:50:29Z:cacdeaec1b682c6260f04659233c6624aadb10ddaaf84d30aa1818a8650c77b0:nZaYQPIqdk7Xuw9TAuRGylx4Nr4gYt8HtpuQE9WxbCFB9KOjxi2ccX92mIF/WqTuUFgZ6UY5FTMbYnciiOSSCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/services
 tags: [service, health, identity, status]
-version: "1.2.0"
+version: "1.3.0"
 description: Health, identity, and status service reference.
 ---
 
@@ -17,6 +17,23 @@ Invariant: health and public identity surfaces are safe unauthenticated reads; s
   status, selected bundle/implementation, manifest and signer identities,
   adapter digest/build, declared and effective capabilities, and inspected
   payload digests.
+- `node/locality` returns this node's own graded locality facts: for each of
+  `boot`, `storage` and `account` a digest the node measured, or `unknown` with
+  a reason key (`emulated_kernel`, `not_measurable`, `user_namespace`). It never
+  returns a boot id, path, mount, device or uid. It needs
+  `ryeos.execute.service.node/locality`, so a remote answers only a caller its
+  operator granted that capability to. Digests are plain SHA-256 over a
+  domain-separated string; `account` and `storage` include the raw boot id (never served), so
+  one uid or device number on two machines never matches.
+- `node/locality/groups` asks each configured remote for `node/locality` and
+  compares the answers with this node's own. A remote that refuses is
+  `not_granted`; one that cannot be reached or is too slow is `did_not_answer`
+  with a reason, which is not the same as `unknown`. A relation holds only when
+  both nodes measured the same digest. Each group says whether it holds this node (`this_computer`); each
+  member fact lists the other members it shares a measured digest with
+  (`shared_with`); each member says whether it `disagrees` with a declared
+  group. Every `as_of` is RFC 3339 in millisecond `Z` form. It needs
+  `ryeos.execute.service.node/locality/groups`; `ryeos node locality` prints it.
 - `system/ingest-ignore` and `system/push-head` support CAS ingestion and remote pushed-head workflows.
 
 See [Execution Isolation](../node/execution-isolation.md) for snapshot and restart
