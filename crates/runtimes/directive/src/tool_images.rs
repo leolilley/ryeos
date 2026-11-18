@@ -75,8 +75,16 @@ pub enum Envelope {
     Parts(Vec<EnvelopePart>),
 }
 
-/// Recognises a `result_parts` result.
-pub fn parse_envelope(result: &Value) -> Envelope {
+/// Recognises a `result_parts` result. A subprocess tool's dispatch answer is
+/// its completion record, with the tool's own JSON under `result`; that inner
+/// value is the one examined.
+pub fn parse_envelope(dispatched: &Value) -> Envelope {
+    let result = match dispatched.as_object() {
+        Some(object) if object.contains_key("outcome_code") && object.contains_key("result") => {
+            &object["result"]
+        }
+        _ => dispatched,
+    };
     let Some(object) = result.as_object() else {
         return Envelope::NotParts;
     };
@@ -354,6 +362,17 @@ mod tests {
     fn only_a_lone_result_parts_object_is_an_envelope() {
         assert_eq!(parse_envelope(&json!({"ok": true})), Envelope::NotParts);
         assert_eq!(parse_envelope(&json!("text")), Envelope::NotParts);
+        let wrapped = json!({
+            "outcome_code": "exit:0",
+            "error": null,
+            "result": {"result_parts": [{"type": "text", "text": "hi"}]}
+        });
+        assert_eq!(
+            parse_envelope(&wrapped),
+            Envelope::Parts(vec![EnvelopePart::Text("hi".to_string())])
+        );
+        let plain = json!({"outcome_code": "exit:0", "result": {"ok": true}});
+        assert_eq!(parse_envelope(&plain), Envelope::NotParts);
         assert_eq!(
             parse_envelope(&json!({"result_parts": [], "other": 1})),
             Envelope::NotParts
