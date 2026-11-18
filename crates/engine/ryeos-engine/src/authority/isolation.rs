@@ -5440,8 +5440,9 @@ impl IsolationRuntime {
 
         // The adapter's own limit covers its sandbox setup, which holds
         // descriptors in proportion to what it inherits and places every
-        // target slot before the target's limit applies. The caller's request
-        // is for the target and travels in the plan (`target_limits`).
+        // target slot before the target's limit applies. The target inherits
+        // it, so it also covers the target's own limit (`target_limits` in the
+        // plan), or is the policy ceiling when the target sets none.
         let highest_target_slot = launch_request
             .plan
             .target_channels
@@ -5455,9 +5456,15 @@ impl IsolationRuntime {
                     .map(|payload| payload.target_fd),
             )
             .max();
+        let target_open_files = launch_request
+            .plan
+            .target_limits
+            .as_ref()
+            .and_then(|limits| limits.max_open_files);
         let effective_open_files = adapter_setup_open_files(
             inherited_fds.len(),
             highest_target_slot,
+            target_open_files,
             self.inspection.limits.open_files,
         )?;
         let effective_stdout_bytes = limits
@@ -8013,16 +8020,22 @@ fn target_open_files(policy: Option<u64>, requested: Option<u64>) -> Option<u64>
 }
 
 /// Open-file limit for the adapter process that builds the sandbox, derived
-/// from the descriptors it inherits and the highest target slot it places,
-/// and bounded by the policy ceiling. A need above the ceiling is refused here
-/// rather than failing mid-setup.
+/// from the descriptors it inherits, the highest target slot it places and
+/// the limit its target installs, and bounded by the policy ceiling. A need
+/// above the ceiling is refused here rather than failing mid-setup.
 fn adapter_setup_open_files(
     inherited_descriptors: usize,
     highest_target_slot: Option<u32>,
+    target_open_files: Option<u64>,
     policy: Option<u64>,
 ) -> Result<Option<u64>, EngineError> {
-    lillux::descriptor_budget::setup_open_files(inherited_descriptors, highest_target_slot, policy)
-        .map_err(|error| refused(error.to_string()))
+    lillux::descriptor_budget::setup_open_files(
+        inherited_descriptors,
+        highest_target_slot,
+        target_open_files,
+        policy,
+    )
+    .map_err(|error| refused(error.to_string()))
 }
 
 /// Keep every inherited source descriptor off the child's declared target
@@ -8104,31 +8117,40 @@ mod tests {
 
     #[test]
     fn adapter_open_files_follow_inherited_descriptors_not_the_target_request() {
-        let small = adapter_setup_open_files(4, None, Some(4096))
+        let small = adapter_setup_open_files(4, None, Some(64), Some(4096))
             .unwrap()
             .unwrap();
-        let large = adapter_setup_open_files(60, None, Some(4096))
+        let large = adapter_setup_open_files(60, None, Some(64), Some(4096))
             .unwrap()
             .unwrap();
         assert!(large > small);
         // A full bundle set must not be squeezed to the target's 64.
         assert!(large > 64);
-        assert_eq!(adapter_setup_open_files(60, None, None).unwrap(), None);
+        assert_eq!(
+            adapter_setup_open_files(60, None, Some(64), None).unwrap(),
+            None
+        );
     }
 
     #[test]
     fn adapter_open_files_cover_a_high_sealed_payload_slot() {
         // A session start seals its delivered secret at a fixed slot far above
         // what a handful of inherited descriptors would budget.
-        let limit = adapter_setup_open_files(5, Some(197), Some(4096))
+        let limit = adapter_setup_open_files(5, Some(197), Some(64), Some(4096))
             .unwrap()
             .unwrap();
         assert!(limit > 197, "{limit}");
+        // With no target limit of its own the target inherits the adapter's,
+        // so the adapter runs at the ceiling.
+        assert_eq!(
+            adapter_setup_open_files(5, Some(197), None, Some(4096)).unwrap(),
+            Some(4096)
+        );
     }
 
     #[test]
     fn adapter_open_files_refuse_above_the_policy_ceiling_with_a_clear_reason() {
-        let error = adapter_setup_open_files(1000, None, Some(128)).unwrap_err();
+        let error = adapter_setup_open_files(1000, None, Some(64), Some(128)).unwrap_err();
         match error {
             EngineError::IsolationPolicyRefused { reason } => {
                 assert!(reason.contains("1000"), "{reason}");
