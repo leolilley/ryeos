@@ -211,6 +211,23 @@ HcmV?d00001
 }
 
 #[test]
+fn a_plain_file_after_a_binary_one_is_its_own_file() {
+    let text = "\
+diff --git a/img.png b/img.png
+Binary files a/img.png and b/img.png differ
+--- /dev/null
++++ b/n.txt
+@@ -0,0 +1 @@
++hello
+";
+    let set = patch(text).unwrap();
+    assert_eq!(set["files"][0]["path"], json!("img.png"));
+    assert_eq!(set["files"][0]["binary"], json!(true));
+    assert_eq!(set["files"][1]["path"], json!("n.txt"));
+    assert_eq!(set["files"][1]["op"], json!("add"));
+}
+
+#[test]
 fn carriage_returns_in_a_patch_do_not_break_parsing() {
     let text = MODIFY.replace('\n', "\r\n");
     assert_eq!(patch(&text), Some(set_of(vec![modify_file()])));

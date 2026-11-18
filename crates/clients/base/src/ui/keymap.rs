@@ -6,6 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::diff::RyeOsDiffAction;
 use super::event::{FieldStepDirection, RyeOsStackMoveDirection, RyeOsUiEvent, RyeOsUiIntent};
 use super::timeline::RyeOsTimelineEntryAction;
 use crate::view_set::FocusDirection;
@@ -166,10 +167,20 @@ pub struct RyeOsKeyContext {
     pub focused_timeline_foldable: bool,
     /// The focused view's source fetch failed, so it can be retried.
     pub focused_source_failed: bool,
+    /// The point is on an open diff: the entry under it is expanded and
+    /// carries one. Absent otherwise.
+    pub diff: Option<RyeOsDiffKeyContext>,
     /// Capabilities of the focused semantic field, if the focused instance is
     /// one. The keymap consumes capabilities rather than widget names or
     /// project roles, so every renderer gets the same actions.
     pub field: Option<RyeOsFieldKeyContext>,
+}
+
+/// What the keys of an open diff can do right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RyeOsDiffKeyContext {
+    /// The cursor is on a row inside the diff, not on the entry carrying it.
+    pub inside: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -297,6 +308,68 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
                 && !context.input_focused =>
         {
             ui(RyeOsUiEvent::FocusInput)
+        }
+        // An open diff under the point takes the file and hunk keys; once the
+        // cursor is inside it, the diff also takes the arrows, Enter, Escape
+        // and copy. None of it applies while typing.
+        RyeOsKey::Char(c @ (']' | '[' | '}' | '{'))
+            if context.diff.is_some()
+                && !context.input_focused
+                && event.modifiers.none_or_shift() =>
+        {
+            diff(match c {
+                ']' => RyeOsDiffAction::NextFile,
+                '[' => RyeOsDiffAction::PreviousFile,
+                '}' => RyeOsDiffAction::NextHunk,
+                _ => RyeOsDiffAction::PreviousHunk,
+            })
+        }
+        RyeOsKey::ArrowDown | RyeOsKey::ArrowUp
+            if event.modifiers.none()
+                && !context.input_focused
+                && context.diff.is_some_and(|diff| diff.inside) =>
+        {
+            diff(RyeOsDiffAction::Move {
+                delta: if event.key == RyeOsKey::ArrowDown {
+                    1
+                } else {
+                    -1
+                },
+            })
+        }
+        RyeOsKey::Enter | RyeOsKey::ArrowRight
+            if event.modifiers.none()
+                && !context.input_focused
+                && context.diff.is_some_and(|diff| diff.inside) =>
+        {
+            diff(RyeOsDiffAction::Toggle)
+        }
+        RyeOsKey::Escape | RyeOsKey::ArrowLeft
+            if event.modifiers.none()
+                && !context.input_focused
+                && context.diff.is_some_and(|diff| diff.inside) =>
+        {
+            diff(RyeOsDiffAction::Leave)
+        }
+        // Right on an open entry steps into its diff.
+        RyeOsKey::ArrowRight
+            if event.modifiers.none()
+                && !context.input_focused
+                && context.diff.is_some_and(|diff| !diff.inside) =>
+        {
+            diff(RyeOsDiffAction::Move { delta: 1 })
+        }
+        RyeOsKey::Char(c)
+            if context.diff.is_some_and(|diff| diff.inside)
+                && !context.input_focused
+                && event.modifiers.none_or_shift()
+                && c.eq_ignore_ascii_case(&'y') =>
+        {
+            diff(if event.modifiers.shift || c.is_uppercase() {
+                RyeOsDiffAction::CopyBlock
+            } else {
+                RyeOsDiffAction::CopyFile
+            })
         }
         // Timeline entry actions act on the point, never while typing.
         RyeOsKey::Char(c)
@@ -592,6 +665,10 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
 
 fn ui(event: RyeOsUiEvent) -> RyeOsKeyCommand {
     RyeOsKeyCommand::Ui { event }
+}
+
+fn diff(action: RyeOsDiffAction) -> RyeOsKeyCommand {
+    ui(RyeOsUiEvent::Diff { action })
 }
 
 fn intent(intent: RyeOsUiIntent) -> RyeOsKeyCommand {
@@ -1027,6 +1104,7 @@ fn initial_list_local_state() -> crate::view_set::ViewLocalState {
         expanded_rows: std::collections::BTreeSet::new(),
         collapsed_tree_rows: std::collections::BTreeSet::new(),
         changed_rows: std::collections::BTreeMap::new(),
+        diffs: std::collections::BTreeMap::new(),
     }
 }
 
@@ -1198,6 +1276,108 @@ mod tests {
             ryeos_key_command(key(RyeOsKey::Escape), ctx),
             RyeOsKeyCommand::EndFocusedFieldQuery
         );
+    }
+
+    #[test]
+    fn an_open_diff_takes_the_file_and_hunk_keys_and_the_arrows_once_inside() {
+        use super::super::diff::RyeOsDiffAction;
+        let diff_command = |key_event, ctx| match ryeos_key_command(key_event, ctx) {
+            RyeOsKeyCommand::Ui {
+                event: RyeOsUiEvent::Diff { action },
+            } => Some(action),
+            _ => None,
+        };
+        let mut ctx = context(false, false);
+        // No open diff under the point: the keys keep their other meanings.
+        for ch in [']', '[', '}', '{'] {
+            assert_eq!(diff_command(key(RyeOsKey::Char(ch)), ctx), None);
+        }
+        assert_eq!(diff_command(key(RyeOsKey::ArrowDown), ctx), None);
+
+        // On the entry that carries the open diff: file and hunk keys work,
+        // Right steps in, and the arrows still move the timeline point.
+        ctx.focused_timeline_entry = true;
+        ctx.focused_row_expandable = true;
+        ctx.focused_row_expanded = true;
+        ctx.diff = Some(RyeOsDiffKeyContext { inside: false });
+        assert_eq!(
+            diff_command(key(RyeOsKey::Char(']')), ctx),
+            Some(RyeOsDiffAction::NextFile)
+        );
+        assert_eq!(
+            diff_command(key(RyeOsKey::Char('[')), ctx),
+            Some(RyeOsDiffAction::PreviousFile)
+        );
+        assert_eq!(
+            diff_command(key(RyeOsKey::Char('}')), ctx),
+            Some(RyeOsDiffAction::NextHunk)
+        );
+        assert_eq!(
+            diff_command(key(RyeOsKey::Char('{')), ctx),
+            Some(RyeOsDiffAction::PreviousHunk)
+        );
+        assert_eq!(
+            diff_command(key(RyeOsKey::ArrowRight), ctx),
+            Some(RyeOsDiffAction::Move { delta: 1 })
+        );
+        assert_eq!(diff_command(key(RyeOsKey::ArrowDown), ctx), None);
+        assert_eq!(diff_command(key(RyeOsKey::Enter), ctx), None);
+        // Copy keeps its entry meaning until the cursor is inside.
+        assert!(matches!(
+            ryeos_key_command(key(RyeOsKey::Char('y')), ctx),
+            RyeOsKeyCommand::Ui {
+                event: RyeOsUiEvent::TimelineEntry { .. }
+            }
+        ));
+        // Left still closes the entry.
+        assert!(matches!(
+            ryeos_key_command(key(RyeOsKey::ArrowLeft), ctx),
+            RyeOsKeyCommand::Ui {
+                event: RyeOsUiEvent::ExpandSelectedRow { expand: false }
+            }
+        ));
+
+        // Inside the diff it owns the arrows, Enter, Escape and copy.
+        ctx.diff = Some(RyeOsDiffKeyContext { inside: true });
+        assert_eq!(
+            diff_command(key(RyeOsKey::ArrowDown), ctx),
+            Some(RyeOsDiffAction::Move { delta: 1 })
+        );
+        assert_eq!(
+            diff_command(key(RyeOsKey::ArrowUp), ctx),
+            Some(RyeOsDiffAction::Move { delta: -1 })
+        );
+        assert_eq!(
+            diff_command(key(RyeOsKey::Enter), ctx),
+            Some(RyeOsDiffAction::Toggle)
+        );
+        assert_eq!(
+            diff_command(key(RyeOsKey::ArrowRight), ctx),
+            Some(RyeOsDiffAction::Toggle)
+        );
+        assert_eq!(
+            diff_command(key(RyeOsKey::Escape), ctx),
+            Some(RyeOsDiffAction::Leave)
+        );
+        assert_eq!(
+            diff_command(key(RyeOsKey::ArrowLeft), ctx),
+            Some(RyeOsDiffAction::Leave)
+        );
+        assert_eq!(
+            diff_command(key(RyeOsKey::Char('y')), ctx),
+            Some(RyeOsDiffAction::CopyFile)
+        );
+        assert_eq!(
+            diff_command(key(RyeOsKey::Char('Y')), ctx),
+            Some(RyeOsDiffAction::CopyBlock)
+        );
+        // Never while typing.
+        ctx.input_focused = true;
+        ctx.input_visible = true;
+        for ch in [']', '}', 'y'] {
+            assert_eq!(diff_command(key(RyeOsKey::Char(ch)), ctx), None);
+        }
+        assert_eq!(diff_command(key(RyeOsKey::ArrowDown), ctx), None);
     }
 
     #[test]

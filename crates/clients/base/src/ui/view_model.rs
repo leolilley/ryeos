@@ -555,6 +555,10 @@ pub enum RyeOsViewVm {
         /// vectors mean either collapsed or not expandable.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         entry_details: Vec<Vec<RyeOsRowDetailVm>>,
+        /// Typed bodies for each visible entry (parallel to `entries`), drawn
+        /// after its details. Empty vectors mean collapsed or no body.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        entry_bodies: Vec<Vec<super::diff::RyeOsBlockVm>>,
     },
     /// A foldable multi-section list — the magit-style status surface: one
     /// widget over many datasets, each section a titled, collapsible group of
@@ -1072,6 +1076,7 @@ struct RowLocalState<'a> {
     expanded_rows: Option<&'a std::collections::BTreeSet<String>>,
     collapsed_tree_rows: Option<&'a std::collections::BTreeSet<String>>,
     changed_rows: Option<&'a std::collections::BTreeMap<String, crate::view_set::RowFlash>>,
+    diffs: Option<&'a std::collections::BTreeMap<String, super::diff::DiffLocalState>>,
 }
 
 fn mounted_selected_state<'a>(
@@ -1086,6 +1091,7 @@ fn mounted_selected_state<'a>(
             expanded_rows,
             collapsed_tree_rows,
             changed_rows,
+            diffs,
             ..
         }) => RowLocalState {
             cursor: Some(*cursor),
@@ -1094,6 +1100,7 @@ fn mounted_selected_state<'a>(
             expanded_rows: Some(expanded_rows),
             collapsed_tree_rows: Some(collapsed_tree_rows),
             changed_rows: Some(changed_rows),
+            diffs: Some(diffs),
         },
         _ => RowLocalState::default(),
     }
@@ -1121,7 +1128,8 @@ pub(super) fn bound_view_vm(core: &RyeOsCore, tile_id: TileId, view_ref: &str) -
             message: "View set is no longer mounted".into(),
         };
     };
-    let (expanded_rows, collapsed_tree_rows, changed_rows) = selected_row_state(core, tile_id);
+    let (expanded_rows, collapsed_tree_rows, changed_rows, diffs) =
+        selected_row_state(core, tile_id);
     let Some(tile) = view_set.tiles.get(&tile_id) else {
         return RyeOsViewVm::Placeholder {
             title: String::new(),
@@ -1139,6 +1147,7 @@ pub(super) fn bound_view_vm(core: &RyeOsCore, tile_id: TileId, view_ref: &str) -
             expanded_rows,
             collapsed_tree_rows,
             changed_rows,
+            diffs,
         },
         view_ref,
     )
@@ -1157,6 +1166,7 @@ fn bound_view_vm_keyed(
         expanded_rows,
         collapsed_tree_rows,
         changed_rows,
+        diffs,
     } = local;
     let Some(binding) = core.binding_for_instance(instance_key, view_ref) else {
         return RyeOsViewVm::Placeholder {
@@ -1396,6 +1406,7 @@ fn bound_view_vm_keyed(
             entry_expandable: Vec::new(),
             entry_expanded: Vec::new(),
             entry_details: Vec::new(),
+            entry_bodies: Vec::new(),
         },
         (_, None)
             if observation_status
@@ -1570,7 +1581,11 @@ fn bound_view_vm_keyed(
             let entry_expandable: Vec<bool> = folded
                 .sources
                 .iter()
-                .map(|source| source.is_some() && !expand_fields.is_empty())
+                .map(|source| {
+                    source.as_ref().is_some_and(|source| {
+                        !expand_fields.is_empty() || super::diff::has_blocks(&source.raw)
+                    })
+                })
                 .collect();
             let entry_expanded: Vec<bool> = folded
                 .sources
@@ -1597,6 +1612,33 @@ fn bound_view_vm_keyed(
                                     .unwrap_or_default()
                             }
                         })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+            let entry_bodies: Vec<Vec<super::diff::RyeOsBlockVm>> =
+                if entry_expanded.iter().any(|expanded| *expanded) {
+                    let policy = super::diff::DiffPolicy::from_projections(&binding.projections);
+                    folded
+                        .sources
+                        .iter()
+                        .zip(entry_expanded.iter())
+                        .map(|(source, expanded)| {
+                            let source = source.as_ref().filter(|_| *expanded)?;
+                            let set = super::diff::entry_change_set(&source.raw)?;
+                            let state = diffs
+                                .and_then(|diffs| diffs.get(&source.key))
+                                .cloned()
+                                .unwrap_or_default();
+                            Some(vec![super::diff::RyeOsBlockVm::Diff(super::diff::diff_vm(
+                                &set,
+                                super::diff::entry_applied(&source.raw),
+                                &policy,
+                                &state,
+                                super::diff::DIFF_RENDER_WINDOW,
+                            ))])
+                        })
+                        .map(Option::unwrap_or_default)
                         .collect()
                 } else {
                     Vec::new()
@@ -1645,6 +1687,7 @@ fn bound_view_vm_keyed(
                 entry_expandable,
                 entry_expanded,
                 entry_details,
+                entry_bodies,
             }
         }
         ("table", Some(response)) => {
@@ -3788,24 +3831,27 @@ type SelectedRowState<'a> = (
     Option<&'a std::collections::BTreeSet<String>>,
     Option<&'a std::collections::BTreeSet<String>>,
     Option<&'a std::collections::BTreeMap<String, crate::view_set::RowFlash>>,
+    Option<&'a std::collections::BTreeMap<String, super::diff::DiffLocalState>>,
 );
 
 fn selected_row_state(core: &RyeOsCore, tile_id: TileId) -> SelectedRowState<'_> {
     let Some(view_set) = core.active_view_set() else {
-        return (None, None, None);
+        return (None, None, None, None);
     };
     match view_set.tiles.get(&tile_id).map(|tile| &tile.local) {
         Some(ViewLocalState::GenericList {
             expanded_rows,
             collapsed_tree_rows,
             changed_rows,
+            diffs,
             ..
         }) => (
             Some(expanded_rows),
             Some(collapsed_tree_rows),
             Some(changed_rows),
+            Some(diffs),
         ),
-        _ => (None, None, None),
+        _ => (None, None, None, None),
     }
 }
 
@@ -3976,6 +4022,7 @@ mod tests {
                 expanded_rows: None,
                 collapsed_tree_rows: None,
                 changed_rows: None,
+                diffs: None,
             },
             view_ref,
         );
@@ -4147,6 +4194,7 @@ mod tests {
                 expanded_rows: None,
                 collapsed_tree_rows: None,
                 changed_rows: None,
+                diffs: None,
             },
             view_ref,
         );
@@ -5125,6 +5173,103 @@ mod tests {
         };
         let command = crate::ui::ryeos_key_command(event, core.key_context());
         core.apply_key_command(command)
+    }
+
+    fn press_key(core: &mut RyeOsCore, key: crate::ui::RyeOsKey) -> Vec<crate::ui::RyeOsEffect> {
+        let event = crate::ui::RyeOsKeyEvent {
+            key,
+            modifiers: Default::default(),
+        };
+        let command = crate::ui::ryeos_key_command(event, core.key_context());
+        core.apply_key_command(command)
+    }
+
+    /// The diff body of the entry under the point, when it is open.
+    fn open_diff(core: &RyeOsCore) -> Option<super::super::diff::RyeOsDiffVm> {
+        let instance = core.focused_view_instance_key().unwrap();
+        match view_vm_for_instance(core, &instance).unwrap() {
+            RyeOsViewVm::Timeline {
+                entry_bodies,
+                selected,
+                ..
+            } => entry_bodies
+                .get(selected?)?
+                .iter()
+                .map(|super::super::diff::RyeOsBlockVm::Diff(diff)| diff.clone())
+                .next(),
+            other => panic!("expected a timeline, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_entry_with_a_change_block_opens_into_a_diff_the_keys_walk() {
+        use crate::ui::RyeOsKey;
+        let mut entry = activity("edit", [1, 1]);
+        entry["blocks"] = json!([{
+            "block": "changes", "basis": "requested", "omitted_files": 0,
+            "files": [{"path": "src/a.rs", "op": "modify", "added": 1, "removed": 1,
+                       "binary": false,
+                       "hunks": [{"old_start": 3, "new_start": 3,
+                                  "lines": [" keep", "-old", "+new"]}]}]
+        }]);
+        let mut core = feed_core(json!([entry]));
+        // The view declares no detail fields; the block alone makes the
+        // entry openable. Closed, there is no diff to act on.
+        let context = core.key_context();
+        assert!(context.focused_row_expandable && !context.focused_row_expanded);
+        assert_eq!(context.diff, None);
+        assert!(open_diff(&core).is_none());
+
+        press_key(&mut core, RyeOsKey::ArrowRight);
+        let diff = open_diff(&core).expect("the opened entry draws its diff");
+        assert_eq!(diff.total_rows, 6);
+        assert_eq!(diff.cursor, None);
+        let line = &diff.rows[4];
+        assert_eq!(
+            (line.mark, line.old_no, line.new_no, line.text.as_str()),
+            (Some('-'), Some(4), None, "old")
+        );
+        assert_eq!(
+            core.key_context().diff,
+            Some(crate::ui::keymap::RyeOsDiffKeyContext { inside: false })
+        );
+
+        // Right steps in; the file key and the arrows move the diff's own
+        // cursor, not the timeline point.
+        press_key(&mut core, RyeOsKey::ArrowRight);
+        assert_eq!(open_diff(&core).unwrap().cursor, Some(0));
+        press_key(&mut core, RyeOsKey::Char(']'));
+        assert_eq!(open_diff(&core).unwrap().cursor, Some(1));
+        press_key(&mut core, RyeOsKey::ArrowDown);
+        assert_eq!(open_diff(&core).unwrap().cursor, Some(2));
+        assert_eq!(timeline_entries(&core).len(), 1);
+
+        let effects = press_key(&mut core, RyeOsKey::Char('y'));
+        assert!(
+            matches!(
+                effects.as_slice(),
+                [RyeOsEffect { kind: RyeOsEffectKind::CopyToClipboard { text }, .. }]
+                    if text == "--- a/src/a.rs\n+++ b/src/a.rs\n@@ -3,2 +3,2 @@\n keep\n-old\n+new\n"
+            ),
+            "got {effects:?}"
+        );
+
+        // Closing the file under the cursor leaves its header; Escape returns
+        // to the entry, and Left then closes the entry.
+        press_key(&mut core, RyeOsKey::ArrowUp);
+        press_key(&mut core, RyeOsKey::Enter);
+        let closed = open_diff(&core).unwrap();
+        assert_eq!(closed.total_rows, 2);
+        assert_eq!(closed.rows[1].collapsed, Some(true));
+        press_key(&mut core, RyeOsKey::Escape);
+        assert_eq!(open_diff(&core).unwrap().cursor, None);
+        assert_eq!(
+            core.key_context().diff,
+            Some(crate::ui::keymap::RyeOsDiffKeyContext { inside: false })
+        );
+        press_key(&mut core, RyeOsKey::ArrowLeft);
+        assert!(open_diff(&core).is_none());
+        assert_eq!(core.key_context().diff, None);
     }
 
     #[test]

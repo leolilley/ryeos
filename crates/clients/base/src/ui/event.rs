@@ -474,6 +474,11 @@ pub enum RyeOsUiEvent {
     },
     /// Fold or unfold the cluster under the point in the focused feed.
     ToggleTimelineFold,
+    /// Act inside the open diff under the point: move its cursor, open or
+    /// close a file or a fold, copy it.
+    Diff {
+        action: super::diff::RyeOsDiffAction,
+    },
     /// Step back up the execution-drill stack: restore the view a step-in left
     /// and the facet context it read. The "return" half of the debugger drill;
     /// no-op at the top of the tree.

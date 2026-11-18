@@ -95,7 +95,8 @@ fn file(lines: &[&str], at: &mut usize) -> Option<RawFile> {
 
     let mut sides: Option<(Side, Side)> = None;
     let mut hunks = Vec::new();
-    if let Some(old) = lines.get(*at).and_then(|line| line.strip_prefix("--- ")) {
+    // A binary file has no text headers: a `---` after it starts another file.
+    if !binary && let Some(old) = lines.get(*at).and_then(|line| line.strip_prefix("--- ")) {
         let new = lines.get(*at + 1)?.strip_prefix("+++ ")?;
         sides = Some((side(old)?, side(new)?));
         *at += 2;

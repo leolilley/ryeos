@@ -2685,6 +2685,7 @@ impl RyeOsCore {
             focused_timeline_entry: timeline_keys.entry,
             focused_timeline_foldable: timeline_keys.foldable,
             focused_source_failed: timeline_keys.source_failed,
+            diff: self.focused_diff_key_context(),
             field: super::keymap::focused_field_key_context(self),
         }
     }
@@ -2784,8 +2785,8 @@ impl RyeOsCore {
             .tiles
             .get(&tile_id)?;
         let binding = self.binding_for_instance(&tile.instance_key, &tile.view.view_ref)?;
-        let (key, _, fields) = self.focused_expandable_row(tile_id, binding)?;
-        if fields.is_empty() {
+        let (key, record, fields) = self.focused_expandable_row(tile_id, binding)?;
+        if fields.is_empty() && !super::diff::has_blocks(&record) {
             return None;
         }
         let expanded = match &tile.local {
@@ -2843,10 +2844,10 @@ impl RyeOsCore {
         else {
             return false;
         };
-        let Some((key, _, fields)) = self.focused_expandable_row(tile_id, binding) else {
+        let Some((key, record, fields)) = self.focused_expandable_row(tile_id, binding) else {
             return false;
         };
-        if fields.is_empty() {
+        if fields.is_empty() && !super::diff::has_blocks(&record) {
             return false;
         }
         let Some(tile) = self
@@ -2977,7 +2978,7 @@ impl RyeOsCore {
         }
     }
 
-    fn focused_row_key_and_record(
+    pub(crate) fn focused_row_key_and_record(
         &self,
         tile_id: crate::ids::TileId,
         binding: &super::content::ViewBinding,

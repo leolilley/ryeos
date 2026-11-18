@@ -667,6 +667,7 @@ impl RyeOsCore {
                 .map_or_else(Vec::new, |intent| self.dispatch_intent(intent)),
             RyeOsUiEvent::TimelineEntry { action } => self.timeline_entry_action(action),
             RyeOsUiEvent::ToggleTimelineFold => self.toggle_timeline_fold(),
+            RyeOsUiEvent::Diff { action } => self.diff_action(action),
             RyeOsUiEvent::PopLens => self.pop_view(),
         }
     }

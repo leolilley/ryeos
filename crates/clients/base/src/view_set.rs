@@ -170,6 +170,10 @@ pub enum ViewLocalState {
         /// the flash carries the transition's tone when there was one.
         #[serde(default)]
         changed_rows: BTreeMap<String, RowFlash>,
+        /// The operator's choices inside a drawn diff (cursor, open files and
+        /// folds), keyed by the stable identity of the record that carries it.
+        #[serde(default)]
+        diffs: BTreeMap<String, crate::ui::diff::DiffLocalState>,
     },
     Field(FieldLocalState),
     #[default]
@@ -206,6 +210,7 @@ impl ViewSpec {
             expanded_rows: BTreeSet::new(),
             collapsed_tree_rows: BTreeSet::new(),
             changed_rows: BTreeMap::new(),
+            diffs: BTreeMap::new(),
         }
     }
 

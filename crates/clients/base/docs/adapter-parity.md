@@ -183,6 +183,7 @@ exact `InputAt` addresses; character-level events remain shared keymap paths.
 | [x] `ActivateFocused` | shared | shared | shared keymap |
 | [x] `TimelineEntry` | shared | shared | shared keymap |
 | [x] `ToggleTimelineFold` | shared | shared | shared keymap |
+| [x] `Diff` | shared | shared | shared keymap |
 | [x] `PopLens` | shared | shared | drill return |
 <!-- parity:RyeOsUiEvent:end -->
 

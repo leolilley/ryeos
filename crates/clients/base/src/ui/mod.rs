@@ -20,6 +20,7 @@ pub mod composition_replay;
 mod composition_subject_inputs_tests;
 pub mod composition_subjects;
 pub mod content;
+pub mod diff;
 pub mod dto;
 pub mod effect;
 pub mod event;

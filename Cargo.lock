@@ -4509,6 +4509,7 @@ name = "ryeos-client-base"
 version = "0.1.0"
 dependencies = [
  "bitflags 2.13.2",
+ "ryeos-changeset",
  "ryeos-engine",
  "ryeos-ui-presentation-contract",
  "serde",
