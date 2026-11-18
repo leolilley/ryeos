@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-18T07:27:32Z:f916d9aa951e2505013ae1d7522ad77e1a4c363b45c1442feba081bbe84b6904:jUdSmgKc7IGzAgU/ysJ2lNSelkeS1yn3wcvPstF+TafYqNBmb0VP00B5wYG/9c2ktSJrUgD/UVUNfVLVMSV4DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T11:49:26Z:8281ed5649bb88569f57097484764cb82c25dc0bdf1cb312b2fb789508792ad2:dNKinoJl5CT2Kin0NZGDHxOk0BTfwTvReVtwdEKV9YVAmAcx+7jYTqLud8CwuZzb5qEwE42Xu3hR654F+9TyBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: project-graphs
 title: Graphs
 version: "1.0.0"
@@ -17,6 +17,8 @@ sources:
     requires_project: true
 projections:
   columns:
+    - label: name
+      field: title
     - label: item
       field: canonical_ref
     - label: space

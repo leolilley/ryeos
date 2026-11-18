@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-18T07:27:32Z:4e4fbf54c9b18dacedb9b89b58820b0a037afc32ffc4d2b68f7052f7d69dde92:sysqz5JHEROU8cqCq/KLxLYstPds8AQ+pTign0u85tCtG4mgjvNlgQI9TgYBi3Ks0O6erWHZlPiq6gYFTvXbCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T11:49:26Z:2c4cb9acd04ed871a43779e63aa71a40b352f34892eae1b870d7ac2e8321f0a8:AYtB100jxSm9ErT9+pz7y7qKeIXjLHpZ5n7lharJ37CmuHE8yarKDBIGC+kAvemAPyml9dcKpRHBTu5IkQ7ADQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: project-knowledge
 title: Knowledge
 version: "1.0.0"
@@ -17,6 +17,8 @@ sources:
     requires_project: true
 projections:
   columns:
+    - label: name
+      field: title
     - label: item
       field: canonical_ref
     - label: namespace
