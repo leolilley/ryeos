@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-17T11:22:49Z:ccc0cb2d5e5f102856fc3a2a99aebb1ed5b3915b97b5b6f240047057a4f761ea:hctVpY4vyLSTnIZsC6kvwH6cQdMhgryh7btz951Er1M4Qi+3N4pQzgY3di9Nnta+fnovXTeqVHG53aCUgevWDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-17T17:48:41Z:e752c1a05126491d6e9260ab9d4fbbdb01ef7a8b071f1c1269ba79e2abeb07f4:jlHTpOd4/KsBya+oXMUioxXvidRxi0OFpEDpcBz64eBTFxXymd08TrV6YtXypwAxBlLvp1pU7gBSM/67pUGbBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/runtimes
 tags: [runtime, directive, llm, callbacks]
@@ -23,7 +23,7 @@ The events carry them:
 
 | Event | Payload |
 |---|---|
-| `cognition_frame` | What the model is given beside the conversation: `frame_seq`, `system` (text parts), `tool_inventory` (the hash of the attachment holding the inventory, repeated in `attachment_refs`), `request_options` (`model`, optional `reasoning`, `sampling`, `max_output_tokens`) and `provider_config` (the hash of the provider configuration in force). A changed frame on resume is recorded as the next `frame_seq`. |
+| `cognition_frame` | What the model is given beside the conversation: `frame_seq`, `system` (text parts), `tool_inventory` (the hash of the attachment holding the inventory, repeated in `attachment_refs`), `request_options` (`model`, optional `reasoning`, `sampling`, `max_output_tokens`) and `provider_config` (the hash of the provider configuration in force). A changed frame on resume is recorded as the next `frame_seq`, unless the provider entry's `schemas.frame_stability.refuse_change_of` lists a component that changed (`system`, `tools` or `reasoning`), in which case the launch fails with `frame_change_refused` before anything is recorded. |
 | `cognition_in` | One input: `origin`, `parts`, and optionally `kind`, `ack` and `pinned`; or a turn marker `{ turn, tools_offered? }`. An input too large for one event is split into hash-bound chunks that fold back into one input. |
 | `cognition_out` | One assistant turn: `turn`, `parts` in stream order, `finish` (the normalised finish reason, or `interrupted`), optional `usage`, `provider_accounting` and `malformed_calls` (`{call_index, raw_len, sha256}` for each tool call whose streamed arguments were not valid JSON; `call_index` counts `tool_call` parts). An interrupted turn carries no tool calls. Streaming fragments (`delta`, `tool_use_partial`) stay ephemeral. |
 | `tool_call_start` | `operation_id`, `call_id`, `tool`, `turn`, `call_index`, `effective_caps`, and `item_ref` when the call resolves to an item. |
