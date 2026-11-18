@@ -111,7 +111,8 @@ impl ItemTitleConfig {
             && (!rule.authored.is_empty() || rule.heading);
         if readable && let Some(source) = read() {
             // A parse can launch the kind's parser, so it runs only when one of
-            // the keys appears in the text at all; otherwise it cannot yield.
+            // the keys appears literally in the text. A key spelled only with
+            // escapes is missed, and the item shows its derived name.
             if rule
                 .authored
                 .iter()
