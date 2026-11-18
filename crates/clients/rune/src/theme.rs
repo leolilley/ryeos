@@ -257,7 +257,6 @@ pub const fn mono(style: TextStyle) -> TextStyle {
 /// tokens so every theme reaches every surface.
 pub struct Palette {
     pub bg: Color,
-    pub bar: Color,
     pub plane: Color,
     pub plane_raised: Color,
     pub plane_selected: Color,
@@ -271,8 +270,6 @@ pub struct Palette {
     pub yellow: Color,
     pub green: Color,
     pub red: Color,
-    /// Ink on a filled control.
-    pub on_accent: Color,
 }
 
 impl Palette {
@@ -284,7 +281,6 @@ impl Palette {
         let over = |opacity: f32| t.bg.mix(t.ink, opacity);
         Palette {
             bg: t.bg,
-            bar: over(0.02),
             plane: over(0.04),
             plane_raised: over(0.07),
             plane_selected: over(0.12),
@@ -298,7 +294,6 @@ impl Palette {
             yellow: t.warn,
             green: t.good,
             red: t.danger,
-            on_accent: t.bg,
         }
     }
 
@@ -337,15 +332,12 @@ pub const fn data(size: f32) -> TextStyle {
 }
 
 /// Fixed shell metrics, in points.
-pub const SYSTEM_HEIGHT: f32 = 28.0;
-pub const STRIP_HEIGHT: f32 = 53.0;
 pub const STATUS_HEIGHT: f32 = 28.0;
 
 /// Which embedded face a string is set in.
 #[derive(Clone, Copy, PartialEq)]
 pub enum Face {
     Ui,
-    Data,
 }
 
 /// Core-projected text with each symbol its face lacks replaced by one it has.
@@ -358,11 +350,8 @@ pub fn drawable(text: &str, face: Face) -> std::borrow::Cow<'_, str> {
             // Neither face has the small triangles.
             ('▸', _) => Some("›"),
             ('▾', Face::Ui) => Some("⌄"),
-            ('▾', Face::Data) => Some("↓"),
-            // Inter has no partial block; IBM Plex Mono does.
+            // Inter has no partial block.
             ('▍', Face::Ui) => Some("|"),
-            // IBM Plex Mono has no erase-left key symbol.
-            ('⌫', Face::Data) => Some("Bksp"),
             _ => None,
         }
     };
@@ -521,11 +510,9 @@ mod tests {
 
     #[test]
     fn missing_symbols_are_swapped_for_the_face_in_use() {
-        assert_eq!(drawable("Earlier ▸", Face::Data), "Earlier ›");
+        assert_eq!(drawable("Earlier ▸", Face::Ui), "Earlier ›");
         assert_eq!(drawable("▍ working…", Face::Ui), "| working…");
-        assert_eq!(drawable("▍ working…", Face::Data), "▍ working…");
-        assert_eq!(drawable("⌫ back", Face::Data), "Bksp back");
-        assert_eq!(drawable("▾ open", Face::Data), "↓ open");
+        assert_eq!(drawable("▾ open", Face::Ui), "⌄ open");
         assert_eq!(drawable("plain", Face::Ui), "plain");
     }
 }

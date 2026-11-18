@@ -326,6 +326,10 @@ fn the_system_bar_never_shows_the_project_path() {
     }
 }
 
+/// The status bar is two floating islands: the launcher with the key hint, and
+/// the core's segments with the node's health. It shows exactly the segments
+/// (as the core words them, not upper-cased) and the launcher's name, and
+/// carries no product name.
 #[test]
 fn the_status_bar_shows_only_its_segments() {
     let rt = shell("", (1280.0, 800.0));
@@ -342,29 +346,37 @@ fn the_status_bar_shows_only_its_segments() {
     let expected: Vec<String> = status
         .segments
         .iter()
-        .map(|segment| {
-            match segment.label.as_deref().filter(|label| !label.is_empty()) {
+        .map(
+            |segment| match segment.label.as_deref().filter(|label| !label.is_empty()) {
                 Some(label) => format!("{label} {}", segment.value),
                 None => segment.value.clone(),
-            }
-            .to_uppercase()
-        })
+            },
+        )
         .collect();
+    // The islands share one row; read the whole band the launcher sits in.
     let shown = texts_in_band(&rt, top, top + height);
+    assert!(
+        shown.contains(&"Launch".to_owned()),
+        "the launch control's name in {shown:?}"
+    );
     for segment in &expected {
-        assert!(shown.contains(segment), "segment {segment:?} in {shown:?}");
+        // A segment's label and value are separate texts beside a dot.
+        let mut words = segment.splitn(2, ' ');
+        let first = words.next().unwrap_or_default();
+        assert!(
+            shown.iter().any(|text| text == segment || text == first),
+            "segment {segment:?} in {shown:?}"
+        );
+        if let Some(rest) = words.next() {
+            assert!(
+                shown.iter().any(|text| text == segment || text == rest),
+                "segment {segment:?} in {shown:?}"
+            );
+        }
     }
     assert!(
-        shown.contains(&"RYEOS".to_owned()),
-        "the launch control's name"
-    );
-    let others: Vec<&String> = shown
-        .iter()
-        .filter(|text| *text != "RYEOS" && !expected.contains(text))
-        .collect();
-    assert!(
-        others.len() <= 1,
-        "only the key hint may follow the segments, found {others:?}"
+        !shown.iter().any(|text| text.eq_ignore_ascii_case("RYEOS")),
+        "the status bar carries no product name, found {shown:?}"
     );
     assert!(
         !shown.iter().any(|text| text.contains("/home/")),
@@ -466,18 +478,25 @@ fn long_lists_build_only_the_rows_in_view_and_the_feed_opens_at_its_end() {
     assert!(!texts.iter().any(|text| text == "Step 1 of the run."));
 }
 
-/// RyeOS fills the bottom-left corner and opens the launcher; the open
-/// Surfaces run along the top from the left, the current one filled, with
-/// the node's status at the right; the two bars are the same height.
+/// The open Surfaces are a switcher of small chips pinned in from the top-left
+/// corner; the status islands float in from the bottom-left corner, with the
+/// node's health in the bottom band.
 #[test]
-fn ryeos_holds_the_bottom_left_corner_and_the_bars_match() {
+fn the_switcher_holds_the_left_edge_and_the_status_islands_float() {
     let (width, height) = (1280.0, 800.0);
+    // The islands and the switcher sit about 10 in from the edges, plus their
+    // own padding.
+    let near = 24.0;
     let rt = shell("", (width, height));
-    let [x, y, _, bottom] = keyed(&rt, "shell:launch").expect("the launch control is drawn");
-    assert_eq!(x, 0.0, "RyeOS starts at the left edge");
+    let [x, y, _, tall] = keyed(&rt, "shell:launch").expect("the launch control is drawn");
     assert!(
-        (y + bottom - height).abs() < 0.5,
-        "RyeOS reaches the bottom edge"
+        x > 0.0 && x <= near,
+        "the launch control is inset from the left edge, at {x}"
+    );
+    let gap = height - (y + tall);
+    assert!(
+        gap > 0.0 && gap <= near,
+        "the island floats just above the bottom edge, {gap} away"
     );
     let vm = model(&rt);
     let current = vm
@@ -486,21 +505,21 @@ fn ryeos_holds_the_bottom_left_corner_and_the_bars_match() {
         .iter()
         .find(|surface| surface.active)
         .expect("the fixture has a current Surface");
-    let [_, top, _, tall] = keyed(&rt, &format!("surface:{:?}", current.surface_instance_id))
-        .expect("the current Surface is in the top bar");
-    assert!(top.abs() < 0.5, "the Surfaces sit in the top bar");
+    let [sx, sy, sw, _] = keyed(&rt, &format!("surface:{:?}", current.surface_instance_id))
+        .expect("the current Surface is a chip in the switcher");
     assert!(
-        (tall - bottom).abs() <= 1.0,
-        "top {tall} and bottom {bottom} bars match"
+        sx > 0.0 && sx <= near && sy > 0.0 && sy <= near,
+        "the switcher is pinned in from the top-left corner, at ({sx}, {sy})"
     );
+    assert!(sw <= 40.0, "the Surface chip is narrow, {sw} wide");
     let status = rt
         .elements()
         .into_iter()
         .find(|element| element.role == "status")
-        .expect("the node's status is in the top bar");
+        .expect("the node's status is in the status bar");
     assert!(
-        status.rect[0] > width / 2.0,
-        "the node's status sits at the right, not at {}",
-        status.rect[0]
+        status.rect[1] > height / 2.0,
+        "the node's status sits in the bottom band, not at {}",
+        status.rect[1]
     );
 }

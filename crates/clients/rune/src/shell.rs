@@ -7,7 +7,7 @@ use ryeos_client_base::layout::SplitBranch;
 use ryeos_client_base::ui::event::{RyeOsInputAction, RyeOsTransportFreshness};
 use ryeos_client_base::ui::view_model::{
     RyeOsDialogVm, RyeOsInputVm, RyeOsLayoutNodeVm, RyeOsNoticeVm, RyeOsSplitAxisVm,
-    RyeOsStatusBarVm, RyeOsSurfaceChoiceVm, RyeOsTileIntentVm, RyeOsTone, RyeOsTopBarVm,
+    RyeOsSurfaceChoiceVm, RyeOsTileIntentVm, RyeOsTone, RyeOsTopBarVm,
     RyeOsViewModel, RyeOsViewSetVm,
 };
 use ryeos_client_base::ui::{RyeOsUiEvent, RyeOsUiIntent};
