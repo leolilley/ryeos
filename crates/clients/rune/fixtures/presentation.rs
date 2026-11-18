@@ -39,6 +39,11 @@ const EXECUTION: &str =
 const BUILD_DEPLOY: &str = include_str!("../../base/tests/fixtures/field/build-deploy-live.json");
 const TIMELINE: &str =
     include_str!("../../../../bundles/ryeos-ui/.ai/views/ryeos/chain/timeline.yaml");
+const TRANSCRIPT: &str =
+    include_str!("../../../../bundles/ryeos-ui/.ai/views/ryeos/thread/transcript.yaml");
+const CONVERSATION: &str =
+    include_str!("../../../../bundles/ryeos-ui/.ai/views/ryeos/thread/conversation.yaml");
+const CONVERSATION_REF: &str = "view:ryeos/thread/conversation";
 const SCHEDULES: &str =
     include_str!("../../../../bundles/ryeos-ui/.ai/views/ryeos/schedules/list.yaml");
 const SURFACES: &str =
@@ -55,7 +60,7 @@ fn response(view_ref: &str, scene: &str) -> Option<Value> {
         return long_response(view_ref);
     }
     if is_timeline_scene(scene) {
-        return (view_ref == "view:ryeos/chain/timeline").then(demo_timeline);
+        return (view_ref == CONVERSATION_REF).then(|| demo_timeline(scene == "timeline-top"));
     }
     if scene == "states" {
         return states_response(view_ref);
@@ -182,6 +187,17 @@ fn timeline(named_chain: bool) -> Result<Value, String> {
     Ok(definition)
 }
 
+/// The conversation view as the resolver gives it: the transcript it extends,
+/// with its own title and composer, naming the chain directly.
+fn conversation() -> Result<Value, String> {
+    let mut definition = view(TRANSCRIPT)?;
+    let own = view(CONVERSATION)?;
+    definition["title"] = own["title"].clone();
+    definition["input"] = own["input"].clone();
+    definition["sources"]["default"]["params"]["chain_root_id"] = json!("chain-demo");
+    Ok(definition)
+}
+
 /// The draft the `timeline-draft` scene types.
 const DRAFT: &str = "Retry the fetch with a longer timeout, and read the retry settings first.";
 
@@ -203,7 +219,7 @@ fn find_input(value: &Value) -> Option<ryeos_client_base::ui::view_model::RyeOsI
 }
 
 fn is_timeline_scene(scene: &str) -> bool {
-    matches!(scene, "timeline" | "timeline-draft")
+    matches!(scene, "timeline" | "timeline-draft" | "timeline-top")
 }
 
 /// The `states` scene: the first table answers with no rows, the second is
@@ -228,7 +244,7 @@ fn with_tone(mut entry: Value, tone: &str) -> Value {
 /// activities in each state, a link, long entries, an answered ask, an
 /// outcome, two pending asks, and a closing cluster. The lane waits on the
 /// first pending ask.
-fn demo_timeline() -> Value {
+fn demo_timeline(top: bool) -> Value {
     let entry = |id: &str, kind: &str, slots: Value| fixture_entry(id, kind, "x1", slots);
     let done = |id: &str, headline: &str, detail: &str, badge: Option<&str>| {
         let mut slots = json!({ "headline": headline, "detail": detail });
@@ -241,8 +257,7 @@ fn demo_timeline() -> Value {
         value.as_object_mut().map(|map| map.remove("item"));
         value
     };
-    let long_body = "The retry loop waits a fixed interval between attempts and gives up after the          third one, so a slow response that would have arrived on the fourth is reported as a          failure. Raising the limit helps only when the server is merely slow; when it is          refusing connections the same change just delays the error. "
-        .repeat(8);
+    let long_body = "The retry loop waits a fixed interval between attempts and gives up after the third one, so a slow response that would have arrived on the fourth is reported as a failure. Raising the limit helps only when the server is merely slow; when it is refusing connections the same change just delays the error. ".repeat(3);
     let pending_ask = |id: &str, headline: &str, detail: &str, allowed: bool| {
         with_tone(
             with_state(
@@ -372,6 +387,34 @@ fn demo_timeline() -> Value {
             ]
         }),
     ];
+    // The top scene keeps the start of the conversation and the asks, so the
+    // whole of it fits one frame.
+    let items: Vec<Value> = if top {
+        items
+            .into_iter()
+            .filter(|item| {
+                matches!(
+                    item["id"].as_str(),
+                    Some(
+                        "rc:e0"
+                            | "mk1"
+                            | "m1"
+                            | "t1"
+                            | "p1"
+                            | "a1"
+                            | "a2"
+                            | "a3"
+                            | "a4"
+                            | "l1"
+                            | "k1"
+                            | "k2"
+                    )
+                )
+            })
+            .collect()
+    } else {
+        items
+    };
     json!({
         "timeline_contract": TIMELINE_CONTRACT_VERSION, "chain_root_id": "chain-demo",
         "older": 0, "next_limit": null, "highest_chain_seq": 40,
@@ -399,7 +442,7 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
             "view:ryeos/threads/history"
         ])
     } else if is_timeline_scene(scene) {
-        json!(["view:ryeos/chain/timeline"])
+        json!([CONVERSATION_REF])
     } else if scene == "states" {
         json!([
             "view:ryeos/threads/history",
@@ -418,7 +461,8 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
         "views": {
             "view:ryeos/threads/history": view(THREADS)?,
             "view:ryeos/development/execution": execution()?,
-            "view:ryeos/chain/timeline": timeline(scene == "long" || is_timeline_scene(scene))?,
+            "view:ryeos/chain/timeline": timeline(scene == "long")?,
+            CONVERSATION_REF: conversation()?,
             "view:ryeos/schedules/list": view(SCHEDULES)?,
             "view:ryeos/surfaces/list": view(SURFACES)?
         }
@@ -549,11 +593,13 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
     // The scene picks what is open when the frame is drawn.
     match scene {
         "" | "field" | "long" | "states" => {}
-        "timeline" | "timeline-draft" => {
+        "timeline" | "timeline-draft" | "timeline-top" => {
             // The newest group is opened, so an opened group is drawn too.
-            core.dispatch(RyeOsEvent::Ui {
-                event: RyeOsUiEvent::ToggleTimelineFold,
-            });
+            if scene != "timeline-top" {
+                core.dispatch(RyeOsEvent::Ui {
+                    event: RyeOsUiEvent::ToggleTimelineFold,
+                });
+            }
             if scene == "timeline-draft" {
                 let vm = ryeos_client_base::ui::view_model::build_view_model(&core);
                 let input = serde_json::to_value(&vm)

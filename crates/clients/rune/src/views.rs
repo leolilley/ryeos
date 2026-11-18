@@ -1533,6 +1533,8 @@ fn timeline_view(
     let mut column = col()
         .w_full()
         .max_w(TIMELINE_COLUMN + 2.0 * SELECT_REACH)
+        .pt(TIMELINE_PAD.top)
+        .pb(TIMELINE_PAD.bottom)
         .gap(TIMELINE_GAP);
     if let Some(status) = status {
         column = column.child(status);
@@ -1547,8 +1549,6 @@ fn timeline_view(
         .shrink()
         .min_h(0.0)
         .px(TIMELINE_PAD.x)
-        .pt(TIMELINE_PAD.top)
-        .pb(TIMELINE_PAD.bottom)
         .items_center()
         .label(title.to_owned())
         .scroll(ScrollSpec { stick_bottom: true })
