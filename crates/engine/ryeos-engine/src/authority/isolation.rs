@@ -2075,17 +2075,14 @@ impl IsolationRuntime {
         &self,
         allocation: &lillux::ProcessScopeAllocation,
     ) -> Result<lillux::ProcessScope, EngineError> {
-        // Allocation creates a kernel resource that only this function
-        // retires on a lost generation, so it always verifies for itself,
-        // also inside a guarded operation.
-        self.verify_registered_generation_now()?;
+        self.ensure_registered_generation_current()?;
         let timeout = self.process_scope_control_timeout()?;
         let provider = self
             .process_scope_provider
             .as_ref()
             .ok_or_else(|| refused("node process-scope qualification is unavailable".to_owned()))?;
         let scope = provider.allocate(allocation).map_err(refused)?;
-        if let Err(error) = self.verify_registered_generation_now() {
+        if let Err(error) = self.ensure_registered_generation_current() {
             let retirement = provider.retire(scope.recovery(), timeout);
             return Err(refused(format!(
                 "process-scope reservation lost its generation: {error}; retirement: {retirement:?}; recovery: {:?}",
@@ -2175,26 +2172,11 @@ impl IsolationRuntime {
         self.generation_registered_bundle_roots.as_deref()
     }
 
-    /// Verification point for the retained bundle generation.
-    ///
-    /// Inside a [`Self::with_verified_generation`] operation for this same
-    /// generation on the calling thread, the operation's own before and after
-    /// verification covers this point and nothing is re-verified. Everywhere
-    /// else this verifies every installed bundle now.
+    /// Verify every installed bundle of the retained generation now. This
+    /// always verifies, also inside a guarded operation: every caller that is
+    /// about to launch a workload, allocate a resource or commit a write keeps
+    /// its own real check immediately before that effect.
     pub fn ensure_registered_generation_current(&self) -> Result<(), EngineError> {
-        if self
-            .registered_generation_identity
-            .is_some_and(generation_scope::is_covered)
-        {
-            return Ok(());
-        }
-        self.verify_registered_generation_now()
-    }
-
-    /// Verify every installed bundle of the retained generation now, whether
-    /// or not the caller is inside a guarded operation. A caller about to
-    /// commit an effect it cannot undo uses this as its last check.
-    pub fn verify_registered_generation_now(&self) -> Result<(), EngineError> {
         match &self._generation_lifeline {
             Some(lifeline) => {
                 let started = std::time::Instant::now();
@@ -2208,13 +2190,39 @@ impl IsolationRuntime {
         }
     }
 
+    /// Verification point of work that commits nothing: it only produces a
+    /// value which the enclosing guarded operation refuses if its
+    /// after-verification fails.
+    ///
+    /// Inside a [`Self::with_verified_generation`] operation for this same
+    /// generation on the calling thread, the operation's own before and after
+    /// verification covers this point and nothing is re-verified. Everywhere
+    /// else this verifies every installed bundle now.
+    ///
+    /// The only callers are the launch of a handler subprocess
+    /// ([`Self::apply_handler_launch`]) and, through
+    /// [`Self::with_verified_generation`], a nested guarded operation.
+    pub(crate) fn ensure_registered_generation_current_unless_covered(
+        &self,
+    ) -> Result<(), EngineError> {
+        if self
+            .registered_generation_identity
+            .is_some_and(generation_scope::is_covered)
+        {
+            return Ok(());
+        }
+        self.ensure_registered_generation_current()
+    }
+
     /// Run `operation` against the retained bundle generation, verified once
     /// before and once after. A failed after-verification refuses the
     /// operation's result.
     ///
     /// The token passed to `operation` names the verified generation. While
-    /// `operation` runs, verification points for that generation reached on
-    /// the calling thread are covered by this operation's two verifications.
+    /// `operation` runs, a nested guarded operation and a handler subprocess
+    /// launch for that generation on the calling thread are covered by this
+    /// operation's two verifications. Every other verification point still
+    /// verifies for itself.
     /// Nested inside an operation for the same generation, this adds no
     /// verification of its own; the outermost operation's after-verification
     /// still runs and still refuses its result.
@@ -2231,16 +2239,18 @@ impl IsolationRuntime {
         ) {
             (Some(_), Some(identity)) => generation_scope::run_verified(
                 identity,
-                || self.verify_registered_generation_now().map_err(E::from),
+                || self.ensure_registered_generation_current().map_err(E::from),
                 operation,
             ),
             // A lifeline is always retained together with its identity; an
             // unidentified one could not be matched by any enclosed
             // verification point, so nothing is ever covered for it.
             (Some(_), None) => {
-                self.verify_registered_generation_now().map_err(E::from)?;
+                self.ensure_registered_generation_current()
+                    .map_err(E::from)?;
                 let value = generation_scope::run_unregistered(operation)?;
-                self.verify_registered_generation_now().map_err(E::from)?;
+                self.ensure_registered_generation_current()
+                    .map_err(E::from)?;
                 Ok(value)
             }
             (None, _) => generation_scope::run_unregistered(operation),
@@ -2713,6 +2723,39 @@ impl IsolationRuntime {
             );
             applied.request
         })
+    }
+
+    /// Apply this immutable policy snapshot to the launch of one handler
+    /// subprocess: a parser, composer, validator or evidence projector.
+    ///
+    /// A handler is launched by its exact verified executable digest, sees
+    /// installed bundle roots read-only, is given no writable mount, and
+    /// returns only a value. Launching one commits nothing. Inside a guarded
+    /// operation for this generation its result is refused together with the
+    /// operation's when the after-verification fails, so the launch does not
+    /// verify the generation again there. Outside a guarded operation it
+    /// verifies before and after, as every other launch does.
+    pub(crate) fn apply_handler_launch(
+        &self,
+        request: lillux::SubprocessRequest,
+        context: IsolationLaunchContext<'_>,
+    ) -> Result<lillux::SubprocessRequest, EngineError> {
+        self.ensure_registered_generation_current_unless_covered()?;
+        let applied = self.apply_with_provenance_current(
+            request,
+            context,
+            RequestedLaunchLifecycle::Run,
+            RetainedContainment::Group,
+            None,
+            None,
+            None,
+        )?;
+        self.ensure_registered_generation_current_unless_covered()?;
+        tracing::debug!(
+            isolation = ?applied.provenance,
+            "compiled isolation launch provenance"
+        );
+        Ok(applied.request)
     }
 
     pub fn apply_with_provenance(

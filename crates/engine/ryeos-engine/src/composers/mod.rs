@@ -309,6 +309,16 @@ impl ComposerRegistry {
                 .collect(),
         };
 
+        // What a cache hit skips, because no process is launched: the
+        // per-launch check that the executable on disk still has its admitted
+        // digest, and, outside a guarded operation, the per-launch
+        // verification of the installed bundles. The executable digest in
+        // the key is the one recorded when the handler registry was loaded.
+        // A held response was produced by a launch that passed both checks
+        // for that same digest, so what is served is still the admitted
+        // binary's output for this exact request. A hit never vouches for
+        // the bundles as they are now: that remains the enclosing guarded
+        // operation's verification.
         let success = match bound.result_cache_key(&self.handler_registry_fingerprint, &request) {
             Some(key) => self
                 .results

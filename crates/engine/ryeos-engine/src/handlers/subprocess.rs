@@ -173,7 +173,7 @@ fn launch_handler(
         source_path: binary_path,
         content_hash: binary_hash,
     }];
-    let req = launch.isolation.apply(
+    let req = launch.isolation.apply_handler_launch(
         req,
         IsolationLaunchContext {
             immutable_project: None,

@@ -1070,7 +1070,7 @@ impl CheckedEngineGeneration<'_> {
     pub fn verify_before_commit(&self) -> Result<(), EngineError> {
         self.engine
             .isolation_generation
-            .verify_registered_generation_now()
+            .ensure_registered_generation_current()
     }
 
     pub fn resolve(
@@ -1731,10 +1731,12 @@ impl Engine {
     ///
     /// The generation is verified once before `operation` and once after it,
     /// and a failed after-verification refuses the result. Guarded engine
-    /// calls and handler launches that `operation` makes for the same
-    /// generation are covered by those two verifications and do not verify
-    /// again. A guarded call nested inside another for the same generation
-    /// therefore adds none; the outermost call keeps both of its own.
+    /// calls and handler subprocess launches that `operation` makes for the
+    /// same generation commit nothing themselves, are covered by those two
+    /// verifications and do not verify again. A guarded call nested inside
+    /// another for the same generation therefore adds none; the outermost
+    /// call keeps both of its own. Launch compilation for workloads and
+    /// process-scope planning and allocation still verify for themselves.
     pub fn with_checked_bundle_generation<T, E>(
         &self,
         operation: impl FnOnce(&CheckedEngineGeneration<'_>) -> Result<T, E>,
@@ -5438,7 +5440,7 @@ formats:
                         .clone()
                         .with_checked_bundle_generation(|_| -> Result<(), EngineError> { Ok(()) })
                 })?;
-                isolation.ensure_registered_generation_current()?;
+                isolation.ensure_registered_generation_current_unless_covered()?;
                 assert_eq!(lifeline.checks.load(Ordering::SeqCst), 1);
                 Ok(())
             })
@@ -5456,11 +5458,57 @@ formats:
         );
     }
 
+    /// Only work that commits nothing is covered. The verification in front
+    /// of a workload launch, a resource allocation or a write, and an
+    /// explicit commit point, verify inside a guarded operation too.
+    #[test]
+    fn effect_side_verification_is_never_covered() {
+        let (engine, lifeline, isolation) = engine_with_counted_generation();
+
+        engine
+            .with_checked_bundle_generation(|generation| -> Result<(), EngineError> {
+                assert_eq!(lifeline.checks.load(Ordering::SeqCst), 1);
+                // The covered kind: a handler launch's verification point.
+                isolation.ensure_registered_generation_current_unless_covered()?;
+                assert_eq!(lifeline.checks.load(Ordering::SeqCst), 1);
+                // The effect-side kind, as used by launch compilation and
+                // process-scope planning and allocation.
+                isolation.ensure_registered_generation_current()?;
+                assert_eq!(lifeline.checks.load(Ordering::SeqCst), 2);
+                isolation.admission_class_provenance()?;
+                assert_eq!(lifeline.checks.load(Ordering::SeqCst), 4);
+                generation.verify_before_commit()?;
+                assert_eq!(lifeline.checks.load(Ordering::SeqCst), 5);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(lifeline.checks.load(Ordering::SeqCst), 6);
+
+        // A change during the operation is seen by the effect-side point at
+        // once, before any effect, not only by the after-verification.
+        let refused = engine.with_checked_bundle_generation(|_| -> Result<(), EngineError> {
+            lifeline.changed.store(true, Ordering::SeqCst);
+            isolation.ensure_registered_generation_current_unless_covered()?;
+            isolation.ensure_registered_generation_current()
+        });
+        assert!(matches!(
+            refused,
+            Err(EngineError::IsolationPolicyRefused { .. })
+        ));
+        assert_eq!(
+            lifeline.checks.load(Ordering::SeqCst),
+            8,
+            "the before-verification and the refusing effect-side point"
+        );
+    }
+
     #[test]
     fn verification_outside_a_guarded_operation_always_verifies() {
         let (engine, lifeline, isolation) = engine_with_counted_generation();
 
-        isolation.ensure_registered_generation_current().unwrap();
+        isolation
+            .ensure_registered_generation_current_unless_covered()
+            .unwrap();
         assert_eq!(lifeline.checks.load(Ordering::SeqCst), 1);
 
         engine
@@ -5469,7 +5517,9 @@ formats:
         assert_eq!(lifeline.checks.load(Ordering::SeqCst), 3);
 
         // The operation has ended: nothing it verified covers a later call.
-        isolation.ensure_registered_generation_current().unwrap();
+        isolation
+            .ensure_registered_generation_current_unless_covered()
+            .unwrap();
         engine
             .with_checked_bundle_generation(|_| -> Result<(), EngineError> { Ok(()) })
             .unwrap();
@@ -5481,7 +5531,9 @@ formats:
         });
         assert!(failed.is_err());
         assert_eq!(lifeline.checks.load(Ordering::SeqCst), 7);
-        isolation.ensure_registered_generation_current().unwrap();
+        isolation
+            .ensure_registered_generation_current_unless_covered()
+            .unwrap();
         assert_eq!(lifeline.checks.load(Ordering::SeqCst), 8);
     }
 
@@ -5493,7 +5545,7 @@ formats:
         outer
             .with_checked_bundle_generation(|_| -> Result<(), EngineError> {
                 // The enclosing operation verified `outer`'s generation only.
-                inner_isolation.ensure_registered_generation_current()?;
+                inner_isolation.ensure_registered_generation_current_unless_covered()?;
                 assert_eq!(inner_lifeline.checks.load(Ordering::SeqCst), 1);
                 inner.with_checked_bundle_generation(|_| -> Result<(), EngineError> { Ok(()) })?;
                 assert_eq!(inner_lifeline.checks.load(Ordering::SeqCst), 3);
@@ -5515,7 +5567,7 @@ formats:
             // covered and do not notice.
             lifeline.changed.store(true, Ordering::SeqCst);
             engine.with_checked_bundle_generation(|_| -> Result<(), EngineError> { Ok(()) })?;
-            isolation.ensure_registered_generation_current()?;
+            isolation.ensure_registered_generation_current_unless_covered()?;
             assert_eq!(lifeline.checks.load(Ordering::SeqCst), 1);
 
             // A commit point verifies for itself and refuses before the effect.
@@ -5581,7 +5633,9 @@ formats:
 
         // The same thread and the same generation, outside any operation: a
         // verification point and a guarded call both verify for themselves.
-        isolation.ensure_registered_generation_current().unwrap();
+        isolation
+            .ensure_registered_generation_current_unless_covered()
+            .unwrap();
         assert_eq!(lifeline.checks.load(Ordering::SeqCst), 2);
         engine
             .with_checked_bundle_generation(|_| -> Result<(), EngineError> { Ok(()) })
@@ -5604,7 +5658,9 @@ formats:
                             // Covered work on the worker panics.
                             let unwound = catch_unwind(AssertUnwindSafe(|| {
                                 generation.verified.cover_current_thread::<()>(|| {
-                                    isolation.ensure_registered_generation_current().unwrap();
+                                    isolation
+                                        .ensure_registered_generation_current_unless_covered()
+                                        .unwrap();
                                     assert_eq!(lifeline.checks.load(Ordering::SeqCst), 1);
                                     panic!("batch worker panicked")
                                 })
@@ -5613,14 +5669,16 @@ formats:
 
                             // The same worker thread afterwards is uncovered:
                             // its verification point verifies for itself.
-                            isolation.ensure_registered_generation_current().unwrap();
+                            isolation
+                                .ensure_registered_generation_current_unless_covered()
+                                .unwrap();
                             assert_eq!(lifeline.checks.load(Ordering::SeqCst), 2);
                         })
                         .join()
                         .unwrap();
                 });
                 // The operation's own thread is still covered.
-                isolation.ensure_registered_generation_current()?;
+                isolation.ensure_registered_generation_current_unless_covered()?;
                 assert_eq!(lifeline.checks.load(Ordering::SeqCst), 2);
                 Ok(())
             })
@@ -5643,7 +5701,7 @@ formats:
                     .with_checked_bundle_generation(|_| -> Result<(), EngineError> {
                         inside.send(()).unwrap();
                         wait_release.recv().unwrap();
-                        isolation.ensure_registered_generation_current()?;
+                        isolation.ensure_registered_generation_current_unless_covered()?;
                         Ok(())
                     })
                     .unwrap();
@@ -5653,13 +5711,15 @@ formats:
 
             // Meanwhile this thread, and a second operation on a third thread,
             // verify for themselves although the generation is the same.
-            isolation.ensure_registered_generation_current().unwrap();
+            isolation
+                .ensure_registered_generation_current_unless_covered()
+                .unwrap();
             assert_eq!(lifeline.checks.load(Ordering::SeqCst), 2);
             scope
                 .spawn(|| {
                     engine
                         .with_checked_bundle_generation(|_| -> Result<(), EngineError> {
-                            isolation.ensure_registered_generation_current()
+                            isolation.ensure_registered_generation_current_unless_covered()
                         })
                         .unwrap();
                 })
@@ -5690,7 +5750,7 @@ formats:
                     generation.verified.cover_current_thread(|| {
                         engine
                             .isolation_generation
-                            .ensure_registered_generation_current()
+                            .ensure_registered_generation_current_unless_covered()
                     })
                 });
                 assert!(covered.into_iter().all(|outcome| outcome.is_ok()));

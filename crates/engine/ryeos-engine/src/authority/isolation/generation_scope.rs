@@ -3,13 +3,16 @@
 //! The guarantee a guarded operation gives is "the installed bundles did not
 //! change while this ran": verify the generation, do the work, verify it
 //! again, and refuse the result if either verification fails. Work inside the
-//! operation often reaches further verification points for the same
-//! generation (a nested guarded engine call, the launch of a handler
-//! subprocess). Those add nothing to the guarantee, because the enclosing
-//! after-verification already covers everything that ran before it, and each
-//! of them re-verifies every installed bundle.
+//! operation reaches two further kinds of verification point for the same
+//! generation that commit nothing themselves: a nested guarded engine call,
+//! and the launch of a handler subprocess, which only returns a value. Those
+//! add nothing to the guarantee, because the enclosing after-verification
+//! already covers everything that ran before it, and each of them re-verifies
+//! every installed bundle. Verification points in front of an effect (a
+//! workload launch, a resource allocation, a write) are not covered and keep
+//! verifying for themselves.
 //!
-//! This module lets such an inner verification point see that it is enclosed:
+//! This module lets those two kinds of inner point see that they are enclosed:
 //!
 //! * [`VerifiedGeneration`] is the token of one enclosing operation. Only
 //!   [`run_verified`] creates it, and only after the before-verification has
@@ -19,8 +22,8 @@
 //!   cannot keep it.
 //! * While the operation's closure runs, the calling thread carries a marker
 //!   for that identity. [`is_covered`] answers whether the calling thread is
-//!   inside an operation for a given identity. A verification point for a
-//!   different generation is never covered.
+//!   inside an operation for a given identity. A point for a different
+//!   generation is never covered.
 //! * The marker is removed when the closure returns or unwinds, before the
 //!   after-verification runs. The after-verification is therefore always a
 //!   real one.
@@ -65,8 +68,9 @@ impl VerifiedGeneration {
     }
 
     /// Run `work` on the calling thread as part of this token's operation, so
-    /// verification points for the same generation reached by `work` are
-    /// covered by the operation's own before and after verification.
+    /// nested guarded operations and handler launches for the same generation
+    /// reached by `work` are covered by the operation's own before and after
+    /// verification.
     ///
     /// The engine uses this for worker threads that it starts and joins inside
     /// the operation. The token's borrow keeps `work` from outliving the
