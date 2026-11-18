@@ -820,35 +820,23 @@ impl SealedRootExecutionRequest {
     /// stricter stands, so neither can weaken the other. A policy with no
     /// minimum is held to the holding alone, and is refused without one.
     ///
-    /// On an enforced node a policy minimum of `trusted_process_group_absent`
-    /// is refused outright rather than raised to a containment: the trusted
-    /// process-group lane belongs to nodes that do not enforce isolation, and
-    /// the requirement is never silently upgraded.
+    /// A policy minimum is a floor. On an enforced node the node's own
+    /// retained containment always answers, so the requirement is at least
+    /// any qualified containment whatever the minimum (including
+    /// `trusted_process_group_absent`); the signed policy is not rewritten.
     pub fn process_containment_for_qualification_under(
         &self,
         selected_holding: Option<&ryeos_engine::protocols::ProtocolHolding>,
         enforced: bool,
     ) -> Result<super::ProcessContainmentRequirement> {
         use super::ProcessContainmentRequirement as Requirement;
-        use ryeos_state::external_content::products::qualification::VerifierProcessSettlementAuthority as Settlement;
         self.validate_qualification_purpose()?;
         let Some(purpose) = self.qualification.as_ref() else {
             return Ok(Requirement::None);
         };
-        if enforced
-            && purpose
-                .policy_source
-                .policy
-                .minimum_verifier_process_settlement
-                == Some(Settlement::TrustedProcessGroupAbsent)
-        {
-            bail!(
-                "the trusted process-group lane is never a substitute under enforcement; an enforced node settles direct verifiers by retained containment, but the signed verifier policy names a `trusted_process_group_absent` minimum"
-            );
-        }
         let from_holding =
             selected_holding.map(|holding| Requirement::for_settlement(holding.root_settlement));
-        match (
+        let requirement = match (
             purpose
                 .policy_source
                 .policy
@@ -861,7 +849,12 @@ impl SealedRootExecutionRequest {
             (None, None) => bail!(
                 "a qualification policy that names no minimum settlement takes its containment from the selected protocol's holding, and none was supplied"
             ),
-        }
+        }?;
+        Ok(if enforced {
+            requirement.at_least(Requirement::AnyQualifiedContainment)
+        } else {
+            requirement
+        })
     }
 
     /// Whether the sealed root demands any retained containment.
@@ -2612,42 +2605,32 @@ mod authority_tests {
     }
 
     #[test]
-    fn enforced_node_refuses_a_trusted_process_group_minimum_before_contact() {
+    fn enforced_node_raises_a_trusted_process_group_floor_to_containment() {
         use crate::thread_lifecycle::ProcessContainmentRequirement as Requirement;
         use ryeos_state::external_content::products::qualification::VerifierProcessSettlementAuthority as Settlement;
         let mut sealed = qualified_product_sealed_fixture();
-        let set = |sealed: &mut SealedRootExecutionRequest, minimum| {
+        sealed
+            .qualification
+            .as_mut()
+            .unwrap()
+            .policy_source
+            .policy
+            .minimum_verifier_process_settlement = Some(Settlement::TrustedProcessGroupAbsent);
+        let under = |sealed: &SealedRootExecutionRequest, enforced| {
             sealed
-                .qualification
-                .as_mut()
+                .process_containment_for_qualification_under(None, enforced)
                 .unwrap()
-                .policy_source
-                .policy
-                .minimum_verifier_process_settlement = Some(minimum);
         };
-        set(&mut sealed, Settlement::TrustedProcessGroupAbsent);
-        let refusal = sealed
-            .process_containment_for_qualification_under(None, true)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            refusal
-                .contains("the trusted process-group lane is never a substitute under enforcement"),
-            "{refusal}"
-        );
-        assert_eq!(
-            sealed
-                .process_containment_for_qualification_under(None, false)
-                .unwrap(),
-            Requirement::None
-        );
-        set(&mut sealed, Settlement::ContainmentEmpty);
-        assert_eq!(
-            sealed
-                .process_containment_for_qualification_under(None, true)
-                .unwrap(),
-            Requirement::AnyQualifiedContainment
-        );
+        assert_eq!(under(&sealed, false), Requirement::None);
+        assert_eq!(under(&sealed, true), Requirement::AnyQualifiedContainment);
+        sealed
+            .qualification
+            .as_mut()
+            .unwrap()
+            .policy_source
+            .policy
+            .minimum_verifier_process_settlement = Some(Settlement::ScopeEmpty);
+        assert_eq!(under(&sealed, true), Requirement::CgroupScope);
     }
 
     #[test]
