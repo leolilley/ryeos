@@ -87,8 +87,13 @@ fn create_outside_thread(
             upstream_thread_id: None,
             requested_by: Some("fp:test".to_string()),
             project_root: None,
+            base_project_snapshot_hash: match &project_authority {
+                ExecutionProjectAuthority::PinnedGeneration {
+                    base_snapshot_hash, ..
+                } => Some(base_snapshot_hash.clone()),
+                _ => None,
+            },
             project_authority,
-            base_project_snapshot_hash: None,
             usage_subject: None,
             usage_subject_asserted_by: None,
             captured_history_policy: Some(captured_policy()),
@@ -885,10 +890,18 @@ async fn project_config_at_the_shell_presentation_ref_is_never_read() {
         )
         .await
         .expect("mint the shell session");
+        let session_id = minted["session_id"].as_str().expect("session id");
+        assert_eq!(
+            get_ui_state(&state)
+                .expect("UI state")
+                .browser_sessions
+                .consume_launch_token(minted["token"].as_str().expect("launch token")),
+            Some(session_id.to_string())
+        );
         let session = get_ui_state(&state)
             .expect("UI state")
             .browser_sessions
-            .get_session(minted["session_id"].as_str().expect("session id"))
+            .get_session(session_id)
             .expect("active session");
         let attachment = session
             .attachments
