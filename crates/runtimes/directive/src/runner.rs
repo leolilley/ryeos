@@ -5609,6 +5609,20 @@ mod tests {
     }
 
     #[test]
+    fn a_tool_cut_at_the_deadline_reaches_the_model_as_an_interrupted_unknown_outcome() {
+        let body: Value = serde_json::from_str(&tool_interrupted_envelope()).unwrap();
+        assert_eq!(body["error"]["code"], "tool_interrupted_at_deadline");
+        assert_eq!(body["error"]["outcome"], "unknown");
+        assert_eq!(body["error"]["retryable"], false);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("side effects may have partially happened")
+        );
+    }
+
+    #[test]
     fn callback_error_envelope_does_not_expose_daemon_message() {
         let error = ryeos_runtime::callback::CallbackError::ActionFailed {
             code: "policy_denied".to_string(),

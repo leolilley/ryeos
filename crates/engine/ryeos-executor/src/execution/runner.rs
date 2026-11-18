@@ -9809,6 +9809,50 @@ mod tests {
     use ryeos_app::launch_metadata::OriginalPushedHeadRef;
     use ryeos_engine::contracts::{EffectivePrincipal, ExecutionHints, Principal};
 
+    fn timed_out_completion() -> ExecutionCompletion {
+        ExecutionCompletion {
+            status: ryeos_engine::contracts::ThreadTerminalStatus::Killed,
+            outcome_code: Some("timeout".to_owned()),
+            result: None,
+            error: Some(json!({"message": "subprocess timed out", "stderr": "partial"})),
+            artifacts: Vec::new(),
+            final_cost: None,
+            continuation_request: None,
+            metadata: None,
+        }
+    }
+
+    #[test]
+    fn a_tool_cut_by_the_deadline_bound_is_recorded_interrupted_with_an_unknown_outcome() {
+        let mut completion = timed_out_completion();
+        record_deadline_cut(&mut completion, true);
+        assert_eq!(
+            completion.outcome_code.as_deref(),
+            Some("tool_interrupted_at_deadline")
+        );
+        let error = completion.error.expect("error");
+        assert_eq!(error["outcome"], "unknown");
+        assert_eq!(error["retryable"], false);
+        assert_eq!(error["stderr"], "partial");
+        assert!(
+            error["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("side effects may have partially happened"))
+        );
+    }
+
+    #[test]
+    fn a_tools_own_timeout_stays_its_own_timeout() {
+        let mut own = timed_out_completion();
+        record_deadline_cut(&mut own, false);
+        assert_eq!(own.outcome_code.as_deref(), Some("timeout"));
+        // A tool that ended some other way is never rewritten as a cut.
+        let mut exited = timed_out_completion();
+        exited.outcome_code = Some("exit:0".to_owned());
+        record_deadline_cut(&mut exited, true);
+        assert_eq!(exited.outcome_code.as_deref(), Some("exit:0"));
+    }
+
     #[test]
     fn a_recovered_tool_is_judged_on_this_nodes_report_before_it_is_spawned_again() {
         use lillux::process_control::{HOST_PROVIDER, HostCapabilities, ProofSource};
