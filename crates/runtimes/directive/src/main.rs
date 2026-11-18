@@ -18,6 +18,7 @@ mod provider_adapter;
 mod provider_transport_timing;
 mod result_guard;
 mod resume;
+mod run_clock;
 mod runner;
 mod spend_verifier;
 mod startup_timing;
@@ -486,6 +487,7 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
         &bootstrap_output.config.tools,
         harness.effective_caps(),
         bootstrap_output.config.outputs.as_deref(),
+        harness.run_clock().is_some(),
     );
     let mut launch_frame = launch_records::build_frame(
         1,

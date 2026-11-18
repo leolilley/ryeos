@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-10T02:15:39Z:7ba03840f38ab2ba3b1330394e2ec62e5a28e2fd52ee72f4a90736b733c55dfd:JuJ/hspftKWwmmHgQPCsXh1/mge0dxbzhpUsuxCC3ok+wKm/uhisv9z3YBcrTKjlq426mKaZ+HR7FExmIYlBCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-17T17:28:58Z:12d3f07f061dd752d3ffaaaefb7876e44b08f3f2a318b690d71894e5e5053743:IS0y9+fU4Oukrkmwu5lUF39DiI0uRCtsszD2P15NFSOy/hC4GnzJXHKo4eJKdc7i7y02C7E0z9bDJy1bjJxdAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [fundamentals, directives, workflows, prompts]
 version: "2.1.0"
@@ -140,7 +140,63 @@ removes that subtree's authority.
   Routes without a proven bound reject a finite hard limit at launch.
   Conservative reserved-maximum charges are reported distinctly from
   provider-reported cost.
-- `limits.duration_seconds` — wall-clock timeout
+- `limits.duration_seconds` — wall-clock timeout of one process. A
+  continuation or a resume starts a new process with a new clock, so this is
+  not a limit on the whole run; use the run deadline below for that.
+- `limits.deadline.reserve_seconds` — time this directive keeps for itself to
+  settle after its work is stopped (see Run deadline). Defaults to the signed
+  directive limits config.
+- `limits.wrap_up_seconds` — how long before the hard stop the model is told
+  time is short. `0` never tells it. Only meaningful for a run with a deadline.
+
+### Run deadline
+
+A caller sets one deadline for a whole run by passing `run_timeout` (unsigned
+seconds) when it launches the root execution. The daemon turns it into one
+absolute instant when the execution tree is born. Every descendant, continuation
+and resume shares that instant, and restarting the node does not restart the
+clock. The node's `caps.aggregate.duration_seconds` caps what a caller may ask
+for. Only the root launch may set it: a child that sends `run_timeout` is
+refused with `run_timeout_root_only`.
+
+Each level of the tree ends earlier than its parent. An execution keeps its
+`limits.deadline.reserve_seconds` for itself, so a child launched before the
+parent's reserve window opens is stopped when the window opens, and the parent
+still has the reserve to react. A child launched inside the parent's reserve
+window (the parent's own fallback work) may use what is left of it, never more.
+
+A directive run with a deadline moves through three phases, with `R` the
+reserve and `E` the execution's end:
+
+- running, until `E - R - wrap_up_seconds`;
+- wrap-up, until `E - R`: once, the model receives a harness input of kind
+  `deadline_wrap_up` stating the time left. It is recorded durably and is not
+  repeated after a recovery or continuation;
+- hard stop, from `E - R`: any model call in flight is cut, no new turn or tool
+  call starts, and the run settles `timed_out` with outcome `deadline`. The
+  daemon's own kill at `E` is only the backstop.
+
+Reserves stack with depth. Each level of the tree keeps its own reserve out of
+its descendants' time, and every directive defaults to the signed 30 s reserve,
+so a child ends 30 s before its parent's hard stop, a grandchild 60 s before,
+and so on. A short `run_timeout` with deep nesting can leave a deep descendant
+no window at all (it stops as soon as it launches); size `run_timeout` to at
+least the depth times the reserve plus the work, or author smaller reserves on
+the intermediate items.
+
+A directive's tools are bounded by the directive's end, not its hard stop, so a
+tool already running at the hard stop is not cut until the end.
+
+The model can ask for the clock with the built-in `time_left` tool, which is
+offered only when the run has a deadline. It returns `now_ms`,
+`deadline_at_ms`, `remaining_ms` (until the hard stop), `phase`,
+`wrap_up_at_ms` and `hard_stop_at_ms`.
+
+A continuation, resume or follow successor whose end has already passed does
+not launch: it settles `timed_out` with outcome `deadline` and phase
+`elapsed_before_launch`. A thread whose deadline passes while the node is down
+settles the same way when the node recovers. A graph reads the outcome as
+`outcome_kind: deadline` on its failed branch.
 
 ### Context
 Context blocks inject knowledge into the LLM prompt:

@@ -122,7 +122,7 @@ pub fn bootstrap(
     // (`Engine::build_inventory_for_launching_kind`). Anything missing
     // from the inventory is treated as "no such tool" by the
     // dispatcher's per-call resolution.
-    let tools = project_tool_inventory(inventory);
+    let tools = project_tool_inventory(inventory)?;
     let hooks = compile_admitted_directive_hooks(&header, composed_view)?;
 
     let risk_policy = load_risk_policy(loader)?;
@@ -303,10 +303,13 @@ pub(super) fn parse_effective_header(view: &KindComposedView) -> Result<Directiv
 /// any" case, so we treat an absent `tool` entry as "no tools declared"
 /// and let the dispatcher's per-call `unknown tool` path surface any
 /// genuine misconfiguration.
+///
+/// `time_left` names the runtime's own in-process tool, so an inventory tool
+/// of that name is refused here rather than offered to the model twice.
 fn project_tool_inventory(
     inventory: &std::collections::HashMap<String, Vec<ryeos_runtime::envelope::ItemDescriptor>>,
-) -> Vec<ToolSchema> {
-    inventory
+) -> Result<Vec<ToolSchema>> {
+    let tools: Vec<ToolSchema> = inventory
         .get("tool")
         .map(|items| {
             items
@@ -319,7 +322,19 @@ fn project_tool_inventory(
                 })
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if let Some(reserved) = tools
+        .iter()
+        .find(|tool| tool.name == crate::directive::TIME_LEFT_TOOL)
+    {
+        anyhow::bail!(
+            "tool `{}` uses the name `{}`, which the directive runtime reserves for its \
+             built-in time-left tool",
+            reserved.item_id,
+            reserved.name
+        );
+    }
+    Ok(tools)
 }
 
 fn compile_admitted_directive_hooks(
@@ -466,6 +481,35 @@ mod tests {
     };
     use ryeos_runtime::{HookDefinition, HookLayer, HookResultMode, HookSources};
     use serde_json::json;
+
+    #[test]
+    fn an_inventory_tool_named_time_left_is_refused_at_load() {
+        use ryeos_runtime::envelope::ItemDescriptor;
+        let mut inventory = std::collections::HashMap::new();
+        inventory.insert(
+            "tool".to_string(),
+            vec![ItemDescriptor {
+                name: "time_left".to_string(),
+                item_id: "tool:project/time_left".to_string(),
+                ..ItemDescriptor::default()
+            }],
+        );
+        let error = project_tool_inventory(&inventory).unwrap_err().to_string();
+        assert!(
+            error.contains("time_left") && error.contains("reserves"),
+            "{error}"
+        );
+
+        inventory.insert(
+            "tool".to_string(),
+            vec![ItemDescriptor {
+                name: "noop".to_string(),
+                item_id: "tool:project/noop".to_string(),
+                ..ItemDescriptor::default()
+            }],
+        );
+        assert_eq!(project_tool_inventory(&inventory).unwrap().len(), 1);
+    }
     use std::collections::{BTreeMap, BTreeSet};
 
     fn hook(id: &str, event: &str, action: serde_json::Value) -> HookDefinition {

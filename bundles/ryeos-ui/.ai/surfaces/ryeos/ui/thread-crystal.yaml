@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-08T06:41:17Z:9a129b3b787d226d74be89dca3afe81eacdaefbb9eb5dc9b719b9618bbb3a2fe:9nyF7NhHdRwGp50cW9sN0J3h3C5GaMtz1ZgfNaIGnuQ50LdN0XD1kgTwyIHQClvA+m76Vb4kvPD+wzpqOpWbDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T22:09:14Z:4810b8ae22c8b0b09254845ecdc842134d50829249e594ba26b82837804b00b0:FKYPmB76FYEbWqdO/Y1D89IYt2oQO3n9uvVLMnQHeMKgL+d+Xgkv/91rp3meDPn5y38I4CJkaqoz3zxPa+72CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-thread-crystal
 title: Thread crystal
 version: "1.0.0"
@@ -50,7 +50,7 @@ input:
         item_ref: directive:ryeos/ops/base
         project_path: "@session:project_root"
         ref_bindings:
-          model: directive:ryeos/ops/base
+          model: directive:ryeos/models/general
 
 affordances:
   - id: view.transcript

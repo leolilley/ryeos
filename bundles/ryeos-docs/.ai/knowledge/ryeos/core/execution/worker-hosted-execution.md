@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-16T08:18:41Z:8d4dfa69ffdc7de7a3b44fbb49dbdf219ca36e7d75971db67676b54338de2d88:sMKNkrxAh2brH040NbOt4vCgL3r0ZsLFxVny2oDm6wZ+MVjcyJ42osI2sqAdykEw2Ol3872Qp2MOBhs+vS1YDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-17T11:27:04Z:3e4488f19d30e4300d2471ac6b636aff8504931d4b5a00e5efb41d69764523de:WOEjyyXjtDhUrVwoz3OiW+AweUP7x6Xo6nILGoQYh2PiksnKPkHV0hJzPg8Pxst0BjGOtzy+3LzWDgX3zzdwBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/core/execution"
 name: "worker-hosted-execution"
@@ -721,6 +721,12 @@ claim; only root-proved uncontacted attempts release a contact. Possible or
 unknown contact remains consumed. Finite hosted-contact limits are rejected
 for interactive sessions because their open command stream has no equivalent
 pre-contact meter.
+
+The aggregate duration deadline is the run deadline a root launch sets with the
+`run_timeout` caller parameter. It follows the scope through descendants, and
+each descendant ends earlier by the hold-back sealed at its first launch, so a
+parent keeps its own settling window. A worker session reads its placing
+thread's end, not the bare tree deadline.
 
 This operational frontier is currently node-bound. A signed remote launch may
 admit the whole beat directly on its target node, but cross-site migration of

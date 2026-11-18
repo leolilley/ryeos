@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-08T06:41:17Z:0751a2632c94088e898dc362b35a6513b614d021fb0f30c468f8e1984498c79a:kPkvEESwmQl0FwDTETi7GseMmD1KvpYDr+q+BojBCmz1EgUifUiXWUoiwrWSupqBHUxf9Ugm3rtJ2JX9zNYeDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T22:09:14Z:e7a5759ec3aea4df8f60f5d780e833822f86f3196f2b461189de327133e6e9d7:S+Kv0JfYVy1vaO7YqHrXkG+o4KNENgWrK0DqUAD4zhD9dAi9I+484++Y9d0/1MKbkCNHXR08S3lDaehrRYURBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-thread
 title: Thread
 version: "1.0.0"
@@ -56,7 +56,7 @@ input:
         item_ref: directive:ryeos/ops/base
         project_path: "@session:project_root"
         ref_bindings:
-          model: directive:ryeos/ops/base
+          model: directive:ryeos/models/general
 
 affordances:
   - id: view.threads

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-08T06:41:17Z:b223773168bdd2eb964c1577de17fe62305b7440f2ddc7517accc8d58217c424:pcKznC7HkFVi+oCLrNNZBQftX9TC9C2Nuu1Ap5jegivRtrL7lALws9Dv6bHJ7RGh7mDsFhDAACxC/AntFHuEDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T22:09:14Z:2459c47ef365d81cccc3fbea9090783a1087a974f742054b7f02b183ce86e186:izIzPQprDkal10uLEETPRMjkKe/Znvumcd7/nwDLq2QEb7/pv7c1TV9zkej15BXuQzmdr7Qfaa8x+NJUuqWpDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-project
 title: Project
 version: "1.0.0"
@@ -57,7 +57,7 @@ input:
         item_ref: directive:ryeos/ops/base
         project_path: "@session:project_root"
         ref_bindings:
-          model: directive:ryeos/ops/base
+          model: directive:ryeos/models/general
 
 affordances:
   - id: view.files

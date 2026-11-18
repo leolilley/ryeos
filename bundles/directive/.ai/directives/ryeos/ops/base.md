@@ -1,9 +1,7 @@
-<!-- ryeos:signed:2026-11-13T04:34:21Z:f80937723e73d82eb355e6cb325a6d605a47701b70253004e552ffd1e8b6ee09:zj9N70gAXPQ0FhiHCRMq2XJW6afq0SyNoX/p/qQ/7DRMCOIhg+eZlyaGbpkrEoe+eOtZNv9U1mCovwex2+wZCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-17T22:09:14Z:06a3b496e8da461c1b9693dd16377ebbee7d9c092537646ea2e3dcfacfdbf133:fpcxq5bvInx4qv+bahbxdvbo9H5LoFBuLNli+/M6XHTt+pvQ/UK+l4S/4zGcPR/Qhc+DOtFPi7Q7lVD0wm1GAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 description: "Base operations directive for ryeos — runs a single operator turn in a thread."
 version: "1.0.0"
-model:
-  tier: general
 inputs:
   - name: input
     type: string

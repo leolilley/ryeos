@@ -1,6 +1,8 @@
 use serde_json::{Map, Value, json};
 
-use crate::directive::{DIRECTIVE_RETURN_TOOL, ProviderMessage, ProviderMessageExt, ToolSchema};
+use crate::directive::{
+    DIRECTIVE_RETURN_TOOL, ProviderMessage, ProviderMessageExt, TIME_LEFT_TOOL, ToolSchema,
+};
 use ryeos_directive_definition::OutputSpec;
 
 pub(super) fn initial_messages(
@@ -20,6 +22,7 @@ pub(super) fn visible_provider_tools(
     effective_caps: &[String],
     directive_outputs: Option<&[OutputSpec]>,
     dispatch_tools_available: bool,
+    run_deadline: bool,
 ) -> Vec<ToolSchema> {
     let mut visible_tools_owned: Vec<_> = if dispatch_tools_available {
         crate::provider_adapter::tools::filter_tools_by_caps(tools, effective_caps)
@@ -35,7 +38,27 @@ pub(super) fn visible_provider_tools(
     if let Some(outputs) = directive_outputs.filter(|outputs| !outputs.is_empty()) {
         visible_tools_owned.push(build_directive_return_tool(outputs));
     }
+    // A run with a deadline can ask how much time is left. The tool is
+    // answered in process and needs no capability.
+    if run_deadline {
+        visible_tools_owned.push(build_time_left_tool());
+    }
     visible_tools_owned
+}
+
+/// Synthesize the in-process `time_left` provider tool.
+fn build_time_left_tool() -> ToolSchema {
+    ToolSchema {
+        name: TIME_LEFT_TOOL.to_string(),
+        item_id: "lifecycle:time_left".to_string(),
+        description: Some(
+            "Report how much time this run has left. `remaining_ms` counts down to the \
+             hard stop, after which no new work can start; `phase` is `running`, \
+             `wrap_up` or `hard_stop`."
+                .to_string(),
+        ),
+        input_schema: Some(json!({"type": "object", "properties": {}})),
+    }
 }
 
 /// Synthesize the lifecycle-only `directive_return` provider tool.
@@ -121,7 +144,7 @@ mod tests {
 
     #[test]
     fn empty_outputs_do_not_advertise_directive_return() {
-        assert!(visible_provider_tools(&[], &[], Some(&[]), true).is_empty());
+        assert!(visible_provider_tools(&[], &[], Some(&[]), true, false).is_empty());
     }
 
     #[test]
@@ -142,8 +165,18 @@ mod tests {
             &["ryeos.execute.tool.*".to_string()],
             Some(&outputs),
             false,
+            false,
         );
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].name, DIRECTIVE_RETURN_TOOL);
+    }
+
+    #[test]
+    fn a_run_with_a_deadline_offers_time_left_even_without_other_tools() {
+        let visible = visible_provider_tools(&[], &[], None, false, true);
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].name, TIME_LEFT_TOOL);
+        assert_eq!(visible[0].item_id, "lifecycle:time_left");
+        assert!(visible_provider_tools(&[], &[], None, true, false).is_empty());
     }
 }
