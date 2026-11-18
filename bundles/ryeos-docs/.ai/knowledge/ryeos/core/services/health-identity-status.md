@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-18T02:43:35Z:de6a240785df4cb586799bac31c981b1b2313eafc345e5d7087dee09492a6417:cfR/k6vQZTVoXUmU+8joQKRcBJg3X1k42M0nm18zxJ2KJPO4IF7/mEoGR4t7vMvYiWqxkhBfxO1w1/dLDzCNDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-18T04:50:29Z:cacdeaec1b682c6260f04659233c6624aadb10ddaaf84d30aa1818a8650c77b0:nZaYQPIqdk7Xuw9TAuRGylx4Nr4gYt8HtpuQE9WxbCFB9KOjxi2ccX92mIF/WqTuUFgZ6UY5FTMbYnciiOSSCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/services
 tags: [service, health, identity, status]
@@ -23,7 +23,7 @@ Invariant: health and public identity surfaces are safe unauthenticated reads; s
   returns a boot id, path, mount, device or uid. It needs
   `ryeos.execute.service.node/locality`, so a remote answers only a caller its
   operator granted that capability to. Digests are plain SHA-256 over a
-  domain-separated string; `account` and `storage` include the boot digest, so
+  domain-separated string; `account` and `storage` include the raw boot id (never served), so
   one uid or device number on two machines never matches.
 - `node/locality/groups` asks each configured remote for `node/locality` and
   compares the answers with this node's own. A remote that refuses is

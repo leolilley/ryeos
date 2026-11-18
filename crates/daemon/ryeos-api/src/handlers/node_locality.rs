@@ -12,8 +12,9 @@
 //! Digests are plain SHA-256 over a domain-separated string with no salt: the
 //! values are served only to callers the operator granted the capability, so
 //! there is nothing for a salt to protect. `account` and `storage` are scoped
-//! to the boot digest, so one uid or one device number on two machines never
-//! matches.
+//! to the raw boot id (never served), so one uid or one device number on two
+//! machines never matches, and neither value can be recovered from the served
+//! digests by trying every small number.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -52,13 +53,13 @@ fn digest(domain: &str, parts: &[&str]) -> String {
 
 /// The facts a node serves, from what its host measured. Pure.
 pub fn facts_from_observation(observed: &LocalityObservation) -> NodeLocalityFacts {
-    let boot: Result<String, &'static str> = if observed.kernel_kind == "gvisor" {
+    let boot: Result<(&str, String), &'static str> = if observed.kernel_kind == "gvisor" {
         // Under gVisor the kernel is emulated: its boot id is the sandbox's
         // own and says nothing about the machine beneath.
         Err(REASON_EMULATED_KERNEL)
     } else {
         match observed.boot_id.as_deref() {
-            Some(boot_id) => Ok(digest(DOMAIN_BOOT, &[boot_id])),
+            Some(boot_id) => Ok((boot_id, digest(DOMAIN_BOOT, &[boot_id]))),
             None => Err(REASON_NOT_MEASURABLE),
         }
     };
@@ -68,7 +69,10 @@ pub fn facts_from_observation(observed: &LocalityObservation) -> NodeLocalityFac
 
     let mut relations = BTreeMap::new();
     match &boot {
-        Ok(boot_digest) => {
+        // Account and storage are scoped to the raw boot id, which is never
+        // served. Scoping them to the served boot digest would let a granted
+        // caller recover the uid or device number by trying every small value.
+        Ok((boot_id, boot_digest)) => {
             relations.insert(
                 RELATION_BOOT.to_owned(),
                 RelationFact::Measured {
@@ -79,7 +83,7 @@ pub fn facts_from_observation(observed: &LocalityObservation) -> NodeLocalityFac
                 RELATION_ACCOUNT.to_owned(),
                 match (observed.account_uid, observed.initial_user_namespace) {
                     (Some(uid), _) => RelationFact::Measured {
-                        digest: digest(DOMAIN_ACCOUNT, &[boot_digest, &uid.to_string()]),
+                        digest: digest(DOMAIN_ACCOUNT, &[boot_id, &uid.to_string()]),
                     },
                     (None, Some(false)) => unknown(REASON_USER_NAMESPACE),
                     (None, _) => unknown(REASON_NOT_MEASURABLE),
@@ -89,7 +93,7 @@ pub fn facts_from_observation(observed: &LocalityObservation) -> NodeLocalityFac
                 RELATION_STORAGE.to_owned(),
                 match observed.storage_device {
                     Some(device) => RelationFact::Measured {
-                        digest: digest(DOMAIN_STORAGE, &[boot_digest, &device.to_string()]),
+                        digest: digest(DOMAIN_STORAGE, &[boot_id, &device.to_string()]),
                     },
                     None => unknown(REASON_NOT_MEASURABLE),
                 },

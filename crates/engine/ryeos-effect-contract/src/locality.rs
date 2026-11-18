@@ -17,7 +17,7 @@
 //!   and both measured it. Nobody witnessed anything: each node speaks for
 //!   itself, so no grade here is stronger than `measured`.
 //! - `account` and `storage` mean something only inside one boot. Their
-//!   digests are built from the boot digest by the node, and the comparison
+//!   digests are built from the raw boot id by the node, and the comparison
 //!   also refuses to let them hold across boots.
 //! - A node that did not answer is not a node that could not tell. They are
 //!   different rows and different states.
