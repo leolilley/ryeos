@@ -362,7 +362,7 @@ impl RuntimeDb {
                     let created_at = occurrence.provider_creation_observation["created_at"]
                         .as_str()
                         .context("read-only cleanup has no exact creation timestamp")?;
-                    let created = chrono::DateTime::parse_from_rfc3339(created_at)?.timestamp_millis();
+                    let created = ryeos_effect_contract::rfc3339::parse_unix_millis(created_at)?;
                     let timeout_seconds = occurrence.provider_creation_observation["timeout_seconds"]
                         .as_u64()
                         .context("read-only cleanup has no exact lifetime")?;
@@ -516,7 +516,7 @@ mod tests {
         RuntimeSnapshotBootstrapIntent,
         RuntimeSnapshotBootstrapOccurrence,
     ) {
-        source_with_created_at(db, late, &chrono::Utc::now().to_rfc3339())
+        source_with_created_at(db, late, &ryeos_effect_contract::rfc3339::now_millis())
     }
 
     fn source_with_created_at(
@@ -689,7 +689,7 @@ mod tests {
     fn recovery_rotates_past_permanently_uncertain_oldest_sources() {
         let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let now = lillux::time::timestamp_millis();
-        let created = chrono::Utc::now().to_rfc3339();
+        let created = ryeos_effect_contract::rfc3339::now_millis();
         let mut all = std::collections::BTreeSet::new();
         for index in 0..65 {
             let (source, occurrence) =
@@ -711,10 +711,10 @@ mod tests {
         let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
         let (source, occurrence) = source(&db, false);
         let mut snapshot = ready_snapshot(&db, &source, &occurrence);
-        let created =
-            chrono::DateTime::parse_from_rfc3339(snapshot.source_created_at.as_deref().unwrap())
-                .unwrap()
-                .timestamp_millis();
+        let created = ryeos_effect_contract::rfc3339::parse_unix_millis(
+            snapshot.source_created_at.as_deref().unwrap(),
+        )
+        .unwrap();
         let mut beyond_source = snapshot.clone();
         beyond_source.attempt_deadline_ms = created + 901_000;
         beyond_source.operation_id = beyond_source.derived_operation_id().unwrap();
@@ -728,13 +728,14 @@ mod tests {
     #[test]
     fn uncertain_upload_allows_only_read_only_cleanup_after_exact_lifetime() {
         let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
-        let created_at = (chrono::Utc::now() - chrono::Duration::seconds(898)).to_rfc3339();
+        let created_at = ryeos_effect_contract::rfc3339::format_unix_millis(
+            lillux::time::timestamp_millis() - 898_000,
+        )
+        .unwrap();
         let (source, occurrence) = source_with_created_at(&db, false, &created_at);
         let mut snapshot = ready_snapshot(&db, &source, &occurrence);
-        snapshot.attempt_deadline_ms = chrono::DateTime::parse_from_rfc3339(&created_at)
-            .unwrap()
-            .timestamp_millis()
-            + 900_000;
+        snapshot.attempt_deadline_ms =
+            ryeos_effect_contract::rfc3339::parse_unix_millis(&created_at).unwrap() + 900_000;
         snapshot.operation_id = snapshot.derived_operation_id().unwrap();
         db.reserve_runtime_snapshot(&snapshot).unwrap();
         db.claim_runtime_snapshot_attempt(&snapshot.operation_id, &snapshot.digest().unwrap())
@@ -779,7 +780,7 @@ mod tests {
         assert!(db.reserve_bootstrap_termination(&mutation).is_err());
 
         let other = crate::runtime_db::test_native::TestRuntime::open_temporary();
-        let created_at = chrono::Utc::now().to_rfc3339();
+        let created_at = ryeos_effect_contract::rfc3339::now_millis();
         let (source, occurrence) = source_with_created_at(&other, false, &created_at);
         let mut early = termination(&source, &occurrence);
         early.mode = BootstrapCleanupMode::ObserveOnly;

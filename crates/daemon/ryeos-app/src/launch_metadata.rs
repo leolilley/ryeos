@@ -587,9 +587,35 @@ impl ResumeContext {
             expected.original_snapshot_hash = Some(generation.snapshot_hash.clone());
             expected.original_pushed_head_ref = None;
         }
-        if transition_kind == ContinuationAuthorityTransitionKind::OperatorFollowUp {
-            expected.parameters = self.parameters.clone();
-            expected.requested_by = self.requested_by.clone();
+        match &transition_kind {
+            ContinuationAuthorityTransitionKind::Inherit => {}
+            ContinuationAuthorityTransitionKind::OperatorFollowUp => {
+                expected.parameters = self.parameters.clone();
+                expected.requested_by = self.requested_by.clone();
+            }
+            ContinuationAuthorityTransitionKind::OperatorRebind { names } => {
+                expected.parameters = self.parameters.clone();
+                expected.requested_by = self.requested_by.clone();
+                if names.is_empty() {
+                    anyhow::bail!("an operator rebind continuation names no ref binding");
+                }
+                for name in names {
+                    // A rebind names a different item at a binding the
+                    // operator states; an unchanged or dropped entry is not
+                    // one, so the named set is exactly what changed.
+                    let rebound = self.ref_bindings.get(name).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "operator rebind continuation states no ref binding `{name}`"
+                        )
+                    })?;
+                    if source.ref_bindings.get(name) == Some(rebound) {
+                        anyhow::bail!(
+                            "operator rebind continuation leaves ref binding `{name}` unchanged"
+                        );
+                    }
+                    expected.ref_bindings.insert(name.clone(), rebound.clone());
+                }
+            }
         }
         if self != &expected {
             anyhow::bail!(
@@ -747,15 +773,21 @@ impl ResumeContext {
     }
 }
 
-/// The two continuation authority changes admitted by the lifecycle.
+/// The continuation authority changes admitted by the lifecycle.
 ///
 /// This tag is supplied by the already-separated machine/follow and
-/// operator-follow-up state boundaries; it is never inferred from changed
-/// fields in an untrusted successor envelope.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ContinuationAuthorityTransitionKind {
+/// operator state boundaries; it is never inferred from changed fields in an
+/// untrusted successor envelope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContinuationAuthorityTransitionKind {
     Inherit,
     OperatorFollowUp,
+    /// An operator follow-up that also binds a different item at each named
+    /// ref binding. The successor keeps the admitted program and re-admits
+    /// only what launch preparation derives from those bindings.
+    OperatorRebind {
+        names: std::collections::BTreeSet<String>,
+    },
 }
 
 impl RuntimeLaunchMetadata {
@@ -1912,6 +1944,84 @@ mod tests {
                     None,
                     ContinuationAuthorityTransitionKind::OperatorFollowUp,
                 )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn operator_rebind_changes_only_the_named_ref_bindings_beside_an_operator_follow_up() {
+        let project = tempfile::tempdir().unwrap();
+        let mut source = resume_context(ProjectContext::LocalPath {
+            path: project.path().to_path_buf(),
+        });
+        source.ref_bindings = BTreeMap::from([
+            (
+                "model".to_string(),
+                "directive:test/models/first".to_string(),
+            ),
+            ("guard".to_string(), "directive:test/guard".to_string()),
+        ]);
+        let rebind = |names: &[&str]| ContinuationAuthorityTransitionKind::OperatorRebind {
+            names: names.iter().map(|name| (*name).to_string()).collect(),
+        };
+        let mut rebound = source.clone();
+        rebound.parameters = serde_json::json!({"input": "continue"});
+        rebound.ref_bindings.insert(
+            "model".to_string(),
+            "directive:test/models/second".to_string(),
+        );
+        rebound
+            .validate_continuation_transition_from(&source, None, rebind(&["model"]))
+            .unwrap();
+
+        // The change is admitted only under the typed rebind transition.
+        for kind in [
+            ContinuationAuthorityTransitionKind::Inherit,
+            ContinuationAuthorityTransitionKind::OperatorFollowUp,
+        ] {
+            assert!(
+                rebound
+                    .validate_continuation_transition_from(&source, None, kind)
+                    .is_err()
+            );
+        }
+        // Naming nothing, an unchanged binding, or an absent one is refused.
+        for names in [
+            &[][..],
+            &["guard"][..],
+            &["guard", "model"][..],
+            &["absent"][..],
+        ] {
+            assert!(
+                rebound
+                    .validate_continuation_transition_from(&source, None, rebind(names))
+                    .is_err(),
+                "{names:?}"
+            );
+        }
+        // A binding outside the named set cannot change with it.
+        let mut widened = rebound.clone();
+        widened.ref_bindings.insert(
+            "guard".to_string(),
+            "directive:test/other-guard".to_string(),
+        );
+        assert!(
+            widened
+                .validate_continuation_transition_from(&source, None, rebind(&["model"]))
+                .is_err()
+        );
+        // Nor can any other launch field.
+        let mut other = rebound.clone();
+        other.item_ref = "tool:test/other".to_string();
+        assert!(
+            other
+                .validate_continuation_transition_from(&source, None, rebind(&["model"]))
+                .is_err()
+        );
+        let mut caps = rebound.clone();
+        caps.effective_caps.push("ryeos.execute.*".to_string());
+        assert!(
+            caps.validate_continuation_transition_from(&source, None, rebind(&["model"]))
                 .is_err()
         );
     }

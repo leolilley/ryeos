@@ -73,9 +73,9 @@ pub use admitted_launch_capsule::{
     AdmittedExecutionClosure, AdmittedLaunchArtifactIdentity, AdmittedLaunchAuthority,
     AdmittedLaunchCapsule, BundleExecutorMemberSourceProofV1, BundleExecutorRequestOriginV1,
     DirectExecutableIdentity, DirectRootSourceIdentity, DirectRuntimeIdentity,
-    DirectRuntimeSourceSpace, MAX_ADMITTED_LAUNCH_CAPSULE_BYTES, RetainedItemSpaceV1,
-    RetainedRuntimeBinarySelectionV1, RetainedRuntimeDefinitionOwnerV1, RetainedTrustClassV1,
-    SelectedBundleIdentityV1, admitted_direct_command_execution_path,
+    DirectRuntimeSourceSpace, MAX_ADMITTED_LAUNCH_CAPSULE_BYTES, REBOUND_PREPARED_LAUNCH_FIELDS,
+    RetainedItemSpaceV1, RetainedRuntimeBinarySelectionV1, RetainedRuntimeDefinitionOwnerV1,
+    RetainedTrustClassV1, SelectedBundleIdentityV1, admitted_direct_command_execution_path,
 };
 pub use attestation::Attestation;
 pub use bundle_event::{

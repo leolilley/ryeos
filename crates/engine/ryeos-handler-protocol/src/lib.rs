@@ -946,6 +946,17 @@ pub struct RefBindingDeclWire {
     pub allowed_kinds: Vec<String>,
     pub allowed_spaces: Vec<ItemSpaceWire>,
     pub allowed_trust: Vec<TrustClassWire>,
+    pub continuation_rebind: ContinuationRebindWire,
+}
+
+/// Who may replace a ref binding on a continuation of an admitted thread.
+/// The engine always states it, so a preparer that does not know the term
+/// fails strict decoding instead of acknowledging a contract it cannot read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuationRebindWire {
+    Never,
+    Operator,
 }
 
 /// Restrictive condition activated by a present resolved ref binding. This

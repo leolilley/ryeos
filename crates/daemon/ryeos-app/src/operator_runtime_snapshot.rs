@@ -3043,7 +3043,7 @@ fn snapshot_attempt_deadline(
 ) -> Result<i64> {
     let deadline = match (source_created_at, source_timeout_seconds) {
         (Some(created_at), Some(timeout_seconds)) => {
-            let created_ms = chrono::DateTime::parse_from_rfc3339(created_at)?.timestamp_millis();
+            let created_ms = ryeos_effect_contract::rfc3339::parse_unix_millis(created_at)?;
             let source_expiry_ms = created_ms
                 .checked_add(i64::from(timeout_seconds) * 1_000)
                 .context("snapshot source expiry overflow")?;
@@ -3435,9 +3435,7 @@ mod tests {
     #[test]
     fn materialized_snapshot_window_ends_at_source_expiry_not_first_contact() {
         let created = "2026-09-29T00:00:00Z";
-        let created_ms = chrono::DateTime::parse_from_rfc3339(created)
-            .unwrap()
-            .timestamp_millis();
+        let created_ms = ryeos_effect_contract::rfc3339::parse_unix_millis(created).unwrap();
         let now = created_ms + 30_000;
         assert_eq!(
             snapshot_attempt_deadline(now, 60, 3_600, Some(created), Some(900)).unwrap(),

@@ -2336,6 +2336,114 @@ impl AdmittedLaunchCapsule {
                 .same_continuation_lineage(&other.project_authority)?)
     }
 
+    /// Compare a source segment with the successor of an operator rebind
+    /// continuation: one that keeps the admitted program and re-admits only
+    /// what launch preparation derives from the ref bindings at `names`.
+    ///
+    /// The successor may differ from the source in exactly these places:
+    /// - `ref_bindings` and `resolved_ref_bindings` at each name, where the
+    ///   source must already seal a binding and the successor must name a
+    ///   different item;
+    /// - the prepared launch's `binding_records` at each name;
+    /// - the prepared launch fields in
+    ///   [`REBOUND_PREPARED_LAUNCH_FIELDS`], which preparation computes from
+    ///   the bound items and current signed configuration.
+    ///
+    /// Everything else is compared whole after those places are removed, so a
+    /// field added to the program, the prepared launch, or this capsule later
+    /// is held equal until it is classified here. That covers the admitted
+    /// subject and resolution, descriptors, executor, driver, lifecycle,
+    /// capabilities, accounting scope, every other binding, the isolation,
+    /// network and resource ceilings, target and project-result requirements,
+    /// and all execution, content, environment, evidence and session
+    /// dependencies. Project authority keeps the ordinary continuation
+    /// lineage rule.
+    ///
+    /// This proves the shape of the change only. The caller must separately
+    /// prove that the source's admitted runtime contract lets an operator
+    /// rebind each name, select this comparison from the typed transition it
+    /// is committing rather than from the fields that changed, and prove that
+    /// the two realization objects differ only in their launch-authority and
+    /// execution-closure digests.
+    pub fn same_rebound_continuation_admission(
+        &self,
+        successor: &Self,
+        names: &std::collections::BTreeSet<String>,
+    ) -> anyhow::Result<bool> {
+        self.validate()?;
+        successor.validate()?;
+        if names.is_empty() {
+            anyhow::bail!("an operator rebind continuation names no ref binding");
+        }
+        // Exhaustive on purpose: a new capsule field does not compile until it
+        // is placed in the comparison below or deliberately left per-segment.
+        let Self {
+            schema,
+            kind,
+            exact_program,
+            // Recomputed from `exact_program` by `validate`; it moves with the
+            // rebound bindings.
+            exact_program_hash: _,
+            // Per-segment envelope, validated against each segment's own
+            // resume ledger.
+            sealed_invocation: _,
+            project_authority,
+            lifecycle_authority,
+            launch_driver,
+            artifact_identity,
+            execution_closure,
+            // The caller proves the realization transition.
+            execution_realization_hash: _,
+            source_binding_hash,
+            accounting_scope,
+            effective_caps,
+            parent_delegation_caps,
+            runtime_ref,
+            executor_ref,
+        } = self;
+        let (
+            AdmittedExecutionClosure::ManagedRuntime {
+                prepared_runtime_launch,
+                runtime_descriptor_document,
+                protocol_descriptor_document,
+                executor_blob_hash,
+            },
+            AdmittedExecutionClosure::ManagedRuntime {
+                prepared_runtime_launch: successor_prepared_runtime_launch,
+                runtime_descriptor_document: successor_runtime_descriptor_document,
+                protocol_descriptor_document: successor_protocol_descriptor_document,
+                executor_blob_hash: successor_executor_blob_hash,
+            },
+        ) = (execution_closure, &successor.execution_closure)
+        else {
+            // Only a managed runtime launch has a prepared, binding-derived
+            // closure to re-admit.
+            return Ok(false);
+        };
+        if !rebound_names_replace_sealed_bindings(exact_program, &successor.exact_program, names)? {
+            return Ok(false);
+        }
+        Ok(*schema == successor.schema
+            && *kind == successor.kind
+            && rebound_program_remainder(exact_program, names)?
+                == rebound_program_remainder(&successor.exact_program, names)?
+            && *lifecycle_authority == successor.lifecycle_authority
+            && *launch_driver == successor.launch_driver
+            && *artifact_identity == successor.artifact_identity
+            && rebound_prepared_launch_remainder(prepared_runtime_launch, names)?
+                == rebound_prepared_launch_remainder(successor_prepared_runtime_launch, names)?
+            && runtime_descriptor_document == successor_runtime_descriptor_document
+            && protocol_descriptor_document == successor_protocol_descriptor_document
+            && executor_blob_hash == successor_executor_blob_hash
+            && *source_binding_hash == successor.source_binding_hash
+            && *accounting_scope == successor.accounting_scope
+            && *effective_caps == successor.effective_caps
+            && *parent_delegation_caps == successor.parent_delegation_caps
+            && *runtime_ref == successor.runtime_ref
+            && *executor_ref == successor.executor_ref
+            && project_authority.same_continuation_lineage(&successor.project_authority)?)
+    }
+
     /// Return the exact named persistent-session capsules retained by this
     /// outer launch. Names are mechanically opaque here; the caller verifies
     /// each capsule's inner exact program through the ordinary typed object.
@@ -2375,6 +2483,94 @@ impl AdmittedLaunchCapsule {
             && self.runtime_ref == target.runtime_ref
             && self.executor_ref == target.executor_ref)
     }
+}
+
+/// Prepared-launch fields a rebound continuation replaces whole. Launch
+/// preparation computes each from the bound items and the signed
+/// configuration current at the rebind, so none can be inherited from the
+/// source. Every prepared-launch field absent from this list, and every
+/// binding record outside the rebound names, must stay equal.
+pub const REBOUND_PREPARED_LAUNCH_FIELDS: &[&str] = &[
+    "config_contributors",
+    "external_effect_authority",
+    "financial_authority",
+    "required_secrets",
+    "runtime_data",
+    "runtime_facts",
+];
+
+const REBOUND_PROGRAM_BINDING_FIELDS: &[&str] = &["ref_bindings", "resolved_ref_bindings"];
+
+fn rebound_binding_map<'a>(
+    owner: &'a serde_json::Value,
+    field: &str,
+) -> anyhow::Result<&'a serde_json::Map<String, serde_json::Value>> {
+    owner
+        .get(field)
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| anyhow::anyhow!("rebound continuation has no {field} object"))
+}
+
+/// A rebind replaces a binding the source already sealed with a different
+/// item. It never introduces a binding name, drops one, or relabels an
+/// unchanged binding as rebound.
+fn rebound_names_replace_sealed_bindings(
+    source_program: &serde_json::Value,
+    successor_program: &serde_json::Value,
+    names: &std::collections::BTreeSet<String>,
+) -> anyhow::Result<bool> {
+    let source_refs = rebound_binding_map(source_program, "ref_bindings")?;
+    let successor_refs = rebound_binding_map(successor_program, "ref_bindings")?;
+    let source_resolved = rebound_binding_map(source_program, "resolved_ref_bindings")?;
+    let successor_resolved = rebound_binding_map(successor_program, "resolved_ref_bindings")?;
+    Ok(names.iter().all(|name| {
+        source_resolved.contains_key(name)
+            && successor_resolved.contains_key(name)
+            && successor_refs.get(name).is_some_and(|successor| {
+                successor.is_string() && source_refs.get(name) != Some(successor)
+            })
+    }))
+}
+
+/// The exact program with the rebound binding entries removed.
+fn rebound_program_remainder(
+    program: &serde_json::Value,
+    names: &std::collections::BTreeSet<String>,
+) -> anyhow::Result<serde_json::Value> {
+    let mut remainder = program.clone();
+    for field in REBOUND_PROGRAM_BINDING_FIELDS {
+        let bindings = remainder
+            .get_mut(*field)
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or_else(|| anyhow::anyhow!("rebound continuation has no {field} object"))?;
+        for name in names {
+            bindings.remove(name);
+        }
+    }
+    Ok(remainder)
+}
+
+/// The prepared launch with the replaced fields and the rebound binding
+/// records removed.
+fn rebound_prepared_launch_remainder(
+    prepared_runtime_launch: &serde_json::Value,
+    names: &std::collections::BTreeSet<String>,
+) -> anyhow::Result<serde_json::Value> {
+    let mut remainder = prepared_runtime_launch.clone();
+    let object = remainder
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("prepared runtime launch must be an object"))?;
+    for field in REBOUND_PREPARED_LAUNCH_FIELDS {
+        object.remove(*field);
+    }
+    let records = object
+        .get_mut("binding_records")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| anyhow::anyhow!("prepared runtime launch has no binding_records object"))?;
+    for name in names {
+        records.remove(name);
+    }
+    Ok(remainder)
 }
 
 fn admitted_persistent_session_capsules_from_closure(
@@ -3479,6 +3675,287 @@ mod tests {
                 .unwrap()
         );
         assert!(!source.same_continuation_admission(&successor).unwrap());
+    }
+
+    /// A managed capsule that seals a `model` binding and one other binding,
+    /// with every prepared-launch field present. `model` and `facts` vary the
+    /// bound item and what preparation derived from it.
+    fn bound_capsule(model: &str, facts: &str) -> AdmittedLaunchCapsule {
+        let resolved = serde_json::json!({
+            "model": {
+                "canonical_ref": model,
+                "resolution": {
+                    "root_raw_content_digest": lillux::sha256_hex(model.as_bytes())
+                }
+            },
+            "guard": {
+                "canonical_ref": "directive:test/guard",
+                "resolution": {"root_raw_content_digest": "7".repeat(64)}
+            }
+        });
+        let mut capsule = managed_capsule(serde_json::json!({
+            "project_result_requirement": "none",
+            "filesystem_authority_ceiling": "captured_execution",
+            "network_authority_ceiling": "isolated",
+            "target_requirement": null,
+            "resource_authority_ceiling": "node_policy",
+            "runtime_data": {"provider_snapshot": {"model_name": facts}},
+            "required_secrets": [{"name": format!("{facts}_KEY")}],
+            "runtime_facts": {"model_name": facts},
+            "binding_records": resolved,
+            "execution_dependencies": {"provider_transport": {"ref": "tool:test/transport"}},
+            "content_dependencies": {},
+            "evidence_attachments": [],
+            "environment_contributions": {},
+            "admitted_sessions": {},
+            "config_contributors": [{"canonical_id": format!("config:test/{facts}")}],
+            "financial_authority": {"authority_digest": facts},
+            "external_effect_authority": {"authority_family": facts},
+        }));
+        capsule.sealed_invocation["ref_bindings"] =
+            serde_json::json!({"model": model, "guard": "directive:test/guard"});
+        capsule.sealed_invocation["resolved_ref_bindings"] = resolved;
+        reseal_program(&mut capsule);
+        capsule.validate().expect("bound capsule fixture");
+        capsule
+    }
+
+    fn reseal_program(capsule: &mut AdmittedLaunchCapsule) {
+        capsule.exact_program =
+            project_sealed_root_exact_program(&capsule.sealed_invocation).unwrap();
+        capsule.exact_program_hash = lillux::sha256_hex(
+            lillux::canonical_json(&capsule.exact_program)
+                .unwrap()
+                .as_bytes(),
+        );
+    }
+
+    fn prepared_launch(capsule: &mut AdmittedLaunchCapsule) -> &mut serde_json::Value {
+        let AdmittedExecutionClosure::ManagedRuntime {
+            prepared_runtime_launch,
+            ..
+        } = &mut capsule.execution_closure
+        else {
+            unreachable!()
+        };
+        prepared_runtime_launch
+    }
+
+    fn rebound_names(names: &[&str]) -> std::collections::BTreeSet<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    /// The source, and a successor rebound at `model` to a different item.
+    fn rebound_pair() -> (AdmittedLaunchCapsule, AdmittedLaunchCapsule) {
+        let source = bound_capsule("directive:test/models/first", "first");
+        let mut successor = bound_capsule("directive:test/models/second", "second");
+        successor.execution_realization_hash = "8".repeat(64);
+        successor.sealed_invocation["parameters"] = serde_json::json!({"input": "next"});
+        reseal_program(&mut successor);
+        (source, successor)
+    }
+
+    #[test]
+    fn rebound_continuation_accepts_a_change_at_an_allowed_name_only() {
+        let (source, successor) = rebound_pair();
+        let model = rebound_names(&["model"]);
+        assert_ne!(source.exact_program_hash, successor.exact_program_hash);
+        assert!(
+            source
+                .same_rebound_continuation_admission(&successor, &model)
+                .unwrap()
+        );
+        // The ordinary continuation comparison still refuses the same pair.
+        assert!(
+            !source
+                .same_continuation_program_admission(&successor)
+                .unwrap()
+        );
+
+        // The comparison is selected by name: the unchanged binding cannot be
+        // the rebound one, and naming nothing is not a rebind.
+        assert!(
+            !source
+                .same_rebound_continuation_admission(&successor, &rebound_names(&["guard"]))
+                .unwrap()
+        );
+        assert!(
+            !source
+                .same_rebound_continuation_admission(
+                    &successor,
+                    &rebound_names(&["guard", "model"])
+                )
+                .unwrap()
+        );
+        assert!(
+            source
+                .same_rebound_continuation_admission(&successor, &rebound_names(&[]))
+                .is_err()
+        );
+        // A name the source never sealed cannot be introduced by a rebind.
+        assert!(
+            !source
+                .same_rebound_continuation_admission(&successor, &rebound_names(&["absent"]))
+                .unwrap()
+        );
+        // An unchanged binding is not a rebind, even with fresh preparation.
+        let mut refreshed = source.clone();
+        prepared_launch(&mut refreshed)["runtime_facts"] =
+            serde_json::json!({"model_name": "refreshed"});
+        assert!(
+            !source
+                .same_rebound_continuation_admission(&refreshed, &model)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn rebound_continuation_refuses_a_change_outside_the_named_binding() {
+        let (source, successor) = rebound_pair();
+        let model = rebound_names(&["model"]);
+        let refused = |successor: &AdmittedLaunchCapsule| {
+            successor
+                .validate()
+                .expect("mutated successor stays a valid capsule");
+            !source
+                .same_rebound_continuation_admission(successor, &model)
+                .unwrap()
+        };
+
+        // Another binding, in the program and in its prepared record.
+        let mut other_binding = successor.clone();
+        let changed = serde_json::json!({
+            "canonical_ref": "directive:test/other-guard",
+            "resolution": {"root_raw_content_digest": "6".repeat(64)}
+        });
+        other_binding.sealed_invocation["ref_bindings"]["guard"] =
+            serde_json::json!("directive:test/other-guard");
+        other_binding.sealed_invocation["resolved_ref_bindings"]["guard"] = changed.clone();
+        reseal_program(&mut other_binding);
+        prepared_launch(&mut other_binding)["binding_records"]["guard"] = changed;
+        assert!(refused(&other_binding));
+
+        // Program identity outside the bindings.
+        for (field, value) in [
+            ("item_ref", serde_json::json!("directive:test/other")),
+            ("execution_hints", serde_json::json!({"debug_raw": true})),
+            (
+                "effective_definition_digest",
+                serde_json::json!("2".repeat(64)),
+            ),
+            (
+                "resolved_result_policy",
+                serde_json::json!({"retention": "none"}),
+            ),
+            ("verified_trust_class", serde_json::json!("trusted_project")),
+        ] {
+            let mut changed = successor.clone();
+            changed.sealed_invocation[field] = value;
+            reseal_program(&mut changed);
+            assert!(refused(&changed), "program field {field}");
+        }
+
+        // Capsule authority outside the program.
+        let mut caps = successor.clone();
+        caps.effective_caps
+            .push("ryeos.write.project.live".to_string());
+        assert!(refused(&caps));
+        let mut parent_caps = successor.clone();
+        parent_caps.parent_delegation_caps = Some(vec!["ryeos.read.project.live".to_string()]);
+        assert!(refused(&parent_caps));
+        let mut accounting = successor.clone();
+        accounting.accounting_scope = Some(AdmittedAccountingScope {
+            budget_authority_site_id: "site:fixture-a".to_string(),
+            ledger_epoch: 1,
+            execution_budget_id: "budget:fresh".to_string(),
+            directive_budget_id: None,
+        });
+        assert!(refused(&accounting));
+        let mut lifecycle = successor.clone();
+        lifecycle.lifecycle_authority = ExecutionLifecycleAuthority::DAEMON_NON_RECOVERABLE;
+        assert!(refused(&lifecycle));
+        let mut executor = successor.clone();
+        let AdmittedExecutionClosure::ManagedRuntime {
+            executor_blob_hash, ..
+        } = &mut executor.execution_closure
+        else {
+            unreachable!()
+        };
+        *executor_blob_hash = "b".repeat(64);
+        assert!(
+            !source
+                .same_rebound_continuation_admission(&executor, &model)
+                .unwrap_or(false)
+        );
+    }
+
+    #[test]
+    fn rebound_continuation_refuses_widened_ceilings_and_changed_dependencies() {
+        let (source, successor) = rebound_pair();
+        let model = rebound_names(&["model"]);
+        for (field, value) in [
+            (
+                "filesystem_authority_ceiling",
+                serde_json::json!("node_policy"),
+            ),
+            (
+                "network_authority_ceiling",
+                serde_json::json!("node_policy"),
+            ),
+            ("resource_authority_ceiling", serde_json::json!("unbounded")),
+            ("target_requirement", serde_json::json!({"class": "gpu"})),
+            (
+                "project_result_requirement",
+                serde_json::json!("retained_generation"),
+            ),
+            (
+                "execution_dependencies",
+                serde_json::json!({"provider_transport": {"ref": "tool:test/other-transport"}}),
+            ),
+            (
+                "content_dependencies",
+                serde_json::json!({"weights": {"ref": "config:test/weights"}}),
+            ),
+            (
+                "environment_contributions",
+                serde_json::json!({"provider": {"target": "provider_transport"}}),
+            ),
+            (
+                "evidence_attachments",
+                serde_json::json!([{"event": "1".repeat(64)}]),
+            ),
+            (
+                "admitted_sessions",
+                serde_json::json!({"worker": "1".repeat(64)}),
+            ),
+            // A prepared-launch field this comparison has never classified is
+            // held equal, not ignored.
+            ("unclassified_later_field", serde_json::json!(true)),
+        ] {
+            let mut changed = successor.clone();
+            prepared_launch(&mut changed)[field] = value;
+            changed
+                .validate()
+                .expect("mutated successor stays a valid capsule");
+            assert!(
+                !source
+                    .same_rebound_continuation_admission(&changed, &model)
+                    .unwrap(),
+                "prepared launch field {field}"
+            );
+        }
+
+        // Exactly the classified preparer outputs may differ.
+        for field in REBOUND_PREPARED_LAUNCH_FIELDS {
+            let mut changed = successor.clone();
+            prepared_launch(&mut changed)[*field] = serde_json::json!({"replaced": field});
+            assert!(
+                source
+                    .same_rebound_continuation_admission(&changed, &model)
+                    .unwrap(),
+                "replaced prepared launch field {field}"
+            );
+        }
     }
 
     #[test]

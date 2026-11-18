@@ -939,8 +939,10 @@ async fn scheduling_node_follows_the_remedy_to_a_ready_core_node() -> Result<()>
         observe(&runtime, MAIN)?.is_some(),
         "a scheduling-selected boot must construct scheduler.sqlite3"
     );
-    let fire_at = (chrono::Utc::now() + chrono::Duration::seconds(5))
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let fire_at = ryeos_effect_contract::rfc3339::format_unix_millis(
+        lillux::time::timestamp_millis() + 5_000,
+    )
+    .unwrap();
     let (status, body) = h
         .post_execute(
             "service:scheduler/register",
