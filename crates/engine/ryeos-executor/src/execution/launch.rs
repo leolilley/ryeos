@@ -7430,8 +7430,11 @@ async fn run_claimed_thread_row_inner(
         // A continuation, resume or follow successor that finds its end
         // already passed settles as a typed deadline stop and spawns nothing.
         // A fresh launch keeps the plain refusal below.
+        // A same-thread recovery of a runtime that replays its chain (so it
+        // runs no native checkpoint resume) is a successor all the same.
         let successor_launch = previous_thread_id.is_some()
             || is_resume
+            || matches!(checkpoint_resume_mode, CheckpointResumeMode::SameThread)
             || launch_metadata.as_ref().is_some_and(|metadata| {
                 metadata.continuation_source_thread_id.is_some()
                     || metadata.follow_parent_context.is_some()
