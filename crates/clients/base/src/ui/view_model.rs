@@ -180,6 +180,9 @@ pub struct RyeOsTopBarVm {
     pub tabs: Vec<RyeOsViewSetTabVm>,
     pub focused_title: String,
     pub layout_symbol: String,
+    /// Whether the add-tab affordance is offered; the active Surface's
+    /// `style.add_tab`, true unless it declares false.
+    pub add_tab: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1002,6 +1005,7 @@ fn top_bar_vm(core: &RyeOsCore) -> RyeOsTopBarVm {
             .collect(),
         focused_title: focused_tile_title(core),
         layout_symbol: layout_symbol(core),
+        add_tab: active_surface_style(core).add_tab,
     }
 }
 
@@ -5044,6 +5048,17 @@ mod tests {
                 .status_bar
                 .visible
         );
+    }
+
+    #[test]
+    fn surface_style_add_tab_reaches_the_top_bar() {
+        let declared_off = build_view_model(&core_with_surface_yaml(
+            "name: No add\nstyle:\n  add_tab: false\n",
+        ));
+        assert!(!declared_off.presentation.chrome.top_bar.add_tab);
+
+        let undeclared = build_view_model(&core_with_surface_yaml("name: Plain\n"));
+        assert!(undeclared.presentation.chrome.top_bar.add_tab);
     }
 
     #[test]
