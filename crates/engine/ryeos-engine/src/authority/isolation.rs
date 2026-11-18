@@ -26,6 +26,7 @@ use ryeos_isolation_protocol::{
 
 mod authority;
 mod backend;
+mod generation_scope;
 mod inspection;
 mod network_inputs;
 mod policy;
@@ -44,6 +45,7 @@ pub use authority::{
     IsolationWritableRuntimeViewMountAuthority, OriginalProductManifestRole,
 };
 pub use backend::{ResolvedIsolationBackend, VerifiedIsolationBackendCapture};
+pub use generation_scope::VerifiedGeneration;
 pub use inspection::{
     CALLBACK_CAPTURED_COMPATIBLE, DescendantContainmentGuarantee, DescendantContainmentReadiness,
     FILESYSTEM_CAPTURED_EXECUTION, GuaranteeHost, ISOLATION_ENFORCED, ISOLATION_PROVIDER,
@@ -2170,16 +2172,88 @@ impl IsolationRuntime {
         self.generation_registered_bundle_roots.as_deref()
     }
 
+    /// Verify every installed bundle of the retained generation now. This
+    /// always verifies, also inside a guarded operation: every caller that is
+    /// about to launch a workload, allocate a resource or commit a write keeps
+    /// its own real check immediately before that effect.
     pub fn ensure_registered_generation_current(&self) -> Result<(), EngineError> {
         match &self._generation_lifeline {
             Some(lifeline) => {
-                lifeline
-                    .ensure_current()
-                    .map_err(|reason| EngineError::IsolationPolicyRefused {
-                        reason: format!("registered bundle generation changed: {reason}"),
-                    })
+                let started = std::time::Instant::now();
+                let outcome = lifeline.ensure_current();
+                crate::work_tally::GENERATION_VERIFICATIONS.record(started.elapsed());
+                outcome.map_err(|reason| EngineError::IsolationPolicyRefused {
+                    reason: format!("registered bundle generation changed: {reason}"),
+                })
             }
             None => Ok(()),
+        }
+    }
+
+    /// Verification point of work that commits nothing: it only produces a
+    /// value which the enclosing guarded operation refuses if its
+    /// after-verification fails.
+    ///
+    /// Inside a [`Self::with_verified_generation`] operation for this same
+    /// generation on the calling thread, the operation's own before and after
+    /// verification covers this point and nothing is re-verified. Everywhere
+    /// else this verifies every installed bundle now.
+    ///
+    /// The only callers are the launch of a handler subprocess
+    /// ([`Self::apply_handler_launch`]) and, through
+    /// [`Self::with_verified_generation`], a nested guarded operation.
+    pub(crate) fn ensure_registered_generation_current_unless_covered(
+        &self,
+    ) -> Result<(), EngineError> {
+        if self
+            .registered_generation_identity
+            .is_some_and(generation_scope::is_covered)
+        {
+            return Ok(());
+        }
+        self.ensure_registered_generation_current()
+    }
+
+    /// Run `operation` against the retained bundle generation, verified once
+    /// before and once after. A failed after-verification refuses the
+    /// operation's result.
+    ///
+    /// The token passed to `operation` names the verified generation. While
+    /// `operation` runs, a nested guarded operation and a handler subprocess
+    /// launch for that generation on the calling thread are covered by this
+    /// operation's two verifications. Every other verification point still
+    /// verifies for itself.
+    /// Nested inside an operation for the same generation, this adds no
+    /// verification of its own; the outermost operation's after-verification
+    /// still runs and still refuses its result.
+    pub fn with_verified_generation<T, E>(
+        &self,
+        operation: impl FnOnce(&VerifiedGeneration) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<EngineError>,
+    {
+        match (
+            &self._generation_lifeline,
+            self.registered_generation_identity,
+        ) {
+            (Some(_), Some(identity)) => generation_scope::run_verified(
+                identity,
+                || self.ensure_registered_generation_current().map_err(E::from),
+                operation,
+            ),
+            // A lifeline is always retained together with its identity; an
+            // unidentified one could not be matched by any enclosed
+            // verification point, so nothing is ever covered for it.
+            (Some(_), None) => {
+                self.ensure_registered_generation_current()
+                    .map_err(E::from)?;
+                let value = generation_scope::run_unregistered(operation)?;
+                self.ensure_registered_generation_current()
+                    .map_err(E::from)?;
+                Ok(value)
+            }
+            (None, _) => generation_scope::run_unregistered(operation),
         }
     }
 
@@ -2649,6 +2723,39 @@ impl IsolationRuntime {
             );
             applied.request
         })
+    }
+
+    /// Apply this immutable policy snapshot to the launch of one handler
+    /// subprocess: a parser, composer, validator or evidence projector.
+    ///
+    /// A handler is launched by its exact verified executable digest, sees
+    /// installed bundle roots read-only, is given no writable mount, and
+    /// returns only a value. Launching one commits nothing. Inside a guarded
+    /// operation for this generation its result is refused together with the
+    /// operation's when the after-verification fails, so the launch does not
+    /// verify the generation again there. Outside a guarded operation it
+    /// verifies before and after, as every other launch does.
+    pub(crate) fn apply_handler_launch(
+        &self,
+        request: lillux::SubprocessRequest,
+        context: IsolationLaunchContext<'_>,
+    ) -> Result<lillux::SubprocessRequest, EngineError> {
+        self.ensure_registered_generation_current_unless_covered()?;
+        let applied = self.apply_with_provenance_current(
+            request,
+            context,
+            RequestedLaunchLifecycle::Run,
+            RetainedContainment::Group,
+            None,
+            None,
+            None,
+        )?;
+        self.ensure_registered_generation_current_unless_covered()?;
+        tracing::debug!(
+            isolation = ?applied.provenance,
+            "compiled isolation launch provenance"
+        );
+        Ok(applied.request)
     }
 
     pub fn apply_with_provenance(

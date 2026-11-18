@@ -2102,6 +2102,11 @@ mod group_presence_tests {
             body();
             unsafe { libc::_exit(0) };
         }
+        // Both sides make the group: a signal sent right after the fork (a
+        // SIGSTOP, say) can stop the child before it runs its own `setpgid`,
+        // and a child stopped outside the group is never found by a scan of
+        // that group. Under load that race is wide.
+        unsafe { libc::setpgid(pid, pid) };
         pid
     }
 

@@ -55,6 +55,7 @@ pub use registry::{
 
 #[doc(hidden)]
 pub mod test_support;
+pub mod work_tally;
 
 /// The working directory name used in all three spaces.
 /// Every space follows: `base_path / AI_DIR / {kind_directory} / {item_id}`

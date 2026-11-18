@@ -83,6 +83,7 @@ pub struct Response {
 }
 
 pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
+    let _timing = crate::phase_timing::PhaseTimer::start("launch_mint", "total");
     require_current_binding_contract(&req.ui_binding_contract_revision)?;
 
     // Require a verified signed caller. Hosted principal launches bind
@@ -148,8 +149,10 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     let mut session_ctx = ctx.clone();
     session_ctx.scopes = granted_caps.clone();
 
-    let (compiled_binding, presentation) =
-        compile_session_binding(&req, &session_ctx, &state, project_authority.as_deref())?;
+    let (compiled_binding, presentation) = {
+        let _timing = crate::phase_timing::PhaseTimer::start("launch_mint", "binding_compile");
+        compile_session_binding(&req, &session_ctx, &state, project_authority.as_deref())?
+    };
     let _project_registry_gate = match (
         registered_project_id.as_deref(),
         project_authority.as_deref(),

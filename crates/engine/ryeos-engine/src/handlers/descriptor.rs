@@ -34,6 +34,38 @@ pub struct HandlerDescriptor {
     /// Human-readable description.
     #[serde(default)]
     pub description: String,
+    /// Signed result-caching contract. Only a composer may enable it;
+    /// parsers declare theirs on the parser descriptor.
+    #[serde(default, skip_serializing_if = "HandlerResultCachePolicy::is_disabled")]
+    pub cache: HandlerResultCachePolicy,
+}
+
+/// Signed handler-result caching contract. Disabled is the safety default: a
+/// handler must opt in explicitly before a response can outlive the launch
+/// that produced it.
+///
+/// `content_addressed` is the publisher's assertion that the binary is a
+/// deterministic function of its request: for the same request bytes it
+/// returns the same response, it reads nothing else (no environment, clock,
+/// network or file beyond the request on standard input), and it has no
+/// externally visible side effect. The engine binds a cached response to the
+/// binary's digest, this signed descriptor and the exact request.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HandlerResultCachePolicy {
+    #[default]
+    Disabled,
+    ContentAddressed,
+}
+
+impl HandlerResultCachePolicy {
+    pub fn is_disabled(&self) -> bool {
+        matches!(self, Self::Disabled)
+    }
+
+    pub fn is_content_addressed(&self) -> bool {
+        matches!(self, Self::ContentAddressed)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]

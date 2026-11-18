@@ -858,6 +858,19 @@ pub(crate) fn classify_trust(
     project_root: Option<&std::path::Path>,
 ) -> Option<TrustSummary> {
     let raw = crate::seat_auth::read_whole_item_source(path, access)?;
+    classify_trust_of_source(&raw, envelope, trust_store, space, kind, project_root)
+}
+
+/// Trust class of item source bytes already read, so a caller that shows text
+/// from those bytes shows exactly what was verified.
+pub(crate) fn classify_trust_of_source(
+    raw: &str,
+    envelope: Option<&SignatureEnvelope>,
+    trust_store: &ryeos_engine::trust::TrustStore,
+    space: ItemSpace,
+    kind: &str,
+    project_root: Option<&std::path::Path>,
+) -> Option<TrustSummary> {
     let Some(envelope) = envelope else {
         return Some(TrustSummary {
             class: "unknown".into(),
@@ -865,7 +878,7 @@ pub(crate) fn classify_trust(
         });
     };
 
-    let Some(header) = parse_signature_header(&raw, envelope) else {
+    let Some(header) = parse_signature_header(raw, envelope) else {
         return Some(TrustSummary {
             class: "unsigned".into(),
             signer: None,
@@ -874,7 +887,7 @@ pub(crate) fn classify_trust(
 
     let signer = Some(header.signer_fingerprint.clone());
     let ctx = ryeos_engine::trust::SignerContext::new(space, kind, project_root);
-    let class = match verify_item_signature(&raw, &header, envelope, trust_store, &ctx) {
+    let class = match verify_item_signature(raw, &header, envelope, trust_store, &ctx) {
         Ok((TrustClass::Trusted, _)) => "trusted",
         Ok((TrustClass::Untrusted, _)) => "untrusted",
         Ok((TrustClass::Unsigned, _)) => "unsigned",

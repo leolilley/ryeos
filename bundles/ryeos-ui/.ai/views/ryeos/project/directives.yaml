@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-18T07:27:32Z:669f83fba1e98e1492c59be290debafaaa971c786f61539c5454d6beeeb7470a:Fk+79qWGJfWeb2w2+s8D3pnmas9en30bdcsHQ/nhIiNFMF/1V8dp22mV3iBjWeh0PGB4EzoQ1aq+0IdnAeGKAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T11:49:26Z:0530c3137944a7ae67651f71b803e735f839314adbb197465c0f3f04f7301c09:nV1jGChYBFAXaZnm/omwMGGZy6EZHNJUvNL89G6eZJ0Dszfe2kGC0lylQSPdgyBqjjKvxXGd5fBvERvdsRnNDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: project-directives
 title: Directives
 version: "1.0.0"
@@ -17,6 +17,8 @@ sources:
     requires_project: true
 projections:
   columns:
+    - label: name
+      field: title
     - label: item
       field: canonical_ref
     - label: space

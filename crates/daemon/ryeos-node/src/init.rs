@@ -3621,10 +3621,11 @@ mod tests {
             "{undeclared}"
         );
         // A profile without a hosted variant does not run hosted.
-        let development = authored_profile("development");
+        let contained = authored_profile("contained-workflow");
         let refused = format!(
             "{:#}",
-            select_profile_host_class("development", &development, Some("hosted")).unwrap_err()
+            select_profile_host_class("contained-workflow", &contained, Some("hosted"))
+                .unwrap_err()
         );
         assert!(refused.contains("it declares local"), "{refused}");
         let noncanonical = format!(

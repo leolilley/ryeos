@@ -161,6 +161,8 @@ pub enum HandlerError {
     },
     #[error("handler `{name}`: required_caps must be empty (handlers are pure functions)")]
     HandlersMustHaveNoCaps { name: String },
+    #[error("handler `{name}`: only a composer handler may declare a result cache")]
+    ResultCacheNotSupported { name: String },
     #[error("handler `{name}`: binary_ref `{found}` does not match `bin/<triple>/<name>` shape")]
     BadBinaryRefShape { name: String, found: String },
     #[error("handler `{name}`: descriptor file stem must match `name` field")]
@@ -513,6 +515,13 @@ fn validate_handler_descriptor(path: &Path, desc: &HandlerDescriptor) -> Result<
         });
     }
 
+    // A cached response is only ever consulted for compose requests.
+    if !desc.cache.is_disabled() && desc.serves != HandlerServes::Composer {
+        return Err(HandlerError::ResultCacheNotSupported {
+            name: desc.name.clone(),
+        });
+    }
+
     // 4. binary_ref matches bin/<triple>/<name> shape
     let triple = env!("RYEOS_ENGINE_HOST_TRIPLE");
     let expected_prefix = format!("bin/{triple}/");
@@ -559,6 +568,7 @@ mod tests {
                 binary_ref: format!("bin/{}/{name}", env!("RYEOS_ENGINE_HOST_TRIPLE")),
                 serves: HandlerServes::Parser,
                 required_caps: Vec::new(),
+                cache: Default::default(),
                 description: String::new(),
             },
         )
@@ -582,6 +592,50 @@ mod tests {
                 ..
             } if expected == SUPPORTED_HANDLER_ABI_VERSION && found == "v1"
         ));
+    }
+
+    #[test]
+    fn only_a_composer_may_declare_a_result_cache() {
+        use crate::handlers::descriptor::HandlerResultCachePolicy;
+
+        let (path, mut descriptor) = descriptor_with_abi(SUPPORTED_HANDLER_ABI_VERSION);
+        descriptor.cache = HandlerResultCachePolicy::ContentAddressed;
+        for serves in [
+            HandlerServes::Parser,
+            HandlerServes::LaunchPreparer,
+            HandlerServes::EffectiveValidator,
+            HandlerServes::ExecutionEvidenceProjector,
+        ] {
+            descriptor.serves = serves;
+            assert!(matches!(
+                validate_handler_descriptor(&path, &descriptor).unwrap_err(),
+                HandlerError::ResultCacheNotSupported { .. }
+            ));
+        }
+        descriptor.serves = HandlerServes::Composer;
+        validate_handler_descriptor(&path, &descriptor).unwrap();
+    }
+
+    #[test]
+    fn result_cache_is_disabled_unless_the_signed_descriptor_declares_it() {
+        use crate::handlers::descriptor::HandlerResultCachePolicy;
+
+        let body = format!(
+            "category: test\nname: test-handler\nkind: handler\nserves: composer\n\
+             binary_ref: bin/{}/test-handler\nabi_version: \"{SUPPORTED_HANDLER_ABI_VERSION}\"\n",
+            env!("RYEOS_ENGINE_HOST_TRIPLE")
+        );
+        let silent: HandlerDescriptor = serde_yaml::from_str(&body).unwrap();
+        assert_eq!(silent.cache, HandlerResultCachePolicy::Disabled);
+
+        let declared: HandlerDescriptor =
+            serde_yaml::from_str(&format!("{body}cache:\n  mode: content_addressed\n")).unwrap();
+        assert_eq!(declared.cache, HandlerResultCachePolicy::ContentAddressed);
+
+        assert!(
+            serde_yaml::from_str::<HandlerDescriptor>(&format!("{body}cache:\n  mode: always\n"))
+                .is_err()
+        );
     }
 
     #[test]
@@ -614,6 +668,7 @@ mod tests {
                 binary_ref: "bin/x86_64-unknown-linux-gnu/my_handler".to_owned(),
                 serves: HandlerServes::Parser,
                 required_caps: vec![],
+                cache: Default::default(),
                 description: String::new(),
             },
             trust_class: TrustClass::TrustedBundle,
@@ -658,6 +713,7 @@ mod tests {
                 binary_ref: "bin/x86_64-unknown-linux-gnu/missing".to_owned(),
                 serves: HandlerServes::Composer,
                 required_caps: vec![],
+                cache: Default::default(),
                 description: String::new(),
             },
             trust_class: TrustClass::TrustedProject,
