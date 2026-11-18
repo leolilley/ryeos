@@ -7,14 +7,14 @@ use ryeos_directive_definition::{
     SnapshotItemSpace, SnapshotTrustClass, VerifiedConfigItem, prepare_directive_launch,
 };
 use ryeos_handler_protocol::{
-    ConfigMergeModeWire, ExternalEffectAuthorityDeclWire, ExternalEffectAuthorityResultWire,
-    FinancialAuthorityDeclWire, FinancialAuthorityResultWire, HandlerResponse, ItemSpaceWire,
-    LaunchConfigContributorWire, LaunchConfigInputDeclWire, LaunchConfigSnapshotWire,
-    LaunchDiagnosticScalarWire, LaunchExecutionDependencyRequestWire, LaunchPrepareError,
-    LaunchPrepareErrorClass, LaunchPrepareRequest, LaunchPrepareResponse, LaunchPrepareSuccess,
-    LaunchSecretOriginWire, LaunchSecretRequirement, RefBindingSourceWire, RuntimeFactKindWire,
-    TrustClassWire, ValidateLaunchPreparerConfigRequest, ValidateLaunchPreparerConfigResponse,
-    ValidateLaunchPreparerConfigSuccess,
+    ConfigMergeModeWire, ContinuationRebindWire, ExternalEffectAuthorityDeclWire,
+    ExternalEffectAuthorityResultWire, FinancialAuthorityDeclWire, FinancialAuthorityResultWire,
+    HandlerResponse, ItemSpaceWire, LaunchConfigContributorWire, LaunchConfigInputDeclWire,
+    LaunchConfigSnapshotWire, LaunchDiagnosticScalarWire, LaunchExecutionDependencyRequestWire,
+    LaunchPrepareError, LaunchPrepareErrorClass, LaunchPrepareRequest, LaunchPrepareResponse,
+    LaunchPrepareSuccess, LaunchSecretOriginWire, LaunchSecretRequirement, RefBindingDeclWire,
+    RefBindingSourceWire, RuntimeFactKindWire, TrustClassWire, ValidateLaunchPreparerConfigRequest,
+    ValidateLaunchPreparerConfigResponse, ValidateLaunchPreparerConfigSuccess,
 };
 
 const ALLOWED_SECRET_NAMES: &[&str] = &[
@@ -445,31 +445,7 @@ fn validate_contract(request: &ValidateLaunchPreparerConfigRequest) -> Result<()
         .ref_bindings
         .get(MODEL_BINDING)
         .ok_or_else(|| "ref_bindings.model is required".to_string())?;
-    if !model.required {
-        return Err("ref_bindings.model must be required".to_string());
-    }
-    if model.source != RefBindingSourceWire::CallerOrPrimaryRef {
-        return Err(
-            "ref_bindings.model must be caller-sourced with the primary ref as default".to_string(),
-        );
-    }
-    if model.project_result_requirement != ryeos_handler_protocol::ProjectResultRequirement::None {
-        return Err("ref_bindings.model must not require a retained project result".to_string());
-    }
-    exact_strings("model.allowed_kinds", &model.allowed_kinds, &["directive"])?;
-    exact_values(
-        "model.allowed_spaces",
-        &model.allowed_spaces,
-        &[ItemSpaceWire::Bundle, ItemSpaceWire::Project],
-    )?;
-    exact_trust_values(
-        "model.allowed_trust",
-        &model.allowed_trust,
-        &[
-            TrustClassWire::TrustedBundle,
-            TrustClassWire::TrustedProject,
-        ],
-    )?;
+    validate_model_binding(model)?;
 
     if request.config_inputs.len() != 3 {
         return Err(
@@ -780,6 +756,40 @@ fn exact_values<T: PartialEq>(label: &str, actual: &[T], expected: &[T]) -> Resu
     }
 }
 
+/// The one ref binding the directive launch contract declares. An operator
+/// may rebind it on a continuation, so a runtime descriptor that seals the
+/// binding for the whole chain is not this contract.
+fn validate_model_binding(model: &RefBindingDeclWire) -> Result<(), String> {
+    if !model.required {
+        return Err("ref_bindings.model must be required".to_string());
+    }
+    if model.source != RefBindingSourceWire::CallerOrPrimaryRef {
+        return Err(
+            "ref_bindings.model must be caller-sourced with the primary ref as default".to_string(),
+        );
+    }
+    if model.project_result_requirement != ryeos_handler_protocol::ProjectResultRequirement::None {
+        return Err("ref_bindings.model must not require a retained project result".to_string());
+    }
+    if model.continuation_rebind != ContinuationRebindWire::Operator {
+        return Err("ref_bindings.model must allow an operator continuation rebind".to_string());
+    }
+    exact_strings("model.allowed_kinds", &model.allowed_kinds, &["directive"])?;
+    exact_values(
+        "model.allowed_spaces",
+        &model.allowed_spaces,
+        &[ItemSpaceWire::Bundle, ItemSpaceWire::Project],
+    )?;
+    exact_trust_values(
+        "model.allowed_trust",
+        &model.allowed_trust,
+        &[
+            TrustClassWire::TrustedBundle,
+            TrustClassWire::TrustedProject,
+        ],
+    )
+}
+
 fn fact(
     request: &ValidateLaunchPreparerConfigRequest,
     name: &str,
@@ -811,6 +821,62 @@ mod tests {
 
     fn repository_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..")
+    }
+
+    fn model_binding() -> super::RefBindingDeclWire {
+        use ryeos_handler_protocol::{ItemSpaceWire, TrustClassWire};
+        super::RefBindingDeclWire {
+            required: true,
+            source: super::RefBindingSourceWire::CallerOrPrimaryRef,
+            project_result_requirement: ryeos_handler_protocol::ProjectResultRequirement::None,
+            allowed_kinds: vec!["directive".to_owned()],
+            allowed_spaces: vec![ItemSpaceWire::Bundle, ItemSpaceWire::Project],
+            allowed_trust: vec![
+                TrustClassWire::TrustedBundle,
+                TrustClassWire::TrustedProject,
+            ],
+            continuation_rebind: super::ContinuationRebindWire::Operator,
+        }
+    }
+
+    #[test]
+    fn model_binding_contract_requires_operator_continuation_rebind() {
+        super::validate_model_binding(&model_binding()).expect("the directive contract's binding");
+
+        let mut sealed = model_binding();
+        sealed.continuation_rebind = super::ContinuationRebindWire::Never;
+        let error = super::validate_model_binding(&sealed).unwrap_err();
+        assert!(error.contains("operator continuation rebind"), "{error}");
+
+        let mut optional = model_binding();
+        optional.required = false;
+        assert!(super::validate_model_binding(&optional).is_err());
+
+        let mut caller_only = model_binding();
+        caller_only.source = super::RefBindingSourceWire::Caller;
+        assert!(super::validate_model_binding(&caller_only).is_err());
+    }
+
+    #[test]
+    fn bundled_directive_runtime_declares_the_model_binding_contract() {
+        let runtime: serde_yaml::Value = serde_yaml::from_str(
+            &std::fs::read_to_string(
+                repository_root().join("bundles/directive/.ai/runtimes/directive-runtime.yaml"),
+            )
+            .expect("read directive runtime descriptor"),
+        )
+        .expect("parse directive runtime descriptor");
+        let bindings = runtime["launch_contract"]["ref_bindings"]
+            .as_mapping()
+            .expect("directive runtime ref bindings");
+        assert_eq!(bindings.len(), 1);
+        let model = &runtime["launch_contract"]["ref_bindings"][super::MODEL_BINDING];
+        assert_eq!(model["continuation_rebind"].as_str(), Some("operator"));
+        assert_eq!(
+            model["source"]["kind"].as_str(),
+            Some("caller_or_primary_ref")
+        );
+        assert_eq!(model["required"].as_bool(), Some(true));
     }
 
     #[test]

@@ -318,6 +318,24 @@ pub struct RefBindingDecl {
     pub allowed_kinds: Vec<String>,
     pub allowed_spaces: Vec<LaunchItemSpace>,
     pub allowed_trust: Vec<TrustClass>,
+    /// Who may replace this binding on a continuation of an admitted thread.
+    #[serde(default)]
+    pub continuation_rebind: ContinuationRebind,
+}
+
+/// Whether a continuation may bind a different item at a ref-binding name.
+///
+/// `never` keeps the binding sealed at first admission for the whole chain.
+/// `operator` lets an operator continuation name a different item; the
+/// replacement is still parsed, authorized, resolved and trust-checked as a
+/// binding, and every other part of the admitted program stays fixed. An
+/// absent field is `never`, so a runtime opts in by signing the word.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuationRebind {
+    #[default]
+    Never,
+    Operator,
 }
 
 /// Signed owner of a managed runtime's ref-binding coordinate.
@@ -2054,6 +2072,7 @@ mod tests {
                 allowed_kinds: vec!["test_kind".to_string()],
                 allowed_spaces: vec![LaunchItemSpace::Node],
                 allowed_trust: vec![TrustClass::TrustedNode],
+                continuation_rebind: ContinuationRebind::Never,
             },
         );
         let error = validate_runtime_yaml(&test_path(), &yaml)
