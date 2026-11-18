@@ -63,6 +63,18 @@ host_service_diagnostics() {
   sudo -n sh -c 'for f in /var/log/lillux-host-service/*/current; do echo "== $f"; tail -n 80 "$f"; done' >&2 2>&1 || true
 }
 
+thread_diagnostics() {
+  [[ -n "${THREAD_ID:-}" ]] || return 0
+  echo "--- thread chain and each thread's tail" >&2
+  local chain id
+  chain="$(timeout 30 ryeos thread chain --thread-id "$THREAD_ID" 2>&1 || true)"
+  printf '%s\n' "$chain" | head -n 200 >&2
+  for id in $(grep -Eo 'T-[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' <<<"$chain" | sort -u); do
+    echo "== thread tail $id" >&2
+    timeout 30 ryeos thread tail "$id" 2>&1 | head -n 120 >&2 || true
+  done
+}
+
 cleanup() {
   timeout 15 ryeos stop --force >/dev/null 2>&1 || true
   host_service_retire
@@ -74,7 +86,10 @@ cleanup() {
 }
 smoke_exit() {
   local status="$1"
-  [[ "$status" == "0" ]] || host_service_diagnostics
+  if [[ "$status" != "0" ]]; then
+    thread_diagnostics
+    host_service_diagnostics
+  fi
   ryeos_term_handle_exit "$status"
   cleanup
   return "$status"
