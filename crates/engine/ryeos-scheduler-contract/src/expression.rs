@@ -1,7 +1,7 @@
 //! Pure expression interpretation; timer computation remains scheduler-owned.
 
+use crate::cron::{CronSchedule, ScheduleZone};
 use anyhow::{Context, Result, bail};
-use std::str::FromStr;
 
 pub fn parse_iso_ts(expression: &str) -> Option<i64> {
     ryeos_effect_contract::rfc3339::parse_unix_millis(expression)
@@ -17,7 +17,7 @@ pub fn parse_iso_ts(expression: &str) -> Option<i64> {
 pub fn validate_expression(schedule_type: &str, expression: &str) -> Result<()> {
     match schedule_type {
         "cron" => {
-            cron::Schedule::from_str(expression)
+            CronSchedule::parse(expression)
                 .with_context(|| format!("invalid cron expression: {}", expression))?;
             Ok(())
         }
@@ -45,9 +45,7 @@ pub fn validate_expression(schedule_type: &str, expression: &str) -> Result<()> 
 
 /// Validate a timezone string.
 pub fn validate_timezone(tz: &str) -> Result<()> {
-    tz.parse::<chrono_tz::Tz>()
-        .with_context(|| format!("invalid IANA timezone: {}", tz))?;
-    Ok(())
+    ScheduleZone::parse(tz).map(|_| ())
 }
 
 /// Validate the canonical schedule identity shared with durable fire records.

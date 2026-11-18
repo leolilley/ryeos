@@ -10,6 +10,7 @@
       "parent": null,
       "exchange": "msg:6/0",
       "counts_as": null,
+      "text_streamed": true,
       "slots": {
         "body": "<scrubbed content 2444 chars>"
       },
@@ -111,6 +112,7 @@
       "parent": null,
       "exchange": "msg:6/0",
       "counts_as": null,
+      "text_streamed": true,
       "slots": {
         "body": "<scrubbed content 24 chars>"
       },

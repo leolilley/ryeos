@@ -12,9 +12,6 @@ test-support = ["dep:tempfile", "ryeos-state/test-support", "lillux-sqlite/test-
 
 [dependencies]
 anyhow = { workspace = true }
-chrono = { workspace = true }
-chrono-tz = { workspace = true }
-cron = { workspace = true }
 lillux = { workspace = true }
 lillux-sqlite = { workspace = true }
 ryeos-engine = { workspace = true }
