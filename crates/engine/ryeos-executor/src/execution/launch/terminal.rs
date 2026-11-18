@@ -258,6 +258,30 @@ pub(super) fn head_advance_not_applied_finalization(
     }
 }
 
+/// Whether a runtime that stopped without self-finalizing must have its
+/// dedicated session worker retired before the stopped-runtime workspace
+/// capture. The worker owns the workspace's process group, so the capture's
+/// absence proof refuses while it is still alive and pooled.
+///
+/// Sessions in a candidate-disposition state keep the capture-first order:
+/// retiring them goes through the candidate cancel, which would destroy the
+/// candidate that the `freezing` binding step must still bind and that later
+/// disposition states already carry. A terminal session has no worker left to
+/// retire, and a session in `publishing` is refused by retirement itself.
+pub(super) fn retire_session_worker_before_capture(session_state: &str) -> bool {
+    !matches!(
+        session_state,
+        "terminal"
+            | "freezing"
+            | "frozen"
+            | "verifying"
+            | "qualifying"
+            | "publish_ready"
+            | "publishing"
+            | "discarding"
+    )
+}
+
 /// Materialize the canonical DB finalization and complete managed terminal
 /// envelope when a runtime exits without finalizing itself through its
 /// callback.
@@ -539,6 +563,41 @@ mod tests {
         );
         assert_eq!(fallback.managed_envelope["success"], false);
         assert_eq!(fallback.managed_envelope["result"], "payload");
+    }
+
+    #[test]
+    fn candidate_disposition_sessions_keep_their_candidate_past_the_capture() {
+        // A freezing session's candidate is bound after the capture; early
+        // retirement would cancel it, so no candidate-disposition state may
+        // be retired first.
+        for state in [
+            "freezing",
+            "frozen",
+            "verifying",
+            "qualifying",
+            "publish_ready",
+            "publishing",
+            "discarding",
+            "terminal",
+        ] {
+            assert!(
+                !retire_session_worker_before_capture(state),
+                "{state} must keep the capture-first order"
+            );
+        }
+        // Sessions that still own a live worker are retired before capture so
+        // the workspace owner's process group is absent when it is checked.
+        for state in [
+            "turn_running",
+            "awaiting_approval",
+            "recovering",
+            "outcome_unknown",
+        ] {
+            assert!(
+                retire_session_worker_before_capture(state),
+                "{state} must retire its worker before capture"
+            );
+        }
     }
 
     #[test]
