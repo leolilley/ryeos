@@ -769,6 +769,12 @@ pub enum ResolutionError {
         item_ref: String,
         source: Box<crate::kind_registry::MetadataAnchoringError>,
     },
+    /// A project file shadows an installed bundle item of a kind whose signed
+    /// schema refuses that. Carries the resolver's own typed refusal, which
+    /// names the member of the chain it was raised for and both files.
+    ProjectShadowsBundleItem {
+        refusal: Box<crate::error::EngineError>,
+    },
     /// Kind has no execution block (not executable).
     KindNotExecutable { kind: String },
     /// Generic step failure.
@@ -836,6 +842,7 @@ impl std::fmt::Display for ResolutionError {
             ResolutionError::MetadataAnchoringFailed { item_ref, source } => {
                 write!(f, "metadata anchoring failed for {}: {}", item_ref, source)
             }
+            ResolutionError::ProjectShadowsBundleItem { refusal } => write!(f, "{refusal}"),
             ResolutionError::KindNotExecutable { kind } => {
                 write!(f, "kind {} has no execution block (not executable)", kind)
             }

@@ -517,6 +517,11 @@ pub(crate) fn load_item_raw(
                 referenced_by: referenced_by.to_string(),
             });
         }
+        Err(refusal @ EngineError::ProjectShadowsBundleItem { .. }) => {
+            return Err(ResolutionError::ProjectShadowsBundleItem {
+                refusal: Box::new(refusal),
+            });
+        }
         Err(EngineError::ItemResolutionUnavailable { .. }) => {
             return Err(ResolutionError::StepFailed {
                 step,

@@ -536,6 +536,8 @@ fn resolve_item_full_inner(
     }
     let mut winner: Option<(PathBuf, ItemSpace, ItemSourceRoot, String, String, PathBuf)> = None;
     let mut shadowed = Vec::new();
+    // The first admitted bundle candidate found behind a project winner.
+    let mut bundle_behind_project: Option<(String, PathBuf)> = None;
     let mut probed_absent = Vec::new();
     let mut searched_spaces = Vec::new();
 
@@ -658,6 +660,16 @@ fn resolve_item_full_inner(
                         root.ai_root.clone(),
                     ));
                 } else {
+                    if bundle_behind_project.is_none()
+                        && let Some((_, ItemSpace::Project, ..)) = &winner
+                        && root.space == ItemSpace::Bundle
+                    {
+                        let bundle = match &root.identity {
+                            ItemSourceRoot::Bundle { name } => name.clone(),
+                            _ => root.label.clone(),
+                        };
+                        bundle_behind_project = Some((bundle, path.clone()));
+                    }
                     shadowed.push(ShadowedCandidate {
                         label: root.label.clone(),
                         space: root.space,
@@ -675,6 +687,23 @@ fn resolve_item_full_inner(
                 });
             }
         }
+    }
+
+    // A kind may declare that a project item never replaces a bundle item.
+    // The refusal is decided here, on file presence alone, so it holds for
+    // every consumer of resolution, for every member of an extends chain, and
+    // before any signature is read: a trusted signer changes nothing.
+    if kind_schema.project_shadowing == crate::kind_registry::ProjectShadowing::Refuse
+        && let Some((project_path, ItemSpace::Project, ..)) = &winner
+        && let Some((bundle, bundle_path)) = bundle_behind_project
+    {
+        return Err(EngineError::ProjectShadowsBundleItem {
+            canonical_ref: ref_.to_string(),
+            kind: ref_.kind.clone(),
+            bundle,
+            project_path: project_path.clone(),
+            bundle_path,
+        });
     }
 
     match winner {
@@ -1166,6 +1195,7 @@ mod tests {
             inventory_schema_keys: Vec::new(),
             inventory_policy: Default::default(),
             launch_trust: None,
+            project_shadowing: Default::default(),
         }
     }
 
@@ -1482,6 +1512,98 @@ mod tests {
         assert!(
             validate_owned_namespaces(&["ryeos/core".to_owned(), "ryeos/core".to_owned()]).is_err()
         );
+    }
+
+    fn shadow_refusing_schema(directory: &str) -> KindSchema {
+        let mut schema = make_kind_schema(directory, vec![(".yaml", "yaml")]);
+        schema.project_shadowing = crate::kind_registry::ProjectShadowing::Refuse;
+        schema
+    }
+
+    #[test]
+    fn a_project_item_shadowing_a_bundle_item_is_refused_when_the_kind_declares_it() {
+        let project = tempdir();
+        let bundle = tempdir();
+        let project_ai = project.join(crate::AI_DIR);
+        let bundle_ai = bundle.join(crate::AI_DIR);
+        write_item(&project_ai, "views", "shared/x", ".yaml", "widget: text");
+        write_item(&bundle_ai, "views", "shared/x", ".yaml", "widget: rows");
+        write_item(&project_ai, "views", "mine/x", ".yaml", "widget: text");
+        write_item(&bundle_ai, "views", "theirs/x", ".yaml", "widget: rows");
+        let installed = vec![RegisteredBundleRoot {
+            name: "shipper".to_owned(),
+            canonical_root: bundle.clone(),
+            owned_namespaces: Vec::new(),
+        }];
+        let roots = ResolutionRoots::from_registered(Some(project.clone()), &installed);
+        let schema = shadow_refusing_schema("views");
+
+        let item = CanonicalRef::parse("view:shared/x").unwrap();
+        match resolve_item_full(&roots, &schema, &item) {
+            Err(EngineError::ProjectShadowsBundleItem {
+                canonical_ref,
+                kind,
+                bundle: named,
+                project_path,
+                bundle_path,
+            }) => {
+                assert_eq!(canonical_ref, "view:shared/x");
+                assert_eq!(kind, "view");
+                assert_eq!(named, "shipper");
+                assert!(project_path.starts_with(&project));
+                assert!(bundle_path.starts_with(&bundle));
+            }
+            other => panic!("expected project_shadows_bundle_item, got {other:?}"),
+        }
+
+        // A project item under its own ref, and a bundle item nothing in the
+        // project names, both resolve as before.
+        let mine = resolve_item_full(&roots, &schema, &CanonicalRef::parse("view:mine/x").unwrap())
+            .unwrap();
+        assert_eq!(mine.winner_space, ItemSpace::Project);
+        let theirs = resolve_item_full(
+            &roots,
+            &schema,
+            &CanonicalRef::parse("view:theirs/x").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(theirs.winner_space, ItemSpace::Bundle);
+
+        // Without the project the bundle item answers for the shared ref.
+        let node_only = ResolutionRoots::from_registered(None, &installed);
+        assert_eq!(
+            resolve_item_full(&node_only, &schema, &item)
+                .unwrap()
+                .winner_space,
+            ItemSpace::Bundle
+        );
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(bundle).unwrap();
+    }
+
+    #[test]
+    fn a_kind_that_does_not_declare_the_refusal_keeps_project_first_shadowing() {
+        let project = tempdir();
+        let bundle = tempdir();
+        let project_ai = project.join(crate::AI_DIR);
+        let bundle_ai = bundle.join(crate::AI_DIR);
+        write_item(&project_ai, "views", "shared/x", ".yaml", "widget: text");
+        write_item(&bundle_ai, "views", "shared/x", ".yaml", "widget: rows");
+        let installed = vec![RegisteredBundleRoot {
+            name: "shipper".to_owned(),
+            canonical_root: bundle.clone(),
+            owned_namespaces: Vec::new(),
+        }];
+        let roots = ResolutionRoots::from_registered(Some(project.clone()), &installed);
+        let schema = make_kind_schema("views", vec![(".yaml", "yaml")]);
+        let item = CanonicalRef::parse("view:shared/x").unwrap();
+
+        let result = resolve_item_full(&roots, &schema, &item).unwrap();
+        assert_eq!(result.winner_space, ItemSpace::Project);
+        assert_eq!(result.shadowed.len(), 1);
+        assert_eq!(result.shadowed[0].space, ItemSpace::Bundle);
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(bundle).unwrap();
     }
 
     fn bundle_only_schema() -> KindSchema {

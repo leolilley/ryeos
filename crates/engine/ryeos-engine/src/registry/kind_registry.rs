@@ -2043,6 +2043,23 @@ pub struct KindSchema {
     /// Required on every root-executable kind; absent on kinds that are
     /// never launched as a root.
     pub launch_trust: Option<launch_trust::LaunchTrustPolicy>,
+    /// Whether a project item of this kind may take the ref of an item an
+    /// installed bundle supplies. Absent means it may: the project item wins
+    /// and the bundle item is recorded as shadowed.
+    pub project_shadowing: ProjectShadowing,
+}
+
+/// The signed, kind-owned answer to a project item and an installed bundle
+/// item sharing one ref.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectShadowing {
+    /// The project item is the item; the bundle item is shadowed.
+    #[default]
+    Allow,
+    /// Neither item answers for the ref. Resolution refuses it, naming both
+    /// files, until the project file is renamed or removed.
+    Refuse,
 }
 
 impl KindSchema {
@@ -2776,6 +2793,15 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
         }
         _ => None,
     };
+    let project_shadowing = match data.get("project_shadowing") {
+        Some(value) if !value.is_null() => serde_yaml::from_value::<ProjectShadowing>(
+            value.clone(),
+        )
+        .map_err(|error| EngineError::SchemaLoaderError {
+            reason: format!("{display}: invalid `project_shadowing`: {error}"),
+        })?,
+        _ => ProjectShadowing::default(),
+    };
     let root_executable = execution
         .as_ref()
         .and_then(|execution| execution.thread_profile.as_ref())
@@ -2819,6 +2845,7 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
         inventory_schema_keys,
         inventory_policy,
         launch_trust,
+        project_shadowing,
     })
 }
 
@@ -2886,6 +2913,7 @@ const KIND_SCHEMA_KEYS: &[&str] = &[
     "inventory_schema_keys",
     "inventory_policy",
     "launch_trust",
+    "project_shadowing",
     "thread_profile",
 ];
 

@@ -368,6 +368,7 @@ fn resolution_error_to_engine(
         ResolutionError::MissingItem { item_ref, .. } => EngineError::EffectiveItemNotFound {
             canonical_ref: item_ref,
         },
+        ResolutionError::ProjectShadowsBundleItem { refusal } => *refusal,
         ResolutionError::ComposedValueContractViolation {
             item_ref, report, ..
         } => EngineError::ComposedValueContractViolation {
