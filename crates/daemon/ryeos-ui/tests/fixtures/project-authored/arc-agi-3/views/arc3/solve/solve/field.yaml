@@ -1,0 +1,198 @@
+# ryeos:signed:2026-08-10T06:08:48Z:2128468548b57f43999a2e810632e772c8b146cea87d76e15ba2d3745ef22ed7:iU+7eN0bB/jhyEguHQ+XhYNEmP9GW9WZfPzJTAm3q+u8rwheggcKart8d6kArjVjuGeVanhh2wVwNILSNTUGAQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
+name: arc-solve-field
+title: Live ARC solve
+version: "1.1.0"
+description: "ARC's signed visual vocabulary over exact campaign/solver execution, dispatch classifications, provider-call evidence, peer runs, and normalized domain evidence."
+
+widget: field
+sources:
+  definition:
+    ref: service:ui/ryeos-ui/field/definition
+    params:
+      thread_id: "@facet:selection.thread_id"
+  execution:
+    ref: service:ui/ryeos-ui/field/execution
+    params:
+      thread_id: "@facet:selection.thread_id"
+      cursor: "@field:cursor"
+      expansions: "@field:expansions"
+      max_depth: 32
+      max_nodes: 1000
+  peers:
+    ref: service:ui/ryeos-ui/field/runs
+    params:
+      item_ref: graph:arc3/solve/game_solver
+      facets:
+        game: "@facet:selection.game"
+      limit: 200
+projections:
+  schema_version: ryeos.ui.field.projection.v1
+  groups:
+    - { id: definition, label: Exact admitted solver, layout: flow }
+    - { id: execution, label: Execution, layout: lanes }
+    - { id: controllers, label: Controller cohort, parent: execution, layout: lanes }
+    - { id: states, label: Admitted state spine, parent: execution, layout: flow }
+    - { id: exploration, label: Probes and search, parent: execution, layout: stack, aggregate: { mode: count } }
+    - { id: evidence, label: Evidence, parent: execution, layout: stack }
+    - { id: dispatch-proof, label: Dispatch proof, parent: execution, layout: stack }
+    - { id: provider, label: Provider calls, parent: execution, layout: flow }
+    - { id: peer-runs, label: Same-game runs, layout: lanes }
+  layers:
+    - { id: structure, label: Exact structure, default_visible: true }
+    - { id: live, label: Live execution, default_visible: true }
+    - { id: states, label: Admitted states, default_visible: true }
+    - { id: candidates, label: Controller candidates, default_visible: true }
+    - { id: search, label: Search and probes, default_visible: true }
+    - { id: evidence, label: Evidence, default_visible: true }
+    - { id: proof, label: Dispatch proof, default_visible: true }
+    - { id: provider, label: Provider evidence, default_visible: true }
+    - { id: peers, label: Peer runs, default_visible: true }
+  entity_rules:
+    - match: { source: definition, kind: graph_definition }
+      set: { role: solver-definition, group: definition, layer: structure, shape: hex, fill: hollow, emphasis: strong }
+    - match: { source: definition, kind: graph_node }
+      set: { role: solver-node, group: definition, layer: structure, shape: rect, fill: hollow }
+    - match: { source: execution, kind: graph_run }
+      set: { role: graph-run, group: execution, layer: live, shape: capsule, emphasis: strong }
+    - match: { source: execution, kind: occurrence }
+      set:
+        role: executing-node
+        group: execution
+        layer: live
+        lane: "{attributes.thread.id}"
+        order: "{attributes.step}"
+        shape: capsule
+        tone:
+          field: status
+          map: { running: accent, ok: good, completed: good, error: danger, retry: warn }
+          default: neutral
+        motion:
+          field: status
+          map: { running: pulse }
+          default: none
+        secondary: "{attributes.thread.facets.game}"
+    - match: { source: execution, kind: thread, attributes.thread.facets.candidate_key: { exists: true } }
+      set:
+        role: controller-candidate
+        group: controllers
+        layer: candidates
+        lane: "{attributes.thread.facets.candidate_key}"
+        shape: capsule
+        secondary: "{attributes.thread.facets.controller}"
+    - match: { source: execution, kind: hook_observation, attributes.observation.kind: arc.state_observed }
+      set: { role: observed-state, group: states, layer: states, shape: grid, fill: hollow, tone: neutral, label: "{attributes.observation.payload.state_id}" }
+    - match: { source: execution, kind: hook_observation, attributes.observation.kind: arc.accepted_transition }
+      set: { role: accepted-state, group: states, layer: states, shape: grid, emphasis: strong, tone: good, label: "{attributes.observation.payload.state_id}", secondary: "{attributes.observation.payload.restore_status}" }
+    - match: { source: execution, kind: event, attributes.kind: arc.state_observed }
+      set: { role: observed-state, group: states, layer: states, shape: grid, fill: hollow, label: "{attributes.payload.state_id}" }
+    - match: { source: execution, kind: event, attributes.kind: arc.level_banked }
+      set: { role: banked-level, group: states, layer: states, shape: anchor, emphasis: strong, tone: accent, label: "{attributes.payload.state_id}" }
+    - match: { source: execution, kind: hook_observation, attributes.observation.kind: arc.candidate_result }
+      set: { role: candidate-result, group: controllers, layer: candidates, shape: grid, fill: ghost, secondary: "{attributes.observation.payload.candidate_key}" }
+    - match: { source: execution, kind: hook_observation, attributes.observation.kind: arc.portfolio_decision }
+      set: { role: portfolio-decision, group: controllers, layer: candidates, shape: diamond, emphasis: strong, tone: accent, secondary: "{attributes.observation.payload.selected_candidate_key}" }
+    - match: { source: execution, kind: hook_observation, attributes.observation.kind: arc.search_summary }
+      set: { role: search-summary, group: exploration, layer: search, shape: aggregate, fill: hollow, tone: accent }
+    - match: { source: execution, kind: event, attributes.kind: arc.search_summary }
+      set: { role: search-summary, group: exploration, layer: search, shape: aggregate, fill: hollow, tone: accent }
+    - match: { source: execution, kind: event, attributes.kind: arc.knowledge_used }
+      set: { role: knowledge-use, group: evidence, layer: evidence, shape: rect, fill: hollow }
+    - match: { source: execution, kind: event, attributes.kind: arc.model_revision }
+      set: { role: model-revision, group: evidence, layer: evidence, shape: hex, fill: hollow, tone: accent }
+    - match: { source: execution, kind: event, attributes.kind: arc.pursuit_intent }
+      set: { role: pursuit-intent, group: evidence, layer: evidence, shape: diamond, fill: hollow }
+    - match: { source: execution, kind: event, attributes.kind: arc.rationale_pass }
+      set: { role: rationale-pass, group: evidence, layer: evidence, shape: rect, fill: ghost, emphasis: quiet }
+    - match: { source: execution, kind: hook_failure }
+      set: { role: evidence-failure, group: evidence, layer: evidence, shape: diamond, tone: danger, emphasis: strong }
+    - match: { source: execution, kind: project_observation, attributes.namespace: arc.campaign_dispatch_classified }
+      set:
+        role: dispatch-classification
+        group: dispatch-proof
+        layer: proof
+        shape: diamond
+        emphasis: strong
+        label: "{attributes.payload.row_status}"
+        secondary: "{attributes.payload.report_ref}"
+        tone:
+          field: status
+          map: { replay_proven: good, banked_pending: warn, generation_moved_pending: warn, stale_miss: danger, unanchored_replay: danger }
+          default: neutral
+    - match: { source: execution, kind: directive_turn }
+      set: { role: directive-turn, group: provider, layer: provider, shape: capsule, fill: hollow }
+    - match: { source: execution, kind: provider_record }
+      set: { role: provider-record, group: provider, layer: provider, shape: anchor, fill: hollow, secondary: "{attributes.record_hash}" }
+    - match: { source: execution, kind: provider_call_observation }
+      set: { role: provider-call-observation, group: provider, layer: provider, shape: diamond, label: "{attributes.source}", secondary: "{attributes.publication}" }
+    - match: { source: execution, kind: state_anchor }
+      set: { role: restore-anchor, group: states, layer: states, shape: anchor, emphasis: strong }
+    - match: { source: peers, kind: run_summary }
+      set: { role: peer-run, group: peer-runs, layer: peers, lane: "{attributes.thread.facets.game}", shape: capsule, secondary: "{attributes.thread.facets.game}" }
+  relation_rules:
+    - match: { source: definition, kind: contains }
+      set: { layer: structure, stroke: solid, directed: true }
+    - match: { source: definition, kind: flows_to }
+      set: { layer: structure, stroke: solid, directed: true, motion: flow }
+    - match: { source: execution, kind: contains }
+      set: { layer: live, stroke: solid, directed: true }
+    - match: { source: execution, kind: executes_node }
+      set: { layer: live, stroke: dotted, directed: true, motion: flow, tone: accent }
+    - match: { source: execution, kind: follows }
+      set: { layer: candidates, stroke: solid, directed: true, motion: flow }
+    - match: { source: execution, kind: trace_branch }
+      set: { layer: search, stroke: dashed, directed: true, emphasis: quiet }
+    - match: { source: execution, kind: observes }
+      set: { layer: evidence, stroke: dotted, directed: true }
+    - match: { source: execution, kind: evidenced_by }
+      set: { layer: evidence, stroke: dotted, directed: true, emphasis: quiet }
+    - match: { source: execution, kind: evidences }
+      set: { layer: provider, stroke: solid, directed: true, tone: accent }
+    - match: { source: execution, kind: records }
+      set: { layer: proof, stroke: dotted, directed: true, emphasis: quiet }
+  derived_relations:
+    - id: selected-controller
+      left:
+        match: { source: execution, kind: hook_observation, attributes.observation.kind: arc.portfolio_decision }
+        keys: [attributes.hook.occurrence.graph_run_id, attributes.observation.payload.selected_candidate_key]
+      right:
+        match: { source: execution, kind: thread }
+        keys: [attributes.thread.facets.portfolio, attributes.thread.facets.candidate_key]
+      relation: { kind: admitted, layer: candidates, stroke: solid, directed: true, emphasis: strong, tone: good, motion: flow, label: admitted }
+    - id: observed-to-accepted
+      left:
+        match: { source: execution, kind: event, attributes.kind: arc.state_observed }
+        keys: [attributes.payload.state_id]
+      right:
+        match: { source: execution, kind: hook_observation, attributes.observation.kind: arc.accepted_transition }
+        keys: [attributes.observation.payload.predecessor_state_id]
+      relation: { kind: accepted_transition, layer: states, stroke: solid, directed: true, emphasis: strong, tone: good, motion: flow }
+    - id: accepted-to-accepted
+      left:
+        match: { source: execution, kind: hook_observation, attributes.observation.kind: arc.accepted_transition }
+        keys: [attributes.observation.payload.state_id]
+      right:
+        match: { source: execution, kind: hook_observation, attributes.observation.kind: arc.accepted_transition }
+        keys: [attributes.observation.payload.predecessor_state_id]
+      relation: { kind: accepted_transition, layer: states, stroke: solid, directed: true, emphasis: strong, tone: good, motion: flow }
+selection:
+  change: select
+  activate: select
+affordances:
+  - id: select
+    label: Inspect
+    invoke:
+      plane: ui
+      facet: selection
+      value:
+        thread_id: "{record.attributes.thread.id}"
+        definition_digest: "{record.effective_definition_digest}"
+        game: "{record.attributes.thread.facets.game}"
+        entity_id: "{record.id}"
+refresh:
+  on_hint: [thread, activity]
+field_state:
+  cursor_scope:
+    id: solve-replay
+    subject:
+      - "@facet:selection.thread_id"
+      - "@facet:selection.definition_digest"

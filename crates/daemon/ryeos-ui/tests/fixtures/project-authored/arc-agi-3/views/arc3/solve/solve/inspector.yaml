@@ -1,0 +1,91 @@
+# ryeos:signed:2026-08-10T06:08:50Z:eaa18a20a2bce4d5c0e5f20adcb72e2cb0cb62e4e87b9cf7ec9b4e3cd76b97a7:eqys0A0tP2GtqskABQYSpO6lQgWQumn+joVwxH8UcGBUb1c0Afw0ojPJS8ge0RJ2WeOacZ+/Sf67UrhotoLpCA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
+name: arc-solve-inspector
+title: ARC evidence inspector
+version: "1.1.0"
+description: "Exact occurrences, receipts, artifacts, hook evidence, ARC dispatch classifications, and generic provider evidence for the selected execution."
+
+widget: field
+sources:
+  execution:
+    ref: service:ui/ryeos-ui/field/execution
+    params:
+      thread_id: "@facet:selection.thread_id"
+      cursor: "@field:cursor"
+      expansions: "@field:expansions"
+      max_depth: 32
+      max_nodes: 1000
+projections:
+  schema_version: ryeos.ui.field.projection.v1
+  groups:
+    - { id: claims, label: ARC claims, layout: stack }
+    - { id: substrate, label: RyeOS evidence, layout: stack }
+  layers:
+    - { id: claims, label: Domain claims, default_visible: true }
+    - { id: substrate, label: Substrate evidence, default_visible: true }
+  entity_rules:
+    - match: { source: execution, kind: hook_observation }
+      set: { role: normalized-observation, group: claims, layer: claims, shape: diamond, emphasis: strong, label: "{attributes.observation.kind}" }
+    - match: { source: execution, kind: hook_failure }
+      set: { role: observation-failure, group: claims, layer: claims, shape: diamond, emphasis: strong, tone: danger }
+    - match: { source: execution, kind: event, attributes.kind: { exists: true } }
+      set: { role: domain-milestone, group: claims, layer: claims, shape: rect, label: "{attributes.kind}" }
+    - match: { source: execution, kind: occurrence }
+      set: { role: occurrence, group: substrate, layer: substrate, shape: capsule, secondary: "{attributes.node}" }
+    - match: { source: execution, kind: receipt }
+      set: { role: receipt, group: substrate, layer: substrate, shape: rect, fill: hollow }
+    - match: { source: execution, kind: artifact }
+      set: { role: artifact, group: substrate, layer: substrate, shape: hex, fill: hollow }
+    - match: { source: execution, kind: state_anchor }
+      set: { role: restore-anchor, group: claims, layer: claims, shape: anchor, emphasis: strong, tone: accent }
+    - match: { source: execution, kind: project_observation, attributes.namespace: arc.campaign_dispatch_classified }
+      set:
+        role: dispatch-classification
+        group: claims
+        layer: claims
+        shape: diamond
+        emphasis: strong
+        label: "{attributes.payload.row_status}"
+        secondary: "{attributes.payload.report_ref}"
+        tone:
+          field: status
+          map: { replay_proven: good, banked_pending: warn, generation_moved_pending: warn, stale_miss: danger, unanchored_replay: danger }
+          default: neutral
+    - match: { source: execution, kind: directive_turn }
+      set: { role: directive-turn, group: substrate, layer: substrate, shape: capsule, fill: hollow }
+    - match: { source: execution, kind: provider_record }
+      set: { role: provider-record, group: substrate, layer: substrate, shape: anchor, fill: hollow }
+    - match: { source: execution, kind: provider_call_observation }
+      set: { role: provider-call-observation, group: substrate, layer: substrate, shape: diamond, label: "{attributes.source}", secondary: "{attributes.publication}" }
+  relation_rules:
+    - match: { source: execution, kind: evidenced_by }
+      set: { layer: substrate, stroke: dotted, directed: true }
+    - match: { source: execution, kind: observes }
+      set: { layer: claims, stroke: solid, directed: true, tone: accent }
+    - match: { source: execution, kind: produced }
+      set: { layer: substrate, stroke: dashed, directed: true }
+    - match: { source: execution, kind: evidences }
+      set: { layer: substrate, stroke: solid, directed: true, tone: accent }
+    - match: { source: execution, kind: records }
+      set: { layer: substrate, stroke: dotted, directed: true }
+selection:
+  change: select
+  activate: select
+affordances:
+  - id: select
+    label: Inspect
+    invoke:
+      plane: ui
+      facet: selection
+      value:
+        thread_id: "{record.attributes.thread.id}"
+        definition_digest: "{record.effective_definition_digest}"
+        game: "{record.attributes.thread.facets.game}"
+        entity_id: "{record.id}"
+refresh:
+  on_hint: [thread, activity]
+field_state:
+  cursor_scope:
+    id: solve-replay
+    subject:
+      - "@facet:selection.thread_id"
+      - "@facet:selection.definition_digest"

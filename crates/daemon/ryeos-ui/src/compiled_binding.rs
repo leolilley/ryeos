@@ -156,6 +156,155 @@ pub struct BindingCompileContext<'a> {
     pub project_root: Option<&'a str>,
     pub node_policy_generation_digest: &'a str,
     pub identities: EmbeddedSurfaceIdentity,
+    /// Node-authored capability patterns naming the read services an item
+    /// authored in project space may bind as sources. The caller loads it
+    /// from signed bundle-space data; nothing a project supplies reaches it.
+    pub project_source_ceiling: &'a [String],
+}
+
+/// Name of the refusal for a source a project-authored item binds outside
+/// the node's list of read services for project-authored UI.
+pub const REFUSAL_PROJECT_SOURCE_OUTSIDE_CEILING: &str = "project_authored_source_outside_ceiling";
+/// Name of the refusal for an executing affordance on a project-authored
+/// view, or on any view or surface composed under a project-authored surface.
+pub const REFUSAL_PROJECT_EXECUTING_AFFORDANCE: &str = "project_authored_executing_affordance";
+/// Name of the refusal for an input route on a project-authored surface.
+pub const REFUSAL_PROJECT_SURFACE_ROUTE: &str = "project_authored_surface_route";
+/// Name of the refusal for a target outside the composing surface's lane.
+pub const REFUSAL_TARGET_OUTSIDE_SURFACE_CEILING: &str = "target_outside_surface_ceiling";
+
+/// Typed refusal of a binding target before it is resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UiTargetRefusal {
+    /// A source or affordance names an item whose kind does not terminate in
+    /// the daemon's service registry. Only services are UI targets: a tool,
+    /// directive or graph is launched by naming it, never by a bound control.
+    NotAService { target_ref: String, kind: String },
+}
+
+impl UiTargetRefusal {
+    pub const NOT_A_SERVICE_CODE: &'static str = "ui_target_not_a_service";
+
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NotAService { .. } => Self::NOT_A_SERVICE_CODE,
+        }
+    }
+}
+
+impl std::fmt::Display for UiTargetRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotAService { target_ref, kind } => write!(
+                f,
+                "{}: UI sources and affordances may target services only; `{target_ref}` is a `{kind}`",
+                Self::NOT_A_SERVICE_CODE
+            ),
+        }
+    }
+}
+
+impl std::error::Error for UiTargetRefusal {}
+
+/// Who authored a surface or view, as far as binding authority goes. Read
+/// from the engine's weakest-link trust class over the item's extends chain,
+/// so one project-space member makes the whole item project-authored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Authority {
+    /// Every member is a verified bundle item.
+    Node,
+    /// A project-space member signed by a signer pinned for that project.
+    Project,
+    /// Unsigned, or signed by a signer the node does not trust.
+    Untrusted,
+}
+
+impl Authority {
+    fn of(identity: &EffectiveUiItemIdentity) -> Self {
+        use ryeos_engine::resolution::TrustClass;
+        match identity.effective_trust_class {
+            TrustClass::TrustedBundle => Self::Node,
+            TrustClass::TrustedProject => Self::Project,
+            TrustClass::TrustedNode | TrustClass::UntrustedProject | TrustClass::Unsigned => {
+                Self::Untrusted
+            }
+        }
+    }
+
+    /// The weaker of a surface's authority and the authority of a view it
+    /// binds: a view never holds more than the surface composing it.
+    fn under(self, surface: Self) -> Self {
+        match (self, surface) {
+            (Self::Untrusted, _) | (_, Self::Untrusted) => Self::Untrusted,
+            (Self::Project, _) | (_, Self::Project) => Self::Project,
+            (Self::Node, Self::Node) => Self::Node,
+        }
+    }
+}
+
+/// The grant one owner (the surface, or one view) compiles under.
+struct OwnerGrant<'a> {
+    authority: Authority,
+    source_ceiling: &'a [String],
+    affordance_ceiling: &'a [String],
+    project_source_ceiling: &'a [String],
+    caller_scopes: &'a [String],
+    has_project: bool,
+}
+
+impl OwnerGrant<'_> {
+    /// Why a resolved read target is not admitted as a source, or `None`.
+    fn source_refusal(&self, target: &CompiledUiTarget, untrusted_reason: &str) -> Option<String> {
+        if self.authority == Authority::Untrusted {
+            return Some(untrusted_reason.to_string());
+        }
+        if !target.source_safe {
+            return Some("source target is not declared read-only".to_string());
+        }
+        if self.authority == Authority::Project
+            && !lane_allows(self.project_source_ceiling, target)
+        {
+            return Some(format!(
+                "{REFUSAL_PROJECT_SOURCE_OUTSIDE_CEILING}: a project-authored item may bind only the read services the node lists for project-authored UI; `{}` is not listed",
+                target.identity.canonical_ref
+            ));
+        }
+        if !lane_allows(self.source_ceiling, target) {
+            return Some(format!(
+                "{REFUSAL_TARGET_OUTSIDE_SURFACE_CEILING}: `{}` is outside the surface's source lane",
+                target.identity.canonical_ref
+            ));
+        }
+        if !caller_has_all(self.caller_scopes, &target.required_caps) {
+            return Some("caller lacks target capabilities".to_string());
+        }
+        None
+    }
+
+    /// Why a resolved target is not admitted for execution, or `None`. A
+    /// project-authored owner never reaches this: it is refused before its
+    /// target is resolved.
+    fn execution_refusal(&self, target: &CompiledUiTarget) -> Option<String> {
+        if !lane_allows(self.affordance_ceiling, target) {
+            return Some(format!(
+                "{REFUSAL_TARGET_OUTSIDE_SURFACE_CEILING}: `{}` is outside the surface's affordance lane",
+                target.identity.canonical_ref
+            ));
+        }
+        if !caller_has_all(self.caller_scopes, &target.required_caps) {
+            return Some("caller lacks target capabilities".to_string());
+        }
+        None
+    }
+}
+
+/// The reason recorded when a target could not be compiled. A typed refusal
+/// keeps its own name; any other failure is a resolution failure.
+fn target_failure_reason(error: &anyhow::Error) -> String {
+    match error.downcast_ref::<UiTargetRefusal>() {
+        Some(refusal) => refusal.to_string(),
+        None => format!("target resolution failed: {error:#}"),
+    }
 }
 
 impl SessionCompiledUiBinding {
@@ -176,8 +325,31 @@ impl SessionCompiledUiBinding {
                 .as_object()
                 .context("effective surface views mapping is not an object")?,
         };
-        let source_ceiling = capability_lane(effective_surface, "sources")?;
-        let affordance_ceiling = capability_lane(effective_surface, "affordances")?;
+        let surface_authority = Authority::of(&context.identities.surface);
+        // A node surface must declare both lanes. A surface authored in
+        // project space never sets its own ceiling: a lane it declares can
+        // only narrow, and one it omits is the node's list for sources and
+        // nothing for affordances.
+        let (source_ceiling, affordance_ceiling) = match surface_authority {
+            Authority::Node => (
+                capability_lane(effective_surface, "sources")?,
+                capability_lane(effective_surface, "affordances")?,
+            ),
+            Authority::Project | Authority::Untrusted => (
+                optional_capability_lane(effective_surface, "sources")?
+                    .unwrap_or_else(|| context.project_source_ceiling.to_vec()),
+                optional_capability_lane(effective_surface, "affordances")?.unwrap_or_default(),
+            ),
+        };
+        let grant_for = |authority: Authority| OwnerGrant {
+            authority,
+            source_ceiling: &source_ceiling,
+            affordance_ceiling: &affordance_ceiling,
+            project_source_ceiling: context.project_source_ceiling,
+            caller_scopes: context.caller_scopes,
+            has_project: context.project_root.is_some(),
+        };
+        let surface_grant = grant_for(surface_authority);
 
         let mut sources = BTreeMap::new();
         let mut affordances = BTreeMap::new();
@@ -188,14 +360,10 @@ impl SessionCompiledUiBinding {
         // rather than living in a hard-coded browser bootstrap API.
         if let Some(source_map) = effective_surface.get("sources").and_then(Value::as_object) {
             let surface_ref = context.identities.surface.canonical_ref.clone();
-            let trusted_surface = is_trusted(&context.identities.surface);
             compile_sources(
                 &surface_ref,
                 source_map,
-                trusted_surface,
-                &source_ceiling,
-                context.caller_scopes,
-                context.project_root.is_some(),
+                &surface_grant,
                 &mut resolve_target,
                 &mut sources,
                 &mut attenuated,
@@ -214,7 +382,7 @@ impl SessionCompiledUiBinding {
             // canonical ref remains inside `identity`; substituting it here
             // would break aliases and let two declared aliases collide.
             let coordinate_view_ref = declared_view_ref.clone();
-            let trusted_view = is_trusted(&context.identities.surface) && is_trusted(identity);
+            let view_grant = grant_for(Authority::of(identity).under(surface_authority));
             let dynamic_parameters = view
                 .get("input")
                 .and_then(|input| input.get("feeds"))
@@ -225,10 +393,7 @@ impl SessionCompiledUiBinding {
                 compile_sources(
                     &coordinate_view_ref,
                     source_map,
-                    trusted_view,
-                    &source_ceiling,
-                    context.caller_scopes,
-                    context.project_root.is_some(),
+                    &view_grant,
                     &mut resolve_target,
                     &mut sources,
                     &mut attenuated,
@@ -250,42 +415,35 @@ impl SessionCompiledUiBinding {
                     };
                     let channel = format!("input.{input_id}.{suffix}");
                     let coordinate = format!("source:{coordinate_view_ref}:{channel}");
-                    match resolve_target(item_ref) {
-                        Ok(target)
-                            if trusted_view
-                                && target.source_safe
-                                && lane_allows(&source_ceiling, &target.required_caps)
-                                && caller_has_all(context.caller_scopes, &target.required_caps) =>
-                        {
-                            sources
-                                .entry(coordinate_view_ref.clone())
-                                .or_default()
-                                .insert(
-                                    channel,
-                                    CompiledUiSource {
-                                        target,
-                                        parameters: Value::Object(Default::default()),
-                                        dynamic_parameters: Vec::new(),
-                                        activation: Default::default(),
-                                        requires_project: false,
-                                    },
-                                );
-                        }
-                        Ok(_) if !trusted_view => attenuated.push(AttenuatedUiBinding {
-                            coordinate,
-                            reason: "untrusted surface/view authority excludes input sources"
-                                .to_string(),
-                        }),
-                        Ok(_) => attenuated.push(AttenuatedUiBinding {
-                            coordinate,
-                            reason: "input source is not admitted by the surface and caller grant"
-                                .to_string(),
-                        }),
-                        Err(error) => attenuated.push(AttenuatedUiBinding {
-                            coordinate,
-                            reason: format!("target resolution failed: {error}"),
-                        }),
-                    }
+                    let refusal = match resolve_target(item_ref) {
+                        Ok(target) => match view_grant.source_refusal(
+                            &target,
+                            "untrusted surface/view authority excludes input sources",
+                        ) {
+                            Some(reason) => reason,
+                            None => {
+                                sources
+                                    .entry(coordinate_view_ref.clone())
+                                    .or_default()
+                                    .insert(
+                                        channel,
+                                        CompiledUiSource {
+                                            target,
+                                            parameters: Value::Object(Default::default()),
+                                            dynamic_parameters: Vec::new(),
+                                            activation: Default::default(),
+                                            requires_project: false,
+                                        },
+                                    );
+                                continue;
+                            }
+                        },
+                        Err(error) => target_failure_reason(&error),
+                    };
+                    attenuated.push(AttenuatedUiBinding {
+                        coordinate,
+                        reason: refusal,
+                    });
                 }
             }
 
@@ -298,10 +456,7 @@ impl SessionCompiledUiBinding {
                     &coordinate_view_ref,
                     items,
                     input_submit,
-                    context.project_root.is_some(),
-                    trusted_view,
-                    &affordance_ceiling,
-                    context.caller_scopes,
+                    &view_grant,
                     &mut resolve_target,
                     &mut affordances,
                     &mut attenuated,
@@ -323,10 +478,7 @@ impl SessionCompiledUiBinding {
                 &surface_ref,
                 items,
                 None,
-                context.project_root.is_some(),
-                is_trusted(&context.identities.surface),
-                &affordance_ceiling,
-                context.caller_scopes,
+                &surface_grant,
                 &mut resolve_target,
                 &mut affordances,
                 &mut attenuated,
@@ -335,10 +487,7 @@ impl SessionCompiledUiBinding {
 
         let surface_route = compile_surface_route(
             effective_surface,
-            context.project_root.is_some(),
-            is_trusted(&context.identities.surface),
-            &affordance_ceiling,
-            context.caller_scopes,
+            &surface_grant,
             &mut resolve_target,
             &mut attenuated,
         );
@@ -398,6 +547,7 @@ impl SessionCompiledUiBinding {
                 .affordances
                 .get(&self.binding.surface.canonical_ref),
         );
+        mark_authorship(surface_fields, authorship_marker(&self.binding.surface));
         if self.binding.surface_route.is_none()
             && let Some(input) = surface_fields
                 .get_mut("input")
@@ -414,6 +564,13 @@ impl SessionCompiledUiBinding {
                 let Some(fields) = view.as_object_mut() else {
                     continue;
                 };
+                let marker = match self.binding.views.get(view_ref) {
+                    Some(EmbeddedViewIdentity::Resolved { identity }) => {
+                        authorship_marker(identity)
+                    }
+                    Some(EmbeddedViewIdentity::Degraded { .. }) | None => None,
+                };
+                mark_authorship(fields, marker);
                 sanitize_sources(fields, self.binding.sources.get(view_ref));
                 sanitize_affordances(fields, self.binding.affordances.get(view_ref));
                 let retained = self.binding.affordances.get(view_ref);
@@ -459,10 +616,7 @@ fn sanitize_affordances(
 fn compile_sources(
     owner_ref: &str,
     source_map: &serde_json::Map<String, Value>,
-    trusted_owner: bool,
-    source_ceiling: &[String],
-    caller_scopes: &[String],
-    has_project: bool,
+    grant: &OwnerGrant<'_>,
     resolve_target: &mut impl FnMut(&str) -> Result<CompiledUiTarget>,
     out: &mut BTreeMap<String, BTreeMap<String, CompiledUiSource>>,
     attenuated: &mut Vec<AttenuatedUiBinding>,
@@ -482,7 +636,7 @@ fn compile_sources(
             serde_json::from_value(source.clone()).with_context(|| {
                 format!("source {owner_ref}:{channel} violates the closed source contract")
             })?;
-        if authored.requires_project && !has_project {
+        if authored.requires_project && !grant.has_project {
             attenuated.push(AttenuatedUiBinding {
                 coordinate,
                 reason: "source requires a project-bound session".to_string(),
@@ -507,41 +661,31 @@ fn compile_sources(
         if primary_channel == Some(channel.as_str()) {
             dynamic_parameters.extend(primary_dynamic_parameters.iter().cloned());
         }
-        match resolve_target(item_ref) {
-            Ok(target)
-                if trusted_owner
-                    && target.source_safe
-                    && lane_allows(source_ceiling, &target.required_caps)
-                    && caller_has_all(caller_scopes, &target.required_caps) =>
+        let refusal = match resolve_target(item_ref) {
+            Ok(target) => match grant
+                .source_refusal(&target, "untrusted surface/view authority excludes sources")
             {
-                out.entry(owner_ref.to_string()).or_default().insert(
-                    channel.clone(),
-                    CompiledUiSource {
-                        target,
-                        parameters: authored.params,
-                        dynamic_parameters: dynamic_parameters.into_iter().collect(),
-                        activation: authored.activation,
-                        requires_project: authored.requires_project,
-                    },
-                );
-            }
-            Ok(_) if !trusted_owner => attenuated.push(AttenuatedUiBinding {
-                coordinate,
-                reason: "untrusted surface/view authority excludes sources".to_string(),
-            }),
-            Ok(target) if !target.source_safe => attenuated.push(AttenuatedUiBinding {
-                coordinate,
-                reason: "source target is not declared read-only".to_string(),
-            }),
-            Ok(_) => attenuated.push(AttenuatedUiBinding {
-                coordinate,
-                reason: "caller lacks target capabilities".to_string(),
-            }),
-            Err(error) => attenuated.push(AttenuatedUiBinding {
-                coordinate,
-                reason: format!("target resolution failed: {error}"),
-            }),
-        }
+                Some(reason) => reason,
+                None => {
+                    out.entry(owner_ref.to_string()).or_default().insert(
+                        channel.clone(),
+                        CompiledUiSource {
+                            target,
+                            parameters: authored.params,
+                            dynamic_parameters: dynamic_parameters.into_iter().collect(),
+                            activation: authored.activation,
+                            requires_project: authored.requires_project,
+                        },
+                    );
+                    continue;
+                }
+            },
+            Err(error) => target_failure_reason(&error),
+        };
+        attenuated.push(AttenuatedUiBinding {
+            coordinate,
+            reason: refusal,
+        });
     }
     Ok(())
 }
@@ -556,10 +700,7 @@ fn valid_parameter_name(value: &str) -> bool {
 
 fn compile_surface_route(
     surface: &Value,
-    has_project: bool,
-    trusted_surface: bool,
-    affordance_ceiling: &[String],
-    caller_scopes: &[String],
+    grant: &OwnerGrant<'_>,
     resolve_target: &mut impl FnMut(&str) -> Result<CompiledUiTarget>,
     attenuated: &mut Vec<AttenuatedUiBinding>,
 ) -> Option<CompiledUiRoute> {
@@ -568,7 +709,7 @@ fn compile_surface_route(
         .get("requires_project")
         .and_then(Value::as_bool)
         .unwrap_or(false)
-        && !has_project
+        && !grant.has_project
     {
         attenuated.push(AttenuatedUiBinding {
             coordinate: "surface_route".to_string(),
@@ -588,18 +729,27 @@ fn compile_surface_route(
         }
     };
     let coordinate = "surface_route".to_string();
-    if !trusted_surface {
-        attenuated.push(AttenuatedUiBinding {
-            coordinate,
-            reason: "surface authority excludes an executable input route".to_string(),
-        });
-        return None;
+    match grant.authority {
+        Authority::Node => {}
+        Authority::Project => {
+            attenuated.push(AttenuatedUiBinding {
+                coordinate,
+                reason: format!(
+                    "{REFUSAL_PROJECT_SURFACE_ROUTE}: a project-authored surface may not declare an input route"
+                ),
+            });
+            return None;
+        }
+        Authority::Untrusted => {
+            attenuated.push(AttenuatedUiBinding {
+                coordinate,
+                reason: "surface authority excludes an executable input route".to_string(),
+            });
+            return None;
+        }
     }
     match resolve_target(item_ref) {
-        Ok(target)
-            if lane_allows(affordance_ceiling, &target.required_caps)
-                && caller_has_all(caller_scopes, &target.required_caps) =>
-        {
+        Ok(target) if grant.execution_refusal(&target).is_none() => {
             let parameters = route
                 .get("params")
                 .cloned()
@@ -617,17 +767,19 @@ fn compile_surface_route(
                 bindings,
             })
         }
-        Ok(_) => {
+        Ok(target) => {
             attenuated.push(AttenuatedUiBinding {
                 coordinate,
-                reason: "surface route is not admitted by the surface and caller grant".to_string(),
+                reason: grant
+                    .execution_refusal(&target)
+                    .unwrap_or_else(|| "surface route is not admitted".to_string()),
             });
             None
         }
         Err(error) => {
             attenuated.push(AttenuatedUiBinding {
                 coordinate,
-                reason: format!("target resolution failed: {error:#}"),
+                reason: target_failure_reason(&error),
             });
             None
         }
@@ -745,10 +897,7 @@ fn compile_affordances(
     view_ref: &str,
     items: &[Value],
     input_submit: Option<&str>,
-    has_project: bool,
-    trusted_surface: bool,
-    affordance_ceiling: &[String],
-    caller_scopes: &[String],
+    grant: &OwnerGrant<'_>,
     resolve_target: &mut impl FnMut(&str) -> Result<CompiledUiTarget>,
     out: &mut BTreeMap<String, BTreeMap<String, CompiledUiAffordance>>,
     attenuated: &mut Vec<AttenuatedUiBinding>,
@@ -782,7 +931,7 @@ fn compile_affordances(
             .get("requires_project")
             .and_then(Value::as_bool)
             .unwrap_or(false)
-            && !has_project
+            && !grant.has_project
         {
             attenuated.push(AttenuatedUiBinding {
                 coordinate,
@@ -790,7 +939,7 @@ fn compile_affordances(
             });
             continue;
         }
-        if !trusted_surface {
+        if grant.authority == Authority::Untrusted {
             attenuated.push(AttenuatedUiBinding {
                 coordinate,
                 reason: "untrusted surface/view authority excludes affordances".to_string(),
@@ -807,6 +956,18 @@ fn compile_affordances(
                     },
                 );
             }
+            // A project-authored owner binds selection and navigation only.
+            // Its executing affordance is refused by name before the target
+            // is resolved, whatever the target is, and the rest of the item
+            // still compiles, as for any other entry outside its grant.
+            Some("rye") if grant.authority == Authority::Project => {
+                attenuated.push(AttenuatedUiBinding {
+                    coordinate,
+                    reason: format!(
+                        "{REFUSAL_PROJECT_EXECUTING_AFFORDANCE}: a project-authored item may bind UI-plane affordances only"
+                    ),
+                });
+            }
             Some("rye") => {
                 let Some(target_ref) = invoke.get("ref").and_then(Value::as_str) else {
                     attenuated.push(AttenuatedUiBinding {
@@ -816,10 +977,7 @@ fn compile_affordances(
                     continue;
                 };
                 match resolve_target(target_ref) {
-                    Ok(target)
-                        if lane_allows(affordance_ceiling, &target.required_caps)
-                            && caller_has_all(caller_scopes, &target.required_caps) =>
-                    {
+                    Ok(target) if grant.execution_refusal(&target).is_none() => {
                         out.entry(view_ref.to_string()).or_default().insert(
                             id.to_string(),
                             CompiledUiAffordance::Execution {
@@ -829,13 +987,15 @@ fn compile_affordances(
                             },
                         );
                     }
-                    Ok(_) => attenuated.push(AttenuatedUiBinding {
+                    Ok(target) => attenuated.push(AttenuatedUiBinding {
                         coordinate,
-                        reason: "caller lacks target capabilities".to_string(),
+                        reason: grant
+                            .execution_refusal(&target)
+                            .unwrap_or_else(|| "affordance is not admitted".to_string()),
                     }),
                     Err(error) => attenuated.push(AttenuatedUiBinding {
                         coordinate,
-                        reason: format!("target resolution failed: {error}"),
+                        reason: target_failure_reason(&error),
                     }),
                 }
             }
@@ -873,13 +1033,44 @@ fn capability_lane(surface: &Value, lane: &str) -> Result<Vec<String>> {
         .collect()
 }
 
-fn lane_allows(patterns: &[String], required: &[String]) -> bool {
-    !patterns.is_empty()
-        && required.iter().all(|required| {
-            patterns
-                .iter()
-                .any(|granted| ryeos_state::capability::grant_matches(granted, required))
-        })
+/// A lane the surface may omit. A present lane must still be a string list.
+fn optional_capability_lane(surface: &Value, lane: &str) -> Result<Option<Vec<String>>> {
+    match surface
+        .get("capabilities")
+        .and_then(|value| value.get(lane))
+    {
+        None | Some(Value::Null) => Ok(None),
+        Some(_) => capability_lane(surface, lane).map(Some),
+    }
+}
+
+/// The capability naming execution of exactly this target, in the vocabulary
+/// surface lanes are written in. `None` when the target's ref does not parse.
+fn target_execute_capability(target: &CompiledUiTarget) -> Option<String> {
+    let parsed =
+        ryeos_engine::canonical_ref::CanonicalRef::parse(&target.identity.canonical_ref).ok()?;
+    Some(ryeos_runtime::authorizer::canonical_cap(
+        &parsed.kind,
+        &parsed.bare_id,
+        "execute",
+    ))
+}
+
+/// Whether a lane admits a target. The lane must name the target itself, by
+/// its execute capability, and every capability the target declares. A
+/// target that declares none therefore passes only a lane that names it;
+/// declaring nothing is never a way past a ceiling.
+fn lane_allows(patterns: &[String], target: &CompiledUiTarget) -> bool {
+    let admits = |required: &str| {
+        patterns
+            .iter()
+            .any(|granted| ryeos_state::capability::grant_matches(granted, required))
+    };
+    target_execute_capability(target).is_some_and(|capability| admits(&capability))
+        && target
+            .required_caps
+            .iter()
+            .all(|required| admits(required))
 }
 
 fn source_dynamic_parameters(feeds: &Value) -> Vec<String> {
@@ -901,12 +1092,29 @@ fn source_dynamic_parameters(feeds: &Value) -> Vec<String> {
     parameters.into_iter().collect()
 }
 
-fn is_trusted(identity: &EffectiveUiItemIdentity) -> bool {
-    matches!(
-        identity.effective_trust_class,
-        ryeos_engine::resolution::TrustClass::TrustedBundle
-            | ryeos_engine::resolution::TrustClass::TrustedProject
-    )
+/// The marker a project-authored item carries in the presentation, or `None`
+/// for an item every member of which is a verified bundle item.
+fn authorship_marker(identity: &EffectiveUiItemIdentity) -> Option<Value> {
+    match Authority::of(identity) {
+        Authority::Node => None,
+        Authority::Project | Authority::Untrusted => Some(serde_json::json!({
+            "space": "project",
+            "trust_class": identity.effective_trust_class,
+        })),
+    }
+}
+
+/// Write the daemon's own authorship fact over whatever the item authored
+/// under that key, so a view or surface file can neither claim nor hide it.
+fn mark_authorship(fields: &mut serde_json::Map<String, Value>, marker: Option<Value>) {
+    match marker {
+        Some(marker) => {
+            fields.insert("authorship".to_string(), marker);
+        }
+        None => {
+            fields.remove("authorship");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -955,6 +1163,7 @@ mod tests {
                 caller_scopes: &["cap.read".into(), "cap.write".into()],
                 project_root: Some("/project"),
                 node_policy_generation_digest: "policy:test",
+                project_source_ceiling: &[],
                 identities: EmbeddedSurfaceIdentity {
                     request_engine_generation_identity: "engine:test".into(),
                     surface: identity("surface:test/root", 'a'),
@@ -986,9 +1195,21 @@ mod tests {
         .unwrap()
     }
 
+    /// A lane names the targets it admits by their execute capability, plus
+    /// whatever capability each target declares. A non-empty affordance lane
+    /// therefore also names the test services.
     fn surface(affordance_caps: Value) -> Value {
+        let mut affordance_caps = affordance_caps;
+        if let Some(lane) = affordance_caps.as_array_mut()
+            && !lane.is_empty()
+        {
+            lane.push(serde_json::json!("ryeos.execute.service.test/*"));
+        }
         serde_json::json!({
-            "capabilities": {"sources":["cap.read"], "affordances":affordance_caps},
+            "capabilities": {
+                "sources":["cap.read", "ryeos.execute.service.test/*"],
+                "affordances":affordance_caps
+            },
             "sources": {
                 "shell": {
                     "ref":"service:test/read",
@@ -1063,6 +1284,7 @@ mod tests {
                 caller_scopes: &["cap.read".into()],
                 project_root: None,
                 node_policy_generation_digest: "policy:test",
+                project_source_ceiling: &[],
                 identities: EmbeddedSurfaceIdentity {
                     request_engine_generation_identity: "engine:test".into(),
                     surface: identity("surface:test/root", 'a'),
@@ -1140,6 +1362,7 @@ mod tests {
                 caller_scopes: &["cap.read".into(), "cap.write".into()],
                 project_root: None,
                 node_policy_generation_digest: "policy:test",
+                project_source_ceiling: &[],
                 identities: EmbeddedSurfaceIdentity {
                     request_engine_generation_identity: "engine:test".into(),
                     surface: identity("surface:test/root", 'a'),
@@ -1189,14 +1412,30 @@ mod tests {
 
     // ── Project-authored surfaces and views ─────────────────────────────
     //
-    // The tests below pin how the compiler treats a surface or view whose
-    // effective trust class says it came from project space. They assert
-    // the behaviour as it is today. Where a test documents an exposure, its
-    // comment says so; such a test is expected to change when the exposure
-    // is closed.
+    // A surface or view whose effective trust class says a project-space
+    // file is part of it binds less than a bundle item: read sources the
+    // node lists, UI-plane affordances, and nothing that executes.
 
     const VIEW_REF: &str = "view:test/input";
     const SURFACE_REF: &str = "surface:test/root";
+    const FIELD_PROJECT: &str = "service:ui/ryeos-ui/field/project";
+    const FIELD_RUNS: &str = "service:ui/ryeos-ui/field/runs";
+    const FIELD_EXECUTION: &str = "service:ui/ryeos-ui/field/execution";
+    const FIELD_DEFINITION: &str = "service:ui/ryeos-ui/field/definition";
+
+    fn ceiling(services: &[&str]) -> Vec<String> {
+        services
+            .iter()
+            .map(|service| {
+                let bare = service.strip_prefix("service:").expect("service ref");
+                format!("ryeos.execute.service.{bare}")
+            })
+            .collect()
+    }
+
+    fn every_field_service() -> Vec<String> {
+        ceiling(&[FIELD_PROJECT, FIELD_RUNS, FIELD_EXECUTION, FIELD_DEFINITION])
+    }
 
     fn identity_of(item_ref: &str, byte: char, trust: TrustClass) -> EffectiveUiItemIdentity {
         EffectiveUiItemIdentity {
@@ -1205,14 +1444,29 @@ mod tests {
         }
     }
 
-    /// Stand-in for the signed service registry: `…/read` is a read-only
-    /// service needing `cap.read`, anything else writes and needs
-    /// `cap.write`. Targets are always bundle services.
+    /// Stand-in for the signed service registry. `service:test/…/read` is a
+    /// read-only service needing `cap.read`; any other `service:test/…`
+    /// writes and needs `cap.write`; the UI field services are read-only and
+    /// declare no capability. Anything that is not a service is refused the
+    /// way the daemon's target compiler refuses it.
     fn bundle_service_target(item_ref: &str) -> Result<CompiledUiTarget> {
-        let read_only = item_ref.ends_with("/read");
+        let Some(bare) = item_ref.strip_prefix("service:") else {
+            let kind = item_ref.split(':').next().unwrap_or_default().to_string();
+            return Err(UiTargetRefusal::NotAService {
+                target_ref: item_ref.to_string(),
+                kind,
+            }
+            .into());
+        };
+        let field = bare.starts_with("ui/ryeos-ui/field/");
+        let read_only = field || item_ref.ends_with("/read");
         Ok(CompiledUiTarget {
             identity: identity(item_ref, if read_only { 'c' } else { 'd' }),
-            required_caps: vec![if read_only { "cap.read" } else { "cap.write" }.into()],
+            required_caps: if field {
+                Vec::new()
+            } else {
+                vec![if read_only { "cap.read" } else { "cap.write" }.into()]
+            },
             source_safe: read_only,
             dispatch_class: CompiledUiDispatchClass::Verified,
             result_effect: None,
@@ -1228,10 +1482,28 @@ mod tests {
         surface_trust: TrustClass,
         view_trust: TrustClass,
         caller_scopes: &[&str],
+        project_source_ceiling: &[String],
         surface: &Value,
         resolve_target: impl FnMut(&str) -> Result<CompiledUiTarget>,
     ) -> SessionCompiledUiBinding {
         let caller_scopes: Vec<String> = caller_scopes.iter().map(|s| s.to_string()).collect();
+        let views = surface
+            .get("views")
+            .and_then(Value::as_object)
+            .map(|views| {
+                views
+                    .keys()
+                    .map(|view_ref| {
+                        (
+                            view_ref.clone(),
+                            EmbeddedViewIdentity::Resolved {
+                                identity: identity_of(view_ref, 'b', view_trust),
+                            },
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         SessionCompiledUiBinding::compile(
             BindingCompileContext {
                 contract_revision: "test.v1",
@@ -1239,15 +1511,11 @@ mod tests {
                 caller_scopes: &caller_scopes,
                 project_root: Some("/project"),
                 node_policy_generation_digest: "policy:test",
+                project_source_ceiling,
                 identities: EmbeddedSurfaceIdentity {
                     request_engine_generation_identity: "engine:test".into(),
                     surface: identity_of(SURFACE_REF, 'a', surface_trust),
-                    views: BTreeMap::from([(
-                        VIEW_REF.into(),
-                        EmbeddedViewIdentity::Resolved {
-                            identity: identity_of(VIEW_REF, 'b', view_trust),
-                        },
-                    )]),
+                    views,
                 },
             },
             surface,
@@ -1268,110 +1536,177 @@ mod tests {
             .map(|entry| entry.reason.as_str())
     }
 
-    /// Documents an exposure. A view supplied from project space and signed
-    /// by a signer the operator pinned for that space (`TrustedProject`)
-    /// keeps its executing affordance and its mount-time source under a
-    /// bundle surface, exactly as a bundle-authored view would. Activating
-    /// the affordance dispatches the write service under the session's
-    /// scopes.
-    #[test]
-    fn trusted_project_view_under_a_bundle_surface_keeps_its_source_and_executing_affordance() {
-        let compiled = compile_authored_by(
-            TrustClass::TrustedBundle,
-            TrustClass::TrustedProject,
-            &["cap.read", "cap.write"],
-            &surface(serde_json::json!(["cap.write"])),
-            bundle_service_target,
-        );
-
-        let source = &compiled.binding.sources[VIEW_REF]["default"];
-        assert_eq!(source.target.identity.canonical_ref, "service:test/read");
-        assert_eq!(
-            source.activation,
-            ryeos_client_base::ui::content::SourceActivation::Initial,
-            "a source with no authored activation is fetched when the view mounts"
-        );
-        match &compiled.binding.affordances[VIEW_REF]["run"] {
-            CompiledUiAffordance::Execution { target, .. } => {
-                assert_eq!(target.identity.canonical_ref, "service:test/write");
-            }
-            other => panic!("expected an executing affordance, got {other:?}"),
-        }
-        assert_eq!(compiled.posture, EffectiveUiPosture::Interactive);
-        assert_eq!(
-            attenuation(&compiled, "affordance:view:test/input:run"),
-            None
-        );
-        assert_eq!(
-            attenuation(&compiled, "source:view:test/input:default"),
-            None
+    fn refused_as(compiled: &SessionCompiledUiBinding, coordinate: &str, name: &str) {
+        let reason = attenuation(compiled, coordinate)
+            .unwrap_or_else(|| panic!("{coordinate} is not attenuated"));
+        assert!(
+            reason.starts_with(&format!("{name}: ")),
+            "{coordinate} was refused as `{reason}`, expected `{name}`"
         );
     }
 
-    /// Documents an exposure. Nothing in the compiled grant or in the
-    /// presentation sent to the renderer distinguishes a trusted project
-    /// view from a bundle view. The only difference is the trust class kept
-    /// in the daemon-side identity record, which the presentation does not
-    /// carry.
-    #[test]
-    fn trusted_project_view_yields_the_same_grant_and_presentation_as_a_bundle_view() {
-        let authored = surface(serde_json::json!(["cap.write"]));
-        let bundle = compile_authored_by(
-            TrustClass::TrustedBundle,
-            TrustClass::TrustedBundle,
-            &["cap.read", "cap.write"],
-            &authored,
-            bundle_service_target,
-        );
-        let project = compile_authored_by(
-            TrustClass::TrustedBundle,
-            TrustClass::TrustedProject,
-            &["cap.read", "cap.write"],
-            &authored,
-            bundle_service_target,
-        );
-
-        assert_eq!(project.binding.sources, bundle.binding.sources);
-        assert_eq!(project.binding.affordances, bundle.binding.affordances);
-        assert_eq!(project.binding.surface_route, bundle.binding.surface_route);
-        assert_eq!(project.binding.attenuated, bundle.binding.attenuated);
-        assert_eq!(project.posture, bundle.posture);
-        assert_eq!(
-            project.sanitize_effective_surface(&authored).unwrap(),
-            bundle.sanitize_effective_surface(&authored).unwrap(),
-            "the renderer receives an identical presentation for both authors"
-        );
-
-        assert_ne!(project.binding.views, bundle.binding.views);
-        assert_eq!(
-            project.binding.views[VIEW_REF],
-            EmbeddedViewIdentity::Resolved {
-                identity: identity_of(VIEW_REF, 'b', TrustClass::TrustedProject),
-            }
-        );
-    }
-
-    /// A project view whose signer is not pinned, or which is unsigned,
-    /// still takes its place in the surface, but every source and every
-    /// affordance it declares is removed, UI-local ones included. Bundle
-    /// content around it is unaffected.
-    #[test]
-    fn untrusted_or_unsigned_project_view_is_attenuated_to_a_static_presentation() {
+    /// The surface every test starts from, with one more source on the view
+    /// that the project ceiling lists and one UI-plane affordance.
+    fn surface_with_listed_source_and_selection() -> Value {
         let mut authored = surface(serde_json::json!(["cap.write"]));
-        authored["views"][VIEW_REF]["widget"] = serde_json::json!("text");
+        authored["capabilities"]["sources"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!("ryeos.execute.service.ui/ryeos-ui/*"));
+        authored["views"][VIEW_REF]["widget"] = serde_json::json!("field");
+        authored["views"][VIEW_REF]["sources"]["project"] =
+            serde_json::json!({"ref": FIELD_PROJECT, "params": {}});
         authored["views"][VIEW_REF]["affordances"]
             .as_array_mut()
             .unwrap()
             .push(serde_json::json!({
-                "id": "local",
-                "invoke": {"plane": "ui", "open_view": "view:test/other"}
+                "id": "select",
+                "invoke": {"plane": "ui", "facet": "selection"}
             }));
+        authored
+    }
+
+    /// A view from project space under a pinned signer, bound by a bundle
+    /// surface, keeps the read source the node lists and its UI-plane
+    /// affordance. Its other source and its executing affordance are refused
+    /// by name. The bundle surface's own source and input route are
+    /// untouched: only the project item is restricted.
+    #[test]
+    fn trusted_project_view_under_a_bundle_surface_keeps_only_listed_sources_and_ui_affordances() {
+        let compiled = compile_authored_by(
+            TrustClass::TrustedBundle,
+            TrustClass::TrustedProject,
+            &["cap.read", "cap.write"],
+            &ceiling(&[FIELD_PROJECT]),
+            &surface_with_listed_source_and_selection(),
+            bundle_service_target,
+        );
+
+        let sources = &compiled.binding.sources[VIEW_REF];
+        assert_eq!(sources.keys().collect::<Vec<_>>(), ["project"]);
+        assert_eq!(sources["project"].target.identity.canonical_ref, FIELD_PROJECT);
+        refused_as(
+            &compiled,
+            "source:view:test/input:default",
+            REFUSAL_PROJECT_SOURCE_OUTSIDE_CEILING,
+        );
+
+        let affordances = &compiled.binding.affordances[VIEW_REF];
+        assert_eq!(affordances.keys().collect::<Vec<_>>(), ["select"]);
+        assert!(matches!(
+            affordances["select"],
+            CompiledUiAffordance::Local { .. }
+        ));
+        refused_as(
+            &compiled,
+            "affordance:view:test/input:run",
+            REFUSAL_PROJECT_EXECUTING_AFFORDANCE,
+        );
+
+        // The bundle surface keeps its own grants.
+        assert!(compiled.binding.sources[SURFACE_REF].contains_key("shell"));
+        assert_eq!(
+            compiled
+                .binding
+                .surface_route
+                .as_ref()
+                .unwrap()
+                .target
+                .identity
+                .canonical_ref,
+            "service:test/write"
+        );
+        assert_eq!(attenuation(&compiled, "surface_route"), None);
+    }
+
+    /// The same view authored by a bundle keeps everything, which is what
+    /// makes the restriction above a property of the author and not of the
+    /// surface, the caller or the targets.
+    #[test]
+    fn bundle_view_under_the_same_surface_keeps_its_sources_and_executing_affordance() {
+        let compiled = compile_authored_by(
+            TrustClass::TrustedBundle,
+            TrustClass::TrustedBundle,
+            &["cap.read", "cap.write"],
+            &ceiling(&[FIELD_PROJECT]),
+            &surface(serde_json::json!(["cap.write"])),
+            bundle_service_target,
+        );
+        assert!(compiled.binding.sources[VIEW_REF].contains_key("default"));
+        assert!(matches!(
+            compiled.binding.affordances[VIEW_REF]["run"],
+            CompiledUiAffordance::Execution { .. }
+        ));
+        assert!(compiled.binding.attenuated.is_empty());
+    }
+
+    /// A project-authored view and surface carry an authorship marker in the
+    /// presentation sent to clients; bundle items carry none. The daemon
+    /// writes the marker from the engine's trust result, so a view file that
+    /// authors the key itself can neither claim nor hide it.
+    #[test]
+    fn project_authored_items_are_marked_in_the_presentation_and_bundle_items_are_not() {
+        let mut authored = surface_with_listed_source_and_selection();
+        authored["views"][VIEW_REF]["authorship"] = serde_json::json!({"space": "bundle"});
+        authored["authorship"] = serde_json::json!({"space": "bundle"});
+
+        let present = |surface_trust, view_trust| {
+            compile_authored_by(
+                surface_trust,
+                view_trust,
+                &["cap.read", "cap.write"],
+                &ceiling(&[FIELD_PROJECT]),
+                &authored,
+                bundle_service_target,
+            )
+            .sanitize_effective_surface(&authored)
+            .unwrap()
+        };
+
+        let bundle = present(TrustClass::TrustedBundle, TrustClass::TrustedBundle);
+        assert!(bundle.get("authorship").is_none());
+        assert!(bundle["views"][VIEW_REF].get("authorship").is_none());
+
+        let project_view = present(TrustClass::TrustedBundle, TrustClass::TrustedProject);
+        assert!(project_view.get("authorship").is_none());
+        assert_eq!(
+            project_view["views"][VIEW_REF]["authorship"],
+            serde_json::json!({"space": "project", "trust_class": "trusted_project"})
+        );
+
+        let project_surface = present(TrustClass::TrustedProject, TrustClass::TrustedBundle);
+        assert_eq!(
+            project_surface["authorship"],
+            serde_json::json!({"space": "project", "trust_class": "trusted_project"})
+        );
+        assert!(project_surface["views"][VIEW_REF].get("authorship").is_none());
+
+        for (trust, name) in [
+            (TrustClass::UntrustedProject, "untrusted_project"),
+            (TrustClass::Unsigned, "unsigned"),
+        ] {
+            let untrusted = present(TrustClass::TrustedBundle, trust);
+            assert_eq!(
+                untrusted["views"][VIEW_REF]["authorship"],
+                serde_json::json!({"space": "project", "trust_class": name})
+            );
+        }
+    }
+
+    /// A project view whose signer is not pinned, or which is unsigned,
+    /// still takes its place in the surface, but every source and every
+    /// affordance it declares is removed, listed sources and UI-local
+    /// affordances included. Bundle content around it is unaffected.
+    #[test]
+    fn untrusted_or_unsigned_project_view_is_attenuated_to_a_static_presentation() {
+        let authored = surface_with_listed_source_and_selection();
 
         for trust in [TrustClass::UntrustedProject, TrustClass::Unsigned] {
             let compiled = compile_authored_by(
                 TrustClass::TrustedBundle,
                 trust,
                 &["cap.read", "cap.write"],
+                &ceiling(&[FIELD_PROJECT]),
                 &authored,
                 bundle_service_target,
             );
@@ -1384,11 +1719,13 @@ mod tests {
                 !compiled.binding.affordances.contains_key(VIEW_REF),
                 "{trust:?}"
             );
-            assert_eq!(
-                attenuation(&compiled, "source:view:test/input:default"),
-                Some("untrusted surface/view authority excludes sources")
-            );
-            for id in ["run", "local"] {
+            for channel in ["default", "project"] {
+                assert_eq!(
+                    attenuation(&compiled, &format!("source:view:test/input:{channel}")),
+                    Some("untrusted surface/view authority excludes sources")
+                );
+            }
+            for id in ["run", "select"] {
                 assert_eq!(
                     attenuation(&compiled, &format!("affordance:view:test/input:{id}")),
                     Some("untrusted surface/view authority excludes affordances")
@@ -1402,44 +1739,152 @@ mod tests {
             // The view body still reaches the renderer, without behaviour.
             let presentation = compiled.sanitize_effective_surface(&authored).unwrap();
             let view = &presentation["views"][VIEW_REF];
-            assert_eq!(view["widget"], "text");
+            assert_eq!(view["widget"], "field");
             assert_eq!(view["sources"], serde_json::json!({}));
             assert_eq!(view["affordances"], serde_json::json!([]));
         }
     }
 
-    /// Documents an exposure. A surface supplied from project space by a
-    /// pinned signer is trusted like a bundle surface: its own input route,
-    /// its own sources and the affordances of the views it binds all
-    /// compile. The capability ceiling consulted is the one this same
-    /// surface declares.
+    /// A surface from project space under a pinned signer has no input
+    /// route, and neither it nor any view it binds has an executing
+    /// affordance, bundle views included. Sources compile only for services
+    /// the node lists; the surface's own shell source is not one of them.
     #[test]
-    fn trusted_project_surface_keeps_its_route_its_sources_and_its_views_affordances() {
+    fn trusted_project_surface_has_no_route_no_executing_affordance_and_only_listed_sources() {
         let compiled = compile_authored_by(
             TrustClass::TrustedProject,
             TrustClass::TrustedBundle,
             &["cap.read", "cap.write"],
-            &surface(serde_json::json!(["cap.write"])),
+            &ceiling(&[FIELD_PROJECT]),
+            &surface_with_listed_source_and_selection(),
+            bundle_service_target,
+        );
+
+        assert!(compiled.binding.surface_route.is_none());
+        refused_as(&compiled, "surface_route", REFUSAL_PROJECT_SURFACE_ROUTE);
+        assert!(!compiled.binding.sources.contains_key(SURFACE_REF));
+        refused_as(
+            &compiled,
+            "source:surface:test/root:shell",
+            REFUSAL_PROJECT_SOURCE_OUTSIDE_CEILING,
+        );
+        assert_eq!(
+            compiled.binding.sources[VIEW_REF].keys().collect::<Vec<_>>(),
+            ["project"]
+        );
+        assert!(matches!(
+            compiled.binding.affordances[VIEW_REF]["select"],
+            CompiledUiAffordance::Local { .. }
+        ));
+        refused_as(
+            &compiled,
+            "affordance:view:test/input:run",
+            REFUSAL_PROJECT_EXECUTING_AFFORDANCE,
+        );
+        assert_eq!(compiled.posture, EffectiveUiPosture::ObservationOnly);
+    }
+
+    /// A project surface that writes its own wide capabilities block gains
+    /// nothing by it. Its declared lanes only narrow the node's ceiling: a
+    /// source outside the node's list stays refused, and its affordance lane
+    /// admits no executing affordance and no route.
+    #[test]
+    fn project_surface_with_its_own_capabilities_block_is_bounded_by_the_node_ceiling() {
+        let mut authored = surface_with_listed_source_and_selection();
+        authored["capabilities"] = serde_json::json!({
+            "sources": ["*"],
+            "affordances": ["*"]
+        });
+        authored["sources"]["listed"] = serde_json::json!({"ref": FIELD_PROJECT, "params": {}});
+        let compiled = compile_authored_by(
+            TrustClass::TrustedProject,
+            TrustClass::TrustedProject,
+            &["*"],
+            &ceiling(&[FIELD_PROJECT]),
+            &authored,
             bundle_service_target,
         );
 
         assert_eq!(
-            compiled
-                .binding
-                .surface_route
-                .as_ref()
-                .unwrap()
-                .target
-                .identity
-                .canonical_ref,
-            "service:test/write"
+            compiled.binding.sources[SURFACE_REF]
+                .keys()
+                .collect::<Vec<_>>(),
+            ["listed"]
         );
-        assert!(compiled.binding.sources[SURFACE_REF].contains_key("shell"));
-        assert!(matches!(
-            compiled.binding.affordances[VIEW_REF]["run"],
-            CompiledUiAffordance::Execution { .. }
-        ));
-        assert_eq!(compiled.posture, EffectiveUiPosture::Interactive);
+        refused_as(
+            &compiled,
+            "source:surface:test/root:shell",
+            REFUSAL_PROJECT_SOURCE_OUTSIDE_CEILING,
+        );
+        refused_as(
+            &compiled,
+            "source:view:test/input:default",
+            REFUSAL_PROJECT_SOURCE_OUTSIDE_CEILING,
+        );
+        refused_as(&compiled, "surface_route", REFUSAL_PROJECT_SURFACE_ROUTE);
+        refused_as(
+            &compiled,
+            "affordance:view:test/input:run",
+            REFUSAL_PROJECT_EXECUTING_AFFORDANCE,
+        );
+        assert!(compiled.binding.affordances.values().all(|owner| {
+            owner
+                .values()
+                .all(|entry| matches!(entry, CompiledUiAffordance::Local { .. }))
+        }));
+
+        // A lane the project surface declares can still narrow the node's.
+        authored["capabilities"]["sources"] = serde_json::json!([]);
+        let narrowed = compile_authored_by(
+            TrustClass::TrustedProject,
+            TrustClass::TrustedProject,
+            &["*"],
+            &ceiling(&[FIELD_PROJECT]),
+            &authored,
+            bundle_service_target,
+        );
+        assert!(narrowed.binding.sources.is_empty());
+    }
+
+    /// A project surface that declares no capabilities block compiles: the
+    /// node's list is its source lane and it has no affordance lane. A node
+    /// surface with no block is still refused.
+    #[test]
+    fn project_surface_without_a_capabilities_block_takes_the_node_ceiling() {
+        let mut authored = surface_with_listed_source_and_selection();
+        authored.as_object_mut().unwrap().remove("capabilities");
+        let compiled = compile_authored_by(
+            TrustClass::TrustedProject,
+            TrustClass::TrustedProject,
+            &[],
+            &ceiling(&[FIELD_PROJECT]),
+            &authored,
+            bundle_service_target,
+        );
+        assert_eq!(
+            compiled.binding.sources[VIEW_REF].keys().collect::<Vec<_>>(),
+            ["project"]
+        );
+        assert!(compiled.binding.surface_route.is_none());
+
+        let node_surface = SessionCompiledUiBinding::compile(
+            BindingCompileContext {
+                contract_revision: "test.v1",
+                principal_id: "principal:test",
+                caller_scopes: &[],
+                project_root: Some("/project"),
+                node_policy_generation_digest: "policy:test",
+                project_source_ceiling: &[],
+                identities: EmbeddedSurfaceIdentity {
+                    request_engine_generation_identity: "engine:test".into(),
+                    surface: identity(SURFACE_REF, 'a'),
+                    views: BTreeMap::new(),
+                },
+            },
+            &authored,
+            bundle_service_target,
+        );
+        assert!(node_surface.is_err());
     }
 
     /// An untrusted or unsigned project surface carries no behaviour at
@@ -1452,7 +1897,8 @@ mod tests {
                 trust,
                 TrustClass::TrustedBundle,
                 &["cap.read", "cap.write"],
-                &surface(serde_json::json!(["cap.write"])),
+                &every_field_service(),
+                &surface_with_listed_source_and_selection(),
                 bundle_service_target,
             );
             assert!(compiled.binding.sources.is_empty(), "{trust:?}");
@@ -1462,15 +1908,102 @@ mod tests {
         }
     }
 
-    /// The two bounds that do apply to a trusted project view: the surface
-    /// ceiling and the session's own scopes. A target outside either is
-    /// attenuated.
+    /// An executing affordance on a project-authored view is refused by
+    /// name whatever it targets, and the target is never resolved: a
+    /// service, a tool, a directive and a graph are all the same refusal.
     #[test]
-    fn trusted_project_view_affordance_is_bounded_by_the_surface_ceiling_and_the_caller_scopes() {
-        let outside_caller = compile_authored_by(
+    fn project_view_with_an_executing_affordance_is_refused_by_name_whatever_the_target() {
+        let mut authored = surface(serde_json::json!(["*"]));
+        authored["views"][VIEW_REF]["sources"] = serde_json::json!({});
+        authored["views"][VIEW_REF]["affordances"] = serde_json::json!([
+            {"id": "service", "invoke": {"plane": "rye", "ref": "service:test/write"}},
+            {"id": "tool", "invoke": {"plane": "rye", "ref": "tool:project/anything"}},
+            {"id": "directive", "invoke": {"plane": "rye", "ref": "directive:project/anything"}},
+            {"id": "graph", "invoke": {"plane": "rye", "ref": "graph:project/anything"}}
+        ]);
+        let mut resolved = Vec::new();
+        let compiled = compile_authored_by(
             TrustClass::TrustedBundle,
             TrustClass::TrustedProject,
+            &["*"],
+            &every_field_service(),
+            &authored,
+            |item_ref| {
+                resolved.push(item_ref.to_string());
+                bundle_service_target(item_ref)
+            },
+        );
+
+        assert!(!compiled.binding.affordances.contains_key(VIEW_REF));
+        for id in ["service", "tool", "directive", "graph"] {
+            refused_as(
+                &compiled,
+                &format!("affordance:view:test/input:{id}"),
+                REFUSAL_PROJECT_EXECUTING_AFFORDANCE,
+            );
+        }
+        assert!(
+            resolved
+                .iter()
+                .all(|item_ref| item_ref == "service:test/read" || item_ref == "service:test/write"),
+            "no affordance target of the project view was resolved: {resolved:?}"
+        );
+        // The entries leave the presentation with the grant.
+        let presentation = compiled.sanitize_effective_surface(&authored).unwrap();
+        assert_eq!(
+            presentation["views"][VIEW_REF]["affordances"],
+            serde_json::json!([])
+        );
+    }
+
+    /// A source or affordance of a bundle item that names something other
+    /// than a service is refused by the target compiler's own name, and the
+    /// rest of the item compiles.
+    #[test]
+    fn non_service_target_on_a_bundle_item_is_refused_by_name() {
+        let mut authored = surface(serde_json::json!(["*"]));
+        authored["capabilities"]["sources"] = serde_json::json!(["*"]);
+        authored["views"][VIEW_REF]["sources"]["tool"] =
+            serde_json::json!({"ref": "tool:project/anything", "params": {}});
+        authored["views"][VIEW_REF]["affordances"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": "directive",
+                "invoke": {"plane": "rye", "ref": "directive:project/anything"}
+            }));
+        let compiled = compile_authored_by(
+            TrustClass::TrustedBundle,
+            TrustClass::TrustedBundle,
+            &["*"],
+            &[],
+            &authored,
+            bundle_service_target,
+        );
+        refused_as(
+            &compiled,
+            "source:view:test/input:tool",
+            UiTargetRefusal::NOT_A_SERVICE_CODE,
+        );
+        refused_as(
+            &compiled,
+            "affordance:view:test/input:directive",
+            UiTargetRefusal::NOT_A_SERVICE_CODE,
+        );
+        assert!(compiled.binding.sources[VIEW_REF].contains_key("default"));
+        assert!(compiled.binding.affordances[VIEW_REF].contains_key("run"));
+    }
+
+    /// The two bounds on a bundle view's executing affordance: the surface's
+    /// affordance lane and the session's own scopes. Each failure has its
+    /// own reason.
+    #[test]
+    fn bundle_view_affordance_is_bounded_by_the_surface_ceiling_and_the_caller_scopes() {
+        let outside_caller = compile_authored_by(
+            TrustClass::TrustedBundle,
+            TrustClass::TrustedBundle,
             &["cap.read"],
+            &[],
             &surface(serde_json::json!(["cap.write"])),
             bundle_service_target,
         );
@@ -1483,40 +2016,282 @@ mod tests {
 
         let outside_ceiling = compile_authored_by(
             TrustClass::TrustedBundle,
-            TrustClass::TrustedProject,
+            TrustClass::TrustedBundle,
             &["cap.read", "cap.write"],
+            &[],
             &surface(serde_json::json!(["cap.unrelated"])),
             bundle_service_target,
         );
         assert!(!outside_ceiling.binding.affordances.contains_key(VIEW_REF));
-        assert!(
-            attenuation(&outside_ceiling, "affordance:view:test/input:run").is_some(),
-            "a target outside the surface's affordance lane is attenuated"
+        refused_as(
+            &outside_ceiling,
+            "affordance:view:test/input:run",
+            REFUSAL_TARGET_OUTSIDE_SURFACE_CEILING,
         );
     }
 
-    /// Both bounds are expressed over the target's declared capabilities,
-    /// so a target that declares none passes any non-empty ceiling and any
-    /// caller, including a caller holding no scope. This pins the compile
-    /// gate only; a later execution layer may still refuse the dispatch.
+    /// A lane admits a target only by naming it. A target that declares no
+    /// capability no longer passes a lane that names something else, for any
+    /// caller; it passes once the lane names the target's own execute
+    /// capability, exactly or by pattern.
     #[test]
-    fn a_target_declaring_no_required_caps_passes_any_nonempty_ceiling_and_any_caller() {
-        let compiled = compile_authored_by(
+    fn a_target_declaring_no_required_caps_passes_only_a_lane_that_names_it() {
+        fn no_caps(item_ref: &str) -> Result<CompiledUiTarget> {
+            Ok(CompiledUiTarget {
+                required_caps: Vec::new(),
+                ..bundle_service_target(item_ref)?
+            })
+        }
+        let mut authored = surface(serde_json::json!([]));
+        authored["capabilities"] = serde_json::json!({
+            "sources": ["cap.unrelated"],
+            "affordances": ["cap.unrelated"]
+        });
+        let unnamed = compile_authored_by(
             TrustClass::TrustedBundle,
-            TrustClass::TrustedProject,
+            TrustClass::TrustedBundle,
             &[],
-            &surface(serde_json::json!(["cap.unrelated"])),
-            |item_ref| {
-                Ok(CompiledUiTarget {
-                    required_caps: Vec::new(),
-                    ..bundle_service_target(item_ref)?
-                })
-            },
+            &[],
+            &authored,
+            no_caps,
         );
+        assert!(unnamed.binding.sources.is_empty());
+        assert!(unnamed.binding.affordances.is_empty());
+        assert!(unnamed.binding.surface_route.is_none());
+        for coordinate in [
+            "source:surface:test/root:shell",
+            "source:view:test/input:default",
+            "affordance:view:test/input:run",
+            "surface_route",
+        ] {
+            refused_as(&unnamed, coordinate, REFUSAL_TARGET_OUTSIDE_SURFACE_CEILING);
+        }
+
+        authored["capabilities"] = serde_json::json!({
+            "sources": ["ryeos.execute.service.test/read"],
+            "affordances": ["ryeos.execute.service.test/*"]
+        });
+        let named = compile_authored_by(
+            TrustClass::TrustedBundle,
+            TrustClass::TrustedBundle,
+            &[],
+            &[],
+            &authored,
+            no_caps,
+        );
+        assert!(named.binding.sources[VIEW_REF].contains_key("default"));
         assert!(matches!(
-            compiled.binding.affordances[VIEW_REF]["run"],
+            named.binding.affordances[VIEW_REF]["run"],
             CompiledUiAffordance::Execution { .. }
         ));
-        assert!(compiled.binding.surface_route.is_some());
+        assert!(named.binding.surface_route.is_some());
+    }
+
+    /// A view a refused shadow left unresolved stays in the presentation as
+    /// a degraded entry carrying the refusal's own words: it is neither
+    /// dropped nor replaced by the bundle view, and it has no behaviour.
+    #[test]
+    fn a_refused_view_reaches_the_presentation_as_a_degraded_entry_with_its_reason() {
+        let reason = "project item `view:test/input` at /project/.ai/views/test/input.yaml shadows the item of the same ref supplied by installed bundle `shipper`";
+        let mut authored = surface(serde_json::json!(["cap.write"]));
+        authored["views"][VIEW_REF] = serde_json::json!({"degraded": reason});
+        let compiled = SessionCompiledUiBinding::compile(
+            BindingCompileContext {
+                contract_revision: "test.v1",
+                principal_id: "principal:test",
+                caller_scopes: &["cap.read".into(), "cap.write".into()],
+                project_root: Some("/project"),
+                node_policy_generation_digest: "policy:test",
+                project_source_ceiling: &[],
+                identities: EmbeddedSurfaceIdentity {
+                    request_engine_generation_identity: "engine:test".into(),
+                    surface: identity(SURFACE_REF, 'a'),
+                    views: BTreeMap::from([(
+                        VIEW_REF.to_string(),
+                        EmbeddedViewIdentity::Degraded {
+                            reason: reason.to_string(),
+                        },
+                    )]),
+                },
+            },
+            &authored,
+            bundle_service_target,
+        )
+        .unwrap();
+        assert!(!compiled.binding.sources.contains_key(VIEW_REF));
+        assert!(!compiled.binding.affordances.contains_key(VIEW_REF));
+        let presentation = compiled.sanitize_effective_surface(&authored).unwrap();
+        assert_eq!(
+            presentation["views"][VIEW_REF],
+            serde_json::json!({"degraded": reason})
+        );
+    }
+
+    // ── Real project files ──────────────────────────────────────────────
+    //
+    // Byte copies of views and surfaces two projects ship, compiled as a
+    // project-authored surface binding project-authored views.
+
+    fn fixture(relative: &str) -> Value {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/project-authored")
+            .join(relative);
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        serde_yaml::from_str(&text).unwrap_or_else(|error| panic!("parse {relative}: {error}"))
+    }
+
+    /// The surface fixture with each view its tiles name embedded from the
+    /// same project's fixtures, as composition would embed them.
+    fn project_surface_fixture(project: &str, surface: &str) -> Value {
+        let mut body = fixture(&format!("{project}/surfaces/{surface}.yaml"));
+        let tiles: Vec<String> = body["tiles"]
+            .as_array()
+            .expect("surface tiles")
+            .iter()
+            .map(|tile| tile.as_str().expect("tile view ref").to_string())
+            .collect();
+        for view_ref in tiles {
+            let bare = view_ref.strip_prefix("view:").expect("view ref");
+            body["views"][&view_ref] = fixture(&format!("{project}/views/{bare}.yaml"));
+        }
+        body
+    }
+
+    fn compile_project_fixture(body: &Value, ceiling: &[String]) -> SessionCompiledUiBinding {
+        compile_authored_by(
+            TrustClass::TrustedProject,
+            TrustClass::TrustedProject,
+            &[],
+            ceiling,
+            body,
+            bundle_service_target,
+        )
+    }
+
+    /// A project view shaped like the real ones compiles and keeps working
+    /// when the node lists the field services it reads: every source keeps
+    /// its authored parameters, the UI-plane selection affordance is a local
+    /// affordance, and both survive into the presentation with the marker.
+    #[test]
+    fn project_view_with_field_sources_and_a_selection_affordance_compiles_and_works() {
+        let view_ref = "view:farm/project/field";
+        let body = project_surface_fixture("kaggriculture", "farm/ui/campaign-terminal");
+        let compiled = compile_project_fixture(&body, &every_field_service());
+
+        assert!(
+            compiled.binding.attenuated.is_empty(),
+            "{:?}",
+            compiled.binding.attenuated
+        );
+        let sources = &compiled.binding.sources[view_ref];
+        assert_eq!(
+            sources.keys().collect::<Vec<_>>(),
+            ["execution", "project", "runs"]
+        );
+        assert_eq!(sources["project"].target.identity.canonical_ref, FIELD_PROJECT);
+        assert_eq!(sources["runs"].target.identity.canonical_ref, FIELD_RUNS);
+        assert_eq!(
+            sources["runs"].parameters,
+            serde_json::json!({"item_ref": "graph:farm/match", "limit": 500})
+        );
+        assert_eq!(
+            sources["execution"].parameters["thread_id"],
+            "@facet:selection.thread_id"
+        );
+        assert!(matches!(
+            compiled.binding.affordances[view_ref]["select"],
+            CompiledUiAffordance::Local { .. }
+        ));
+        assert!(compiled.binding.surface_route.is_none());
+        assert_eq!(compiled.posture, EffectiveUiPosture::ObservationOnly);
+
+        let presentation = compiled.sanitize_effective_surface(&body).unwrap();
+        let view = &presentation["views"][view_ref];
+        assert_eq!(view["sources"].as_object().unwrap().len(), 3);
+        assert_eq!(view["affordances"].as_array().unwrap().len(), 1);
+        assert_eq!(view["authorship"]["space"], "project");
+        assert_eq!(presentation["authorship"]["trust_class"], "trusted_project");
+    }
+
+    fn shipped_project_source_ceiling() -> Vec<String> {
+        let path = ryeos_engine::test_support::workspace_root()
+            .join("bundles/ryeos-ui/.ai/config/ryeos/ui/project-authoring.yaml");
+        let text = std::fs::read_to_string(path).unwrap();
+        crate::handlers::ui_launch_mint::ProjectAuthoringConfig::from_value(
+            serde_yaml::from_str(&text).unwrap(),
+        )
+        .unwrap()
+        .sources
+    }
+
+    /// The list the UI bundle ships names services exactly, and a list with
+    /// a wildcard is refused when it is loaded.
+    #[test]
+    fn shipped_project_source_ceiling_names_each_service_exactly() {
+        let shipped = shipped_project_source_ceiling();
+        assert_eq!(shipped, ceiling(&[FIELD_PROJECT]));
+        for widened in ["ryeos.execute.service.*", "ryeos.execute.service.ui/ryeos-ui/field/*", ""] {
+            let refusal = crate::handlers::ui_launch_mint::ProjectAuthoringConfig::from_value(
+                serde_json::json!({"sources": [widened]}),
+            )
+            .unwrap_err();
+            assert!(refusal.contains("must name one service exactly"), "{refusal}");
+        }
+    }
+
+    /// Every real project file compiles under the shipped list. Each view's
+    /// selection affordance and each `field/project` source are kept; a
+    /// source reading a service the node does not list is refused by name,
+    /// and nothing else is refused.
+    #[test]
+    fn real_project_files_compile_against_the_shipped_ceiling() {
+        let shipped = shipped_project_source_ceiling();
+        for (project, surface) in [
+            ("kaggriculture", "farm/ui/campaign-terminal"),
+            ("arc-agi-3", "arc3/solve/ui/solve-terminal"),
+            ("arc-agi-3", "arc3/solve/ui/solve-web"),
+        ] {
+            let body = project_surface_fixture(project, surface);
+            let compiled = compile_project_fixture(&body, &shipped);
+            let views = body["views"].as_object().expect("embedded views");
+            assert!(!views.is_empty(), "{surface} binds views");
+            for (view_ref, view) in views {
+                for (channel, source) in view["sources"].as_object().expect("view sources") {
+                    let target = source["ref"].as_str().expect("source ref");
+                    let compiled_source = compiled
+                        .binding
+                        .sources
+                        .get(view_ref)
+                        .and_then(|sources| sources.get(channel));
+                    if target == FIELD_PROJECT {
+                        assert!(compiled_source.is_some(), "{view_ref}:{channel}");
+                    } else {
+                        assert!(compiled_source.is_none(), "{view_ref}:{channel}");
+                        refused_as(
+                            &compiled,
+                            &format!("source:{view_ref}:{channel}"),
+                            REFUSAL_PROJECT_SOURCE_OUTSIDE_CEILING,
+                        );
+                    }
+                }
+                assert!(
+                    matches!(
+                        compiled.binding.affordances[view_ref]["select"],
+                        CompiledUiAffordance::Local { .. }
+                    ),
+                    "{view_ref}"
+                );
+            }
+            assert!(
+                compiled
+                    .binding
+                    .attenuated
+                    .iter()
+                    .all(|entry| entry.reason.starts_with(REFUSAL_PROJECT_SOURCE_OUTSIDE_CEILING)),
+                "{surface}: {:?}",
+                compiled.binding.attenuated
+            );
+        }
     }
 }

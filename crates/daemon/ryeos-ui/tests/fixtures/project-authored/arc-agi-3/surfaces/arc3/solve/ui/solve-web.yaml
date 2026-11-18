@@ -1,0 +1,33 @@
+# ryeos:signed:2026-08-04T13:37:04Z:19c1cdf4f5285f859e992be0f80579b5d2387febe6e54f35c57516a9ba55493c:VtwXMDq2GZY+pu9kki650rcxP/kJXqPaszI8gstyCHn+JymuOYUzCBoue3wNF+wyeoSl+OVKKPZFNq5wiGCsDA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
+name: arc-solve-web
+version: "1.0.0"
+description: "Wide ARC execution-field workspace: project, live solve, board, evidence, and one-braid timeline."
+
+tiling:
+  mode: master_stack
+  master: { side: left, arrange: vertical, ratio: 0.68, count: 2 }
+  stack: { arrange: vertical }
+  insert: end
+
+tiles:
+  - view:arc3/solve/project/field
+  - view:arc3/solve/solve/field
+  - view:arc3/solve/state/board
+  - view:arc3/solve/solve/inspector
+  - view:arc3/solve/solve/timeline
+
+style:
+  border: thin
+
+library:
+  - group: ARC execution
+    views:
+      - view:arc3/solve/project/field
+      - view:arc3/solve/solve/field
+      - view:arc3/solve/state/board
+      - view:arc3/solve/solve/inspector
+      - view:arc3/solve/solve/timeline
+
+ambient:
+  show_background: true
+  opacity: 0.9

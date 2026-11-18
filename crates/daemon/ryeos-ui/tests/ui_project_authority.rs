@@ -258,6 +258,144 @@ async fn compiled_project_sources_query_only_the_canonical_session_project() {
     .await;
 }
 
+/// Two projects, a thread in each, and a compiled session on the first. The
+/// returned directories keep both projects alive for the test's duration.
+fn two_project_session(
+    state: &AppState,
+) -> (
+    tempfile::TempDir,
+    ryeos_ui::browser_session::BrowserSession,
+    HandlerContext,
+) {
+    let projects = tempfile::tempdir().expect("projects tempdir");
+    let first = projects.path().join("first");
+    let second = projects.path().join("second");
+    std::fs::create_dir(&first).expect("create first project");
+    std::fs::create_dir(&second).expect("create second project");
+    create_project_thread(state, "T-first", &first);
+    create_project_thread(state, "T-second", &second);
+    let session = compiled_project_session(state, &first);
+    let ctx = HandlerContext::new(
+        "fp:compiled-source".to_string(),
+        vec!["ui.read".into()],
+        true,
+    );
+    (projects, session, ctx)
+}
+
+#[tokio::test]
+async fn field_project_refuses_an_authored_project_path() {
+    let (_state_dir, _state_owner, state) = test_state::build_test_state();
+    let (_projects, session, ctx) = two_project_session(&state);
+    let state = Arc::new(state);
+    let attachment = session
+        .attachments
+        .get(&session.root_attachment_id)
+        .expect("surface attachment")
+        .clone();
+    ryeos_ui::seat_auth::with_compiled_ui_attachment(attachment, async {
+        // The service takes no project selector; an authored project path
+        // is an unknown field and is refused before any project is read.
+        let error = (ryeos_ui::handlers::ui_field_project::DESCRIPTOR.handler)(
+            serde_json::json!({"project_path": "/"}),
+            ctx,
+            state,
+        )
+        .await
+        .expect_err("an authored project path must be refused");
+        assert!(matches!(
+            error.downcast_ref::<ryeos_app::handler_error::HandlerError>(),
+            Some(ryeos_app::handler_error::HandlerError::BadRequest(_))
+        ));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn field_definition_refuses_a_thread_of_another_project() {
+    let (_state_dir, _state_owner, state) = test_state::build_test_state();
+    let (_projects, session, ctx) = two_project_session(&state);
+    let state = Arc::new(state);
+    let attachment = session
+        .attachments
+        .get(&session.root_attachment_id)
+        .expect("surface attachment")
+        .clone();
+    ryeos_ui::seat_auth::with_compiled_ui_attachment(attachment, async {
+        let error = (ryeos_ui::handlers::ui_field_definition::DESCRIPTOR.handler)(
+            serde_json::json!({
+                "thread_id": "T-second",
+                "definition_ref": "directive:test/project-authority",
+            }),
+            ctx,
+            state,
+        )
+        .await
+        .expect_err("a thread of another project must not be readable");
+        assert!(matches!(
+            error.downcast_ref::<ryeos_app::handler_error::HandlerError>(),
+            Some(ryeos_app::handler_error::HandlerError::NotFound)
+        ));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn field_execution_refuses_a_thread_of_another_project() {
+    let (_state_dir, _state_owner, state) = test_state::build_test_state();
+    let (_projects, session, ctx) = two_project_session(&state);
+    let state = Arc::new(state);
+    let attachment = session
+        .attachments
+        .get(&session.root_attachment_id)
+        .expect("surface attachment")
+        .clone();
+    ryeos_ui::seat_auth::with_compiled_ui_attachment(attachment, async {
+        let error = (ryeos_ui::handlers::ui_field_execution::DESCRIPTOR.handler)(
+            serde_json::json!({"thread_id": "T-second", "max_depth": 8, "max_nodes": 64}),
+            ctx,
+            state,
+        )
+        .await
+        .expect_err("a thread of another project must not be readable");
+        assert!(matches!(
+            error.downcast_ref::<ryeos_app::handler_error::HandlerError>(),
+            Some(ryeos_app::handler_error::HandlerError::NotFound)
+        ));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn field_runs_with_an_item_ref_lists_only_the_session_project() {
+    let (_state_dir, _state_owner, state) = test_state::build_test_state();
+    let (_projects, session, ctx) = two_project_session(&state);
+    let state = Arc::new(state);
+    let attachment = session
+        .attachments
+        .get(&session.root_attachment_id)
+        .expect("surface attachment")
+        .clone();
+    ryeos_ui::seat_auth::with_compiled_ui_attachment(attachment, async {
+        // Both fixture threads run this item; only the session project's
+        // run may come back.
+        let runs = (ryeos_ui::handlers::ui_field_runs::DESCRIPTOR.handler)(
+            serde_json::json!({
+                "item_ref": "directive:test/project-authority",
+                "limit": 1000,
+            }),
+            ctx,
+            state,
+        )
+        .await
+        .expect("item-scoped field runs source");
+        let encoded = serde_json::to_string(&runs).expect("encode field runs");
+        assert!(encoded.contains("T-first"));
+        assert!(!encoded.contains("T-second"));
+    })
+    .await;
+}
+
 #[tokio::test]
 #[ignore = "requires populated handler binaries via scripts/populate-bundles.sh"]
 async fn compiled_browser_dispatch_keeps_equivalent_paths_and_live_projects_isolated() {
@@ -382,7 +520,7 @@ fn seat_admission_reads_the_retained_project_after_its_path_is_swapped() {
     let (session, access) = retained_access_then_swap(&state, &project, &decoy);
     let owner = format!("session:{}", session.session_id);
 
-    // A by-name walk of the project path now resolves the decoy's shadow.
+    // A by-name walk of the project path now reaches the decoy's shadow.
     let by_name = ryeos_app::thread_lifecycle::admit_non_execution_root(
         &state.engine,
         state.node_history_policy().expect("node history policy"),
@@ -396,14 +534,15 @@ fn seat_admission_reads_the_retained_project_after_its_path_is_swapped() {
             thread_profile: "seat".to_string(),
         },
     );
-    assert_eq!(
-        by_name
-            .expect("by-name seat admission")
-            .verified_subject()
-            .resolved
-            .source_space,
-        ryeos_engine::contracts::ItemSpace::Project,
-        "the decoy must be able to redirect a by-name walk"
+    // The decoy's surface takes a ref the bundle ships, so the walk that
+    // reads the decoy is refused as a shadow instead of serving it.
+    let by_name = match by_name {
+        Ok(_) => panic!("a by-name walk of the swapped path must reach the decoy and be refused"),
+        Err(error) => format!("{error:#}"),
+    };
+    assert!(
+        by_name.contains("shadows the item of the same ref"),
+        "the decoy must be able to redirect a by-name walk: {by_name}"
     );
 
     let admission = ryeos_ui::handlers::ui_seat::admit_seat_root(
@@ -419,4 +558,64 @@ fn seat_admission_reads_the_retained_project_after_its_path_is_swapped() {
         ryeos_engine::contracts::ItemSpace::Bundle
     );
     assert_eq!(admission.project_root(), Some(canonical_project.as_path()));
+}
+
+/// A project file at the ref of a view the node's project surface binds does
+/// not replace that view. The surface still opens; the shadowed view is held
+/// in the binding as a degraded entry whose reason is the engine's refusal
+/// naming both files, it has no sources and no affordances, and the views
+/// the project does not shadow keep theirs. The project file here is
+/// unsigned: the refusal is decided before any signature is read.
+#[tokio::test]
+async fn project_file_shadowing_a_bound_view_leaves_that_view_unavailable_with_its_reason() {
+    let (_state_dir, _state_owner, state) = test_state::build_test_state_with_live_bundles();
+    let projects = tempfile::tempdir().expect("projects tempdir");
+    let project = projects.path().join("project");
+    std::fs::create_dir(&project).expect("create project");
+    write_project_file(
+        &project,
+        ".ai/views/ryeos/threads/history.yaml",
+        "widget: text\n",
+    );
+
+    let (session_id, _context, _producer, coordinate) =
+        test_state::live_presentation_with_surface_in_project(
+            &state,
+            &project,
+            &project,
+            "surface:ryeos/ui/project",
+        )
+        .await;
+    let session = get_ui_state(&state)
+        .expect("UI state")
+        .browser_sessions
+        .get_session(&session_id)
+        .expect("active compiled project session");
+    let attachment = session
+        .attachments
+        .get(&coordinate.binding_attachment_id)
+        .expect("surface attachment");
+    let binding = &attachment.compiled_binding.binding;
+
+    match binding.views.get("view:ryeos/threads/history") {
+        Some(ryeos_api::surface_views::EmbeddedViewIdentity::Degraded { reason }) => {
+            assert!(
+                reason.contains("shadows the item of the same ref"),
+                "{reason}"
+            );
+            assert!(reason.contains("view:ryeos/threads/history"), "{reason}");
+            assert!(reason.contains("unavailable"), "{reason}");
+        }
+        other => panic!("the shadowed view must be degraded, got {other:?}"),
+    }
+    assert!(!binding.sources.contains_key("view:ryeos/threads/history"));
+    assert!(!binding.affordances.contains_key("view:ryeos/threads/history"));
+    assert!(
+        binding
+            .sources
+            .get("view:ryeos/project/files")
+            .is_some_and(|sources| !sources.is_empty()),
+        "a view the project does not shadow keeps its sources: {:?}",
+        binding.attenuated
+    );
 }

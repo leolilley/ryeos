@@ -1,0 +1,33 @@
+# ryeos:signed:2026-08-04T13:37:03Z:09754ca5e9d703fc169c9f08dac763e4a3c4a9747414338a401c1ac1d9968a6c:qzSBTu7ljRspmTUhbpJNfOTBKVEUFk9BRLsGajxmmTrZCRQ4GPioF/euHM0LzToHfATLJQtNELOpPsLkUnPUAA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
+name: arc-solve-terminal
+version: "1.0.0"
+description: "Terminal ARC execution-field workspace using the same views, stable identities, and shared intents as web."
+
+tiling:
+  mode: master_stack
+  master: { side: left, arrange: vertical, ratio: 0.56, count: 1 }
+  stack: { arrange: vertical }
+  insert: end
+
+tiles:
+  - view:arc3/solve/solve/field
+  - view:arc3/solve/project/field
+  - view:arc3/solve/state/board
+  - view:arc3/solve/solve/inspector
+  - view:arc3/solve/solve/timeline
+
+style:
+  border: thin
+
+library:
+  - group: ARC execution
+    views:
+      - view:arc3/solve/project/field
+      - view:arc3/solve/solve/field
+      - view:arc3/solve/state/board
+      - view:arc3/solve/solve/inspector
+      - view:arc3/solve/solve/timeline
+
+ambient:
+  show_background: false
+  opacity: 1.0

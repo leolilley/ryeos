@@ -1,0 +1,73 @@
+# ryeos:signed:2026-08-10T06:08:51Z:4449abd10e61f3fc587052eba31f51260e3ba2f56874c0d13aeb800efed7bc45:HRi0+zQc0+qFaUu3wQ8MqWCgj3L4pJuC/8CosuW4B3Jc4hlEEP+M6mH34oIzxPt3IrPI5Rgcd4JdqAiKNFB/BQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
+name: arc-solve-timeline
+title: ARC solve timeline
+version: "1.1.0"
+description: "Cursorable one-braid execution rail with concurrent chains visibly outside the selected cut."
+
+widget: field
+sources:
+  execution:
+    ref: service:ui/ryeos-ui/field/execution
+    params:
+      thread_id: "@facet:selection.thread_id"
+      cursor: "@field:cursor"
+      max_depth: 32
+      max_nodes: 1000
+projections:
+  schema_version: ryeos.ui.field.projection.v1
+  groups:
+    - { id: braid, label: Selected braid, layout: flow }
+    - { id: concurrent, label: Concurrent context, layout: lanes }
+  layers:
+    - { id: timeline, label: Timeline, default_visible: true }
+    - { id: evidence, label: Domain evidence, default_visible: true }
+  entity_rules:
+    - match: { source: execution, kind: event }
+      set: { role: timeline-event, group: braid, layer: timeline, order: "{event_ref.chain_seq}", shape: dot, emphasis: quiet, secondary: "{status}" }
+    - match: { source: execution, kind: occurrence }
+      set: { role: occurrence, group: braid, layer: timeline, order: "{attributes.step}", shape: capsule, secondary: "{attributes.node}" }
+    - match: { source: execution, kind: hook_observation }
+      set: { role: domain-observation, group: braid, layer: evidence, shape: diamond, label: "{attributes.observation.kind}", emphasis: strong }
+    - match: { source: execution, kind: project_observation, attributes.namespace: arc.campaign_dispatch_classified }
+      set:
+        role: dispatch-classification
+        group: braid
+        layer: evidence
+        shape: diamond
+        label: "{attributes.payload.row_status}"
+        emphasis: strong
+        tone:
+          field: status
+          map: { replay_proven: good, banked_pending: warn, generation_moved_pending: warn, stale_miss: danger, unanchored_replay: danger }
+          default: neutral
+    - match: { source: execution, kind: provider_call_observation }
+      set: { role: provider-call, group: braid, layer: evidence, shape: dot, label: "{attributes.source}", secondary: "{attributes.publication}" }
+    - match: { source: execution, kind: thread, status: outside_cut }
+      set: { role: outside-cut-thread, group: concurrent, layer: timeline, shape: capsule, fill: ghost, emphasis: quiet, tone: warn }
+  relation_rules:
+    - match: { source: execution, kind: evidenced_by }
+      set: { layer: timeline, stroke: dotted, directed: true }
+    - match: { source: execution, kind: observes }
+      set: { layer: evidence, stroke: solid, directed: true, tone: accent }
+selection:
+  change: select
+  activate: select
+affordances:
+  - id: select
+    label: Inspect
+    invoke:
+      plane: ui
+      facet: selection
+      value:
+        thread_id: "{record.attributes.thread.id}"
+        definition_digest: "{record.effective_definition_digest}"
+        game: "{record.attributes.thread.facets.game}"
+        entity_id: "{record.id}"
+refresh:
+  on_hint: [thread, activity]
+field_state:
+  cursor_scope:
+    id: solve-replay
+    subject:
+      - "@facet:selection.thread_id"
+      - "@facet:selection.definition_digest"

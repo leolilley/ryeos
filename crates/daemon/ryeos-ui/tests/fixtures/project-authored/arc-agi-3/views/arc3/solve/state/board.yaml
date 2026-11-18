@@ -1,0 +1,76 @@
+# ryeos:signed:2026-08-10T06:08:52Z:019800b9c0eb78acac9c6469151adba7b4a67ee73b1b1b6903cda0e1859d4179:IFrUJxy92jNlSMK53wG3ZK2wM+CVWi1/yKHMB3mrOdUJttizzq6NRggIJVSogNz15VIhSAy3ZwT66fCgSx3/BA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
+name: arc-state-board
+title: ARC board states
+version: "1.1.0"
+description: "Selected solve evidence with generic indexed-grid previews and predecessor comparison."
+
+widget: field
+sources:
+  execution:
+    ref: service:ui/ryeos-ui/field/execution
+    params:
+      thread_id: "@facet:selection.thread_id"
+      cursor: "@field:cursor"
+      max_depth: 32
+      max_nodes: 1000
+projections:
+  schema_version: ryeos.ui.field.projection.v1
+  groups:
+    - { id: states, label: Observed and admitted boards, layout: flow }
+    - { id: context, label: Execution context, layout: stack, aggregate: { mode: count } }
+  layers:
+    - { id: boards, label: Boards, default_visible: true }
+    - { id: context, label: Context, default_visible: false }
+  entity_rules:
+    - match: { source: execution, kind: event, attributes.kind: arc.state_observed }
+      set: { role: observed-state, group: states, layer: boards, shape: grid, fill: hollow, label: "{attributes.payload.state_id}" }
+    - match: { source: execution, kind: hook_observation, attributes.observation.kind: arc.accepted_transition }
+      set: { role: accepted-state, group: states, layer: boards, shape: grid, emphasis: strong, tone: good, label: "{attributes.observation.payload.state_id}", secondary: "{attributes.observation.payload.restore_status}" }
+    - match: { source: execution, kind: hook_observation, attributes.observation.kind: arc.candidate_result }
+      set: { role: candidate-state, group: states, layer: boards, shape: grid, fill: ghost, secondary: "{attributes.observation.payload.candidate_key}" }
+    - match: { source: execution, kind: state_anchor }
+      set: { role: restore-anchor, group: states, layer: boards, shape: anchor, emphasis: strong, tone: accent }
+    - match: { source: execution, kind: occurrence }
+      set: { role: occurrence-context, group: context, layer: context, shape: capsule, emphasis: quiet }
+  relation_rules:
+    - match: { source: execution, kind: observes }
+      set: { layer: context, stroke: dotted, directed: true }
+  derived_relations:
+    - id: observed-to-accepted
+      left:
+        match: { source: execution, kind: event, attributes.kind: arc.state_observed }
+        keys: [attributes.payload.state_id]
+      right:
+        match: { source: execution, kind: hook_observation, attributes.observation.kind: arc.accepted_transition }
+        keys: [attributes.observation.payload.predecessor_state_id]
+      relation: { kind: accepted_transition, layer: boards, stroke: solid, directed: true, emphasis: strong, tone: good, motion: flow }
+    - id: accepted-to-accepted
+      left:
+        match: { source: execution, kind: hook_observation, attributes.observation.kind: arc.accepted_transition }
+        keys: [attributes.observation.payload.state_id]
+      right:
+        match: { source: execution, kind: hook_observation, attributes.observation.kind: arc.accepted_transition }
+        keys: [attributes.observation.payload.predecessor_state_id]
+      relation: { kind: accepted_transition, layer: boards, stroke: solid, directed: true, emphasis: strong, tone: good, motion: flow }
+selection:
+  change: select
+  activate: select
+affordances:
+  - id: select
+    label: Compare
+    invoke:
+      plane: ui
+      facet: selection
+      value:
+        thread_id: "{record.attributes.thread.id}"
+        definition_digest: "{record.effective_definition_digest}"
+        game: "{record.attributes.thread.facets.game}"
+        entity_id: "{record.id}"
+refresh:
+  on_hint: [thread, activity]
+field_state:
+  cursor_scope:
+    id: solve-replay
+    subject:
+      - "@facet:selection.thread_id"
+      - "@facet:selection.definition_digest"

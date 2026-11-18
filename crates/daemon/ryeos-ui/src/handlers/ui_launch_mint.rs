@@ -269,6 +269,7 @@ pub(crate) fn compile_session_binding(
     let root_ref = CanonicalRef::parse(&req.root_ref)
         .map_err(|error| HandlerError::BadRequest(format!("invalid root ref: {error}")))?;
     let project_subject = project_authority.map(|_| project_path.as_path());
+    let project_authoring = load_project_authoring_config(state)?;
 
     prepared
         .exec_ctx
@@ -298,6 +299,7 @@ pub(crate) fn compile_session_binding(
                     project_root: canonical_project_root.as_deref(),
                     node_policy_generation_digest: state.node_policy.generation_digest(),
                     identities: composition.identities.clone(),
+                    project_source_ceiling: &project_authoring.sources,
                 },
                 &composition.compile_body,
                 |target_ref| compile_target(generation, &prepared, target_ref),
@@ -539,6 +541,110 @@ pub(crate) fn revalidate_binding_authority(
     Ok(())
 }
 
+/// Whether items of `kind` are executed in-process by the daemon's service
+/// registry, as its signed kind schema declares.
+pub(crate) fn kind_terminates_in_service_registry(
+    kinds: &ryeos_engine::kind_registry::KindRegistry,
+    kind: &str,
+) -> bool {
+    kinds
+        .get(kind)
+        .and_then(|schema| schema.execution())
+        .and_then(|execution| execution.terminator.as_ref())
+        .is_some_and(|terminator| {
+            matches!(
+                terminator,
+                ryeos_engine::kind_registry::TerminatorDecl::InProcess {
+                    registry: ryeos_engine::kind_registry::InProcessRegistryKind::Services,
+                    ..
+                }
+            )
+        })
+}
+
+/// Signed bundle-space config naming the read services an item authored in
+/// project space may bind as sources.
+pub const PROJECT_AUTHORING_CONFIG_REF: &str = "config:ryeos/ui/project-authoring";
+const PROJECT_AUTHORING_CONFIG_PATH: &str = "ryeos/ui/project-authoring.yaml";
+
+/// The node's source ceiling for project-authored UI.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectAuthoringConfig {
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Capability patterns, one per allowed read service. Each names one
+    /// service exactly: a wildcard is refused, so the list is the whole
+    /// answer to what project-authored UI may read.
+    pub sources: Vec<String>,
+}
+
+impl ProjectAuthoringConfig {
+    pub fn from_value(value: Value) -> std::result::Result<Self, String> {
+        let config: Self = serde_json::from_value(value)
+            .map_err(|error| format!("{PROJECT_AUTHORING_CONFIG_REF} is invalid: {error}"))?;
+        for source in &config.sources {
+            if source.is_empty() || source.contains('*') {
+                return Err(format!(
+                    "{PROJECT_AUTHORING_CONFIG_REF} lists `{source}`; each entry must name one service exactly"
+                ));
+            }
+        }
+        Ok(config)
+    }
+}
+
+/// Resolve and verify the project-authoring ceiling. The resolution roots
+/// carry no project, so only installed bundles can supply the config, and it
+/// must verify as trusted; a project file of the same path is never read.
+pub fn load_project_authoring_config(state: &AppState) -> Result<ProjectAuthoringConfig> {
+    use ryeos_engine::config_loading::{ConfigLoadContext, ConfigSpec, ResolveMode};
+
+    let engine = &state.engine;
+    let roots = engine.resolution_roots(None);
+    let load_context = ConfigLoadContext {
+        roots: &roots,
+        parsers: &engine.parser_dispatcher,
+        kinds: &engine.kinds,
+        trust_store: &engine.trust_store,
+        project_authority: None,
+    };
+    let resolved = ryeos_engine::config_loading::resolve_config_spec(
+        &ConfigSpec {
+            path: PROJECT_AUTHORING_CONFIG_PATH.to_string(),
+            mode: ResolveMode::FirstMatch,
+        },
+        &load_context,
+    )
+    .map_err(|error| {
+        HandlerError::Internal(format!("resolve {PROJECT_AUTHORING_CONFIG_REF}: {error}"))
+    })?;
+    // A node with no such config installed lists nothing, so project-authored
+    // UI there binds no source at all. Absence never widens.
+    let Some(layer) = resolved.layers.first() else {
+        return Ok(ProjectAuthoringConfig {
+            category: None,
+            version: None,
+            description: None,
+            sources: Vec::new(),
+        });
+    };
+    let value = ryeos_engine::config_loading::load_and_verify_trusted_config_file(
+        &layer.path,
+        &load_context,
+    )
+    .map_err(|error| {
+        HandlerError::Internal(format!(
+            "{PROJECT_AUTHORING_CONFIG_REF} is untrusted: {error}"
+        ))
+    })?;
+    Ok(ProjectAuthoringConfig::from_value(value).map_err(HandlerError::Internal)?)
+}
+
 pub(crate) fn compile_target(
     generation: &ryeos_engine::engine::CheckedEngineGeneration<'_>,
     prepared: &crate::handlers::ui_invocations_dispatch::PreparedInvocation,
@@ -554,10 +660,21 @@ pub(crate) fn compile_target(
 
     let item_ref = CanonicalRef::parse(target_ref)
         .with_context(|| format!("invalid binding target ref `{target_ref}`"))?;
+    // Only a kind whose signed schema terminates in the daemon's service
+    // registry is a UI target. The kind is judged before anything is
+    // resolved, so a project tool, directive or graph named by a view is
+    // never read, at session mint or again at dispatch.
+    if !kind_terminates_in_service_registry(&prepared.exec_ctx.engine.kinds, &item_ref.kind) {
+        return Err(crate::compiled_binding::UiTargetRefusal::NotAService {
+            target_ref: target_ref.to_string(),
+            kind: item_ref.kind.clone(),
+        }
+        .into());
+    }
     let request = EffectiveItemRequest {
         logical_project_root: None,
         item_ref: item_ref.clone(),
-        expected_kind: None,
+        expected_kind: Some(item_ref.kind.clone()),
         project_root: Some(prepared.project.effective_path.clone()),
         subject_resolution_authority: prepared
             .exec_ctx

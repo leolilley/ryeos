@@ -1,0 +1,121 @@
+# ryeos:signed:2026-08-10T06:08:47Z:f91f6838ac6c97a11d22d2a8032ef68847e7a6cc853e26d8b8e84f17b06e49d5:OuqyFVzru1OC40HHnl1KwPG3Qw42DRXxXdQ3ZJvXGaETQ4ZDd6atgoDHoAiSmLsGYAmgrQ+aynGkj1suL7gyDA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
+name: arc-project-field
+title: ARC project field
+version: "1.1.0"
+description: "Signed ARC project structure plus campaign, per-game proof-wrapper, and solver run entry points over generic RyeOS field facts."
+
+widget: field
+sources:
+  project:
+    ref: service:ui/ryeos-ui/field/project
+    params: {}
+  campaign_runs:
+    ref: service:ui/ryeos-ui/field/runs
+    params:
+      item_ref: graph:arc3/solve/campaign_pass
+      limit: 500
+  wrapper_runs:
+    ref: service:ui/ryeos-ui/field/runs
+    params:
+      item_ref: graph:arc3/solve/campaign_game
+      limit: 500
+  solver_runs:
+    ref: service:ui/ryeos-ui/field/runs
+    params:
+      item_ref: graph:arc3/solve/game_solver
+      limit: 500
+projections:
+  schema_version: ryeos.ui.field.projection.v1
+  groups:
+    - { id: program, label: ARC program, layout: flow }
+    - { id: campaign, label: Campaign wave, parent: program, layout: flow }
+    - { id: wrapper, label: Per-game proof wrapper, parent: program, layout: flow }
+    - { id: solver, label: Game solver, parent: program, layout: flow }
+    - { id: runs, label: Campaign execution, layout: lanes }
+  layers:
+    - { id: structure, label: Signed structure, default_visible: true }
+    - { id: runs, label: Runs, default_visible: true }
+  entity_rules:
+    - match: { source: project, kind: item_ref, canonical_ref: graph:arc3/solve/campaign_pass }
+      set: { role: campaign-entry, group: campaign, layer: structure, shape: capsule, emphasis: strong, tone: accent }
+    - match: { source: project, kind: graph_definition, canonical_ref: graph:arc3/solve/campaign_pass }
+      set: { role: campaign-definition, group: campaign, layer: structure, shape: hex, fill: hollow, emphasis: strong }
+    - match: { source: project, kind: graph_node, canonical_ref: graph:arc3/solve/campaign_pass }
+      set: { role: campaign-node, group: campaign, layer: structure, shape: rect, fill: hollow }
+    - match: { source: project, kind: item_ref, canonical_ref: graph:arc3/solve/campaign_game }
+      set: { role: proof-wrapper-entry, group: wrapper, layer: structure, shape: capsule, emphasis: strong, tone: accent }
+    - match: { source: project, kind: graph_definition, canonical_ref: graph:arc3/solve/campaign_game }
+      set: { role: proof-wrapper-definition, group: wrapper, layer: structure, shape: hex, fill: hollow, emphasis: strong }
+    - match: { source: project, kind: graph_node, canonical_ref: graph:arc3/solve/campaign_game }
+      set: { role: proof-wrapper-node, group: wrapper, layer: structure, shape: rect, fill: hollow }
+    - match: { source: project, kind: item_ref, canonical_ref: graph:arc3/solve/game_solver }
+      set: { role: solver-entry, group: solver, layer: structure, shape: capsule, emphasis: strong, tone: accent }
+    - match: { source: project, kind: graph_definition, canonical_ref: graph:arc3/solve/game_solver }
+      set: { role: solver-definition, group: solver, layer: structure, shape: hex, fill: hollow, emphasis: strong }
+    - match: { source: project, kind: graph_node, canonical_ref: graph:arc3/solve/game_solver }
+      set: { role: solver-node, group: solver, layer: structure, shape: rect, fill: hollow }
+    - match: { source: project, kind: graph_definition }
+      set: { role: graph-definition, group: program, layer: structure, shape: hex, fill: hollow }
+    - match: { source: project, kind: graph_node }
+      set: { role: graph-node, group: program, layer: structure, shape: rect, fill: hollow, emphasis: quiet }
+    - match: { source: campaign_runs, kind: run_summary }
+      set:
+        role: campaign-run
+        group: runs
+        layer: runs
+        lane: ungrouped
+        shape: capsule
+        tone:
+          field: status
+          map: { running: accent, completed: good, failed: danger, cancelled: warn }
+          default: neutral
+        motion:
+          field: status
+          map: { running: pulse }
+          default: none
+        secondary: "{attributes.thread.facets.fleet}"
+    - match: { source: campaign_runs, kind: run_summary, attributes.thread.facets.game: { exists: true } }
+      set: { lane: "{attributes.thread.facets.game}", secondary: "{attributes.thread.facets.game}" }
+    - match: { source: wrapper_runs, kind: run_summary }
+      set: { role: proof-wrapper-run, group: runs, layer: runs, lane: ungrouped, shape: capsule, secondary: "{attributes.thread.facets.fleet}" }
+    - match: { source: wrapper_runs, kind: run_summary, attributes.thread.facets.game: { exists: true } }
+      set: { lane: "{attributes.thread.facets.game}", secondary: "{attributes.thread.facets.game}" }
+    - match: { source: solver_runs, kind: run_summary }
+      set: { role: solve-run, group: runs, layer: runs, lane: ungrouped, shape: capsule, secondary: "{attributes.thread.facets.fleet}" }
+    - match: { source: solver_runs, kind: run_summary, attributes.thread.facets.game: { exists: true } }
+      set: { lane: "{attributes.thread.facets.game}", secondary: "{attributes.thread.facets.game}" }
+  relation_rules:
+    - match: { source: project, kind: contains }
+      set: { layer: structure, stroke: solid, directed: true }
+    - match: { source: project, kind: calls }
+      set: { layer: structure, stroke: dashed, directed: true, emphasis: quiet }
+    - match: { source: project, kind: flows_to }
+      set: { layer: structure, stroke: solid, directed: true, motion: flow }
+    - match: { source: campaign_runs, kind: executes_definition }
+      set: { layer: runs, stroke: solid, directed: true, tone: accent }
+    - match: { source: campaign_runs, kind: at_graph_node }
+      set: { layer: runs, stroke: dotted, directed: true, tone: accent }
+    - match: { source: wrapper_runs, kind: executes_definition }
+      set: { layer: runs, stroke: solid, directed: true, tone: accent }
+    - match: { source: wrapper_runs, kind: at_graph_node }
+      set: { layer: runs, stroke: dotted, directed: true, tone: accent }
+    - match: { source: solver_runs, kind: executes_definition }
+      set: { layer: runs, stroke: solid, directed: true, tone: accent }
+    - match: { source: solver_runs, kind: at_graph_node }
+      set: { layer: runs, stroke: dotted, directed: true, tone: accent }
+selection:
+  change: select
+  activate: select
+affordances:
+  - id: select
+    label: Follow
+    invoke:
+      plane: ui
+      facet: selection
+      value:
+        thread_id: "{record.attributes.thread.id}"
+        definition_digest: "{record.effective_definition_digest}"
+        game: "{record.attributes.thread.facets.game}"
+        entity_id: "{record.id}"
+refresh:
+  on_hint: [thread, activity]

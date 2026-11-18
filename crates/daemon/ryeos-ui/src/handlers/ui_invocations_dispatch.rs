@@ -254,6 +254,7 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
                 prepared.project_content.as_ref(),
             )?;
             super::ui_launch_mint::compile_target(generation, &prepared, &item_ref)
+                .map_err(ui_target_refusal_to_handler)
         })?;
     if current != bound.target {
         return Err(binding_stale(
@@ -1747,6 +1748,25 @@ fn map_dispatch_error(error: anyhow::Error) -> HandlerError {
         .downcast::<ryeos_executor::dispatch_error::DispatchError>()
         .unwrap_or_else(ryeos_executor::dispatch_error::DispatchError::Internal);
     dispatch_error_to_handler(error)
+}
+
+/// Answer a refused binding target with its own name. A target of a kind
+/// that is not a service is refused again here, at dispatch, whatever a
+/// retained binding says.
+fn ui_target_refusal_to_handler(error: anyhow::Error) -> anyhow::Error {
+    match error.downcast_ref::<crate::compiled_binding::UiTargetRefusal>() {
+        Some(refusal) => HandlerError::Structured {
+            code: refusal.code().to_owned(),
+            status: 403,
+            body: json!({
+                "code": refusal.code(),
+                "error": refusal.to_string(),
+                "retryable": false,
+            }),
+        }
+        .into(),
+        None => error,
+    }
 }
 
 fn dispatch_error_to_handler(error: ryeos_executor::dispatch_error::DispatchError) -> HandlerError {
