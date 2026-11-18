@@ -5,6 +5,7 @@
 //! checks the admitted mechanical identity, executes the already-admitted
 //! subject, and stores a normalized answer. No kind vocabulary belongs here.
 
+pub mod locality;
 pub mod rfc3339;
 
 use anyhow::{Context as _, bail};

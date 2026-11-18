@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-18T05:02:16Z:384dda3e5900f3f9d73cacf0e19b6d9c377c3a3d1a024b51ebf230030a40f5b3:45eTtCBJX+/YlIC1dv5F7Bm07uEgPx3ZwEKnibmrGM4kU6cgURCzmmel1rR9riXG+qg7ooDyxHiQdL+0715ODA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T05:21:01Z:367daf0d8959b0556bf774e42f87b73851191acbbfdcc78ee2dc46c45748bfe2:hEmzaQvhL+/8Q/G1MTWy3wupwHYzUKqc01rcKHbEODyGTWKnykEUMRc9lL3px7b5wCu8POB8yjaEYvyXP+6eDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
 #   category: ryeos/development/repository-validation
 #   version: "1.0.0"
@@ -26,7 +26,11 @@ locks, the version and checksum must be equal. Identities present in only one
 lock are exempt (the renderer's git sources and graphics stack, or root-only
 crates the renderer never reaches).
 
---check       compare the locks (no cargo, no network); exit 1 on disagreement
+The renderer manifest also restates the root workspace lint table ([lints]
+against [workspace.lints]); the check holds them equal.
+
+--check       compare the locks and lint tables (no cargo, no network); exit 1 on
+              disagreement
 --regenerate  rebuild the renderer lock from the root lock: seed it with every
               root package plus the renderer's own packages for ranges the
               root lock does not hold, let cargo prune and resolve it, then
@@ -44,6 +48,7 @@ from pathlib import Path
 ROOT_LOCK = "Cargo.lock"
 RUNE_MANIFEST = "crates/clients/rune/Cargo.toml"
 RUNE_LOCK = "crates/clients/rune/Cargo.lock"
+ROOT_MANIFEST = "Cargo.toml"
 
 
 def compatible_range(version):
@@ -81,6 +86,10 @@ def check(root):
             failures.append(
                 f"{name} ({source or 'path'}): root lock {core[key][0]}, renderer lock {rune[key][0]}"
                 + ("" if core[key][0] != rune[key][0] else " (checksum differs)"))
+    root_lints = tomllib.loads((root / ROOT_MANIFEST).read_text())["workspace"].get("lints")
+    rune_lints = tomllib.loads((root / RUNE_MANIFEST).read_text()).get("lints")
+    if root_lints != rune_lints:
+        failures.append(f"renderer [lints] {rune_lints} differ from root [workspace.lints] {root_lints}")
     return failures, len(core.keys() & rune.keys())
 
 
