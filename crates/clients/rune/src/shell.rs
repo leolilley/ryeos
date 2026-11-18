@@ -426,7 +426,7 @@ fn view_set_strip(top_bar: &RyeOsTopBarVm, local: &Local) -> El {
         .child(el().grow(1.0))
         .child(
             row()
-                .pin(Some(0.0), None, Some(18.0), Some(0.0))
+                .pin(None, Some(0.0), Some(18.0), Some(0.0))
                 .center_y()
                 .gap(14.0)
                 .label("Focused view and layout")
