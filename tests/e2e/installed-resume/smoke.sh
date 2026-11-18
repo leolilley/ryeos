@@ -116,16 +116,26 @@ bounded() {
 }
 
 mkdir -p "$PROJECT_ROOT/.ai/tools/smoke" "$PROJECT_ROOT/.ai/graphs/smoke"
-cat >"$PROJECT_ROOT/.ai/tools/smoke/resume.yaml" <<'YAML'
+# The tool's wrapper runtime declares native_resume, so a daemon restart
+# respawns the process under the resumed graph instead of failing it.
+cat >"$PROJECT_ROOT/.ai/tools/smoke/resume_runtime.yaml" <<'YAML'
 category: smoke
 version: "1.0.0"
 executor_id: "@subprocess"
 execution_protocol: "protocol:ryeos/core/opaque"
-description: Deterministic long-running fixture for installed resume smoke tests
+description: Native-resume runtime for the installed resume smoke fixture
+native_resume: true
 config:
   command: /bin/sh
   args: ["-c", "sleep 120; printf ryeos-resume-smoke-ok"]
   timeout_secs: 180
+YAML
+cat >"$PROJECT_ROOT/.ai/tools/smoke/resume.yaml" <<'YAML'
+category: smoke
+version: "1.0.0"
+executor_id: "tool:smoke/resume_runtime"
+execution_protocol: "protocol:ryeos/core/opaque"
+description: Deterministic long-running fixture for installed resume smoke tests
 YAML
 cat >"$PROJECT_ROOT/.ai/graphs/smoke/resume.yaml" <<'YAML'
 version: "1.0.0"
@@ -266,7 +276,7 @@ fi
 bounded_for "$INIT_TIMEOUT" ryeos "${init_args[@]}"
 host_service_setup
 ryeos_term_info "signing resumable fixture"
-bounded ryeos --project "$PROJECT_ROOT" sign tool:smoke/resume graph:smoke/resume
+bounded ryeos --project "$PROJECT_ROOT" sign tool:smoke/resume_runtime tool:smoke/resume graph:smoke/resume
 bounded ryeos start
 wait_ready
 
