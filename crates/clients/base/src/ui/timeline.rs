@@ -199,7 +199,8 @@ pub struct RyeOsTimelineLaneVm {
 }
 
 /// A pending ask docked at the tail of the thread tile, directly above the
-/// composer. The ask also keeps its summary row in the flow.
+/// composer. While pending the ask is drawn here only; once answered it is
+/// an ordinary entry in the flow.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsTimelineDockVm {
     /// The ask entry's id.
@@ -221,6 +222,14 @@ pub struct RyeOsTimelineDockActionVm {
     pub intent: Option<RyeOsUiIntent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disabled_reason: Option<String>,
+}
+
+/// Whether a service item is a pending ask. A pending ask is drawn in the
+/// dock and only there; once answered it is an ordinary entry. This one
+/// condition both puts an ask in the dock and keeps it out of the feed.
+fn is_docked(item: &Value) -> bool {
+    item.get("type").and_then(Value::as_str) == Some("ask")
+        && item.get("state").and_then(Value::as_str) == Some("pending")
 }
 
 /// The role of one service item: its entry type, or `cluster` / `recap`.
@@ -621,10 +630,7 @@ pub(crate) fn pending_asks(
         .unwrap_or("");
     entries
         .into_iter()
-        .filter(|entry| {
-            entry.get("type").and_then(Value::as_str) == Some("ask")
-                && entry.get("state").and_then(Value::as_str) == Some("pending")
-        })
+        .filter(|entry| is_docked(entry))
         .map(|entry| {
             let slot_text = |name: &str| slot(entry, name);
             // Without the fence fields an ask cannot be answered from here.
@@ -723,11 +729,14 @@ struct LayoutBuilder {
     indent_by_id: HashMap<String, u8>,
     /// The chain the response describes; a retry continues within it.
     chain_root_id: String,
+    /// Leave docked asks out: the feed of a client that draws the dock.
+    hide_docked: bool,
 }
 
 impl LayoutBuilder {
-    fn new(chain_root_id: &str) -> Self {
+    fn new(chain_root_id: &str, hide_docked: bool) -> Self {
         Self {
+            hide_docked,
             layout: TimelineLayout {
                 section_parent: vec![None],
                 section_keys: vec![None],
@@ -874,7 +883,7 @@ impl LayoutBuilder {
         for member in item_members(item) {
             if member.get("item").and_then(Value::as_str) == Some("cluster") {
                 self.group(member, section, indent + 1);
-            } else {
+            } else if !(self.hide_docked && is_docked(member)) {
                 self.push_entry(member, indent + 1, section, false);
             }
         }
@@ -906,6 +915,7 @@ impl LayoutBuilder {
 
     fn item(&mut self, item: &Value) {
         match item.get("item").and_then(Value::as_str) {
+            Some("entry") if self.hide_docked && is_docked(item) => {}
             Some("entry") => {
                 self.enter_exchange(item.get("exchange").and_then(Value::as_str));
                 let header = std::mem::take(&mut self.header_pending);
@@ -944,7 +954,7 @@ pub(crate) fn timeline_layout(
     chain_root_id: &str,
     lead: Vec<RyeOsTimelineEntryVm>,
 ) -> TimelineLayout {
-    build_layout(items, chain_root_id, lead, None)
+    build_layout(items, chain_root_id, lead, None, false)
 }
 
 /// [`timeline_layout`] with the system events notice, a folded group after the
@@ -954,8 +964,9 @@ fn build_layout(
     chain_root_id: &str,
     lead: Vec<RyeOsTimelineEntryVm>,
     notice: Option<&SystemEvents>,
+    hide_docked: bool,
 ) -> TimelineLayout {
-    let mut builder = LayoutBuilder::new(chain_root_id);
+    let mut builder = LayoutBuilder::new(chain_root_id, hide_docked);
     for entry in lead {
         builder.push(entry, 0, None, 0, false);
     }
@@ -1022,6 +1033,7 @@ pub(crate) fn timeline_layout_for(
             .unwrap_or(""),
         lead,
         system_events(response).as_ref(),
+        true,
     )
 }
 
@@ -2325,7 +2337,7 @@ mod tests {
     }
 
     #[test]
-    fn asks_whose_latest_state_is_pending_are_docked_and_keep_their_row() {
+    fn asks_whose_latest_state_is_pending_are_docked_and_leave_the_feed() {
         let binding = window_binding(None);
         let cluster = json!({
             "item": "cluster", "id": "cl", "headline": "2 pages",
@@ -2347,16 +2359,18 @@ mod tests {
             RyeOsTimelineEntryVm::Line { primary, tone: RyeOsTone::Warn, .. }
                 if primary == "approval requested: write"
         ));
-        // The ask also keeps its summary row in the flow.
+        // A docked ask is not also a row in the feed; an answered one is.
         let response = json!({ "items": items });
         let built = timeline_layout_for(&binding, &response, &instance(), "view:t");
-        assert!(
-            built
-                .sources
-                .iter()
-                .flatten()
-                .any(|source| source.key == "item:ask:1")
-        );
+        let keys: Vec<&str> = built
+            .sources
+            .iter()
+            .flatten()
+            .map(|source| source.key.as_str())
+            .collect();
+        assert!(!keys.contains(&"item:ask:1"));
+        assert!(!keys.contains(&"item:ask:in-cluster"));
+        assert!(keys.contains(&"item:ask:2"));
         assert!(
             pending_asks(
                 &binding,
@@ -2391,9 +2405,11 @@ mod tests {
             ]});
             affordances.push(json!({
                 "id": "accept", "label": "Approve", "producer": "selection",
-                "visible_when": when, "invoke": invoke(true),
-                "enabled_when": {"field": "accept_allowed", "equals": true},
-                "disabled_reason": "cannot accept"
+                "invoke": invoke(true),
+                "visible_when": {"all": [
+                    {"field": "type", "equals": "ask"}, {"field": "state", "equals": "pending"},
+                    {"field": "accept_allowed", "equals": true}
+                ]}
             }));
             affordances.push(json!({
                 "id": "decline", "label": "Decline", "producer": "selection",
@@ -2458,8 +2474,8 @@ mod tests {
             other => panic!("expected an affordance invocation, got {other:?}"),
         }
 
-        // A contract that does not admit accepting disables Approve with its
-        // reason; Decline stays available.
+        // A request that does not allow accepting is not offered Approve;
+        // Decline is all that is left.
         let refused = pending_asks(
             &answering_binding(true),
             &response,
@@ -2468,9 +2484,56 @@ mod tests {
             "view:t",
         );
         let actions = &refused[0].actions;
-        assert_eq!(actions[0].intent, None);
-        assert_eq!(actions[0].disabled_reason.as_deref(), Some("cannot accept"));
-        assert!(actions[1].intent.is_some());
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].label, "Decline");
+        assert!(actions[0].intent.is_some());
+    }
+
+    #[test]
+    fn a_pending_ask_is_docked_and_absent_from_the_feed_until_it_is_answered() {
+        let response = json!({"chain_root_id": "C-1"});
+        let pending = [
+            entry("msg:1", "message", json!({"body": "go"})),
+            fenced_ask("true"),
+        ];
+        let feed = |items: &[Value]| {
+            timeline_layout_for(
+                &answering_binding(true),
+                &json!({"chain_root_id": "C-1", "items": items}),
+                &instance(),
+                "view:t",
+            )
+        };
+        let layout = feed(&pending);
+        assert_eq!(layout.entries.len(), 1, "only the message is in the feed");
+        assert_eq!(layout.sources.len(), layout.entries.len());
+        assert_eq!(
+            pending_asks(
+                &answering_binding(true),
+                &response,
+                &pending,
+                &instance(),
+                "view:t"
+            )
+            .len(),
+            1
+        );
+        // Answered: one line in the feed, nothing in the dock.
+        let answered = [
+            entry("msg:1", "message", json!({"body": "go"})),
+            with(fenced_ask("true"), "state", json!("approved")),
+        ];
+        assert_eq!(feed(&answered).entries.len(), 2);
+        assert!(
+            pending_asks(
+                &answering_binding(true),
+                &response,
+                &answered,
+                &instance(),
+                "view:t"
+            )
+            .is_empty()
+        );
     }
 
     #[test]
