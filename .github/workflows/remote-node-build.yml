@@ -1,0 +1,175 @@
+name: Remote node build
+
+# Builds a node install on a GitHub-hosted runner so it need not be compiled on
+# a developer machine. It runs exactly what
+#   install-local-direct.sh --populate --all --bundle-set <set>
+# builds (scripts/populate-bundles.sh with the installer's default dev publisher
+# key and owner, release profile, whole set), then packs what the installer
+# reads without --populate into one artifact: the binaries it copies from
+# <target>/release, the populated bundle state of the checkout, and a manifest.
+#
+#   gh workflow run remote-node-build.yml --repo leolilley/ryeos \
+#     --ref work/<branch> -f bundle_set=standard -f label=<thread>
+#
+# The job summary prints the artifact name and the exact download and install
+# commands; the same steps are in .ai/knowledge/ryeos/development/build-and-test.md.
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_set:
+        description: "Bundle set to populate (the installer's --bundle-set)"
+        required: true
+        default: standard
+        type: choice
+        options:
+          - standard
+          - development
+          - central-host
+          - standard-central-auth
+          - local-inference
+          - hosted-workflow
+          - bundle-source
+          - core
+          - core-scheduling
+          - core-workflow
+          - core-knowledge
+          - release-authority
+      label:
+        description: "Optional short label shown in the run name"
+        required: false
+        default: ""
+        type: string
+
+run-name: "remote node build ${{ inputs.bundle_set }} ${{ inputs.label }} (${{ github.ref_name }})"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: sccache
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  build:
+    name: build ${{ inputs.bundle_set }} ${{ inputs.label }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml zstd jq
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      - name: Prepare the runner
+        run: ./scripts/ci/prepare-runner.sh
+
+      # The same call the installer makes for --populate --all: its default
+      # development publisher key and owner label, the release profile.
+      - name: Populate and sign the bundle set
+        env:
+          BUNDLE_SET: ${{ inputs.bundle_set }}
+          CARGO_TARGET_DIR: ${{ runner.temp }}/ryeos-node-target
+        run: |
+          ./scripts/populate-bundles.sh \
+            --key .dev-keys/PUBLISHER_DEV.pem \
+            --owner "RyeOS Development" \
+            --bundle-set "$BUNDLE_SET" --all
+
+      - name: Pack the install artifact
+        id: pack
+        env:
+          BUNDLE_SET: ${{ inputs.bundle_set }}
+          CARGO_TARGET_DIR: ${{ runner.temp }}/ryeos-node-target
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          name="ryeos-node-${BUNDLE_SET}-${sha:0:12}"
+          stage="$RUNNER_TEMP/node-pack"
+          rm -rf "$stage"
+          mkdir -p "$stage/target/release" "$RUNNER_TEMP/node-out"
+
+          # The binaries the installer copies from <target>/release: its
+          # required ones, the set's host-support ones, and lillux when built.
+          # shellcheck source=scripts/pkg/bundle-sets.sh
+          source scripts/pkg/bundle-sets.sh
+          bins=(ryeosd ryeos lillux)
+          mapfile -t support < <(ryeos_bundle_set_host_support_bins "$BUNDLE_SET")
+          bins+=("${support[@]}")
+          for b in "${bins[@]}"; do
+            [[ -z "$b" ]] && continue
+            if [[ -f "$CARGO_TARGET_DIR/release/$b" ]]; then
+              install -m755 "$CARGO_TARGET_DIR/release/$b" "$stage/target/release/$b"
+            elif [[ "$b" != lillux ]]; then
+              echo "missing built binary: $b" >&2
+              exit 1
+            fi
+          done
+
+          # The populated bundle state of the checkout (everything the
+          # installer reads from bundles/ that is not tracked source).
+          ./scripts/ci/pack-bundle-state.sh "$stage/bundle-state.tar.zst"
+
+          (cd "$stage/target/release" && sha256sum -- *) > "$stage/binaries.sha256"
+          jq -n --arg sha "$sha" --arg set "$BUNDLE_SET" --arg ref "$GITHUB_REF_NAME" \
+            --arg run "$GITHUB_RUN_ID" --arg built "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --rawfile sums "$stage/binaries.sha256" \
+            '{commit:$sha, bundle_set:$set, ref:$ref, run_id:$run, built_utc:$built,
+              binaries:($sums | split("\n") | map(select(length>0) | split("  ") | {(.[1]): .[0]}) | add)}' \
+            > "$stage/manifest.json"
+          cat "$stage/manifest.json"
+
+          tar -C "$stage" --zstd -cf "$RUNNER_TEMP/node-out/$name.tar.zst" \
+            manifest.json target bundle-state.tar.zst
+          ls -l "$RUNNER_TEMP/node-out"
+          {
+            echo "name=$name"
+            echo "file=$RUNNER_TEMP/node-out/$name.tar.zst"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload the install artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: ${{ steps.pack.outputs.name }}
+          path: ${{ steps.pack.outputs.file }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+
+      - name: Print how to install it
+        env:
+          NAME: ${{ steps.pack.outputs.name }}
+          BUNDLE_SET: ${{ inputs.bundle_set }}
+          FILE: ${{ steps.pack.outputs.file }}
+        run: |
+          {
+            echo "## Node install artifact"
+            echo
+            echo "Artifact \`$NAME\` ($(stat -c %s "$FILE") bytes, kept 3 days), commit \`$GITHUB_SHA\`, bundle set \`$BUNDLE_SET\`."
+            echo
+            echo "Download and unpack into a fresh directory:"
+            echo
+            echo '```sh'
+            echo "d=\$(mktemp -d) && gh run download $GITHUB_RUN_ID --repo $GITHUB_REPOSITORY -n $NAME -D \"\$d\" && tar --zstd -xf \"\$d/$NAME.tar.zst\" -C \"\$d\""
+            echo '```'
+            echo
+            echo "Install from a checkout of that commit (see build-and-test.md, install build on GitHub):"
+            echo
+            echo '```sh'
+            echo "git worktree add --detach \"\$d/src\" $GITHUB_SHA && cd \"\$d/src\" && ./scripts/ci/unpack-bundle-state.sh \"\$d/bundle-state.tar.zst\""
+            echo "./scripts/pkg/install-local-direct.sh --bundle-set $BUNDLE_SET --cargo-target-dir \"\$d/target\" --trust-source-publishers"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
