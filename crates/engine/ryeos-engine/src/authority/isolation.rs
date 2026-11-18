@@ -5442,7 +5442,10 @@ impl IsolationRuntime {
         // descriptors in proportion to what it inherits and places every
         // target slot before the target's limit applies. The target inherits
         // it, so it also covers the target's own limit (`target_limits` in the
-        // plan), or is the policy ceiling when the target sets none.
+        // plan), or is the policy ceiling when the target sets none. Sources
+        // relocated above the highest slot may sit at or above this limit:
+        // they are already open when it is installed, and only new
+        // descriptors (dup3 onto a slot included) are bounded by it.
         let highest_target_slot = launch_request
             .plan
             .target_channels
