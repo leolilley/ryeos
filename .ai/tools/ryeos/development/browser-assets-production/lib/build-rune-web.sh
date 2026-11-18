@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-18T04:15:43Z:c9e7399a104fb0254d0cdf2eff1db5bd09583a51dd1f52f41be54459702cd675:G9zURS3Av9XsHacZlI7LDmBepOb0XVUWcMTGtCOcCrWDx7wB9KTC1R2hfuwkepq23w2Sfx9e1FZ1it8w2nkPCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T05:02:16Z:66c3be61bab1551f4192ce52ee3b0603b05f7f31e35d16ac2180ef4b2b2e4ce3:ZC7qgT3/BWM55V/nSNemMqiBBEL1Z7bC6QdXFr9NKQl5aRijT1488JEAnxGWv8rANZtwPxX/uc+c29O60XkhBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Externally invoked host helper in the development bundle; lib/ is excluded
 # from Tool resolution, so this is signed source, not an admitted Tool. It
 # grants no RyeOS authority. Run it from a checkout of this repository.
@@ -17,13 +17,17 @@
 # --out DIR writes the same files into DIR instead and leaves pkg/ and the registry alone
 # (the signed browser-assets-production tool checks and publishes through it).
 #
-# Environment: CARGO (default cargo), CARGO_TARGET_DIR (default <repo>/target),
+# The renderer is its own Cargo workspace (crates/clients/rune, with its own Cargo.lock), so
+# it builds through that manifest and its wasm-bindgen version comes from that lock.
+#
+# Environment: CARGO (default cargo), CARGO_TARGET_DIR (default <repo>/crates/clients/rune/target),
 # WASM_BINDGEN (default wasm-bindgen; must match the locked wasm-bindgen crate).
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../../../../../.." && pwd)
 cargo=${CARGO:-cargo}
-target_dir=${CARGO_TARGET_DIR:-$root/target}
+renderer=$root/crates/clients/rune
+target_dir=${CARGO_TARGET_DIR:-$renderer/target}
 bindgen=${WASM_BINDGEN:-wasm-bindgen}
 pkg=$root/crates/clients/rune/pkg
 out=
@@ -38,7 +42,7 @@ fi
 
 snippet_list=$(dirname "$0")/rune-snippets.toml
 
-locked=$(python3 -I -c 'import sys, tomllib; print(next(p["version"] for p in tomllib.load(open(sys.argv[1], "rb"))["package"] if p["name"] == "wasm-bindgen"))' "$root/Cargo.lock")
+locked=$(python3 -I -c 'import sys, tomllib; print(next(p["version"] for p in tomllib.load(open(sys.argv[1], "rb"))["package"] if p["name"] == "wasm-bindgen"))' "$renderer/Cargo.lock")
 if [[ $("$bindgen" --version) != "wasm-bindgen $locked" ]]; then
     echo "wasm-bindgen CLI must be $locked (set WASM_BINDGEN): $("$bindgen" --version)" >&2
     exit 1
@@ -46,7 +50,7 @@ fi
 
 cargo_home=${CARGO_HOME:-$HOME/.cargo}
 export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$root=/ryeos --remap-path-prefix=$HOME=/home --remap-path-prefix=$cargo_home=/cargo"
-"$cargo" build --locked --profile web -p ryeos-client-rune --target wasm32-unknown-unknown
+"$cargo" build --locked --profile web --manifest-path "$renderer/Cargo.toml" --target wasm32-unknown-unknown
 artifact=$target_dir/wasm32-unknown-unknown/web/ryeos_client_rune.wasm
 [[ -f $artifact ]] || { echo "build produced no $artifact" >&2; exit 1; }
 
