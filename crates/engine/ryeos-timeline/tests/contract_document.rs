@@ -38,7 +38,9 @@ fn table(document: &str, heading: &str) -> Vec<Vec<String>> {
             .split('|')
             .map(|cell| cell.trim().trim_matches('`').to_string())
             .collect();
-        let separator = cells.iter().all(|cell| cell.chars().all(|c| c == '-' || c == ':'));
+        let separator = cells
+            .iter()
+            .all(|cell| cell.chars().all(|c| c == '-' || c == ':'));
         if !separator {
             rows.push(cells);
         }

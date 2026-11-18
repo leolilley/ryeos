@@ -59,12 +59,14 @@ fn response(view_ref: &str, long: bool) -> Option<Value> {
               "project": { "name": "ryeos-next" }, "status": "failed", "created_at": "2026-11-12T07:03:00Z" }
         ], "coverage": { "complete": false, "returned": 3 } }),
         "view:ryeos/development/execution" => serde_json::from_str(BUILD_DEPLOY).ok()?,
-        "view:ryeos/chain/timeline" => json!({ "timeline_contract": TIMELINE_CONTRACT_VERSION, "older": 0, "items": [
-            fixture_entry("m1", "message", "x1", json!({ "body": "Review the layout module." })),
-            fixture_entry("p1", "prose", "x1", json!({ "body": "Reading the layout module first." })),
-            with_state(fixture_entry("a1", "activity", "x1", json!({ "headline": "read_file", "badge": "4.0 KiB" })), "done"),
-            fixture_entry("p2", "prose", "x1", json!({ "body": "Tile sizes are pixels in both renderers." }))
-        ]}),
+        "view:ryeos/chain/timeline" => {
+            json!({ "timeline_contract": TIMELINE_CONTRACT_VERSION, "older": 0, "items": [
+                fixture_entry("m1", "message", "x1", json!({ "body": "Review the layout module." })),
+                fixture_entry("p1", "prose", "x1", json!({ "body": "Reading the layout module first." })),
+                with_state(fixture_entry("a1", "activity", "x1", json!({ "headline": "read_file", "badge": "4.0 KiB" })), "done"),
+                fixture_entry("p2", "prose", "x1", json!({ "body": "Tile sizes are pixels in both renderers." }))
+            ]})
+        }
         _ => return None,
     })
 }
