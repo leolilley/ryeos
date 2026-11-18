@@ -16,6 +16,7 @@
 mod chrome;
 mod dialog;
 mod input;
+mod overlay;
 mod primitives;
 mod text;
 mod theme;
@@ -107,6 +108,12 @@ fn build_surface(vm: &RyeOsViewModel, width: usize, height: usize) -> TextSurfac
             "●",
             tone_style(chrome::node_tone(vm)),
         );
+    }
+
+    // The overlay takes the whole screen, over any dialog.
+    if vm.overlay.open {
+        overlay::draw_overlay(&mut surface, vm);
+        return surface;
     }
 
     if let Some(active_dialog) = vm.dialogs.first() {
@@ -683,6 +690,62 @@ mod tests {
             let mut line = TextSurface::new(80, 1);
             chrome::draw_tab_band(&mut line, 0, &vm);
             assert!(surface_text(&line).contains(&format!("{title} ●")));
+        }
+    }
+
+    #[test]
+    fn a_surface_without_add_tab_has_no_plus_on_its_tab_line() {
+        let mut vm = build_view_model(&empty_center_core());
+        let mut line = TextSurface::new(80, 1);
+        chrome::draw_tab_band(&mut line, 0, &vm);
+        assert!(surface_text(&line).trim_end().ends_with('+'));
+        vm.presentation.chrome.top_bar.add_tab = false;
+        let mut line = TextSurface::new(80, 1);
+        chrome::draw_tab_band(&mut line, 0, &vm);
+        assert!(!surface_text(&line).contains('+'));
+    }
+
+    #[test]
+    fn the_overlay_lists_its_sections_and_the_selected_rows_actions() {
+        use ryeos_client_base::ui::event::RyeOsUiIntent;
+        use ryeos_client_base::ui::view_model::{RyeOsOverlayActionVm, RyeOsOverlayRowVm};
+        let mut vm = build_view_model(&empty_center_core());
+        let now = i64::try_from(vm.now_ms).unwrap_or(i64::MAX);
+        let row = |title: &str, minutes: i64| RyeOsOverlayRowVm {
+            id: title.into(),
+            title: title.into(),
+            where_: "ryeos".into(),
+            tone: ryeos_client_base::ui::view_model::RyeOsTone::Warn,
+            since_ms: now - minutes * 60_000,
+            actions: vec![RyeOsOverlayActionVm {
+                keys: "a".into(),
+                word: "acknowledge".into(),
+                intent: RyeOsUiIntent::ToggleTopStatusBar,
+            }],
+        };
+        vm.overlay.open = true;
+        vm.overlay.needs_you = vec![row("Approve the deploy", 4), row("Build failed", 130)];
+        vm.overlay.needs_you_count = Some(2);
+        vm.overlay.running_count = None;
+        vm.overlay.selected = Some(0);
+        let surface = build_surface(&vm, 80, 20);
+        let text = surface_text(&surface);
+        assert!(text.contains("OPEN SURFACES"), "{text}");
+        assert!(text.contains("> ● Approve the deploy — ryeos"), "{text}");
+        assert!(text.contains("[a] acknowledge"), "{text}");
+        assert!(text.contains("Build failed — ryeos"), "{text}");
+        assert!(text.contains("2h"), "{text}");
+        assert!(
+            !text.contains("4m"),
+            "the selected row shows its actions: {text}"
+        );
+        assert!(text.contains("RUNNING"), "{text}");
+        assert!(text.contains("unavailable"), "an unknown count: {text}");
+        for hint in &vm.overlay.key_hints {
+            assert!(
+                text.contains(&format!("[{}] {}", hint.keys, hint.word)),
+                "{text}"
+            );
         }
     }
 

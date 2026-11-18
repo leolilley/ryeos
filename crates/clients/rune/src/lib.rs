@@ -10,6 +10,7 @@ mod boot;
 mod field;
 mod icons;
 mod marks;
+mod overlay;
 #[cfg(test)]
 mod probe;
 mod recovery;

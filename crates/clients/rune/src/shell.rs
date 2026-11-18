@@ -166,6 +166,10 @@ pub fn shell(
     for dialog in &vm.dialogs {
         page = page.child(dialog_layer(dialog, local));
     }
+    // The overlay draws over everything but an actions menu.
+    if vm.overlay.open {
+        page = page.child(crate::overlay::layer(vm, local));
+    }
     // An open actions menu draws last, anchored to its control.
     if let Some(key) = &local.menu
         && let Some(intents) = vm
@@ -694,8 +698,9 @@ fn view_set_strip(top_bar: &RyeOsTopBarVm, local: &Local, edges: Edges) -> El {
         // collapse and the group scrolls between the switcher and the readout.
         .child(el().grow(1.0))
         .child(tabs)
-        .child(
+        .child(if top_bar.add_tab {
             col()
+                .key("shell:new-view-set")
                 .size(28.0, 28.0)
                 .center()
                 .role("button")
@@ -710,8 +715,11 @@ fn view_set_strip(top_bar: &RyeOsTopBarVm, local: &Local, edges: Edges) -> El {
                     app.ui(RyeOsUiEvent::Activate {
                         intent: RyeOsUiIntent::NewViewSet,
                     });
-                }),
-        )
+                })
+        } else {
+            // The Surface offers no new tab (the website's): no plus.
+            el().w(0.0)
+        })
         .child(el().grow(1.0))
         // The focus readout takes its own slot in the flow, so the tabs are
         // bounded between the left padding and it.

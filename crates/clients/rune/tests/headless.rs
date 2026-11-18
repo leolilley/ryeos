@@ -861,4 +861,66 @@ fn a_bare_surface_draws_no_switcher_and_no_status_bar_but_keeps_the_health_dot()
     assert!(w <= 6.5 && h <= 6.5 && x > width - 30.0 && y > height - 30.0);
     let (left, _) = tile_extent(&rt);
     assert!(left < 40.0, "no switcher room: {left}");
+    assert!(
+        model(&rt).presentation.chrome.top_bar.visible,
+        "the scene shows its tabs"
+    );
+    assert!(
+        exactly_keyed(&rt, "shell:new-view-set").is_none(),
+        "a Surface with add_tab false has no plus"
+    );
+}
+
+#[test]
+fn the_overlay_draws_its_sections_rows_and_the_selected_rows_actions() {
+    let (width, height) = (1280.0, 800.0);
+    let rt = shell("overlay", (width, height));
+    let vm = model(&rt);
+    assert!(vm.overlay.open);
+    let [sx, sy, sw, _] = exactly_keyed(&rt, "overlay").expect("the overlay sheet");
+    assert!((sy - 150.0).abs() < 1.0, "the sheet sits 150 down: {sy}");
+    assert!(
+        sw <= 920.5 && (sx + sw / 2.0 - width / 2.0).abs() < 1.0,
+        "centred, at most 920"
+    );
+    for surface in &vm.session.surfaces {
+        assert!(
+            exactly_keyed(
+                &rt,
+                &format!("overlay:surface:{:?}", surface.surface_instance_id)
+            )
+            .is_some(),
+            "a card per open Surface"
+        );
+    }
+    // Needs-you rows take the first indices; running continues after them.
+    assert!(exactly_keyed(&rt, "overlay:needs-you:0").is_some());
+    assert!(exactly_keyed(&rt, "overlay:needs-you:1").is_some());
+    assert!(exactly_keyed(&rt, "overlay:running:2").is_some());
+    let texts: Vec<String> = drawn_texts(&rt).into_iter().map(|(text, _)| text).collect();
+    for wanted in [
+        "Approve the deploy",
+        "this node",
+        "acknowledge",
+        "3 more",
+        "12m",
+        "2h",
+    ] {
+        assert!(
+            texts.iter().any(|text| text == wanted),
+            "{wanted:?} in {texts:?}"
+        );
+    }
+    // Only the selected row shows its actions; the others show their age.
+    assert!(
+        !texts.iter().any(|text| text == "4m"),
+        "the selected row shows actions, not age"
+    );
+    for hint in &vm.overlay.key_hints {
+        assert!(
+            texts.iter().any(|text| *text == hint.word),
+            "footer hint {:?}",
+            hint.word
+        );
+    }
 }

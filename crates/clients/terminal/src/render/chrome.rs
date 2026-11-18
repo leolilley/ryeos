@@ -58,7 +58,7 @@ pub fn draw_switcher(surface: &mut TextSurface, y: usize, vm: &RyeOsViewModel) {
             ),
         })
         .collect();
-    draw_strip(surface, y, limit, &entries);
+    draw_strip(surface, y, limit, &entries, true);
 }
 
 /// The view-set tabs as one line: bare words, the current one reversed, then
@@ -78,7 +78,14 @@ pub fn draw_tab_band(surface: &mut TextSurface, y: usize, vm: &RyeOsViewModel) {
             dot: work_dot(tab.needs_you.unwrap_or(false), tab.running.unwrap_or(false)),
         })
         .collect();
-    draw_strip(surface, y, surface.width, &entries);
+    // A Surface that offers no new tab (the website's) has no `+`.
+    draw_strip(
+        surface,
+        y,
+        surface.width,
+        &entries,
+        vm.presentation.chrome.top_bar.add_tab,
+    );
 }
 
 /// After a project-authored Surface's name: a middle dot in the name's own
@@ -115,11 +122,18 @@ fn work_dot(needs_you: bool, running: bool) -> Option<RyeOsTone> {
 /// One strip of entries, a space between them and `+` after the last, drawn
 /// left of column `limit`. The `+` keeps its columns; when the entries overflow
 /// what is left, the strip starts at the current entry.
-fn draw_strip(surface: &mut TextSurface, y: usize, limit: usize, entries: &[StripEntry]) {
+fn draw_strip(
+    surface: &mut TextSurface,
+    y: usize,
+    limit: usize,
+    entries: &[StripEntry],
+    plus: bool,
+) {
     const GAP: usize = 1;
     const PLUS: &str = " + ";
     let limit = limit.min(surface.width);
-    let end = limit.saturating_sub(display_width(PLUS));
+    let plus_width = if plus { display_width(PLUS) } else { 0 };
+    let end = limit.saturating_sub(plus_width);
     let full = entries
         .iter()
         .map(|entry| entry.width() + GAP)
@@ -160,7 +174,7 @@ fn draw_strip(surface: &mut TextSurface, y: usize, limit: usize, entries: &[Stri
         }
         x += GAP;
     }
-    if x + display_width(PLUS) <= limit {
+    if plus && x + plus_width <= limit {
         surface.draw_text(x, y, PLUS, style_muted());
     }
 }
