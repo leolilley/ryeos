@@ -40,6 +40,13 @@ pub enum RyeOsBlockVm {
 pub struct RyeOsDiffVm {
     /// The whole block in plain words, for a screen reader or a copy.
     pub label: String,
+    /// What the change is evidence of, as the header draws it.
+    pub basis: RyeOsDiffBasisVm,
+    /// The file count in words ("3 files"), omitted files included.
+    pub files: String,
+    /// Lines added and removed over the listed files.
+    pub added: usize,
+    pub removed: usize,
     pub total_rows: usize,
     pub first_row: usize,
     pub rows: Vec<RyeOsDiffRowVm>,
@@ -51,6 +58,34 @@ pub struct RyeOsDiffVm {
     pub above: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub below: Option<String>,
+}
+
+/// The basis of a change as drawn: its word, an optional note saying what
+/// that basis means, and a tone. Only a recorded change takes the good tone,
+/// because only it is evidence; a requested change on an entry that did not
+/// complete it reads as not applied, in the danger tone.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RyeOsDiffBasisVm {
+    pub word: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub tone: RyeOsTone,
+}
+
+/// The parts of a file header, for a renderer that sets each in its own
+/// style. The row's `text` carries the same parts as one line.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RyeOsDiffFileVm {
+    pub path: String,
+    /// The path a renamed file had.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// The operation in the view's word; for a binary file, the view's word
+    /// for binary.
+    pub op: String,
+    /// Absent for a binary file, which has no line counts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counts: Option<(usize, usize)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,6 +129,9 @@ pub struct RyeOsDiffRowVm {
     /// is now.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collapsed: Option<bool>,
+    /// A file header's parts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<RyeOsDiffFileVm>,
 }
 
 /// The words a diff is drawn and read with, from signed view data. A key the
@@ -119,7 +157,8 @@ pub(crate) struct DiffPolicy {
     /// Context lines kept either side of a folded run; a run longer than
     /// twice this folds.
     pub fold_after: usize,
-    /// A block with more diff lines than this starts collapsed to its header.
+    /// A block with more diff lines than this starts collapsed to its header
+    /// and its file headers.
     pub collapse_lines: usize,
     /// Files drawn before a "more files" row.
     pub files_shown: usize,
@@ -132,9 +171,9 @@ impl Default for DiffPolicy {
         Self {
             words: DiffWords::default(),
             fold_after: 3,
-            collapse_lines: 400,
-            files_shown: 10,
-            lines_shown: 200,
+            collapse_lines: 40,
+            files_shown: 8,
+            lines_shown: 120,
         }
     }
 }
@@ -178,9 +217,10 @@ pub struct DiffLocalState {
     /// default the view's `collapse_lines` gives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open: Option<bool>,
-    /// Files folded to their header, by file index.
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub closed_files: BTreeSet<usize>,
+    /// Files whose disclosure the operator changed, by file index: true is
+    /// folded to its header. A file not listed follows the block.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub file_folds: BTreeMap<usize, bool>,
     /// Opened unchanged runs, by `(file index, fold index)`.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub open_folds: BTreeSet<(usize, usize)>,
@@ -221,7 +261,6 @@ enum RowRef {
         count: usize,
     },
     MoreFiles(usize),
-    Binary(usize),
     FileCut(usize),
     FilesCut(usize),
 }
@@ -230,7 +269,23 @@ fn mark_of(line: &str) -> char {
     line.chars().next().unwrap_or(' ')
 }
 
-/// Whether the block is drawn past its header.
+/// Whether a file is folded to its header: the operator's choice for it, or
+/// else the block's state. A file with nothing to show has no disclosure.
+fn file_closed(set: &ChangeSet, policy: &DiffPolicy, state: &DiffLocalState, index: usize) -> bool {
+    state
+        .file_folds
+        .get(&index)
+        .copied()
+        .unwrap_or(!block_open(set, policy, state))
+}
+
+/// Whether a file has rows under its header at all.
+fn file_opens(file: &FileChange) -> bool {
+    !file.hunks.is_empty() || file.truncated.is_some()
+}
+
+/// Whether the block's files start open: the operator's choice, or else
+/// whether the change is within the view's `collapse_lines`.
 fn block_open(set: &ChangeSet, policy: &DiffPolicy, state: &DiffLocalState) -> bool {
     state
         .open
@@ -240,9 +295,6 @@ fn block_open(set: &ChangeSet, policy: &DiffPolicy, state: &DiffLocalState) -> b
 /// Every row of the diff under the policy and the operator's choices.
 fn plan(set: &ChangeSet, policy: &DiffPolicy, state: &DiffLocalState) -> Vec<RowRef> {
     let mut rows = vec![RowRef::Summary];
-    if !block_open(set, policy, state) {
-        return rows;
-    }
     let files_shown = if state.all_files {
         set.files.len()
     } else {
@@ -250,7 +302,7 @@ fn plan(set: &ChangeSet, policy: &DiffPolicy, state: &DiffLocalState) -> Vec<Row
     };
     for (file_index, file) in set.files.iter().enumerate().take(files_shown) {
         rows.push(RowRef::File(file_index));
-        if state.closed_files.contains(&file_index) {
+        if file_closed(set, policy, state, file_index) {
             continue;
         }
         plan_file(&mut rows, file_index, file, policy, state);
@@ -404,9 +456,6 @@ fn plan_file(
             None => None,
         };
     }
-    if file.binary {
-        rows.push(RowRef::Binary(file_index));
-    }
     if file.truncated.is_some() {
         rows.push(RowRef::FileCut(file_index));
     }
@@ -480,6 +529,36 @@ fn basis_word<'a>(set: &ChangeSet, applied: bool, words: &'a DiffWords) -> &'a s
     }
 }
 
+/// The basis as the header draws it. The note is the view's sentence for the
+/// basis, when it gives one.
+fn basis_vm(set: &ChangeSet, applied: bool, words: &DiffWords) -> RyeOsDiffBasisVm {
+    let not_applied = set.basis == Basis::Requested && !applied;
+    let (note, tone) = match set.basis {
+        _ if not_applied => ("note.not_applied", RyeOsTone::Danger),
+        Basis::Requested => ("note.requested", RyeOsTone::Neutral),
+        Basis::Reported => ("note.reported", RyeOsTone::Neutral),
+        Basis::Recorded => ("note.recorded", RyeOsTone::Good),
+    };
+    RyeOsDiffBasisVm {
+        word: basis_word(set, applied, words).to_string(),
+        note: words.sentence(note).map(str::to_string),
+        tone,
+    }
+}
+
+/// Lines added and removed over the listed files.
+fn totals(set: &ChangeSet) -> (usize, usize) {
+    set.files.iter().fold((0, 0), |(added, removed), file| {
+        (added + file.added, removed + file.removed)
+    })
+}
+
+/// The file count in words, omitted files included.
+fn files_words(set: &ChangeSet, words: &DiffWords) -> String {
+    let files = set.files.len() + set.omitted_files;
+    format!("{files} {}", counted(files, "file", "files", words))
+}
+
 /// The whole block in plain words.
 fn block_label(set: &ChangeSet, applied: bool, words: &DiffWords) -> String {
     let files = set.files.len() + set.omitted_files;
@@ -524,51 +603,62 @@ fn row_vm(
         new_no: None,
         tone,
         collapsed,
+        file: None,
     };
     match row {
         RowRef::Summary => {
-            let (added, removed) = set.files.iter().fold((0, 0), |(added, removed), file| {
-                (added + file.added, removed + file.removed)
-            });
-            let files = set.files.len() + set.omitted_files;
-            let text = format!(
-                "{} · {files} {} · +{added} -{removed}",
-                basis_word(set, applied, words),
-                counted(files, "file", "files", words),
-            );
+            let basis = basis_vm(set, applied, words);
+            let (added, removed) = totals(set);
+            let text = [
+                Some(basis.word.as_str()),
+                basis.note.as_deref(),
+                Some(files_words(set, words).as_str()),
+                Some(format!("+{added} -{removed}").as_str()),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · ");
             RyeOsDiffRowVm {
                 label: block_label(set, applied, words),
                 ..plain(
                     RyeOsDiffRowKind::Summary,
                     text,
-                    if set.basis == Basis::Requested && !applied {
-                        RyeOsTone::Warn
-                    } else {
-                        RyeOsTone::Neutral
-                    },
+                    basis.tone,
                     Some(!block_open(set, policy, state)),
                 )
             }
         }
         RowRef::File(index) => {
             let file = &set.files[index];
-            let path = match &file.from {
-                Some(from) => format!("{from} → {}", file.path),
-                None => file.path.clone(),
+            let parts = RyeOsDiffFileVm {
+                path: file.path.clone(),
+                from: file.from.clone(),
+                op: words
+                    .get(if file.binary {
+                        "binary"
+                    } else {
+                        op_key(file.op)
+                    })
+                    .to_string(),
+                counts: (!file.binary).then_some((file.added, file.removed)),
             };
-            let text = format!(
-                "{path} · {} · +{} -{}",
-                words.get(op_key(file.op)),
-                file.added,
-                file.removed
-            );
+            let mut text = match &parts.from {
+                Some(from) => format!("{} ← {from}", parts.path),
+                None => parts.path.clone(),
+            };
+            text.push_str(&format!("  {}", parts.op));
+            if let Some((added, removed)) = parts.counts {
+                text.push_str(&format!("  +{added} -{removed}"));
+            }
             RyeOsDiffRowVm {
                 label: file_label(file, words),
+                file: Some(parts),
                 ..plain(
                     RyeOsDiffRowKind::File,
                     text,
                     RyeOsTone::Neutral,
-                    Some(state.closed_files.contains(&index)),
+                    file_opens(file).then(|| file_closed(set, policy, state, index)),
                 )
             }
         }
@@ -584,7 +674,7 @@ fn row_vm(
                 .into_iter()
                 .flatten()
                 .collect::<Vec<_>>()
-                .join(" · ");
+                .join("  ");
             plain(RyeOsDiffRowKind::Hunk, text, RyeOsTone::Neutral, None)
         }
         RowRef::Line {
@@ -622,6 +712,7 @@ fn row_vm(
                 new_no,
                 tone,
                 collapsed: None,
+                file: None,
             }
         }
         RowRef::Fold { count, .. } => plain(
@@ -650,12 +741,6 @@ fn row_vm(
             ),
             RyeOsTone::Neutral,
             Some(true),
-        ),
-        RowRef::Binary(_) => plain(
-            RyeOsDiffRowKind::NotShown,
-            words.get("binary").to_string(),
-            RyeOsTone::Neutral,
-            None,
         ),
         RowRef::FileCut(index) => {
             let file = &set.files[index];
@@ -722,8 +807,13 @@ pub(crate) fn diff_vm(
     let left_out = |count: usize| {
         (count > 0).then(|| format!("{count} {}", counted(count, "more_row", "more_rows", words)))
     };
+    let (added, removed) = totals(set);
     RyeOsDiffVm {
         label: block_label(set, applied, words),
+        basis: basis_vm(set, applied, words),
+        files: files_words(set, words),
+        added,
+        removed,
         total_rows,
         first_row,
         above: left_out(first_row),
@@ -786,7 +876,6 @@ fn row_file(row: RowRef) -> Option<usize> {
         | RowRef::Line { file, .. }
         | RowRef::Fold { file, .. }
         | RowRef::MoreLines { file, .. }
-        | RowRef::Binary(file)
         | RowRef::FileCut(file) => Some(file),
         RowRef::Summary | RowRef::MoreFiles(_) | RowRef::FilesCut(_) => None,
     }
@@ -857,15 +946,14 @@ pub(crate) fn apply_action(
         }
         RyeOsDiffAction::Toggle => match rows[cursor.unwrap_or(0)] {
             RowRef::Summary => {
+                // The header opens or closes every file at once.
                 state.open = Some(!block_open(set, policy, state));
+                state.file_folds.clear();
                 state.cursor = Some(0);
             }
-            RowRef::File(file) => {
-                if state.closed_files.contains(&file) {
-                    state.closed_files.remove(&file);
-                } else {
-                    state.closed_files.insert(file);
-                }
+            RowRef::File(file) if file_opens(&set.files[file]) => {
+                let closed = file_closed(set, policy, state, file);
+                state.file_folds.insert(file, !closed);
             }
             RowRef::Fold { file, fold, .. } => {
                 state.open_folds.insert((file, fold));
@@ -926,13 +1014,13 @@ pub(crate) fn view_change_set(projections: &Value, response: &Value) -> Option<C
     .ok()
 }
 
-/// What a `diff` view says when its source has no change to draw: the view's
-/// `empty` sentence when it gives one, else the source's availability record
-/// as it stands (`state: reason`).
+/// What a `diff` view says when its source has no change to draw. A source
+/// that answered with no files says the view's `empty` sentence. A source
+/// that could not give the change never reads as "no changes": it says the
+/// view's sentence for its reason (`unavailable.<reason>`), or its general
+/// `unavailable` sentence, or else its availability record as it stands
+/// (`state: reason`).
 pub(crate) fn unavailable_message(policy: &DiffPolicy, response: &Value) -> String {
-    if let Some(sentence) = policy.words.sentence("empty") {
-        return sentence.to_string();
-    }
     let record = response.pointer("/availability/0");
     let part = |name: &str| {
         record
@@ -940,7 +1028,19 @@ pub(crate) fn unavailable_message(policy: &DiffPolicy, response: &Value) -> Stri
             .and_then(Value::as_str)
             .unwrap_or_default()
     };
-    format!("{}: {}", part("state"), part("reason"))
+    let (state, reason) = (part("state"), part("reason"));
+    let sentence = if state == "available" {
+        policy.words.sentence("empty")
+    } else {
+        policy
+            .words
+            .sentence(&format!("unavailable.{reason}"))
+            .or_else(|| policy.words.sentence("unavailable"))
+    };
+    match sentence {
+        Some(sentence) => sentence.to_string(),
+        None => format!("{state}: {reason}"),
+    }
 }
 
 /// Whether a record carries any typed block, so it can be opened to show one.
@@ -1142,8 +1242,8 @@ mod tests {
             rows(&vm),
             [
                 (None, None, None, "Requested · 1 file · +3 -2"),
-                (None, None, None, "src/main.rs · modified · +3 -2"),
-                (None, None, None, "9 unchanged lines · fn main() {"),
+                (None, None, None, "src/main.rs  modified  +3 -2"),
+                (None, None, None, "9 unchanged lines  fn main() {"),
                 (Some(10), Some(10), Some(' '), "fn main() {"),
                 (Some(11), None, Some('-'), "    old();"),
                 (None, Some(11), Some('+'), "    new();"),
@@ -1266,7 +1366,8 @@ mod tests {
         assert_eq!(vm.rows[4].label, "11 removed:     old();");
         assert_eq!(vm.rows[7].label, "12 13 unchanged: }");
         let renamed = vm.rows.last().unwrap();
-        assert_eq!(renamed.text, "old.rs → new.rs · renamed · +0 -0");
+        assert_eq!(renamed.text, "new.rs ← old.rs  renamed  +0 -0");
+        assert_eq!(renamed.collapsed, None, "nothing under a pure rename");
         assert_eq!(
             renamed.label,
             "old.rs renamed to new.rs, renamed, 0 added, 0 removed, 0 hunks"
@@ -1278,7 +1379,10 @@ mod tests {
                 .label
                 .starts_with("Requested, not applied change to 2 files")
         );
-        assert_eq!(failed.rows[0].tone, RyeOsTone::Warn);
+        assert_eq!(failed.rows[0].tone, RyeOsTone::Danger);
+        assert_eq!(failed.basis.tone, RyeOsTone::Danger);
+        assert_eq!(vm.basis.tone, RyeOsTone::Neutral);
+        assert_eq!((vm.files.as_str(), vm.added, vm.removed), ("2 files", 3, 2));
         // A view that gives no words still reads, by key.
         let bare = diff_vm(
             &set,
@@ -1288,6 +1392,50 @@ mod tests {
             200,
         );
         assert!(bare.label.starts_with("basis.requested change_to 2 files"));
+    }
+
+    #[test]
+    fn the_basis_carries_the_views_note_and_only_recorded_reads_as_evidence() {
+        let policy = DiffPolicy::from_projections(&json!({"diff": {"words": {
+            "basis.requested": "requested", "basis.recorded": "recorded",
+            "basis.reported": "reported", "basis.not_applied": "requested, not applied",
+            "note.requested": "what the call asked for", "note.not_applied": "the call failed",
+            "note.recorded": "from the retained snapshot", "file": "file"}}}));
+        let basis = |basis: Basis, applied: bool| {
+            let set = ChangeSet::from_edit("f", "a\n", "b\n", basis, &wide()).unwrap();
+            let vm = diff_vm(&set, applied, &policy, &DiffLocalState::default(), 200);
+            (vm.rows[0].text.clone(), vm.basis)
+        };
+        let (text, requested) = basis(Basis::Requested, true);
+        assert_eq!(text, "requested · what the call asked for · 1 file · +1 -1");
+        assert_eq!(requested.tone, RyeOsTone::Neutral);
+        let (_, failed) = basis(Basis::Requested, false);
+        assert_eq!(
+            (failed.word.as_str(), failed.note.as_deref(), failed.tone),
+            (
+                "requested, not applied",
+                Some("the call failed"),
+                RyeOsTone::Danger
+            )
+        );
+        let (_, reported) = basis(Basis::Reported, false);
+        assert_eq!((reported.note, reported.tone), (None, RyeOsTone::Neutral));
+        let (_, recorded) = basis(Basis::Recorded, true);
+        assert_eq!(recorded.tone, RyeOsTone::Good);
+    }
+
+    #[test]
+    fn thresholds_a_view_does_not_state_take_the_declared_defaults() {
+        let policy = DiffPolicy::from_projections(&json!({}));
+        assert_eq!(
+            (
+                policy.fold_after,
+                policy.collapse_lines,
+                policy.files_shown,
+                policy.lines_shown
+            ),
+            (3, 40, 8, 120)
+        );
     }
 
     #[test]
@@ -1346,8 +1494,9 @@ mod tests {
         // Without the operator's choices the view's thresholds hold it back:
         // collapsed to its header, then the head of the file and a count.
         let closed = diff_vm(&set, true, &policy(), &DiffLocalState::default(), 40);
-        assert_eq!(closed.total_rows, 1);
+        assert_eq!(closed.total_rows, 2);
         assert_eq!(closed.rows[0].collapsed, Some(true));
+        assert_eq!(closed.rows[1].collapsed, Some(true));
         let mut state = DiffLocalState::default();
         apply_action(&set, &policy(), &mut state, RyeOsDiffAction::Toggle);
         let head = diff_vm(&set, true, &policy(), &state, 400);
@@ -1383,12 +1532,12 @@ mod tests {
 
         // Closing the file under the cursor leaves its header.
         apply_action(&set, &policy, &mut state, RyeOsDiffAction::Toggle);
-        assert_eq!(state.closed_files, BTreeSet::from([0]));
+        assert_eq!(state.file_folds, BTreeMap::from([(0, true)]));
         let vm = diff_vm(&set, true, &policy, &state, 200);
         assert_eq!(vm.total_rows, 4);
         assert_eq!(vm.rows[1].collapsed, Some(true));
         apply_action(&set, &policy, &mut state, RyeOsDiffAction::Toggle);
-        assert!(state.closed_files.is_empty());
+        assert_eq!(state.file_folds, BTreeMap::from([(0, false)]));
 
         // Moving past either end leaves the block.
         assert_eq!(
@@ -1425,14 +1574,13 @@ mod tests {
             texts,
             [
                 "Recorded · 3 files · +10 -0",
-                "a · added file · +10 -0",
+                "a  added file  +10 -0",
                 "l0",
                 "l1",
                 "l2",
                 "l3",
                 "Not shown: 6 lines (file limit)",
-                "i.png · modified · +0 -0",
-                "binary",
+                "i.png  binary",
                 "Not shown: 1 file (limit)",
             ]
         );

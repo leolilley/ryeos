@@ -485,6 +485,10 @@ pub enum RyeOsViewVm {
         source_status: Option<RyeOsSourceStatusVm>,
         provenance: String,
         diff: super::diff::RyeOsDiffVm,
+        /// What a copy of this diff is, in the view's words: the bounded
+        /// display, not the file. Absent when the view gives no sentence.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        copy_note: Option<String>,
     },
     /// The generic content widget surface: every bound view renders
     /// through rows (typed widget variants arrive with the render pass).
@@ -1900,6 +1904,7 @@ fn bound_view_vm_keyed(
                     &state,
                     super::diff::DIFF_RENDER_WINDOW,
                 ),
+                copy_note: policy.words.sentence("copy_note").map(str::to_string),
             }
         }
         ("document", Some(response)) => {
@@ -5479,7 +5484,10 @@ mod tests {
                         "basis": "basis", "files": "files", "omitted_files": "omitted_files",
                         "diff": {"words": {
                             "basis.recorded": "Recorded", "file": "file",
-                            "op.modify": "modified", "empty": "Choose a changed file",
+                            "op.modify": "modified", "empty": "No changes",
+                            "unavailable": "Change not available",
+                            "unavailable.path_not_changed": "Not a changed file",
+                            "copy_note": "Copy is the bounded display, not the file.",
                             "copy_notice": "Copied the bounded display, not the file"}}
                     }
                 }
@@ -5514,6 +5522,7 @@ mod tests {
         assert_eq!(diff.total_rows, 5);
         assert_eq!(diff.cursor, Some(0));
         assert_eq!(diff.rows[0].text, "Recorded · 1 file · +1 -1");
+        assert_eq!(diff.basis.tone, RyeOsTone::Good);
         assert_eq!(
             core.key_context().diff,
             Some(crate::ui::keymap::RyeOsDiffKeyContext {
@@ -5561,19 +5570,35 @@ mod tests {
 
     #[test]
     fn a_diff_view_with_no_change_says_so_in_the_views_words() {
-        for response in [
-            json!({"availability": [{"state": "unavailable", "reason": "path_not_changed"}],
-                   "basis": "recorded", "files": [], "omitted_files": 0}),
+        for (response, said) in [
+            // The source answered and there is nothing changed.
+            (
+                json!({"availability": [{"state": "available", "reason": "candidate_retained"}],
+                       "basis": "recorded", "files": [], "omitted_files": 0}),
+                "No changes",
+            ),
+            // The source could not give the change: never "No changes".
+            (
+                json!({"availability": [{"state": "unavailable", "reason": "path_not_changed"}],
+                       "basis": "recorded", "files": [], "omitted_files": 0}),
+                "Not a changed file",
+            ),
+            (
+                json!({"availability": [{"state": "pending", "reason": "candidate_not_captured"}],
+                       "basis": "recorded", "files": [], "omitted_files": 0}),
+                "Change not available",
+            ),
             // A response that is not the change-set shape draws nothing.
-            json!({"basis": "recorded", "files": [{"path": "a", "op": "chmod"}]}),
-            json!({"files": "x"}),
+            (
+                json!({"basis": "recorded", "files": [{"path": "a", "op": "chmod"}]}),
+                "Change not available",
+            ),
+            (json!({"files": "x"}), "Change not available"),
         ] {
             let core = diff_view_core(response);
             let instance = core.focused_view_instance_key().unwrap();
             match view_vm_for_instance(&core, &instance).unwrap() {
-                RyeOsViewVm::Placeholder { message, .. } => {
-                    assert_eq!(message, "Choose a changed file");
-                }
+                RyeOsViewVm::Placeholder { message, .. } => assert_eq!(message, said),
                 other => panic!("expected a placeholder, got {other:?}"),
             }
             assert_eq!(core.key_context().diff, None);

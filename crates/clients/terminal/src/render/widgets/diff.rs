@@ -13,9 +13,10 @@ use super::super::theme::{PANEL, style_fg, style_muted, tone_style};
 const DIFF_TAB: &str = "    ";
 
 /// A diff body as literal lines: per row its text, style and whether the
-/// diff's cursor is on it. Line numbers take a gutter as wide as the largest
-/// number drawn; a diff without numbers has no gutter. Marks are characters,
-/// so the diff reads the same without colour.
+/// diff's cursor is on it. Both number columns are always there, as wide as
+/// the largest number drawn, so text aligns whether or not a hunk knows its
+/// line numbers. Marks are characters, so the diff reads the same without
+/// colour; separators, folds and held-back rows are dim.
 pub(super) fn diff_lines(diff: &RyeOsDiffVm) -> Vec<(String, Style, bool)> {
     let gutter = diff
         .rows
@@ -23,15 +24,14 @@ pub(super) fn diff_lines(diff: &RyeOsDiffVm) -> Vec<(String, Style, bool)> {
         .flat_map(|row| [row.old_no, row.new_no])
         .flatten()
         .max()
-        .map(|number| number.to_string().len());
-    let number = |value: Option<usize>| match (gutter, value) {
-        (Some(width), Some(value)) => format!("{value:>width$} "),
-        (Some(width), None) => " ".repeat(width + 1),
-        (None, _) => String::new(),
+        .map_or(1, |number| number.to_string().len());
+    let number = |value: Option<usize>| match value {
+        Some(value) => format!("{value:>gutter$} "),
+        None => " ".repeat(gutter + 1),
     };
     let mut lines = Vec::with_capacity(diff.rows.len() + 2);
     if let Some(above) = &diff.above {
-        lines.push((format!("  ⋯ {above}"), style_muted(), false));
+        lines.push((format!("  ... {above}"), style_muted(), false));
     }
     for (offset, row) in diff.rows.iter().enumerate() {
         let focus = diff.cursor == Some(diff.first_row + offset);
@@ -45,8 +45,13 @@ pub(super) fn diff_lines(diff: &RyeOsDiffVm) -> Vec<(String, Style, bool)> {
             RyeOsDiffRowKind::Summary => {
                 (format!("{disclosure}{}", row.text), tone_style(row.tone))
             }
-            RyeOsDiffRowKind::File => (format!("{disclosure}{}", row.text), style_fg()),
-            RyeOsDiffRowKind::Hunk => (format!("@@ {}", row.text), style_muted()),
+            RyeOsDiffRowKind::File => (
+                format!("{disclosure}{}", row.text.replace('←', "<-")),
+                style_fg(),
+            ),
+            RyeOsDiffRowKind::Hunk | RyeOsDiffRowKind::Fold | RyeOsDiffRowKind::More => {
+                (format!("... {}", row.text), style_muted())
+            }
             RyeOsDiffRowKind::Line => (
                 format!(
                     "{}{}{}{}",
@@ -55,27 +60,43 @@ pub(super) fn diff_lines(diff: &RyeOsDiffVm) -> Vec<(String, Style, bool)> {
                     row.mark.unwrap_or(' '),
                     row.text.replace('\t', DIFF_TAB)
                 ),
-                tone_style(row.tone),
+                match row.mark {
+                    Some('+' | '-') => tone_style(row.tone),
+                    Some(' ') => style_fg(),
+                    _ => style_muted(),
+                },
             ),
-            RyeOsDiffRowKind::Fold | RyeOsDiffRowKind::More => {
-                (format!("{disclosure}⋯ {}", row.text), style_muted())
-            }
             RyeOsDiffRowKind::NotShown => (row.text.clone(), tone_style(row.tone)),
         };
         lines.push((format!("{pointer}{body}"), style, focus));
     }
     if let Some(below) = &diff.below {
-        lines.push((format!("  ⋯ {below}"), style_muted(), false));
+        lines.push((format!("  ... {below}"), style_muted(), false));
     }
     lines
 }
 
 /// Draws a view whose body is one diff: its rows top-down, scrolled so the
 /// row under the cursor stays in view, that row filled like a selected one.
-pub fn draw_diff(surface: &mut TextSurface, rect: Rect, diff: &RyeOsDiffVm) {
-    let (width, height) = (rect.w as usize, rect.h as usize);
+/// The view's copy note, when it gives one, takes the last line, dim.
+pub fn draw_diff(
+    surface: &mut TextSurface,
+    rect: Rect,
+    diff: &RyeOsDiffVm,
+    copy_note: Option<&str>,
+) {
+    let (width, mut height) = (rect.w as usize, rect.h as usize);
     if width == 0 || height == 0 {
         return;
+    }
+    if let Some(note) = copy_note.filter(|_| height > 1) {
+        height -= 1;
+        surface.draw_text(
+            rect.x as usize,
+            rect.y as usize + height,
+            &truncate(note, width),
+            style_muted(),
+        );
     }
     let lines = diff_lines(diff);
     let start = lines
@@ -119,7 +140,7 @@ mod tests {
             w: 40,
             h: height,
         };
-        draw_diff(&mut surface, rect, diff);
+        draw_diff(&mut surface, rect, diff, None);
         let rows = (0..usize::from(height))
             .map(|y| {
                 (0..40)
@@ -141,7 +162,7 @@ mod tests {
             rows,
             [
                 "  ▾ Recorded · 1 file · +1 -1",
-                "  ▾ src/a.rs · modified · +1 -1",
+                "  ▾ src/a.rs  modified  +1 -1",
                 "  1 1  keep",
                 "› 2   -old",
                 "    2 +new",
@@ -149,6 +170,22 @@ mod tests {
         );
         assert!((0..40).all(|x| surface.get(x, 3).bg == PANEL));
         assert!((0..40).any(|x| surface.get(x, 2).bg != PANEL));
+        // The view's copy note takes the last line.
+        let mut surface = TextSurface::new(40, 6);
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            w: 40,
+            h: 6,
+        };
+        draw_diff(
+            &mut surface,
+            rect,
+            &diff,
+            Some("Copy is the bounded display."),
+        );
+        let last: String = (0..40).map(|x| surface.get(x, 5).rune).collect();
+        assert_eq!(last.trim_end(), "Copy is the bounded display.");
         // A short tile scrolls to the cursor.
         let (_, rows) = drawn(&diff, 2);
         assert!(rows.iter().any(|row| row == "› 2   -old"), "{rows:?}");

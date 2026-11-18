@@ -521,8 +521,15 @@ pub fn body(view: &RyeOsViewVm, instance: &RyeOsViewInstanceKey, local: &crate::
             title,
             source_status,
             diff,
+            copy_note,
             ..
-        } => diff_view(instance, title, source_status.as_ref(), diff),
+        } => diff_view(
+            instance,
+            title,
+            source_status.as_ref(),
+            diff,
+            copy_note.as_deref(),
+        ),
         RyeOsViewVm::Table {
             title,
             source_status,
@@ -972,18 +979,20 @@ fn document_view(
 }
 
 /// A view whose body is one diff: the same rows a timeline entry's diff
-/// draws, in a scrolling page.
+/// draws, in a scrolling page, with the view's copy note at its foot.
 fn diff_view(
     instance: &RyeOsViewInstanceKey,
     title: &str,
     status: Option<&RyeOsSourceStatusVm>,
     diff: &RyeOsDiffVm,
+    copy_note: Option<&str>,
 ) -> El {
+    let p = Palette::get();
     let mut page = col().w_full().shrink().min_h(0.0).label(title.to_owned());
     if let Some(status) = status {
         page = page.child(source_status(status));
     }
-    page.child(
+    page = page.child(
         col()
             .key(format!("diff:{instance:?}"))
             .w_full()
@@ -992,8 +1001,21 @@ fn diff_view(
             .scroll(ScrollSpec {
                 stick_bottom: false,
             })
-            .child(diff_body(diff)),
-    )
+            .child(diff_body(diff, true)),
+    );
+    if let Some(note) = copy_note {
+        page = page.child(
+            row()
+                .w_full()
+                .h(theme::diff::COPY_NOTE_HEIGHT)
+                .px(theme::diff::HEADER_PAD)
+                .center_y()
+                .border_sides([1.0, 0.0, 0.0, 0.0], p.line)
+                .child(el().grow(1.0).min_w(0.0))
+                .child(text(note.to_owned()).font(theme::ui(11.0)).color(p.faint)),
+        );
+    }
+    page
 }
 
 /// The detail column every table carries at its right edge.
@@ -1597,7 +1619,13 @@ fn timeline_entry(instance: &RyeOsViewInstanceKey, timeline: &Timeline<'_>, inde
     if expanded {
         for block in timeline.bodies.get(index).into_iter().flatten() {
             let RyeOsBlockVm::Diff(diff) = block;
-            record = record.child(diff_body(diff));
+            record = record.child(
+                col()
+                    .w_full()
+                    .min_w(0.0)
+                    .pl(theme::diff::BLOCK_INDENT)
+                    .child(diff_body(diff, false)),
+            );
         }
     }
     record
@@ -1606,85 +1634,217 @@ fn timeline_entry(instance: &RyeOsViewInstanceKey, timeline: &Timeline<'_>, inde
 /// Columns a tab in diff text is drawn as.
 const DIFF_TAB: &str = "    ";
 
-/// A diff under an expanded record. Each diff row is one line in the data
-/// face: the line numbers, the mark as a character, then the text, so the
-/// columns align and the diff reads without colour. A row carries its
-/// plain-words label, and the row under the diff's cursor is filled like a
-/// selected record.
-pub(crate) fn diff_body(diff: &RyeOsDiffVm) -> El {
+/// A diff: the block header with the basis, then one row per diff row. A line
+/// row has both number columns (empty where a line has no number), the mark
+/// as a character in its own column, and the text on one line, cut at the
+/// edge; added and removed rows carry a band. Every row has its plain-words
+/// label, and the row under the diff's cursor is filled. `totals` adds the
+/// block's added and removed counts to the header, as a view that is a diff
+/// shows them.
+pub(crate) fn diff_body(diff: &RyeOsDiffVm, totals: bool) -> El {
+    use theme::diff as look;
     let p = Palette::get();
-    let gutter = diff
-        .rows
-        .iter()
-        .flat_map(|row| [row.old_no, row.new_no])
-        .flatten()
-        .max()
-        .map(|number| number.to_string().len());
-    let number = |value: Option<usize>| match (gutter, value) {
-        (Some(width), Some(value)) => format!("{value:>width$} "),
-        (Some(width), None) => " ".repeat(width + 1),
-        (None, _) => String::new(),
+    let ink = |step: f32| p.text.alpha(step);
+    let cell = |content: String, style: rune::tok::TextStyle, color: rune::Color| {
+        text(theme::drawable(&content, theme::Face::Data).into_owned())
+            .font(style)
+            .color(color)
     };
-    let line = |content: String, ink: rune::Color, label: String, focus: bool| {
-        let mut line = row().w_full().min_w(0.0).py(1.0).child(
-            text(theme::drawable(&content, theme::Face::Data).into_owned())
-                .selectable(true)
-                .font(theme::data(9.0))
-                .color(ink)
-                .wrap_anywhere()
-                .grow(1.0)
-                .min_w(0.0)
-                .label(label),
-        );
-        if focus {
-            line = line.fill(p.plane_selected);
-        }
-        line
+    let separator = |content: &str, label: &str| {
+        row()
+            .w_full()
+            .min_w(0.0)
+            .h(look::SEPARATOR_HEIGHT)
+            .pl(look::SEPARATOR_INDENT)
+            .center_y()
+            .fill(ink(look::SEPARATOR_FILL))
+            .label(label.to_owned())
+            .child(
+                cell(content.to_owned(), theme::ui(11.0), p.muted)
+                    .truncate()
+                    .grow(1.0)
+                    .min_w(0.0),
+            )
     };
     let mut block = col()
         .w_full()
-        .pt(7.0)
-        .pb(9.0)
-        .pl(34.0)
-        .pr(12.0)
-        .fill(p.plane_raised.alpha(0.45))
+        .min_w(0.0)
+        .radius(look::BLOCK_RADIUS)
+        .border(1.0, ink(look::BLOCK_BORDER))
+        .fill(p.bg.alpha(look::BLOCK_FILL))
         .label(diff.label.clone());
     if let Some(above) = &diff.above {
-        block = block.child(line(format!("… {above}"), p.faint, above.clone(), false));
+        block = block.child(separator(above, above));
     }
     for (offset, row_vm) in diff.rows.iter().enumerate() {
         let focus = diff.cursor == Some(diff.first_row + offset);
-        let disclosure = match row_vm.collapsed {
-            Some(true) => "▸ ",
-            Some(false) => "▾ ",
-            None => "",
-        };
-        let (content, ink) = match row_vm.kind {
-            RyeOsDiffRowKind::Summary => (
-                format!("{disclosure}{}", row_vm.text),
-                p.tone(row_vm.tone, p.muted),
-            ),
-            RyeOsDiffRowKind::File => (format!("{disclosure}{}", row_vm.text), p.text),
-            RyeOsDiffRowKind::Hunk => (format!("@@ {}", row_vm.text), p.faint),
-            RyeOsDiffRowKind::Line => (
-                format!(
-                    "{}{}{}{}",
-                    number(row_vm.old_no),
-                    number(row_vm.new_no),
-                    row_vm.mark.unwrap_or(' '),
-                    row_vm.text.replace('\t', DIFF_TAB)
-                ),
-                p.tone(row_vm.tone, p.muted),
-            ),
-            RyeOsDiffRowKind::Fold | RyeOsDiffRowKind::More => {
-                (format!("{disclosure}… {}", row_vm.text), p.faint)
+        let mut line = match row_vm.kind {
+            RyeOsDiffRowKind::Summary => {
+                let mut header = row()
+                    .w_full()
+                    .min_w(0.0)
+                    .h(look::HEADER_HEIGHT)
+                    .px(look::HEADER_PAD)
+                    .gap(look::BASIS_GAP)
+                    .center_y()
+                    .border_sides([0.0, 0.0, 1.0, 0.0], p.line)
+                    .child(
+                        el().size(look::BASIS_DOT, look::BASIS_DOT)
+                            .radius(look::BASIS_DOT / 2.0)
+                            .fill(p.tone(diff.basis.tone, p.muted)),
+                    )
+                    .child(cell(
+                        diff.basis.word.clone(),
+                        rune::tok::TextStyle::new(11.5, 500.0).family(theme::UI),
+                        ink(0.9),
+                    ));
+                if let Some(note) = &diff.basis.note {
+                    header = header.child(cell(note.clone(), theme::ui(11.5), p.muted));
+                }
+                header = header.child(el().grow(1.0).min_w(0.0));
+                if totals {
+                    header = header.child(cell(
+                        format!("+{} -{}", diff.added, diff.removed),
+                        theme::data(12.0),
+                        ink(0.72),
+                    ));
+                }
+                header.child(cell(diff.files.clone(), theme::ui(11.0), p.muted))
             }
-            RyeOsDiffRowKind::NotShown => (row_vm.text.clone(), p.tone(row_vm.tone, p.muted)),
+            RyeOsDiffRowKind::File => {
+                let disclosure = match row_vm.collapsed {
+                    Some(true) => "▸",
+                    Some(false) => "▾",
+                    None => "",
+                };
+                let mut header = row()
+                    .w_full()
+                    .min_w(0.0)
+                    .h(look::FILE_HEIGHT)
+                    .px(look::HEADER_PAD)
+                    .gap(look::FILE_GAP)
+                    .center_y()
+                    .child(
+                        cell(disclosure.to_owned(), theme::data(12.0), p.muted)
+                            .w(look::FILE_DISCLOSURE),
+                    );
+                match &row_vm.file {
+                    Some(file) => {
+                        let path = match &file.from {
+                            Some(from) => format!("{}  ←  {from}", file.path),
+                            None => file.path.clone(),
+                        };
+                        header = header
+                            .child(
+                                cell(path, theme::data(12.0), ink(look::CHANGED_INK))
+                                    .truncate_head()
+                                    .grow(1.0)
+                                    .min_w(0.0),
+                            )
+                            .child(cell(file.op.clone(), theme::ui(11.0), p.muted));
+                        if let Some((added, removed)) = file.counts {
+                            header = header
+                                .child(cell(
+                                    format!("+{added}"),
+                                    theme::data(11.5),
+                                    p.green.alpha(look::FILE_COUNT),
+                                ))
+                                .child(cell(
+                                    format!("-{removed}"),
+                                    theme::data(11.5),
+                                    p.red.alpha(look::FILE_COUNT),
+                                ));
+                        }
+                    }
+                    None => {
+                        header = header.child(
+                            cell(
+                                row_vm.text.clone(),
+                                theme::data(12.0),
+                                ink(look::CHANGED_INK),
+                            )
+                            .truncate()
+                            .grow(1.0)
+                            .min_w(0.0),
+                        );
+                    }
+                }
+                header
+            }
+            RyeOsDiffRowKind::Line => {
+                let number = |value: Option<usize>| {
+                    cell(
+                        value.map_or_else(String::new, |value| format!("{value:>4}")),
+                        theme::data(11.0),
+                        ink(look::NUMBER_INK),
+                    )
+                    .w(look::NUMBER_WIDTH)
+                };
+                let mark = row_vm.mark.unwrap_or(' ');
+                let (mark_ink, text_ink, band) = match mark {
+                    '+' => (p.green, ink(look::CHANGED_INK), Some(p.green)),
+                    '-' => (p.red, ink(look::CHANGED_INK), Some(p.red)),
+                    ' ' => (p.faint, ink(look::CONTEXT_INK), None),
+                    _ => (p.faint, p.muted, None),
+                };
+                let mut line = row()
+                    .w_full()
+                    .min_w(0.0)
+                    .h(look::ROW_HEIGHT)
+                    .center_y()
+                    .child(number(row_vm.old_no))
+                    .child(number(row_vm.new_no))
+                    .child(cell(mark.to_string(), theme::data(11.5), mark_ink).w(look::MARK_WIDTH))
+                    .child(
+                        cell(
+                            row_vm.text.replace('\t', DIFF_TAB),
+                            theme::data(11.5),
+                            text_ink,
+                        )
+                        .selectable(true)
+                        .truncate()
+                        .grow(1.0)
+                        .min_w(0.0),
+                    );
+                if let Some(band) = band {
+                    line = line.fill(band.alpha(look::BAND));
+                }
+                line
+            }
+            RyeOsDiffRowKind::Hunk | RyeOsDiffRowKind::Fold | RyeOsDiffRowKind::More => {
+                separator(&row_vm.text, &row_vm.label)
+            }
+            RyeOsDiffRowKind::NotShown => row()
+                .w_full()
+                .min_w(0.0)
+                .h(look::SEPARATOR_HEIGHT)
+                .px(look::HEADER_PAD)
+                .gap(look::BASIS_GAP)
+                .center_y()
+                .child(
+                    el().size(look::BASIS_DOT, look::BASIS_DOT)
+                        .radius(look::BASIS_DOT / 2.0)
+                        .fill(p.yellow),
+                )
+                .child(
+                    cell(
+                        row_vm.text.clone(),
+                        theme::ui(11.0),
+                        ink(look::NOT_SHOWN_INK),
+                    )
+                    .truncate()
+                    .grow(1.0)
+                    .min_w(0.0),
+                ),
         };
-        block = block.child(line(content, ink, row_vm.label.clone(), focus));
+        line = line.label(row_vm.label.clone());
+        if focus {
+            line = line.fill(ink(look::SELECT_FILL));
+        }
+        block = block.child(line);
     }
     if let Some(below) = &diff.below {
-        block = block.child(line(format!("… {below}"), p.faint, below.clone(), false));
+        block = block.child(separator(below, below));
     }
     block
 }
@@ -2197,7 +2357,8 @@ mod tests {
                        "hunks": [{"old_start": 9, "new_start": 9, "section": "fn a()",
                                   "lines": [" keep", "-old\tx", "+new"]}]}]}]});
         let projections = json!({"diff": {"words": {
-            "basis.requested": "Requested", "file": "file", "files": "files",
+            "basis.requested": "requested", "note.requested": "what the call asked for",
+            "file": "file", "files": "files",
             "op.modify": "modified", "unchanged_line": "unchanged line",
             "unchanged_lines": "unchanged lines",
             "line.added": "added", "line.removed": "removed", "line.unchanged": "unchanged",
@@ -2206,6 +2367,8 @@ mod tests {
         let mut diff =
             ryeos_client_base::ui::diff::diff_vm_for_entry(&entry, &projections).unwrap();
         diff.cursor = cursor;
+        let mut body = serde_json::to_value(&diff).unwrap();
+        body["block"] = json!("diff");
         serde_json::from_value(json!({
             "type": "timeline", "title": "Thread",
             "entries": [{"type": "line", "primary": "src/a.rs", "tone": "neutral"}],
@@ -2213,10 +2376,7 @@ mod tests {
             "entry_cursors": [0], "entry_arrived_at_ms": [null], "entry_indents": [0],
             "selected": 0, "entry_expandable": [true], "entry_expanded": [true],
             "entry_details": [[]],
-            "entry_bodies": [[{"block": "diff",
-                               "label": diff.label, "total_rows": diff.total_rows,
-                               "first_row": diff.first_row, "rows": diff.rows,
-                               "cursor": diff.cursor}]]
+            "entry_bodies": [[body]]
         }))
         .unwrap()
     }
@@ -2224,15 +2384,26 @@ mod tests {
     #[test]
     fn an_open_timeline_entry_draws_its_diff_rows_with_marks_and_numbers() {
         let rt = drawn(timeline_with_diff(None));
-        for row in [
-            "↓ Requested · 1 file · +1 -1",
-            "↓ src/a.rs · modified · +1 -1",
-            "@@ 8 unchanged lines · fn a()",
-            " 9  9  keep",
-            "10    -old    x",
-            "   10 +new",
+        // The header: basis word and note, and the file count.
+        // The file header's parts, each its own text.
+        // A line: both numbers, the mark as a character, the text.
+        for drawn_text in [
+            "requested",
+            "what the call asked for",
+            "1 file",
+            "modified",
+            "+1",
+            "-1",
+            "8 unchanged lines  fn a()",
+            "   9",
+            "  10",
+            "+",
+            "-",
+            "keep",
+            "old    x",
+            "new",
         ] {
-            assert!(says(&rt, row), "missing diff row {row:?}");
+            assert!(says(&rt, drawn_text), "missing diff text {drawn_text:?}");
         }
         // Each row is announced in plain words, and the block as a whole.
         assert_eq!(
@@ -2241,7 +2412,7 @@ mod tests {
         );
         assert_eq!(
             labelled_containing(&rt, "change to 1 file"),
-            vec!["Requested change to 1 file: src/a.rs modified, 1 added, 1 removed".to_owned(); 2]
+            vec!["requested change to 1 file: src/a.rs modified, 1 added, 1 removed".to_owned(); 2]
         );
     }
 
@@ -2250,7 +2421,7 @@ mod tests {
         let mut view = serde_json::to_value(timeline_with_diff(None)).unwrap();
         view["entry_expanded"] = json!([false]);
         let rt = drawn(serde_json::from_value(view).unwrap());
-        assert!(!says(&rt, "10    -old    x"));
+        assert!(!says(&rt, "old    x"));
         assert!(says(&rt, "src/a.rs"));
     }
 

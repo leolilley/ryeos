@@ -763,8 +763,8 @@ mod tests {
             rows[1..],
             [
                 "    ▾ Requested · 1 file · +1 -1",
-                "    ▾ src/a.rs · modified · +1 -1",
-                "    @@ 8 unchanged lines · fn a()",
+                "    ▾ src/a.rs  modified  +1 -1",
+                "    ... 8 unchanged lines  fn a()",
                 "     9  9  keep",
                 "    10    -old    x",
                 "       10 +new",
@@ -793,8 +793,8 @@ mod tests {
         diff.above = Some("3 more rows".to_string());
         diff.below = Some("9 more rows".to_string());
         let rows = draw_with_body(diff, 9);
-        assert_eq!(rows[1], "    ⋯ 3 more rows");
-        assert_eq!(rows[8], "    ⋯ 9 more rows");
+        assert_eq!(rows[1], "    ... 3 more rows");
+        assert_eq!(rows[8], "    ... 9 more rows");
     }
 
     #[test]

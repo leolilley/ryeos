@@ -88,6 +88,46 @@ pub const fn data(size: f32) -> TextStyle {
 }
 
 /// Fixed shell metrics, in points.
+/// Metrics and ink steps of the diff (a `changes` block and the `diff`
+/// widget). Sizes are points; the fractions are opacities of the ink, tone or
+/// ground colour they are applied to.
+pub mod diff {
+    /// The block inside an entry: its indent, corner, edge and fill.
+    pub const BLOCK_INDENT: f32 = 15.0;
+    pub const BLOCK_RADIUS: f32 = 10.0;
+    pub const BLOCK_BORDER: f32 = 0.08;
+    pub const BLOCK_FILL: f32 = 0.35;
+    /// The block header: basis at the left, file count at the right.
+    pub const HEADER_HEIGHT: f32 = 30.0;
+    pub const HEADER_PAD: f32 = 12.0;
+    pub const BASIS_DOT: f32 = 6.0;
+    pub const BASIS_GAP: f32 = 8.0;
+    /// A file header.
+    pub const FILE_HEIGHT: f32 = 32.0;
+    pub const FILE_GAP: f32 = 10.0;
+    pub const FILE_DISCLOSURE: f32 = 10.0;
+    pub const FILE_COUNT: f32 = 0.9;
+    /// A diff row and its columns.
+    pub const ROW_HEIGHT: f32 = 20.0;
+    pub const NUMBER_WIDTH: f32 = 40.0;
+    pub const NUMBER_INK: f32 = 0.28;
+    pub const MARK_WIDTH: f32 = 16.0;
+    pub const CHANGED_INK: f32 = 0.96;
+    pub const CONTEXT_INK: f32 = 0.55;
+    /// The band behind an added or removed row.
+    pub const BAND: f32 = 0.10;
+    /// Hunk separators, folded runs and held-back rows.
+    pub const SEPARATOR_HEIGHT: f32 = 24.0;
+    pub const SEPARATOR_FILL: f32 = 0.035;
+    pub const SEPARATOR_INDENT: f32 = 80.0;
+    /// "Not shown" rows.
+    pub const NOT_SHOWN_INK: f32 = 0.6;
+    /// The copy note at the foot of a diff view.
+    pub const COPY_NOTE_HEIGHT: f32 = 40.0;
+    /// The fill behind the row under the cursor.
+    pub const SELECT_FILL: f32 = 0.08;
+}
+
 pub const SYSTEM_HEIGHT: f32 = 28.0;
 pub const STRIP_HEIGHT: f32 = 53.0;
 pub const STATUS_HEIGHT: f32 = 28.0;

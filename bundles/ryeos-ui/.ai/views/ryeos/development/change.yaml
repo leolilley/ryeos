@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-18T01:58:55Z:95e7676856bca7c09c20d7a477ba9f9ecbeae3ec3adb25a799705a231625df57:z9004QL2SHQrdEzGAscnYPijXc5+1W6fu3jZlbvsvTMbVOYTYQ9B7tfO/jZ/v14+V8T4dmnMyUGpdegm7wvwCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T05:32:35Z:bed026d44f75a593187d3f60bcde2b7348d70568e93c1e8e939fd1805d86a5ec:lolvAY41clYufpKhwmQeeMS5VgbEYgYuxGsfNRsfvir+WRv0ZRdXj/imImxjq2vP0nxgjpGJa6p9ZDYbElOCAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: development-change
 title: Change
 version: "1.0.0"
@@ -17,19 +17,23 @@ projections:
   files: files
   omitted_files: omitted_files
   # A run of unchanged lines longer than twice fold_after folds; a diff with
-  # more lines than collapse_lines starts closed; lines_shown holds the rest
+  # more lines than collapse_lines opens with its file closed; lines_shown holds the rest
   # of a file behind a row that opens it. Every word a row or label carries is
   # one of these.
   diff:
     fold_after: 3
-    collapse_lines: 2000
-    files_shown: 10
-    lines_shown: 400
+    collapse_lines: 40
+    files_shown: 8
+    lines_shown: 120
     words:
-      basis.requested: Requested
-      basis.reported: Reported
-      basis.recorded: Recorded
-      basis.not_applied: Requested, not applied
+      basis.requested: requested
+      basis.reported: reported
+      basis.recorded: recorded
+      basis.not_applied: requested, not applied
+      note.requested: what the call asked for
+      note.not_applied: the call failed
+      note.reported: what the tool said it did
+      note.recorded: from the retained snapshot
       op.add: added
       op.modify: modified
       op.delete: deleted
@@ -57,16 +61,22 @@ projections:
       more_files: more files
       more_row: more row
       more_rows: more rows
-      not_shown: Not shown
-      binary: Binary file
-      reason.lines: file line limit
-      reason.total: line limit
-      reason.bytes: size limit
+      not_shown: not shown
+      binary: binary
+      reason.lines: limit
+      reason.total: limit
+      reason.bytes: limit
       reason.window: open the raw events for the whole change
       reason.too_large: file too large
-      reason.files: file limit
+      reason.files: limit
       copy_notice: Copied the bounded display, not the file
-      empty: Choose a changed file to see its diff
+      copy_note: Copy is the bounded display, not the file.
+      empty: No changes
+      unavailable: The change could not be read
+      unavailable.path_not_changed: This path is not a change of the candidate
+      unavailable.path_not_shown: This path is not shown as a change
+      unavailable.candidate_not_captured: No candidate has been captured yet
+      unavailable.not_dedicated_session: This work has no retained candidate
 
 refresh:
   on_facet: selection

@@ -317,8 +317,11 @@ fn draw_view(surface: &mut TextSurface, mut rect: Rect, view: &RyeOsViewVm, now_
         draw_text_view(surface, rect, lines, *position);
         return;
     }
-    if let RyeOsViewVm::Diff { diff, .. } = view {
-        widgets::diff::draw_diff(surface, rect, diff);
+    if let RyeOsViewVm::Diff {
+        diff, copy_note, ..
+    } = view
+    {
+        widgets::diff::draw_diff(surface, rect, diff, copy_note.as_deref());
         return;
     }
     if let RyeOsViewVm::Document {
