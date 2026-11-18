@@ -291,11 +291,7 @@ fn authorship_chip(authorship: &ryeos_client_base::ui::content::ItemAuthorship) 
         .radius(theme::radius_pill(22.0))
         .border(1.0, t.ink_at(0.22))
         .label(format!("Project view, {}", authorship.mark_tail()))
-        .child(
-            text("project")
-                .font(theme::TYPE_NOTE)
-                .color(t.ink_soft()),
-        )
+        .child(text("project").font(theme::TYPE_NOTE).color(t.ink_soft()))
         .child(el().size(1.0, 10.0).fill(t.ink_at(0.18)))
         .child(
             text(authorship.mark_tail())
