@@ -538,6 +538,7 @@ pub(crate) async fn dispatch_runtime_method_with_publication(
         "runtime.append_event" => handle_append_event(&clean_params, state),
         "runtime.append_events" => handle_append_event_batch(&clean_params, state),
         "runtime.replay_events" => handle_replay_events(&clean_params, state),
+        "runtime.read_attachment" => handle_read_attachment(&clean_params, state),
         "runtime.bundle_events_append" => {
             handle_bundle_events_append(&clean_params, state, callback_cap.as_ref())
         }
@@ -1019,7 +1020,10 @@ fn is_thread_auth_method(method: &str) -> bool {
 fn is_chain_read_method(method: &str) -> bool {
     matches!(
         method,
-        "runtime.get_thread" | "runtime.replay_events" | "runtime.get_thread_events"
+        "runtime.get_thread"
+            | "runtime.replay_events"
+            | "runtime.get_thread_events"
+            | "runtime.read_attachment"
     )
 }
 
@@ -1590,6 +1594,33 @@ fn handle_replay_events(params: &serde_json::Value, state: &AppState) -> Result<
         .context("failed to encode events.replay result")
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadAttachmentParams {
+    thread_id: String,
+    attachment: String,
+}
+
+/// `runtime.read_attachment` — the media type and bytes of one stored
+/// attachment named by an event of the caller's chain. Meaning-blind: the
+/// daemon neither knows nor cares what the bytes are.
+fn handle_read_attachment(
+    params: &serde_json::Value,
+    state: &AppState,
+) -> Result<serde_json::Value> {
+    use base64::Engine as _;
+    let params: ReadAttachmentParams =
+        serde_json::from_value(params.clone()).context("invalid runtime.read_attachment params")?;
+    let stored = state
+        .events
+        .read_attachment(&params.thread_id, &params.attachment)?;
+    Ok(json!({
+        "media_type": stored.media_type,
+        "byte_length": stored.bytes.len(),
+        "bytes_b64": base64::engine::general_purpose::STANDARD.encode(&stored.bytes),
+    }))
+}
+
 /// `runtime.poll_input` — poll-and-persist staged operator inputs for a running
 /// thread. The queue is daemon-side scratch; this is the ONLY place a queued
 /// input becomes a durable braid event.
@@ -2152,6 +2183,14 @@ mod tests {
         assert!(!is_running_runtime_mutation("runtime.scoped_child_observe"));
         assert!(is_stop_completion_method("runtime.scoped_child_observe"));
         assert!(!is_chain_read_method("runtime.scoped_child_observe"));
+        // Reading an attachment is a chain read that stays open after the
+        // thread ends, so a successor can read its predecessor's images, and
+        // it is never a mutation.
+        assert!(is_chain_read_method("runtime.read_attachment"));
+        assert!(is_unrestricted_runtime_read_method(
+            "runtime.read_attachment"
+        ));
+        assert!(!is_running_runtime_mutation("runtime.read_attachment"));
         assert!(!is_unrestricted_runtime_read_method(
             "runtime.scoped_child_observe"
         ));

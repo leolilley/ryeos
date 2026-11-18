@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-17T11:22:49Z:eba4400f9d9665609ed0d4f92b9b924a11db18ab0ad30bd41d0652065fa15b95:hgLlfi+eKGN7zsol9FP/zOMxmKA7ZHF+prcG5kZ23TtRbb6qjdlx9Us4UiHlVqZdmwvldQAUCfha6EoR1U6YAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-18T01:04:43Z:49fb3ed2be105630b3e473b148129261b4a0304439924155a6b0d6807b3ead5f:BWKLf5lhruYulUFwbuupNXTDloRZ72Ulq6zXhmaNf91AU2Tty6Dr76R1RFLfP8hl5ncPCMIZDh1/uJcIWzjSDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 tags: [reference, execution, retry, timeout, config]
@@ -32,6 +32,7 @@ how LLM API calls are made — timeouts, retries, backoff, and more.
 | `max_provider_stream_frame_bytes` | 1048576 | Maximum buffered logical SSE event size; `0` disables |
 | `accounting.failure_policy` | auto | Fail closed for unavailable usage with a finite token/spend budget; otherwise warn |
 | `accounting.budget_mode` | settled | Settle after each attempt; may overshoot a finite budget by one attempt |
+| `tool_images` | see below | Ceilings on the images a run's tools return |
 | `tool_preload`       | false    | Whether to preload tool definitions   |
 
 ## Retry Behavior
@@ -111,6 +112,32 @@ as capable of a one-attempt overshoot. `hard` is rejected during config
 validation in this runtime build: RyeOS must not claim a hard budget until the
 durable reservation/reconciliation backend is enabled. Reservation ceiling
 fields are rejected in `settled` mode rather than silently ignored.
+
+## Tool images
+
+A tool returns images by answering with a JSON object whose only key is
+`result_parts`, a list of `{"type": "text", "text": ...}` and
+`{"type": "image", "media_type": ..., "data_b64": ...}` parts. Any other result
+is an ordinary result. The runtime checks each image against its real header
+(png, jpeg, gif and webp are read), the model's declared form and these
+ceilings, stores the bytes as thread attachments and records only their hashes.
+An image that fails a check is dropped and the result names a stable code:
+`image_oversize`, `image_media_type`, `image_decode`, `image_limit` or
+`image_input_unsupported`. A malformed envelope is an error result,
+`tool_result_parts_invalid`.
+
+```yaml
+tool_images:
+  max_bytes_per_image: 3145728     # keep within the node's thread_attachments limit
+  max_images_per_result: 4
+  max_bytes_per_result: 6291456    # image bytes in one result, before base64
+  max_images_per_run: 256
+  max_bytes_per_run: 50331648      # distinct image bytes a run may store
+```
+
+The per-run counters are rebuilt from the record on resume and continuation.
+The node's `thread_attachments` policy still bounds every append, and a model's
+own `image_input.accepts.max_bytes_per_image` can lower the per-image limit.
 
 ## Config Resolution Chain
 

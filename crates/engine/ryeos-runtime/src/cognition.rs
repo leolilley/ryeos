@@ -265,9 +265,29 @@ pub struct ToolResultPayload {
     pub status: ToolResultStatus,
     pub parts: Vec<Part>,
     pub guard: ToolResultGuard,
+    /// The object hashes of the attachments the image parts name, distinct and
+    /// in order of first use. Absent when the result carries no image. The
+    /// daemon links each to the event, so the bytes stay reachable from the
+    /// signed chain.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachment_refs: Vec<String>,
 }
 
 impl ToolResultPayload {
+    /// The distinct attachment hashes of a result's image parts, in order of
+    /// first use: what `attachment_refs` must list.
+    pub fn image_attachment_hashes(parts: &[Part]) -> Vec<String> {
+        let mut hashes: Vec<String> = Vec::new();
+        for part in parts {
+            if let Part::Image(image) = part
+                && !hashes.contains(&image.attachment)
+            {
+                hashes.push(image.attachment.clone());
+            }
+        }
+        hashes
+    }
+
     /// Joined text of the result's text parts: exactly the model-visible
     /// string the live run put in the provider message.
     pub fn text(&self) -> String {
@@ -304,6 +324,9 @@ impl ToolResultPayload {
         }
         if self.guard.duplicate_of.is_some() && self.status == ToolResultStatus::Error {
             bail!("an error tool result cannot be a duplicate");
+        }
+        if self.attachment_refs != Self::image_attachment_hashes(&self.parts) {
+            bail!("tool result attachment_refs do not match the attachments of its image parts");
         }
         self.message().validate()
     }

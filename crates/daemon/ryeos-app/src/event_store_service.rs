@@ -17,6 +17,28 @@ use crate::state_store::{NewEventRecord, NewThreadAttachment, PersistedEventReco
 /// Most append receipts kept to answer a retried idempotent append.
 const MAX_APPEND_RECEIPTS: usize = 256;
 const MAX_IDEMPOTENCY_KEY_BYTES: usize = 128;
+/// Most proven (chain, attachment) pairs kept; the cache is cleared at the
+/// bound, which costs one more scan.
+const MAX_NAMED_ATTACHMENT_CACHE: usize = 4096;
+/// The event types that name the attachments a run reads back: tool results
+/// that carry images, and inputs.
+const ATTACHMENT_NAMING_EVENT_TYPES: [&str; 2] = ["tool_call_result", "cognition_in"];
+
+/// The media type and bytes of one stored attachment.
+#[derive(Debug, Clone)]
+pub struct StoredAttachment {
+    pub media_type: String,
+    pub bytes: Vec<u8>,
+}
+
+fn events_name_attachment(events: &[PersistedEventRecord], attachment: &str) -> Result<bool> {
+    for event in events {
+        if ryeos_state::objects::payload_attachment_refs(&event.payload)?.contains(&attachment) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
 
 /// What a keyed append returned, kept so that a retry after a lost
 /// acknowledgement gets the same answer and writes nothing twice.
@@ -32,6 +54,10 @@ struct AppendReceipt {
 pub struct EventStoreService {
     state_store: Arc<StateStore>,
     receipts: Arc<Mutex<VecDeque<AppendReceipt>>>,
+    /// `(chain root, attachment object hash)` pairs already proven to be named
+    /// by an event of that chain, so a later read of the same attachment skips
+    /// the scan.
+    named_attachments: Arc<Mutex<BTreeSet<(String, String)>>>,
 }
 
 /// One runtime-appended event. It carries no storage class: the daemon
@@ -122,6 +148,75 @@ impl EventStoreService {
         Self {
             state_store,
             receipts: Arc::new(Mutex::new(VecDeque::new())),
+            named_attachments: Arc::new(Mutex::new(BTreeSet::new())),
+        }
+    }
+
+    /// One stored attachment, for a caller that holds a thread of the chain
+    /// that names it. Meaning-blind: it returns the stored media type and
+    /// bytes of any attachment. The hash must be named by an event of the
+    /// thread's chain, so a caller cannot read another chain's attachment by
+    /// guessing its hash.
+    pub fn read_attachment(&self, thread_id: &str, attachment: &str) -> Result<StoredAttachment> {
+        ryeos_state::objects::thread_snapshot::validate_canonical_hash(
+            "attachment hash",
+            attachment,
+        )?;
+        let chain_root_id = self
+            .state_store
+            .get_thread(thread_id)?
+            .ok_or_else(|| anyhow::anyhow!("thread not found: {thread_id}"))?
+            .chain_root_id;
+        let key = (chain_root_id.clone(), attachment.to_owned());
+        let known = self
+            .named_attachments
+            .lock()
+            .map_err(|_| anyhow::anyhow!("attachment name cache is poisoned"))?
+            .contains(&key);
+        if !known {
+            if !self.chain_names_attachment(&chain_root_id, attachment)? {
+                bail!("attachment {attachment} is not named by any event of this chain");
+            }
+            let mut cache = self
+                .named_attachments
+                .lock()
+                .map_err(|_| anyhow::anyhow!("attachment name cache is poisoned"))?;
+            if cache.len() >= MAX_NAMED_ATTACHMENT_CACHE {
+                cache.clear();
+            }
+            cache.insert(key);
+        }
+        let (media_type, bytes) = self
+            .state_store
+            .read_thread_attachment(attachment)?
+            .ok_or_else(|| anyhow::anyhow!("attachment {attachment} is not stored"))?;
+        Ok(StoredAttachment { media_type, bytes })
+    }
+
+    /// Whether any indexed event of the chain that can name attachments lists
+    /// `attachment` in its `attachment_refs`.
+    fn chain_names_attachment(&self, chain_root_id: &str, attachment: &str) -> Result<bool> {
+        let types: Vec<String> = ATTACHMENT_NAMING_EVENT_TYPES
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect();
+        let mut after = None;
+        loop {
+            let page = self.state_store.replay_events_of_types(
+                chain_root_id,
+                None,
+                after,
+                MAX_REPLAY_LIMIT,
+                MAX_REPLAY_SERIALIZED_BYTES,
+                Some(&types),
+            )?;
+            if events_name_attachment(&page.events, attachment)? {
+                return Ok(true);
+            }
+            match (page.has_more, page.events.last()) {
+                (true, Some(last)) => after = Some(last.chain_seq),
+                _ => return Ok(false),
+            }
         }
     }
 
@@ -577,6 +672,44 @@ mod tests {
             attachments,
             idempotency_key: key.map(str::to_owned),
         }
+    }
+
+    fn recorded(event_type: &str, payload: Value) -> PersistedEventRecord {
+        PersistedEventRecord {
+            event_id: 1,
+            event_hash: None,
+            chain_root_id: "T-1".to_owned(),
+            chain_seq: 1,
+            thread_id: "T-1".to_owned(),
+            thread_seq: 1,
+            event_type: event_type.to_owned(),
+            storage_class: "indexed".to_owned(),
+            ts: "2026-11-18T00:00:00Z".to_owned(),
+            prev_chain_event_hash: None,
+            prev_thread_event_hash: None,
+            payload,
+        }
+    }
+
+    #[test]
+    fn an_attachment_is_named_only_by_an_event_that_lists_its_hash() {
+        let (_, named) = upload("image/png", b"pixels");
+        let (_, other) = upload("image/png", b"other pixels");
+        let events = vec![
+            recorded("tool_call_result", json!({"parts": []})),
+            recorded(
+                "tool_call_result",
+                json!({"attachment_refs": [named.clone()]}),
+            ),
+        ];
+        assert!(events_name_attachment(&events, &named).unwrap());
+        assert!(!events_name_attachment(&events, &other).unwrap());
+        assert!(!events_name_attachment(&[], &named).unwrap());
+        let malformed = vec![recorded(
+            "tool_call_result",
+            json!({"attachment_refs": "x"}),
+        )];
+        assert!(events_name_attachment(&malformed, &named).is_err());
     }
 
     #[test]

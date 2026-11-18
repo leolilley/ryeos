@@ -10,6 +10,8 @@ use crate::directive::{
 };
 use crate::result_guard::ResultGuard;
 use crate::runner::ToolOccurrence;
+use crate::tool_images::ImageRunState;
+use ryeos_directive_definition::ImageAcceptConfig;
 use ryeos_provider_contract::ToolResultStatus;
 use ryeos_runtime::{
     CognitionFramePayload, CognitionOutPayload, FINISH_INTERRUPTED, ToolResultPayload,
@@ -54,6 +56,8 @@ pub struct ResumeState {
     /// Whether the run-deadline wrap-up input is already on the path, so a
     /// recovered or continued segment does not tell the model twice.
     pub deadline_wrap_up_delivered: bool,
+    /// What the path has stored of tool images, against the run's limits.
+    pub images: ImageRunState,
 }
 
 impl ResumeState {
@@ -130,11 +134,14 @@ const RECOVERY_EVENT_TYPES: [&str; 7] = [
     "provider_retry",
 ];
 
+/// `images` is the model's image cost declaration, so the carry trim counts an
+/// image as the request will.
 pub async fn load_resume_state(
     callback: &CallbackClient,
     previous_thread_id: &str,
     carry_turns: u32,
     mode: ResumeMode,
+    images: Option<&ImageAcceptConfig>,
 ) -> Result<ResumeState> {
     // Fold the linear CONTINUATION PATH (turn 1 → … → predecessor), not the
     // whole chain namespace: a conversation is a chain of turns, so turn N must
@@ -211,7 +218,7 @@ pub async fn load_resume_state(
     let frame = latest_frame(&events)?;
     let predecessor = fold_messages(&events[..own_start])?;
     let own = fold_messages(&events[own_start..])?;
-    let mut messages = carry_into_successor(predecessor, carry_turns)?;
+    let mut messages = carry_into_successor(predecessor, carry_turns, images)?;
     messages.extend(own.into_iter().map(|folded| folded.message));
 
     Ok(ResumeState {
@@ -228,7 +235,27 @@ pub async fn load_resume_state(
         trailing_length_turns,
         frame,
         deadline_wrap_up_delivered: recover_wrap_up_delivered(&events)?,
+        images: recover_image_run(&events)?,
     })
+}
+
+/// What the whole path has stored of tool images: how many were admitted and
+/// how many distinct bytes they hold, and which attachments the node therefore
+/// already stores. Seeds the run's limits and keeps a repeated image from
+/// being uploaded again.
+fn recover_image_run(events: &[ReplayedEventRecord]) -> Result<ImageRunState> {
+    let mut run = ImageRunState::default();
+    for event in events
+        .iter()
+        .filter(|event| event.event_type == "tool_call_result")
+    {
+        for part in replayed_tool_result(event)?.parts {
+            if let ryeos_provider_contract::Part::Image(image) = part {
+                run.record(&image);
+            }
+        }
+    }
+    Ok(run)
 }
 
 /// Whether any input on the path is the run-deadline wrap-up notice.
@@ -1307,6 +1334,7 @@ impl std::error::Error for ResumeFoldError {}
 fn carry_into_successor(
     folded: Vec<FoldedMessage>,
     carry_turns: u32,
+    images: Option<&ImageAcceptConfig>,
 ) -> Result<Vec<ProviderMessage>> {
     if folded.is_empty() {
         return Ok(Vec::new());
@@ -1318,14 +1346,15 @@ fn carry_into_successor(
     let rest_len = rest.len();
 
     let recent = trim_to_recent_turns(rest, carry_turns);
-    let pinned_tokens = crate::estimate::estimate_tokens(&pinned);
+    let pinned_tokens = crate::estimate::estimate_tokens(&pinned, images);
     if pinned_tokens > SUCCESSOR_START_TOKEN_BUDGET {
         return Err(ResumeFoldError::PinnedInputsExceedBudget {
             budget: SUCCESSOR_START_TOKEN_BUDGET,
         }
         .into());
     }
-    let recent = trim_to_token_budget(recent, SUCCESSOR_START_TOKEN_BUDGET - pinned_tokens)?;
+    let recent =
+        trim_to_token_budget(recent, SUCCESSOR_START_TOKEN_BUDGET - pinned_tokens, images)?;
 
     let mut messages = if recent.len() == rest_len {
         whole
@@ -1435,13 +1464,14 @@ fn trim_to_recent_turns(
 fn trim_to_token_budget(
     mut messages: Vec<ProviderMessage>,
     max_tokens: u64,
+    images: Option<&ImageAcceptConfig>,
 ) -> Result<Vec<ProviderMessage>> {
     if messages.is_empty() {
         return Ok(messages);
     }
 
     loop {
-        let total = crate::estimate::estimate_tokens(&messages);
+        let total = crate::estimate::estimate_tokens(&messages, images);
         if total <= max_tokens {
             return Ok(messages);
         }
@@ -1682,9 +1712,15 @@ mod tests {
     #[tokio::test]
     async fn load_empty_replay_returns_empty() {
         let callback = make_callback(vec![]);
-        let state = load_resume_state(&callback, "nonexistent", 8, ResumeMode::NativeSameThread)
-            .await
-            .unwrap();
+        let state = load_resume_state(
+            &callback,
+            "nonexistent",
+            8,
+            ResumeMode::NativeSameThread,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(state.messages.is_empty());
         assert_eq!(state.turns_completed, 0);
         assert!(state.thread_usage.is_none());
@@ -1701,9 +1737,15 @@ mod tests {
                 ]),
             ),
         }]);
-        let error = load_resume_state(&callback, "T-predecessor", 8, ResumeMode::Continuation)
-            .await
-            .unwrap_err();
+        let error = load_resume_state(
+            &callback,
+            "T-predecessor",
+            8,
+            ResumeMode::Continuation,
+            None,
+        )
+        .await
+        .unwrap_err();
         assert!(
             error
                 .to_string()
@@ -2323,9 +2365,15 @@ mod tests {
         // The thread's own turns are never trimmed, so the proposal that the
         // old recovery budget would have refused is rebuilt with its call
         // still pending.
-        let state = load_resume_state(&callback, "nonexistent", 0, ResumeMode::NativeSameThread)
-            .await
-            .unwrap();
+        let state = load_resume_state(
+            &callback,
+            "nonexistent",
+            0,
+            ResumeMode::NativeSameThread,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(state.messages.len(), 1);
         assert!(state.messages[0].has_tool_calls());
         assert_eq!(state.pending_tools.len(), 1);
@@ -2681,7 +2729,7 @@ mod tests {
                 "answer {i} with some content here"
             )));
         }
-        let trimmed = trim_to_token_budget(messages, 200).unwrap();
+        let trimmed = trim_to_token_budget(messages, 200, None).unwrap();
         assert!(trimmed.len() < 200);
         assert!(!trimmed.is_empty());
     }
@@ -2937,7 +2985,7 @@ mod tests {
             },
         ];
         let callback = make_callback(events);
-        let state = load_resume_state(&callback, "T-prev", 8, ResumeMode::NativeSameThread)
+        let state = load_resume_state(&callback, "T-prev", 8, ResumeMode::NativeSameThread, None)
             .await
             .unwrap();
         assert_eq!(state.messages.len(), 2);
@@ -3087,7 +3135,7 @@ mod tests {
     async fn resume_folds_only_continuation_path_not_chain_children() {
         let inner: Arc<dyn RuntimeCallbackAPI> = Arc::new(PathMock);
         let callback = CallbackClient::from_inner(inner, "T3", "/tmp/test", "tat-test");
-        let state = load_resume_state(&callback, "T2", 8, ResumeMode::Continuation)
+        let state = load_resume_state(&callback, "T2", 8, ResumeMode::Continuation, None)
             .await
             .unwrap();
 
@@ -3113,18 +3161,19 @@ mod tests {
         let inner: Arc<dyn RuntimeCallbackAPI> = Arc::new(PathMock);
         let callback = CallbackClient::from_inner(inner, "T2", "/tmp/test", "tat-test");
         for carry in [0, 1, 8] {
-            let state = load_resume_state(&callback, "T2", carry, ResumeMode::NativeSameThread)
-                .await
-                .unwrap();
+            let state =
+                load_resume_state(&callback, "T2", carry, ResumeMode::NativeSameThread, None)
+                    .await
+                    .unwrap();
             let texts: Vec<String> = state.messages.iter().filter_map(|m| m.text()).collect();
             let own = ["turn2 in".to_string(), "turn2 out".to_string()];
             assert!(texts.ends_with(&own), "carry {carry}: {texts:?}");
         }
-        let all = load_resume_state(&callback, "T2", 8, ResumeMode::NativeSameThread)
+        let all = load_resume_state(&callback, "T2", 8, ResumeMode::NativeSameThread, None)
             .await
             .unwrap();
         assert_eq!(all.messages.len(), 4);
-        let own_only = load_resume_state(&callback, "T2", 0, ResumeMode::NativeSameThread)
+        let own_only = load_resume_state(&callback, "T2", 0, ResumeMode::NativeSameThread, None)
             .await
             .unwrap();
         assert_eq!(own_only.messages.len(), 2);
@@ -3144,7 +3193,7 @@ mod tests {
             folded(ProviderMessage::user("u3"), false),
             folded(ProviderMessage::assistant_text("a3"), false),
         ];
-        let carried = carry_into_successor(conversation, 1).unwrap();
+        let carried = carry_into_successor(conversation, 1, None).unwrap();
         let texts: Vec<String> = carried.iter().filter_map(|m| m.text()).collect();
         assert_eq!(texts, ["launch", "u3", "a3"]);
         assert_eq!(carried[0].role(), "user");
@@ -3186,9 +3235,9 @@ mod tests {
             folded(ProviderMessage::user("u2"), false),
             folded(assistant_with_artefact("a2", envelope(2)), false),
         ];
-        let all = carry_into_successor(conversation.clone(), 8).unwrap();
+        let all = carry_into_successor(conversation.clone(), 8, None).unwrap();
         assert_eq!(artefacts_of(&all), [envelope(1), envelope(2)]);
-        let recent = carry_into_successor(conversation, 1).unwrap();
+        let recent = carry_into_successor(conversation, 1, None).unwrap();
         assert_eq!(artefacts_of(&recent), [envelope(2)]);
     }
 
@@ -3234,7 +3283,7 @@ mod tests {
             folded(ProviderMessage::user("launch"), true),
             folded(ProviderMessage::assistant_text("a1"), false),
         ];
-        let carried = carry_into_successor(conversation, 0).unwrap();
+        let carried = carry_into_successor(conversation, 0, None).unwrap();
         let texts: Vec<String> = carried.iter().filter_map(|m| m.text()).collect();
         assert_eq!(texts, ["launch"]);
     }
@@ -3247,7 +3296,7 @@ mod tests {
             folded(ProviderMessage::user("pinned later"), true),
             folded(ProviderMessage::assistant_text("a2"), false),
         ];
-        let carried = carry_into_successor(conversation, 8).unwrap();
+        let carried = carry_into_successor(conversation, 8, None).unwrap();
         let texts: Vec<String> = carried.iter().filter_map(|m| m.text()).collect();
         assert_eq!(texts, ["u1", "a1", "pinned later", "a2"]);
     }
@@ -3260,7 +3309,7 @@ mod tests {
             folded(ProviderMessage::user("u2"), false),
             folded(ProviderMessage::assistant_text("a2"), false),
         ];
-        let carried = carry_into_successor(conversation, 1).unwrap();
+        let carried = carry_into_successor(conversation, 1, None).unwrap();
         let texts: Vec<String> = carried.iter().filter_map(|m| m.text()).collect();
         assert_eq!(texts, ["u2", "a2"]);
     }
@@ -3371,15 +3420,21 @@ mod tests {
     #[tokio::test]
     async fn a_thread_that_recorded_nothing_resumes_as_a_fresh_launch() {
         let empty = make_callback(vec![]);
-        let state = load_resume_state(&empty, "T-empty", 8, ResumeMode::NativeSameThread)
+        let state = load_resume_state(&empty, "T-empty", 8, ResumeMode::NativeSameThread, None)
             .await
             .unwrap();
         assert!(state.has_no_launch_records());
 
         let with_frame = make_callback(vec![frame_event(1, "system text")]);
-        let state = load_resume_state(&with_frame, "T-framed", 8, ResumeMode::NativeSameThread)
-            .await
-            .unwrap();
+        let state = load_resume_state(
+            &with_frame,
+            "T-framed",
+            8,
+            ResumeMode::NativeSameThread,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(!state.has_no_launch_records());
         assert_eq!(state.frame.unwrap().frame_seq, 1);
     }
@@ -3388,7 +3443,7 @@ mod tests {
     async fn zero_carry_still_preserves_cumulative_turn_coordinate() {
         let inner: Arc<dyn RuntimeCallbackAPI> = Arc::new(PathMock);
         let callback = CallbackClient::from_inner(inner, "T3", "/tmp/test", "tat-test");
-        let state = load_resume_state(&callback, "T2", 0, ResumeMode::Continuation)
+        let state = load_resume_state(&callback, "T2", 0, ResumeMode::Continuation, None)
             .await
             .unwrap();
         assert!(state.messages.is_empty());

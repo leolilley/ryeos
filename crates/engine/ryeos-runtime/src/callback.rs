@@ -1031,6 +1031,20 @@ pub trait RuntimeCallbackAPI: Send + Sync {
     /// target against the caller's chain.
     async fn replay_events(&self, params: Value) -> Result<Value, CallbackError>;
 
+    /// One stored attachment named by an event of the caller's chain, as
+    /// `{ media_type, byte_length, bytes_b64 }`. Meaning-blind: any attachment.
+    /// The daemon refuses a hash no event of the chain names.
+    async fn read_attachment(
+        &self,
+        thread_id: &str,
+        attachment: &str,
+    ) -> Result<Value, CallbackError> {
+        let _ = (thread_id, attachment);
+        Err(CallbackError::Transport(anyhow::anyhow!(
+            "this callback client cannot read attachments"
+        )))
+    }
+
     async fn bundle_events_append(
         &self,
         thread_id: &str,
