@@ -99,9 +99,9 @@ fn declare(label: &str, members: &[&str]) -> MachineDeclaration {
 
 fn fixture_groups() -> LocalityGroups {
     let mut desk_this = host('a');
-    desk_this.push(("rack", measured('r')));
+    desk_this.push(("rack", measured('9')));
     let mut desk_other = host('a');
-    desk_other.push(("rack", measured('r')));
+    desk_other.push(("rack", measured('9')));
     let unknown_everywhere = [
         (
             "boot",
@@ -160,15 +160,15 @@ fn fixture_groups() -> LocalityGroups {
             "site:g",
             "seen-one",
             MemberKind::Remote,
-            answered(&host('g')),
+            answered(&host('1')),
         ),
         node(
             "site:h",
             "seen-two",
             MemberKind::Remote,
-            answered(&host('g')),
+            answered(&host('1')),
         ),
-        node("site:i", "solo", MemberKind::Remote, answered(&host('i'))),
+        node("site:i", "solo", MemberKind::Remote, answered(&host('2'))),
         node(
             "site:j",
             "sandbox",
