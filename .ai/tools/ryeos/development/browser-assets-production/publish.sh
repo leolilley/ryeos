@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-13T13:05:39Z:113253a54af6c287f7c9057712e5d7ae1a8d4d6d5de95f0f145cbb71efb477cc:Evg5obicviSIPYvdHcuKcblw2uh5NrnSTj59yD7IMFnCCY1NsngWFM8n6zG5aSTesdZ8BniaG5cm1PKbelS7Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T04:15:43Z:a65ff5359646e8b653a097ca3aa938bcf25963138c58a81e32625e7524f5d9d9:INXBgV120DT9tiT4xvKkGrx71FR9Ie9k28wfLVg8F/i3zAPD396bjwMFEk86jMKvdYRloWbmeOk7QwmG3Mp4Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 set -euo pipefail
 
 mode="${1:---check}"
@@ -19,16 +19,9 @@ trap 'rm -rf -- "$stage"' EXIT
 # wasm-bindgen CLI the lock names (the build refuses any other version).
 "$root/.ai/tools/ryeos/development/browser-assets-production/lib/build-rune-web.sh" --out "$stage/final"
 
-expected=(
-  index.html
-  rune_bridge.js
-  rune_platform.js
-  ryeos-cjk.ttf.gz
-  ryeos-emoji.ttf.gz
-  ryeos_boot.js
-  ryeos_rune.js
-  ryeos_rune_bg.wasm.gz
-)
+# The closed generation is whatever the registry lists; the registry check below
+# holds it to rune-snippets.toml and to the package.
+mapfile -t expected < <(python3 -I -c 'import json, sys; print("\n".join(sorted(a["filename"] for a in json.load(open(sys.argv[1]))["assets"])))' "$root/crates/daemon/ryeos-ui/web-assets.json" | LC_ALL=C sort)
 mapfile -t actual < <(find "$stage/final" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)
 if [[ "${actual[*]}" != "${expected[*]}" ]]; then
   echo "assembled browser asset inventory is not the closed generation" >&2

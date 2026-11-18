@@ -368,6 +368,10 @@ async fn service_threads_timeline_folds_an_owned_chain_with_the_installed_defini
         "threads.timeline missing items array: {result}"
     );
     assert_eq!(result["chain_root_id"], tid);
+    assert_eq!(
+        result["timeline_contract"],
+        ryeos_client_base::ui::timeline::TIMELINE_CONTRACT_VERSION
+    );
     assert!(result["highest_chain_seq"].as_i64().is_some());
     assert!(result.get("summary").is_some(), "missing summary: {result}");
 
