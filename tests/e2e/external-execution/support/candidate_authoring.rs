@@ -102,6 +102,11 @@ pub fn qualification_policy_source(
         .iter()
         .map(|claim| format!("    - {claim}\n"))
         .collect::<String>();
+    // The minimum stays `trusted_process_group_absent` on purpose: it is
+    // exactly the shipped bundle-release and environment-qualification case.
+    // Those signed policies name that lowest floor and run on the enforced
+    // release-authority node, which exceeds the floor with its own retained
+    // containment.
     format!(
         "category: fixtures\nversion: \"1.0.0\"\ndescription: {description}\nproduct_qualification_policy:\n  schema: ryeos.product_qualification_policy.v5\n  verifier_ref: {verifier_ref}\n  subject_declaration_id: subject\n  allowed_claims:\n{claims}  minimum_verifier_process_settlement: trusted_process_group_absent\n  verifier_parameters: {parameters}\n{launch_shape}"
     )

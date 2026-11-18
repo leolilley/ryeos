@@ -289,6 +289,11 @@ jobs:
       - name: Check workspace dependency direction
         run: python3 .ai/tools/ryeos/development/repository-validation/dependency-layers.py --project-path "$PWD" --config-file .ai/config/development/ryeos/repository-validation.yaml
 
+      # The browser renderer is its own Cargo workspace; every package its lock shares with the
+      # root lock must resolve identically.
+      - name: Check the browser renderer lock agrees with the root lock
+        run: python3 -I .ai/tools/ryeos/development/repository-validation/rune-lock.py --check --project-path "$PWD"
+
   rust-policy:
     name: Rust formatting, lint, and dependency policy
     runs-on: ubuntu-latest
@@ -323,9 +328,14 @@ jobs:
           key: workspace-crates-v1
           cache-workspace-crates: true
           cache-on-failure: true
+          workspaces: |
+            . -> target
+            crates/clients/rune -> target
 
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        run: |
+          cargo fmt --all -- --check
+          cargo fmt --manifest-path crates/clients/rune/Cargo.toml --all -- --check
 
       - name: Check test-support features stay out of shipped builds
         run: ./scripts/ci/check-test-support-feature-leak.sh
@@ -333,9 +343,17 @@ jobs:
       - name: Check Clippy policy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
-      # The browser renderer's page entry and the runtime's web platform compile only for wasm32.
+      # The browser renderer is its own Cargo workspace (crates/clients/rune), so the root
+      # workspace commands above do not reach it. Its page entry and the runtime's web platform
+      # compile only for wasm32; the native build carries its tests (tests/headless.rs).
       - name: Check browser renderer Clippy policy
-        run: cargo clippy --locked -p ryeos-client-rune --target wasm32-unknown-unknown -- -D warnings
+        run: |
+          cargo clippy --locked -p ryeos-client-runtime --target wasm32-unknown-unknown -- -D warnings
+          cargo clippy --locked --manifest-path crates/clients/rune/Cargo.toml --all-targets -- -D warnings
+          cargo clippy --locked --manifest-path crates/clients/rune/Cargo.toml --target wasm32-unknown-unknown -- -D warnings
+
+      - name: Test the browser renderer
+        run: cargo test --locked --manifest-path crates/clients/rune/Cargo.toml
 
       # Rune's JS snippets are declared once (rune-snippets.toml); a pin bump that adds or
       # drops one fails here instead of at the next manual package build.
@@ -343,7 +361,9 @@ jobs:
         run: python3 -I .ai/tools/ryeos/development/browser-assets-production/lib/check-rune-snippets.py
 
       - name: Check dependency advisories, licenses, and sources
-        run: cargo deny check
+        run: |
+          cargo deny check
+          cargo deny --manifest-path crates/clients/rune/Cargo.toml --config deny.toml check
 
       - name: Check client and daemon-side crate layering
         run: python3 .ai/tools/ryeos/development/repository-validation/client-layering.py --project-path "$PWD"
@@ -1109,14 +1129,36 @@ jobs:
       - name: Audit WASM client
         run: |
           set +e
+          # The runtime is a root workspace member; the browser renderer is its own Cargo
+          # workspace, where the runtime is a path dependency whose warnings Cargo caps.
           CARGO_TARGET_DIR="$RUNNER_TEMP/ryeos-rust-2024-wasm-target" \
           RUSTFLAGS="-W rust-2024-compatibility" \
-            cargo check --locked -p ryeos-client-rune -p ryeos-client-runtime \
+            cargo check --locked -p ryeos-client-runtime \
               --target wasm32-unknown-unknown --lib --message-format=json \
               >"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/wasm.jsonl" \
               2>"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/wasm.stderr"
-          printf '%s\n' "$?" \
+          runtime="$?"
+          CARGO_TARGET_DIR="$RUNNER_TEMP/ryeos-rust-2024-wasm-target" \
+          RUSTFLAGS="-W rust-2024-compatibility" \
+            cargo check --locked --manifest-path crates/clients/rune/Cargo.toml \
+              --target wasm32-unknown-unknown --lib --message-format=json \
+              >>"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/wasm.jsonl" \
+              2>>"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/wasm.stderr"
+          renderer="$?"
+          printf '%s\n' "$(( runtime > renderer ? runtime : renderer ))" \
             >"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/wasm.status"
+
+      - name: Audit browser renderer native targets
+        run: |
+          set +e
+          CARGO_TARGET_DIR="$RUNNER_TEMP/ryeos-rust-2024-rune-target" \
+          RUSTFLAGS="-W rust-2024-compatibility" \
+            cargo check --locked --manifest-path crates/clients/rune/Cargo.toml \
+              --all-targets --keep-going --message-format=json \
+              >"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/rune.jsonl" \
+              2>"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/rune.stderr"
+          printf '%s\n' "$?" \
+            >"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/rune.status"
 
       - name: Upload compatibility diagnostics
         if: ${{ always() }}
@@ -1130,7 +1172,7 @@ jobs:
       - name: Require every audit surface to compile
         run: |
           failed=0
-          for surface in workspace doctest wasm; do
+          for surface in workspace doctest wasm rune; do
             status="$(cat "$RUNNER_TEMP/ryeos-rust-2024-diagnostics/$surface.status")"
             if [[ "$status" != 0 ]]; then
               echo "::error::$surface compatibility audit exited with status $status"

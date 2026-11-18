@@ -164,6 +164,11 @@ pub enum FastFixtureProfile {
     Standard,
     StandardCentralAuth,
     Development,
+    /// The Development composition initialized under its `hosted` host
+    /// class, the trusted process-group lane a hosting provider runs. The
+    /// default Development fixture runs `local`, whose enforced isolation
+    /// refuses `sessions:trusted_process_group`.
+    DevelopmentHosted,
 }
 
 impl FastFixtureProfile {
@@ -173,7 +178,7 @@ impl FastFixtureProfile {
             Self::CoreScheduling => "core-scheduling",
             Self::Standard => "standard",
             Self::StandardCentralAuth => "standard-central-auth",
-            Self::Development => "development",
+            Self::Development | Self::DevelopmentHosted => "development",
         }
     }
 
@@ -183,7 +188,25 @@ impl FastFixtureProfile {
             Self::CoreScheduling => Some(&["core", "scheduling"]),
             Self::Standard => Some(STANDARD_BUNDLE_INVENTORY),
             Self::StandardCentralAuth => Some(STANDARD_CENTRAL_AUTH_BUNDLE_INVENTORY),
-            Self::Development => Some(DEVELOPMENT_BUNDLE_INVENTORY),
+            Self::Development | Self::DevelopmentHosted => Some(DEVELOPMENT_BUNDLE_INVENTORY),
+        }
+    }
+
+    /// The host class this fixture initializes the profile under, from the
+    /// classes the profile declares.
+    fn host_class<'a>(self, declared: impl IntoIterator<Item = &'a str>) -> Result<&'static str> {
+        let declared: Vec<&str> = declared.into_iter().collect();
+        match self {
+            Self::DevelopmentHosted => {
+                anyhow::ensure!(
+                    declared.contains(&"hosted"),
+                    "profile {} declares no hosted host class; it declares {}",
+                    self.name(),
+                    declared.join(", ")
+                );
+                Ok("hosted")
+            }
+            _ => fixture_host_class(declared),
         }
     }
 }
@@ -1041,7 +1064,8 @@ fn materialize_seed_node_policy_generation(
         );
     }
     // Every fast-fixture node runs under its profile's fixture host class.
-    let host_class = fixture_host_class(profile.host_classes()?.iter().map(String::as_str))?;
+    let host_class =
+        selected_profile.host_class(profile.host_classes()?.iter().map(String::as_str))?;
     let mut profile = profile.for_host_class(host_class).with_context(|| {
         format!(
             "select the fixture host class of profile {}",
@@ -1097,6 +1121,11 @@ pub fn fixture_host_class<'a>(declared: impl IntoIterator<Item = &'a str>) -> Re
         Ok("local_unconfined")
     } else if declared.contains(&"local") {
         Ok("local")
+    } else if declared == ["hosted"] {
+        // A policy already narrowed to the hosted class (see
+        // `FastFixtureProfile::DevelopmentHosted`); an authored profile that
+        // declares `hosted` beside a local class never reaches this arm.
+        Ok("hosted")
     } else {
         anyhow::bail!(
             "node profile declares no local host class for the fixture; it declares {}",
@@ -1120,7 +1149,7 @@ pub fn fixture_host_class_of_policy(isolation: &serde_json::Value) -> Result<&'s
 fn fixture_host_class_of_profile(selected_profile: FastFixtureProfile) -> Result<&'static str> {
     let profile = load_authored_profile(selected_profile)?;
     let declared = profile.host_classes()?;
-    fixture_host_class(declared.iter().map(String::as_str))
+    selected_profile.host_class(declared.iter().map(String::as_str))
 }
 
 fn load_authored_profile(
@@ -1292,6 +1321,9 @@ fn direct_host_isolation(isolation: &mut serde_json::Value) -> Result<()> {
         .pointer_mut(&format!("/policy/host_classes/{class}"))
         .and_then(serde_json::Value::as_object_mut)
         .context("isolation member has no fast-fixture host class")?;
+    if class == "hosted" {
+        return hosted_host_enclosure_floor(policy);
+    }
     let scoped = matches!(
         policy
             .get("process_scopes")
@@ -1401,4 +1433,47 @@ pub fn authorize_fixture_bundle(
     let body = serde_yaml::to_string(&policy).context("serialize test command policy")?;
     let signed = lillux::signature::sign_content_at(&body, node, "#", None, FAST_FIXTURE_TIME);
     fs::write(&path, signed).context("publish test command policy")
+}
+
+/// Narrow the `hosted` class floor to what a directly spawned test daemon can
+/// prove.
+///
+/// The authored `hosted` floor requires `recovery:enclosure_trusted_init` and
+/// `termination:enclosure_trusted_init`, graded `measured` or `trusted`. The
+/// node proves those only when it is pid 1 of a private pid namespace, or its
+/// parent is a pid 1 named in `enclosure_inits`
+/// (`lillux::process_control::decide_enclosure_exit`), and the recovery name
+/// also needs a private cgroup namespace. A fixture daemon is a child of the
+/// test process in the host's pid namespace, so neither can ever hold on a
+/// CI runner or a developer machine.
+///
+/// The fixture removes exactly those two named entries from
+/// `requires_capabilities` and changes nothing else: mode, trusted
+/// process-group acceptance, backend, proc filesystem and the rest of the floor
+/// (`accounting` or swap-absence, `storage:durable_root`, `time`) stay as
+/// authored. The `sessions:trusted_process_group` guarantee does not depend on
+/// the enclosure proof, so trusted-lane launches are judged as shipped. What
+/// this leaves untested is hosted orphan recovery across a node restart, which
+/// rests on the enclosure proof. The result is signed by the fixture node key
+/// and never shipped.
+fn hosted_host_enclosure_floor(
+    policy: &mut serde_json::Map<String, serde_json::Value>,
+) -> Result<()> {
+    let floor = policy
+        .get_mut("requires_capabilities")
+        .and_then(serde_json::Value::as_array_mut)
+        .context("isolation policy has no requires_capabilities list")?;
+    let enclosure_only = |name: &str| {
+        name == lillux::process_control::RECOVERY_ENCLOSURE_TRUSTED_INIT
+            || name == lillux::process_control::TERMINATION_ENCLOSURE_TRUSTED_INIT
+    };
+    floor.retain(|entry| {
+        let name = match entry {
+            serde_json::Value::String(name) => Some(name.as_str()),
+            serde_json::Value::Object(spec) => spec.get("name").and_then(serde_json::Value::as_str),
+            _ => None,
+        };
+        !name.is_some_and(enclosure_only)
+    });
+    Ok(())
 }

@@ -254,6 +254,21 @@ pub struct ToolResultGuard {
     /// The hash of the earlier result this one repeats.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duplicate_of: Option<String>,
+    /// The images of the result that were not used, each with its stable
+    /// code. The model-visible text ends with a note for each; they are kept
+    /// apart from the guard's own truncation so a rebuild can tell the guarded
+    /// text from the notes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dropped_images: Vec<DroppedImage>,
+}
+
+/// One image of a tool result that was dropped instead of used.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DroppedImage {
+    /// One-based position among the result's image parts.
+    pub position: u32,
+    pub code: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -265,9 +280,29 @@ pub struct ToolResultPayload {
     pub status: ToolResultStatus,
     pub parts: Vec<Part>,
     pub guard: ToolResultGuard,
+    /// The object hashes of the attachments the image parts name, distinct and
+    /// in order of first use. Absent when the result carries no image. The
+    /// daemon links each to the event, so the bytes stay reachable from the
+    /// signed chain.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachment_refs: Vec<String>,
 }
 
 impl ToolResultPayload {
+    /// The distinct attachment hashes of a result's image parts, in order of
+    /// first use: what `attachment_refs` must list.
+    pub fn image_attachment_hashes(parts: &[Part]) -> Vec<String> {
+        let mut hashes: Vec<String> = Vec::new();
+        for part in parts {
+            if let Part::Image(image) = part
+                && !hashes.contains(&image.attachment)
+            {
+                hashes.push(image.attachment.clone());
+            }
+        }
+        hashes
+    }
+
     /// Joined text of the result's text parts: exactly the model-visible
     /// string the live run put in the provider message.
     pub fn text(&self) -> String {
@@ -304,6 +339,9 @@ impl ToolResultPayload {
         }
         if self.guard.duplicate_of.is_some() && self.status == ToolResultStatus::Error {
             bail!("an error tool result cannot be a duplicate");
+        }
+        if self.attachment_refs != Self::image_attachment_hashes(&self.parts) {
+            bail!("tool result attachment_refs do not match the attachments of its image parts");
         }
         self.message().validate()
     }
