@@ -24227,6 +24227,34 @@ fn parse_json_blob(blob: Option<Vec<u8>>) -> rusqlite::Result<Option<Value>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_dedicated_session_state_is_classified_for_early_retirement() {
+        let marker = "CREATE TABLE IF NOT EXISTS dedicated_session (";
+        let table = SCHEMA_SQL
+            .find(marker)
+            .map(|at| &SCHEMA_SQL[at..])
+            .expect("dedicated_session table in schema");
+        let check = table
+            .split("state TEXT NOT NULL CHECK (state IN (")
+            .nth(1)
+            .expect("dedicated_session state CHECK");
+        let list = check.split("))").next().expect("state CHECK list");
+        let schema_states: std::collections::BTreeSet<&str> = list
+            .split(',')
+            .map(|s| s.trim().trim_matches('\''))
+            .collect();
+        let classified: std::collections::BTreeSet<&str> =
+            crate::dedicated_session_service::DEDICATED_SESSION_STATE_RETIRES_BEFORE_CAPTURE
+                .iter()
+                .map(|(state, _)| *state)
+                .collect();
+        assert_eq!(
+            schema_states, classified,
+            "a dedicated-session state was added or removed without classifying it"
+        );
+        assert!(!crate::dedicated_session_service::session_state_retires_before_capture("novel"));
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn inspection_copy_retains_original_role_receipts_and_same_lease() {

@@ -45,7 +45,7 @@ mod terminal;
 use runtime_request::{SpawnRuntimeParams, spawn_runtime};
 use terminal::{
     fallback_finalization, head_advance_not_applied_finalization, is_thread_terminal_status,
-    reconcile_terminal_finalization, retire_session_worker_before_capture, runtime_terminal_status,
+    reconcile_terminal_finalization, runtime_terminal_status,
 };
 
 const MAX_SIGNED_EXECUTOR_MANIFEST_REF_BYTES: u64 = 256 * 1024;
@@ -8300,19 +8300,22 @@ async fn run_claimed_thread_row_inner(
         // be retired first (the same order as the owner-drop path). One
         // hosted root terminalization fence covers retirement, capture and
         // finalization. That fence is exclusive and not reentrant, so it is
-        // acquired exactly once here and lent to the capture, which would
-        // otherwise try to reserve the root a second time and refuse. A
-        // session in a candidate-disposition state (notably `freezing`) is
-        // not retired first: retirement cancels its candidate, which the
-        // binding step below still needs. That path keeps capture first with
-        // the capture's own temporary fence, released before the candidate
-        // wait, then takes the terminalization fence and retires after it.
+        // acquired exactly once and lent to the capture, which would
+        // otherwise try to reserve the root a second time and refuse.
+        //
+        // The session state is read only after the fence is held: acquiring
+        // it drains in-flight worker operations, and one of them can finish a
+        // turn and move the session to `freezing` while we wait. Under the
+        // fence no root operation can move it. A session that is not in the
+        // retire-first allow-list (a candidate-disposition state, whose
+        // retirement would cancel the candidate the binding step below still
+        // needs) releases the fence and takes the capture-first path: the
+        // capture's own temporary fence, then the candidate wait, then the
+        // terminalization fence and retirement. The guard is dropped before
+        // that path runs, so the two never overlap.
         let mut hosted_root_terminalization = None;
-        let retires_before_capture = state
-            .state_store
-            .dedicated_session(&thread_id)?
-            .is_some_and(|session| retire_session_worker_before_capture(&session.state));
-        if retires_before_capture {
+        let mut retires_before_capture = false;
+        if state.state_store.dedicated_session(&thread_id)?.is_some() {
             let terminalization =
                 ryeos_app::hosted_operation::begin_hosted_root_terminalization_async(
                     &state.state_store,
@@ -8320,21 +8323,36 @@ async fn run_claimed_thread_row_inner(
                 )
                 .await
                 .map_err(BuildAndLaunchError::Internal)?;
-            if ryeos_app::dedicated_session_service::abort_session_for_root_stop(state, &thread_id)
-                .is_err()
-            {
-                return Err(BuildAndLaunchError::RuntimeCleanupUnresolved {
-                    runtime_status: runtime_result.status,
-                    runtime_error: fallback_finalization(
-                        &thread_id,
-                        &runtime_result,
-                        terminal_status,
+            let retire_first = state
+                .state_store
+                .dedicated_session(&thread_id)?
+                .is_some_and(|session| {
+                    ryeos_app::dedicated_session_service::session_state_retires_before_capture(
+                        &session.state,
                     )
-                    .params
-                    .error,
                 });
+            if retire_first {
+                if ryeos_app::dedicated_session_service::abort_session_for_root_stop(
+                    state, &thread_id,
+                )
+                .is_err()
+                {
+                    return Err(BuildAndLaunchError::RuntimeCleanupUnresolved {
+                        runtime_status: runtime_result.status,
+                        runtime_error: fallback_finalization(
+                            &thread_id,
+                            &runtime_result,
+                            terminal_status,
+                        )
+                        .params
+                        .error,
+                    });
+                }
+                retires_before_capture = true;
+                hosted_root_terminalization = Some(terminalization);
+            } else {
+                drop(terminalization);
             }
-            hosted_root_terminalization = Some(terminalization);
         }
         // An externally placed candidate never executes in the controller's
         // local COW view.  If the bounded session did not reach its exact
