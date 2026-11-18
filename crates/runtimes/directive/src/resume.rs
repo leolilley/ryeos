@@ -3229,6 +3229,23 @@ mod tests {
     }
 
     #[test]
+    fn the_signed_rebind_minimum_is_the_successor_starting_budget() {
+        // An operator continuation may bind a different model. The runtime
+        // contract refuses one whose context window is smaller than the
+        // conversation a successor starts from, so the signed number and this
+        // budget must be the same number.
+        let descriptor =
+            include_str!("../../../../bundles/directive/.ai/runtimes/directive-runtime.yaml");
+        let runtime: ryeos_engine::runtime_registry::RuntimeYaml =
+            serde_yaml::from_str(&lillux::signature::strip_signature_lines(descriptor))
+                .expect("shipped directive runtime descriptor");
+        assert_eq!(
+            runtime.launch_contract.runtime_facts["context_window"].rebind_minimum,
+            Some(SUCCESSOR_START_TOKEN_BUDGET)
+        );
+    }
+
+    #[test]
     fn a_zero_carry_still_keeps_pinned_inputs() {
         let conversation = vec![
             folded(ProviderMessage::user("launch"), true),

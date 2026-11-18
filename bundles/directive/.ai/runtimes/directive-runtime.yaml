@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-18T01:17:18Z:f1e2f7a3a838663d54c199c923362e5a1fd5d92656bc1cde255817719244ea04:BncPt0OJlXeY/IsOFqWKnqjfwTWLMkEDZxnUNvAHyTSvbPxAIEDMXxK6rJnAHXpzW2d9DEfFc4Gd4QuiJKVYDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T05:09:15Z:70d403ceae003764d2125d594fb78ebd92950d13260ad48386fcd2d244af0b11:nhReEjRDprNNiNQ0mIfFvoVTOYXtQCdyTnI8ww4W9fZoQjPjcSFDjLVskO1OFmxA7HHI8/xzz/P2TfXx+EX+DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: runtime
 serves: directive
 default: true
@@ -120,9 +120,13 @@ launch_contract:
   required_runtime_data:
     - provider_snapshot
   runtime_facts:
-    provider_id: {required: true, kind: string, max_bytes: 128}
-    model_name: {required: true, kind: string, max_bytes: 256}
-    context_window: {required: true, kind: integer, max_bytes: 32}
+    # The record of an operator rebind carries the three facts marked
+    # rebind_record, before and after; no other fact is written to it.
+    provider_id: {required: true, kind: string, max_bytes: 128, rebind_record: true}
+    model_name: {required: true, kind: string, max_bytes: 256, rebind_record: true}
+    # An operator rebind is refused below the token budget of the
+    # conversation a successor starts from.
+    context_window: {required: true, kind: integer, max_bytes: 32, rebind_minimum: 16000, rebind_record: true}
     sampling: {required: true, kind: json, max_bytes: 4096}
     reasoning: {required: true, kind: json, max_bytes: 4096}
     request_url: {required: false, kind: string, max_bytes: 2048}

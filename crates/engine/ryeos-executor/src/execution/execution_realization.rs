@@ -366,6 +366,55 @@ pub(crate) fn transition_continuation_project_authority(
     store_realization_candidate(state, candidate, None)
 }
 
+/// Rebind an exact retained execution realization to the successor of an
+/// operator rebind continuation.
+///
+/// Such a successor replaces the binding-derived part of its execution
+/// closure, so its realization commits two fields of its own: the launch
+/// authority digest and the execution closure digest. Everything else is
+/// copied from the already-verified source realization: the substrate
+/// identity and attestation, effective definition, artifact identity,
+/// execution contract, components and properties. Nothing is re-read from
+/// the node's current substrate state, so a rebind cannot quietly move a
+/// thread onto different evidence than it was admitted with.
+///
+/// `source_capsule` is the capsule the state store rooted for the source,
+/// never one rebuilt from operational launch metadata. The copy is sound
+/// only when the successor capsule differs from it in the places a rebind
+/// may change. That is proved here, with the permission read from the
+/// runtime descriptor that capsule sealed, before any realization is stored;
+/// the state boundary proves it again when the successor is born.
+pub(crate) fn transition_rebound_continuation_authority(
+    state: &AppState,
+    source_capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
+    successor: &ryeos_app::launch_metadata::RuntimeLaunchMetadata,
+    names: &std::collections::BTreeSet<String>,
+) -> Result<ExecutionRealizationAdmission> {
+    let successor_capsule = successor.admitted_launch_capsule()?.ok_or_else(|| {
+        anyhow::anyhow!("rebound continuation successor has no admitted launch capsule")
+    })?;
+    ryeos_app::state_store::require_operator_rebindable(source_capsule, names)?;
+    if !source_capsule.same_rebound_continuation_admission(&successor_capsule, names)? {
+        anyhow::bail!(
+            "operator rebind continuation changed launch authority outside its rebound ref bindings"
+        );
+    }
+
+    let authority = state
+        .state_store
+        .with_state_db(|database| database.pinned_authority())?;
+    let source_realization = source_capsule.verify_retained_execution_realization(
+        &authority.cas_store()?,
+        &authority.large_object_store()?,
+        authority.trust_store(),
+    )?;
+    let successor_authority = successor_capsule.launch_authority();
+    let mut candidate = source_realization;
+    candidate.launch_authority_digest = successor_authority.digest()?;
+    candidate.execution_closure_digest = successor_authority.execution_closure_digest()?;
+    store_realization_candidate(state, candidate, None)
+}
+
 fn store_new_realization(
     state: &AppState,
     launch_authority_digest: String,

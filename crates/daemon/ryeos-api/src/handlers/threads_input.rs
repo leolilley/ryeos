@@ -786,6 +786,7 @@ pub async fn handle(
             Some(ryeos_state::queries::ContinuationReasonMarker::OperatorFollowUp.as_str()),
             &fingerprint,
             prepared.launch_metadata(),
+            prepared.continuation_transition(),
             initial_audit_events,
         )
         .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
