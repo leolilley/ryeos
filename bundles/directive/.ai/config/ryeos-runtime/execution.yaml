@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-17T11:17:14Z:16d2fb4c4d2a02a90377a25fd6442c4d769203a37582496ab0a04d0f0924dc61:5P/QEKlCpddkggcLCfIMUc4PwHkMYu7eFOwjkviJsnM9Kvrze+m7lXTee652IA8FccMaKllpfRKs9QTUhgJkBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T06:12:01Z:ed9d4985677022904ce3d2bb7f10a67cd3fe7338add4f7bc310af230b1956c36:m4dCIgaU5X7iKfImlOuonvk7i/GFN6HccOYLSaFTaRPiSauMV8uaflAEz2ANbAZzc+DRGIaa3SL+4QaexD0dBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime"
 retries: 2
 retry_status_codes: [429, 500, 502, 503, 504, 529]
@@ -12,4 +12,11 @@ max_provider_stream_frame_bytes: 1048576
 accounting:
   failure_policy: auto
   budget_mode: settled
+tool_images:
+  max_bytes_per_image: 2097152
+  max_images_per_result: 4
+  max_bytes_per_result: 3000000
+  max_images_per_run: 256
+  max_bytes_per_run: 50331648
+  max_image_dimension: 8000
 tool_preload: false

@@ -1,8 +1,14 @@
+# The browser renderer is its own Cargo workspace with its own Cargo.lock. Rune and the crates it
+# patches come from git, and the root lock (which the release chain vendors) names crates.io
+# sources only. Every package both locks share must resolve identically: the repository policy
+# check compares them, and `rune-lock.py --regenerate` rebuilds this lock from the root one.
+[workspace]
+
 [package]
 name = "ryeos-client-rune"
 version = "0.1.0"
 edition = "2024"
-license.workspace = true
+license = "MIT"
 description = "RyeOS in Rune: the GPU renderer for the browser and, later, a native window, over the shared client runtime"
 
 [lib]
@@ -10,17 +16,42 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 rune = { git = "https://github.com/leolilley/rune", rev = "cc754dd38d85f0fe577d900013d4ae5e21dd649e", default-features = false, features = ["embedded-fonts", "webgl"] }
-ryeos-client-base = { workspace = true }
-ryeos-client-runtime = { workspace = true }
-serde_json = { workspace = true }
+ryeos-client-base = { path = "../base" }
+ryeos-client-runtime = { path = "../runtime" }
+serde_json = { version = "1", features = ["raw_value"] }
 
 [dev-dependencies]
-serde_yaml = { workspace = true }
+serde_yaml = "0.9"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # Exact: the wasm-bindgen CLI that packages this crate must be the same version.
 wasm-bindgen = "=0.2.129"
 wasm-bindgen-futures = "0.4"
 
-[lints]
-workspace = true
+[lints.clippy]
+result_large_err = "allow"
+large_enum_variant = "allow"
+too_many_arguments = "allow"
+type_complexity = "allow"
+
+[profile.release]
+lto = "thin"
+strip = "debuginfo"
+
+# The browser renderer (.ai/tools/ryeos/development/browser-assets-production/lib/build-rune-web.sh): a page downloads it, so
+# size wins. Whole-program LTO, one codegen unit, and no symbol names, which
+# the page has no use for and which cost megabytes.
+[profile.web]
+inherits = "release"
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+strip = true
+
+[patch.crates-io]
+# Rune builds against its own patched copies of these crates (its `vendor/` directory). A
+# dependency's `[patch]` does not reach the workspace that depends on it, so this workspace names
+# them here, at the same revision as the `rune` dependency above.
+wgpu-hal = { git = "https://github.com/leolilley/rune", rev = "cc754dd38d85f0fe577d900013d4ae5e21dd649e" }
+winit = { git = "https://github.com/leolilley/rune", rev = "cc754dd38d85f0fe577d900013d4ae5e21dd649e" }
+parley_engine = { git = "https://github.com/leolilley/rune", rev = "cc754dd38d85f0fe577d900013d4ae5e21dd649e" }

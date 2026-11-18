@@ -193,6 +193,12 @@ impl Part {
 impl ImagePart {
     fn validate(&self) -> anyhow::Result<()> {
         validate_media_type(&self.media_type)?;
+        if !self.media_type.starts_with("image/") {
+            bail!(
+                "image part media type {:?} is not an image/ type",
+                self.media_type
+            );
+        }
         require_hex64("image attachment", &self.attachment)?;
         if self.byte_length == 0 {
             bail!("image part has zero byte length");
@@ -456,6 +462,8 @@ mod tests {
         bad.media_type = "IMAGE/PNG".to_string();
         assert!(bad.validate().is_err());
         bad.media_type = "image".to_string();
+        assert!(bad.validate().is_err());
+        bad.media_type = "application/pdf".to_string();
         assert!(bad.validate().is_err());
         bad.media_type = "image/webp".to_string();
         bad.attachment = "short".to_string();

@@ -261,6 +261,23 @@ pub(super) fn head_advance_not_applied_finalization(
 /// Materialize the canonical DB finalization and complete managed terminal
 /// envelope when a runtime exits without finalizing itself through its
 /// callback.
+/// The thread status a stopped runtime settles under once its result is
+/// final. A replacement result built from the canonical session projection
+/// is the authority over the runtime's stdout in both directions: a declared
+/// worker failure value fails the thread even when stdout said completed, and
+/// a completed projection completes it even when stdout said failed. An
+/// operator stop (`Killed`, `Cancelled`) still settles as that stop.
+pub(super) fn settled_terminal_status(
+    current: ThreadStatus,
+    runtime_result: &RuntimeResult,
+) -> ThreadStatus {
+    if matches!(current, ThreadStatus::Killed | ThreadStatus::Cancelled) {
+        current
+    } else {
+        runtime_terminal_status(runtime_result.status)
+    }
+}
+
 pub(super) fn fallback_finalization(
     thread_id: &str,
     runtime_result: &RuntimeResult,
@@ -335,6 +352,55 @@ pub(super) fn fallback_finalization(
 mod tests {
     use super::super::{BuildAndLaunchError, retained_launch_failure};
     use super::*;
+
+    /// The canonical projection of a session whose worker reported its
+    /// profile's `crashed` failure value: the session ended normally, the
+    /// result-status declaration named the outcome `worker_failure`.
+    fn crashed_worker_projection() -> RuntimeResult {
+        ryeos_runtime::envelope::dedicated_session_terminal_result(
+            "T-crashed".to_string(),
+            json!({
+                "state": "terminal",
+                "terminal_reason": "completed",
+                "outcome_kind": "worker_failure",
+                "worker_result": {
+                    "status": "crashed",
+                    "result": {"text": "stub: claude code crashed"},
+                },
+            }),
+        )
+    }
+
+    #[test]
+    fn a_worker_failure_projection_settles_the_thread_failed_over_a_completed_stdout() {
+        let projection = crashed_worker_projection();
+        assert_eq!(projection.status, RuntimeResultStatus::Failed);
+        // The runtime's own stdout had said completed.
+        let status = settled_terminal_status(ThreadStatus::Completed, &projection);
+        assert_eq!(status, ThreadStatus::Failed);
+        let fallback = fallback_finalization("T-crashed", &projection, status);
+        assert_eq!(fallback.params.status, "failed");
+        assert_eq!(fallback.params.outcome_code.as_deref(), Some("failed"));
+        assert!(!fallback.runtime_result.success);
+        // The partial result stays attached for the graph's on_error reader.
+        assert_eq!(
+            fallback.params.result.as_ref().unwrap()["session"]["outcome_kind"],
+            json!("worker_failure")
+        );
+    }
+
+    #[test]
+    fn an_operator_stop_keeps_precedence_over_the_projection() {
+        let projection = crashed_worker_projection();
+        for stop in [ThreadStatus::Killed, ThreadStatus::Cancelled] {
+            assert_eq!(settled_terminal_status(stop, &projection), stop);
+        }
+        let completed = runtime_result(RuntimeResultStatus::Completed);
+        assert_eq!(
+            settled_terminal_status(ThreadStatus::Failed, &completed),
+            ThreadStatus::Completed
+        );
+    }
 
     fn runtime_result(status: RuntimeResultStatus) -> RuntimeResult {
         RuntimeResult {

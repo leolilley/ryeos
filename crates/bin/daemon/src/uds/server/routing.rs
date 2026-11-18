@@ -254,6 +254,17 @@ fn rpc_result(request_id: u64, result: Result<serde_json::Value>) -> RpcResponse
                 );
             }
             if let Some(refusal) =
+                err.downcast_ref::<ryeos_app::event_store_service::AttachmentRefusal>()
+            {
+                return RpcResponse::classified_err(
+                    request_id,
+                    refusal.code(),
+                    refusal.to_string(),
+                    false,
+                    json!({ "code": refusal.code() }),
+                );
+            }
+            if let Some(refusal) =
                 ryeos_app::native_headroom::NativeHeadroomInsufficient::find(&err)
             {
                 let mut details = refusal.details();
