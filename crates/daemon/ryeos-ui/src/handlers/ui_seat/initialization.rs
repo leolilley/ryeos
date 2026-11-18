@@ -33,13 +33,19 @@ pub(crate) fn materialize_unclaimed(
         .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
     let owner = super::seat_owner(session);
     let project_access = crate::seat_auth::attachment_project_access(&attachment)?;
-    let admission = super::admit_seat_root(
-        state,
-        &attachment.root_ref,
-        project_access.as_ref(),
-        &owner,
-        session.granted_caps.clone(),
-    )?;
+    let admission = {
+        let _timing = crate::phase_timing::PhaseTimer::start(
+            "seat_open_prepare",
+            "materialize_unclaimed.admit_seat_root",
+        );
+        super::admit_seat_root(
+            state,
+            &attachment.root_ref,
+            project_access.as_ref(),
+            &owner,
+            session.granted_caps.clone(),
+        )?
+    };
     let seat_kind = super::seat_kind(state)?;
     let _dispatch = ui
         .browser_sessions
@@ -68,6 +74,10 @@ pub(crate) fn materialize_unclaimed(
         .as_deref()
         .ok_or_else(|| HandlerError::Internal("chain reservation absent".into()))?;
     if state.state_store.get_thread(thread)?.is_none() {
+        let _timing = crate::phase_timing::PhaseTimer::start(
+            "seat_open_prepare",
+            "materialize_unclaimed.create_thread",
+        );
         let site = state.threads.site_id().to_string();
         state.threads.create_non_execution_root_thread(
             &ThreadCreateParams {
@@ -138,7 +148,13 @@ pub(crate) fn materialize_unclaimed(
             .into());
         }
     }
-    ensure(state, session, &membership, &detail)?;
+    {
+        let _timing = crate::phase_timing::PhaseTimer::start(
+            "seat_open_prepare",
+            "materialize_unclaimed.ensure_initialization",
+        );
+        ensure(state, session, &membership, &detail)?;
+    }
     Ok(membership)
 }
 
@@ -201,7 +217,7 @@ pub(super) fn ensure(
         .engine
         .with_checked_bundle_generation(|generation| -> anyhow::Result<()> {
             revalidate_current_admission(generation, state, &session.session_id, membership)?;
-            ensure_current(state, session, membership, detail).map_err(Into::into)
+            ensure_current(generation, state, session, membership, detail).map_err(Into::into)
         })
         .map_err(|error| HandlerError::Conflict(format!("{error:#}")))
 }
@@ -282,6 +298,7 @@ pub(super) fn revalidate_current_admission(
 }
 
 fn ensure_current(
+    generation: &ryeos_engine::engine::CheckedEngineGeneration<'_>,
     state: &AppState,
     session: &BrowserSession,
     membership: &PresentationMembership,
@@ -301,6 +318,13 @@ fn ensure_current(
     let payload = serde_json::to_value(record(membership))
         .map_err(|error| HandlerError::Internal(error.to_string()))?;
     let owner = super::seat_owner(session);
+    // The initialization record is durable and is never withdrawn. Verify the
+    // installed bundles once more here, after the admission was re-resolved
+    // and immediately before the append, so the record is never written from
+    // an admission resolved on bundles that have since changed.
+    generation
+        .verify_before_commit()
+        .map_err(|error| HandlerError::Conflict(error.to_string()))?;
     let written = state
         .state_store
         .append_seat_events_and_renew_if_anchor(

@@ -139,6 +139,10 @@ pub struct AppState {
     pub authorizer: Arc<Authorizer>,
     /// Ingest ignore matcher compiled from the retained node-policy snapshot.
     pub ignore_matcher: Arc<IgnoreMatcher>,
+    /// The `.ai` roots AI-only project sync admits and produces, composed once
+    /// at startup. Consulted only where a tree is admitted or captured; code
+    /// that re-reads an already-admitted tree checks the floors alone.
+    pub sync_include: Arc<ryeos_state::project_sync::SyncInclude>,
     /// Vault X25519 public key fingerprint. `None` when using
     /// `EmptyVault` or when the vault public key file doesn't exist.
     /// Populated at startup from `<system>/.ai/node/vault/public_key.pem`.
@@ -602,6 +606,7 @@ pub mod test_support {
                     patterns: Vec::new(),
                 },
             )?),
+            sync_include: Arc::new(ryeos_state::project_sync::SyncInclude::for_tests()),
             vault_fingerprint: None,
             accounting: None,
             persistent_sessions: Arc::new(crate::persistent_session::PersistentSessionPool::new()),
