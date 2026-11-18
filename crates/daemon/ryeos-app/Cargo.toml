@@ -19,7 +19,6 @@ anyhow = { workspace = true }
 arc-swap = { workspace = true }
 base64 = { workspace = true }
 hex = { workspace = true }
-chrono = { workspace = true }
 directories = { workspace = true }
 lillux = { workspace = true }
 lillux-sqlite = { workspace = true }

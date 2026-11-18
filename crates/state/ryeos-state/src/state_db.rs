@@ -1004,8 +1004,7 @@ impl AuthoritativeTerminalChain {
             return Ok(false);
         };
         let now = crate::objects::parse_canonical_timestamp(now)
-            .with_context(|| format!("invalid canonical retention current time `{now}`"))?
-            .timestamp();
+            .with_context(|| format!("invalid canonical retention current time `{now}`"))?;
         Ok(now >= retire_after)
     }
 }

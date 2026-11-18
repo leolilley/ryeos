@@ -7,7 +7,7 @@
 //! short-lived bearer token to a different destination.
 
 use anyhow::{Context as _, Result, anyhow, ensure};
-use chrono::DateTime;
+use ryeos_effect_contract::rfc3339;
 use serde::Deserialize;
 use url::Url;
 use zeroize::Zeroizing;
@@ -127,9 +127,8 @@ pub(crate) fn bind_connect_response(
             && response.execution_id.len() > 4,
         "Render connect execution identity is invalid"
     );
-    let expires_at_ms = DateTime::parse_from_rfc3339(&response.expires_at)
-        .context("Render connect token expiry is invalid")?
-        .timestamp_millis();
+    let expires_at_ms = rfc3339::parse_unix_millis(&response.expires_at)
+        .context("Render connect token expiry is invalid")?;
     ensure!(
         expires_at_ms > now_ms && expires_at_ms <= now_ms.saturating_add(24 * 60 * 60 * 1000),
         "Render connect token expiry is outside its bound"

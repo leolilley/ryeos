@@ -514,9 +514,8 @@ pub fn testimony_issue_time(signed: &Attestation, now_unix: i64) -> anyhow::Resu
         issued_at: signed.issued_at.clone(),
         window_secs: TESTIMONY_SUBMISSION_WINDOW_SECS,
     };
-    let issued = chrono::DateTime::parse_from_rfc3339(&signed.issued_at)
-        .map_err(|_| stale())?
-        .timestamp();
+    let issued = ryeos_effect_contract::rfc3339::parse_unix_seconds(&signed.issued_at)
+        .map_err(|_| stale())?;
     if issued > now_unix + 60 || now_unix - issued > TESTIMONY_SUBMISSION_WINDOW_SECS {
         return Err(stale().into());
     }
@@ -568,19 +567,18 @@ pub fn finish_testimony_export(
 /// carries no expiry of its own; the testimony bound is what limits it.
 fn testimony_expiry(qualification: &Attestation, now: &str) -> anyhow::Result<String> {
     let parse = |label: &str, value: &str| {
-        chrono::DateTime::parse_from_rfc3339(value)
-            .map(|time| time.with_timezone(&chrono::Utc))
+        ryeos_effect_contract::rfc3339::parse_unix_nanos(value)
             .with_context(|| format!("{label} is not an RFC 3339 time"))
     };
-    let limit = parse("export time", now)?
-        + chrono::Duration::seconds(i64::try_from(
-            MAX_REMOTE_QUALIFICATION_TESTIMONY_AGE_SECONDS,
-        )?);
+    let max_age_nanos = i128::from(MAX_REMOTE_QUALIFICATION_TESTIMONY_AGE_SECONDS) * 1_000_000_000;
+    let limit = parse("export time", now)? + max_age_nanos;
     let expiry = match qualification.expires_at.as_deref() {
         Some(own) => limit.min(parse("qualification expiry", own)?),
         None => limit,
     };
-    Ok(expiry.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+    let expiry_seconds = i64::try_from(expiry.div_euclid(1_000_000_000))
+        .context("testimony expiry is out of range")?;
+    ryeos_effect_contract::rfc3339::format_unix_seconds(expiry_seconds)
 }
 
 /// Controller side, blocking. `owner_principal` is the authenticated
@@ -2140,9 +2138,8 @@ mod tests {
                 serde_json::json!({}),
             )
         };
-        let now = chrono::DateTime::parse_from_rfc3339("2026-11-15T00:10:00Z")
-            .unwrap()
-            .timestamp();
+        let now =
+            ryeos_effect_contract::rfc3339::parse_unix_seconds("2026-11-15T00:10:00Z").unwrap();
         assert_eq!(
             testimony_issue_time(&issued("2026-11-15T00:05:00Z"), now).unwrap(),
             "2026-11-15T00:05:00Z"
