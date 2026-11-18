@@ -4,6 +4,18 @@ category: "ryeos-runtime/model-providers"
 # Gateway entry for the PLE model route: one Chat Completions endpoint serving
 # every model, one credential name. Every per-model row below is PROVISIONAL:
 # measured on a LiteLLM stand-in; the organisers' route may differ.
+# Asserted without measurement:
+#  - image media types jpeg, gif and webp (only an 8x8 PNG was probed);
+#  - the image `cost` block (pixels_per_token, max_tokens);
+#  - `whole_types: [redacted_thinking]` on the Claude capture rule;
+#  - the `max_completion_tokens` output_limit path;
+#  - the usage paths for gpt-oss and GLM (copied from the shared entry).
+# No `reasoning.effort` mapping yet: its values depend on the organisers'
+# per-model notes; the shape exists (`schemas.reasoning.effort`), so it comes
+# later as data.
+# Profile `match` globs are suffix-only (the matcher supports only a leading
+# or trailing `*`), so dated or `-lite` ids miss their row. That fails safe:
+# the entry default refuses images and sends no cache marks.
 #
 # base_url is a placeholder. The entry cannot read the environment; the start
 # path writes the node-space override that carries the real MODEL_BASE_URL and
@@ -86,7 +98,9 @@ body_template:
 extra:
   stream_url: "/chat/completions"
 profiles:
-  # Opus 5.5: images in a user message and in a tool result; signed thinking
+  # Opus 5.5: images accepted in a user message (the probe also read one in a
+  # tool-role message, but the request builder hoists tool-result images into a
+  # user message, so tool-role acceptance is not exercised); signed thinking
   # blocks replayed verbatim inside the open tool loop; explicit cache marks
   # (the route caches only where marked); cached counts as above. A profile's
   # `schemas` replaces the entry's whole, so the shared route is restated.
@@ -96,7 +110,9 @@ profiles:
       unsupported: refuse
       accepts:
         media_types: [image/png, image/jpeg, image/gif, image/webp]
-        # Limits are not measured (no limit text seen); conservative values.
+        # Limits are not measured (no limit text seen). These sit above the
+        # shipped tool_images ceilings (2 MiB per image, 4 per result), so they
+        # are inert upper bounds, not a tightened policy.
         max_bytes_per_image: 3145728
         max_images_per_request: 20
         text_part_template: {type: text, text: "{text}"}
@@ -187,7 +203,9 @@ profiles:
       unsupported: refuse
       accepts:
         media_types: [image/png, image/jpeg, image/gif, image/webp]
-        # Limits are not measured (no limit text seen); conservative values.
+        # Limits are not measured (no limit text seen). These sit above the
+        # shipped tool_images ceilings (2 MiB per image, 4 per result), so they
+        # are inert upper bounds, not a tightened policy.
         max_bytes_per_image: 3145728
         max_images_per_request: 20
         text_part_template: {type: text, text: "{text}"}

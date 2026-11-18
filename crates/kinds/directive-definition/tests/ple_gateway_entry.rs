@@ -121,7 +121,37 @@ fn every_model_reads_cached_counts_from_the_gateway_usage_chunk() {
 
 #[test]
 fn the_entry_carries_no_tariff_and_no_setup() {
-    let value = resolved("claude-opus-5-5");
-    assert!(value.get("spend_authority").is_none_or(Value::is_null));
-    assert!(value["extra"].get("setup").is_none());
+    let config = load();
+    let mut resolved = vec![serde_json::to_value(&config).expect("serialize")];
+    for model in [
+        "claude-opus-5-5",
+        "gemini-4-argon",
+        "gpt-oss-120b",
+        "unlisted-model",
+    ] {
+        resolved.push(self::resolved(model));
+    }
+    for value in resolved {
+        assert!(value.get("spend_authority").is_none_or(Value::is_null));
+        assert!(value["extra"].get("setup").is_none());
+    }
+}
+
+#[test]
+fn near_miss_and_unlisted_models_fall_back_to_the_safe_default() {
+    for model in ["gemma-4-31b", "gemini-3.8-flash-lite", "unlisted-model"] {
+        let value = resolved(model);
+        assert!(value.get("cache_marks").is_none(), "{model}");
+        assert!(value["image_input"]["accepts"].is_null(), "{model}");
+        assert_eq!(value["image_input"]["unsupported"], "refuse", "{model}");
+    }
+}
+
+#[test]
+fn the_claude_profile_restates_the_entry_schemas_except_reasoning() {
+    let mut entry = resolved("unlisted-model")["schemas"].clone();
+    let mut claude = resolved("claude-opus-5-5")["schemas"].clone();
+    entry.as_object_mut().unwrap().remove("reasoning");
+    claude.as_object_mut().unwrap().remove("reasoning");
+    assert_eq!(entry, claude);
 }
