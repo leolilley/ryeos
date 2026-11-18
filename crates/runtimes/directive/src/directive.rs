@@ -174,8 +174,8 @@ pub struct ToolImagesConfig {
     pub max_bytes_per_image: u64,
     #[serde(default = "default_tool_images_per_result")]
     pub max_images_per_result: u32,
-    /// Most image bytes one result may hold, kept under one callback frame
-    /// after base64 inflation.
+    /// Most image bytes one result may hold, kept under the 4 MiB a tool's
+    /// stored result may take once base64 inflates them.
     #[serde(default = "default_tool_image_bytes_per_result")]
     pub max_bytes_per_result: u64,
     #[serde(default = "default_tool_images_per_run")]
@@ -183,18 +183,30 @@ pub struct ToolImagesConfig {
     /// Most distinct image bytes a run may store.
     #[serde(default = "default_tool_image_bytes_per_run")]
     pub max_bytes_per_run: u64,
+    /// Most pixels on either side of one image, read from its header. A
+    /// truncated body is not detectable without decoding, so this bounds what
+    /// the header claims, not what the bytes hold.
+    #[serde(default = "default_tool_image_dimension")]
+    pub max_image_dimension: u32,
+}
+
+fn default_tool_image_dimension() -> u32 {
+    8000
 }
 
 fn default_tool_image_max_bytes() -> u64 {
-    3 * 1024 * 1024
+    2 * 1024 * 1024
 }
 
 fn default_tool_images_per_result() -> u32 {
     4
 }
 
+/// A subprocess tool's whole result is stored in the thread's result, which
+/// holds at most 4 MiB of compact JSON; base64 makes an image a third larger,
+/// so 3 MB of image bytes leaves about 190 KB for the text and wrapper.
 fn default_tool_image_bytes_per_result() -> u64 {
-    6 * 1024 * 1024
+    3_000_000
 }
 
 fn default_tool_images_per_run() -> u32 {
@@ -213,6 +225,7 @@ impl Default for ToolImagesConfig {
             max_bytes_per_result: default_tool_image_bytes_per_result(),
             max_images_per_run: default_tool_images_per_run(),
             max_bytes_per_run: default_tool_image_bytes_per_run(),
+            max_image_dimension: default_tool_image_dimension(),
         }
     }
 }
@@ -224,6 +237,7 @@ impl ToolImagesConfig {
             || self.max_bytes_per_result == 0
             || self.max_images_per_run == 0
             || self.max_bytes_per_run == 0
+            || self.max_image_dimension == 0
         {
             anyhow::bail!("execution.tool_images limits must all be positive");
         }

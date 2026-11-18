@@ -346,8 +346,26 @@ fn recover_result_guard(
             }
             continue;
         }
+        // The notes for dropped images follow the guard's text and were never
+        // part of what it hashed.
+        let text = result.text();
+        let dropped: Vec<(usize, &str)> = result
+            .guard
+            .dropped_images
+            .iter()
+            .map(|image| (image.position as usize, image.code.as_str()))
+            .collect();
+        let guarded = if dropped.is_empty() {
+            text.as_str()
+        } else {
+            crate::tool_images::strip_drop_notes(&text, &dropped).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "resume: tool result text does not end with its dropped-image notes"
+                )
+            })?
+        };
         guard
-            .restore_result(&result.text(), result.guard.duplicate_of.as_deref())
+            .restore_result(guarded, result.guard.duplicate_of.as_deref())
             .map_err(|error| anyhow::anyhow!("resume: invalid result-guard evidence: {error}"))?;
     }
     Ok(guard)
@@ -2493,6 +2511,44 @@ mod tests {
         let next = guard.process(&content);
         assert_eq!(next.duplicate_of.as_deref(), Some(hash.as_str()));
         assert_eq!(next.content, marker);
+    }
+
+    #[test]
+    fn dropped_image_notes_are_not_part_of_the_recovered_guard_text() {
+        let content = "x".repeat(1024);
+        let hash = lillux::sha256_hex(content.as_bytes());
+        let dropped = [(1usize, "image_oversize")];
+        let with_notes = |text: &str| crate::tool_images::with_drop_notes(text, &dropped);
+        let marker = format!("[duplicate result omitted — hash {}]", &hash[..16]);
+        let record = |operation: &str, call: &str, text: String, duplicate: Option<&str>| {
+            let mut payload = result_with(operation, call, "tool:t", &text, "ok", duplicate);
+            payload["guard"]["dropped_images"] = json!([{"position": 1, "code": "image_oversize"}]);
+            ReplayedEventRecord {
+                event_type: "tool_call_result".to_string(),
+                payload,
+            }
+        };
+        let events = vec![
+            record(&"4".repeat(64), "c1", with_notes(&content), None),
+            record(
+                &"5".repeat(64),
+                "c2",
+                with_notes(&marker),
+                Some(hash.as_str()),
+            ),
+        ];
+        let sources = vec!["T-current".to_string(); 2];
+        let mut guard = recover_result_guard(&events, &sources, "T-current").unwrap();
+        let next = guard.process(&content);
+        assert_eq!(next.duplicate_of.as_deref(), Some(hash.as_str()));
+        // Text that does not end with its recorded notes is refused.
+        let mut broken = events.clone();
+        broken[0].payload["parts"] = text_parts(&content);
+        let error = recover_result_guard(&broken, &sources, "T-current").unwrap_err();
+        assert!(
+            format!("{error:#}").contains("dropped-image notes"),
+            "{error:#}"
+        );
     }
 
     #[test]

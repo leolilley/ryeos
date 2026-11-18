@@ -27,8 +27,13 @@ fn execution(extra: &str) -> String {
 
 /// The provider entry of an image-capable model.
 fn image_input(max_images_per_request: u32) -> String {
+    image_input_bytes(max_images_per_request, 4096)
+}
+
+/// The same entry with its own per-image byte limit.
+fn image_input_bytes(max_images_per_request: u32, max_bytes_per_image: u64) -> String {
     format!(
-        "image_input:\n  accepts:\n    media_types: [image/png]\n    max_bytes_per_image: 4096\n    max_images_per_request: {max_images_per_request}\n    text_part_template: {{type: text, text: \"{{text}}\"}}\n    image_part_template: {{type: image_url, image_url: {{url: \"{{data_url}}\"}}}}\n    tool_result_note: \"[{{count}} image(s) follow in the next message]\"\n    deferred_label: \"Image {{index}} from tool result {{call_id}}:\"\n    omitted_note: \"[earlier image omitted: {{media_type}} {{width}}x{{height}}]\"\n    cost: {{pixels_per_token: 750, max_tokens: 1600, unknown_dimensions_tokens: 1600}}\n"
+        "image_input:\n  accepts:\n    media_types: [image/png]\n    max_bytes_per_image: {max_bytes_per_image}\n    max_images_per_request: {max_images_per_request}\n    text_part_template: {{type: text, text: \"{{text}}\"}}\n    image_part_template: {{type: image_url, image_url: {{url: \"{{data_url}}\"}}}}\n    tool_result_note: \"[{{count}} image(s) follow in the next message]\"\n    deferred_label: \"Image {{index}} from tool result {{call_id}}:\"\n    omitted_note: \"[earlier image omitted: {{media_type}} {{width}}x{{height}}]\"\n    cost: {{pixels_per_token: 750, max_tokens: 1600, unknown_dimensions_tokens: 1600}}\n"
     )
 }
 
@@ -207,10 +212,10 @@ async fn a_text_note_entry_keeps_the_result_text_and_stores_nothing() {
     assert!(image_urls(&bodies[1]).is_empty());
     let results = chain_payloads(&rig.h, &thread_id, "tool_call_result").await;
     assert_eq!(results[0]["status"], "ok");
-    assert_eq!(results[0]["guard"]["truncated"], true);
+    assert_eq!(results[0]["guard"]["truncated"], false);
     assert_eq!(
-        results[0]["guard"]["truncated_reason"],
-        "image_input_unsupported"
+        results[0]["guard"]["dropped_images"],
+        json!([{"position": 1, "code": "image_input_unsupported"}])
     );
     assert!(results[0].get("attachment_refs").is_none());
 }
@@ -278,7 +283,10 @@ async fn the_per_run_cap_refuses_an_image_past_the_limit_and_the_run_goes_on() {
     assert_eq!(results[1]["parts"][1]["type"], "image");
     let refused = &results[2];
     assert_eq!(refused["parts"].as_array().expect("parts").len(), 1);
-    assert_eq!(refused["guard"]["truncated_reason"], "image_limit");
+    assert_eq!(
+        refused["guard"]["dropped_images"],
+        json!([{"position": 1, "code": "image_limit"}])
+    );
     assert!(refused.get("attachment_refs").is_none());
     assert!(
         refused["parts"][0]["text"]
@@ -306,7 +314,10 @@ async fn a_wrong_type_and_an_oversize_image_are_dropped_with_their_codes() {
     let results = chain_payloads(&rig.h, &thread_id, "tool_call_result").await;
     assert_eq!(results.len(), 2);
     // The first result lost its GIF-as-PNG and kept the good image.
-    assert_eq!(results[0]["guard"]["truncated_reason"], "image_media_type");
+    assert_eq!(
+        results[0]["guard"]["dropped_images"],
+        json!([{"position": 1, "code": "image_media_type"}])
+    );
     assert_eq!(results[0]["parts"].as_array().expect("parts").len(), 2);
     assert!(
         results[0]["parts"][0]["text"]
@@ -315,7 +326,10 @@ async fn a_wrong_type_and_an_oversize_image_are_dropped_with_their_codes() {
             .contains("[image 1 not used: image_media_type]")
     );
     // The second held only an oversize image.
-    assert_eq!(results[1]["guard"]["truncated_reason"], "image_oversize");
+    assert_eq!(
+        results[1]["guard"]["dropped_images"],
+        json!([{"position": 1, "code": "image_oversize"}])
+    );
     assert_eq!(results[1]["parts"].as_array().expect("parts").len(), 1);
     assert!(results[1].get("attachment_refs").is_none());
     let bodies = rig.stub.request_bodies().await;
@@ -409,4 +423,33 @@ async fn a_follow_up_successor_sends_the_images_of_its_predecessor() {
     let bodies = rig.stub.request_bodies().await;
     assert_eq!(bodies.len(), 3);
     assert_eq!(image_urls(&bodies[2]), vec![data_url(&sent[0])]);
+}
+
+// 8 ── an image just under the signed per-image default crosses a subprocess tool
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_subprocess_tool_image_just_under_the_per_image_default_arrives() {
+    // The signed defaults (2 MiB per image, 3 MB per result) are sized so a
+    // result survives base64 and the JSON wrapper under the 4 MiB cap on a
+    // tool's stored result; the model entry allows the whole default.
+    let rig = rig(
+        &calls(&["shot_wide_shot_wide"]),
+        RigOptions {
+            provider_top_extra: image_input_bytes(4, 3 * 1024 * 1024),
+            ..RigOptions::default()
+        },
+    )
+    .await;
+    let thread_id = run_to_completion(&rig).await;
+    let sent = returned_images(&rig);
+    assert_eq!(sent.len(), 1);
+    let bodies = rig.stub.request_bodies().await;
+    assert_eq!(image_urls(&bodies[1]), vec![data_url(&sent[0])]);
+    let results = chain_payloads(&rig.h, &thread_id, "tool_call_result").await;
+    assert_eq!(results[0]["status"], "ok");
+    assert_eq!(results[0]["parts"][1]["type"], "image");
+    assert_eq!(
+        results[0]["parts"][1]["byte_length"],
+        2 * 1024 * 1024 - 1024
+    );
 }

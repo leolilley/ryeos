@@ -214,7 +214,8 @@ import json, os, time
 /// and appends its base64 to `aux/shots.log`, one line per good image, so a
 /// test can compare what the model was sent with what the tool returned.
 /// Variants: `good` (text and one PNG), `bad` (a GIF declared as PNG, then a
-/// good PNG) and `big` (a PNG padded past the model's per-image limit).
+/// good PNG) and `big` (a PNG padded past the model's per-image limit) and `wide` (a PNG
+/// just under the signed per-image default).
 pub fn image_tool_code(aux: &Path, variant: &str) -> String {
     let counter = aux.join("shot.count");
     let log = aux.join("shots.log");
@@ -252,6 +253,13 @@ parts = [{'type': 'text', 'text': 'bad %d' % n}, part('image/png', b'GIF89a\\x01
         }
         "big" => {
             "parts = [{'type': 'text', 'text': 'big %d' % n}, part('image/png', good + b'\\x00' * 8000)]"
+        }
+        // A PNG padded to 1 KiB under the signed per-image default (2 MiB), so
+        // the whole result is about 2.8 MB of JSON on the tool's stdout.
+        "wide" => {
+            "wide = good + b'\\x00' * (2 * 1024 * 1024 - 1024 - len(good))
+log(wide)
+parts = [{'type': 'text', 'text': 'wide %d' % n}, part('image/png', wide)]"
         }
         other => panic!("unknown image tool variant {other}"),
     };
@@ -482,7 +490,12 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
         &fixture.publisher,
     )?;
     if opts.image_tools {
-        for (name, variant) in [("shot", "good"), ("shot_bad", "bad"), ("shot_big", "big")] {
+        for (name, variant) in [
+            ("shot", "good"),
+            ("shot_bad", "bad"),
+            ("shot_big", "big"),
+            ("shot_wide", "wide"),
+        ] {
             plant_python_tool(
                 root,
                 name,

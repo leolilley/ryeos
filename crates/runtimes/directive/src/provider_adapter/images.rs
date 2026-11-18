@@ -11,7 +11,7 @@
 //! ones stand in as a short text note, in place. The estimate applies the same
 //! rule, so what is counted is what is sent.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use anyhow::{Result, bail};
 use base64::Engine as _;
@@ -35,11 +35,26 @@ pub struct StoredImage {
 }
 
 /// Images by the hash of their attachment object, bounded in memory.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ImageStore {
     entries: HashMap<String, StoredImage>,
     order: VecDeque<String>,
     bytes: usize,
+    /// Images eviction must leave: the ones the next request carries.
+    pinned: HashSet<String>,
+    limit: usize,
+}
+
+impl Default for ImageStore {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            bytes: 0,
+            pinned: HashSet::new(),
+            limit: IMAGE_STORE_MAX_BYTES,
+        }
+    }
 }
 
 impl ImageStore {
@@ -57,13 +72,28 @@ impl ImageStore {
             },
         );
         self.order.push_back(attachment.to_owned());
-        while self.bytes > IMAGE_STORE_MAX_BYTES && self.order.len() > 1 {
-            if let Some(oldest) = self.order.pop_front()
+        // Evict the oldest image that is neither pinned nor the one just
+        // inserted; when only those remain the store stays over its bound
+        // rather than lose an image a request needs.
+        while self.bytes > self.limit {
+            let Some(at) = self
+                .order
+                .iter()
+                .position(|held| held != attachment && !self.pinned.contains(held))
+            else {
+                break;
+            };
+            if let Some(oldest) = self.order.remove(at)
                 && let Some(dropped) = self.entries.remove(&oldest)
             {
                 self.bytes -= dropped.base64.len();
             }
         }
+    }
+
+    /// Protects exactly these images from eviction, replacing any earlier pin.
+    pub fn pin(&mut self, attachments: impl IntoIterator<Item = String>) {
+        self.pinned = attachments.into_iter().collect();
     }
 
     pub fn contains(&self, attachment: &str) -> bool {
@@ -75,6 +105,53 @@ impl ImageStore {
     }
 }
 
+/// Replaces, in every message, each image the model's entry cannot take by
+/// size with a text note that names `code`: an image whose bytes exceed the
+/// entry's per-image limit, or whose base64 would not fit one callback frame
+/// when read back. Whether an image fails depends only on its recorded size
+/// and the entry, so a live run, a resume and a continuation all replace the
+/// same images. Returns how many were replaced.
+pub fn replace_unsendable_images(
+    messages: &mut [ProviderMessage],
+    accepts: &ImageAcceptConfig,
+    code: &str,
+) -> usize {
+    let fails = |image: &ImagePart| {
+        image.byte_length > accepts.max_bytes_per_image
+            || image.byte_length.div_ceil(3).saturating_mul(4) + READ_FRAME_HEADROOM_BYTES
+                > READ_FRAME_BYTES
+    };
+    let note = |_: &ImagePart| Part::text(format!("[image not used: {code}]"));
+    let mut replaced = 0;
+    for message in messages.iter_mut() {
+        for part in message.parts.iter_mut() {
+            match part {
+                Part::Image(image) if fails(image) => {
+                    *part = note(image);
+                    replaced += 1;
+                }
+                Part::ToolResult(result) => {
+                    for inner in result.parts.iter_mut() {
+                        if let Part::Image(image) = inner
+                            && fails(image)
+                        {
+                            *inner = note(image);
+                            replaced += 1;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    replaced
+}
+
+/// The most a callback frame carries: a stored image is read back whole in
+/// one frame, as base64 inside a small JSON wrapper.
+const READ_FRAME_BYTES: u64 = 10 * 1024 * 1024;
+const READ_FRAME_HEADROOM_BYTES: u64 = 4096;
+
 /// The images moved out of a run of tool messages: per call, whether each is
 /// carried by the request, and the image.
 type Deferred = Vec<(String, Vec<(bool, ImagePart)>)>;
@@ -82,13 +159,23 @@ type Deferred = Vec<(String, Vec<(bool, ImagePart)>)>;
 /// Every image of a history, oldest first: message order, then part order,
 /// then order inside a tool result. A request carries the images from some
 /// position on, so the position of an image is its ordinal in this order and
-/// does not depend on which messages a request leaves out.
+/// does not depend on which messages a request leaves out. `lower_images`
+/// counts the same way: a top-level image only in a message that is not a tool
+/// message, a result's images only inside a tool message. A validated message
+/// can hold an image only in a user message (`Part::allowed_in`), so a tool
+/// message never has a top-level one.
 fn image_parts(messages: &[ProviderMessage]) -> Vec<&ImagePart> {
     let mut images = Vec::new();
     for message in messages {
         for part in &message.parts {
             match part {
-                Part::Image(image) => images.push(image),
+                Part::Image(image) => {
+                    debug_assert!(
+                        message.role != Role::Tool,
+                        "a tool message holds no top-level image"
+                    );
+                    images.push(image)
+                }
                 Part::ToolResult(result) => {
                     images.extend(result.parts.iter().filter_map(|inner| match inner {
                         Part::Image(image) => Some(image),
@@ -261,6 +348,10 @@ pub fn lower_images(
         let mut parts = Vec::with_capacity(message.parts.len());
         for part in &message.parts {
             let Part::ToolResult(result) = part else {
+                debug_assert!(
+                    !matches!(part, Part::Image(_)),
+                    "a tool message holds no top-level image, so none goes uncounted"
+                );
                 parts.push(part.clone());
                 continue;
             };
@@ -401,6 +492,68 @@ mod tests {
             Role::Tool,
             vec![Part::tool_result(call_id, parts, ToolResultStatus::Ok)],
         )
+    }
+
+    #[test]
+    fn eviction_leaves_pinned_images_and_the_one_just_inserted() {
+        let mut store = ImageStore {
+            limit: 20,
+            ..ImageStore::default()
+        };
+        // Each 6-byte image is 8 bytes of base64: two fit, a third evicts.
+        for seed in ['a', 'b'] {
+            store.insert(&hash(seed), "image/png", b"123456");
+        }
+        store.pin([hash('a')]);
+        store.insert(&hash('c'), "image/png", b"123456");
+        assert!(store.contains(&hash('a')), "pinned image evicted");
+        assert!(!store.contains(&hash('b')), "oldest unpinned stays");
+        assert!(store.contains(&hash('c')));
+        // With everything else pinned the store goes over its bound rather
+        // than lose an image the request needs.
+        store.pin([hash('a'), hash('c'), hash('d')]);
+        store.insert(&hash('d'), "image/png", b"123456");
+        assert!(store.contains(&hash('a')) && store.contains(&hash('c')));
+        assert!(store.contains(&hash('d')));
+    }
+
+    #[test]
+    fn an_image_too_large_to_send_becomes_a_note_everywhere_it_appears() {
+        let accepts = accepts(4);
+        let accepts = accepts.accepts.as_ref().unwrap();
+        let mut big = image('b');
+        big.byte_length = 1001;
+        let mut messages = vec![
+            Message::new(
+                Role::User,
+                vec![Part::Image(big.clone()), Part::Image(image('a'))],
+            ),
+            Message::new(
+                Role::Tool,
+                vec![Part::tool_result(
+                    "c1",
+                    vec![Part::text("t"), Part::Image(big)],
+                    ToolResultStatus::Ok,
+                )],
+            ),
+        ];
+        let replaced = replace_unsendable_images(&mut messages, accepts, "image_oversize");
+        assert_eq!(replaced, 2);
+        assert_eq!(
+            retained_images(&messages, 10)
+                .iter()
+                .map(|image| image.attachment.clone())
+                .collect::<Vec<_>>(),
+            vec![hash('a')]
+        );
+        assert!(
+            matches!(&messages[0].parts[0], Part::Text(text) if text.text == "[image not used: image_oversize]")
+        );
+        // Nothing left to replace, so a second pass is a no-op.
+        assert_eq!(
+            replace_unsendable_images(&mut messages, accepts, "image_oversize"),
+            0
+        );
     }
 
     fn store_with(seeds: &[char]) -> ImageStore {

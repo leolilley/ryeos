@@ -254,6 +254,21 @@ pub struct ToolResultGuard {
     /// The hash of the earlier result this one repeats.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duplicate_of: Option<String>,
+    /// The images of the result that were not used, each with its stable
+    /// code. The model-visible text ends with a note for each; they are kept
+    /// apart from the guard's own truncation so a rebuild can tell the guarded
+    /// text from the notes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dropped_images: Vec<DroppedImage>,
+}
+
+/// One image of a tool result that was dropped instead of used.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DroppedImage {
+    /// One-based position among the result's image parts.
+    pub position: u32,
+    pub code: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

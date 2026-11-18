@@ -39,6 +39,7 @@ pub const IMAGE_OVERSIZE: &str = "image_oversize";
 pub const IMAGE_MEDIA_TYPE: &str = "image_media_type";
 pub const IMAGE_DECODE: &str = "image_decode";
 pub const IMAGE_LIMIT: &str = "image_limit";
+pub const IMAGE_DIMENSIONS: &str = "image_dimensions";
 
 /// What the run has already stored, restored from the record on resume: how
 /// many images it has admitted, how many distinct bytes it holds, and which
@@ -75,12 +76,25 @@ pub enum Envelope {
     Parts(Vec<EnvelopePart>),
 }
 
+/// Whether a completion record reports a tool that ran to success: a success
+/// outcome and no error.
+fn completion_succeeded(record: &serde_json::Map<String, Value>) -> bool {
+    matches!(
+        record.get("outcome_code").and_then(Value::as_str),
+        Some("success" | "exit:0")
+    ) && record.get("error").is_none_or(Value::is_null)
+}
+
 /// Recognises a `result_parts` result. A subprocess tool's dispatch answer is
 /// its completion record, with the tool's own JSON under `result`; that inner
-/// value is the one examined.
+/// value is the one examined, and only when the record reports success. A
+/// failed record is an ordinary result, so the model reads the failure whole.
 pub fn parse_envelope(dispatched: &Value) -> Envelope {
     let result = match dispatched.as_object() {
         Some(object) if object.contains_key("outcome_code") && object.contains_key("result") => {
+            if !completion_succeeded(object) {
+                return Envelope::NotParts;
+            }
             &object["result"]
         }
         _ => dispatched,
@@ -175,24 +189,50 @@ pub struct Settled {
 }
 
 impl Settled {
-    /// The text the result carries before the result guard sees it: the tool's
-    /// text, a note for each dropped image, or a note that there was none.
-    pub fn model_text(&self) -> String {
-        let mut text = if self.text.is_empty() && self.dropped.is_empty() {
+    /// The text the result guard sees: the tool's own text, or a note that
+    /// there was none when the result held neither text nor a dropped image.
+    pub fn guarded_input(&self) -> String {
+        if self.text.is_empty() && self.dropped.is_empty() {
             NO_TEXT_NOTE.to_string()
-        } else if self.text.is_empty() {
-            String::new()
         } else {
             self.text.clone()
-        };
-        for (position, code) in &self.dropped {
-            if !text.is_empty() {
-                text.push('\n');
-            }
-            text.push_str(&format!("[image {position} not used: {code}]"));
         }
-        text
     }
+}
+
+/// One line for each dropped image: its position and the stable code.
+fn drop_notes<'a>(dropped: impl IntoIterator<Item = (usize, &'a str)>) -> String {
+    dropped
+        .into_iter()
+        .map(|(position, code)| format!("[image {position} not used: {code}]"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The model-visible text of a result: the guarded text, then a note for each
+/// dropped image. The notes follow the guard, so truncation and duplicate
+/// collapse never remove them and the guard's hashes cover the text alone.
+pub fn with_drop_notes(guarded: &str, dropped: &[(usize, &str)]) -> String {
+    if dropped.is_empty() {
+        return guarded.to_string();
+    }
+    let notes = drop_notes(dropped.iter().copied());
+    if guarded.is_empty() {
+        notes
+    } else {
+        format!("{guarded}\n{notes}")
+    }
+}
+
+/// The guarded text of a recorded result: its text without the notes that
+/// `with_drop_notes` appended for `dropped`. `None` when the text does not end
+/// with exactly those notes.
+pub fn strip_drop_notes<'a>(text: &'a str, dropped: &[(usize, &str)]) -> Option<&'a str> {
+    let notes = drop_notes(dropped.iter().copied());
+    if text == notes {
+        return Some("");
+    }
+    text.strip_suffix(notes.as_str())?.strip_suffix('\n')
 }
 
 /// Checks a result's parts. `config` is the model's provider entry.
@@ -262,6 +302,10 @@ pub fn admit_parts(
             .any(|accepted| accepted == facts.media_type)
         {
             settled.dropped.push((position, IMAGE_MEDIA_TYPE));
+            continue;
+        }
+        if facts.width > limits.max_image_dimension || facts.height > limits.max_image_dimension {
+            settled.dropped.push((position, IMAGE_DIMENSIONS));
             continue;
         }
         let Ok(upload) = EventAttachment::new(facts.media_type, bytes.clone()) else {
@@ -373,6 +417,17 @@ mod tests {
         );
         let plain = json!({"outcome_code": "exit:0", "result": {"ok": true}});
         assert_eq!(parse_envelope(&plain), Envelope::NotParts);
+        // The same envelope under a failed record is not unwrapped.
+        let parts = json!({"result_parts": [{"type": "text", "text": "hi"}]});
+        for record in [
+            json!({"outcome_code": "exit:1", "error": null, "result": parts}),
+            json!({"outcome_code": "exit:0", "error": {"code": "x"}, "result": parts}),
+            json!({"outcome_code": "failed", "result": parts}),
+        ] {
+            assert_eq!(parse_envelope(&record), Envelope::NotParts, "{record}");
+        }
+        let success = json!({"outcome_code": "success", "result": parts});
+        assert!(matches!(parse_envelope(&success), Envelope::Parts(_)));
         assert_eq!(
             parse_envelope(&json!({"result_parts": [], "other": 1})),
             Envelope::NotParts
@@ -472,7 +527,7 @@ mod tests {
         assert!(settled.images.is_empty());
         assert_eq!(settled.dropped, vec![(1, IMAGE_INPUT_UNSUPPORTED)]);
         assert_eq!(
-            settled.model_text(),
+            with_drop_notes(&settled.guarded_input(), &settled.dropped),
             "kept\n[image 1 not used: image_input_unsupported]"
         );
         assert_eq!(run, ImageRunState::default());
@@ -525,6 +580,51 @@ mod tests {
     }
 
     #[test]
+    fn drop_notes_follow_the_text_and_strip_back_off() {
+        let dropped = [(1, IMAGE_OVERSIZE), (3, IMAGE_LIMIT)];
+        let both = with_drop_notes("text", &dropped);
+        assert_eq!(
+            both,
+            "text\n[image 1 not used: image_oversize]\n[image 3 not used: image_limit]"
+        );
+        assert_eq!(strip_drop_notes(&both, &dropped), Some("text"));
+        // A result with no text stands on its notes alone.
+        let alone = with_drop_notes("", &dropped[..1]);
+        assert_eq!(alone, "[image 1 not used: image_oversize]");
+        assert_eq!(strip_drop_notes(&alone, &dropped[..1]), Some(""));
+        assert_eq!(strip_drop_notes("text", &dropped), None);
+        assert_eq!(with_drop_notes("text", &[]), "text");
+    }
+
+    #[test]
+    fn an_image_whose_header_claims_too_many_pixels_is_dropped_with_its_code() {
+        let config = config("refuse", true);
+        let limits = ToolImagesConfig {
+            max_image_dimension: 100,
+            ..ToolImagesConfig::default()
+        };
+        let mut run = ImageRunState::default();
+        let Verdict::Settled(settled) = admit(
+            vec![
+                image(png(101, 10, 0)),
+                image(png(10, 101, 0)),
+                image(png(100, 100, 0)),
+            ],
+            &config,
+            &limits,
+            &mut run,
+        ) else {
+            panic!("refused");
+        };
+        assert_eq!(
+            settled.dropped,
+            vec![(1, IMAGE_DIMENSIONS), (2, IMAGE_DIMENSIONS)]
+        );
+        assert_eq!(settled.images.len(), 1);
+        assert_eq!(run.images, 1);
+    }
+
+    #[test]
     fn the_per_result_and_per_run_caps_refuse_past_the_limit() {
         let config = config("refuse", true);
         let limits = ToolImagesConfig {
@@ -566,6 +666,6 @@ mod tests {
             }],
             dropped: Vec::new(),
         };
-        assert_eq!(settled.model_text(), NO_TEXT_NOTE);
+        assert_eq!(settled.guarded_input(), NO_TEXT_NOTE);
     }
 }
