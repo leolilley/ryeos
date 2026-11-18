@@ -24,7 +24,9 @@ use ryeos_engine::contracts::ItemSpace;
 use ryeos_executor::executor::ServiceAvailability;
 
 use super::item_titles::{ItemTitleConfig, is_trusted};
-use super::signed_item_topology::{classify_trust, label_for_bare_id, namespace_for_bare_id};
+use super::signed_item_topology::{
+    classify_trust_of_source, label_for_bare_id, namespace_for_bare_id,
+};
 
 // ── items.list types ───────────────────────────────────────────────
 
@@ -139,6 +141,12 @@ pub struct InspectedItem {
     pub bare_id: String,
     pub source_path: String,
     pub space: String,
+    /// Display name, from the same rules and bytes as `items/list`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Where `title` came from: "authored", "heading" or "derived".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title_source: Option<String>,
     pub executable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trust: Option<super::signed_item_topology::TrustSummary>,
@@ -280,40 +288,15 @@ fn build_items_list(
             *by_kind.entry(kind_name.to_string()).or_insert(0) += 1;
             *by_space.entry(space_str.clone()).or_insert(0) += 1;
 
-            // Trust classification
-            let trust = classify_trust(
-                &resolution.winner_path,
-                project_access,
-                schema
-                    .spec_for(&resolution.matched_ext)
-                    .map(|spec| &spec.signature),
-                &state.engine.trust_store,
-                resolution.winner_space,
-                kind_name,
-                project_path.map(PathBuf::as_path),
-            );
-
-            // Display name, read only from an item whose trust class is trusted.
-            let spec = schema.spec_for(&resolution.matched_ext);
-            let (title, title_source) = titles.title(
+            let (trust, title, title_source) = trust_and_title(
+                state,
+                titles,
+                schema,
+                &resolution,
                 kind_name,
                 &item_ref.bare_id,
-                is_trusted(trust.as_ref()),
-                spec.map(|spec| &spec.signature),
-                || crate::seat_auth::read_whole_item_source(&resolution.winner_path, project_access),
-                |content| {
-                    let spec = spec?;
-                    state
-                        .engine
-                        .parser_dispatcher
-                        .dispatch(
-                            &spec.parser,
-                            content,
-                            Some(resolution.winner_path.as_path()),
-                            &spec.signature,
-                        )
-                        .ok()
-                },
+                project_access,
+                project_path,
             );
 
             // Shadowed candidates
@@ -364,6 +347,59 @@ fn build_items_list(
     }
 }
 
+/// An item's trust class and display name, both from one read of its source:
+/// the title is only ever taken from the bytes whose signature was verified.
+#[allow(clippy::too_many_arguments)]
+fn trust_and_title(
+    state: &AppState,
+    titles: &ItemTitleConfig,
+    schema: &ryeos_engine::kind_registry::KindSchema,
+    resolution: &ryeos_engine::item_resolution::ResolutionResult,
+    kind: &str,
+    bare_id: &str,
+    project_access: Option<&crate::seat_auth::RetainedProjectAccess>,
+    project_path: Option<&PathBuf>,
+) -> (
+    Option<super::signed_item_topology::TrustSummary>,
+    String,
+    &'static str,
+) {
+    let spec = schema.spec_for(&resolution.matched_ext);
+    let envelope = spec.map(|spec| &spec.signature);
+    let raw = crate::seat_auth::read_whole_item_source(&resolution.winner_path, project_access);
+    let trust = raw.as_deref().and_then(|raw| {
+        classify_trust_of_source(
+            raw,
+            envelope,
+            &state.engine.trust_store,
+            resolution.winner_space,
+            kind,
+            project_path.map(PathBuf::as_path),
+        )
+    });
+    let (title, source) = titles.title(
+        kind,
+        bare_id,
+        is_trusted(trust.as_ref()),
+        envelope,
+        || raw,
+        |content| {
+            let spec = spec?;
+            state
+                .engine
+                .parser_dispatcher
+                .dispatch(
+                    &spec.parser,
+                    content,
+                    Some(resolution.winner_path.as_path()),
+                    &spec.signature,
+                )
+                .ok()
+        },
+    );
+    (trust, title, source)
+}
+
 fn parse_space_filter(s: &str) -> impl Fn(&ItemSpace) -> bool + '_ {
     move |space: &ItemSpace| space.as_str() == s
 }
@@ -395,14 +431,21 @@ pub async fn handle_item_inspect(
     let req: ItemInspectRequest = serde_json::from_value(params)
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
 
-    let response =
-        build_item_inspect(&state, project_path.as_ref(), project_access.as_ref(), &req)?;
+    let titles = ItemTitleConfig::load(&state)?;
+    let response = build_item_inspect(
+        &state,
+        &titles,
+        project_path.as_ref(),
+        project_access.as_ref(),
+        &req,
+    )?;
 
     serde_json::to_value(response).map_err(Into::into)
 }
 
 fn build_item_inspect(
     state: &AppState,
+    titles: &ItemTitleConfig,
     project_path: Option<&PathBuf>,
     project_access: Option<&crate::seat_auth::RetainedProjectAccess>,
     req: &ItemInspectRequest,
@@ -427,17 +470,15 @@ fn build_item_inspect(
     let space_str = resolution.winner_space.as_str().to_string();
     let executable = schema.is_executable();
 
-    // Trust classification
-    let trust = classify_trust(
-        &resolution.winner_path,
-        project_access,
-        schema
-            .spec_for(&resolution.matched_ext)
-            .map(|spec| &spec.signature),
-        &state.engine.trust_store,
-        resolution.winner_space,
+    let (trust, title, title_source) = trust_and_title(
+        state,
+        titles,
+        schema,
+        &resolution,
         &item_ref.kind,
-        project_path.map(PathBuf::as_path),
+        &item_ref.bare_id,
+        project_access,
+        project_path,
     );
 
     // Shadowed
@@ -495,6 +536,8 @@ fn build_item_inspect(
             bare_id: item_ref.bare_id.clone(),
             source_path: resolution.winner_path.display().to_string(),
             space: space_str,
+            title: Some(title),
+            title_source: Some(title_source.to_string()),
             executable,
             trust,
             shadowed,
