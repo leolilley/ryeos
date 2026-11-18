@@ -154,6 +154,25 @@ pub(super) fn harvest_chunk_meta(
                              {output_tokens}"
                     ));
                 }
+                if usage_config.cache_included_in_input
+                    && let Some(input) = input_tokens
+                {
+                    match cache_read_tokens
+                        .unwrap_or(0)
+                        .checked_add(cache_write_tokens.unwrap_or(0))
+                    {
+                        Some(cached) if cached <= input => {}
+                        Some(cached) => anomalies.push(format!(
+                            "cache read and write tokens {cached} exceed input tokens {input}, \
+                             which already contain them"
+                        )),
+                        None => anomalies.push(
+                            "cache read and write tokens overflow u64 while validating \
+                             input_tokens"
+                                .to_string(),
+                        ),
+                    }
+                }
                 let update = TokenUsage {
                     input_tokens,
                     output_tokens,
@@ -650,6 +669,77 @@ mod tests {
         assert!(usage.anomalies.iter().any(|message| {
             message.contains("cache token partition") && message.contains("input_tokens 100")
         }));
+    }
+
+    fn harvest_included_cache(block: &str) -> Option<TokenUsage> {
+        let mut streaming = declared_metadata(UsageAggregation::LatestSnapshot);
+        let usage_config = streaming
+            .metadata
+            .as_mut()
+            .and_then(|metadata| metadata.usage.as_mut())
+            .expect("declared usage metadata");
+        usage_config.cache_read_tokens_path = Some("cache_read_input_tokens".into());
+        usage_config.cache_write_tokens_path = Some("cache_creation_input_tokens".into());
+        usage_config.cache_included_in_input = true;
+        let mut usage = None;
+        let mut finish = None;
+        let mut response_id = None;
+        harvest_chunk_meta(
+            block,
+            &mut usage,
+            &mut finish,
+            &mut response_id,
+            Some(&streaming),
+        );
+        usage
+    }
+
+    #[test]
+    fn cache_counts_inside_the_input_are_read_from_declared_paths() {
+        // A write turn: the cached prefix is written, nothing read.
+        let usage = harvest_included_cache(concat!(
+            "data: {\"usage\":{\"prompt_tokens\":2051,\"completion_tokens\":20,",
+            "\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":2013}}\n",
+        ))
+        .expect("usage");
+        assert_eq!(usage.input_tokens, Some(2051));
+        assert_eq!(usage.cache_read_tokens, Some(0));
+        assert_eq!(usage.cache_write_tokens, Some(2013));
+        assert!(usage.is_valid(), "{:?}", usage.anomalies);
+
+        // A read-only report: no write field at all.
+        let usage = harvest_included_cache(concat!(
+            "data: {\"usage\":{\"prompt_tokens\":9002,\"completion_tokens\":40,",
+            "\"cache_read_input_tokens\":6948}}\n",
+        ))
+        .expect("usage");
+        assert_eq!(usage.cache_read_tokens, Some(6948));
+        assert_eq!(usage.cache_write_tokens, None);
+        assert!(usage.is_valid(), "{:?}", usage.anomalies);
+
+        // A route that reports no cache fields yields none, with no anomaly.
+        let usage = harvest_included_cache(concat!(
+            "data: {\"usage\":{\"prompt_tokens\":137,\"completion_tokens\":37}}\n",
+        ))
+        .expect("usage");
+        assert_eq!(usage.cache_read_tokens, None);
+        assert_eq!(usage.cache_write_tokens, None);
+        assert!(usage.is_valid(), "{:?}", usage.anomalies);
+    }
+
+    #[test]
+    fn cache_counts_above_the_input_they_are_included_in_invalidate_the_usage() {
+        let usage = harvest_included_cache(concat!(
+            "data: {\"usage\":{\"prompt_tokens\":2000,\"completion_tokens\":20,",
+            "\"cache_read_input_tokens\":1500,\"cache_creation_input_tokens\":600}}\n",
+        ))
+        .expect("usage");
+        assert!(!usage.is_valid());
+        assert!(
+            usage.anomalies.iter().any(|message| {
+                message.contains("2100") && message.contains("input tokens 2000")
+            })
+        );
     }
 
     #[test]
