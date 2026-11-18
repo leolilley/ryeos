@@ -40,6 +40,7 @@ fi
 sudo -n sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
 if [[ "$host_service" == 1 ]]; then
+    ls -l /usr/bin/sudo /usr/bin/install; . /etc/os-release; echo "$PRETTY_NAME"
     sudo apt-get update
     sudo apt-get install -y --no-install-recommends runit
     dpkg -L runit | grep -E '/(bin|sbin)/|runsvdir|\.service$' || true

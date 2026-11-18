@@ -971,7 +971,9 @@ jobs:
 
   installed-resume-smoke:
     name: Installed restart/resume smoke
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    # Lillux pins /usr/bin/sudo as an exact root-owned regular file; ubuntu-26.04
+    # ships sudo-rs as a symlink, which that pin refuses (ELOOP).
     timeout-minutes: 120
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.installed_resume_smoke }}
     steps:
@@ -1015,7 +1017,9 @@ jobs:
 
   browser-smoke:
     name: Installed browser client smoke
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    # Lillux pins /usr/bin/sudo as an exact root-owned regular file; ubuntu-26.04
+    # ships sudo-rs as a symlink, which that pin refuses (ELOOP).
     timeout-minutes: 120
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.browser_smoke }}
     env:
