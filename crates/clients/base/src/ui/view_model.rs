@@ -860,9 +860,13 @@ fn presentation_vm(
 }
 
 fn top_bar_vm(core: &RyeOsCore) -> RyeOsTopBarVm {
+    let view_set_tabs = core
+        .active_surface_attachment()
+        .and_then(|attachment| attachment.presentation.definition.surface())
+        .is_some_and(|surface| surface.style.view_set_tabs);
     RyeOsTopBarVm {
         visible: core.active_surface().is_some()
-            && (core.style.view_set_tabs || core.ui.top_status_visible),
+            && (view_set_tabs || core.ui.top_status_visible),
         tabs: core
             .active_surface_view_sets()
             .unwrap_or(&[])
@@ -4709,21 +4713,46 @@ mod tests {
             "name": "ryeos-base",
             "style": { "border": "thick" }
         }));
-        let mut core = test_support_core(session);
-        core.style.border = crate::surface::BorderStyleSpec::Hidden;
+        let core = test_support_core(session);
         let vm = build_view_model(&core);
         assert_eq!(vm.presentation.chrome.border, "thick");
 
-        // Without an active Surface there is no origin to inherit chrome from,
-        // even if transient state still contains a different style.
-        let mut empty = RyeOsCore::default();
-        empty.style.border = crate::surface::BorderStyleSpec::Hidden;
+        // Without an active Surface there is no origin to inherit chrome from.
+        let empty = RyeOsCore::default();
         let default_vm = build_view_model(&empty);
         assert_eq!(default_vm.presentation.chrome.border, "thin");
         let undeclared = test_support_core(session_with_surface(json!({"name":"No style"})));
         assert_eq!(
             build_view_model(&undeclared).presentation.chrome.border,
             "thin"
+        );
+    }
+
+    #[test]
+    fn surface_style_view_set_tabs_reaches_top_bar_visibility() {
+        let yaml_surface = |yaml: &str| -> serde_json::Value {
+            serde_yaml::from_str(yaml).unwrap()
+        };
+        let with_tabs = test_support_core(session_with_surface(yaml_surface(
+            "name: Tabs\nstyle:\n  view_set_tabs: true\n",
+        )));
+        assert!(
+            build_view_model(&with_tabs)
+                .presentation
+                .chrome
+                .top_bar
+                .visible
+        );
+
+        let without_tabs = test_support_core(session_with_surface(yaml_surface(
+            "name: No tabs\nstyle:\n  border: thick\n",
+        )));
+        assert!(
+            !build_view_model(&without_tabs)
+                .presentation
+                .chrome
+                .top_bar
+                .visible
         );
     }
 
