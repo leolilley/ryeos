@@ -62,6 +62,20 @@ pub enum EngineError {
         project_path: PathBuf,
     },
 
+    /// A project file and an installed bundle file answer for one ref of a
+    /// kind whose signed schema declares `project_shadowing: refuse`. Neither
+    /// is served: the ref is unavailable until the project file moves.
+    #[error(
+        "project item `{canonical_ref}` at {project_path} shadows the item of the same ref supplied by installed bundle `{bundle}` at {bundle_path}; the `{kind}` kind does not let a project replace a bundle item, so `{canonical_ref}` is unavailable until the project file is renamed or removed"
+    )]
+    ProjectShadowsBundleItem {
+        canonical_ref: String,
+        kind: String,
+        bundle: String,
+        project_path: PathBuf,
+        bundle_path: PathBuf,
+    },
+
     #[error("pinned version not found for `{canonical_ref}`: {reason}")]
     PinnedVersionNotFound {
         canonical_ref: String,

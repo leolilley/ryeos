@@ -46,6 +46,58 @@ impl EffectiveUiItemIdentity {
     }
 }
 
+/// Key under which a composed surface or view carries the engine's authorship
+/// fact for an item with a project-space member.
+pub const AUTHORSHIP_KEY: &str = "authorship";
+
+/// The authorship fact for an effective item, or `None` when every member of
+/// its extends chain is a verified bundle item. It names the space, the
+/// engine's weakest-link trust class, the item's ref and, when the first
+/// project-space member is signed, that signer's fingerprint with the label
+/// the node's trust registry records for it.
+fn authorship_fact(
+    item: &EffectiveItem,
+    signer_label: impl Fn(&str) -> Option<String>,
+) -> Option<Value> {
+    if item.trust_class == TrustClass::TrustedBundle {
+        return None;
+    }
+    let mut fact = serde_json::json!({
+        "space": "project",
+        "trust_class": item.trust_class,
+        "ref": item.canonical_ref,
+    });
+    let signer = std::iter::once(&item.provenance.root)
+        .chain(item.provenance.ancestors.iter())
+        .find(|member| member.source_space == ryeos_engine::contracts::ItemSpace::Project)
+        .and_then(|member| member.signer_fingerprint.clone());
+    if let Some(fingerprint) = signer {
+        let mut signer = serde_json::json!({ "fingerprint": fingerprint });
+        if let Some(name) = signer_label(&fingerprint) {
+            signer["name"] = Value::String(name);
+        }
+        fact["signer"] = signer;
+    }
+    Some(fact)
+}
+
+/// Write the engine's authorship fact over whatever the item authored under
+/// that key, so an item file can neither claim an author nor hide one.
+fn stamp_authorship(item: &mut EffectiveItem, signer_label: impl Fn(&str) -> Option<String>) {
+    let fact = authorship_fact(item, signer_label);
+    let Some(fields) = item.composed_value.as_object_mut() else {
+        return;
+    };
+    match fact {
+        Some(fact) => {
+            fields.insert(AUTHORSHIP_KEY.to_string(), fact);
+        }
+        None => {
+            fields.remove(AUTHORSHIP_KEY);
+        }
+    }
+}
+
 /// Resolution state for one view named by the surface. A failed view remains
 /// in both the presentation as a degraded placeholder and this sidecar as a
 /// degraded identity record; failure never fabricates definition identity.
@@ -237,7 +289,12 @@ pub fn embed_surface_views(
                     project_root,
                 ),
             })
-            .map(|effective| effective.composed_value)
+            .map(|mut effective| {
+                stamp_authorship(&mut effective, |fingerprint| {
+                    engine.signer_label(fingerprint)
+                });
+                effective.composed_value
+            })
             .map_err(|e| e.to_string())
     })
 }
@@ -306,6 +363,9 @@ fn embed_effective_surface_views(
     effective_surface: &mut EffectiveItem,
 ) -> EmbeddedSurfaceViews {
     let surface = EffectiveUiItemIdentity::from_effective_item(effective_surface);
+    stamp_authorship(effective_surface, |fingerprint| {
+        generation.signer_label(fingerprint)
+    });
     if !effective_surface.composed_value.is_object() {
         return EmbeddedSurfaceViews {
             identity: EmbeddedSurfaceIdentity {
@@ -419,8 +479,11 @@ fn resolve_identity_views_in_generation(
                 (
                     view_ref,
                     result
-                        .map(|effective| {
+                        .map(|mut effective| {
                             let identity = EffectiveUiItemIdentity::from_effective_item(&effective);
+                            stamp_authorship(&mut effective, |fingerprint| {
+                                generation.signer_label(fingerprint)
+                            });
                             (effective.composed_value, identity)
                         })
                         .map_err(|error| error.to_string()),

@@ -119,6 +119,7 @@ fn draw_layout_node(
             background_transparent,
             input,
             tabs,
+            authorship,
             ..
         } => {
             let rect = if tabs.len() > 1 && rect.h > 1 {
@@ -154,6 +155,15 @@ fn draw_layout_node(
                         format!("{} · {attachment}", group_label.as_deref().unwrap_or(title))
                     }
                     None => group_label.as_deref().unwrap_or(title).to_string(),
+                };
+                // A project-authored view says so after its title. The title is
+                // one unstyled string drawn in the border, so the mark takes
+                // the title's style rather than a dim one. The word `project`
+                // is the plain key: no vocabulary mechanism reaches this draw
+                // site. Drawn whenever authorship is present.
+                let title = match authorship {
+                    Some(authorship) => format!("{title} [project: {}]", authorship.mark_tail()),
+                    None => title,
                 };
                 chrome::draw_tile(
                     surface,

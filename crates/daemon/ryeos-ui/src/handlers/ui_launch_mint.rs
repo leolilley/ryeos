@@ -293,6 +293,7 @@ pub(crate) fn compile_session_binding(
                 project_subject,
                 project_authority,
             )?;
+            let project_authoring = load_project_authoring_config(generation)?;
             let binding = SessionCompiledUiBinding::compile(
                 BindingCompileContext {
                     contract_revision: crate::UI_BINDING_CONTRACT_REVISION,
@@ -301,6 +302,7 @@ pub(crate) fn compile_session_binding(
                     project_root: canonical_project_root.as_deref(),
                     node_policy_generation_digest: state.node_policy.generation_digest(),
                     identities: composition.identities.clone(),
+                    project_source_ceiling: &project_authoring.sources,
                 },
                 &composition.compile_body,
                 |target_ref| compile_target(generation, &prepared, target_ref),
@@ -409,28 +411,37 @@ fn resolve_composition(
             })
         }
         "config" => {
+            // The shell's presentation config decides the mount, the dialogs
+            // and the initial Surfaces, and nothing marks its author. The
+            // config kind lets a project overlay a bundle item, so this root
+            // is resolved with no project in the resolution roots: only an
+            // installed bundle can supply it, at mint and at revalidation
+            // alike. The Views it names still resolve under the project.
+            let request = ryeos_engine::engine::EffectiveItemRequest {
+                project_root: None,
+                subject_resolution_authority:
+                    ryeos_engine::contracts::SubjectResolutionAuthority::for_live_project_root(
+                        None,
+                    ),
+                ..request
+            };
             let root = match admission {
                 Some(state) => {
                     let policy = state.node_policy.require::<
                         ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy,
                     >()?;
                     let maximum = usize::try_from(policy.shared_presentation.max_declaration_bytes)?;
-                    generation.effective_item_with_content_bounds(
-                        request,
-                        project_content.map(|content| {
-                            content as &dyn ryeos_engine::project_content::AuthoritativeProjectContent
-                        }),
-                        maximum,
-                        maximum,
-                    )?
+                    generation.effective_item_with_content_bounds(request, None, maximum, maximum)?
                 }
-                None => match project_content {
-                    Some(content) => {
-                        generation.effective_item_under_project_authority(request, content)?
-                    }
-                    None => generation.effective_item(request)?,
-                },
+                None => generation.effective_item(request)?,
             };
+            if root.trust_class != ryeos_engine::resolution::TrustClass::TrustedBundle {
+                return Err(HandlerError::Forbidden(format!(
+                    "shell presentation config `{}` is not a verified bundle item",
+                    root.canonical_ref
+                ))
+                .into());
+            }
             let config: SharedPresentationConfig =
                 serde_json::from_value(root.composed_value.clone())
                     .context("decode shared presentation Config")?;
@@ -503,7 +514,7 @@ fn resolve_composition(
     }
 }
 
-pub(crate) fn revalidate_binding_authority(
+pub fn revalidate_binding_authority(
     generation: &ryeos_engine::engine::CheckedEngineGeneration<'_>,
     compiled: &SessionCompiledUiBinding,
     resolution_root: Option<&std::path::Path>,
@@ -526,6 +537,26 @@ pub(crate) fn revalidate_binding_authority(
     };
     let current =
         resolve_composition(generation, None, request, project_root, project_content)?.identities;
+    // A binding with a project-authored member was compiled under the node's
+    // project-authoring list. A list that has since changed, or gone, makes
+    // that binding stale exactly as a changed surface or view does.
+    let ceiling_changed = !compiled.binding.project_source_ceiling_digest.is_empty()
+        && crate::compiled_binding::project_source_ceiling_digest(
+            &load_project_authoring_config(generation)?.sources,
+        )? != compiled.binding.project_source_ceiling_digest;
+    if ceiling_changed {
+        return Err(HandlerError::Structured {
+            code: "ui_binding_stale".to_string(),
+            status: 409,
+            body: serde_json::json!({
+                "code": "ui_binding_stale",
+                "error": "the node's project-authoring source list changed after session mint",
+                "retryable": false,
+                "remediation": "mint a new UI session"
+            }),
+        }
+        .into());
+    }
     if current.surface != compiled.binding.surface || current.views != compiled.binding.views {
         return Err(HandlerError::Structured {
             code: "ui_binding_stale".to_string(),
@@ -540,6 +571,89 @@ pub(crate) fn revalidate_binding_authority(
         .into());
     }
     Ok(())
+}
+
+/// Whether items of `kind` are executed in-process by the daemon's service
+/// registry, as its signed kind schema declares.
+pub(crate) fn kind_terminates_in_service_registry(
+    kinds: &ryeos_engine::kind_registry::KindRegistry,
+    kind: &str,
+) -> bool {
+    kinds
+        .get(kind)
+        .and_then(|schema| schema.execution())
+        .and_then(|execution| execution.terminator.as_ref())
+        .is_some_and(|terminator| {
+            matches!(
+                terminator,
+                ryeos_engine::kind_registry::TerminatorDecl::InProcess {
+                    registry: ryeos_engine::kind_registry::InProcessRegistryKind::Services,
+                    ..
+                }
+            )
+        })
+}
+
+/// Signed bundle-space config naming the read services an item authored in
+/// project space may bind as sources.
+pub const PROJECT_AUTHORING_CONFIG_REF: &str = "config:ryeos/ui/project-authoring";
+const PROJECT_AUTHORING_CONFIG_PATH: &str = "ryeos/ui/project-authoring.yaml";
+
+/// The node's source ceiling for project-authored UI.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectAuthoringConfig {
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Capability patterns, one per allowed read service. Each names one
+    /// service exactly: a wildcard is refused, so the list is the whole
+    /// answer to what project-authored UI may read.
+    pub sources: Vec<String>,
+}
+
+impl ProjectAuthoringConfig {
+    pub fn from_value(value: Value) -> std::result::Result<Self, String> {
+        let config: Self = serde_json::from_value(value)
+            .map_err(|error| format!("{PROJECT_AUTHORING_CONFIG_REF} is invalid: {error}"))?;
+        for source in &config.sources {
+            if source.is_empty() || source.contains('*') {
+                return Err(format!(
+                    "{PROJECT_AUTHORING_CONFIG_REF} lists `{source}`; each entry must name one service exactly"
+                ));
+            }
+        }
+        Ok(config)
+    }
+}
+
+/// Resolve and verify the project-authoring ceiling inside one checked
+/// generation. Only installed bundles can supply the config and it must
+/// verify as trusted; a project file of the same path is never read. A node
+/// with no such config installed lists nothing, so project-authored UI there
+/// binds no source at all: absence never widens.
+pub fn load_project_authoring_config(
+    generation: &ryeos_engine::engine::CheckedEngineGeneration<'_>,
+) -> Result<ProjectAuthoringConfig> {
+    let value = generation
+        .load_trusted_bundle_config(PROJECT_AUTHORING_CONFIG_PATH)
+        .map_err(|error| {
+            HandlerError::Internal(format!("load {PROJECT_AUTHORING_CONFIG_REF}: {error}"))
+        })?;
+    match value {
+        Some(value) => {
+            Ok(ProjectAuthoringConfig::from_value(value).map_err(HandlerError::Internal)?)
+        }
+        None => Ok(ProjectAuthoringConfig {
+            category: None,
+            version: None,
+            description: None,
+            sources: Vec::new(),
+        }),
+    }
 }
 
 pub(crate) fn compile_target(
@@ -557,10 +671,21 @@ pub(crate) fn compile_target(
 
     let item_ref = CanonicalRef::parse(target_ref)
         .with_context(|| format!("invalid binding target ref `{target_ref}`"))?;
+    // Only a kind whose signed schema terminates in the daemon's service
+    // registry is a UI target. The kind is judged before anything is
+    // resolved, so a project tool, directive or graph named by a view is
+    // never read, at session mint or again at dispatch.
+    if !kind_terminates_in_service_registry(&prepared.exec_ctx.engine.kinds, &item_ref.kind) {
+        return Err(crate::compiled_binding::UiTargetRefusal::NotAService {
+            target_ref: target_ref.to_string(),
+            kind: item_ref.kind.clone(),
+        }
+        .into());
+    }
     let request = EffectiveItemRequest {
         logical_project_root: None,
         item_ref: item_ref.clone(),
-        expected_kind: None,
+        expected_kind: Some(item_ref.kind.clone()),
         project_root: Some(prepared.project.effective_path.clone()),
         subject_resolution_authority: prepared
             .exec_ctx

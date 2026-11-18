@@ -22,6 +22,10 @@ enum ExactThreadCaller {
     Session {
         canonical_project_root: Option<PathBuf>,
         principal_id: Option<String>,
+        /// The read is made by a source a project-authored view or Surface
+        /// declared. Such a source reads threads of the session's own live
+        /// project and nothing else.
+        project_authored_source: bool,
     },
     Operator {
         principal_id: String,
@@ -37,6 +41,7 @@ impl ExactThreadCaller {
                 )
                 .map_err(|_| HandlerError::NotFound)?,
                 principal_id: Some(attachment.compiled_binding.binding.principal_id.clone()),
+                project_authored_source: crate::seat_auth::compiled_ui_source_is_project_authored(),
             },
             SeatCaller::Operator { principal_id } => Self::Operator {
                 principal_id: principal_id.clone(),
@@ -60,6 +65,17 @@ impl ExactThreadCaller {
                     ..
                 },
             ) => canonical_project_root.as_ref() == Some(canonical_root),
+            // A projectless or pinned-generation thread belongs to no live
+            // project, so a project-authored source never reads one, whoever
+            // launched it.
+            (
+                ExecutionProjectAuthority::Projectless { .. }
+                | ExecutionProjectAuthority::PinnedGeneration { .. },
+                Self::Session {
+                    project_authored_source: true,
+                    ..
+                },
+            ) => false,
             (ExecutionProjectAuthority::LiveProject { .. }, Self::Operator { .. })
             | (ExecutionProjectAuthority::Projectless { .. }, _)
             | (ExecutionProjectAuthority::PinnedGeneration { .. }, _) => {
@@ -339,6 +355,7 @@ mod tests {
     #[test]
     fn live_session_requires_the_same_canonical_project() {
         let caller = ExactThreadCaller::Session {
+            project_authored_source: false,
             canonical_project_root: Some(Path::new("/project/a").to_path_buf()),
             principal_id: Some("fp:owner".to_string()),
         };
@@ -358,10 +375,12 @@ mod tests {
     #[test]
     fn pinned_and_projectless_sessions_require_durable_ownership() {
         let owner = ExactThreadCaller::Session {
+            project_authored_source: false,
             canonical_project_root: None,
             principal_id: Some("fp:owner".to_string()),
         };
         let anonymous = ExactThreadCaller::Session {
+            project_authored_source: false,
             canonical_project_root: None,
             principal_id: None,
         };
@@ -371,6 +390,37 @@ mod tests {
             ExecutionProjectAuthority::PROJECTLESS,
         )));
         assert!(!anonymous.authorizes(&subject(
+            Some("fp:owner"),
+            ExecutionProjectAuthority::PROJECTLESS,
+        )));
+    }
+
+    /// A source a project-authored item declared reads threads of the
+    /// session's own live project only. A pinned-generation or projectless
+    /// thread is refused even to the principal that launched it, and so is a
+    /// thread of another project. The same session reading through a
+    /// node-authored source keeps the owner rule.
+    #[test]
+    fn project_authored_source_reads_only_threads_of_the_session_live_project() {
+        let session = |project_authored_source| ExactThreadCaller::Session {
+            project_authored_source,
+            canonical_project_root: Some(PathBuf::from("/project/a")),
+            principal_id: Some("fp:owner".to_string()),
+        };
+        let project_authored = session(true);
+        assert!(project_authored.authorizes(&subject(Some("fp:owner"), live("/project/a"))));
+        assert!(!project_authored.authorizes(&subject(Some("fp:owner"), live("/project/b"))));
+        assert!(!project_authored.authorizes(&subject(Some("fp:owner"), pinned())));
+        assert!(!project_authored.authorizes(&subject(
+            Some("fp:owner"),
+            ExecutionProjectAuthority::PROJECTLESS,
+        )));
+
+        let node_authored = session(false);
+        assert!(node_authored.authorizes(&subject(Some("fp:owner"), live("/project/a"))));
+        assert!(!node_authored.authorizes(&subject(Some("fp:owner"), live("/project/b"))));
+        assert!(node_authored.authorizes(&subject(Some("fp:owner"), pinned())));
+        assert!(node_authored.authorizes(&subject(
             Some("fp:owner"),
             ExecutionProjectAuthority::PROJECTLESS,
         )));

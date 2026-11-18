@@ -283,6 +283,9 @@ pub enum RyeOsLayoutNodeVm {
         /// Present when the tile's view declares an `input` block.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         input: Option<RyeOsInputVm>,
+        /// Present when the tile's view is project-authored (daemon-stamped).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        authorship: Option<super::content::ItemAuthorship>,
     },
 }
 
@@ -2600,6 +2603,10 @@ fn layout_node_vm(node: &LayoutTree, core: &RyeOsCore) -> RyeOsLayoutNodeVm {
                 chrome_hidden,
                 background_transparent,
                 input,
+                authorship: view_set.tiles.get(tile_id).and_then(|tile| {
+                    core.binding_for_instance(&tile.instance_key, &tile.view.view_ref)
+                        .and_then(|binding| binding.authorship.clone())
+                }),
             }
         }
         LayoutTree::Split {
@@ -4490,7 +4497,9 @@ mod tests {
                 "ryeos.execute.service.node/status",
                 "ryeos.execute.service.projects/list",
                 "ryeos.execute.service.events/chain_replay",
-                "ryeos.execute.service.worker-executions/approvals"
+                "ryeos.execute.service.worker-executions/approvals",
+                "ryeos.execute.service.bundle/list",
+                "ryeos.execute.service.scheduler/list"
             ])
         );
         assert_eq!(observe["capabilities"]["affordances"], json!([]));

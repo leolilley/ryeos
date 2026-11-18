@@ -1,7 +1,7 @@
-# ryeos:signed:2026-11-13T09:43:35Z:1e274cf8db6c1364362069b9479228761719c70708036c0804984eb478ca10e0:BGP8nVp6n8CfdTaxHKnWc945zQQvwU4dHuMzMZv52laLKw8hQ3YHSKesvHvAiLNCaaMeLfb/Wi7tdICnOLG7Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T09:42:19Z:f3e8e7f9791105289b09b31aca9fd1a3c1ef6cf95d33161745aeed8650fb4fb0:HIg5AoFMkkgkM4N3E7M8pvDIMULxkNQp+azgqWakH3ediJBvwBgKrewEss9q1oInMaoSya+GzVZ0H4ItdGV3Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-base-observe
 title: Home
-version: "2.0.0"
+version: "2.1.0"
 description: Observation-only browser Home over the Assistant's view sets; it reads the node and changes nothing.
 
 extends: surface:ryeos/ui/assistant
@@ -13,6 +13,8 @@ capabilities:
     - ryeos.execute.service.projects/list
     - ryeos.execute.service.events/chain_replay
     - ryeos.execute.service.worker-executions/approvals
+    - ryeos.execute.service.bundle/list
+    - ryeos.execute.service.scheduler/list
   affordances: []
 
 view_sets:

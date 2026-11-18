@@ -103,6 +103,8 @@ pub struct FrameSpec<'a> {
     pub supplement: Option<&'a RyeOsViewSupplementVm>,
     pub view: &'a RyeOsViewVm,
     pub input: Option<&'a RyeOsInputVm>,
+    /// Set when the view is project-authored; drawn beside the label.
+    pub authorship: Option<&'a ryeos_client_base::ui::content::ItemAuthorship>,
 }
 
 /// The key of a tile's actions menu, and of the control that opens it.
@@ -183,6 +185,12 @@ fn frame_header(spec: &FrameSpec<'_>, local: &crate::Local) -> El {
         .center_y()
         .gap(10.0)
         .child(identity.grow(1.0));
+    // The mark for a project-authored view: always drawn when present, at
+    // the right of the title row, in ink (never a warning tone). The title
+    // truncates before the mark does.
+    if let Some(authorship) = spec.authorship {
+        title_row = title_row.child(authorship_chip(authorship));
+    }
     let Some(tile) = &spec.tile else {
         // A frame without tile tools names its attachment or its detail, as
         // the right note.
@@ -267,6 +275,30 @@ fn frame_header(spec: &FrameSpec<'_>, local: &crate::Local) -> El {
         );
     }
     header
+}
+
+/// The chip that marks a project-authored view: the word `project` (plain
+/// key; no vocabulary reaches the frame), a separator, then the signer's name
+/// (or fingerprint prefix), or the trust word when there is no signer. It is
+/// ink on ink, never a tone: a project-authored view is not a fault.
+fn authorship_chip(authorship: &ryeos_client_base::ui::content::ItemAuthorship) -> El {
+    let t = Tokens::get();
+    row()
+        .h(22.0)
+        .px(9.0)
+        .gap(7.0)
+        .center_y()
+        .radius(theme::radius_pill(22.0))
+        .border(1.0, t.ink_at(0.22))
+        .label(format!("Project view, {}", authorship.mark_tail()))
+        .child(text("project").font(theme::TYPE_NOTE).color(t.ink_soft()))
+        .child(el().size(1.0, 10.0).fill(t.ink_at(0.18)))
+        .child(
+            text(authorship.mark_tail())
+                .font(theme::medium(theme::TYPE_NOTE))
+                .color(t.ink_at(0.85))
+                .truncate(),
+        )
 }
 
 /// A tile's right note: `type.small` at `ink.dim`.

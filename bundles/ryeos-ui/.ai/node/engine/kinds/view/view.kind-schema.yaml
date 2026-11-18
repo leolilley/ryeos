@@ -1,6 +1,10 @@
-# ryeos:signed:2026-10-20T19:22:30Z:532c9373fa0168f7623bd7f1cb15a10572308e344c545b98f43f78b0f7963b3c:iT4cUl94E9uK8MwClV37vNcP6Vdu8aAoJ2U0K3lY1mSIWstBcVRQzG2D60lQ/mOnst5VsydHXJVD4Z2KHrirDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T06:08:47Z:5281fda90a0a4afe506724e12f00e4b776c9a20cc09f055a814ca622127c6903:KIjIOg7ViD1XiVxZLX1NjOpZ/RMt7W8M36kXj1eILecQ7eVEUsgskByrAd4jnEaFvAScQsHfjEekUENJlaZAAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/view"
-version: "1.0.0"
+version: "1.1.0"
+# A project file may not take the ref of a view an installed bundle
+# supplies. Resolution refuses the ref, naming both files, so a project can
+# add its own views but never replace the node's.
+project_shadowing: refuse
 location:
   directory: views
 

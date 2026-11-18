@@ -100,6 +100,68 @@ pub struct ViewBinding {
     /// view — degrade honestly, never drop silently.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub degraded: Option<String>,
+    /// Daemon-stamped marker: present only when this view was authored from
+    /// project space. Absent for bundle (node) views.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorship: Option<ItemAuthorship>,
+}
+
+/// Where a composed item was authored, as stamped by the daemon. Only
+/// project-authored items carry it; the daemon owns the value. Every part
+/// beyond `space` and `trust_class` may be absent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ItemAuthorship {
+    pub space: String,
+    pub trust_class: String,
+    /// The item's canonical ref.
+    #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub item_ref: Option<String>,
+    /// Absent when the item is unsigned or the signer is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer: Option<ItemSigner>,
+    /// The sources the daemon actually bound for this item.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_refs: Vec<String>,
+}
+
+/// The key that signed a project-authored item, with the node's label for it
+/// when the node has one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ItemSigner {
+    pub fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+impl ItemAuthorship {
+    /// The signer's display name: the node's label, else the first eight
+    /// characters of the fingerprint. `None` when there is no signer.
+    pub fn signer_label(&self) -> Option<String> {
+        let signer = self.signer.as_ref()?;
+        Some(
+            match signer.name.as_deref().filter(|name| !name.is_empty()) {
+                Some(name) => name.to_owned(),
+                None => signer.fingerprint.chars().take(8).collect(),
+            },
+        )
+    }
+
+    /// The word shown where a signer would be, when there is none.
+    pub fn trust_word(&self) -> &str {
+        match self.trust_class.as_str() {
+            "trusted_project" => "trusted",
+            "untrusted_project" => "untrusted",
+            other => other,
+        }
+    }
+
+    /// Signer label, or the trust word when the item has no signer.
+    pub fn mark_tail(&self) -> String {
+        self.signer_label()
+            .unwrap_or_else(|| self.trust_word().to_owned())
+    }
 }
 
 /// Renderer-neutral presentation eligibility for one signed affordance.
@@ -2364,6 +2426,91 @@ mod tests {
         let binding = out.get("view:ryeos/gone").expect("present");
         assert_eq!(binding.degraded.as_deref(), Some("item not found"));
         assert_eq!(binding.view_ref.as_deref(), Some("view:ryeos/gone"));
+    }
+
+    #[test]
+    fn embedded_view_authorship_parses() {
+        let surface = json!({ "views": {
+            "view:proj/mine": {
+                "widget": "rows",
+                "authorship": { "space": "project", "trust_class": "untrusted_project" }
+            }
+        }});
+        let out = views_from_surface(Some(&surface));
+        let binding = out.get("view:proj/mine").expect("present");
+        assert!(binding.degraded.is_none(), "{:?}", binding.degraded);
+        let authorship = binding.authorship.as_ref().expect("authorship parsed");
+        assert_eq!(authorship.space, "project");
+        assert_eq!(authorship.trust_class, "untrusted_project");
+        assert_eq!(authorship.item_ref, None);
+        assert_eq!(authorship.signer, None);
+        assert!(authorship.source_refs.is_empty());
+        assert_eq!(authorship.mark_tail(), "untrusted");
+    }
+
+    #[test]
+    fn embedded_view_authorship_full_shape_parses() {
+        let surface = json!({ "views": {
+            "view:farm/project/field": {
+                "widget": "rows",
+                "authorship": {
+                    "space": "project",
+                    "trust_class": "trusted_project",
+                    "ref": "view:farm/project/field",
+                    "signer": { "fingerprint": "0123456789abcdef", "name": "leo" },
+                    "source_refs": ["service:ui/ryeos-ui/field/project"]
+                }
+            },
+            "view:farm/project/nameless": {
+                "widget": "rows",
+                "authorship": {
+                    "space": "project",
+                    "trust_class": "trusted_project",
+                    "signer": { "fingerprint": "0123456789abcdef" }
+                }
+            }
+        }});
+        let out = views_from_surface(Some(&surface));
+        let full = out.get("view:farm/project/field").expect("present");
+        assert!(full.degraded.is_none(), "{:?}", full.degraded);
+        let authorship = full.authorship.as_ref().expect("authorship parsed");
+        assert_eq!(
+            authorship.item_ref.as_deref(),
+            Some("view:farm/project/field")
+        );
+        assert_eq!(
+            authorship.source_refs,
+            vec!["service:ui/ryeos-ui/field/project"]
+        );
+        let signer = authorship.signer.as_ref().expect("signer parsed");
+        assert_eq!(signer.fingerprint, "0123456789abcdef");
+        assert_eq!(signer.name.as_deref(), Some("leo"));
+        assert_eq!(authorship.mark_tail(), "leo");
+        let nameless = out.get("view:farm/project/nameless").expect("present");
+        let authorship = nameless.authorship.as_ref().expect("authorship parsed");
+        assert_eq!(authorship.mark_tail(), "01234567");
+    }
+
+    #[test]
+    fn embedded_bundle_view_has_no_authorship() {
+        let surface = json!({ "views": {
+            "view:ryeos/threads": { "widget": "rows" }
+        }});
+        let out = views_from_surface(Some(&surface));
+        let binding = out.get("view:ryeos/threads").expect("present");
+        assert!(binding.degraded.is_none(), "{:?}", binding.degraded);
+        assert_eq!(binding.authorship, None);
+    }
+
+    #[test]
+    fn degraded_entry_has_no_authorship() {
+        let surface = json!({ "views": {
+            "view:ryeos/gone": { "degraded": "item not found" }
+        }});
+        let out = views_from_surface(Some(&surface));
+        let binding = out.get("view:ryeos/gone").expect("present");
+        assert_eq!(binding.degraded.as_deref(), Some("item not found"));
+        assert_eq!(binding.authorship, None);
     }
 
     #[test]

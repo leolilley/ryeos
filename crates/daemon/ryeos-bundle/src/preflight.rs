@@ -2622,6 +2622,7 @@ strict_fields: warn
             inventory_schema_keys: vec![],
             inventory_policy: Default::default(),
             launch_trust: None,
+            project_shadowing: Default::default(),
         }
     }
 

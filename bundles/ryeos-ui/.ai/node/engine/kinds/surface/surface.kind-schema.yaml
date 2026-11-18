@@ -1,6 +1,10 @@
-# ryeos:signed:2026-11-12T10:40:20Z:df4703a5e2b30630121e7b11bcef1ebcd113631a92030bf483ada4998372f233:FGojhGNOzTX50Pgf8w+gG+JmpvJa0bhIJZVrc2DXfoeVX/5OYst56C/T/9fHdoFpnqIy6wlz5SmuWVdWqx2lCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T06:08:47Z:9a546fdc0fd15668e12a7a350847167b3c2cdb7b009535f568ee18bbd639ddd6:xvxfNa5e/uz+qVYP5dyNdLp0+Lf/PVaa6ljJr+sGOzflKQhxOwyCMeMV48lMdiIT5p65Ndf91UApld3WwoABCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/surface"
-version: "2.2.0"
+version: "2.3.0"
+# A project file may not take the ref of a surface an installed bundle
+# supplies. Resolution refuses the ref, naming both files, so a project can
+# add its own surfaces but never replace the node's.
+project_shadowing: refuse
 location:
   directory: surfaces
 
