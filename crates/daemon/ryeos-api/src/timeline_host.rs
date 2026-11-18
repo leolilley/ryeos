@@ -31,7 +31,7 @@ use ryeos_app::state::AppState;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::config_loading::{ConfigLoadContext, ConfigSpec, ResolveMode};
 use ryeos_state::queries::ThreadUsageTotals;
-use ryeos_timeline::{Definition, Folder, Timeline};
+use ryeos_timeline::{Definition, Folder, TIMELINE_CONTRACT_VERSION, Timeline};
 
 const TIMELINE_CACHE_MAX_ENTRIES: usize = 64;
 const PRESENTATION_CACHE_MAX_ENTRIES: usize = 256;
@@ -407,6 +407,7 @@ fn window_response(
     let older = older_count(timeline.items.len(), limit);
     let window = &timeline.items[older..];
     let mut response = json!({
+        "timeline_contract": TIMELINE_CONTRACT_VERSION,
         "chain_root_id": chain_root_id,
         "definition_ref": definition_ref,
         "definition_digest": definition_digest,
@@ -958,5 +959,67 @@ mod tests {
         let big = json!({"exact_program": {"resolution_output": {"composed": {
             "composed": {"presentation": {"body": ["a".repeat(MAX_PRESENTATION_BYTES)]}}}}}});
         assert_eq!(presentation_block(&big), None);
+    }
+
+    #[test]
+    fn the_response_names_the_contract_version() {
+        let value =
+            window_response("c", "config:x", "d", &folded(1, 9), summary(), 200, None).unwrap();
+        assert_eq!(value["timeline_contract"], TIMELINE_CONTRACT_VERSION);
+    }
+
+    /// The field names the contract document lists for the response, by when
+    /// they are present: `always`, or `upsert` (only when `since_chain_seq`
+    /// was given).
+    fn documented_response_fields() -> (Vec<String>, Vec<String>) {
+        let text = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../bundles/ryeos-ui/.ai/knowledge/ryeos/ui/timeline-v1.md"),
+        )
+        .expect("the timeline contract document is part of the repository");
+        let mut always = Vec::new();
+        let mut upsert = Vec::new();
+        let mut in_table = false;
+        for line in text.lines() {
+            if let Some(heading) = line.strip_prefix("## ") {
+                in_table = heading.trim() == "Response fields";
+                continue;
+            }
+            if !in_table {
+                continue;
+            }
+            let cells: Vec<&str> = line.split('|').map(str::trim).collect();
+            if cells.len() < 4 || !cells[1].starts_with('`') {
+                continue;
+            }
+            let name = cells[1].trim_matches('`').to_string();
+            match cells[2] {
+                "always" => always.push(name),
+                "upsert" => upsert.push(name),
+                other => panic!("unknown presence {other:?} for response field {name}"),
+            }
+        }
+        (always, upsert)
+    }
+
+    fn sorted_keys(value: &Value) -> Vec<String> {
+        let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        keys
+    }
+
+    #[test]
+    fn the_documented_response_fields_are_the_fields_the_host_returns() {
+        let (always, upsert) = documented_response_fields();
+        let mut whole = always.clone();
+        whole.sort();
+        let mut with_since: Vec<String> = always.iter().chain(&upsert).cloned().collect();
+        with_since.sort();
+        let state = folded(3, 9);
+        let full = window_response("c", "config:x", "d", &state, summary(), 200, None).unwrap();
+        assert_eq!(sorted_keys(&full), whole, "whole-window response");
+        let update =
+            window_response("c", "config:x", "d", &state, summary(), 200, Some(1)).unwrap();
+        assert_eq!(sorted_keys(&update), with_since, "upsert response");
     }
 }
