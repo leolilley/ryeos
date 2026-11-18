@@ -235,6 +235,8 @@ pub const TYPE_SMALL: TextStyle = TextStyle::new(12.0, 400.0);
 pub const TYPE_MICRO: TextStyle = TextStyle::new(11.5, 400.0);
 /// Coverage sentences.
 pub const TYPE_NOTE: TextStyle = TextStyle::new(11.0, 400.0);
+/// A key chip's text (status bar hints).
+pub const TYPE_KEY: TextStyle = TextStyle::new(10.5, 500.0);
 /// Column headers and section titles; the caller sets the text in upper case.
 pub const TYPE_LABEL: TextStyle = TextStyle::new(10.5, 500.0).tracking(1.5);
 

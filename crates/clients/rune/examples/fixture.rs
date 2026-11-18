@@ -39,5 +39,9 @@ fn main() {
         std::process::exit(2);
     }
     let scene = std::env::var("RYEOS_FIXTURE_SCENE").unwrap_or_default();
-    ryeos_client_rune::start_fixture(presentation::core(&scene), fonts.as_slice());
+    ryeos_client_rune::start_fixture(
+        presentation::core(&scene),
+        presentation::dress(&scene),
+        fonts.as_slice(),
+    );
 }

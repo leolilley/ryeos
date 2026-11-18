@@ -5,7 +5,9 @@
 use ryeos_client_base::layout::Rect;
 use ryeos_client_base::text_surface::{Border, Style, TextSurface};
 use ryeos_client_base::ui::event::RyeOsTransportFreshness;
-use ryeos_client_base::ui::view_model::{RyeOsInputVm, RyeOsTone, RyeOsViewModel, RyeOsViewVm};
+use ryeos_client_base::ui::view_model::{
+    RyeOsInputVm, RyeOsStatusBarVm, RyeOsTone, RyeOsViewModel, RyeOsViewVm,
+};
 
 use super::input::draw_input_tile;
 use super::primitives::{fill_line, fill_rect};
@@ -36,16 +38,27 @@ pub fn draw_switcher(surface: &mut TextSurface, y: usize, vm: &RyeOsViewModel) {
         );
         return;
     }
-    let entries: Vec<(String, bool)> = surfaces
+    let entries: Vec<StripEntry> = surfaces
         .iter()
-        .map(|choice| {
-            (
-                format!(" {} {} ", choice.ordinal, choice.title),
-                choice.active,
-            )
+        .map(|choice| StripEntry {
+            label: format!(
+                " {} {}{}",
+                choice.ordinal,
+                choice.title,
+                if choice.chip.authored_in_project {
+                    PROJECT_MARK
+                } else {
+                    ""
+                }
+            ),
+            active: choice.active,
+            dot: work_dot(
+                choice.needs_you.is_some_and(|count| count > 0),
+                choice.running.is_some_and(|count| count > 0),
+            ),
         })
         .collect();
-    draw_strip(surface, y, limit, &entries);
+    draw_strip(surface, y, limit, &entries, true);
 }
 
 /// The view-set tabs as one line: bare words, the current one reversed, then
@@ -53,61 +66,122 @@ pub fn draw_switcher(surface: &mut TextSurface, y: usize, vm: &RyeOsViewModel) {
 /// in view.
 pub fn draw_tab_band(surface: &mut TextSurface, y: usize, vm: &RyeOsViewModel) {
     fill_line(surface, 0, y, surface.width, Style::new().fg(FG).bg(BG));
-    let entries: Vec<(String, bool)> = vm
+    let entries: Vec<StripEntry> = vm
         .presentation
         .chrome
         .top_bar
         .tabs
         .iter()
-        .map(|tab| (format!(" {} ", tab.title), tab.active))
+        .map(|tab| StripEntry {
+            label: format!(" {}", tab.title),
+            active: tab.active,
+            dot: work_dot(tab.needs_you.unwrap_or(false), tab.running.unwrap_or(false)),
+        })
         .collect();
-    draw_strip(surface, y, surface.width, &entries);
+    // A Surface that offers no new tab (the website's) has no `+`.
+    draw_strip(
+        surface,
+        y,
+        surface.width,
+        &entries,
+        vm.presentation.chrome.top_bar.add_tab,
+    );
+}
+
+/// After a project-authored Surface's name: a middle dot in the name's own
+/// colour, never a warning.
+const PROJECT_MARK: &str = "·";
+
+/// One entry of a strip: its words (with the leading space), whether it is
+/// the current one, and the tone of its work dot, if any.
+struct StripEntry {
+    label: String,
+    active: bool,
+    dot: Option<RyeOsTone>,
+}
+
+impl StripEntry {
+    /// The columns it takes: the words, the dot and its space, the closing
+    /// space.
+    fn width(&self) -> usize {
+        display_width(&self.label) + self.dot.map_or(0, |_| 2) + 1
+    }
+}
+
+/// The dot for work needing you (warn) or running (accent); needing you wins.
+fn work_dot(needs_you: bool, running: bool) -> Option<RyeOsTone> {
+    if needs_you {
+        Some(RyeOsTone::Warn)
+    } else if running {
+        Some(RyeOsTone::Accent)
+    } else {
+        None
+    }
 }
 
 /// One strip of entries, a space between them and `+` after the last, drawn
 /// left of column `limit`. The `+` keeps its columns; when the entries overflow
 /// what is left, the strip starts at the current entry.
-fn draw_strip(surface: &mut TextSurface, y: usize, limit: usize, entries: &[(String, bool)]) {
+fn draw_strip(
+    surface: &mut TextSurface,
+    y: usize,
+    limit: usize,
+    entries: &[StripEntry],
+    plus: bool,
+) {
     const GAP: usize = 1;
     const PLUS: &str = " + ";
     let limit = limit.min(surface.width);
-    let end = limit.saturating_sub(display_width(PLUS));
+    let plus_width = if plus { display_width(PLUS) } else { 0 };
+    let end = limit.saturating_sub(plus_width);
     let full = entries
         .iter()
-        .map(|(label, _)| display_width(label) + GAP)
+        .map(|entry| entry.width() + GAP)
         .sum::<usize>();
     let start = if full < end {
         0
     } else {
-        entries.iter().position(|(_, active)| *active).unwrap_or(0)
+        entries.iter().position(|entry| entry.active).unwrap_or(0)
     };
     let mut x = 1usize;
-    for (label, active) in entries.iter().skip(start) {
+    for entry in entries.iter().skip(start) {
         // The gap after an entry stays inside `end`, so the `+` always has
         // its columns after the last entry drawn.
         let available = end.saturating_sub(x + GAP);
         if available < 2 {
             break;
         }
-        let width = display_width(label);
-        if !*active && width > available {
+        if !entry.active && entry.width() > available {
             break;
         }
-        let style = if *active {
+        let style = if entry.active {
             Style::new().fg(FG).bg(BG).reverse()
         } else {
             style_muted()
         };
-        x += surface.draw_text(x, y, &truncate(label, available), style) + GAP;
+        // A current entry too long for the room keeps its words and loses
+        // the dot first.
+        let dot = entry.dot.filter(|_| entry.width() <= available);
+        let words = available.saturating_sub(dot.map_or(0, |_| 2) + 1);
+        let start_x = x;
+        x += surface.draw_text(x, y, &truncate(&entry.label, words), style);
+        if let Some(tone) = dot {
+            x += surface.draw_text(x, y, " ", style);
+            x += surface.draw_text(x, y, "●", tone_style(tone));
+        }
+        if x < start_x + available {
+            x += surface.draw_text(x, y, " ", style);
+        }
+        x += GAP;
     }
-    if x + display_width(PLUS) <= limit {
+    if plus && x + plus_width <= limit {
         surface.draw_text(x, y, PLUS, style_muted());
     }
 }
 
 /// The node's tone as the bars show it: a node the client cannot reach is
 /// danger, a feed still connecting or catching up is warn.
-fn node_tone(vm: &RyeOsViewModel) -> RyeOsTone {
+pub(super) fn node_tone(vm: &RyeOsViewModel) -> RyeOsTone {
     match vm.transport.freshness {
         RyeOsTransportFreshness::Current => vm.chrome.health_tone,
         RyeOsTransportFreshness::Reconnecting | RyeOsTransportFreshness::ExpiredOrRevoked => {
@@ -119,10 +193,10 @@ fn node_tone(vm: &RyeOsViewModel) -> RyeOsTone {
     }
 }
 
-/// The bottom line: the keys at the left, then the status parts separated by
+/// The status line (the bottom line, or the top one when the Surface puts it
+/// there): the keys at the left, then the status parts separated by
 /// ` | ` at the right, ending with the node. No product name.
-pub fn draw_status_bar(surface: &mut TextSurface, vm: &RyeOsViewModel) {
-    let y = surface.height.saturating_sub(1);
+pub fn draw_status_bar(surface: &mut TextSurface, y: usize, vm: &RyeOsViewModel) {
     let model = &vm.presentation.chrome.status_bar;
     let energy = model.energy.clamp(0.0, 1.0);
     let mut bg = mix_toward(BG, ACCENT, 0.12 * energy);
@@ -165,13 +239,13 @@ pub fn draw_status_bar(surface: &mut TextSurface, vm: &RyeOsViewModel) {
     let width = width.min(budget);
     let status_start = surface.width.saturating_sub(width + 1);
 
-    // The keys: as much of the hint as fits before the status.
+    // The keys: as many hints as fit before the status, in priority order.
     let keys_end = status_start.saturating_sub(2);
     if keys_end > 1 {
         surface.draw_text(
             1,
             y,
-            &truncate(&model.key_hint_text(), keys_end - 1),
+            &truncate(&key_hints_line(model), keys_end - 1),
             style_muted().bg(bg),
         );
     }
@@ -194,6 +268,20 @@ pub fn draw_status_bar(surface: &mut TextSurface, vm: &RyeOsViewModel) {
         surface.draw_text(x, y, &truncate(value, room), tone_style(*tone).bg(bg));
         x += display_width(value).min(room);
     }
+}
+
+/// The key hints as the terminal shows them: `[keys] word`, two spaces apart.
+fn key_hints_line(model: &RyeOsStatusBarVm) -> String {
+    model
+        .key_hints
+        .iter()
+        .map(|hint| {
+            format!("[{}] {}", hint.keys, hint.word)
+                .trim_end()
+                .to_owned()
+        })
+        .collect::<Vec<_>>()
+        .join("  ")
 }
 
 pub fn draw_tile(

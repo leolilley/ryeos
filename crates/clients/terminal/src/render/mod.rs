@@ -16,6 +16,7 @@
 mod chrome;
 mod dialog;
 mod input;
+mod overlay;
 mod primitives;
 mod text;
 mod theme;
@@ -24,7 +25,7 @@ mod widgets;
 use ryeos_client_base::layout::Rect;
 use ryeos_client_base::text_surface::{Border, Style, TextSurface};
 use ryeos_client_base::ui::view_model::{
-    RyeOsLayoutNodeVm, RyeOsSplitAxisVm, RyeOsTextLineVm, RyeOsViewModel, RyeOsViewVm,
+    RyeOsEdgeVm, RyeOsLayoutNodeVm, RyeOsSplitAxisVm, RyeOsTextLineVm, RyeOsViewModel, RyeOsViewVm,
 };
 
 use crate::render_text;
@@ -63,19 +64,30 @@ fn build_surface(vm: &RyeOsViewModel, width: usize, height: usize) -> TextSurfac
     surface.fill(Style::new().fg(FG).bg(BG));
 
     // There is no "home" mode. Bars and dialogs render in every state.
-    // The switcher is the top line; the tabs, when shown, the line beneath.
-    // On a very short terminal the switcher gives its line to the body first.
+    // The switcher is the top line (under the status line when the Surface
+    // puts that on top); the tabs, when shown, the line beneath. A Surface can
+    // hide either bar. On a very short terminal the switcher gives its line to
+    // the body first.
+    let chrome = &vm.presentation.chrome;
+    let status_shown =
+        chrome.status_bar.visible && chrome.status_bar.edge != RyeOsEdgeVm::Hidden && height >= 3;
+    let status_top = status_shown && chrome.status_bar.edge == RyeOsEdgeVm::Top;
+    let switcher_shown = chrome.switcher.edge != RyeOsEdgeVm::Hidden && height >= 4;
     let mut top_h = 0;
-    if height >= 4 {
-        chrome::draw_switcher(&mut surface, 0, vm);
+    if status_top {
+        chrome::draw_status_bar(&mut surface, 0, vm);
         top_h += 1;
     }
-    if vm.presentation.chrome.top_bar.visible && height >= 3 + top_h {
+    if switcher_shown {
+        chrome::draw_switcher(&mut surface, top_h, vm);
+        top_h += 1;
+    }
+    if chrome.top_bar.visible && height >= 3 + top_h {
         chrome::draw_tab_band(&mut surface, top_h, vm);
         top_h += 1;
     }
-    let bottom_h = if vm.presentation.chrome.status_bar.visible && height >= 3 {
-        chrome::draw_status_bar(&mut surface, vm);
+    let bottom_h = if status_shown && !status_top {
+        chrome::draw_status_bar(&mut surface, height - 1, vm);
         1
     } else {
         0
@@ -85,6 +97,23 @@ fn build_surface(vm: &RyeOsViewModel, width: usize, height: usize) -> TextSurfac
     if let Some(root) = vm.view_set.as_ref().and_then(|set| set.root.as_ref()) {
         let border = theme::border_for(&vm.presentation.chrome.border);
         draw_layout_node(&mut surface, body, root, border, vm.now_ms);
+    }
+
+    // With neither bar drawn, the node's health keeps a dot in the bottom-right
+    // corner, as the Rune client's does.
+    if !status_shown && !switcher_shown && width >= 2 && height >= 2 {
+        surface.draw_text(
+            width - 2,
+            height - 1,
+            "●",
+            tone_style(chrome::node_tone(vm)),
+        );
+    }
+
+    // The overlay takes the whole screen, over any dialog.
+    if vm.overlay.open {
+        overlay::draw_overlay(&mut surface, vm);
+        return surface;
     }
 
     if let Some(active_dialog) = vm.dialogs.first() {
@@ -568,7 +597,7 @@ mod tests {
                 word: String::new(),
             }];
         let mut long = TextSurface::new(40, 1);
-        chrome::draw_status_bar(&mut long, &vm);
+        chrome::draw_status_bar(&mut long, 0, &vm);
         let text = surface_text(&long);
         assert!(text.contains("KEY"), "{text}");
         assert!(text.contains("● rye"), "{text}");
@@ -577,17 +606,147 @@ mod tests {
         vm.presentation.chrome.status_bar.segments[0].value = "3".into();
         vm.presentation.chrome.status_bar.segments[0].label = Some("need you".into());
         let mut wide = TextSurface::new(80, 1);
-        chrome::draw_status_bar(&mut wide, &vm);
+        chrome::draw_status_bar(&mut wide, 0, &vm);
         let text = surface_text(&wide);
         assert!(text.contains("need you 3 | ● rye"), "{text}");
 
         // A long node label is cut at half the line; the keys keep their room.
         vm.chrome.health_label = "H".repeat(200);
         let mut long_health = TextSurface::new(40, 1);
-        chrome::draw_status_bar(&mut long_health, &vm);
+        chrome::draw_status_bar(&mut long_health, 0, &vm);
         let text = surface_text(&long_health);
         assert!(text.contains("KEY"), "{text}");
         assert!(text.contains('…'), "{text}");
+    }
+
+    #[test]
+    fn work_dots_project_marks_and_key_hints_read_on_the_bars() {
+        use ryeos_client_base::ui::view_model::RyeOsKeyHintVm;
+        let mut vm = build_view_model(&empty_center_core());
+        vm.presentation.chrome.status_bar.key_hints = vec![
+            RyeOsKeyHintVm {
+                keys: "ctrl+k".into(),
+                word: "open".into(),
+            },
+            RyeOsKeyHintVm {
+                keys: "alt+t/b".into(),
+                word: "bars".into(),
+            },
+        ];
+        let mut status = TextSurface::new(80, 1);
+        chrome::draw_status_bar(&mut status, 0, &vm);
+        assert!(
+            surface_text(&status).contains("[ctrl+k] open  [alt+t/b] bars"),
+            "{}",
+            surface_text(&status)
+        );
+
+        {
+            let template = vm
+                .session
+                .surfaces
+                .first()
+                .cloned()
+                .expect("the test core has an open Surface");
+            let mut home = template.clone();
+            home.title = "Home".into();
+            home.active = false;
+            home.needs_you = Some(2);
+            home.running = Some(1);
+            let mut project = template;
+            project.title = "ryeos".into();
+            project.active = true;
+            project.chip.authored_in_project = true;
+            project.running = Some(0);
+            vm.session.surfaces = vec![home, project];
+            let mut line = TextSurface::new(80, 1);
+            chrome::draw_switcher(&mut line, 0, &vm);
+            let text = surface_text(&line);
+            assert!(text.contains("Home ●"), "{text}");
+            assert!(text.contains("ryeos·"), "{text}");
+            assert!(
+                !text.contains("ryeos· ●"),
+                "a zero count draws no dot: {text}"
+            );
+            let dot = text.find('●').expect("a dot");
+            let column = text[..dot].chars().count();
+            assert_eq!(
+                line.get(column, 0).fg,
+                super::theme::WARN,
+                "needing you wins"
+            );
+        }
+
+        {
+            let tab = vm
+                .presentation
+                .chrome
+                .top_bar
+                .tabs
+                .first_mut()
+                .expect("the test core has a view set");
+            tab.running = Some(true);
+            let title = tab.title.clone();
+            let mut line = TextSurface::new(80, 1);
+            chrome::draw_tab_band(&mut line, 0, &vm);
+            assert!(surface_text(&line).contains(&format!("{title} ●")));
+        }
+    }
+
+    #[test]
+    fn a_surface_without_add_tab_has_no_plus_on_its_tab_line() {
+        let mut vm = build_view_model(&empty_center_core());
+        let mut line = TextSurface::new(80, 1);
+        chrome::draw_tab_band(&mut line, 0, &vm);
+        assert!(surface_text(&line).trim_end().ends_with('+'));
+        vm.presentation.chrome.top_bar.add_tab = false;
+        let mut line = TextSurface::new(80, 1);
+        chrome::draw_tab_band(&mut line, 0, &vm);
+        assert!(!surface_text(&line).contains('+'));
+    }
+
+    #[test]
+    fn the_overlay_lists_its_sections_and_the_selected_rows_actions() {
+        use ryeos_client_base::ui::event::RyeOsUiIntent;
+        use ryeos_client_base::ui::view_model::{RyeOsOverlayActionVm, RyeOsOverlayRowVm};
+        let mut vm = build_view_model(&empty_center_core());
+        let now = i64::try_from(vm.now_ms).unwrap_or(i64::MAX);
+        let row = |title: &str, minutes: i64| RyeOsOverlayRowVm {
+            id: title.into(),
+            title: title.into(),
+            where_: "ryeos".into(),
+            tone: ryeos_client_base::ui::view_model::RyeOsTone::Warn,
+            since_ms: now - minutes * 60_000,
+            actions: vec![RyeOsOverlayActionVm {
+                keys: "a".into(),
+                word: "acknowledge".into(),
+                intent: RyeOsUiIntent::ToggleTopStatusBar,
+            }],
+        };
+        vm.overlay.open = true;
+        vm.overlay.needs_you = vec![row("Approve the deploy", 4), row("Build failed", 130)];
+        vm.overlay.needs_you_count = Some(2);
+        vm.overlay.running_count = None;
+        vm.overlay.selected = Some(0);
+        let surface = build_surface(&vm, 80, 20);
+        let text = surface_text(&surface);
+        assert!(text.contains("OPEN SURFACES"), "{text}");
+        assert!(text.contains("> ● Approve the deploy — ryeos"), "{text}");
+        assert!(text.contains("[a] acknowledge"), "{text}");
+        assert!(text.contains("Build failed — ryeos"), "{text}");
+        assert!(text.contains("2h"), "{text}");
+        assert!(
+            !text.contains("4m"),
+            "the selected row shows its actions: {text}"
+        );
+        assert!(text.contains("RUNNING"), "{text}");
+        assert!(text.contains("unavailable"), "an unknown count: {text}");
+        for hint in &vm.overlay.key_hints {
+            assert!(
+                text.contains(&format!("[{}] {}", hint.keys, hint.word)),
+                "{text}"
+            );
+        }
     }
 
     #[test]
@@ -623,7 +782,7 @@ mod tests {
                 assert_eq!(line.cells.len(), width);
             }
             let mut status = TextSurface::new(width, 1);
-            chrome::draw_status_bar(&mut status, &vm);
+            chrome::draw_status_bar(&mut status, 0, &vm);
             assert_eq!(status.cells.len(), width);
         }
         // One current tab, in widths around where it exactly fills the line.
