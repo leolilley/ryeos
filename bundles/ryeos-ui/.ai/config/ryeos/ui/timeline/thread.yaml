@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-18T00:17:54Z:831a98cc615896978b4f3cb9b5a518c5d089c65280b603f2776104c47fcc2937:Vgr4lPysUB8mgAdfVPjA/S7WVGC8lzRcD5fP8pTleQC7NvFJ7zkhVJhb1byzS57VqWNA2YaJZSwxhtSG8fPOBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T01:19:09Z:17cda94eac10d0167f2a363610b7636aa4cf9b5b7370e2a0e6609e517f3fcdb9:gPBG5ixxaFkaKDfGA4V+y4yEXCOzFkMaH5A62688QsC+T8AqvqMIeRs4F6OFz/nRrXX2pp/7cEyQSVd3CulhDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Thread timeline definition: how a chain's events fold into timeline items.
 # Declarative data read by the timeline service; the fold engine names no event type itself.
 category: ryeos/ui/timeline
@@ -63,6 +63,7 @@ events:
   provider_call_observation_recorded: [{drop: true}]  # provider call evidence
   resource_budget_transition_v1: [{drop: true}]  # accounting evidence
   resource_precontact_budget_transition_v1: [{drop: true}]  # accounting evidence
+  attention_acknowledged: [{drop: true}]  # triage record for the attention queue, not part of the run's story
   # Live stream fragments: the finished cognition_out and tool events carry the content.
   token_delta: [{drop: true}]
   stream_snapshot: [{drop: true}]
