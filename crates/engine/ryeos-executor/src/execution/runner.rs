@@ -124,6 +124,51 @@ pub struct ExecutionParams {
     /// for every reconstructed or recovered launch: a host-direct run is never
     /// rebuilt from durable state, so its plan refuses without this.
     pub host_access: Option<ryeos_app::host_access::AdmittedHostAccess>,
+    /// The end of the calling runtime's run, from the daemon's sealed deadline
+    /// records, for a tool dispatched by a runtime under a run deadline. The
+    /// tool's process timeout never outlasts it. `None` outside a deadlined
+    /// callback dispatch.
+    pub deadline_end_at_ms: Option<i64>,
+}
+
+/// Bound a callback-dispatched tool's process timeout by its caller's hard
+/// stop, from the daemon's sealed deadline records. Refuses a launch whose
+/// hard stop is already reached. Returns whether the bound is now the
+/// effective limit.
+fn bound_tool_timeout_at_deadline(
+    prepared_plan: &mut ryeos_app::thread_lifecycle::PreparedItemPlan,
+    deadline_end_at_ms: Option<i64>,
+) -> Result<bool> {
+    prepared_plan.bound_timeout_at_deadline(deadline_end_at_ms, lillux::time::timestamp_millis())
+}
+
+/// A tool killed by its own bound was cut at the caller's deadline, not by its
+/// own timeout. Record it as an interrupted call whose outcome is unknown: the
+/// process was stopped mid-run, so side effects may have partially happened.
+/// It is never a success and never retried automatically.
+fn record_deadline_cut(completion: &mut ExecutionCompletion, cut_at_deadline: bool) {
+    if !cut_at_deadline || completion.outcome_code.as_deref() != Some("timeout") {
+        return;
+    }
+    completion.outcome_code = Some(ryeos_app::run_deadline::TOOL_INTERRUPTED_OUTCOME.to_owned());
+    completion.result = None;
+    let mut error = serde_json::json!({
+        "code": ryeos_app::run_deadline::TOOL_INTERRUPTED_OUTCOME,
+        "outcome": "unknown",
+        "retryable": false,
+        "message": "the tool was stopped at the run deadline while it was running; \
+                    its outcome is unknown and side effects may have partially happened",
+    });
+    if let (Some(existing), Some(target)) = (completion.error.take(), error.as_object_mut())
+        && let Some(existing) = existing.as_object()
+    {
+        for key in ["stdout", "stderr"] {
+            if let Some(value) = existing.get(key) {
+                target.insert(key.to_owned(), value.clone());
+            }
+        }
+    }
+    completion.error = Some(error);
 }
 
 /// Tracks execution state for explicit cleanup, with a conservative Drop net.
@@ -5640,6 +5685,11 @@ pub async fn run_and_wait(
 
     // Spawn — use the per-request engine (pushed_head overlay or
     // daemon startup engine), NOT state.engine directly.
+    // The caller's hard stop bounds the tool's process timeout (only ever
+    // shortening it); a hard stop already reached refuses the launch.
+    let tool_deadline_cut =
+        bound_tool_timeout_at_deadline(&mut prepared_plan, params.deadline_end_at_ms)
+            .map_err(|error| guard.fail_before_spawn(error))?;
     let launch_timeout_secs = prepared_plan.timeout_secs;
     let tid = created.thread_id.clone();
     let crid = created.chain_root_id.clone();
@@ -6081,7 +6131,7 @@ pub async fn run_and_wait(
     )
     .await
     {
-        Ok(c) => {
+        Ok(mut c) => {
             // Unproved settlement keeps the guard armed: its owner-drop stop
             // runs before any workspace cleanup.
             if let Err(error) = wait_settlement.settle_after_reap() {
@@ -6089,6 +6139,7 @@ pub async fn run_and_wait(
                     wait_settlement.into_unsettled_failure(error),
                 ));
             }
+            record_deadline_cut(&mut c, tool_deadline_cut);
             c
         }
         Err(join_err) => {
@@ -6736,6 +6787,11 @@ pub async fn run_detached(
             created.thread_id
         )));
     }
+    // The caller's hard stop bounds the tool's process timeout (only ever
+    // shortening it); a hard stop already reached refuses the launch.
+    let tool_deadline_cut =
+        bound_tool_timeout_at_deadline(&mut prepared_plan, params.deadline_end_at_ms)
+            .map_err(|error| guard.fail_before_spawn(error))?;
     let launch_timeout_secs = prepared_plan.timeout_secs;
     let bg_bundle_state_home =
         open_direct_bundle_state_home(&state, &engine, &params.effective_caps)
@@ -6859,6 +6915,7 @@ pub async fn run_detached(
         bg_cb_token,
         bg_tat_token,
         Some(launch_claim),
+        tool_deadline_cut,
     ));
 
     // Every execution input and cleanup guard is now owned by the scheduled
@@ -6988,6 +7045,7 @@ async fn dispatch_detached_bg_task(
     bg_cb_token: Option<String>,
     bg_tat_token: Option<String>,
     launch_claim: Option<ThreadLaunchClaim>,
+    bg_deadline_cut: bool,
 ) {
     // Keep recovery's durable spawn authorization alive through spawn, attach,
     // running, wait, and failure/finalization. Every early return drops it; a
@@ -7613,6 +7671,7 @@ async fn dispatch_detached_bg_task(
     let bg_exec_dir_path = bg_temp_dir.as_ref().and_then(|g| g.path());
     match wait_result {
         Ok(mut completion) => {
+            record_deadline_cut(&mut completion, bg_deadline_cut);
             let candidate_integration_completion =
                 match record_candidate_integration_process_completion(
                     &bg_state,
@@ -8839,6 +8898,8 @@ pub fn execution_params_from_sealed_root_request(
         effect_authority: None,
         finalized_direct: None,
         host_access: None,
+        // A recovered root is not a callback-dispatched tool, so no caller bounds it.
+        deadline_end_at_ms: None,
     })
 }
 
@@ -9739,6 +9800,7 @@ async fn run_existing_recovered_thread(
         bg_cb_token,
         bg_tat_token,
         Some(resume_claim),
+        false,
     ));
 
     Ok(RecoveryLaunchOutcome::Enqueued)
@@ -9749,6 +9811,50 @@ mod tests {
     use super::*;
     use ryeos_app::launch_metadata::OriginalPushedHeadRef;
     use ryeos_engine::contracts::{EffectivePrincipal, ExecutionHints, Principal};
+
+    fn timed_out_completion() -> ExecutionCompletion {
+        ExecutionCompletion {
+            status: ryeos_engine::contracts::ThreadTerminalStatus::Killed,
+            outcome_code: Some("timeout".to_owned()),
+            result: None,
+            error: Some(json!({"message": "subprocess timed out", "stderr": "partial"})),
+            artifacts: Vec::new(),
+            final_cost: None,
+            continuation_request: None,
+            metadata: None,
+        }
+    }
+
+    #[test]
+    fn a_tool_cut_by_the_deadline_bound_is_recorded_interrupted_with_an_unknown_outcome() {
+        let mut completion = timed_out_completion();
+        record_deadline_cut(&mut completion, true);
+        assert_eq!(
+            completion.outcome_code.as_deref(),
+            Some("tool_interrupted_at_deadline")
+        );
+        let error = completion.error.expect("error");
+        assert_eq!(error["outcome"], "unknown");
+        assert_eq!(error["retryable"], false);
+        assert_eq!(error["stderr"], "partial");
+        assert!(
+            error["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("side effects may have partially happened"))
+        );
+    }
+
+    #[test]
+    fn a_tools_own_timeout_stays_its_own_timeout() {
+        let mut own = timed_out_completion();
+        record_deadline_cut(&mut own, false);
+        assert_eq!(own.outcome_code.as_deref(), Some("timeout"));
+        // A tool that ended some other way is never rewritten as a cut.
+        let mut exited = timed_out_completion();
+        exited.outcome_code = Some("exit:0".to_owned());
+        record_deadline_cut(&mut exited, true);
+        assert_eq!(exited.outcome_code.as_deref(), Some("exit:0"));
+    }
 
     #[test]
     fn a_recovered_tool_is_judged_on_this_nodes_report_before_it_is_spawned_again() {

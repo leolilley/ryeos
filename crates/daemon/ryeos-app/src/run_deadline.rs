@@ -59,6 +59,83 @@ pub fn thread_end_at_ms(
     ))
 }
 
+/// Outcome code of a tool call cut at its caller's hard stop.
+pub const TOOL_INTERRUPTED_OUTCOME: &str =
+    ryeos_runtime::callback_contract::TOOL_INTERRUPTED_AT_DEADLINE_OUTCOME;
+/// Refusal code of a tool launch that found its caller's hard stop reached.
+pub const TOOL_DEADLINE_ELAPSED_CODE: &str = "tool_deadline_elapsed";
+
+/// The end of a tool called by a runtime whose own deadline share is `parent`:
+/// the tree deadline minus the hold-back the parent's reserve rule gives a
+/// callee at `now_ms`, which is the parent's hard stop. `None` when the tree
+/// has no deadline. Derived only from sealed records, never from a number the
+/// caller supplies.
+pub fn tool_end_at_ms(
+    tree_deadline_at_ms: Option<i64>,
+    parent: &DeadlineLimits,
+    now_ms: i64,
+) -> Option<i64> {
+    tree_deadline_at_ms.map(|deadline| {
+        DeadlineLimits::effective_at_ms(deadline, parent.child_hold_back_ms(deadline, now_ms))
+    })
+}
+
+/// How a tool's own timeout meets its caller's hard stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolTimeout {
+    /// No end applies, or the tool's own timeout is the shorter: unchanged.
+    Own(u64),
+    /// The hard stop is nearer than the tool's own timeout (or the tool has
+    /// none): the tool is cut after this many whole seconds.
+    CutAtDeadline(u64),
+}
+
+/// The effective tool timeout: the shorter of the tool's own timeout and the
+/// time left to `end_at_ms`. It never lengthens a timeout. A tool timeout of
+/// `0` means "none", so a bound is then the only limit. An end that has passed
+/// or is under a second away is refused, never turned into `0`, because a
+/// timeout of `0` would mean no timeout at all. All arithmetic saturates.
+pub fn clamp_tool_timeout(
+    own_timeout_secs: u64,
+    end_at_ms: Option<i64>,
+    now_ms: i64,
+) -> Result<ToolTimeout, ToolDeadlineElapsed> {
+    let Some(end_at_ms) = end_at_ms else {
+        return Ok(ToolTimeout::Own(own_timeout_secs));
+    };
+    let remaining_ms = end_at_ms.saturating_sub(now_ms);
+    let remaining_secs = u64::try_from(remaining_ms).unwrap_or(0) / 1_000;
+    if remaining_secs == 0 {
+        return Err(ToolDeadlineElapsed { end_at_ms, now_ms });
+    }
+    if own_timeout_secs != 0 && own_timeout_secs <= remaining_secs {
+        Ok(ToolTimeout::Own(own_timeout_secs))
+    } else {
+        Ok(ToolTimeout::CutAtDeadline(remaining_secs))
+    }
+}
+
+/// The caller's hard stop is reached (or under a second away): the tool does
+/// not launch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolDeadlineElapsed {
+    pub end_at_ms: i64,
+    pub now_ms: i64,
+}
+
+impl std::fmt::Display for ToolDeadlineElapsed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{TOOL_DEADLINE_ELAPSED_CODE}: the run's hard stop ({} ms) is reached at {} ms; \
+             the tool did not start",
+            self.end_at_ms, self.now_ms
+        )
+    }
+}
+
+impl std::error::Error for ToolDeadlineElapsed {}
+
 /// The terminal record for a thread whose effective end passed before it ran:
 /// status `timed_out`, outcome `deadline`, and a result that names the phase
 /// and the reason. Nothing was spawned, so there is no cost to carry.
@@ -106,6 +183,99 @@ mod tests {
         assert!(has_elapsed(Some(1_000), 1_000));
         assert!(!has_elapsed(Some(1_000), 999));
         assert!(!has_elapsed(None, i64::MAX));
+    }
+
+    fn parent(hold_back_ms: u64, reserve_seconds: u64) -> DeadlineLimits {
+        DeadlineLimits {
+            reserve_seconds,
+            hold_back_ms,
+            at_ms: None,
+        }
+    }
+
+    #[test]
+    fn a_tool_ends_at_the_callers_hard_stop() {
+        // Tree deadline 100 s, parent holds back nothing and reserves 5 s.
+        let reserving = parent(0, 5);
+        assert_eq!(
+            tool_end_at_ms(Some(100_000), &reserving, 10_000),
+            Some(95_000)
+        );
+        // Inside the reserve window the callee may use what remains.
+        assert_eq!(
+            tool_end_at_ms(Some(100_000), &reserving, 96_000),
+            Some(100_000)
+        );
+        assert_eq!(tool_end_at_ms(None, &reserving, 10_000), None);
+        // The hold-back of an ancestor is subtracted as well.
+        assert_eq!(
+            tool_end_at_ms(Some(100_000), &parent(20_000, 5), 0),
+            Some(75_000)
+        );
+    }
+
+    #[test]
+    fn the_clamp_only_shortens_and_never_yields_no_timeout() {
+        // Own timeout longer than the time left: cut at what is left.
+        assert_eq!(
+            clamp_tool_timeout(300, Some(60_000), 5_000),
+            Ok(ToolTimeout::CutAtDeadline(55))
+        );
+        // Own timeout shorter: kept.
+        assert_eq!(
+            clamp_tool_timeout(10, Some(60_000), 5_000),
+            Ok(ToolTimeout::Own(10))
+        );
+        // A tool with no timeout of its own is bounded by the end.
+        assert_eq!(
+            clamp_tool_timeout(0, Some(60_000), 5_000),
+            Ok(ToolTimeout::CutAtDeadline(55))
+        );
+        // No end: unchanged, including a tool's own `0`.
+        assert_eq!(
+            clamp_tool_timeout(300, None, 5_000),
+            Ok(ToolTimeout::Own(300))
+        );
+        assert_eq!(clamp_tool_timeout(0, None, 5_000), Ok(ToolTimeout::Own(0)));
+        // Whole seconds round down, so the cut is never after the end.
+        assert_eq!(
+            clamp_tool_timeout(300, Some(10_999), 0),
+            Ok(ToolTimeout::CutAtDeadline(10))
+        );
+    }
+
+    #[test]
+    fn a_reached_or_sub_second_end_is_refused_not_unbounded() {
+        for (end, now) in [(5_000, 5_000), (5_000, 9_000), (5_999, 5_000), (0, 0)] {
+            assert!(
+                clamp_tool_timeout(300, Some(end), now).is_err(),
+                "{end} {now}"
+            );
+            assert!(
+                clamp_tool_timeout(0, Some(end), now).is_err(),
+                "{end} {now}"
+            );
+        }
+        // Extreme values saturate instead of panicking or wrapping.
+        assert!(clamp_tool_timeout(300, Some(i64::MIN), i64::MAX).is_err());
+        assert!(clamp_tool_timeout(300, Some(i64::MAX), i64::MIN).is_ok());
+        assert_eq!(
+            clamp_tool_timeout(u64::MAX, Some(i64::MAX), 0),
+            Ok(ToolTimeout::CutAtDeadline(i64::MAX as u64 / 1_000))
+        );
+        assert!(clamp_tool_timeout(300, Some(i64::MIN), i64::MIN).is_err());
+    }
+
+    #[test]
+    fn a_callers_larger_claim_cannot_outlast_the_sealed_bound() {
+        // The sealed end is 60 s from now. Whatever a caller says about its
+        // remaining time never enters the computation: the same end always
+        // yields the same cut.
+        let sealed = tool_end_at_ms(Some(60_000), &parent(0, 0), 0);
+        assert_eq!(
+            clamp_tool_timeout(300, sealed, 0),
+            Ok(ToolTimeout::CutAtDeadline(60))
+        );
     }
 
     #[test]

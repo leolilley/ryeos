@@ -1240,6 +1240,11 @@ async fn dispatch_tool_subprocess(
         effect_authority: request.effect_authority.clone(),
         finalized_direct: Some(finalized_direct),
         host_access,
+        deadline_end_at_ms: caller_hard_stop_at_ms(
+            state,
+            request.parent_execution_context.as_ref(),
+        )
+        .map_err(DispatchError::Internal)?,
     };
 
     if request.launch_mode == "detached" {
@@ -1288,6 +1293,45 @@ async fn dispatch_tool_subprocess(
             })),
         }
     }
+}
+
+/// The end of a tool called by a runtime that runs under a run deadline: the
+/// caller's hard stop, from the daemon's sealed records only. The tree deadline
+/// comes from the accounting ledger and the caller's hold-back and reserve from
+/// its sealed hard limits; nothing the caller reports enters the computation.
+/// `None` when the call has no parent, the parent has no deadline share, or the
+/// tree has no deadline.
+fn caller_hard_stop_at_ms(
+    state: &AppState,
+    parent: Option<&crate::dispatch::ParentExecutionContext>,
+) -> anyhow::Result<Option<i64>> {
+    let Some(parent) = parent else {
+        return Ok(None);
+    };
+    let (Some(scope), Some(accounting)) =
+        (parent.accounting_scope.as_ref(), state.accounting.as_ref())
+    else {
+        return Ok(None);
+    };
+    if parent
+        .hard_limits
+        .as_object()
+        .is_none_or(|limits| limits.is_empty())
+    {
+        return Ok(None);
+    }
+    let limits: ryeos_engine::launch_envelope_types::HardLimits =
+        serde_json::from_value(parent.hard_limits.clone())
+            .map_err(|error| anyhow::anyhow!("failed to parse parent hard limits: {error}"))?;
+    let tree_deadline_at_ms = accounting
+        .execution_resource_budget_snapshot(&scope.execution_budget_id)
+        .map_err(|error| anyhow::anyhow!("execution budget deadline lookup failed: {error:#}"))?
+        .and_then(|budget| budget.deadline_at_ms);
+    Ok(ryeos_app::run_deadline::tool_end_at_ms(
+        tree_deadline_at_ms,
+        &limits.deadline,
+        lillux::time::timestamp_millis(),
+    ))
 }
 
 fn validate_direct_source_closure(
