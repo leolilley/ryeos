@@ -37,6 +37,41 @@ async fn timed<T>(step: &str, request: impl std::future::Future<Output = T>) -> 
     answer
 }
 
+/// A daemon log line with its terminal colour sequences removed.
+fn without_terminal_colors(line: &str) -> String {
+    let mut plain = String::with_capacity(line.len());
+    let mut characters = line.chars();
+    while let Some(character) = characters.next() {
+        if character == '\u{1b}' {
+            // Skip through the letter that ends the sequence.
+            for skipped in characters.by_ref() {
+                if skipped.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            plain.push(character);
+        }
+    }
+    plain
+}
+
+/// The unsigned value of `name=<digits>` in a colour-free phase timing line.
+fn phase_field(line: &str, name: &str) -> anyhow::Result<u64> {
+    let start = line
+        .find(&format!("{name}="))
+        .ok_or_else(|| anyhow::anyhow!("phase timing line has no {name}: {line}"))?
+        + name.len()
+        + 1;
+    let digits: String = line[start..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits
+        .parse()
+        .map_err(|error| anyhow::anyhow!("phase timing field {name} in {line}: {error}"))
+}
+
 /// Send a JSON request authenticated only by the session cookie.
 async fn cookie_request(
     harness: &DaemonHarness,
@@ -186,12 +221,15 @@ async fn browser_session_authority_lifecycle_over_http() -> anyhow::Result<()> {
     // The daemon's stderr goes to a file the harness reads back. Its phase
     // timing lines say where each mint and seat open spent its time.
     let log = harness.stderr_so_far();
-    for line in log
+    let phase_lines: Vec<String> = log
         .lines()
         .filter(|line| line.contains("request phase timing"))
-    {
+        .map(without_terminal_colors)
+        .collect();
+    for line in &phase_lines {
         eprintln!("daemon {line}");
     }
+    let verification_counts = prepare_verification_counts(&phase_lines);
     if outcome.is_err() || repeat.is_err() {
         // Show the tail so a failed request can be matched with what the
         // daemon logged.
@@ -204,7 +242,41 @@ async fn browser_session_authority_lifecycle_over_http() -> anyhow::Result<()> {
             tail.join("\n")
         );
     }
-    outcome.and(repeat)
+    outcome.and(repeat)?;
+
+    // One prepare verifies the installed bundles 18 times: before and after
+    // the Surface compile (2); before and after the admission block plus once
+    // before it publishes the membership (3); before and after each of the
+    // five guarded engine calls of the seat-root admission (10); before and
+    // after the initialization step plus once before it appends the record
+    // (3). Work inside a guarded operation adds none. The bound leaves room
+    // for an unrelated daemon task verifying while the prepare runs; a guard
+    // that stopped covering nested work would show several hundred.
+    let verification_counts = verification_counts?;
+    anyhow::ensure!(
+        verification_counts.len() == 2,
+        "expected two prepare timing lines, found {}",
+        verification_counts.len()
+    );
+    for verifications in verification_counts {
+        anyhow::ensure!(
+            (18..=30).contains(&verifications),
+            "one prepare ran {verifications} bundle-generation verifications; 18 are expected"
+        );
+    }
+    Ok(())
+}
+
+/// The bundle-generation verification count of each prepare, from the
+/// daemon's colour-free `total` phase timing lines.
+fn prepare_verification_counts(phase_lines: &[String]) -> anyhow::Result<Vec<u64>> {
+    phase_lines
+        .iter()
+        .filter(|line| {
+            line.contains("request=\"seat_open_prepare\"") && line.contains("phase=\"total\"")
+        })
+        .map(|line| phase_field(line, "generation_verifications"))
+        .collect()
 }
 
 /// Mint, activate and claim a producer for a new session on a running daemon.
