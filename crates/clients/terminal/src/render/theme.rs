@@ -1,5 +1,5 @@
-//! The terminal palette: gruvbox dark per style.md, and the tone →
-//! style mapping. This is the ONLY color authority in the renderer —
+//! The terminal palette: the Gruvbox theme's tokens (`bg`, `ink`, `accent`,
+//! `good`, `warn`, `danger`), and the tone → style mapping. This is the ONLY color authority in the renderer —
 //! tone semantics come from the VM; draw sites take styles from here
 //! and never invent colors.
 
@@ -11,9 +11,9 @@ pub const PANEL: Color = Color::Rgb(0x28, 0x28, 0x28);
 pub const FG: Color = Color::Rgb(0xeb, 0xdb, 0xb2);
 pub const FG_SOFT: Color = Color::Rgb(0xd5, 0xc4, 0xa1);
 pub const MUTED: Color = Color::Rgb(0xa8, 0x99, 0x84);
-pub const ACCENT: Color = Color::Rgb(0xd6, 0x5d, 0x0e);
+pub const ACCENT: Color = Color::Rgb(0xfe, 0x80, 0x19);
 pub const WARN: Color = Color::Rgb(0xfa, 0xbd, 0x2f);
-pub const GOOD: Color = Color::Rgb(0x8e, 0xc0, 0x7c);
+pub const GOOD: Color = Color::Rgb(0xb8, 0xbb, 0x26);
 pub const DANGER: Color = Color::Rgb(0xfb, 0x49, 0x34);
 
 // Content renders on the page background (BG), separated by borders —
@@ -133,6 +133,19 @@ pub fn border_for(name: &str) -> Option<Border> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tone_takes_the_specs_terminal_colour() {
+        let fg = |tone| tone_style(tone).fg;
+        assert_eq!(fg(RyeOsTone::Accent), Color::Rgb(0xfe, 0x80, 0x19));
+        assert_eq!(fg(RyeOsTone::Good), Color::Rgb(0xb8, 0xbb, 0x26));
+        assert_eq!(fg(RyeOsTone::Warn), Color::Rgb(0xfa, 0xbd, 0x2f));
+        assert_eq!(fg(RyeOsTone::Danger), Color::Rgb(0xfb, 0x49, 0x34));
+        // No tone: the default ink, not a fifth colour.
+        assert_eq!(fg(RyeOsTone::Neutral), style_fg().fg);
+        assert_eq!(BG, Color::Rgb(0x1d, 0x20, 0x21));
+        assert_eq!(FG, Color::Rgb(0xeb, 0xdb, 0xb2));
+    }
 
     #[test]
     fn border_for_maps_names_and_degrades_to_thin() {

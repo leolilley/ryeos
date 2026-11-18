@@ -3,22 +3,22 @@
 //! Every view kind the core projects is matched here without a wildcard, so a
 //! new kind fails to compile until this renderer decides how to draw it.
 
-use rune::{Align, El, Key, KeyEvent, ScrollSpec, Side, col, el, row, text};
+use rune::{Align, Color, El, Key, KeyEvent, ScrollSpec, Side, col, el, row, text};
 use ryeos_client_base::ids::RyeOsViewInstanceKey;
 use ryeos_client_base::ui::timeline::RyeOsTimelineEntryVm;
 
 use ryeos_client_base::ui::view_model::{
     RyeOsInputVm, RyeOsRowDetailVm, RyeOsRowVm, RyeOsSectionVm, RyeOsSourceStatusVm,
-    RyeOsTableCoverageVm, RyeOsTableHierarchyVm, RyeOsTableRowVm, RyeOsTextLineVm,
-    RyeOsTileIntentVm, RyeOsTimelineDockActionVm, RyeOsTimelineDockVm, RyeOsTimelineLaneVm,
-    RyeOsTone, RyeOsViewHeadingVm, RyeOsViewSupplementVm, RyeOsViewTabVm, RyeOsViewVm,
+    RyeOsTableHierarchyVm, RyeOsTableRowVm, RyeOsTextLineVm, RyeOsTileIntentVm,
+    RyeOsTimelineDockActionVm, RyeOsTimelineDockVm, RyeOsTimelineLaneVm, RyeOsTone,
+    RyeOsViewHeadingVm, RyeOsViewSupplementVm, RyeOsViewTabVm, RyeOsViewVm,
 };
 use ryeos_client_base::ui::{
     RyeOsKey, RyeOsKeyEvent, RyeOsKeyModifiers, RyeOsUiEvent, RyeOsUiIntent,
 };
 
 use crate::App;
-use crate::theme::{self, HEADER_HEIGHT, Palette};
+use crate::theme::{self, Palette, Tokens};
 
 /// Translate a Rune key into the core's key vocabulary. Keys the core has no
 /// name for stay with Rune.
@@ -65,13 +65,17 @@ pub fn is_launcher_chord(event: &KeyEvent) -> bool {
     k && !mods.shift && !mods.logo && (mods.ctrl != mods.alt)
 }
 
-/// The uppercase data-face label used by tile headers.
-pub fn header_label(label: &str, color: rune::Color) -> El {
-    text(label.to_uppercase())
-        .font(theme::data(9.0).tracking(1.0))
-        .color(color)
+/// A tile's title: `type.title` at `ink.strong`.
+fn tile_title(label: &str) -> El {
+    let t = Tokens::get();
+    text(label.to_owned())
+        .font(theme::TYPE_TITLE)
+        .color(t.ink_strong())
         .truncate()
 }
+
+/// Height of a tile's title row.
+const TITLE_ROW_HEIGHT: f32 = 44.0;
 
 /// What a tile adds to a frame's header beyond its title.
 pub struct TileChrome<'a> {
@@ -106,27 +110,36 @@ pub fn menu_key(instance: &RyeOsViewInstanceKey) -> String {
     format!("menu:{instance:?}")
 }
 
+/// How much of the tile fill a tile with a transparent background keeps.
+const TRANSPARENT_TILE_FILL: f32 = 0.8;
+
 /// A bordered frame: header, heading, the view body, supplement footer and
 /// the input composer, in the order the browser shell draws them.
 pub fn frame(spec: FrameSpec<'_>, local: &crate::Local) -> El {
-    let p = Palette::get();
+    let t = Tokens::get();
+    // A tile: `sheet.fill` and a 1 px edge, `sheet.focus` when it holds focus.
+    let mut fill = t.sheet_fill();
+    if spec.transparent {
+        fill = fill.alpha(fill.a * TRANSPARENT_TILE_FILL);
+    }
     let mut frame = col()
         .key(spec.key.clone())
         .w_full()
         .h_full()
         .min_w(0.0)
         .min_h(0.0)
-        .fill(p.plane.alpha(if spec.transparent { 0.78 } else { 0.94 }))
+        .fill(fill)
+        .radius(theme::RADIUS_TILE)
         .border(
             1.0,
             if spec.focused {
-                p.accent
+                t.sheet_focus()
             } else {
-                p.accent.alpha(0.0)
+                t.sheet_border()
             },
         )
         // Content taller than its slot stays inside the frame.
-        .clip_rounded(0.0);
+        .clip_rounded(theme::RADIUS_TILE);
     if !spec.chrome_hidden {
         frame = frame.child(frame_header(&spec, local));
     }
@@ -147,6 +160,9 @@ pub fn frame(spec: FrameSpec<'_>, local: &crate::Local) -> El {
     if let RyeOsViewVm::Timeline { lane, dock, .. } = spec.view {
         frame = frame.child(timeline_foot(spec.instance, lane.as_ref(), dock));
     }
+    if let Some(foot) = table_foot(spec.view) {
+        frame = frame.child(foot);
+    }
     if let Some(supplement) = spec.supplement {
         frame = supplement_footer(frame, supplement);
     }
@@ -158,41 +174,36 @@ pub fn frame(spec: FrameSpec<'_>, local: &crate::Local) -> El {
 
 fn frame_header(spec: &FrameSpec<'_>, local: &crate::Local) -> El {
     let p = Palette::get();
-    let signal = el()
-        .size(if spec.focused { 13.0 } else { 5.0 }, 5.0)
-        .fill(p.accent_bright);
-    let mut identity = row()
-        .center_y()
-        .gap(10.0)
-        .min_w(0.0)
-        .child(signal)
-        .child(header_label(spec.label, p.text));
-    if let Some(detail) = spec.detail.filter(|detail| !detail.is_empty()) {
-        identity = identity.child(frame_detail(detail));
-    }
+    let t = Tokens::get();
+    let identity = row().center_y().min_w(0.0).child(tile_title(spec.label));
     let mut title_row = row()
         .w_full()
-        .min_h(HEADER_HEIGHT)
-        .px(12.0)
+        .min_h(TITLE_ROW_HEIGHT)
+        .px(theme::PAD_TILE)
         .center_y()
         .gap(10.0)
         .child(identity.grow(1.0));
     let Some(tile) = &spec.tile else {
-        // A frame without tile tools names its attachment or its detail.
+        // A frame without tile tools names its attachment or its detail, as
+        // the right note.
         let aside = spec
             .attachment
             .or(spec.detail)
             .map(str::to_owned)
             .unwrap_or_default();
         return title_row
-            .child(header_label(&aside, p.muted))
-            .border_sides([0.0, 0.0, 1.0, 0.0], p.line);
+            .child(frame_detail(&aside))
+            .border_sides([0.0, 0.0, 1.0, 0.0], t.rule());
     };
     let tabs = (tile.tabs.len() > 1).then(|| view_tabs(tile.tabs, tile.grouped));
     if !tile.grouped
         && let Some(tabs) = tabs.as_ref().cloned()
     {
         title_row = title_row.child(tabs);
+    }
+    // The right note: what the view says about itself.
+    if let Some(detail) = spec.detail.filter(|detail| !detail.is_empty()) {
+        title_row = title_row.child(frame_detail(detail));
     }
     let mut tools = row().center_y().gap(8.0);
     if let Some(attachment) = spec.attachment {
@@ -202,8 +213,8 @@ fn frame_header(spec: &FrameSpec<'_>, local: &crate::Local) -> El {
     let maximized = tile.maximized;
     tools = tools.child(
         text(if maximized { "↙" } else { "↗" })
-            .font(theme::ui(13.0))
-            .color(p.muted)
+            .font(theme::TYPE_LINE)
+            .color(t.ink_dim())
             .padding(2.0)
             .role("button")
             .label(if maximized {
@@ -229,7 +240,7 @@ fn frame_header(spec: &FrameSpec<'_>, local: &crate::Local) -> El {
                 .child(crate::icons::glyph(
                     &crate::icons::MORE,
                     14.0,
-                    if open { p.accent_bright } else { p.muted },
+                    if open { t.accent } else { t.ink_dim() },
                 ))
                 .padding(5.0)
                 .role("button")
@@ -241,7 +252,7 @@ fn frame_header(spec: &FrameSpec<'_>, local: &crate::Local) -> El {
     title_row = title_row.child(tools);
     let mut header = col()
         .w_full()
-        .border_sides([0.0, 0.0, 1.0, 0.0], p.line)
+        .border_sides([0.0, 0.0, 1.0, 0.0], t.rule())
         .child(title_row);
     if tile.grouped
         && let Some(tabs) = tabs
@@ -258,16 +269,17 @@ fn frame_header(spec: &FrameSpec<'_>, local: &crate::Local) -> El {
     header
 }
 
+/// A tile's right note: `type.small` at `ink.dim`.
 fn frame_detail(detail: &str) -> El {
-    let p = Palette::get();
+    let t = Tokens::get();
     text(detail.to_owned())
-        .font(theme::data(9.0).tracking(0.4))
-        .color(p.muted)
+        .font(theme::TYPE_SMALL)
+        .color(t.ink_dim())
         .truncate()
 }
 
 fn view_tabs(tabs: &[RyeOsViewTabVm], grouped: bool) -> El {
-    let p = Palette::get();
+    let t = Tokens::get();
     let mut strip = row().h_full().role("tablist");
     if !grouped {
         strip = strip.ml(18.0);
@@ -280,23 +292,27 @@ fn view_tabs(tabs: &[RyeOsViewTabVm], grouped: bool) -> El {
         strip = strip.child(
             row()
                 .h_full()
-                .min_h(HEADER_HEIGHT)
+                .min_h(TITLE_ROW_HEIGHT)
                 .px(13.0)
                 .center_y()
                 .border_sides(
                     [0.0, 0.0, 1.0, 0.0],
                     if tab.active {
-                        p.yellow
+                        t.ink_strong()
                     } else {
-                        p.plane.alpha(0.0)
+                        Color::TRANSPARENT
                     },
                 )
                 .role("tab")
                 .focus_selected(tab.active)
                 .child(
                     text(tab.title.clone())
-                        .font(theme::data(9.0))
-                        .color(if tab.active { p.text } else { p.muted }),
+                        .font(theme::TYPE_SMALL)
+                        .color(if tab.active {
+                            t.ink_strong()
+                        } else {
+                            t.ink_dim()
+                        }),
                 )
                 .on_press(move |app: &mut App| {
                     app.ui(RyeOsUiEvent::FocusChanged {
@@ -521,7 +537,6 @@ pub fn body(view: &RyeOsViewVm, instance: &RyeOsViewInstanceKey, local: &crate::
             source_status,
             columns,
             total_rows,
-            coverage,
             rows,
             ..
         } => table_view(
@@ -530,7 +545,6 @@ pub fn body(view: &RyeOsViewVm, instance: &RyeOsViewInstanceKey, local: &crate::
             source_status.as_ref(),
             columns,
             *total_rows,
-            coverage.as_ref(),
             rows,
         ),
         RyeOsViewVm::Timeline {
@@ -544,6 +558,27 @@ pub fn body(view: &RyeOsViewVm, instance: &RyeOsViewInstanceKey, local: &crate::
         RyeOsViewVm::Field { field } => crate::field::view(field, instance, local),
     }
 }
+
+/// The inset and spacing of a scrolling list body.
+#[derive(Clone, Copy)]
+struct ListPad {
+    x: f32,
+    top: f32,
+    bottom: f32,
+    /// Between rows.
+    gap: f32,
+    /// Rows sit in a centred column no wider than this.
+    column: Option<f32>,
+}
+
+/// The list views' inset.
+const LIST_PAD: ListPad = ListPad {
+    x: 16.0,
+    top: 12.0,
+    bottom: 12.0,
+    gap: 0.0,
+    column: None,
+};
 
 /// A scrolling list body with the list views' inset.
 fn list(key: String, label: &str) -> El {
@@ -581,6 +616,7 @@ fn rows_view(
             keys,
             ROW_ESTIMATE,
             false,
+            LIST_PAD,
             |view, instance, index| match view {
                 RyeOsViewVm::Rows { rows, .. } => rows
                     .get(index)
@@ -621,6 +657,7 @@ fn virtual_list(
     keys: Vec<String>,
     estimate: f32,
     follow: bool,
+    pad: ListPad,
     build: fn(&RyeOsViewVm, &RyeOsViewInstanceKey, usize) -> Option<El>,
 ) -> El {
     use std::hash::{Hash, Hasher};
@@ -630,11 +667,17 @@ fn virtual_list(
     let count = keys.len();
     let keys = std::rc::Rc::new(keys);
     let build_instance = instance.clone();
-    let rows = col()
+    let mut rows = col()
         .key(format!("{key}:rows"))
         .w_full()
-        .px(16.0)
-        .py(12.0)
+        .pt(pad.top)
+        .pb(pad.bottom)
+        .gap(pad.gap);
+    rows = match pad.column {
+        Some(width) => rows.max_w(width),
+        None => rows.px(pad.x),
+    };
+    let rows = rows
         .growth(rune::GrowthSpec {
             spring: rune::GROWTH,
             edge: rune::edge::NO_MASK,
@@ -662,23 +705,55 @@ fn virtual_list(
         .role(role)
         .label(label.to_owned());
     if let Some(head) = head {
-        body = body.child(col().w_full().px(16.0).pt(12.0).child(head));
+        body = body.child(col().w_full().px(pad.x).pt(pad.top).child(head));
     }
-    body.child(
-        col()
-            .key(format!("{key}:scroll"))
-            .w_full()
-            .grow(1.0)
-            .min_h(0.0)
-            .scroll(ScrollSpec {
-                stick_bottom: follow,
-            })
-            .child(rows),
-    )
+    let mut scroll = col()
+        .key(format!("{key}:scroll"))
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .scroll(ScrollSpec {
+            stick_bottom: follow,
+        });
+    if pad.column.is_some() {
+        scroll = scroll.px(pad.x).items_center();
+    }
+    body.child(scroll.child(rows))
+}
+
+/// Above a section's title, and below it.
+const SECTION_TITLE_ABOVE: f32 = 14.0;
+const SECTION_TITLE_BELOW: f32 = 4.0;
+/// A section's field row.
+const FIELD_ROW_HEIGHT: f32 = 25.0;
+const FIELD_ROW_GAP: f32 = 10.0;
+/// The fixed width of a field's name.
+const FIELD_NAME_WIDTH: f32 = 120.0;
+/// A field row sits this far in from the tile's padding, so its selection
+/// fill has a margin.
+const FIELD_INSET: f32 = 8.0;
+/// A tone's dot beside its words.
+const TONE_DOT: f32 = 6.0;
+/// Between a status dot and its word.
+const TONE_DOT_GAP: f32 = 7.0;
+
+/// A tone's dot: the tone's colour, or nothing at all.
+fn tone_dot(tone: Option<Color>, size: f32) -> Option<El> {
+    tone.map(|color| el().size(size, size).radius(size / 2.0).fill(color))
 }
 
 fn sections_view(instance: &RyeOsViewInstanceKey, title: &str, sections: &[RyeOsSectionVm]) -> El {
-    let mut body = list(format!("sections:{instance:?}"), title);
+    let mut body = col()
+        .key(format!("sections:{instance:?}"))
+        .w_full()
+        .shrink()
+        .min_h(0.0)
+        .px(theme::PAD_TILE - FIELD_INSET)
+        .py(8.0)
+        .label(title.to_owned())
+        .scroll(ScrollSpec {
+            stick_bottom: false,
+        });
     for section in sections {
         body = body.child(section_block(instance, section));
     }
@@ -686,16 +761,16 @@ fn sections_view(instance: &RyeOsViewInstanceKey, title: &str, sections: &[RyeOs
 }
 
 fn section_block(instance: &RyeOsViewInstanceKey, section: &RyeOsSectionVm) -> El {
-    let p = Palette::get();
+    let t = Tokens::get();
     let count = if section.source_status.is_some() {
         "—".to_owned()
     } else {
         format!("{:02}", section.count)
     };
     let ink = if section.header_selected {
-        p.yellow
+        t.ink_strong()
     } else {
-        p.text
+        t.ink_dim()
     };
     let fold = if section.collapsed {
         &crate::icons::COLLAPSED
@@ -704,32 +779,34 @@ fn section_block(instance: &RyeOsViewInstanceKey, section: &RyeOsSectionVm) -> E
     };
     let toggle_key = instance.clone();
     let section_id = section.id.clone();
-    let header = row()
+    let mut header = row()
         .key(format!("section:{instance:?}:{}", section.id))
         .w_full()
-        .min_h(40.0)
-        .px(10.0)
+        .mt(SECTION_TITLE_ABOVE)
+        .mb(SECTION_TITLE_BELOW)
         .center_y()
-        .gap(10.0)
-        .border_sides([0.0, 0.0, 1.0, 0.0], p.line_strong)
-        .hover(p.plane_raised)
+        .gap(8.0)
+        .hover(t.select_fill())
         .role("button")
         .expanded(!section.collapsed)
-        .child(crate::icons::glyph(fold, 12.0, ink))
+        .child(crate::icons::glyph(fold, 10.0, t.ink_mute()))
         .child(
-            text(section.title.clone())
-                .font(theme::ui(13.0))
+            text(section.title.to_uppercase())
+                .font(theme::TYPE_LABEL)
                 .color(ink)
                 .truncate()
                 .grow(1.0),
         )
-        .child(text(count).font(theme::ui(13.0)).color(ink))
+        .child(text(count).font(theme::TYPE_SMALL).color(t.ink_mute()))
         .on_press(move |app: &mut App| {
             app.ui(RyeOsUiEvent::ToggleViewSection {
                 instance_key: toggle_key.clone(),
                 section_id: section_id.clone(),
             });
         });
+    if section.header_selected {
+        header = header.fill(t.select_fill()).radius(theme::RADIUS_ROW);
+    }
     let mut block = col().w_full().child(header);
     if let Some(status) = &section.source_status {
         block = block.child(source_status(status));
@@ -754,12 +831,15 @@ enum RowStyle {
 /// expanded. A `detail` record is only details.
 fn record(instance: &RyeOsViewInstanceKey, item: &RyeOsRowVm, style: RowStyle) -> El {
     let p = Palette::get();
-    let wrapper = col()
+    let t = Tokens::get();
+    let mut wrapper = col()
         .key(format!("item:{instance:?}:{}", item.id))
         .w_full()
         .min_w(0.0)
-        .role("listitem")
-        .border_sides([0.0, 0.0, 1.0, 0.0], p.line);
+        .role("listitem");
+    if style == RowStyle::Rows {
+        wrapper = wrapper.border_sides([0.0, 0.0, 1.0, 0.0], p.line);
+    }
     if style == RowStyle::Rows && item.kind.as_deref() == Some("detail") {
         return wrapper.child(details(&item.detail));
     }
@@ -774,7 +854,10 @@ fn record(instance: &RyeOsViewInstanceKey, item: &RyeOsRowVm, style: RowStyle) -
         .disabled(unavailable)
         .focus_selected(item.selected);
     if item.selected {
-        line = line.fill(p.plane_selected);
+        line = match style {
+            RowStyle::Rows => line.fill(p.plane_selected),
+            RowStyle::Section => line.fill(t.select_fill()).radius(theme::RADIUS_ROW),
+        };
     }
     line = match style {
         RowStyle::Rows => {
@@ -817,18 +900,41 @@ fn record(instance: &RyeOsViewInstanceKey, item: &RyeOsRowVm, style: RowStyle) -
             line
         }
         RowStyle::Section => {
+            // A field row: its name, fixed width, then its value; a toned
+            // row puts the tone's dot before the value's words.
             let aside = item.meta.as_ref().or(item.secondary.as_ref());
-            let mut line = line.min_h(43.0).px(10.0).py(7.0).gap(10.0).child(
-                text(item.primary.clone())
-                    .font(theme::ui(13.0))
-                    .color(ink)
-                    .truncate()
-                    .grow(1.0),
-            );
-            if let Some(aside) = aside {
-                line = line.child(text(aside.clone()).font(theme::ui(10.0)).color(p.muted));
+            let mut value = row().grow(1.0).min_w(0.0).gap(TONE_DOT_GAP).center_y();
+            if let Some(dot) = tone_dot(t.tone(item.tone), TONE_DOT) {
+                value = value.child(dot);
             }
-            line
+            let words = |what: &String| {
+                text(what.clone())
+                    .font(theme::TYPE_CELL)
+                    .color(t.ink_body())
+                    .truncate()
+                    .grow(1.0)
+                    .min_w(0.0)
+            };
+            let line = line
+                .min_h(FIELD_ROW_HEIGHT)
+                .px(FIELD_INSET)
+                .gap(FIELD_ROW_GAP);
+            match aside {
+                Some(aside) => line
+                    .child(
+                        text(item.primary.clone())
+                            .font(theme::TYPE_SMALL)
+                            .color(if item.selected {
+                                t.ink_strong()
+                            } else {
+                                t.ink_dim()
+                            })
+                            .truncate()
+                            .w(FIELD_NAME_WIDTH),
+                    )
+                    .child(value.child(words(aside))),
+                None => line.child(value.child(words(&item.primary))),
+            }
         }
     };
     if unavailable {
@@ -967,20 +1073,50 @@ fn document_view(
 /// The detail column every table carries at its right edge.
 const TABLE_ACTION_WIDTH: f32 = 50.0;
 
+/// A table's header row.
+const TABLE_HEADER_HEIGHT: f32 = 26.0;
+/// A table row: its height, its padding either side, and the gap between its
+/// cells. Rows sit 1 apart, inset from the tile so a selection fill has a
+/// margin.
+const TABLE_ROW_HEIGHT: f32 = 30.0;
+const TABLE_ROW_PAD: f32 = 10.0;
+const TABLE_CELL_GAP: f32 = 10.0;
+const TABLE_ROW_GAP: f32 = 1.0;
+const TABLE_INSET: f32 = 8.0;
+/// Indent per level of a hierarchical table.
+const TABLE_INDENT: f32 = 16.0;
+/// The width of the fold mark's place, so rows without children line up.
+const FOLD_MARK_WIDTH: f32 = 16.0;
+
+/// The table's padding: rows inset from the tile.
+const TABLE_PAD: ListPad = ListPad {
+    x: TABLE_INSET,
+    top: 8.0,
+    bottom: 8.0,
+    gap: TABLE_ROW_GAP,
+    column: None,
+};
+
+/// Whether a source's status says it could not be read.
+fn unreadable(status: Option<&RyeOsSourceStatusVm>) -> bool {
+    status.is_some_and(|status| is_unreadable(&status.state))
+}
+
+fn is_unreadable(state: &str) -> bool {
+    matches!(state, "failed" | "unavailable" | "unresolved")
+}
+
 fn table_view(
     instance: &RyeOsViewInstanceKey,
     title: &str,
     status: Option<&RyeOsSourceStatusVm>,
     columns: &[String],
     total_rows: usize,
-    coverage: Option<&RyeOsTableCoverageVm>,
     rows: &[RyeOsTableRowVm],
 ) -> El {
-    let p = Palette::get();
+    let t = Tokens::get();
     if rows.len() > VIRTUAL_ROWS_FROM {
-        let head = col()
-            .w_full()
-            .children(table_head(status, coverage, columns));
+        let head = col().w_full().children(table_head(status, columns));
         let keys = rows
             .iter()
             .map(|item| format!("item:{instance:?}:{}", item.id))
@@ -994,6 +1130,7 @@ fn table_view(
             keys,
             TABLE_ROW_ESTIMATE,
             false,
+            TABLE_PAD,
             |view, instance, index| match view {
                 RyeOsViewVm::Table { rows, .. } => {
                     rows.get(index).map(|item| table_record(instance, item))
@@ -1007,21 +1144,24 @@ fn table_view(
         .w_full()
         .shrink()
         .min_h(0.0)
-        .px(20.0)
-        .py(16.0)
+        .px(TABLE_PAD.x)
+        .pt(TABLE_PAD.top)
+        .pb(TABLE_PAD.bottom)
+        .gap(TABLE_ROW_GAP)
         .role("table")
         .label(title.to_owned())
         .scroll(ScrollSpec {
             stick_bottom: false,
         })
-        .children(table_head(status, coverage, columns));
-    if total_rows == 0 {
+        .children(table_head(status, columns));
+    // A source that could not be read is never drawn as an empty page.
+    if total_rows == 0 && !unreadable(status) {
         body = body.child(
             text("No rows in this page.")
-                .font(theme::data(10.0))
-                .color(p.muted)
-                .px(9.0)
-                .py(15.0)
+                .font(theme::TYPE_SMALL)
+                .color(t.ink_dim())
+                .px(TABLE_ROW_PAD)
+                .py(TABLE_CELL_GAP)
                 .role("status"),
         );
     }
@@ -1031,44 +1171,54 @@ fn table_view(
     body
 }
 
-/// What a table shows above its rows: source status, coverage and the
-/// column headings.
-fn table_head(
-    status: Option<&RyeOsSourceStatusVm>,
-    coverage: Option<&RyeOsTableCoverageVm>,
-    columns: &[String],
-) -> Vec<El> {
-    let p = Palette::get();
+/// The coverage sentence at the foot of a table's tile, above a rule.
+pub fn table_foot(view: &RyeOsViewVm) -> Option<El> {
+    let RyeOsViewVm::Table {
+        coverage: Some(coverage),
+        ..
+    } = view
+    else {
+        return None;
+    };
+    let t = Tokens::get();
+    Some(
+        col()
+            .w_full()
+            .border_sides([1.0, 0.0, 0.0, 0.0], t.rule())
+            .child(
+                text(format!("{} / {}", coverage.state, coverage.reason).to_uppercase())
+                    .font(theme::TYPE_NOTE)
+                    .color(t.ink_faint())
+                    .wrap_anywhere()
+                    .px(theme::PAD_TILE)
+                    .py(11.0)
+                    .role("status"),
+            ),
+    )
+}
+
+/// What a table shows above its rows: source status and the column headings.
+fn table_head(status: Option<&RyeOsSourceStatusVm>, columns: &[String]) -> Vec<El> {
+    let t = Tokens::get();
     let mut head = Vec::new();
     if let Some(status) = status {
         head.push(source_status(status));
     }
-    if let Some(coverage) = coverage {
-        head.push(
-            text(format!("{} / {}", coverage.state, coverage.reason).to_uppercase())
-                .font(theme::data(10.0).tracking(0.4))
-                .color(p.muted)
-                .wrap_anywhere()
-                .px(9.0)
-                .pb(10.0)
-                .role("status"),
-        );
-    }
     let mut columns_row = row()
         .w_full()
-        .min_h(38.0)
+        .min_h(TABLE_HEADER_HEIGHT)
+        .px(TABLE_ROW_PAD)
+        .gap(TABLE_CELL_GAP)
         .center_y()
-        .role("row")
-        .border_sides([0.0, 0.0, 1.0, 0.0], p.line);
+        .role("row");
     for column in columns {
         columns_row = columns_row.child(
             text(column.to_uppercase())
-                .font(theme::data(9.0))
-                .color(p.muted)
+                .font(theme::TYPE_LABEL)
+                .color(t.ink_dim())
                 .truncate()
                 .grow(1.0)
                 .min_w(0.0)
-                .px(9.0)
                 .role("columnheader"),
         );
     }
@@ -1077,7 +1227,7 @@ fn table_head(
             .w(TABLE_ACTION_WIDTH)
             .center()
             .role("columnheader")
-            .child(text("DETAIL").font(theme::data(9.0)).color(p.muted)),
+            .child(text("DETAIL").font(theme::TYPE_LABEL).color(t.ink_dim())),
     );
     head.push(columns_row);
     head
@@ -1085,35 +1235,60 @@ fn table_head(
 
 fn table_record(instance: &RyeOsViewInstanceKey, item: &RyeOsTableRowVm) -> El {
     let p = Palette::get();
-    let row_ink = p.tone(item.tone, p.text);
-    let mut line = row().w_full().min_w(0.0).min_h(38.0).center_y().role("row");
+    let t = Tokens::get();
+    let mut line = row()
+        .w_full()
+        .min_w(0.0)
+        .min_h(TABLE_ROW_HEIGHT)
+        .px(TABLE_ROW_PAD)
+        .gap(TABLE_CELL_GAP)
+        .center_y()
+        .role("row");
     if item.selected {
-        line = line.fill(p.plane_selected);
+        line = line.fill(t.select_fill()).radius(theme::RADIUS_ROW);
     }
+    // Only a status dot takes the tone; the row's text keeps its colour. A
+    // table that declares no per-cell tones puts the row's tone before its
+    // first cell.
+    let row_tone = if item.cell_tones.is_empty() {
+        t.tone(item.tone)
+    } else {
+        None
+    };
     for (index, cell) in item.cells.iter().enumerate() {
-        let ink = item
-            .cell_tones
-            .get(index)
-            .copied()
-            .flatten()
-            .map_or(row_ink, |tone| p.tone(tone, row_ink));
         let choose_key = instance.clone();
         let item_id = item.id.clone();
+        let cell_tone = item.cell_tones.get(index).copied().flatten();
+        let name = index == 0 && item.selected;
         let mut slot = row().grow(1.0).min_w(0.0).h_full().center_y().role("cell");
         if index == 0
             && let Some(hierarchy) = &item.hierarchy
         {
             slot = slot.child(tree_prefix(instance, &item.id, cell, hierarchy));
         }
+        let mut words = row().grow(1.0).min_w(0.0).gap(TONE_DOT_GAP).center_y();
+        // A status cell: the dot, or room for one, then the word.
+        if let Some(tone) = cell_tone {
+            words = words.child(match tone_dot(t.tone(tone), TONE_DOT) {
+                Some(dot) => dot,
+                None => el().size(TONE_DOT, TONE_DOT),
+            });
+        } else if index == 0
+            && let Some(dot) = tone_dot(row_tone, TONE_DOT)
+        {
+            words = words.child(dot);
+        }
         slot = slot.child(
-            text(cell.clone())
-                .font(theme::ui(13.0))
-                .color(ink)
-                .truncate()
-                .grow(1.0)
-                .min_w(0.0)
-                .px(9.0)
-                .py(11.0)
+            words
+                .child(
+                    text(cell.clone())
+                        .font(theme::TYPE_SMALL)
+                        .color(if name { t.ink_strong() } else { t.ink_body() })
+                        .truncate()
+                        .grow(1.0)
+                        .min_w(0.0),
+                )
+                .py(6.0)
                 .role("button")
                 .label(format!("Select row: {cell}"))
                 .focus_selected(index == 0 && item.selected)
@@ -1130,7 +1305,7 @@ fn table_record(instance: &RyeOsViewInstanceKey, item: &RyeOsTableRowVm) -> El {
     }
     let mut action = col().w(TABLE_ACTION_WIDTH).h_full().role("cell");
     if item.expandable {
-        action = action.child(disclosure(
+        action = action.child(chevron(
             instance,
             &item.id,
             item.expanded,
@@ -1144,7 +1319,6 @@ fn table_record(instance: &RyeOsViewInstanceKey, item: &RyeOsTableRowVm) -> El {
         .w_full()
         .min_w(0.0)
         .role("rowgroup")
-        .border_sides([0.0, 0.0, 1.0, 0.0], p.line)
         .child(line);
     if item.expanded {
         record = record.child(details(&item.detail));
@@ -1152,7 +1326,8 @@ fn table_record(instance: &RyeOsViewInstanceKey, item: &RyeOsTableRowVm) -> El {
     record
 }
 
-/// The tree drawing before a hierarchical table row's first cell. The
+/// The place before a hierarchical table row's first cell: an indent of
+/// `TABLE_INDENT` per level, then the fold mark when the row has children. The
 /// structure comes from the core's retained tree projection, never inferred.
 fn tree_prefix(
     instance: &RyeOsViewInstanceKey,
@@ -1160,61 +1335,48 @@ fn tree_prefix(
     label: &str,
     hierarchy: &RyeOsTableHierarchyVm,
 ) -> El {
+    let t = Tokens::get();
     let p = Palette::get();
-    let mut guides: String = hierarchy
-        .ancestor_continues
-        .iter()
-        .map(|continues| if *continues { '│' } else { '\u{a0}' })
-        .collect();
-    guides.push(if hierarchy.is_last { '└' } else { '├' });
-    let mut prefix = row().center_y().pl(9.0).child(
-        text(guides)
-            .font(theme::data(13.0))
-            .color(p.muted)
-            .a11y_hidden(),
-    );
-    if hierarchy.has_children {
-        let fold_key = instance.clone();
-        let item_id = item_id.to_owned();
-        let collapsed = hierarchy.collapsed;
-        prefix = prefix.child(
-            col()
-                .center()
-                .child(crate::icons::glyph(
-                    if collapsed {
-                        &crate::icons::COLLAPSED
-                    } else {
-                        &crate::icons::EXPANDED
-                    },
-                    12.0,
-                    p.muted,
-                ))
-                .min_w(20.0)
-                .padding(4.0)
-                .hover(p.plane_selected)
-                .role("button")
-                .label(format!(
-                    "{} descendants of {label}",
-                    if collapsed { "Expand" } else { "Collapse" }
-                ))
-                .expanded(!collapsed)
-                .on_press(move |app: &mut App| {
-                    app.ui(RyeOsUiEvent::SetViewTreeItemCollapsed {
-                        instance_key: fold_key.clone(),
-                        item_id: item_id.clone(),
-                        collapsed: !collapsed,
-                    });
-                }),
-        );
-    } else {
-        prefix = prefix.child(
-            text("─")
-                .font(theme::data(13.0))
-                .color(p.muted)
-                .a11y_hidden(),
-        );
+    let depth = hierarchy.ancestor_continues.len() as f32;
+    let prefix = row()
+        .center_y()
+        .pl(depth * TABLE_INDENT)
+        .w(depth * TABLE_INDENT + FOLD_MARK_WIDTH);
+    if !hierarchy.has_children {
+        return prefix;
     }
-    prefix
+    let fold_key = instance.clone();
+    let item_id = item_id.to_owned();
+    let collapsed = hierarchy.collapsed;
+    prefix.child(
+        col()
+            .center()
+            .child(crate::icons::glyph(
+                if collapsed {
+                    &crate::icons::COLLAPSED
+                } else {
+                    &crate::icons::EXPANDED
+                },
+                12.0,
+                t.ink_dim(),
+            ))
+            .min_w(FOLD_MARK_WIDTH)
+            .padding(2.0)
+            .hover(p.plane_selected)
+            .role("button")
+            .label(format!(
+                "{} descendants of {label}",
+                if collapsed { "Expand" } else { "Collapse" }
+            ))
+            .expanded(!collapsed)
+            .on_press(move |app: &mut App| {
+                app.ui(RyeOsUiEvent::SetViewTreeItemCollapsed {
+                    instance_key: fold_key.clone(),
+                    item_id: item_id.clone(),
+                    collapsed: !collapsed,
+                });
+            }),
+    )
 }
 
 /// The expand/collapse control at the right edge of a record.
@@ -1228,35 +1390,41 @@ fn disclosure_icon(expanded: bool, size: f32) -> El {
     }
 }
 
-/// The rows and timeline disclosure column.
-const DISCLOSURE_WIDTH: f32 = 34.0;
+/// The timeline's chevron column.
+const CHEVRON_WIDTH: f32 = 24.0;
 
-/// An expand/collapse control `width` points wide, ruled off on its left.
-fn disclosure(
+/// An expand/collapse chevron `width` points wide: `ink.mute`, turned when the
+/// record is open.
+fn chevron(
     instance: &RyeOsViewInstanceKey,
     item_id: &str,
     expanded: bool,
     what: String,
     width: f32,
 ) -> El {
-    let p = Palette::get();
+    let t = Tokens::get();
     let expand_key = instance.clone();
     let item_id = item_id.to_owned();
     col()
         .w(width)
         .h_full()
-        .min_h(34.0)
         .center()
-        .border_sides([0.0, 0.0, 0.0, 1.0], p.line)
-        .fill(if expanded { p.plane_selected } else { p.plane })
-        .hover(p.plane_selected)
+        .hover(t.select_fill())
         .role("button")
         .label(format!(
             "{} {what}",
             if expanded { "Collapse" } else { "Expand" }
         ))
         .expanded(expanded)
-        .child(disclosure_icon(expanded, 13.0))
+        .child(crate::icons::glyph(
+            if expanded {
+                &crate::icons::EXPANDED
+            } else {
+                &crate::icons::COLLAPSED
+            },
+            12.0,
+            t.ink_mute(),
+        ))
         .on_press(move |app: &mut App| {
             app.ui(RyeOsUiEvent::ToggleViewItemExpansion {
                 instance_key: expand_key.clone(),
@@ -1309,6 +1477,24 @@ impl<'a> Timeline<'a> {
 
 /// Indent per call-tree level.
 const TIMELINE_INDENT: f32 = 18.0;
+/// Content sits in a column no wider than this, centred in the tile.
+const TIMELINE_COLUMN: f32 = 720.0;
+/// Tile padding either side of the column, and above and below it.
+const TIMELINE_PAD_X: f32 = 24.0;
+const TIMELINE_PAD_TOP: f32 = 14.0;
+const TIMELINE_PAD_BOTTOM: f32 = 18.0;
+/// Between entries.
+const TIMELINE_GAP: f32 = 16.0;
+/// A selected line's fill reaches this far past the column on either side.
+const SELECT_REACH: f32 = 10.0;
+
+const TIMELINE_PAD: ListPad = ListPad {
+    x: TIMELINE_PAD_X - SELECT_REACH,
+    top: TIMELINE_PAD_TOP,
+    bottom: TIMELINE_PAD_BOTTOM,
+    gap: TIMELINE_GAP,
+    column: Some(TIMELINE_COLUMN + 2.0 * SELECT_REACH),
+};
 
 fn timeline_view(
     instance: &RyeOsViewInstanceKey,
@@ -1316,6 +1502,7 @@ fn timeline_view(
     status: Option<&RyeOsSourceStatusVm>,
     timeline: Timeline<'_>,
 ) -> El {
+    let status = status.map(|status| row().w_full().center().child(source_status(status)));
     if timeline.entries.len() > VIRTUAL_ROWS_FROM {
         let keys = (0..timeline.entries.len())
             .map(|index| timeline_entry_key(instance, &timeline, index))
@@ -1324,11 +1511,12 @@ fn timeline_view(
             format!("timeline:{instance:?}"),
             title,
             "list",
-            status.map(source_status),
+            status,
             instance,
             keys,
             TIMELINE_ENTRY_ESTIMATE,
             true,
+            TIMELINE_PAD,
             |view, instance, index| {
                 Timeline::of(view)
                     .filter(|timeline| index < timeline.entries.len())
@@ -1336,106 +1524,173 @@ fn timeline_view(
             },
         );
     }
+    let mut column = col()
+        .w_full()
+        .max_w(TIMELINE_COLUMN + 2.0 * SELECT_REACH)
+        .gap(TIMELINE_GAP);
+    if let Some(status) = status {
+        column = column.child(status);
+    }
+    for index in 0..timeline.entries.len() {
+        column = column.child(timeline_entry(instance, &timeline, index));
+    }
     // A feed: it opens at the newest entry and follows new ones while there.
-    let mut body = col()
+    col()
         .key(format!("timeline:{instance:?}"))
         .w_full()
         .shrink()
         .min_h(0.0)
-        .px(16.0)
-        .py(12.0)
+        .px(TIMELINE_PAD.x)
+        .pt(TIMELINE_PAD.top)
+        .pb(TIMELINE_PAD.bottom)
+        .items_center()
         .label(title.to_owned())
-        .scroll(ScrollSpec { stick_bottom: true });
-    if let Some(status) = status {
-        body = body.child(source_status(status));
-    }
-    for index in 0..timeline.entries.len() {
-        body = body.child(timeline_entry(instance, &timeline, index));
-    }
-    body
+        .scroll(ScrollSpec { stick_bottom: true })
+        .child(column)
 }
 
 /// Height reserved for the status lane whether or not it has text, so the
 /// transcript does not move when the lane appears or clears.
-const LANE_HEIGHT: f32 = 28.0;
+const LANE_HEIGHT: f32 = 24.0;
+/// The lane's dot.
+const LANE_DOT: f32 = 7.0;
+/// A dock card: its padding, the gap inside it, and the gap between cards.
+const DOCK_PAD: f32 = 16.0;
+const DOCK_GAP: f32 = 10.0;
+const DOCK_STACK_GAP: f32 = 8.0;
+/// The dock card's border and fill, as opacities of `warn`.
+const DOCK_BORDER: f32 = 0.50;
+const DOCK_FILL: f32 = 0.05;
+/// A dock button's height and horizontal padding.
+const DOCK_BUTTON_HEIGHT: f32 = 32.0;
+const DOCK_BUTTON_PAD: f32 = 14.0;
 
 /// The status lane, then each pending ask docked below it. The ask keeps its
-/// own summary row in the flow above.
+/// own summary row in the flow above. Both sit in the timeline's column.
 fn timeline_foot(
     instance: &RyeOsViewInstanceKey,
     lane: Option<&RyeOsTimelineLaneVm>,
     dock: &[RyeOsTimelineDockVm],
 ) -> El {
-    let p = Palette::get();
+    let t = Tokens::get();
     let mut lane_row = row()
         .key(format!("lane:{instance:?}"))
         .w_full()
         .min_w(0.0)
         .min_h(LANE_HEIGHT)
-        .px(16.0)
+        .gap(10.0)
         .center_y();
     if let Some(lane) = lane {
-        lane_row = lane_row.role("status").label(lane.label.clone()).child(
+        lane_row = lane_row.role("status").label(lane.label.clone());
+        if let Some(dot) = tone_dot(t.tone(lane.tone), LANE_DOT) {
+            lane_row = lane_row.child(dot);
+        }
+        lane_row = lane_row.child(
             text(theme::drawable(&lane.label, theme::Face::Ui).into_owned())
-                .font(theme::ui(12.0))
-                .color(p.tone(lane.tone, p.text))
+                .font(theme::medium(theme::TYPE_LINE))
+                .color(t.ink_body())
                 .truncate()
                 .grow(1.0)
                 .min_w(0.0),
         );
     }
-    let mut foot = col().w_full().min_w(0.0).child(lane_row);
+    let mut foot = col()
+        .w_full()
+        .max_w(TIMELINE_COLUMN)
+        .min_w(0.0)
+        .gap(DOCK_STACK_GAP)
+        .child(lane_row);
     for ask in dock {
-        let (primary, meta, tone) = match &ask.entry {
-            RyeOsTimelineEntryVm::Line {
-                primary,
-                meta,
-                tone,
-                ..
-            } => (primary.clone(), meta.clone(), *tone),
-            other => (other.label(), None, RyeOsTone::Warn),
+        let (primary, meta) = match &ask.entry {
+            RyeOsTimelineEntryVm::Line { primary, meta, .. } => (primary.clone(), meta.clone()),
+            other => (other.label(), None),
         };
-        let mut line = row()
+        let mut card = col()
             .key(format!("dock:{instance:?}:{}", ask.id))
             .w_full()
             .min_w(0.0)
-            .px(16.0)
-            .py(10.0)
-            .center_y()
-            .fill(p.plane_raised)
-            .border_sides([1.0, 0.0, 0.0, 0.0], p.line)
-            .gap(8.0)
-            .child(entry_line(
-                &primary,
-                meta.as_deref(),
-                p.tone(tone, p.text),
-                500.0,
-            ));
-        for action in &ask.actions {
-            line = line.child(dock_action(action));
+            .padding(DOCK_PAD)
+            .gap(DOCK_GAP)
+            .radius(theme::RADIUS_CARD)
+            .border(1.0, t.warn.alpha(DOCK_BORDER))
+            .fill(t.warn.alpha(DOCK_FILL))
+            .child(
+                row()
+                    .gap(10.0)
+                    .center_y()
+                    .child(
+                        el().size(TONE_DOT, TONE_DOT)
+                            .radius(TONE_DOT / 2.0)
+                            .fill(t.warn),
+                    )
+                    .child(
+                        text(theme::drawable(&primary, theme::Face::Ui).into_owned())
+                            .font(theme::TYPE_TITLE)
+                            .color(t.ink_strong())
+                            .wrap()
+                            .grow(1.0)
+                            .min_w(0.0),
+                    ),
+            );
+        if let Some(target) = meta {
+            card = card.child(
+                text(target)
+                    .font(theme::mono(theme::TYPE_SMALL))
+                    .color(t.ink_soft())
+                    .wrap_anywhere(),
+            );
         }
-        foot = foot.child(line);
+        // The first action the ask allows is the filled one; when the request
+        // does not allow the first, the next takes the fill.
+        let filled = ask
+            .actions
+            .iter()
+            .position(|action| action.intent.is_some());
+        let mut actions = row().gap(DOCK_STACK_GAP).center_y();
+        for (index, action) in ask.actions.iter().enumerate() {
+            actions = actions.child(dock_action(action, Some(index) == filled));
+        }
+        foot = foot.child(card.child(actions));
     }
-    foot
+    col()
+        .w_full()
+        .min_w(0.0)
+        .px(TIMELINE_PAD_X)
+        .items_center()
+        .child(foot)
 }
 
 /// One answering action beside a docked ask. One the ask's authority does not
 /// allow is drawn faint, with its reason as its label, and does nothing.
-fn dock_action(action: &RyeOsTimelineDockActionVm) -> El {
+fn dock_action(action: &RyeOsTimelineDockActionVm, filled: bool) -> El {
     let p = Palette::get();
-    let button = text(action.label.clone())
-        .font(theme::ui(12.0))
-        .px(10.0)
-        .py(5.0)
-        .border(1.0, p.line_strong)
+    let t = Tokens::get();
+    let button = row()
+        .h(DOCK_BUTTON_HEIGHT)
+        .px(DOCK_BUTTON_PAD)
+        .center()
+        .radius(theme::RADIUS_BUTTON)
         .role("button");
     match &action.intent {
         Some(intent) => {
             let intent = intent.clone();
+            let button = if filled {
+                button.fill(t.ink).hover(t.ink_strong()).child(
+                    text(action.label.clone())
+                        .font(theme::medium(theme::TYPE_CELL))
+                        .color(t.bg),
+                )
+            } else {
+                button
+                    .border(1.0, t.control_border_strong())
+                    .hover(p.plane_selected)
+                    .child(
+                        text(action.label.clone())
+                            .font(theme::TYPE_CELL)
+                            .color(t.ink_body()),
+                    )
+            };
             button
-                .color(p.text)
-                .fill(p.plane)
-                .hover(p.plane_selected)
                 .label(action.label.clone())
                 .on_press(move |app: &mut App| {
                     app.ui(RyeOsUiEvent::Activate {
@@ -1443,12 +1698,19 @@ fn dock_action(action: &RyeOsTimelineDockActionVm) -> El {
                     });
                 })
         }
-        None => button.color(p.faint).label(
-            action
-                .disabled_reason
-                .clone()
-                .unwrap_or_else(|| action.label.clone()),
-        ),
+        None => button
+            .border(1.0, t.control_border())
+            .child(
+                text(action.label.clone())
+                    .font(theme::TYPE_CELL)
+                    .color(t.ink_faint()),
+            )
+            .label(
+                action
+                    .disabled_reason
+                    .clone()
+                    .unwrap_or_else(|| action.label.clone()),
+            ),
     }
 }
 
@@ -1470,55 +1732,82 @@ fn timeline_entry_key(
     )
 }
 
-/// One timeline entry with its disclosure and, when expanded, its details.
+/// One timeline entry with its chevron and, when expanded, its details.
 fn timeline_entry(instance: &RyeOsViewInstanceKey, timeline: &Timeline<'_>, index: usize) -> El {
     let p = Palette::get();
+    let t = Tokens::get();
     let entry = &timeline.entries[index];
     // The renderer never trusts the parallel arrays to be complete.
     let id = timeline.ids.get(index);
+    let role = timeline.roles.get(index).map_or("", String::as_str);
     let indent = f32::from(timeline.indents.get(index).copied().unwrap_or(0));
     let selected = timeline.selected == Some(index);
     let expandable = timeline.expandable.get(index).copied().unwrap_or(false);
     let expanded = timeline.expanded.get(index).copied().unwrap_or(false);
     let content = match entry {
-        RyeOsTimelineEntryVm::Block { text: body, tone } => {
-            text(theme::drawable(body, theme::Face::Ui).into_owned())
-                .selectable(true)
-                .font(theme::ui(13.0))
-                .color(p.tone(*tone, p.text))
-                .wrap()
-                .grow(1.0)
-                .min_w(0.0)
+        RyeOsTimelineEntryVm::Block { text: body, .. } => {
+            let body = theme::drawable(undecorated(body), theme::Face::Ui).into_owned();
+            if role == "thought" {
+                // A thought is a quiet line, at the headline step.
+                text(body)
+                    .selectable(true)
+                    .font(theme::TYPE_LINE)
+                    .color(t.ink_soft())
+                    .wrap()
+                    .grow(1.0)
+                    .min_w(0.0)
+            } else {
+                // Prose is plain text, never folded.
+                text(body)
+                    .selectable(true)
+                    .font(theme::TYPE_PROSE)
+                    .color(t.ink_body())
+                    .wrap()
+                    .max_w(TIMELINE_COLUMN)
+                    .grow(1.0)
+                    .min_w(0.0)
+            }
         }
         RyeOsTimelineEntryVm::Line {
             primary,
             meta,
             tone,
+            state,
             ..
-        } => entry_line(primary, meta.as_deref(), p.tone(*tone, p.text), 500.0),
+        } => match role {
+            // A boundary in the log: a rule with a word in it.
+            "marker" | "status" => marker_rule(primary, meta.as_deref()),
+            "cluster" => one_line(None, primary, t.ink_soft(), None, None),
+            // A recap's step count stands where a state word would.
+            "recap" => one_line(None, primary, t.ink_strong(), None, meta.as_deref()),
+            _ => one_line(
+                t.tone(*tone),
+                primary,
+                t.ink_soft(),
+                meta.as_deref(),
+                state.as_deref(),
+            ),
+        },
         RyeOsTimelineEntryVm::Pair {
             summary,
             meta,
             tone,
+            state,
             ..
-        } => entry_line(summary, meta.as_deref(), p.tone(*tone, p.text), 400.0),
-        RyeOsTimelineEntryVm::Separator { label } => {
-            text(theme::drawable(label, theme::Face::Data).to_uppercase())
-                .font(theme::data(9.0))
-                .color(p.faint)
-        }
+        } => one_line(
+            t.tone(*tone),
+            summary,
+            t.ink_soft(),
+            meta.as_deref(),
+            state.as_deref(),
+        ),
+        RyeOsTimelineEntryVm::Separator { label } if role == "message" => message_bubble(label),
+        RyeOsTimelineEntryVm::Separator { label } => marker_rule(label, None),
     };
     let mut button = row()
         .grow(1.0)
         .min_w(0.0)
-        .ml(indent * TIMELINE_INDENT)
-        .px(15.0)
-        .py(12.0)
         .center_y()
-        .border_sides(
-            [0.0, 0.0, 0.0, 1.0],
-            if selected { p.accent_bright } else { p.line },
-        )
         .role("button")
         .label(match timeline.roles.get(index) {
             Some(role) => format!("{role}, {}", entry.label()),
@@ -1526,9 +1815,6 @@ fn timeline_entry(instance: &RyeOsViewInstanceKey, timeline: &Timeline<'_>, inde
         })
         .focus_selected(selected)
         .child(content);
-    if selected {
-        button = button.fill(p.plane_selected);
-    }
     if let Some(id) = id {
         let choose_key = instance.clone();
         let item_id = id.clone();
@@ -1540,21 +1826,29 @@ fn timeline_entry(instance: &RyeOsViewInstanceKey, timeline: &Timeline<'_>, inde
             });
         });
     }
-    let mut head = row().w_full().min_w(0.0).child(button);
+    let mut head = row()
+        .w_full()
+        .min_w(0.0)
+        .ml(indent * TIMELINE_INDENT)
+        .px(SELECT_REACH)
+        .radius(theme::RADIUS_ROW)
+        .child(button);
+    if selected {
+        head = head.fill(t.select_fill());
+    }
     if expandable && let Some(id) = id {
-        head = head.child(disclosure(
+        head = head.child(chevron(
             instance,
             id,
             expanded,
             "timeline entry".to_owned(),
-            DISCLOSURE_WIDTH,
+            CHEVRON_WIDTH,
         ));
     }
     let mut record = col()
         .key(timeline_entry_key(instance, timeline, index))
         .w_full()
         .min_w(0.0)
-        .border_sides([0.0, 0.0, 1.0, 0.0], p.line)
         .child(head);
     if expanded && let Some(rows) = timeline.details.get(index) {
         record = record.child(details(rows));
@@ -1562,21 +1856,118 @@ fn timeline_entry(instance: &RyeOsViewInstanceKey, timeline: &Timeline<'_>, inde
     record
 }
 
-/// A timeline line: the primary text with its meta beside it.
-fn entry_line(primary: &str, meta: Option<&str>, ink: rune::Color, weight: f32) -> El {
-    let p = Palette::get();
-    let mut line = row().grow(1.0).min_w(0.0).gap(12.0).center_y().child(
-        text(theme::drawable(primary, theme::Face::Ui).into_owned())
-            .font(rune::tok::TextStyle::new(13.0, weight).family(theme::UI))
-            .color(ink)
+/// Height of a one-line entry, and of a marker.
+const LINE_ENTRY_HEIGHT: f32 = 26.0;
+const MARKER_HEIGHT: f32 = 22.0;
+/// Between the elements of a one-line entry.
+const LINE_ENTRY_GAP: f32 = 9.0;
+/// Between a marker's rule and its word.
+const MARKER_GAP: f32 = 12.0;
+/// A message bubble: its widest, where its text wraps, and its padding.
+const BUBBLE_WIDTH: f32 = 502.0;
+const BUBBLE_WRAP: f32 = 470.0;
+const BUBBLE_PAD_X: f32 = 16.0;
+const BUBBLE_PAD_Y: f32 = 12.0;
+/// The bubble's fill, as an opacity of `ink`.
+const BUBBLE_FILL: f32 = 0.09;
+
+/// Marks the core puts before a headline that the look does not draw.
+const LEADING_MARKS: [char; 2] = ['↘', '✻'];
+
+fn undecorated(text: &str) -> &str {
+    text.trim_start_matches(&LEADING_MARKS[..]).trim_start()
+}
+
+/// A one-line entry: a tone dot or nothing, the headline, detail taking the
+/// remaining width and truncating, a state word. The headline never truncates.
+fn one_line(
+    tone: Option<rune::Color>,
+    headline: &str,
+    headline_ink: rune::Color,
+    detail: Option<&str>,
+    state: Option<&str>,
+) -> El {
+    let t = Tokens::get();
+    let mut line = row()
+        .grow(1.0)
+        .min_w(0.0)
+        .min_h(LINE_ENTRY_HEIGHT)
+        .gap(LINE_ENTRY_GAP)
+        .center_y();
+    if let Some(dot) = tone_dot(tone, TONE_DOT) {
+        line = line.child(dot);
+    }
+    line = line.child(
+        text(theme::drawable(undecorated(headline), theme::Face::Ui).into_owned())
+            .font(theme::TYPE_LINE)
+            .color(headline_ink)
             .wrap()
-            .grow(1.0)
             .min_w(0.0),
     );
-    if let Some(meta) = meta {
-        line = line.child(text(meta.to_owned()).font(theme::ui(10.0)).color(p.muted));
+    // The detail takes whatever width is left; without one a spacer does.
+    line = match detail {
+        Some(detail) => line.child(
+            text(detail.to_owned())
+                .font(theme::TYPE_LINE)
+                .color(t.ink_dim())
+                .truncate()
+                .grow(1.0)
+                .min_w(0.0),
+        ),
+        None => line.child(el().grow(1.0)),
+    };
+    if let Some(state) = state {
+        line = line.child(
+            text(state.to_owned())
+                .font(theme::TYPE_SMALL)
+                .color(t.ink_dim()),
+        );
     }
     line
+}
+
+/// A boundary in the log: a rule either side of a word.
+fn marker_rule(word: &str, detail: Option<&str>) -> El {
+    let t = Tokens::get();
+    let rule = || el().grow(1.0).h(1.0).fill(t.rule());
+    let say = |what: &str| {
+        text(theme::drawable(what, theme::Face::Ui).into_owned())
+            .font(theme::TYPE_MICRO)
+            .color(t.ink_dim())
+    };
+    let mut line = row()
+        .grow(1.0)
+        .min_w(0.0)
+        .min_h(MARKER_HEIGHT)
+        .gap(MARKER_GAP)
+        .center_y()
+        .child(rule())
+        .child(say(word));
+    if let Some(detail) = detail {
+        line = line.child(say(detail));
+    }
+    line.child(rule())
+}
+
+/// The operator's message: a bubble against the right edge.
+fn message_bubble(label: &str) -> El {
+    let t = Tokens::get();
+    row().grow(1.0).min_w(0.0).justify_end().child(
+        el().max_w(BUBBLE_WIDTH)
+            .min_w(0.0)
+            .px(BUBBLE_PAD_X)
+            .py(BUBBLE_PAD_Y)
+            .radius(theme::RADIUS_BUBBLE)
+            .fill(t.ink_at(BUBBLE_FILL))
+            .child(
+                text(theme::drawable(label, theme::Face::Ui).into_owned())
+                    .selectable(true)
+                    .font(theme::TYPE_PROSE)
+                    .color(t.ink_strong())
+                    .wrap()
+                    .max_w(BUBBLE_WRAP),
+            ),
+    )
 }
 
 /// How a block of field/value pairs sits: indented under an expanded record,
@@ -1593,8 +1984,8 @@ pub(crate) fn details(details: &[RyeOsRowDetailVm]) -> El {
 }
 
 pub(crate) fn details_as(details: &[RyeOsRowDetailVm], style: Pairs) -> El {
-    let p = Palette::get();
-    let pairs: Vec<(&str, String, rune::Color)> = details
+    let t = Tokens::get();
+    let pairs: Vec<(&str, String, Option<rune::Color>)> = details
         .iter()
         .map(|detail| {
             let field = if detail.field.is_empty() {
@@ -1602,8 +1993,8 @@ pub(crate) fn details_as(details: &[RyeOsRowDetailVm], style: Pairs) -> El {
             } else {
                 detail.field.as_str()
             };
-            let ink = detail.tone.map_or(p.muted, |tone| p.tone(tone, p.muted));
-            (field, detail.value.clone(), ink)
+            let tone = detail.tone.and_then(|tone| t.tone(tone));
+            (field, detail.value.clone(), tone)
         })
         .collect();
     pair_block(&pairs, style)
@@ -1611,31 +2002,31 @@ pub(crate) fn details_as(details: &[RyeOsRowDetailVm], style: Pairs) -> El {
 
 /// Untoned field/value pairs.
 pub(crate) fn detail_pairs(pairs: &[(&str, String)], style: Pairs) -> El {
-    let p = Palette::get();
-    let pairs: Vec<(&str, String, rune::Color)> = pairs
+    let pairs: Vec<(&str, String, Option<rune::Color>)> = pairs
         .iter()
-        .map(|(field, value)| (*field, value.clone(), p.muted))
+        .map(|(field, value)| (*field, value.clone(), None))
         .collect();
     pair_block(&pairs, style)
 }
 
-fn pair_block(pairs: &[(&str, String, rune::Color)], style: Pairs) -> El {
-    let p = Palette::get();
+/// Field names and values as a section draws them: the name dim, the value at
+/// the cell step, a toned value behind its dot.
+fn pair_block(pairs: &[(&str, String, Option<rune::Color>)], style: Pairs) -> El {
+    let t = Tokens::get();
     let (label_width, gap) = match style {
-        Pairs::Record => (110.0, 12.0),
+        Pairs::Record => (110.0, FIELD_ROW_GAP),
         Pairs::Panel => (76.0, 8.0),
     };
     let mut block = col().w_full();
     block = match style {
-        Pairs::Record => block
-            .pt(7.0)
-            .pb(9.0)
-            .pl(34.0)
-            .pr(12.0)
-            .fill(p.plane_raised.alpha(0.45)),
+        Pairs::Record => block.pt(7.0).pb(9.0).pl(34.0).pr(12.0),
         Pairs::Panel => block.py(5.0),
     };
-    for (field, value, ink) in pairs {
+    for (field, value, tone) in pairs {
+        let mut words = row().grow(1.0).min_w(0.0).gap(TONE_DOT_GAP).center_y();
+        if let Some(dot) = tone_dot(*tone, TONE_DOT) {
+            words = words.child(dot);
+        }
         block = block.child(
             row()
                 .w_full()
@@ -1644,67 +2035,73 @@ fn pair_block(pairs: &[(&str, String, rune::Color)], style: Pairs) -> El {
                 .py(2.0)
                 .child(
                     text((*field).to_owned())
-                        .font(theme::data(9.0))
-                        .color(p.faint)
+                        .font(theme::TYPE_SMALL)
+                        .color(t.ink_dim())
                         .wrap_anywhere()
                         .w(label_width),
                 )
                 .child(
-                    text(value.clone())
-                        .font(theme::data(9.0))
-                        .color(*ink)
-                        .wrap_anywhere()
-                        .grow(1.0)
-                        .min_w(0.0),
+                    words.child(
+                        text(value.clone())
+                            .font(theme::TYPE_CELL)
+                            .color(t.ink_body())
+                            .wrap_anywhere()
+                            .grow(1.0)
+                            .min_w(0.0),
+                    ),
                 ),
         );
     }
     block
 }
 
-/// The admitted source's state when it is not simply live.
+/// The admitted source's state when it is not simply live. A source that
+/// could not be read takes a `warn` dot and is never drawn as empty.
 fn source_status(status: &RyeOsSourceStatusVm) -> El {
     let p = Palette::get();
+    let t = Tokens::get();
     let stale = if status.stale {
         "Last observation (stale) · "
     } else {
         ""
     };
     let message = text(format!("{stale}{}: {}", status.state, status.message))
-        .font(theme::data(11.0))
-        .color(p.muted)
+        .font(theme::TYPE_SMALL)
+        .color(t.ink_dim())
         .wrap_anywhere()
         .grow(1.0)
         .min_w(0.0)
         .role("status");
+    let mut line = row().w_full().gap(TONE_DOT_GAP).center_y().px(9.0).py(6.0);
+    if is_unreadable(&status.state) {
+        line = line.child(
+            el().size(TONE_DOT, TONE_DOT)
+                .radius(TONE_DOT / 2.0)
+                .fill(t.warn),
+        );
+    }
+    line = line.child(message);
     if status.state != "failed" {
-        return message.px(9.0).py(6.0);
+        return line;
     }
     // A failed fetch offers its retry beside the error.
-    row()
-        .w_full()
-        .gap(8.0)
-        .center_y()
-        .px(9.0)
-        .py(6.0)
-        .child(message)
-        .child(
-            text("Retry")
-                .font(theme::ui(12.0))
-                .color(p.text)
-                .px(10.0)
-                .py(5.0)
-                .border(1.0, p.line_strong)
-                .fill(p.plane)
-                .hover(p.plane_selected)
-                .role("button")
-                .label("Retry the failed fetch")
-                .on_press(|app: &mut App| {
-                    app.ui(RyeOsUiEvent::Activate {
-                        intent: RyeOsUiIntent::Refresh,
-                    });
-                }),
-        )
+    line.gap(8.0).child(
+        text("Retry")
+            .font(theme::ui(12.0))
+            .color(p.text)
+            .px(10.0)
+            .py(5.0)
+            .border(1.0, p.line_strong)
+            .fill(p.plane)
+            .hover(p.plane_selected)
+            .role("button")
+            .label("Retry the failed fetch")
+            .on_press(|app: &mut App| {
+                app.ui(RyeOsUiEvent::Activate {
+                    intent: RyeOsUiIntent::Refresh,
+                });
+            }),
+    )
 }
 
 /// A view waiting for a subject: what it needs, and the open selections that
@@ -1961,12 +2358,11 @@ mod tests {
     #[test]
     fn hierarchy_is_drawn_only_in_the_first_column() {
         let rt = drawn(hierarchical());
-        // One guide for the branch row ("│├") and one for the leaf ("└"):
-        // the second column of each row carries none.
+        // Depth is an indent and a fold mark, never drawn guide glyphs.
         let shown = texts(&rt);
-        assert_eq!(shown.iter().filter(|text| *text == "│├").count(), 1);
-        assert_eq!(shown.iter().filter(|text| *text == "└").count(), 1);
-        assert_eq!(shown.iter().filter(|text| *text == "─").count(), 1);
+        for guide in ["│├", "└", "─", "├"] {
+            assert!(!shown.iter().any(|text| text == guide), "{guide:?} drawn");
+        }
         let (alpha, _) = find(&rt, "Select row: Alpha");
         let (beta, _) = find(&rt, "Select row: beta");
         assert_ne!(parent(&alpha), parent(&beta), "each cell has its own slot");
@@ -2151,8 +2547,22 @@ mod tests {
         assert!(!says(&windowed, "No rows in this page."));
     }
 
+    /// A view's body with the foot a frame adds under it.
+    fn drawn_with_foot(view: RyeOsViewVm) -> rune::Runtime<App> {
+        let instance = instance();
+        let local = std::rc::Rc::new(crate::Local::default());
+        runtime((900.0, 700.0), move || {
+            let mut tile = rune::col().child(body(&view, &instance, &local));
+            if let Some(foot) = super::table_foot(&view) {
+                tile = tile.child(foot);
+            }
+            tile
+        })
+    }
+
     #[test]
     fn the_coverage_line_is_shown_whether_or_not_there_are_rows() {
+        let drawn = drawn_with_foot;
         let coverage = json!({"state": "partial", "reason": "page_limit"});
         let empty = drawn(table(Vec::new(), 0, coverage.clone()));
         assert!(says(&empty, "PARTIAL / PAGE_LIMIT"));
@@ -2169,5 +2579,149 @@ mod tests {
             Value::Null,
         ));
         assert!(!texts(&unreported).iter().any(|text| text.contains(" / ")));
+    }
+
+    // ---- The look ----
+
+    fn timeline(entries: Vec<Value>, roles: &[&str]) -> RyeOsViewVm {
+        let ids: Vec<String> = (0..entries.len()).map(|i| format!("e{i}")).collect();
+        serde_json::from_value(json!({
+            "type": "timeline", "title": "Activity", "entries": entries,
+            "entry_roles": roles, "entry_ids": ids
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn timeline_entries_draw_by_their_role() {
+        let rt = drawn(timeline(
+            vec![
+                json!({"type": "separator", "label": "Keep the tiling behaviour."}),
+                json!({"type": "block", "text": "I traced the selection.", "tone": "neutral"}),
+                json!({"type": "pair", "summary": "Fetched", "meta": "docs.rs",
+                       "tone": "good", "pending": false, "state": "done"}),
+                json!({"type": "line", "primary": "↘ review", "meta": "T-e84f",
+                       "tone": "good", "state": "completed"}),
+                json!({"type": "line", "primary": "continued in a new thread",
+                       "tone": "neutral"}),
+            ],
+            &["message", "prose", "activity", "link", "marker"],
+        ));
+        for shown in [
+            "Keep the tiling behaviour.",
+            "I traced the selection.",
+            "Fetched",
+            "docs.rs",
+            "done",
+            "review",
+            "T-e84f",
+            "completed",
+            "continued in a new thread",
+        ] {
+            assert!(says(&rt, shown), "{shown:?} in {:?}", texts(&rt));
+        }
+        assert!(
+            !texts(&rt).iter().any(|text| text.contains('↘')),
+            "the core's leading mark is not drawn"
+        );
+    }
+
+    #[test]
+    fn a_docked_ask_is_a_card_with_its_target_and_actions() {
+        use ryeos_client_base::ui::RyeOsUiIntent;
+        use ryeos_client_base::ui::timeline::RyeOsTimelineEntryVm;
+        use ryeos_client_base::ui::view_model::{
+            RyeOsTimelineDockActionVm, RyeOsTimelineDockVm, RyeOsTimelineLaneVm, RyeOsTone,
+        };
+
+        let instance = instance();
+        let dock = vec![RyeOsTimelineDockVm {
+            id: "ask:1".to_owned(),
+            entry: RyeOsTimelineEntryVm::Line {
+                primary: "Write a file outside the workspace".to_owned(),
+                meta: Some("~/.config/ryeos/presentation.yaml".to_owned()),
+                tone: RyeOsTone::Accent,
+                intent: None,
+                secondary_intent: None,
+                state: None,
+            },
+            actions: vec![
+                RyeOsTimelineDockActionVm {
+                    label: "Approve".to_owned(),
+                    intent: None,
+                    disabled_reason: Some("not allowed here".to_owned()),
+                },
+                RyeOsTimelineDockActionVm {
+                    label: "Decline".to_owned(),
+                    intent: Some(RyeOsUiIntent::Refresh),
+                    disabled_reason: None,
+                },
+            ],
+        }];
+        let lane = RyeOsTimelineLaneVm {
+            label: "Waiting for approval".to_owned(),
+            tone: RyeOsTone::Warn,
+        };
+        let rt = runtime((900.0, 700.0), move || {
+            super::timeline_foot(&instance, Some(&lane), &dock)
+        });
+        for shown in [
+            "Waiting for approval",
+            "Write a file outside the workspace",
+            "~/.config/ryeos/presentation.yaml",
+            "Approve",
+            "Decline",
+        ] {
+            assert!(says(&rt, shown), "{shown:?} in {:?}", texts(&rt));
+        }
+        assert!(
+            labelled_containing(&rt, "not allowed here").len() == 1,
+            "the action the ask does not allow carries its reason"
+        );
+    }
+
+    #[test]
+    fn a_section_row_is_a_name_and_a_value() {
+        let view: RyeOsViewVm = serde_json::from_value(json!({
+            "type": "sections", "title": "Thread",
+            "sections": [{
+                "id": "summary", "title": "Summary", "count": 1, "rows": [
+                    list_row("r1", "status", None, json!({"meta": "running", "tone": "accent"}))
+                ]
+            }]
+        }))
+        .unwrap();
+        let rt = drawn(view);
+        for shown in ["SUMMARY", "status", "running"] {
+            assert!(says(&rt, shown), "{shown:?} in {:?}", texts(&rt));
+        }
+    }
+
+    #[test]
+    fn a_source_that_could_not_be_read_is_never_an_empty_page() {
+        let view: RyeOsViewVm = serde_json::from_value(json!({
+            "type": "table", "title": "Threads", "columns": ["name"],
+            "total_rows": 0, "rows": [],
+            "source_status": {"state": "failed", "message": "denied", "stale": false}
+        }))
+        .unwrap();
+        let rt = drawn(view);
+        assert!(!says(&rt, "No rows in this page."));
+        assert!(says(&rt, "failed: denied"));
+    }
+
+    #[test]
+    fn a_status_cell_keeps_its_word() {
+        let rt = drawn(table(
+            vec![table_row(
+                "t1",
+                ["T-ab", "running"],
+                json!({"cell_tones": [null, "accent"]}),
+            )],
+            1,
+            Value::Null,
+        ));
+        assert!(says(&rt, "T-ab"));
+        assert!(says(&rt, "running"));
     }
 }
