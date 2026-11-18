@@ -120,11 +120,19 @@ pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<Prepar
     {
         bail!("{missing}");
     }
+    // Images are checked before conversion: a history that holds one the
+    // model's entry cannot send fails the attempt with no provider request.
+    let image_render = super::images::ImageRender::prepare(
+        provider.image_input.as_ref(),
+        input.images,
+        input.messages,
+    )?;
     let (converted_messages, system_prompt) = super::messages::convert_messages(
         input.messages,
         &schemas.cloned(),
         &super::messages::ConvertOptions {
             reasoning: reasoning_schema,
+            images: image_render.as_ref(),
         },
     );
 
@@ -424,6 +432,7 @@ mod tests {
             provider_id: "fixture",
             matched_profile: None,
             config_hash: "0",
+            images: &crate::provider_adapter::images::ImageStore::default(),
             execution: &execution,
             model: "fixture-model",
             messages: &messages,
@@ -491,6 +500,7 @@ mod tests {
             provider_id: "fixture",
             matched_profile: None,
             config_hash: "0",
+            images: &crate::provider_adapter::images::ImageStore::default(),
             execution: &execution,
             model: "fixture-model",
             messages: &messages,
@@ -511,5 +521,131 @@ mod tests {
         let message = format!("{error:#}");
         assert!(message.contains("provider_request_body_limit_exceeded"));
         assert!(message.contains("zero provider requests"));
+    }
+
+    fn image_history() -> Vec<ProviderMessage> {
+        use ryeos_provider_contract::{ImagePart, Message, Part, Role, ToolResultStatus};
+        vec![
+            ProviderMessage::user("look"),
+            ProviderMessage::assistant(
+                None,
+                vec![crate::directive::ToolCall {
+                    id: Some("call_1".to_string()),
+                    name: "shot".to_string(),
+                    arguments: json!({}),
+                }],
+                None,
+            ),
+            Message::new(
+                Role::Tool,
+                vec![Part::tool_result(
+                    "call_1",
+                    vec![
+                        Part::text("captured"),
+                        Part::Image(ImagePart {
+                            media_type: "image/png".to_string(),
+                            attachment: "a".repeat(64),
+                            byte_length: 6,
+                            width: Some(2),
+                            height: Some(2),
+                        }),
+                    ],
+                    ToolResultStatus::Ok,
+                )],
+            ),
+        ]
+    }
+
+    fn prepare_images(
+        provider: &ProviderConfig,
+        images: &crate::provider_adapter::images::ImageStore,
+    ) -> Result<PreparedProviderRequest> {
+        let client = reqwest::Client::new();
+        let execution = ExecutionConfig::default();
+        let messages = image_history();
+        let callback_config = EnvelopeCallback {
+            socket_path: std::path::PathBuf::from("/nonexistent/ryeos-callback.sock"),
+            token: "unused".to_string(),
+        };
+        let callback = CallbackClient::new(&callback_config, "T-image-fixture", "unused");
+        prepare_provider_request(&StreamingCallInput {
+            client: &client,
+            provider,
+            provider_id: "fixture",
+            matched_profile: None,
+            config_hash: "0",
+            images,
+            execution: &execution,
+            model: "fixture-model",
+            messages: &messages,
+            tools: &[],
+            callback: &callback,
+            turn: 1,
+            attempt: 1,
+            sampling: None,
+            reasoning: None,
+            provider_request_body_bytes_limit: 0,
+            cancel_flag: None,
+            interrupt_flag: None,
+        })
+    }
+
+    fn image_provider() -> ProviderConfig {
+        let mut value = serde_json::to_value(provider()).expect("provider value");
+        value["image_input"] = json!({
+            "accepts": {
+                "media_types": ["image/png"],
+                "max_bytes_per_image": 1000,
+                "max_images_per_request": 4,
+                "text_part_template": {"type": "text", "text": "{text}"},
+                "image_part_template": {"type": "image_url", "image_url": {"url": "{data_url}"}},
+                "tool_result_note": "[{count} image(s) follow]",
+                "deferred_label": "Image {index} from {call_id}:",
+                "omitted_note": "[omitted]",
+                "cost": {"pixels_per_token": 750, "max_tokens": 1600, "unknown_dimensions_tokens": 1600}
+            }
+        });
+        serde_json::from_value(value).expect("image provider")
+    }
+
+    #[test]
+    fn a_history_with_an_image_for_a_model_that_takes_none_is_refused_before_any_request() {
+        let mut store = crate::provider_adapter::images::ImageStore::default();
+        store.insert(&"a".repeat(64), "image/png", b"pixels");
+        let error = match prepare_images(&provider(), &store) {
+            Ok(_) => panic!("an image must not be dropped silently"),
+            Err(error) => error,
+        };
+        let message = format!("{error:#}");
+        assert!(message.contains("image_input_unsupported"), "{message}");
+        assert!(message.contains("zero provider requests"), "{message}");
+    }
+
+    #[test]
+    fn the_prepared_body_moves_the_image_into_a_user_message_after_the_tool_results() {
+        let mut store = crate::provider_adapter::images::ImageStore::default();
+        store.insert(&"a".repeat(64), "image/png", b"pixels");
+        let prepared = prepare_images(&image_provider(), &store).expect("prepared");
+        let body: Value = serde_json::from_slice(&prepared.body_bytes).expect("body");
+        let messages = body["messages"].as_array().expect("messages");
+        let roles: Vec<&str> = messages
+            .iter()
+            .map(|message| message["role"].as_str().expect("role"))
+            .collect();
+        assert_eq!(roles, ["user", "assistant", "tool", "user"]);
+        assert_eq!(messages[2]["content"], "captured\n[1 image(s) follow]");
+        assert_eq!(
+            messages[3]["content"],
+            json!([
+                {"type": "text", "text": "Image 1 from call_1:"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,cGl4ZWxz"}}
+            ])
+        );
+        let missing = crate::provider_adapter::images::ImageStore::default();
+        let error = match prepare_images(&image_provider(), &missing) {
+            Ok(_) => panic!("missing bytes must refuse"),
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").contains("image_attachment_missing"));
     }
 }

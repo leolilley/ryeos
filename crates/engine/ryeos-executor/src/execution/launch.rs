@@ -8320,6 +8320,65 @@ async fn run_claimed_thread_row_inner(
         {
             terminal_status = ryeos_state::objects::ThreadStatus::Killed;
         }
+        // The dedicated session worker is the workspace owner: its process
+        // group is what the stopped-runtime capture proves absent, so it must
+        // be retired first (the same order as the owner-drop path). One
+        // hosted root terminalization fence covers retirement, capture and
+        // finalization. That fence is exclusive and not reentrant, so it is
+        // acquired exactly once and lent to the capture, which would
+        // otherwise try to reserve the root a second time and refuse.
+        //
+        // The session state is read only after the fence is held: acquiring
+        // it drains in-flight worker operations, and one of them can finish a
+        // turn and move the session to `freezing` while we wait. Under the
+        // fence no root operation can move it. A session that is not in the
+        // retire-first allow-list (a candidate-disposition state, whose
+        // retirement would cancel the candidate the binding step below still
+        // needs) releases the fence and takes the capture-first path: the
+        // capture's own temporary fence, then the candidate wait, then the
+        // terminalization fence and retirement. The guard is dropped before
+        // that path runs, so the two never overlap.
+        let mut hosted_root_terminalization = None;
+        let mut retires_before_capture = false;
+        if state.state_store.dedicated_session(&thread_id)?.is_some() {
+            let terminalization =
+                ryeos_app::hosted_operation::begin_hosted_root_terminalization_async(
+                    &state.state_store,
+                    &thread_id,
+                )
+                .await
+                .map_err(BuildAndLaunchError::Internal)?;
+            let retire_first = state
+                .state_store
+                .dedicated_session(&thread_id)?
+                .is_some_and(|session| {
+                    ryeos_app::dedicated_session_service::session_state_retires_before_capture(
+                        &session.state,
+                    )
+                });
+            if retire_first {
+                if ryeos_app::dedicated_session_service::abort_session_for_root_stop(
+                    state, &thread_id,
+                )
+                .is_err()
+                {
+                    return Err(BuildAndLaunchError::RuntimeCleanupUnresolved {
+                        runtime_status: runtime_result.status,
+                        runtime_error: fallback_finalization(
+                            &thread_id,
+                            &runtime_result,
+                            terminal_status,
+                        )
+                        .params
+                        .error,
+                    });
+                }
+                retires_before_capture = true;
+                hosted_root_terminalization = Some(terminalization);
+            } else {
+                drop(terminalization);
+            }
+        }
         // An externally placed candidate never executes in the controller's
         // local COW view.  If the bounded session did not reach its exact
         // completed fence, that view is still B and is not a partial result.
@@ -8331,12 +8390,24 @@ async fn run_claimed_thread_row_inner(
         // generation joining that failed terminal.
         let mut head_advance_not_applied = None;
         let result_generation = if owns_workspace && !external_candidate_without_completion {
-            match super::prepare_stopped_managed_runtime_terminal_project_result(
-                state,
-                provenance,
-                &thread_id,
-                launch_owner,
-            ) {
+            let captured = match hosted_root_terminalization.as_ref() {
+                Some(terminalization) => {
+                    super::prepare_stopped_managed_runtime_terminal_project_result_under_fence(
+                        state,
+                        provenance,
+                        &thread_id,
+                        launch_owner,
+                        terminalization,
+                    )
+                }
+                None => super::prepare_stopped_managed_runtime_terminal_project_result(
+                    state,
+                    provenance,
+                    &thread_id,
+                    launch_owner,
+                ),
+            };
+            match captured {
                 Ok(generation) => generation,
                 Err(error) => match super::HeadAdvanceNotApplied::find(&error) {
                     Some(not_applied) => {
@@ -8505,6 +8576,11 @@ async fn run_claimed_thread_row_inner(
                 .map_err(BuildAndLaunchError::Internal)?,
             );
         }
+        // When the canonical session projection replaced the runtime's stdout
+        // result above, its status is the authority in both directions (a
+        // declared worker failure fails the thread; a completed projection
+        // completes it). An operator stop still settles as that stop.
+        terminal_status = terminal::settled_terminal_status(terminal_status, &runtime_result);
         let observed_runtime_status = runtime_result.status;
         let fallback = match head_advance_not_applied.as_ref() {
             // An operator stop still settles as that stop.
@@ -8520,20 +8596,18 @@ async fn run_claimed_thread_row_inner(
             _ => fallback_finalization(&thread_id, &runtime_result, terminal_status),
         };
         runtime_result = fallback.runtime_result;
-        let mut hosted_root_terminalization =
-            if state.state_store.dedicated_session(&thread_id)?.is_some() {
-                Some(
-                    ryeos_app::hosted_operation::begin_hosted_root_terminalization_async(
-                        &state.state_store,
-                        &thread_id,
-                    )
-                    .await
-                    .map_err(BuildAndLaunchError::Internal)?,
+        if !retires_before_capture && state.state_store.dedicated_session(&thread_id)?.is_some() {
+            hosted_root_terminalization = Some(
+                ryeos_app::hosted_operation::begin_hosted_root_terminalization_async(
+                    &state.state_store,
+                    &thread_id,
                 )
-            } else {
-                None
-            };
-        if let Some(session) = state.state_store.dedicated_session(&thread_id)?
+                .await
+                .map_err(BuildAndLaunchError::Internal)?,
+            );
+        }
+        if !retires_before_capture
+            && let Some(session) = state.state_store.dedicated_session(&thread_id)?
             && session.state != "terminal"
             && ryeos_app::dedicated_session_service::abort_session_for_root_stop(state, &thread_id)
                 .is_err()

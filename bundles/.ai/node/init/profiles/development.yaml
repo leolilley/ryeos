@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-17T23:16:27Z:ca4a582e550106634f4d09ff60305042298841118e4236e256a1c33f896bd2ef:qXmp9M9pllPVzidChqxIony5O1qyXQbNry4EuVTm02hsUK1hcrdmR+GdBrkF5LK3UrWVg3nM/dA1mRu4lvXfBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T02:10:57Z:c2b8e4f9ac7832145d70640508620c8518ffc62b09319813edc5d9abeb91e0e3:qJz2bSHga0oKdqEmoQyeq13wuAS0cqtWxbJ9KqNZb8aVhjDERGsxiZd78G8mfv31p4w8T8zXkjASrOjG89lVBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -334,6 +334,25 @@ policies:
       # class requires is this profile's own; the same class carries a
       # different floor and lane in another profile.
       host_classes:
+        hosted:
+          # A hosting provider's container (Railway, a Render service, plain
+          # Docker), as in the standard profile. It has no qualified per-job
+          # process scopes and commonly no swap and no CAP_IPC_LOCK, so the
+          # floor accepts a resident region proven only by the absence of swap
+          # at startup (residency:swap_absent). Jobs die with the node because
+          # the node is pid 1 of its container, or its parent is a pid 1 named
+          # in enclosure_inits. Jobs run without a sandbox; the development
+          # qualification and authoring workers run on this trusted lane.
+          requires_capabilities: [{any_of: [accounting, residency:swap_absent]}, {name: recovery:enclosure_trusted_init, accept: [measured, trusted]}, storage:durable_root, {name: termination:enclosure_trusted_init, accept: [measured, trusted]}, time]
+          process_scopes:
+            mode: unconfigured
+          # Transitional trusted/disposable authoring lane. This admits direct
+          # process-group cleanup but makes no hard-containment claim.
+          trusted_process_group_sessions: true
+          mode: disabled
+          backend: null
+          proc_filesystem: empty
+          host_direct: unavailable
         local:
           # Capabilities this node must prove on its host before it starts.
           # `ryeos node doctor` shows what the host proves and what is missing.

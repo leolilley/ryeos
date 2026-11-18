@@ -1712,6 +1712,58 @@ pub(crate) fn prepare_stopped_managed_runtime_terminal_project_result(
     thread_id: &str,
     launch_owner: &str,
 ) -> Result<Option<ryeos_state::objects::WorkspaceGenerationPair>> {
+    let Some(terminal_publication) = stopped_runtime_capture_publication(provenance)? else {
+        return Ok(None);
+    };
+    // The later terminal-state commit acquires its own guard. This temporary
+    // disposition fence drains worker starts before any post-exit capture;
+    // missing attachment metadata alone is not a no-contact proof.
+    let root_contact_fence = ryeos_app::hosted_operation::begin_hosted_root_terminalization(
+        &state.state_store,
+        thread_id,
+    )?;
+    capture_stopped_managed_runtime_result(
+        state,
+        provenance,
+        thread_id,
+        launch_owner,
+        terminal_publication,
+        &root_contact_fence,
+    )
+}
+
+/// Same capture for a caller that already holds the root terminalization
+/// fence across its whole settlement. The fence is exclusive and not
+/// reentrant (a second acquisition for the same root is refused), so such a
+/// caller must pass its own guard here instead of calling
+/// [`prepare_stopped_managed_runtime_terminal_project_result`], which would
+/// try to reserve the root again and refuse.
+pub(crate) fn prepare_stopped_managed_runtime_terminal_project_result_under_fence(
+    state: &ryeos_app::state::AppState,
+    provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
+    thread_id: &str,
+    launch_owner: &str,
+    root_contact_fence: &ryeos_app::hosted_operation::HostedRootTerminalizationGuard,
+) -> Result<Option<ryeos_state::objects::WorkspaceGenerationPair>> {
+    let Some(terminal_publication) = stopped_runtime_capture_publication(provenance)? else {
+        return Ok(None);
+    };
+    capture_stopped_managed_runtime_result(
+        state,
+        provenance,
+        thread_id,
+        launch_owner,
+        terminal_publication,
+        root_contact_fence,
+    )
+}
+
+/// The publication a stopped runtime's capture must honour, or `None` when
+/// no capture applies (a borrowed child, no project foldback, or a discarded
+/// result).
+fn stopped_runtime_capture_publication(
+    provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
+) -> Result<Option<&ryeos_state::objects::PinnedTerminalPublication>> {
     if provenance.is_borrowed_child() || !provenance.project_authority().requires_project_foldback()
     {
         return Ok(None);
@@ -1728,13 +1780,17 @@ pub(crate) fn prepare_stopped_managed_runtime_terminal_project_result(
     ) {
         return Ok(None);
     }
-    // The later terminal-state commit acquires its own guard. This temporary
-    // disposition fence drains worker starts before any post-exit capture;
-    // missing attachment metadata alone is not a no-contact proof.
-    let _root_contact_fence = ryeos_app::hosted_operation::begin_hosted_root_terminalization(
-        &state.state_store,
-        thread_id,
-    )?;
+    Ok(Some(terminal_publication))
+}
+
+fn capture_stopped_managed_runtime_result(
+    state: &ryeos_app::state::AppState,
+    provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
+    thread_id: &str,
+    launch_owner: &str,
+    terminal_publication: &ryeos_state::objects::PinnedTerminalPublication,
+    _root_contact_fence: &ryeos_app::hosted_operation::HostedRootTerminalizationGuard,
+) -> Result<Option<ryeos_state::objects::WorkspaceGenerationPair>> {
     state
         .state_store
         .assert_execution_process_detached_owned(thread_id, launch_owner)?;
@@ -2396,16 +2452,16 @@ pub(crate) fn assert_workspace_capture_processes_settled(
         .get_thread(root)?
         .ok_or_else(|| anyhow::anyhow!("terminal workspace capture root disappeared"))?;
     if let Some(identity) = thread.runtime.process_identity.as_ref() {
-        ryeos_app::process::assert_reaped_process_group_absent(identity)?;
+        ryeos_app::process::assert_reaped_process_group_absent_as(identity, "root runtime")?;
     } else if thread.runtime.pid.is_some() || thread.runtime.pgid.is_some() {
         anyhow::bail!("terminal workspace capture root has incomplete process identity");
     }
     if let Some(encoded) = record.process_identity.as_deref() {
         let identity = serde_json::from_str(encoded).context("decode workspace process owner")?;
-        ryeos_app::process::assert_reaped_process_group_absent(&identity)?;
+        ryeos_app::process::assert_reaped_process_group_absent_as(&identity, "workspace owner")?;
     }
     if let Some(identity) = worker_identity.as_ref() {
-        ryeos_app::process::assert_reaped_process_group_absent(identity)?;
+        ryeos_app::process::assert_reaped_process_group_absent_as(identity, "dedicated worker")?;
     }
     Ok(())
 }

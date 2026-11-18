@@ -1,12 +1,15 @@
 //! Open-descriptor budget for a process that sets up a sandbox from inherited
 //! descriptors.
 //!
-//! A sandbox setup process holds every inherited descriptor it was handed
-//! until that source's last mount is bound and verified; only then does it
-//! release the source and the private authority derived from it (the
-//! re-anchored source, or the byte copy materialized into private staging).
-//! It also keeps a few staging directory handles. The limit installed on that process must
-//! cover that peak.
+//! A sandbox setup process keeps every inherited descriptor it was handed open
+//! for the whole setup. Before the first mount it derives a private authority
+//! for every non-sealed source (the re-anchored source); a sealed source's
+//! private authority (its byte copy in private staging) is made at its first
+//! mount. A private authority is released once its source's last mount is
+//! bound and verified; the inherited original is not. The peak is therefore
+//! two descriptors per inherited non-sealed source, reached before any mount,
+//! plus a few staging directory handles. The limit installed on that process
+//! must cover that peak.
 //!
 //! The target inherits that limit. Lillux installs soft and hard limits
 //! together, so nothing below the setup process can raise it: a target with no
@@ -23,8 +26,9 @@
 use std::fmt;
 
 /// Descriptors held per inherited descriptor at the setup peak: the original,
-/// held until its last mount is bound, and its private authority while that
-/// source still has mounts to bind. Transient duplicates (kind inspection,
+/// open for the whole setup, and its private authority while that source still
+/// has mounts to bind (all non-sealed ones exist at once before the first
+/// mount). Transient duplicates (kind inspection,
 /// positional copy source, ancestor pin) live one source at a time and are
 /// covered by [`SETUP_FIXED_DESCRIPTORS`].
 pub const SETUP_DESCRIPTORS_PER_INHERITED: u64 = 2;

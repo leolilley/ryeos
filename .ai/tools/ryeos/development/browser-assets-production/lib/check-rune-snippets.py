@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-18T04:15:43Z:613fbccaade4313335cb8800a8af5a4004dd063858b5f277e935ed0a4e29832f:6PSB3tXWXGz3RuFzDMlIvac5yDJQwj/d/w/rCBapYouPQ10J/p5MLPuUOBKaNJ336g0d5S9+80PmzCsjLwcmCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T05:02:16Z:4d3287f3a1e2bf25ec48fbaf321a81c2d6a5bef8cafb3533a8709695c87f68fc:kyIdmr+LxdftSXKjawGuFI0o80F1/ZvFLf5zQdXM6W2Ayk+09AWJAUFqX/G4ynqbpAn1k7klPiQTx7PBIDRgBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Externally invoked host helper in the development bundle; lib/ is excluded
 # from Tool resolution, so this is signed source, not an admitted Tool. It
 # grants no RyeOS authority. Run it from a checkout of this repository.
@@ -7,7 +7,8 @@
 # does not list, or the list names one Rune no longer declares. The set comes from Rune's
 # `#[wasm_bindgen(module = "...")]` declarations in the source cargo resolved for the lock,
 # so it needs no wasm build; inline snippets cannot be flattened and are refused outright.
-# Needs the dependencies fetched (cargo metadata --locked).
+# Needs the dependencies fetched (cargo metadata --locked). The renderer is its own Cargo
+# workspace (crates/clients/rune), so this reads that workspace's lock.
 import json, pathlib, re, subprocess, tomllib
 
 here = pathlib.Path(__file__).resolve().parent
@@ -15,7 +16,8 @@ root = here.parents[5]
 listed = set(tomllib.loads((here / "rune-snippets.toml").read_text())["snippets"])
 
 meta = json.loads(subprocess.run(
-    ["cargo", "metadata", "--locked", "--format-version", "1", "--filter-platform", "wasm32-unknown-unknown"],
+    ["cargo", "metadata", "--locked", "--format-version", "1", "--filter-platform", "wasm32-unknown-unknown",
+     "--manifest-path", "crates/clients/rune/Cargo.toml"],
     cwd=root, check=True, capture_output=True, text=True).stdout)
 rune = [p for p in meta["packages"] if p["name"] == "rune"]
 if len(rune) != 1:

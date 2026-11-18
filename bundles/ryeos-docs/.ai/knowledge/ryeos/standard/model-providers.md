@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-17T18:15:21Z:e50187839c8780d26bc6caa119daab64b3f9d585f5ae87dd0bcfbe528d197023:dNjYRYN+zbnMNF6Fe9BiMALZgtn0gNYHd1Efz341+PgceNFC3uzYeXjjYQWQb8w4SnD7O8XvL8iBi7h5Y7z5Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-18T06:12:01Z:0a13112ce3d3a745641898c75db60ed0e620d2d920418e876f22e2d166736fc4:c2FvqCQ5hR1ZAjTNoChQdLYNdjMEV0lQxoBFl4Rdi0O60tWVcXIWy+mc0GZiYrcYVf3p8/Nv8KSZspFnik3tBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/standard
@@ -273,6 +273,47 @@ schemas:
 A resume or continuation whose launch changes a listed component fails with
 `frame_change_refused`, naming the component and the recorded `frame_seq`,
 before anything is recorded. Unlisted changes record the next frame.
+
+## Image input
+
+A provider route can answer 200 and silently drop an image a model cannot read,
+so image support is declared, per model, never learned from an error. `image_input`
+sits at the top level of the provider entry and, like any profile field, a
+profile's value replaces the entry's whole.
+
+```yaml
+image_input:
+  unsupported: refuse          # refuse | text_note, for a model with no `accepts`
+  accepts:                     # absent: the model takes no images
+    media_types: [image/png, image/jpeg, image/gif, image/webp]
+    max_bytes_per_image: 3145728
+    max_images_per_request: 20
+    text_part_template:  {type: text, text: "{text}"}
+    image_part_template: {type: image_url, image_url: {url: "{data_url}"}}
+    tool_result_note: "[{count} image(s) follow in the next message]"
+    deferred_label:   "Image {index} from tool result {call_id}:"
+    omitted_note:     "[earlier image omitted: {media_type} {width}x{height}]"
+    cost: {base_tokens: 0, pixels_per_token: 750, max_tokens: 1600, unknown_dimensions_tokens: 1600}
+```
+
+The part templates substitute whole-string placeholders (`{text}`; `{data_url}`,
+`{data_b64}`, `{media_type}`, `{width}`, `{height}`). The three notes use named
+placeholders and an unknown one fails config validation.
+
+A model with no `accepts` and `unsupported: refuse` (the default) gets an error
+tool result, `image_input_unsupported`, and nothing is stored; `text_note` keeps
+the result text and notes the image. The record keeps an image inside the tool
+result that returned it. When a request is built, the images of each run of
+tool messages move into one user message placed after the tool results, the
+same for every model, and each tool message keeps a note saying so. A request
+carries only the newest `max_images_per_request` images; older ones become the
+`omitted_note` text in place. The estimate counts the same images by `cost`.
+A history that holds an image the entry cannot send fails the attempt with
+`image_input_unsupported` before any provider request. An image larger than the
+entry's `max_bytes_per_image` (or too large to read back in one callback frame)
+is not read back: it stands in the conversation as `[image not used:
+image_oversize]` and the run goes on. Images the next request carries are held
+in memory and are never evicted while that request is built.
 
 ## Provider cache usage
 
