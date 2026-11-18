@@ -389,7 +389,8 @@ fn the_status_bar_shows_only_its_segments() {
         "the fixture's hints keep their ASCII core"
     );
     assert!(
-        left.windows(2).any(|pair| pair[0] == "ctrl+k" && pair[1] == "open"),
+        left.windows(2)
+            .any(|pair| pair[0] == "ctrl+k" && pair[1] == "open"),
         "the open hint as its key then its word, saw {left:?}"
     );
     assert!(
@@ -753,8 +754,111 @@ fn a_tab_with_work_carries_its_dot_after_its_word() {
         let expects_needing = tab.view_set_id == needing.view_set_id;
         let expects_running = tab.view_set_id == running.view_set_id;
         if in_view {
-            assert_eq!(drawn("needs-you", tab.view_set_id).is_some(), expects_needing);
+            assert_eq!(
+                drawn("needs-you", tab.view_set_id).is_some(),
+                expects_needing
+            );
             assert_eq!(drawn("running", tab.view_set_id).is_some(), expects_running);
         }
     }
+}
+
+/// The tiles' left and right extents.
+fn tile_extent(rt: &Runtime<App>) -> (f32, f32) {
+    let tiles: Vec<[f32; 4]> = rt
+        .elements()
+        .into_iter()
+        .filter(|element| {
+            element
+                .key
+                .as_deref()
+                .is_some_and(|key| key.starts_with("tile:"))
+        })
+        .map(|element| element.rect)
+        .collect();
+    assert!(!tiles.is_empty(), "the body draws a tile");
+    (
+        tiles.iter().map(|r| r[0]).fold(f32::INFINITY, f32::min),
+        tiles.iter().map(|r| r[0] + r[2]).fold(0.0, f32::max),
+    )
+}
+
+#[test]
+fn a_switcher_on_the_right_and_a_status_bar_on_top_move_their_room() {
+    let (width, height) = (1280.0, 800.0);
+    let rt = shell("switcher-right", (width, height));
+    let vm = model(&rt);
+    let current = vm
+        .session
+        .surfaces
+        .iter()
+        .find(|surface| surface.active)
+        .expect("a current Surface");
+    let [sx, sy, sw, _] = keyed(&rt, &format!("surface:{:?}", current.surface_instance_id))
+        .expect("the switcher draws");
+    assert!(
+        sx + sw <= width - 10.0 + 0.5 && sx >= width - 60.0,
+        "switcher at the right: {sx}"
+    );
+    let [_, ly, _, lh] = keyed(&rt, "shell:launch").expect("the status bar draws");
+    assert!(ly + lh <= 45.0, "the status bar is at the top: {ly}");
+    assert!(
+        sy >= 40.0,
+        "the switcher clears the status bar on top: {sy}"
+    );
+    let (left, right) = tile_extent(&rt);
+    assert!(left < 40.0, "no room is kept on the left: {left}");
+    assert!(
+        right <= width - 44.0 + 0.5,
+        "the tiles clear the switcher: {right}"
+    );
+    assert!(
+        exactly_keyed(&rt, "shell:health").is_some_and(|[_, y, _, _]| y < 50.0),
+        "the node's health is in the top bar"
+    );
+}
+
+#[test]
+fn a_switcher_along_the_top_is_a_band_of_named_pills() {
+    let (width, height) = (1280.0, 800.0);
+    let rt = shell("switcher-top", (width, height));
+    let vm = model(&rt);
+    assert_eq!(vm.session.surfaces.len(), 4);
+    for surface in &vm.session.surfaces {
+        let [_, y, _, h] =
+            exactly_keyed(&rt, &format!("surface:{:?}", surface.surface_instance_id))
+                .expect("each Surface is a pill");
+        assert!(
+            y >= 10.0 - 0.5 && y + h <= 50.0 + 0.5,
+            "the pill is in the top band: {y}"
+        );
+    }
+    let texts: Vec<String> = drawn_texts(&rt).into_iter().map(|(text, _)| text).collect();
+    assert!(texts.iter().any(|text| text == "Home"), "{texts:?}");
+    assert!(
+        texts.iter().any(|text| text == "ryeos·"),
+        "the project mark: {texts:?}"
+    );
+    let home = &vm.session.surfaces[0];
+    assert!(
+        exactly_keyed(
+            &rt,
+            &format!("needs-you:surface:{:?}", home.surface_instance_id)
+        )
+        .is_some()
+    );
+    let (left, _) = tile_extent(&rt);
+    assert!(left < 40.0, "no side room with the switcher on top: {left}");
+}
+
+#[test]
+fn a_bare_surface_draws_no_switcher_and_no_status_bar_but_keeps_the_health_dot() {
+    let (width, height) = (1280.0, 800.0);
+    let rt = shell("bare", (width, height));
+    assert!(keyed(&rt, "surface:").is_none(), "no switcher");
+    assert!(keyed(&rt, "shell:launch").is_none(), "no status bar");
+    let [x, y, w, h] = exactly_keyed(&rt, "shell:health").expect("the health dot");
+    assert!(w <= 6.5 && h <= 6.5 && x > width - 30.0 && y > height - 30.0);
+    let (left, _) = tile_extent(&rt);
+    assert!(left < 40.0, "no switcher room: {left}");
 }

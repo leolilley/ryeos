@@ -24,7 +24,7 @@ mod widgets;
 use ryeos_client_base::layout::Rect;
 use ryeos_client_base::text_surface::{Border, Style, TextSurface};
 use ryeos_client_base::ui::view_model::{
-    RyeOsLayoutNodeVm, RyeOsSplitAxisVm, RyeOsTextLineVm, RyeOsViewModel, RyeOsViewVm,
+    RyeOsEdgeVm, RyeOsLayoutNodeVm, RyeOsSplitAxisVm, RyeOsTextLineVm, RyeOsViewModel, RyeOsViewVm,
 };
 
 use crate::render_text;
@@ -63,19 +63,30 @@ fn build_surface(vm: &RyeOsViewModel, width: usize, height: usize) -> TextSurfac
     surface.fill(Style::new().fg(FG).bg(BG));
 
     // There is no "home" mode. Bars and dialogs render in every state.
-    // The switcher is the top line; the tabs, when shown, the line beneath.
-    // On a very short terminal the switcher gives its line to the body first.
+    // The switcher is the top line (under the status line when the Surface
+    // puts that on top); the tabs, when shown, the line beneath. A Surface can
+    // hide either bar. On a very short terminal the switcher gives its line to
+    // the body first.
+    let chrome = &vm.presentation.chrome;
+    let status_shown =
+        chrome.status_bar.visible && chrome.status_bar.edge != RyeOsEdgeVm::Hidden && height >= 3;
+    let status_top = status_shown && chrome.status_bar.edge == RyeOsEdgeVm::Top;
+    let switcher_shown = chrome.switcher.edge != RyeOsEdgeVm::Hidden && height >= 4;
     let mut top_h = 0;
-    if height >= 4 {
-        chrome::draw_switcher(&mut surface, 0, vm);
+    if status_top {
+        chrome::draw_status_bar(&mut surface, 0, vm);
         top_h += 1;
     }
-    if vm.presentation.chrome.top_bar.visible && height >= 3 + top_h {
+    if switcher_shown {
+        chrome::draw_switcher(&mut surface, top_h, vm);
+        top_h += 1;
+    }
+    if chrome.top_bar.visible && height >= 3 + top_h {
         chrome::draw_tab_band(&mut surface, top_h, vm);
         top_h += 1;
     }
-    let bottom_h = if vm.presentation.chrome.status_bar.visible && height >= 3 {
-        chrome::draw_status_bar(&mut surface, vm);
+    let bottom_h = if status_shown && !status_top {
+        chrome::draw_status_bar(&mut surface, height - 1, vm);
         1
     } else {
         0
@@ -85,6 +96,17 @@ fn build_surface(vm: &RyeOsViewModel, width: usize, height: usize) -> TextSurfac
     if let Some(root) = vm.view_set.as_ref().and_then(|set| set.root.as_ref()) {
         let border = theme::border_for(&vm.presentation.chrome.border);
         draw_layout_node(&mut surface, body, root, border, vm.now_ms);
+    }
+
+    // With neither bar drawn, the node's health keeps a dot in the bottom-right
+    // corner, as the Rune client's does.
+    if !status_shown && !switcher_shown && width >= 2 && height >= 2 {
+        surface.draw_text(
+            width - 2,
+            height - 1,
+            "●",
+            tone_style(chrome::node_tone(vm)),
+        );
     }
 
     if let Some(active_dialog) = vm.dialogs.first() {
@@ -568,7 +590,7 @@ mod tests {
                 word: String::new(),
             }];
         let mut long = TextSurface::new(40, 1);
-        chrome::draw_status_bar(&mut long, &vm);
+        chrome::draw_status_bar(&mut long, 0, &vm);
         let text = surface_text(&long);
         assert!(text.contains("KEY"), "{text}");
         assert!(text.contains("● rye"), "{text}");
@@ -577,14 +599,14 @@ mod tests {
         vm.presentation.chrome.status_bar.segments[0].value = "3".into();
         vm.presentation.chrome.status_bar.segments[0].label = Some("need you".into());
         let mut wide = TextSurface::new(80, 1);
-        chrome::draw_status_bar(&mut wide, &vm);
+        chrome::draw_status_bar(&mut wide, 0, &vm);
         let text = surface_text(&wide);
         assert!(text.contains("need you 3 | ● rye"), "{text}");
 
         // A long node label is cut at half the line; the keys keep their room.
         vm.chrome.health_label = "H".repeat(200);
         let mut long_health = TextSurface::new(40, 1);
-        chrome::draw_status_bar(&mut long_health, &vm);
+        chrome::draw_status_bar(&mut long_health, 0, &vm);
         let text = surface_text(&long_health);
         assert!(text.contains("KEY"), "{text}");
         assert!(text.contains('…'), "{text}");
@@ -605,7 +627,7 @@ mod tests {
             },
         ];
         let mut status = TextSurface::new(80, 1);
-        chrome::draw_status_bar(&mut status, &vm);
+        chrome::draw_status_bar(&mut status, 0, &vm);
         assert!(
             surface_text(&status).contains("[ctrl+k] open  [alt+t/b] bars"),
             "{}",
@@ -635,10 +657,17 @@ mod tests {
             let text = surface_text(&line);
             assert!(text.contains("Home ●"), "{text}");
             assert!(text.contains("ryeos·"), "{text}");
-            assert!(!text.contains("ryeos· ●"), "a zero count draws no dot: {text}");
+            assert!(
+                !text.contains("ryeos· ●"),
+                "a zero count draws no dot: {text}"
+            );
             let dot = text.find('●').expect("a dot");
             let column = text[..dot].chars().count();
-            assert_eq!(line.get(column, 0).fg, super::theme::WARN, "needing you wins");
+            assert_eq!(
+                line.get(column, 0).fg,
+                super::theme::WARN,
+                "needing you wins"
+            );
         }
 
         {
@@ -690,7 +719,7 @@ mod tests {
                 assert_eq!(line.cells.len(), width);
             }
             let mut status = TextSurface::new(width, 1);
-            chrome::draw_status_bar(&mut status, &vm);
+            chrome::draw_status_bar(&mut status, 0, &vm);
             assert_eq!(status.cells.len(), width);
         }
         // One current tab, in widths around where it exactly fills the line.

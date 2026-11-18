@@ -167,7 +167,7 @@ fn draw_strip(surface: &mut TextSurface, y: usize, limit: usize, entries: &[Stri
 
 /// The node's tone as the bars show it: a node the client cannot reach is
 /// danger, a feed still connecting or catching up is warn.
-fn node_tone(vm: &RyeOsViewModel) -> RyeOsTone {
+pub(super) fn node_tone(vm: &RyeOsViewModel) -> RyeOsTone {
     match vm.transport.freshness {
         RyeOsTransportFreshness::Current => vm.chrome.health_tone,
         RyeOsTransportFreshness::Reconnecting | RyeOsTransportFreshness::ExpiredOrRevoked => {
@@ -179,10 +179,10 @@ fn node_tone(vm: &RyeOsViewModel) -> RyeOsTone {
     }
 }
 
-/// The bottom line: the keys at the left, then the status parts separated by
+/// The status line (the bottom line, or the top one when the Surface puts it
+/// there): the keys at the left, then the status parts separated by
 /// ` | ` at the right, ending with the node. No product name.
-pub fn draw_status_bar(surface: &mut TextSurface, vm: &RyeOsViewModel) {
-    let y = surface.height.saturating_sub(1);
+pub fn draw_status_bar(surface: &mut TextSurface, y: usize, vm: &RyeOsViewModel) {
     let model = &vm.presentation.chrome.status_bar;
     let energy = model.energy.clamp(0.0, 1.0);
     let mut bg = mix_toward(BG, ACCENT, 0.12 * energy);
@@ -261,7 +261,11 @@ fn key_hints_line(model: &RyeOsStatusBarVm) -> String {
     model
         .key_hints
         .iter()
-        .map(|hint| format!("[{}] {}", hint.keys, hint.word).trim_end().to_owned())
+        .map(|hint| {
+            format!("[{}] {}", hint.keys, hint.word)
+                .trim_end()
+                .to_owned()
+        })
         .collect::<Vec<_>>()
         .join("  ")
 }

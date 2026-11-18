@@ -614,7 +614,8 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
     answered += answer(&mut core, effects, scene);
     // The scene picks what is open when the frame is drawn.
     match scene {
-        "" | "field" | "long" | "states" | "chips" => {}
+        "" | "field" | "long" | "states" | "chips" | "switcher-right" | "switcher-top" | "bare" => {
+        }
         "timeline" | "timeline-draft" | "timeline-top" => {
             // The newest group is opened, so an opened group is drawn too.
             if scene != "timeline-top" {
@@ -662,9 +663,23 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
 /// What `scene` adds to each view model the in-memory core builds: counts,
 /// marks and flags whose producers are a node's, not the core's.
 pub fn dress(scene: &str) -> ryeos_client_rune::Dress {
+    use ryeos_client_base::ui::view_model::RyeOsEdgeVm as Edge;
     match scene {
         "chips" => dress_chips,
         "tabs" => dress_tabs,
+        "switcher-right" => |vm| {
+            vm.presentation.chrome.switcher.edge = Edge::Right;
+            vm.presentation.chrome.status_bar.edge = Edge::Top;
+        },
+        "switcher-top" => |vm| {
+            dress_chips(vm);
+            vm.presentation.chrome.switcher.edge = Edge::Top;
+        },
+        // The website's Surface: no switcher, no status bar.
+        "bare" => |vm| {
+            vm.presentation.chrome.switcher.edge = Edge::Hidden;
+            vm.presentation.chrome.status_bar.edge = Edge::Hidden;
+        },
         _ => |_| {},
     }
 }
@@ -689,9 +704,10 @@ fn dress_chips(vm: &mut ryeos_client_base::ui::view_model::RyeOsViewModel) {
         .map(|(index, (title, mark, project, needs_you, running))| {
             let mut choice = template.clone();
             if index > 0 {
-                choice.surface_instance_id =
-                    serde_json::from_value(json!(format!("33333333-3333-4333-8333-33333333333{index}")))
-                        .expect("a fixture Surface id");
+                choice.surface_instance_id = serde_json::from_value(json!(format!(
+                    "33333333-3333-4333-8333-33333333333{index}"
+                )))
+                .expect("a fixture Surface id");
             }
             choice.ordinal = index as u64 + 1;
             choice.title = title.to_owned();

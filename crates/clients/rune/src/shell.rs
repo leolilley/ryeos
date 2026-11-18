@@ -6,9 +6,9 @@ use rune::{El, Key, KeyEvent, ScrollSpec, col, el, row, text, text_input};
 use ryeos_client_base::layout::SplitBranch;
 use ryeos_client_base::ui::event::{RyeOsInputAction, RyeOsTransportFreshness};
 use ryeos_client_base::ui::view_model::{
-    RyeOsChipMarkVm, RyeOsDialogVm, RyeOsInputVm, RyeOsLayoutNodeVm, RyeOsNoticeVm, RyeOsSplitAxisVm,
-    RyeOsSurfaceChoiceVm, RyeOsTileIntentVm, RyeOsTone, RyeOsTopBarVm, RyeOsViewModel,
-    RyeOsViewSetVm,
+    RyeOsChipMarkVm, RyeOsDialogVm, RyeOsEdgeVm, RyeOsInputVm, RyeOsLayoutNodeVm, RyeOsNoticeVm,
+    RyeOsSplitAxisVm, RyeOsSurfaceChoiceVm, RyeOsTileIntentVm, RyeOsTone, RyeOsTopBarVm,
+    RyeOsViewModel, RyeOsViewSetVm,
 };
 use ryeos_client_base::ui::{RyeOsUiEvent, RyeOsUiIntent};
 
@@ -120,36 +120,48 @@ pub fn shell(
     } else {
         theme::SWITCHER_ROOM
     };
-    let main = row()
-        .w_full()
+    let edges = Edges::of(vm);
+    let content = col()
         .grow(1.0)
+        .h_full()
+        .min_w(0.0)
         .min_h(0.0)
-        // look: the switcher's room is always taken; hiding the switcher and its edge setting need a preference the view model does not carry.
-        .child(el().w(room).h_full())
-        .child(
-            col()
-                .grow(1.0)
-                .h_full()
-                .min_w(0.0)
-                .min_h(0.0)
-                .child(body(vm, local)),
-        );
+        .child(body(vm, local));
+    // A switcher at the side takes its room on that side; along the top it
+    // takes its own band, and hidden it takes nothing.
+    let mut main = row().w_full().grow(1.0).min_h(0.0);
+    main = match edges.switcher {
+        RyeOsEdgeVm::Left => main.child(el().w(room).h_full()).child(content),
+        RyeOsEdgeVm::Right => main.child(content).child(el().w(room).h_full()),
+        RyeOsEdgeVm::Top | RyeOsEdgeVm::Bottom | RyeOsEdgeVm::Hidden => main.child(content),
+    };
     let mut page = col()
         .w_full()
         .h_full()
         .fill(p.bg)
-        .on_layout(|app: &mut App, rect: [f32; 4]| app.set_viewport(rect[2], rect[3]))
-        // The switcher is pinned, so its place in the child list does not move
-        // it on screen; first here, keyboard focus starts at the open Surfaces.
-        .child(system_bar(vm, local))
-        .child(view_set_strip(&chrome.top_bar, local))
-        .child(main)
-        .child(status_bar(vm));
+        .on_layout(|app: &mut App, rect: [f32; 4]| app.set_viewport(rect[2], rect[3]));
+    // The side switcher is pinned, so its place in the child list does not
+    // move it on screen; first here, keyboard focus starts at the open
+    // Surfaces.
+    if edges.status_top {
+        page = page.child(status_bar(vm, edges));
+    }
+    page = match edges.switcher {
+        RyeOsEdgeVm::Left | RyeOsEdgeVm::Right => page.child(system_bar(vm, local, edges)),
+        RyeOsEdgeVm::Top => page.child(switcher_band(vm, local)),
+        RyeOsEdgeVm::Bottom | RyeOsEdgeVm::Hidden => page,
+    };
+    page = page
+        .child(view_set_strip(&chrome.top_bar, local, edges))
+        .child(main);
+    if !edges.status_top {
+        page = page.child(status_bar(vm, edges));
+    }
     if let Some(dot) = hidden_health_dot(vm) {
         page = page.child(dot);
     }
     if !vm.notices.is_empty() || !documents.is_empty() {
-        page = page.child(notices(&vm.notices, documents));
+        page = page.child(notices(&vm.notices, documents, edges));
     }
     for dialog in &vm.dialogs {
         page = page.child(dialog_layer(dialog, local));
@@ -167,9 +179,44 @@ pub fn shell(
     page
 }
 
-/// The Surfaces switcher: a column down the left edge, one chip per open
-/// Surface and a plus beneath. It floats over the frame's top-left corner.
-fn system_bar(vm: &RyeOsViewModel, local: &Local) -> El {
+/// Where the switcher and the status bar sit, as this frame draws them.
+#[derive(Clone, Copy)]
+struct Edges {
+    /// The switcher's edge; `Bottom` is not a switcher edge and draws as
+    /// hidden.
+    switcher: RyeOsEdgeVm,
+    /// The status bar is drawn, at the top.
+    status_top: bool,
+    /// The status bar is drawn, at the bottom.
+    status_bottom: bool,
+}
+
+impl Edges {
+    fn of(vm: &RyeOsViewModel) -> Self {
+        let bar = &vm.presentation.chrome.status_bar;
+        let shown = bar.visible && bar.edge != RyeOsEdgeVm::Hidden;
+        Edges {
+            switcher: vm.presentation.chrome.switcher.edge,
+            status_top: shown && bar.edge == RyeOsEdgeVm::Top,
+            status_bottom: shown && bar.edge != RyeOsEdgeVm::Top,
+        }
+    }
+
+    /// Room the side switcher leaves at the left and the right of a band
+    /// that runs under it.
+    fn side_room(self) -> (f32, f32) {
+        match self.switcher {
+            RyeOsEdgeVm::Left => (theme::SWITCHER_ROOM, 0.0),
+            RyeOsEdgeVm::Right => (0.0, theme::SWITCHER_ROOM),
+            RyeOsEdgeVm::Top | RyeOsEdgeVm::Bottom | RyeOsEdgeVm::Hidden => (0.0, 0.0),
+        }
+    }
+}
+
+/// The Surfaces switcher at a side: a column down the left or right edge, one
+/// chip per open Surface and a plus beneath. It floats over the frame's
+/// corner.
+fn system_bar(vm: &RyeOsViewModel, local: &Local, edges: Edges) -> El {
     let t = Tokens::get();
     let session = &vm.session;
     // A rename needs the room for its field; the column widens for it.
@@ -228,13 +275,27 @@ fn system_bar(vm: &RyeOsViewModel, local: &Local) -> El {
         .fill(t.bg_at(theme::BAR_FILL))
         .border(1.0, t.ink_at(theme::BAR_BORDER))
         .child(chips);
+    // Clear of a status bar on either edge; with none at the bottom, clear of
+    // the lone health dot in that corner.
+    let top = theme::SWITCHER_INSET
+        + if edges.status_top {
+            theme::STATUS_BAR_HEIGHT
+        } else {
+            0.0
+        };
+    let bottom = theme::SWITCHER_INSET
+        + if edges.status_bottom {
+            theme::STATUS_BAR_HEIGHT
+        } else {
+            24.0
+        };
+    let (left, right) = if edges.switcher == RyeOsEdgeVm::Right {
+        (None, Some(theme::SWITCHER_INSET))
+    } else {
+        (Some(theme::SWITCHER_INSET), None)
+    };
     col()
-        .pin(
-            Some(theme::SWITCHER_INSET),
-            Some(theme::SWITCHER_INSET),
-            None,
-            Some(theme::STATUS_BAR_HEIGHT + theme::SWITCHER_INSET),
-        )
+        .pin(Some(top), left, right, Some(bottom))
         .w(if renaming {
             theme::SWITCHER_RENAME_WIDTH
         } else {
@@ -299,7 +360,10 @@ fn surface_entry(surface: &RyeOsSurfaceChoiceVm, local: &Local) -> El {
         chip = chip.child(crate::marks::chip_dot(dot, format!("{}:{key}", dot.word())));
     }
     if surface.chip.authored_in_project {
-        chip = chip.child(crate::marks::project_chip_mark(ink, format!("project:{key}")));
+        chip = chip.child(crate::marks::project_chip_mark(
+            ink,
+            format!("project:{key}"),
+        ));
     }
     let mut entry = col()
         .key(key)
@@ -337,6 +401,131 @@ fn surface_entry(surface: &RyeOsSurfaceChoiceVm, local: &Local) -> El {
         });
     }
     entry
+}
+
+/// The Surfaces switcher along the top: its own 40 high band, one pill per
+/// open Surface with its number and name, and the plus after the last.
+fn switcher_band(vm: &RyeOsViewModel, local: &Local) -> El {
+    let t = Tokens::get();
+    let mut tags = row()
+        .h_full()
+        .min_w(0.0)
+        .shrink()
+        .gap(8.0)
+        .center_y()
+        .role("tablist")
+        .label("Open Surfaces")
+        .scroll_x();
+    for surface in &vm.session.surfaces {
+        tags = tags.child(surface_tag(surface, local));
+    }
+    row()
+        .w_full()
+        .h(40.0)
+        .px(theme::SWITCHER_INSET + 8.0)
+        .pt(theme::SWITCHER_INSET)
+        .gap(8.0)
+        .center_y()
+        .role("navigation")
+        .label("Surfaces")
+        .child(tags)
+        .child(
+            col()
+                .size(28.0, 24.0)
+                .center()
+                .radius(theme::RADIUS_ROW)
+                .role("button")
+                .label("Open a Surface")
+                .hover(t.select_fill())
+                .child(crate::icons::glyph(
+                    &crate::icons::PLUS,
+                    14.0,
+                    t.ink_at(0.40),
+                ))
+                .on_press(|app: &mut App| app.ui(RyeOsUiEvent::OpenLauncher)),
+        )
+}
+
+/// One open Surface as a pill in the top switcher: number, name, the project
+/// mark and its work dot. The current one has the strong edge.
+fn surface_tag(surface: &RyeOsSurfaceChoiceVm, local: &Local) -> El {
+    let t = Tokens::get();
+    let key = format!("surface:{:?}", surface.surface_instance_id);
+    let renaming = matches!(
+        &local.rename,
+        Some(crate::Rename { target: RenameTarget::Surface(RyeOsUiIntent::RenameSurface { surface_instance_id, .. }), .. })
+            if *surface_instance_id == surface.surface_instance_id
+    );
+    if renaming {
+        return row().key(key.clone()).h(28.0).center_y().child(rename_form(
+            local,
+            key,
+            "Surface name",
+            ("Save", "Cancel"),
+        ));
+    }
+    let (edge, edge_ink, ink) = if surface.active {
+        (1.5, t.ink_at(0.95), t.ink)
+    } else {
+        (1.0, t.ink_at(0.14), t.ink_at(0.70))
+    };
+    let mut name = surface.title.clone();
+    if surface.chip.authored_in_project {
+        name.push('·');
+    }
+    let mut tag = row()
+        .key(key.clone())
+        .h(24.0)
+        .px(10.0)
+        .gap(6.0)
+        .center_y()
+        .radius(theme::radius_pill(24.0))
+        .border(edge, edge_ink)
+        .role("tab")
+        .label(surface.title.clone())
+        .focus_selected(surface.active)
+        .child(
+            text(format!("{}", surface.ordinal))
+                .font(theme::ui(10.5))
+                .color(t.ink_at(0.35)),
+        )
+        .child(text(name).font(theme::medium(theme::TYPE_CELL)).color(ink));
+    let dot = crate::marks::WorkDot::of(
+        surface.needs_you.is_some_and(|count| count > 0),
+        surface.running.is_some_and(|count| count > 0),
+    );
+    if let Some(dot) = dot {
+        tag = tag.child(crate::marks::tab_dot(dot, format!("{}:{key}", dot.word())));
+    }
+    if surface.active {
+        if let Some(intent) = surface.rename_intent.clone() {
+            let title = surface.title.clone();
+            tag = tag.child(surface_action(
+                &crate::icons::PENCIL,
+                format!("Rename {}", surface.title),
+                move |app| app.begin_rename(RenameTarget::Surface(intent.clone()), &title),
+            ));
+        }
+        if let Some(intent) = surface.close_intent.clone() {
+            tag = tag.child(surface_action(
+                &crate::icons::CLOSE,
+                format!("Close {}; running work is unaffected", surface.title),
+                move |app| {
+                    app.ui(RyeOsUiEvent::Activate {
+                        intent: intent.clone(),
+                    })
+                },
+            ));
+        }
+        tag
+    } else {
+        let select = surface.select_intent.clone();
+        tag.hover(t.select_fill()).on_press(move |app: &mut App| {
+            app.ui(RyeOsUiEvent::Activate {
+                intent: select.clone(),
+            });
+        })
+    }
 }
 
 /// What a Surface's chip shows: Home's grid, a node's key figure, or the
@@ -381,7 +570,7 @@ fn freshness_label(freshness: RyeOsTransportFreshness) -> String {
 
 /// The tabs band: bare words centred as a group, the current one set heavier
 /// with a line under it, and a plus after the last.
-fn view_set_strip(top_bar: &RyeOsTopBarVm, local: &Local) -> El {
+fn view_set_strip(top_bar: &RyeOsTopBarVm, local: &Local, edges: Edges) -> El {
     let t = Tokens::get();
     if !top_bar.visible {
         return el().h(0.0);
@@ -495,8 +684,8 @@ fn view_set_strip(top_bar: &RyeOsTopBarVm, local: &Local) -> El {
         .w_full()
         .h(theme::TABS_HEIGHT)
         // The switcher's room plus the band's own 18, so tabs clear the switcher.
-        .pl(theme::SWITCHER_ROOM + 18.0)
-        .pr(18.0)
+        .pl(edges.side_room().0 + 18.0)
+        .pr(edges.side_room().1 + 18.0)
         .gap(20.0)
         .center_y()
         .role("navigation")
@@ -972,7 +1161,8 @@ fn health_color(vm: &RyeOsViewModel) -> rune::Color {
 /// With the status bar hidden, a lone dot at the bottom-right keeps the
 /// node's health visible. No text, key, handler or focus.
 fn hidden_health_dot(vm: &RyeOsViewModel) -> Option<El> {
-    if vm.presentation.chrome.status_bar.visible {
+    let edges = Edges::of(vm);
+    if edges.status_top || edges.status_bottom {
         return None;
     }
     // The dot is the node's health while the bar is hidden: it carries the
@@ -993,10 +1183,10 @@ fn hidden_health_dot(vm: &RyeOsViewModel) -> Option<El> {
     )
 }
 
-fn status_bar(vm: &RyeOsViewModel) -> El {
+fn status_bar(vm: &RyeOsViewModel, edges: Edges) -> El {
     let t = Tokens::get();
     let model = &vm.presentation.chrome.status_bar;
-    if !model.visible {
+    if !edges.status_top && !edges.status_bottom {
         // Hidden: the health dot drawn by `hidden_health_dot` stands in.
         return el().h(0.0);
     }
@@ -1102,27 +1292,41 @@ fn status_bar(vm: &RyeOsViewModel) -> El {
                     .color(t.ink_body()),
             ),
     );
-    row()
+    let bar = row()
         .w_full()
         .h(theme::STATUS_BAR_HEIGHT)
-        .px(theme::SWITCHER_INSET)
-        .pb(theme::SWITCHER_INSET)
-        .gap(12.0)
+        .px(theme::SWITCHER_INSET);
+    // The inset is on the frame's side, so the islands float off its edge.
+    let bar = if edges.status_top {
+        bar.pt(theme::SWITCHER_INSET)
+    } else {
+        bar.pb(theme::SWITCHER_INSET)
+    };
+    bar.gap(12.0)
         .center_y()
         .child(keys)
         .child(el().grow(1.0))
         .child(status)
 }
 
-fn notices(notices: &[RyeOsNoticeVm], documents: &[(DocumentOffer, Option<String>)]) -> El {
+fn notices(
+    notices: &[RyeOsNoticeVm],
+    documents: &[(DocumentOffer, Option<String>)],
+    edges: Edges,
+) -> El {
     let p = Palette::get();
+    let above = if edges.status_bottom {
+        theme::STATUS_BAR_HEIGHT
+    } else {
+        0.0
+    };
+    let beside = if edges.switcher == RyeOsEdgeVm::Right {
+        theme::SWITCHER_ROOM
+    } else {
+        0.0
+    };
     let mut stack = col()
-        .pin(
-            None,
-            None,
-            Some(20.0),
-            Some(theme::STATUS_BAR_HEIGHT + 18.0),
-        )
+        .pin(None, None, Some(20.0 + beside), Some(above + 18.0))
         .w(390.0)
         .gap(8.0);
     for (offer, link) in documents {
