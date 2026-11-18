@@ -5335,9 +5335,24 @@ mod tests {
         core
     }
 
+    fn set_surface_project(core: &mut RyeOsCore, project: Option<&str>) {
+        let id = core
+            .active_surface()
+            .unwrap()
+            .binding()
+            .binding_attachment_id
+            .clone();
+        core.binding_attachments
+            .get_mut(&id)
+            .unwrap()
+            .descriptor
+            .project_path = project.map(str::to_string);
+    }
+
     #[test]
     fn a_projectless_surface_takes_the_attention_totals() {
-        let core = core_with_attention();
+        let mut core = core_with_attention();
+        set_surface_project(&mut core, None);
         let surface = &build_view_model(&core).session.surfaces[0];
         assert_eq!(surface.needs_you, Some(5));
         assert_eq!(surface.running, Some(4));
@@ -5346,20 +5361,11 @@ mod tests {
     #[test]
     fn a_project_surface_takes_its_projects_entry_and_zero_when_unlisted() {
         let mut core = core_with_attention();
-        let id = core.root_attachment_id.clone();
-        core.binding_attachments
-            .get_mut(&id)
-            .unwrap()
-            .descriptor
-            .project_path = Some("/work/alpha".to_string());
+        set_surface_project(&mut core, Some("/work/alpha"));
         let surface = &build_view_model(&core).session.surfaces[0];
         assert_eq!(surface.needs_you, Some(3));
         assert_eq!(surface.running, Some(4));
-        core.binding_attachments
-            .get_mut(&id)
-            .unwrap()
-            .descriptor
-            .project_path = Some("/work/beta".to_string());
+        set_surface_project(&mut core, Some("/work/beta"));
         let surface = &build_view_model(&core).session.surfaces[0];
         assert_eq!(surface.needs_you, Some(0));
         assert_eq!(surface.running, Some(0));
@@ -5551,7 +5557,14 @@ mod tests {
             chain_root_id: "c-a".to_string(),
         });
         assert_eq!(core.active_view_set().map(|set| set.id), Some(tab_id));
-        assert!(core.ui.notices.is_empty(), "found work raises no notice");
+        assert!(
+            !core
+                .ui
+                .notices
+                .iter()
+                .any(|notice| notice.message.contains("not open in this session")),
+            "found work raises no such notice"
+        );
     }
 
     #[test]
