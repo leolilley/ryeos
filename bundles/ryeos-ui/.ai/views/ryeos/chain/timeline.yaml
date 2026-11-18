@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-17T22:59:58Z:4837d276601d0a5320f9e0a42ff9d0961532c83c8228c7a448a6a3b9025693fd:MCj+BWpXOSKZBwqCTzE86vjGIMDThgGrWO9GES/Di0szuto4S4weBkm62s95N0roaSkWlBMAfFDTwHOA1zj+Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T07:18:23Z:b09c83c60b04402a8ce5ee1706487578231ba4b04a3afb287142cf873242adb0:8GdkSVpfglS6un1/sEKFLA3zvD8npRxDpM8T1hp2hg5q2B3Vs1+2J95CEFv/1SEQRmRkTYoAG0XsmGKZ737wBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: chain-timeline
 version: "1.0.0"
 description: Timeline of the input route's conversation chain, folded by the daemon's timeline service
@@ -52,12 +52,13 @@ affordances:
   - id: accept
     label: Approve
     producer: selection
+    # Offered only where the request allows accepting it; otherwise Decline is
+    # the only answer.
     visible_when:
       all:
         - { field: type, equals: ask }
         - { field: state, equals: pending }
-    enabled_when: { field: accept_allowed, equals: true }
-    disabled_reason: This approval request cannot be accepted; decline it or inspect its authority.
+        - { field: accept_allowed, equals: true }
     invoke:
       plane: rye
       ref: service:worker-executions/resolve-approval

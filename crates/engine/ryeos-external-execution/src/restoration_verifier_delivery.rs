@@ -320,6 +320,7 @@ pub fn inventory_consumer_product(
             crate::guest_package_producer::inventory_root_file(
                 source,
                 name,
+                crate::guest_package_producer::InventoryMode::Portable,
                 &mut entries,
                 &mut total,
                 maximum_regular_bytes,
@@ -343,6 +344,7 @@ pub fn inventory_consumer_product(
                 // this does not attest the source root's ownership or mode.
                 0o755,
                 true,
+                crate::guest_package_producer::InventoryMode::Portable,
                 &mut entries,
                 &mut total,
                 maximum_regular_bytes,
@@ -372,6 +374,7 @@ pub fn inventory_consumer_product(
     crate::guest_package_producer::inventory_root_file(
         manifest,
         &record,
+        crate::guest_package_producer::InventoryMode::Exact,
         &mut entries,
         &mut total,
         maximum_regular_bytes,

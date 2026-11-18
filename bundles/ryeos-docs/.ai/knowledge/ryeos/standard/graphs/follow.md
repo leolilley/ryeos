@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-17T21:34:14Z:78904bc5353d8b2cb4a46f4795fcd30d450dfbf5eedfd98602a2111802dd9d1d:2RM7nZvoF+pRAPihQyKumYsYF21wf0ORzv0zp9/F+PJL7aV4eNRztlAReAUqBLD7X5OpbYOg9jiQ6Hfy7wR8Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-18T08:12:05Z:bc0f46aac7db76b28f0f1bf1e8ae8504b3120ccd7b1a87aab550c3fa13b822e2:JkTo6ectQw7yqEunfe8cth7zTwvDezk8FP38vOh21DawYwZCXsVGOKK1NbV9Yv3QA87iPyVxuj7Yv6i0eDlOCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/graphs
 tags: [graph, follow, authoring, lineage, budget]
@@ -247,6 +247,16 @@ terminal error, never `continued` with no child behind it. See
   does not receive the discarded follow candidate or its collected partial
   results. A failed worker child's outcome record is the one exception: it is
   exposed as `state._outcome` (see above).
+- Read a followed worker's cost by the follow value's names
+  (`${result.cost.input_tokens}`, `output_tokens`, `total_usd`), not the worker
+  profile's result pointers: a profile's `cost_micro_usd` is converted into
+  `total_usd` and is not a field of `cost`. A required path the value lacks
+  fails the node's `assign`.
+- `on_error` also catches the node's own expression errors (an `assign` or
+  `next` path that does not resolve), not only a failed child. Then no outcome
+  record was written and `state._outcome` is absent, so a recovery node that may
+  see both reads it as an optional path (`${state._outcome.outcome_kind ??
+  "none"}`) or checks `exists(...)` first.
 - `retry` on a `follow: true` node is a validation error — retrying a follow
   needs a fresh follow lifecycle per attempt; route a failed follow with an edge
   to a fresh follow node instead.

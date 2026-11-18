@@ -1271,3 +1271,39 @@ fn an_artefact_only_reasoning_part_draws_no_entry() {
         "{with_text:?}"
     );
 }
+
+/// A rebind record names the model only where the model binding changed;
+/// any other rebound binding is named as changed.
+#[test]
+fn a_rebound_binding_names_the_model_only_for_the_model_binding() {
+    let def = definition();
+    let rebound = |changes: Value| {
+        let events = [synthetic(
+            1,
+            T0,
+            "launch_binding_rebound",
+            json!({
+                "source_thread_id": "T-0",
+                "changes": changes,
+                "from_facts": {"model_name": "model-one"},
+                "to_facts": {"model_name": "model-two"},
+            }),
+        )];
+        let timeline = fold(&events, &def).unwrap();
+        assert!(timeline.undeclared.is_empty(), "{:?}", timeline.undeclared);
+        serde_json::to_string(&timeline).unwrap()
+    };
+    let change = |name: &str| json!({"input": "ref_binding", "name": name, "from": "directive:a", "to": "directive:b"});
+
+    let model = rebound(json!([change("model")]));
+    assert!(model.contains("model changed to model-two"), "{model}");
+    assert!(!model.contains("binding changed"), "{model}");
+
+    let other = rebound(json!([change("guard")]));
+    assert!(other.contains("binding changed: guard"), "{other}");
+    assert!(!other.contains("model changed to"), "{other}");
+
+    let both = rebound(json!([change("guard"), change("model")]));
+    assert!(both.contains("binding changed: guard"), "{both}");
+    assert!(both.contains("model changed to model-two"), "{both}");
+}
