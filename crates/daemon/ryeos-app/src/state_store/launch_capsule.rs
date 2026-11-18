@@ -286,18 +286,13 @@ pub(super) fn attach_continuation_launch_capsule(
         (Some((source, source_realization)), Some(successor)) => {
             // The comparison is chosen by the typed transition being
             // committed, never by which capsule fields happen to differ.
-            let admitted = match rebound_names {
-                Some(names) => {
-                    require_operator_rebindable(source, names).with_context(|| {
-                        format!(
-                            "continuation successor {} rebinds source {}",
-                            snapshot.thread_id, source_thread_id
-                        )
-                    })?;
-                    source.same_rebound_continuation_admission(successor, names)?
-                }
-                None => source.same_continuation_program_admission(successor)?,
-            };
+            let admitted =
+                continuation_capsule_admitted(source, successor, &kind).with_context(|| {
+                    format!(
+                        "continuation successor {} continues source {}",
+                        snapshot.thread_id, source_thread_id
+                    )
+                })?;
             if !admitted {
                 bail!(
                     "continuation successor {} changed immutable admitted launch capsule from source {}",
@@ -330,6 +325,32 @@ pub(super) fn attach_continuation_launch_capsule(
     Ok((snapshot, source_snapshot))
 }
 
+/// Whether `successor` is a capsule the typed transition `kind` may commit
+/// after `source`.
+///
+/// A rebind is admitted only when the runtime contract sealed in the source
+/// lets an operator rebind every named binding, and the successor differs
+/// from the source only where a rebind may. Every other transition requires
+/// the same admitted program, so a later continuation of a rebound thread
+/// carries the rebound capsule exactly and cannot fall back to an earlier
+/// binding.
+fn continuation_capsule_admitted(
+    source: &ryeos_state::objects::AdmittedLaunchCapsule,
+    successor: &ryeos_state::objects::AdmittedLaunchCapsule,
+    kind: &crate::launch_metadata::ContinuationAuthorityTransitionKind,
+) -> Result<bool> {
+    match kind {
+        crate::launch_metadata::ContinuationAuthorityTransitionKind::OperatorRebind { names } => {
+            require_operator_rebindable(source, names)?;
+            source.same_rebound_continuation_admission(successor, names)
+        }
+        crate::launch_metadata::ContinuationAuthorityTransitionKind::Inherit
+        | crate::launch_metadata::ContinuationAuthorityTransitionKind::OperatorFollowUp => {
+            source.same_continuation_program_admission(successor)
+        }
+    }
+}
+
 /// The one realization a continuation successor may retain: the source's
 /// verified realization, committed to the successor's launch authority.
 ///
@@ -356,7 +377,7 @@ fn expected_continuation_successor_realization(
 /// rebind every name. The contract is read from the signed descriptor sealed
 /// in the source capsule, never from the runtime registry current now, so a
 /// thread admitted under a contract that seals a binding stays sealed.
-pub(super) fn require_operator_rebindable(
+pub fn require_operator_rebindable(
     source: &ryeos_state::objects::AdmittedLaunchCapsule,
     names: &std::collections::BTreeSet<String>,
 ) -> Result<()> {
@@ -689,6 +710,95 @@ mod rebind_tests {
             .to_string();
         assert!(error.contains("does not let an operator rebind"), "{error}");
         assert!(require_operator_rebindable(&sealed, &names(&["model"])).is_err());
+    }
+
+    /// A capsule that validates, binding `model` to the given item.
+    fn bound_capsule(model: &str) -> AdmittedLaunchCapsule {
+        let project = ryeos_state::objects::ExecutionProjectAuthority::pinned(
+            "project:rebind-boundary".into(),
+            None,
+            "b".repeat(64),
+            ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+            ryeos_state::objects::EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        crate::state_store::external_fixture_launch_metadata(
+            project,
+            serde_json::json!({"binding_records": {"model": {"canonical_ref": model}}}),
+            serde_json::json!({}),
+        )
+        .admitted_launch_capsule()
+        .unwrap()
+        .unwrap()
+    }
+
+    #[test]
+    fn the_state_boundary_refuses_a_rebind_the_sealed_contract_does_not_permit() {
+        use crate::launch_metadata::ContinuationAuthorityTransitionKind as Kind;
+        // The graph runtime declares `product_recipe` and seals it: the
+        // boundary refuses the rebind whatever the successor looks like.
+        let sealed = capsule(SEALED_RUNTIME, "first");
+        let successor = capsule(SEALED_RUNTIME, "second");
+        let error = continuation_capsule_admitted(
+            &sealed,
+            &successor,
+            &Kind::OperatorRebind {
+                names: names(&["product_recipe"]),
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("does not let an operator rebind"), "{error}");
+        // A name the contract does not declare at all is refused the same way.
+        assert!(
+            continuation_capsule_admitted(
+                &sealed,
+                &successor,
+                &Kind::OperatorRebind {
+                    names: names(&["model"]),
+                },
+            )
+            .is_err()
+        );
+        // A capsule whose sealed descriptor is not a runtime contract that
+        // permits the name cannot be rebound either.
+        assert!(
+            continuation_capsule_admitted(
+                &bound_capsule("directive:test/models/first"),
+                &bound_capsule("directive:test/models/second"),
+                &Kind::OperatorRebind {
+                    names: names(&["model"]),
+                },
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_continuation_after_a_rebind_inherits_the_rebound_capsule_exactly() {
+        use crate::launch_metadata::ContinuationAuthorityTransitionKind as Kind;
+        let original = bound_capsule("directive:test/models/first");
+        let rebound = bound_capsule("directive:test/models/second");
+
+        for kind in [Kind::Inherit, Kind::OperatorFollowUp] {
+            // A machine or operator continuation of the rebound thread that
+            // carries the rebound capsule is admitted.
+            assert!(
+                continuation_capsule_admitted(&rebound, &rebound.clone(), &kind).unwrap(),
+                "{kind:?}"
+            );
+            // One that carries the binding from before the rebind is not, and
+            // neither transition can itself change a binding.
+            assert!(
+                !continuation_capsule_admitted(&rebound, &original, &kind).unwrap(),
+                "{kind:?}"
+            );
+            assert!(
+                !continuation_capsule_admitted(&original, &rebound, &kind).unwrap(),
+                "{kind:?}"
+            );
+        }
     }
 
     #[test]

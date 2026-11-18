@@ -13,6 +13,7 @@ mod estimate;
 #[cfg(test)]
 mod expression_inventory_tests;
 mod harness;
+mod image_sniff;
 mod launch_records;
 mod provider_adapter;
 mod provider_transport_timing;
@@ -22,6 +23,7 @@ mod run_clock;
 mod runner;
 mod spend_verifier;
 mod startup_timing;
+mod tool_images;
 
 use ryeos_directive_definition::{PROVIDER_SNAPSHOT_KEY, ResolvedProviderSnapshot};
 use ryeos_runtime::envelope::{LaunchEnvelope, RuntimeResult, RuntimeResultStatus};
@@ -517,8 +519,17 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
             } else {
                 resume::ResumeMode::Continuation
             };
-            let loaded =
-                resume::load_resume_state(&callback, resume_id, carry_turns, resume_mode).await?;
+            let loaded = resume::load_resume_state(
+                &callback,
+                resume_id,
+                carry_turns,
+                resume_mode,
+                provider
+                    .image_input
+                    .as_ref()
+                    .and_then(|image_input| image_input.accepts.as_ref()),
+            )
+            .await?;
             (!(same_thread_resume && loaded.has_no_launch_records())).then_some(loaded)
         }
         None => None,

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-16T21:29:33Z:0022e356d5c615b2ed9ef27a704d9f44b0b601aaf0c0dd6ac5577c23bd79fb7e:Mb3vIZkvJtPNy2ejkgFiKeuQpjGklOu+AEcAw2wKNpH6nmVo3YyhXpvFsoOlHoRoowK2r2q5I22hJpvI5N2gCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T06:38:05Z:2154942576b706348687aa450aaf7458ce079674477668d6428729316c1c0558:80WaI3E4o0OitNXFG0B1+sVRQsxbbll29n7F45t0TVUzNW4rg2kufJff/0ilkLPcSJmoxqjWLOYbqVGx3TwMBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-node
 title: Node
 version: "1.0.0"
@@ -7,6 +7,7 @@ description: Admitted node inspection with explicit execution subjects, register
 capabilities:
   sources:
     - ryeos.execute.service.node/status
+    - ryeos.execute.service.node/locality/groups
     - ryeos.execute.service.bundle/list
     - ryeos.execute.service.projects/list
     - ryeos.execute.service.commands/list
@@ -15,6 +16,7 @@ capabilities:
     - ryeos.execute.service.ui/ryeos-ui/thread/tree
     - ryeos.execute.service.ui/ryeos-ui/node/activity
     - ryeos.execute.service.ui/ryeos-ui/node/usage
+    - ryeos.execute.service.ui/ryeos-ui/node/machines
     - ryeos.execute.service.ui/ryeos-ui/item/inspect
     - ryeos.execute.service.ui/ryeos-ui/remotes/list
     - ryeos.execute.service.ui/ryeos-ui/gc/status
@@ -52,6 +54,7 @@ library:
       - view:ryeos/node/events
       - view:ryeos/node/usage
       - view:ryeos/node/remotes
+      - view:ryeos/node/machines
       - view:ryeos/node/bundles
       - view:ryeos/node/gc
       - view:ryeos/commands/grammar

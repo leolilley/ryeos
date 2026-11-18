@@ -98,6 +98,9 @@ impl StubServer {
             .route("/v1/chat/completions", post(handle))
             .route("/_stub/requests", get(list_requests))
             .route("/_stub/health", get(|| async { "ok" }))
+            // A request that carries images is megabytes; axum's default of
+            // 2 MiB would refuse it before the stub could record it.
+            .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))
             .with_state(state.clone());
         let listener = tokio::net::TcpListener::bind(addr).await?;
         let base_url = format!("http://{}", listener.local_addr()?);

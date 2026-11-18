@@ -489,24 +489,25 @@ pub fn pgid_alive(pgid: i64) -> bool {
     process_group_presence(pgid) == IdentityLiveness::Alive
 }
 
-/// Read-only numeric process-group absence probe. This never signals the
-/// group: signal 0 asks the kernel only whether any member exists. EPERM means
-/// present, ESRCH means absent, and every other outcome is unavailable so
-/// recovery fails closed.
+/// Numeric process-group presence, decided by Lillux's single group rule.
+///
+/// This never signals the group. It may reap, by exact pid, zombie members
+/// that this process adopted as orphans; it never reaps the group leader and
+/// passes no owned pids, so a leader or child handle someone still waits on
+/// keeps its exit status. A zombie parented elsewhere counts as absent; a
+/// zombie still parented by this process counts as present. Membership that
+/// cannot be read or parsed is unavailable, so recovery fails closed.
+///
+/// A group that settles absent has its record retired and nothing signals that
+/// pgid again.
 pub fn process_group_presence(pgid: i64) -> IdentityLiveness {
-    let Ok(pgid) = i32::try_from(pgid) else {
-        return IdentityLiveness::Unavailable;
-    };
-    if pgid <= 1 {
+    if pgid <= 1 || i32::try_from(pgid).is_err() {
         return IdentityLiveness::Unavailable;
     }
-    if unsafe { libc::kill(-pgid, 0) } == 0 {
-        return IdentityLiveness::Alive;
-    }
-    match std::io::Error::last_os_error().raw_os_error() {
-        Some(libc::ESRCH) => IdentityLiveness::DeadOrStale,
-        Some(libc::EPERM) => IdentityLiveness::Alive,
-        _ => IdentityLiveness::Unavailable,
+    match lillux::group_presence(pgid, None, &[]) {
+        lillux::GroupPresence::Present => IdentityLiveness::Alive,
+        lillux::GroupPresence::Absent => IdentityLiveness::DeadOrStale,
+        lillux::GroupPresence::Undecidable => IdentityLiveness::Unavailable,
     }
 }
 
@@ -1207,13 +1208,23 @@ pub fn execution_liveness(identity: &ExecutionProcessIdentity) -> IdentityLivene
 /// gone and either the host boot ended or the whole numeric group is absent.
 /// Unavailable evidence never authorizes clearing a durable attachment.
 pub fn assert_reaped_process_group_absent(identity: &ExecutionProcessIdentity) -> Result<()> {
+    assert_reaped_process_group_absent_as(identity, "owned subprocess")
+}
+
+/// As [`assert_reaped_process_group_absent`], naming which identity is meant
+/// (for example the root runtime or a dedicated worker) in every refusal.
+pub fn assert_reaped_process_group_absent_as(
+    identity: &ExecutionProcessIdentity,
+    label: &str,
+) -> Result<()> {
+    let pgid = identity.pgid();
     if let Some(scope) = &identity.process_scope {
         validate_execution_process_identity_shape(identity)?;
         scope
             .wait_empty(scope.control_timeout())
             .map_err(anyhow::Error::msg)?;
         if execution_liveness(identity) != IdentityLiveness::DeadOrStale {
-            anyhow::bail!("owned subprocess wait did not prove exact target absence");
+            anyhow::bail!("{label} (pgid {pgid}) wait did not prove exact target absence");
         }
         // A PID-namespace init proves only the target's tree empty. Its
         // launcher group may still be publishing the terminal record, so the
@@ -1221,7 +1232,9 @@ pub fn assert_reaped_process_group_absent(identity: &ExecutionProcessIdentity) -
         if scope.is_pid_namespace_init()
             && execution_group_liveness_of_wrapper(identity) != IdentityLiveness::DeadOrStale
         {
-            anyhow::bail!("PID-namespace containment is empty but its launcher group is not");
+            anyhow::bail!(
+                "{label} (pgid {pgid}) PID-namespace containment is empty but its launcher group is not"
+            );
         }
         return Ok(());
     }
@@ -1229,7 +1242,7 @@ pub fn assert_reaped_process_group_absent(identity: &ExecutionProcessIdentity) -
         || (execution_identity_is_current_boot(identity)?
             && process_group_presence(identity.pgid()) != IdentityLiveness::DeadOrStale)
     {
-        anyhow::bail!("owned subprocess wait did not prove exact target and group absence");
+        anyhow::bail!("{label} (pgid {pgid}) wait did not prove exact target and group absence");
     }
     Ok(())
 }

@@ -6787,6 +6787,47 @@ pub fn finish_terminal_credential_cleanup(
     Ok(())
 }
 
+/// Every dedicated-session state with whether root-stop retirement
+/// ([`abort_session_for_root_stop`]) may run before a stopped runtime's
+/// workspace capture without destroying anything the capture's caller still
+/// needs. The list must equal the schema's state set exactly (a test pins it),
+/// so a new state cannot exist without being classified here.
+///
+/// `true` only for states with no candidate to cancel, which fall through to
+/// the worker-retirement path: `admitted` and `binding` (no turn has run, so
+/// no candidate exists), `idle`, `turn_running` and `awaiting_approval` (a live
+/// worker, no candidate yet), `recovering` and `outcome_unknown` (settled as
+/// unattached or retired), and `draining` (the worker is shutting down before
+/// any freeze begins). `freezing`, `frozen`, `verifying`, `qualifying`,
+/// `publish_ready` and `discarding` hold or build a candidate that retirement
+/// cancels; `publishing` is refused by retirement; `terminal` has no worker
+/// left to retire.
+pub const DEDICATED_SESSION_STATE_RETIRES_BEFORE_CAPTURE: [(&str, bool); 16] = [
+    ("admitted", true),
+    ("binding", true),
+    ("idle", true),
+    ("turn_running", true),
+    ("awaiting_approval", true),
+    ("recovering", true),
+    ("outcome_unknown", true),
+    ("draining", true),
+    ("freezing", false),
+    ("frozen", false),
+    ("verifying", false),
+    ("qualifying", false),
+    ("publish_ready", false),
+    ("publishing", false),
+    ("discarding", false),
+    ("terminal", false),
+];
+
+/// Positive allow-list: an unknown state is never retired early.
+pub fn session_state_retires_before_capture(session_state: &str) -> bool {
+    DEDICATED_SESSION_STATE_RETIRES_BEFORE_CAPTURE
+        .iter()
+        .any(|(state, retires)| *retires && *state == session_state)
+}
+
 /// Node-owned owner-drop cancellation path used by the root execution guard.
 /// It does not depend on the cooperative controller still being alive.
 /// This owner retires only session/worker/credential authority. Filesystem

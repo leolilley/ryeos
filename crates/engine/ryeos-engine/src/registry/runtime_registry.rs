@@ -424,6 +424,19 @@ pub struct RuntimeFactDecl {
     pub kind: RuntimeFactKind,
     /// Maximum length of the fact's canonical JSON representation, in bytes.
     pub max_bytes: u32,
+    /// Smallest value of this integer fact a continuation that rebinds a ref
+    /// binding may be prepared with; a rebind whose launch preparation yields
+    /// a smaller value, or no value, is refused. The runtime that signs the
+    /// number owns its meaning. It is consulted for no other launch, so an
+    /// absent field leaves every admission as it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rebind_minimum: Option<u64>,
+    /// Whether the durable record of a rebind carries this fact's value
+    /// before and after. Facts are not recorded unless the runtime signs
+    /// this, so a fact that names an endpoint or a configuration source
+    /// stays out of the thread's events.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rebind_record: bool,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Hash)]
@@ -1214,6 +1227,14 @@ fn validate_launch_contract(yaml_path: &Path, yaml: &RuntimeYaml) -> Result<(), 
                 yaml_path,
                 format!(
                     "launch_contract.runtime_facts.{name}.max_bytes must be in 1..={MAX_LAUNCH_FACT_BYTES}"
+                ),
+            );
+        }
+        if fact.rebind_minimum.is_some() && fact.kind != RuntimeFactKind::Integer {
+            return runtime_yaml_error(
+                yaml_path,
+                format!(
+                    "launch_contract.runtime_facts.{name}.rebind_minimum requires an integer fact"
                 ),
             );
         }
@@ -2058,6 +2079,59 @@ mod tests {
         let error = validate_runtime_yaml(&test_path(), &yaml)
             .expect_err("node trust must remain launch-config-only");
         assert!(error.to_string().contains("config_inputs"));
+    }
+
+    #[test]
+    fn runtime_fact_rebind_minimum_is_optional_and_integer_only() {
+        let fact = |body: &str| serde_yaml::from_str::<RuntimeFactDecl>(body);
+
+        let plain = fact("{required: true, kind: integer, max_bytes: 32}").unwrap();
+        assert_eq!(plain.rebind_minimum, None);
+        // The absent field is not serialized, so the contract's canonical
+        // form is unchanged for every runtime that does not sign one.
+        assert!(
+            serde_json::to_value(&plain)
+                .unwrap()
+                .get("rebind_minimum")
+                .is_none()
+        );
+
+        let floored =
+            fact("{required: true, kind: integer, max_bytes: 32, rebind_minimum: 16000}").unwrap();
+        assert_eq!(floored.rebind_minimum, Some(16_000));
+        assert!(!floored.rebind_record);
+        let recorded =
+            fact("{required: true, kind: string, max_bytes: 32, rebind_record: true}").unwrap();
+        assert!(recorded.rebind_record);
+        assert!(
+            serde_json::to_value(&plain)
+                .unwrap()
+                .get("rebind_record")
+                .is_none()
+        );
+        assert!(
+            fact("{required: true, kind: integer, max_bytes: 32, rebind_minimum: -1}").is_err()
+        );
+
+        // A minimum is a comparison of integers; no other fact kind signs one.
+        for kind in ["string", "json", "bool"] {
+            let mut yaml = minimal_yaml();
+            yaml.launch_contract.runtime_facts.insert(
+                "window".to_string(),
+                fact(&format!(
+                    "{{required: true, kind: {kind}, max_bytes: 32, rebind_minimum: 16000}}"
+                ))
+                .unwrap(),
+            );
+            let error = validate_runtime_yaml(&test_path(), &yaml)
+                .expect_err("only an integer fact may sign a rebind minimum");
+            assert!(
+                error
+                    .to_string()
+                    .contains("rebind_minimum requires an integer fact"),
+                "{kind}: {error}"
+            );
+        }
     }
 
     #[test]

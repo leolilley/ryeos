@@ -409,7 +409,7 @@ fn every_shipped_profile_declares_the_host_classes_its_composition_runs_on() {
     let local_only = ["local", "local_unconfined"];
     let hosted_only = ["hosted"];
     let controller = ["hosted", "hosted_enforced", "local"];
-    let development = ["local", "local_direct"];
+    let development = ["hosted", "local", "local_direct"];
     let expected: [(&str, &[&str]); 15] = [
         ("core", &both),
         ("core-scheduling", &both),
@@ -546,6 +546,18 @@ fn standard_admits_trusted_process_group_sessions_on_the_hosted_class_only() {
         "local_unconfined"
     ));
     assert!(trusts_process_group_sessions("hosted-workflow", "hosted"));
+}
+
+#[test]
+fn development_hosted_class_matches_the_standard_hosted_lane() {
+    let development = load_profile("development");
+    let standard = load_profile("standard");
+    assert_eq!(
+        host_classes(&development)["hosted"],
+        host_classes(&standard)["hosted"],
+        "development's hosted class is the standard hosted class"
+    );
+    assert!(trusts_process_group_sessions("development", "hosted"));
 }
 
 #[test]

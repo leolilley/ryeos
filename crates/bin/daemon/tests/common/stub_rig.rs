@@ -77,10 +77,24 @@ pub fn plant_provider_with(
     paid: bool,
     schemas_extra: &str,
 ) -> anyhow::Result<()> {
+    plant_provider_full(root, base_url, signer, paid, schemas_extra, "")
+}
+
+/// As `plant_provider_with`, plus `top_extra`: YAML spliced at the top level
+/// of the provider entry, for example an `image_input:` declaration.
+pub fn plant_provider_full(
+    root: &Path,
+    base_url: &str,
+    signer: &SigningKey,
+    paid: bool,
+    schemas_extra: &str,
+    top_extra: &str,
+) -> anyhow::Result<()> {
     let schemas_extra: String = schemas_extra
         .lines()
         .map(|line| format!("  {line}\n"))
         .collect();
+    let top_extra: String = top_extra.lines().map(|line| format!("{line}\n")).collect();
     let pricing = if paid {
         r#"pricing:
   input_per_million: "2"
@@ -122,7 +136,7 @@ schemas:
   streaming:
     mode: delta_merge
   output_limit: {{path: max_tokens, semantics: provider_native_output_tokens}}
-{schemas_extra}{pricing}"#
+{schemas_extra}{top_extra}{pricing}"#
     );
     let signed = lillux::signature::sign_content(&body, signer, "#", None);
     std::fs::write(dir.join("stub.yaml"), signed)?;
@@ -193,6 +207,71 @@ import json, os, time
     let signed = lillux::signature::sign_content(&body, signer, "#", None);
     std::fs::write(dir.join(format!("{name}.py")), signed)?;
     Ok(())
+}
+
+/// Python for a tool that returns images in the `result_parts` envelope. Each
+/// call makes a different 1x1 PNG (a counter file in `aux` varies its colour)
+/// and appends its base64 to `aux/shots.log`, one line per good image, so a
+/// test can compare what the model was sent with what the tool returned.
+/// Variants: `good` (text and one PNG), `bad` (a GIF declared as PNG, then a
+/// good PNG) and `big` (a PNG padded past the model's per-image limit) and `wide` (a PNG
+/// just under the signed per-image default).
+pub fn image_tool_code(aux: &Path, variant: &str) -> String {
+    let counter = aux.join("shot.count");
+    let log = aux.join("shots.log");
+    let body = r#"
+import zlib, struct, base64
+def chunk(kind, data):
+    out = struct.pack('>I', len(data)) + kind + data
+    return out + struct.pack('>I', zlib.crc32(kind + data) & 0xffffffff)
+def png(r, g, b):
+    raw = b'\x00' + bytes([r, g, b])
+    return (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', 1, 1, 8, 2, 0, 0, 0))
+            + chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b''))
+n = 1
+try:
+    n = int(open(@COUNTER@).read()) + 1
+except Exception:
+    pass
+open(@COUNTER@, 'w').write(str(n))
+good = png((n * 37) % 256, 20, 200)
+def part(media, data):
+    return {'type': 'image', 'media_type': media, 'data_b64': base64.b64encode(data).decode()}
+def log(data):
+    with open(@LOG@, 'a') as f:
+        f.write(base64.b64encode(data).decode() + '\n')
+@VARIANT@
+"#;
+    let variant_code = match variant {
+        "good" => {
+            "log(good)
+parts = [{'type': 'text', 'text': 'shot %d' % n}, part('image/png', good)]"
+        }
+        "bad" => {
+            "log(good)
+parts = [{'type': 'text', 'text': 'bad %d' % n}, part('image/png', b'GIF89a\\x01\\x00\\x01\\x00'), part('image/png', good)]"
+        }
+        "big" => {
+            "parts = [{'type': 'text', 'text': 'big %d' % n}, part('image/png', good + b'\\x00' * 8000)]"
+        }
+        // A PNG padded to 1 KiB under the signed per-image default (2 MiB), so
+        // the whole result is about 2.8 MB of JSON on the tool's stdout.
+        "wide" => {
+            "wide = good + b'\\x00' * (2 * 1024 * 1024 - 1024 - len(good))
+log(wide)
+parts = [{'type': 'text', 'text': 'wide %d' % n}, part('image/png', wide)]"
+        }
+        other => panic!("unknown image tool variant {other}"),
+    };
+    format!(
+        "{}\nprint(json.dumps({{'result_parts': parts}}))",
+        body.replace(
+            "@COUNTER@",
+            &format!("{:?}", counter.to_str().expect("utf-8 path"))
+        )
+        .replace("@LOG@", &format!("{:?}", log.to_str().expect("utf-8 path")))
+        .replace("@VARIANT@", variant_code)
+    )
 }
 
 pub fn plant_directive(
@@ -267,6 +346,11 @@ pub struct RigOptions {
     /// `plant_provider_with`), for example a `reasoning:` capture and replay
     /// declaration. Empty plants the fixed provider unchanged.
     pub provider_schemas_extra: String,
+    /// YAML spliced at the top level of the provider entry, for example an
+    /// `image_input:` declaration. Empty declares none.
+    pub provider_top_extra: String,
+    /// Plant the image-returning tools `shot`, `shot_bad` and `shot_big`.
+    pub image_tools: bool,
     /// Lines under the directive's `model.reasoning:`, when it sets a
     /// reasoning policy.
     pub directive_reasoning: Option<String>,
@@ -284,6 +368,8 @@ impl Default for RigOptions {
             paid_provider: false,
             graph_vault: false,
             provider_schemas_extra: String::new(),
+            provider_top_extra: String::new(),
+            image_tools: false,
             directive_reasoning: None,
         }
     }
@@ -329,6 +415,7 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
     let paid_provider = opts.paid_provider;
     let graph_vault = opts.graph_vault;
     let schemas_extra = opts.provider_schemas_extra.clone();
+    let top_extra = opts.provider_top_extra.clone();
     let spawn_cell: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
     let spawn_cell_tweak = spawn_cell.clone();
     let started_at = Instant::now();
@@ -343,12 +430,13 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
                 "fixture-stub-model-config",
                 fixture,
                 |bundle_root| {
-                    plant_provider_with(
+                    plant_provider_full(
                         bundle_root,
                         &url,
                         &fixture.publisher,
                         paid_provider,
                         &schemas_extra,
+                        &top_extra,
                     )
                 },
             )
@@ -401,6 +489,21 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
         ),
         &fixture.publisher,
     )?;
+    if opts.image_tools {
+        for (name, variant) in [
+            ("shot", "good"),
+            ("shot_bad", "bad"),
+            ("shot_big", "big"),
+            ("shot_wide", "wide"),
+        ] {
+            plant_python_tool(
+                root,
+                name,
+                &image_tool_code(aux.path(), variant),
+                &fixture.publisher,
+            )?;
+        }
+    }
     plant_directive_with(
         root,
         opts.header_extra,
