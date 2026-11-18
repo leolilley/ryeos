@@ -1,0 +1,47 @@
+# ryeos:signed:2026-11-18T07:27:02Z:ff7252ac85ff7e1c6e3905f911ab4507d5aa0dfeb57c9ff088908e2df6c7ff55:e027jMkrSB3lCia2XK/Nmus4vEWQtAVplScwifUFJhglBq/SzW2ce2VA7/kvkP0gwOptWoi1lK1fIYNkUOFYBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: project-knowledge
+title: Knowledge
+version: "1.0.0"
+description: Signed knowledge entries visible from the active project; selecting one sets the item that Inspector and Explain read
+
+widget: table
+sources:
+  default:
+    ref: service:ui/ryeos-ui/items/list
+    params:
+      kind: knowledge
+      limit: 500
+      project_path: "@session:project_root"
+    collection: items
+    coverage: coverage
+    requires_project: true
+projections:
+  columns:
+    - label: item
+      field: canonical_ref
+    - label: namespace
+      field: namespace
+    - label: space
+      field: space
+    - label: trust
+      field: trust.class
+  tone:
+    field: trust.class
+    map:
+      trusted: good
+      untrusted: danger
+      unsigned: warn
+      unknown: neutral
+    default: neutral
+selection:
+  activate: inspect
+affordances:
+  - id: inspect
+    label: Inspect
+    invoke:
+      plane: ui
+      facet: selection
+      value:
+        item: "{record.canonical_ref}"
+      open_view: view:ryeos/item/inspector
+      drill: true

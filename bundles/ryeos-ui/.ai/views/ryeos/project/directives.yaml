@@ -1,0 +1,45 @@
+# ryeos:signed:2026-11-18T07:27:02Z:4cdfbf74b75c55b760b6b51d8e2e3469dbf1b668d390bd7bbea0b14003a40745:GZMDc9VkLyS6+UIsvvglwGLB0HSN1xFljt7/jem3UYz06fHt7XKo00pjQmXLimPk4/he2j2sdQOui6eAjqmcCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: project-directives
+title: Directives
+version: "1.0.0"
+description: Signed directives visible from the active project; selecting one sets the item that Inspector and Explain read
+
+widget: table
+sources:
+  default:
+    ref: service:ui/ryeos-ui/items/list
+    params:
+      kind: directive
+      limit: 500
+      project_path: "@session:project_root"
+    collection: items
+    coverage: coverage
+    requires_project: true
+projections:
+  columns:
+    - label: item
+      field: canonical_ref
+    - label: space
+      field: space
+    - label: trust
+      field: trust.class
+  tone:
+    field: trust.class
+    map:
+      trusted: good
+      untrusted: danger
+      unsigned: warn
+      unknown: neutral
+    default: neutral
+selection:
+  activate: inspect
+affordances:
+  - id: inspect
+    label: Inspect
+    invoke:
+      plane: ui
+      facet: selection
+      value:
+        item: "{record.canonical_ref}"
+      open_view: view:ryeos/item/inspector
+      drill: true
