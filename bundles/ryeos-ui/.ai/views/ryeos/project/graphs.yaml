@@ -1,0 +1,55 @@
+# ryeos:signed:2026-11-18T11:49:26Z:8281ed5649bb88569f57097484764cb82c25dc0bdf1cb312b2fb789508792ad2:dNKinoJl5CT2Kin0NZGDHxOk0BTfwTvReVtwdEKV9YVAmAcx+7jYTqLud8CwuZzb5qEwE42Xu3hR654F+9TyBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: project-graphs
+title: Graphs
+version: "1.0.0"
+description: Signed graphs visible from the active project; selecting one sets the item that Inspector and Explain read
+
+widget: table
+sources:
+  default:
+    ref: service:ui/ryeos-ui/items/list
+    params:
+      kind: graph
+      limit: 500
+      project_path: "@session:project_root"
+    collection: items
+    coverage: coverage
+    requires_project: true
+projections:
+  columns:
+    - label: name
+      field: title
+    - label: item
+      field: canonical_ref
+    - label: space
+      field: space
+    - label: trust
+      field: trust.class
+  tone:
+    field: trust.class
+    map:
+      trusted: good
+      untrusted: danger
+      unsigned: warn
+      unknown: neutral
+    default: neutral
+selection:
+  activate: inspect
+affordances:
+  - id: inspect
+    label: Inspect
+    invoke:
+      plane: ui
+      facet: selection
+      value:
+        item: "{record.canonical_ref}"
+      open_view: view:ryeos/item/inspector
+      drill: true
+  - id: explain
+    label: Explain
+    invoke:
+      plane: ui
+      facet: selection
+      value:
+        item: "{record.canonical_ref}"
+      open_view: view:ryeos/item/explain

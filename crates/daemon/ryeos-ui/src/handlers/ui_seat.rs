@@ -358,23 +358,30 @@ pub fn admit_seat_root(
         origin_site_id: state.threads.site_id(),
         thread_profile: seat_kind(state)?,
     };
-    match project_access {
-        Some(access) => {
-            ryeos_app::thread_lifecycle::admit_non_execution_root_under_project_authority(
+    // The admission resolves, verifies and seals one subject through several
+    // guarded engine calls. They run as one guarded operation, so the
+    // installed bundles are verified once before and once after the whole
+    // admission, and a change during it refuses the admission. Nothing is
+    // written here; the caller creates the seat thread from the result.
+    state
+        .engine
+        .with_checked_bundle_generation(|_| match project_access {
+            Some(access) => {
+                ryeos_app::thread_lifecycle::admit_non_execution_root_under_project_authority(
+                    &state.engine,
+                    node_history_policy,
+                    access.directory(),
+                    request,
+                )
+            }
+            None => ryeos_app::thread_lifecycle::admit_non_execution_root(
                 &state.engine,
                 node_history_policy,
-                access.directory(),
+                &state.config.app_root,
                 request,
-            )
-        }
-        None => ryeos_app::thread_lifecycle::admit_non_execution_root(
-            &state.engine,
-            node_history_policy,
-            &state.config.app_root,
-            request,
-        ),
-    }
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))
+            ),
+        })
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))
 }
 
 fn presentation_executor_ref(presentation_id: &str, root: &BindingAttachmentCoordinate) -> String {
@@ -1463,6 +1470,7 @@ pub async fn handle_open(
             binding_generation,
             binding_digest,
         } => {
+            let _timing = crate::phase_timing::PhaseTimer::start("seat_open_prepare", "total");
             let root = BindingAttachmentCoordinate {
                 binding_attachment_id,
                 binding_generation,
@@ -1488,6 +1496,10 @@ pub async fn handle_open(
                     .map_err(|error| HandlerError::Conflict(error.to_string()))?
                 {
                     Some(membership) => {
+                        let _timing = crate::phase_timing::PhaseTimer::start(
+                            "seat_open_prepare",
+                            "revalidate_and_admit",
+                        );
                         state
                             .engine
                             .with_checked_bundle_generation(|generation| -> Result<_> {
@@ -1534,13 +1546,18 @@ pub async fn handle_open(
                                 user_principal_id: None,
                                 scopes: None,
                             };
-                            let (compiled_binding, presentation) =
+                            let (compiled_binding, presentation) = {
+                                let _timing = crate::phase_timing::PhaseTimer::start(
+                                    "seat_open_prepare",
+                                    "binding_compile",
+                                );
                                 super::ui_launch_mint::compile_session_binding(
                                     &request,
                                     &compile_context,
                                     &state,
                                     attachment.project_authority.as_deref(),
-                                )?;
+                                )?
+                            };
                             candidates.push(crate::browser_session::InitialSurfaceCandidate {
                                 seed,
                                 candidate: crate::browser_session::BindingAttachmentCandidate {
@@ -1556,6 +1573,10 @@ pub async fn handle_open(
                             .as_ref()
                             .map(|authority| authority.descriptor_path())
                             .transpose()?;
+                        let _timing = crate::phase_timing::PhaseTimer::start(
+                            "seat_open_prepare",
+                            "revalidate_and_admit",
+                        );
                         state
                             .engine
                             .with_checked_bundle_generation(|generation| -> Result<_> {
@@ -1594,6 +1615,11 @@ pub async fn handle_open(
                                         attachment.project_authority.as_deref(),
                                     )?;
                                 }
+                                // Publishing the membership is the commit of this
+                                // admission: verify the installed bundles once more
+                                // after every closure was re-resolved, so a membership
+                                // is never published from bundles that have changed.
+                                generation.verify_before_commit()?;
                                 // The store checks root/policy/principal/project identity,
                                 // every capacity and counter before committing ANY seed.
                                 ui.browser_sessions
@@ -1616,7 +1642,13 @@ pub async fn handle_open(
                             })?
                     }
                 };
-            membership = initialization::materialize_unclaimed(&state, &session, membership)?;
+            membership = {
+                let _timing = crate::phase_timing::PhaseTimer::start(
+                    "seat_open_prepare",
+                    "materialize_unclaimed",
+                );
+                initialization::materialize_unclaimed(&state, &session, membership)?
+            };
             Ok(
                 json!({"presentation_id":membership.presentation_id,"thread_id":membership.thread_id,"chain_root_id":membership.chain_root_id,"root_binding":root}),
             )

@@ -85,6 +85,18 @@ def validate(manifest: dict) -> None:
             f"unregistered={sorted(declared - registered)} stale={sorted(registered - declared)}"
         )
 
+    # The files Rune fetches at runtime are registered, gzip-encoded, and named as imports of
+    # the bindings module that fetches them.
+    bindings = next(
+        asset for asset in manifest["assets"] if asset["filename"] == "ryeos_rune.js"
+    )
+    for path in tomllib.loads(SNIPPETS.read_text())["fetched"]:
+        name = Path(path).name
+        if f"{name}.gz" not in filenames:
+            raise SystemExit(f"a file Rune fetches at runtime is not registered: {name}")
+        if f"/ui/assets/{name}" not in bindings["imports"]:
+            raise SystemExit(f"ryeos_rune.js does not name the file it fetches: {name}")
+
     packaged = {
         path.name
         for path in PACKAGE.iterdir()

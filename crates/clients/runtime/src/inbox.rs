@@ -62,7 +62,7 @@ pub enum Stream {
 /// Something that happened off the reducer's turn.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InboxPayload {
-    /// Results of one batch of effects, in emission order.
+    /// Results of effects that finished together, in emission order.
     EffectResults(Vec<RyeOsEffectResult>),
     /// A session hint: `kind` plus its payload.
     Hint(Value),

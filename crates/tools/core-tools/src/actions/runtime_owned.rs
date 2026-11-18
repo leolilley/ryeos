@@ -13,13 +13,13 @@ use std::path::Path;
 
 use ryeos_engine::AI_DIR;
 use ryeos_state::project_sync::{
-    ProjectAiPathClass, classify_project_ai_path, is_live_execution_denied_only_path,
+    ProjectAiPathClass, classify_floor_path, is_live_execution_denied_only_path,
 };
 
 /// True when a `.ai/`-relative path is node runtime state or a signing secret,
 /// and therefore never a signable authoring source.
 ///
-/// Reuses `classify_project_ai_path`'s code-enforced floor:
+/// Reuses `classify_floor_path`'s code-enforced floor:
 /// - `NodeOwned` — `.ai/state`, `.ai/node/{schedules,routes,bundles}`;
 /// - `NeverDeploySecret` — node identity/auth/vault;
 /// - the live-execution-only roots: the node trust registry, operator key
@@ -32,10 +32,7 @@ use ryeos_state::project_sync::{
 /// The `ignore` matcher is deliberately unused: runtime ownership is a floor,
 /// independent of any project ignore file.
 pub fn is_runtime_owned_ai_path(ai_rel_path: &str) -> bool {
-    matches!(
-        classify_project_ai_path(ai_rel_path, None),
-        ProjectAiPathClass::NodeOwned { .. } | ProjectAiPathClass::NeverDeploySecret { .. }
-    ) || is_live_execution_denied_only_path(ai_rel_path)
+    classify_floor_path(ai_rel_path).is_some() || is_live_execution_denied_only_path(ai_rel_path)
 }
 
 /// True when a `.ai/`-relative path is secret key material that must never be
@@ -47,8 +44,8 @@ pub fn is_runtime_owned_ai_path(ai_rel_path: &str) -> bool {
 /// continues to use [`is_runtime_owned_ai_path`] to exclude node-owned state.
 pub fn is_never_signable_secret_ai_path(ai_rel_path: &str) -> bool {
     matches!(
-        classify_project_ai_path(ai_rel_path, None),
-        ProjectAiPathClass::NeverDeploySecret { .. }
+        classify_floor_path(ai_rel_path),
+        Some(ProjectAiPathClass::NeverDeploySecret { .. })
     )
 }
 

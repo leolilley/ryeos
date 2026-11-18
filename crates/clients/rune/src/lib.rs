@@ -357,6 +357,27 @@ fn selected_keys(vm: &RyeOsViewModel) -> std::collections::BTreeSet<String> {
             _ => {}
         }
     }
+    // The current view-set tab and the current Surface chip, so each stays in
+    // view when its strip scrolls. These formats must stay in step with the
+    // keys `shell::view_set_strip` and `shell::surface_entry` give the elements.
+    let chrome = &vm.presentation.chrome;
+    // A hidden band draws no tab, so its key joins only once the band shows;
+    // then it is new and the reveal happens.
+    keys.extend(
+        chrome
+            .top_bar
+            .tabs
+            .iter()
+            .filter(|tab| chrome.top_bar.visible && tab.active)
+            .map(|tab| format!("view-set:{}", tab.view_set_id)),
+    );
+    keys.extend(
+        vm.session
+            .surfaces
+            .iter()
+            .filter(|surface| surface.active)
+            .map(|surface| format!("surface:{:?}", surface.surface_instance_id)),
+    );
     keys
 }
 
@@ -825,6 +846,19 @@ impl App {
             self.sync_edits();
         }
         taken
+    }
+}
+
+/// Select the theme by name (`night`, `paper` or `gruvbox`) for every later
+/// draw; false, with nothing changed, for any other name. Night is in force
+/// until something selects another.
+pub fn select_theme(name: &str) -> bool {
+    match theme::ThemeId::from_name(name) {
+        Some(id) => {
+            theme::use_theme(id);
+            true
+        }
+        None => false,
     }
 }
 

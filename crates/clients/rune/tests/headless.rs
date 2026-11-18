@@ -304,8 +304,19 @@ fn texts_in_band(rt: &Runtime<App>, top: f32, bottom: f32) -> Vec<String> {
         .collect()
 }
 
+/// Every drawn text with its rectangle.
+fn drawn_texts(rt: &Runtime<App>) -> Vec<(String, [f32; 4])> {
+    rt.elements()
+        .into_iter()
+        .filter_map(|element| element.text.map(|text| (text, element.rect)))
+        .collect()
+}
+
+/// The chrome never shows the project's filesystem path. The chrome is the
+/// Surfaces switcher down the left edge (x under 50) and the tabs band (the top
+/// 50 points); it must draw something, and none of it carries the path.
 #[test]
-fn the_system_bar_never_shows_the_project_path() {
+fn the_chrome_never_shows_the_project_path() {
     for scene in ["", "field", "launcher"] {
         let rt = shell(scene, (1280.0, 800.0));
         let vm = model(&rt);
@@ -314,21 +325,29 @@ fn the_system_bar_never_shows_the_project_path() {
             .project_path
             .clone()
             .expect("the fixture session has a project path to hide");
-        // The system bar is the first 28 points of the page.
-        let bar = texts_in_band(&rt, 0.0, 28.0);
-        assert!(!bar.is_empty(), "{scene}: the system bar says something");
-        for text in &bar {
+        let chrome: Vec<String> = drawn_texts(&rt)
+            .into_iter()
+            .filter(|(_, [x, y, _, h])| *x < 50.0 || y + h / 2.0 <= 50.0)
+            .map(|(text, _)| text)
+            .collect();
+        assert!(!chrome.is_empty(), "{scene}: the chrome says something");
+        for text in &chrome {
             assert!(
                 !text.contains(&path) && !text.contains("/home/"),
-                "{scene}: the system bar shows {text:?}"
+                "{scene}: the chrome shows {text:?}"
             );
         }
     }
 }
 
+/// The status bar is two floating islands: the launcher with the key hint, and
+/// the core's segments with the node's health. It shows exactly the segments
+/// (as the core words them, not upper-cased) and the launcher's name, and
+/// carries no product name.
 #[test]
 fn the_status_bar_shows_only_its_segments() {
-    let rt = shell("", (1280.0, 800.0));
+    let (width, _) = (1280.0_f32, 800.0_f32);
+    let rt = shell("", (width, 800.0));
     let vm = model(&rt);
     let status = &vm.presentation.chrome.status_bar;
     let Some([_, top, _, height]) = keyed(&rt, "shell:launch") else {
@@ -339,32 +358,74 @@ fn the_status_bar_shows_only_its_segments() {
         return;
     };
     assert!(status.visible);
-    let expected: Vec<String> = status
-        .segments
-        .iter()
-        .map(|segment| {
-            match segment.label.as_deref().filter(|label| !label.is_empty()) {
-                Some(label) => format!("{label} {}", segment.value),
-                None => segment.value.clone(),
-            }
-            .to_uppercase()
+    let [launch_x, launch_y, launch_w, launch_h] =
+        keyed(&rt, "shell:launch").expect("the launch control");
+    let launch_right = launch_x + launch_w;
+    // The islands share one row; read the whole band the launcher sits in.
+    let shown = texts_in_band(&rt, top, top + height);
+    // The dialog is not open in this fixture, so no text "Launch" belongs in
+    // the status band: the launch control draws a glyph, not a word.
+    assert!(
+        !shown.iter().any(|text| text == "Launch"),
+        "the launch control carries no visible wording, saw {shown:?}"
+    );
+    // The left island is every text on the control's row left of the window's
+    // middle: it holds nothing but the key hint. The hint is checked by its
+    // ASCII core, since the drawn form may substitute glyphs the faces lack.
+    let left: Vec<(String, [f32; 4])> = drawn_texts(&rt)
+        .into_iter()
+        .filter(|(_, [x, y, _, h])| {
+            let middle = y + h / 2.0;
+            *x >= 0.0 && *x < width / 2.0 && middle >= launch_y && middle <= launch_y + launch_h
         })
         .collect();
-    let shown = texts_in_band(&rt, top, top + height);
-    for segment in &expected {
-        assert!(shown.contains(segment), "segment {segment:?} in {shown:?}");
+    assert!(
+        status.key_hint.contains("ctrl+k open"),
+        "the fixture's hint keeps its ASCII core"
+    );
+    assert!(
+        left.len() == 1 && left[0].0.contains("ctrl+k open"),
+        "only the key hint in the left island, saw {left:?}"
+    );
+    // A text is in the right island when it is right of the launch control and
+    // its vertical centre is within the launch control's top..bottom band.
+    let in_right_island = |wanted: &str| {
+        drawn_texts(&rt).into_iter().any(|(text, [x, y, _, h])| {
+            let middle = y + h / 2.0;
+            text == wanted
+                && x >= launch_right
+                && middle >= launch_y
+                && middle <= launch_y + launch_h
+        })
+    };
+    for segment in &status.segments {
+        if let Some(label) = segment.label.as_deref().filter(|label| !label.is_empty()) {
+            assert!(
+                in_right_island(label),
+                "segment label {label:?} in the right island, saw {shown:?}"
+            );
+        }
+        assert!(
+            in_right_island(&segment.value),
+            "segment value {:?} in the right island, saw {shown:?}",
+            segment.value
+        );
     }
     assert!(
-        shown.contains(&"RYEOS".to_owned()),
-        "the launch control's name"
+        drawn_texts(&rt)
+            .iter()
+            .any(|(text, [x, _, _, _])| *text == vm.chrome.health_label && *x > width / 2.0),
+        "the node health {:?} sits right of the window's middle",
+        vm.chrome.health_label
     );
-    let others: Vec<&String> = shown
-        .iter()
-        .filter(|text| *text != "RYEOS" && !expected.contains(text))
-        .collect();
     assert!(
-        others.len() <= 1,
-        "only the key hint may follow the segments, found {others:?}"
+        in_right_island(&vm.chrome.health_label),
+        "the node health {:?} in the right island, saw {shown:?}",
+        vm.chrome.health_label
+    );
+    assert!(
+        !shown.iter().any(|text| text.eq_ignore_ascii_case("RYEOS")),
+        "the status bar carries no product name, found {shown:?}"
     );
     assert!(
         !shown.iter().any(|text| text.contains("/home/")),
@@ -466,19 +527,28 @@ fn long_lists_build_only_the_rows_in_view_and_the_feed_opens_at_its_end() {
     assert!(!texts.iter().any(|text| text == "Step 1 of the run."));
 }
 
-/// RyeOS fills the bottom-left corner and opens the launcher; the open
-/// Surfaces run along the top from the left, the current one filled, with
-/// the node's status at the right; the two bars are the same height.
+/// The open Surfaces are a switcher of small chips pinned in from the top-left
+/// corner; the status islands float in from the bottom-left corner, with the
+/// node's health in the bottom band.
 #[test]
-fn ryeos_holds_the_bottom_left_corner_and_the_bars_match() {
+fn the_switcher_holds_the_left_edge_and_the_status_islands_float() {
     let (width, height) = (1280.0, 800.0);
     let rt = shell("", (width, height));
-    let [x, y, _, bottom] = keyed(&rt, "shell:launch").expect("the launch control is drawn");
-    assert_eq!(x, 0.0, "RyeOS starts at the left edge");
-    assert!(
-        (y + bottom - height).abs() < 0.5,
-        "RyeOS reaches the bottom edge"
-    );
+    let close = |value: f32, wanted: f32, what: &str| {
+        assert!(
+            (value - wanted).abs() <= 2.0,
+            "{what}: {value}, wanted about {wanted}"
+        );
+    };
+    // The status row has a 10 inset at the sides and the bottom and each island
+    // pads 12, so the launch control sits at x = 10 + 12. The row is 40 high
+    // with 10 beneath; the pressable launch row takes the island's full 30
+    // height (the 20 high chip is drawn inside it), so its bottom is the
+    // island's: bottom = height - 10, and its height is the island's 30.
+    let [x, y, _, tall] = keyed(&rt, "shell:launch").expect("the launch control is drawn");
+    close(x, 10.0 + 12.0, "the launch control's x");
+    close(y + tall, height - 10.0, "the launch control's bottom");
+    close(tall, 30.0, "the launch control's height");
     let vm = model(&rt);
     let current = vm
         .session
@@ -486,21 +556,140 @@ fn ryeos_holds_the_bottom_left_corner_and_the_bars_match() {
         .iter()
         .find(|surface| surface.active)
         .expect("the fixture has a current Surface");
-    let [_, top, _, tall] = keyed(&rt, &format!("surface:{:?}", current.surface_instance_id))
-        .expect("the current Surface is in the top bar");
-    assert!(top.abs() < 0.5, "the Surfaces sit in the top bar");
-    assert!(
-        (tall - bottom).abs() <= 1.0,
-        "top {tall} and bottom {bottom} bars match"
-    );
-    let status = rt
+    // The chip has no key of its own; its entry holds it. The switcher is 10
+    // in from the corner, then 6 (x) and 3 (y) of padding.
+    let [sx, sy, sw, _] = keyed(&rt, &format!("surface:{:?}", current.surface_instance_id))
+        .expect("the current Surface is a chip in the switcher");
+    close(sx, 10.0 + 6.0, "the Surface chip's x");
+    close(sy, 10.0 + 3.0, "the Surface chip's y");
+    assert!(sw <= 40.0, "the Surface chip is narrow, {sw} wide");
+    // The first tile is the first thing the body draws (keys `tile:`); the
+    // frame reserves 44 and the body 18, so it starts at 62 or later.
+    let mut tiles: Vec<[f32; 4]> = rt
         .elements()
         .into_iter()
-        .find(|element| element.role == "status")
-        .expect("the node's status is in the top bar");
+        .filter(|element| {
+            element
+                .key
+                .as_deref()
+                .is_some_and(|key| key.starts_with("tile:"))
+        })
+        .map(|element| element.rect)
+        .collect();
+    assert!(!tiles.is_empty(), "the body draws a tile");
+    tiles.sort_by(|a, b| a[0].total_cmp(&b[0]));
     assert!(
-        status.rect[0] > width / 2.0,
-        "the node's status sits at the right, not at {}",
-        status.rect[0]
+        tiles[0][0] >= 62.0 - 0.01,
+        "the first tile starts clear of the switcher, at {}",
+        tiles[0][0]
+    );
+    let body_bottom = tiles
+        .iter()
+        .map(|[_, ty, _, th]| ty + th)
+        .fold(0.0_f32, f32::max);
+    // Views draw their own `status` roles (a timeline's lane, a field's
+    // readout), so the node's health is found by its own key.
+    let [_, status_top, _, _] =
+        keyed(&rt, "shell:health").expect("the node's health is in the status bar");
+    assert!(
+        status_top >= body_bottom - 0.5,
+        "the node's status at {} sits below the body, which ends at {body_bottom}",
+        status_top
+    );
+}
+
+/// With the status bar hidden (Alt+B), nothing draws the launch control and
+/// the node's health remains as a 6-point dot at the bottom-right, keyed
+/// `shell:health`.
+#[test]
+fn a_hidden_status_bar_keeps_only_the_health_dot() {
+    let mut rt = shell("", (1280.0, 800.0));
+    rt.key(KeyEvent {
+        key: Key::Text("b".to_owned()),
+        mods: Mods {
+            alt: true,
+            ..Mods::default()
+        },
+    });
+    for _ in 0..30 {
+        rt.frame(FRAME);
+    }
+    assert!(
+        !model(&rt).presentation.chrome.status_bar.visible,
+        "Alt+B hid the status bar"
+    );
+    assert!(keyed(&rt, "shell:launch").is_none(), "no launch control");
+    let [x, y, w, h] = keyed(&rt, "shell:health").expect("the health dot remains");
+    assert!(
+        (w - 6.0).abs() < 0.5 && (h - 6.0).abs() < 0.5,
+        "a 6-point dot, not {w}x{h}"
+    );
+    // pinned 14 from the right and bottom of a 1280 x 800 window
+    assert!(
+        (x + w - (1280.0 - 14.0)).abs() < 1.0,
+        "dot right edge at {}",
+        x + w
+    );
+    assert!(
+        (y + h - (800.0 - 14.0)).abs() < 1.0,
+        "dot bottom edge at {}",
+        y + h
+    );
+}
+
+fn exactly_keyed(rt: &Runtime<App>, key: &str) -> Option<[f32; 4]> {
+    rt.elements()
+        .into_iter()
+        .find(|element| element.key.as_deref() == Some(key))
+        .map(|element| element.rect)
+}
+
+#[test]
+fn the_current_view_set_tab_stays_in_view_when_the_tabs_scroll() {
+    let (width, height) = (900.0, 800.0);
+    let rt = shell("tabs", (width, height));
+    let vm = model(&rt);
+    let tabs = &vm.presentation.chrome.top_bar.tabs;
+    assert!(
+        vm.presentation.chrome.top_bar.visible,
+        "the tab band is shown"
+    );
+    assert_eq!(tabs.len(), 15, "the scene declares fifteen view sets");
+    let current = tabs
+        .iter()
+        .find(|tab| tab.active)
+        .expect("a view set is current");
+    assert_eq!(
+        current.view_set_id,
+        tabs.last().unwrap().view_set_id,
+        "the newest view set is current"
+    );
+    let rects: Vec<[f32; 4]> = tabs
+        .iter()
+        .filter_map(|tab| exactly_keyed(&rt, &format!("view-set:{}", tab.view_set_id)))
+        .collect();
+    let left = rects.iter().map(|r| r[0]).fold(f32::INFINITY, f32::min);
+    let right = rects
+        .iter()
+        .map(|r| r[0] + r[2])
+        .fold(f32::NEG_INFINITY, f32::max);
+    let drawn: Vec<String> = rt
+        .elements()
+        .into_iter()
+        .filter_map(|element| element.key)
+        .filter(|key| key.contains("view-set"))
+        .collect();
+    assert!(
+        right - left > width,
+        "the tabs overflow the band ({left}..{right} in {width}); band visible: {}; tabs: {}; drawn: {drawn:?}",
+        vm.presentation.chrome.top_bar.visible,
+        tabs.len()
+    );
+    let [x, _, w, _] = exactly_keyed(&rt, &format!("view-set:{}", current.view_set_id))
+        .expect("the current tab is drawn");
+    assert!(
+        x >= 0.0 && x + w <= width,
+        "the current tab is in view: {x}..{} in {width}",
+        x + w
     );
 }

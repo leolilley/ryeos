@@ -55,6 +55,8 @@ struct RuntimeSourceBundleManifest {
     _shadows: Vec<String>,
     #[serde(default)]
     owns_namespaces: Vec<String>,
+    #[serde(default, rename = "sync_include")]
+    _sync_include: Vec<ryeos_state::project_sync::SyncIncludeDecl>,
     #[serde(default)]
     isolation_backends: Vec<ryeos_isolation_protocol::IsolationBackendDeclaration>,
     #[serde(default)]

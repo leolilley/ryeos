@@ -2,6 +2,7 @@
 
 use ryeos_api::registry::ServiceDescriptor;
 
+pub mod item_titles;
 pub mod signed_item_topology;
 pub mod ui_attention;
 pub mod ui_dimension;

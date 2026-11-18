@@ -1091,6 +1091,79 @@ async fn prepare_rejects_stale_attachment_policy() {
     .expect_err("stale policy");
 }
 
+/// The compose-result cache must not hide the change the revalidations exist
+/// for: an item edited in place while every installed bundle manifest stays as
+/// it was. The fixture Config is such an item. After its seat was prepared,
+/// and a retry was answered from cached composes, the Config is rewritten at
+/// the same ref with different content and a valid signature. The next
+/// prepare re-reads and re-verifies it, composes the new content afresh and
+/// refuses the binding as stale.
+#[tokio::test]
+async fn prepare_refuses_an_item_edited_in_place_although_composes_are_cached() {
+    use ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR;
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let session = activate(&state);
+    let state = Arc::new(state);
+    let composes = || state.engine.composers.result_cache_stats();
+
+    let prepared = prepare(&state, &session).await;
+    let after_prepare = composes();
+    assert!(after_prepare.misses > 0, "the first prepare composes");
+
+    // A retry re-resolves the whole admission and launches no composer.
+    assert_eq!(prepare(&state, &session).await, prepared);
+    let after_retry = composes();
+    assert_eq!(after_retry.misses, after_prepare.misses);
+    assert!(after_retry.hits > after_prepare.hits);
+
+    // Edit the Config in place: same ref, same signer, different content.
+    let path = state
+        .config
+        .app_root
+        .join(".ai/config/test/presentation.yaml");
+    let original = std::fs::read_to_string(&path).unwrap();
+    let body: String = original
+        .lines()
+        .filter(|line| !line.starts_with("# ryeos:signed:"))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    let edited = body.replace("title: Test presentation", "title: Edited presentation");
+    assert_ne!(edited, body);
+    let key = lillux::crypto::load_signing_key(
+        &ryeos_engine::test_support::workspace_root().join(".dev-keys/PUBLISHER_DEV.pem"),
+    )
+    .unwrap();
+    std::fs::write(
+        &path,
+        lillux::signature::sign_content(&edited, &key, "#", None),
+    )
+    .unwrap();
+
+    let refused = route(
+        &state,
+        &session,
+        &OPEN_DESCRIPTOR,
+        prepare_request(&state, &session, "00000000-0000-4000-8000-000000000010"),
+    )
+    .await
+    .expect_err("an edited item makes the admitted binding stale");
+    let detail = format!("{refused:#}");
+    assert!(
+        detail.contains("changed after session mint") || detail.contains("ui_binding_stale"),
+        "{detail}"
+    );
+    let after_edit = composes();
+    assert!(
+        after_edit.misses > after_retry.misses,
+        "the edited content was composed afresh, not answered from the cache"
+    );
+
+    // Restoring the exact original bytes makes the admission current again.
+    std::fs::write(&path, original).unwrap();
+    assert_eq!(prepare(&state, &session).await, prepared);
+    assert_eq!(composes().misses, after_edit.misses);
+}
+
 #[tokio::test]
 async fn forged_presentation_operation_records_do_not_change_the_seat() {
     use ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR;
@@ -2605,10 +2678,11 @@ async fn an_executable_admission_the_signed_binding_does_not_declare_is_refused_
         .await
         .expect_err("a preparation the signed binding does not declare must be refused");
     let message = format!("{error:#}");
-    // The validator refuses with Forbidden, which the service dispatch maps
-    // to a capability denial; the retired stopgap refused with a bad request.
+    // The validator refuses with Forbidden, which the service dispatch
+    // reports as the service's own refusal; the retired stopgap refused with
+    // a bad request.
     assert!(
-        message.contains("service_cap_denied"),
+        message.contains("service_refused"),
         "the signed-binding validator must refuse: {message}"
     );
     assert_eq!(

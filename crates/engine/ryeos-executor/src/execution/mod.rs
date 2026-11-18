@@ -27,6 +27,7 @@ pub mod launch;
 pub(crate) mod launch_claim;
 pub mod launch_envelope;
 pub mod launch_preparation;
+pub mod launch_rebind;
 pub(crate) mod launch_trust_gate;
 pub mod lillux_bridge;
 pub mod limits;
@@ -1068,7 +1069,7 @@ pub(crate) fn fold_back_outputs(params: FoldBackOutputsParams<'_>) -> Result<Fol
             pre_tree,
             operational_shadow_paths,
         )?;
-        ryeos_state::project_sync::validate_project_tree_paths(&captured, policy)?;
+        ryeos_state::project_sync::validate_stored_project_tree_paths(&captured, policy)?;
         (captured != *pre_tree).then_some(captured)
     } else if isolation.is_enforced() {
         let mutation_content = lifecycle.mutation_content.as_ref().ok_or_else(|| {
@@ -1134,7 +1135,7 @@ pub(crate) fn fold_back_outputs(params: FoldBackOutputsParams<'_>) -> Result<Fol
             pre_tree,
             operational_shadow_paths,
         )?;
-        ryeos_state::project_sync::validate_project_tree_paths(&captured, policy)?;
+        ryeos_state::project_sync::validate_stored_project_tree_paths(&captured, policy)?;
         (captured != *pre_tree).then_some(captured)
     };
     let Some(new_tree) = new_tree else {

@@ -489,6 +489,42 @@ pub(crate) fn load_item_raw(
         &dyn crate::project_content::AuthoritativeProjectContent,
     )>,
 ) -> Result<RawLoadedItem, ResolutionError> {
+    let started = std::time::Instant::now();
+    let outcome = read_and_verify_item(
+        kinds,
+        roots,
+        trust_store,
+        ref_,
+        referenced_by,
+        step,
+        project_authority,
+    );
+    tracing::debug!(
+        target: "ryeos_engine::timing",
+        work = "item_load",
+        item_ref = %ref_,
+        source_content_digest = outcome
+            .as_ref()
+            .map_or("", |item| item.source_content_digest.as_str()),
+        elapsed_us = started.elapsed().as_micros() as u64,
+        "engine work timing"
+    );
+    outcome
+}
+
+/// Discover one item, read its source and verify its signature.
+fn read_and_verify_item(
+    kinds: &KindRegistry,
+    roots: &ResolutionRoots,
+    trust_store: &TrustStore,
+    ref_: &CanonicalRef,
+    referenced_by: &str,
+    step: ResolutionStepName,
+    project_authority: Option<(
+        &std::path::Path,
+        &dyn crate::project_content::AuthoritativeProjectContent,
+    )>,
+) -> Result<RawLoadedItem, ResolutionError> {
     let kind_schema = kinds
         .get(&ref_.kind)
         .ok_or_else(|| ResolutionError::StepFailed {

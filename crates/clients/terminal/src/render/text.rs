@@ -104,15 +104,6 @@ pub fn join_with_right_meta(
     }
 }
 
-pub fn letterspace(value: &str) -> String {
-    value
-        .chars()
-        .flat_map(|ch| [ch.to_ascii_uppercase(), ' '])
-        .collect::<String>()
-        .trim_end()
-        .to_string()
-}
-
 pub fn input_cursor_byte(value: &str, cursor: usize) -> usize {
     let mut byte = cursor.min(value.len());
     while byte > 0 && !value.is_char_boundary(byte) {

@@ -234,6 +234,12 @@ pub struct BundleManifestSource {
     /// bundle space supplies it. Signed data in the generated manifest.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub owns_namespaces: Vec<String>,
+    /// Project `.ai` roots this bundle makes AI-only project sync carry,
+    /// as `{kind: <item kind>}` or `{root, shape}` declarations. Signed data
+    /// in the generated manifest; the node unions every installed bundle's
+    /// declarations into its `sync_include` table.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sync_include: Vec<ryeos_state::project_sync::SyncIncludeDecl>,
     /// Privileged node isolation implementations shipped by this bundle.
     /// Presence never activates a backend; immutable node policy selects one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -275,6 +281,9 @@ pub struct BundleManifest {
     /// Owned namespaces, carried verbatim from the source manifest.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub owns_namespaces: Vec<String>,
+    /// Sync-include declarations, carried verbatim from the source manifest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sync_include: Vec<ryeos_state::project_sync::SyncIncludeDecl>,
     /// Signed privileged isolation declarations, carried verbatim from source.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub isolation_backends: Vec<ryeos_isolation_protocol::IsolationBackendDeclaration>,
@@ -407,6 +416,8 @@ pub fn materialize_manifest(
         .map_err(|e| anyhow::anyhow!("invalid `shadows` declaration: {e}"))?;
     ryeos_engine::item_resolution::validate_owned_namespaces(&source.owns_namespaces)
         .map_err(|e| anyhow::anyhow!("invalid `owns_namespaces` declaration: {e}"))?;
+    ryeos_state::project_sync::validate_sync_include_decls(&source.sync_include)
+        .map_err(|e| anyhow::anyhow!("invalid `sync_include` declaration: {e:#}"))?;
     validate_isolation_backends(&source.isolation_backends)
         .map_err(|e| anyhow::anyhow!("invalid `isolation_backends` declaration: {e}"))?;
     validate_external_execution_declarations(
@@ -426,6 +437,7 @@ pub fn materialize_manifest(
         smoke: source.smoke,
         shadows: source.shadows,
         owns_namespaces: source.owns_namespaces,
+        sync_include: source.sync_include,
         isolation_backends: source.isolation_backends,
         external_providers: source.external_providers,
         external_lifecycle_adapters: source.external_lifecycle_adapters,
@@ -465,6 +477,7 @@ pub fn verify_retained_manifest_bytes(
         .map_err(anyhow::Error::msg)?;
     ryeos_engine::item_resolution::validate_owned_namespaces(&manifest.owns_namespaces)
         .map_err(anyhow::Error::msg)?;
+    ryeos_state::project_sync::validate_sync_include_decls(&manifest.sync_include)?;
     validate_isolation_backends(&manifest.isolation_backends).map_err(anyhow::Error::msg)?;
     validate_external_execution_declarations(
         &manifest.external_providers,
@@ -550,6 +563,14 @@ pub fn load_verified_manifest(
             )
         },
     )?;
+    ryeos_state::project_sync::validate_sync_include_decls(&manifest.sync_include).map_err(
+        |error| {
+            anyhow::anyhow!(
+                "invalid `sync_include` declaration in {}: {error:#}",
+                manifest_path.display()
+            )
+        },
+    )?;
     validate_isolation_backends(&manifest.isolation_backends).map_err(|error| {
         anyhow::anyhow!(
             "invalid `isolation_backends` declaration in {}: {error}",
@@ -604,6 +625,70 @@ pub fn verified_owned_namespaces(
     Ok((name, verified.manifest.owns_namespaces))
 }
 
+/// The bundle name and `sync_include` declarations of the signed manifest
+/// installed at `bundle_root`, verified against `trust_store` exactly as
+/// [`verified_owned_namespaces`] is.
+pub fn verified_sync_include(
+    bundle_root: &Path,
+    trust_store: &TrustStore,
+) -> Result<(String, Vec<ryeos_state::project_sync::SyncIncludeDecl>)> {
+    let ai_dir = bundle_root.join(".ai");
+    let manifest_path = ai_dir.join("manifest.yaml");
+    let raw = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("read manifest {}", manifest_path.display()))?;
+    let body = lillux::signature::strip_signature_lines(&raw);
+    let value: serde_yaml::Value = serde_yaml::from_str(&body)
+        .with_context(|| format!("parse manifest {}", manifest_path.display()))?;
+    let name = value
+        .get("name")
+        .and_then(serde_yaml::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("{} names no bundle", manifest_path.display()))?
+        .to_owned();
+    let verified = load_verified_manifest(&ai_dir, &name, trust_store)?;
+    Ok((name, verified.manifest.sync_include))
+}
+
+/// Compose the node's `sync_include` table from the signed manifests of the
+/// installed bundles at `bundle_roots`. Reads bundle roots only: a project
+/// tree has no say. `kinds` resolves `{kind}` declarations to their
+/// `location.directory`.
+pub fn compose_sync_include(
+    bundle_roots: &[PathBuf],
+    trust_store: &TrustStore,
+    kinds: &ryeos_engine::kind_registry::KindRegistry,
+) -> Result<ryeos_state::project_sync::SyncInclude> {
+    let mut bundles = Vec::with_capacity(bundle_roots.len());
+    for root in bundle_roots {
+        bundles.push(
+            verified_sync_include(root, trust_store).with_context(|| {
+                format!("read sync_include of the bundle at {}", root.display())
+            })?,
+        );
+    }
+    ryeos_state::project_sync::SyncInclude::compose(&bundles, &|kind| {
+        kinds.directory(kind).map(str::to_owned)
+    })
+}
+
+/// As [`compose_sync_include`], loading the kind registry from the bundles'
+/// own signed kind schemas.
+pub fn compose_sync_include_for_roots(
+    bundle_roots: &[PathBuf],
+    trust_store: &TrustStore,
+) -> Result<ryeos_state::project_sync::SyncInclude> {
+    let schema_roots = bundle_roots
+        .iter()
+        .map(|root| {
+            root.join(ryeos_engine::AI_DIR)
+                .join(ryeos_engine::KIND_SCHEMAS_DIR)
+        })
+        .filter(|dir| dir.is_dir())
+        .collect::<Vec<_>>();
+    let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(&schema_roots, trust_store)
+        .context("load kind schemas for sync_include")?;
+    compose_sync_include(bundle_roots, trust_store, &kinds)
+}
+
 fn yaml_signature_envelope() -> SignatureEnvelope {
     SignatureEnvelope {
         prefix: "#".into(),
@@ -654,6 +739,14 @@ pub fn parse_manifest(source: &Path, expected_name: &str) -> Result<BundleManife
         |error| {
             anyhow::anyhow!(
                 "invalid `owns_namespaces` declaration in {}: {error}",
+                manifest_path.display()
+            )
+        },
+    )?;
+    ryeos_state::project_sync::validate_sync_include_decls(&manifest.sync_include).map_err(
+        |error| {
+            anyhow::anyhow!(
+                "invalid `sync_include` declaration in {}: {error:#}",
                 manifest_path.display()
             )
         },
@@ -1417,6 +1510,7 @@ typo_field: oops
             smoke: vec![],
             shadows: vec![],
             owns_namespaces: vec![],
+            sync_include: vec![],
             isolation_backends: vec![],
             external_providers: vec![],
             external_lifecycle_adapters: vec![],
@@ -1476,6 +1570,7 @@ typo_field: oops
                 smoke: vec![],
                 shadows: vec![],
                 owns_namespaces: bad,
+                sync_include: vec![],
                 isolation_backends: vec![],
                 external_providers: vec![],
                 external_lifecycle_adapters: vec![],
@@ -1508,6 +1603,7 @@ typo_field: oops
             smoke: vec![],
             shadows: vec![],
             owns_namespaces: vec![],
+            sync_include: vec![],
             isolation_backends: vec![],
             external_providers: vec![],
             external_lifecycle_adapters: vec![],
@@ -1679,6 +1775,7 @@ smoke:
             }],
             shadows: vec![],
             owns_namespaces: vec![],
+            sync_include: vec![],
             isolation_backends: vec![],
             external_providers: vec![],
             external_lifecycle_adapters: vec![],
@@ -1754,6 +1851,7 @@ shadows:
             smoke: vec![],
             shadows: vec!["no-colon".to_string()],
             owns_namespaces: vec![],
+            sync_include: vec![],
             isolation_backends: vec![],
             external_providers: vec![],
             external_lifecycle_adapters: vec![],
@@ -1832,11 +1930,113 @@ isolation_backends:
             smoke: vec![],
             shadows: vec![],
             owns_namespaces: vec![],
+            sync_include: vec![],
             isolation_backends: vec![backend.clone()],
             external_providers: vec![],
             external_lifecycle_adapters: vec![],
         };
         let manifest = materialize_manifest(source, &ai_dir, "isolation").unwrap();
         assert_eq!(manifest.isolation_backends, vec![backend]);
+    }
+
+    fn source_with_sync_include(
+        decls: Vec<ryeos_state::project_sync::SyncIncludeDecl>,
+    ) -> BundleManifestSource {
+        BundleManifestSource {
+            name: "claimant".to_string(),
+            version: "0.1.0".to_string(),
+            description: String::new(),
+            requires_kinds: vec![],
+            uses_kinds: vec![],
+            runtime_authority: RuntimeAuthorityDecls::default(),
+            smoke: vec![],
+            shadows: vec![],
+            owns_namespaces: vec![],
+            sync_include: decls,
+            isolation_backends: vec![],
+            external_providers: vec![],
+            external_lifecycle_adapters: vec![],
+        }
+    }
+
+    #[test]
+    fn materialize_manifest_refuses_bad_sync_include_declarations() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ai_dir = tmp.path().join("claimant/.ai");
+        fs::create_dir_all(&ai_dir).unwrap();
+        for (label, yaml) in [
+            ("floor", "- root: .ai/node/vault\n  shape: directory\n"),
+            ("above a floor", "- root: .ai/node\n  shape: directory\n"),
+            ("outside .ai", "- root: src\n  shape: directory\n"),
+            (
+                "both forms",
+                "- kind: tool\n  root: .ai/tools\n  shape: directory\n",
+            ),
+            (
+                "overlap",
+                "- root: .ai/a\n  shape: directory\n- root: .ai/a/b\n  shape: file\n",
+            ),
+        ] {
+            let decls = serde_yaml::from_str(yaml).unwrap();
+            let error = materialize_manifest(source_with_sync_include(decls), &ai_dir, "claimant")
+                .expect_err(label);
+            assert!(
+                error.to_string().contains("sync_include"),
+                "{label}: {error}"
+            );
+        }
+        // A legal declaration is carried verbatim into the signed manifest.
+        let decls: Vec<ryeos_state::project_sync::SyncIncludeDecl> =
+            serde_yaml::from_str("- kind: tool\n- root: .ai/manifest.yaml\n  shape: file\n")
+                .unwrap();
+        let manifest =
+            materialize_manifest(source_with_sync_include(decls.clone()), &ai_dir, "claimant")
+                .unwrap();
+        assert_eq!(manifest.sync_include, decls);
+    }
+
+    /// The core bundle's signed manifest declares exactly the rows the former
+    /// `PROJECT_AI_SURFACES` constant held, and the source manifest and the
+    /// generated one agree.
+    #[test]
+    fn core_manifest_declares_exactly_the_former_const_rows() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../bundles/core/.ai");
+        let source: BundleManifestSource =
+            serde_yaml::from_str(&fs::read_to_string(root.join("manifest.source.yaml")).unwrap())
+                .unwrap();
+        let generated_raw = fs::read_to_string(root.join("manifest.yaml")).unwrap();
+        let generated = parse_current_manifest_body(
+            &lillux::signature::strip_signature_lines(&generated_raw),
+            &root.join("manifest.yaml"),
+        )
+        .unwrap();
+        assert_eq!(
+            source.sync_include, generated.sync_include,
+            "regenerate and re-sign bundles/core/.ai/manifest.yaml"
+        );
+
+        // `{kind}` declarations resolve through the kind schemas core ships.
+        let kind_directory = |kind: &str| -> Option<String> {
+            let path = root
+                .join("node/engine/kinds")
+                .join(kind)
+                .join(format!("{kind}.kind-schema.yaml"));
+            let value: serde_yaml::Value = serde_yaml::from_str(
+                &lillux::signature::strip_signature_lines(&fs::read_to_string(path).ok()?),
+            )
+            .ok()?;
+            value["location"]["directory"].as_str().map(str::to_owned)
+        };
+        let composed = ryeos_state::project_sync::SyncInclude::compose(
+            &[("core".to_owned(), generated.sync_include)],
+            &kind_directory,
+        )
+        .unwrap();
+        assert_eq!(
+            composed,
+            ryeos_state::project_sync::SyncInclude::for_tests(),
+            "the composed table must equal the former PROJECT_AI_SURFACES rows"
+        );
+        assert_eq!(composed.entries().len(), 17);
     }
 }

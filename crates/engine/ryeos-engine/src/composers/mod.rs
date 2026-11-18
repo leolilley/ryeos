@@ -23,6 +23,10 @@
 //! The engine code never names a kind in Rust string literals — the
 //! kind→composer mapping is entirely data.
 
+mod result_cache;
+
+pub use result_cache::ComposeResultCacheStats;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -61,6 +65,38 @@ struct BoundComposer {
     field_requirements: Vec<ComposerFieldRequirement>,
 }
 
+impl BoundComposer {
+    /// The cache key of `request` to this composer, when its response may be
+    /// cached: the handler's signed descriptor declares content-addressed
+    /// results and its exact binary is resolved.
+    fn result_cache_key(
+        &self,
+        handler_registry_fingerprint: &str,
+        request: &ComposeRequest,
+    ) -> Option<result_cache::ComposeResultCacheKey> {
+        let VerifiedHandler::Resolved {
+            canonical_ref,
+            descriptor,
+            descriptor_content_digest,
+            resolved_binary_hash,
+            ..
+        } = self.handler.as_ref()
+        else {
+            return None;
+        };
+        if !descriptor.cache.is_content_addressed() {
+            return None;
+        }
+        result_cache::ComposeResultCacheKey::new(
+            handler_registry_fingerprint,
+            canonical_ref,
+            descriptor_content_digest,
+            resolved_binary_hash,
+            request,
+        )
+    }
+}
+
 /// Registry of kind composers, one per kind name.
 ///
 /// Built data-drivenly via `from_kinds`: each kind schema declares a
@@ -76,6 +112,13 @@ struct BoundComposer {
 pub struct ComposerRegistry {
     composers: HashMap<String, BoundComposer>,
     launch_runtime: Arc<crate::handlers::subprocess::HandlerLaunchRuntime>,
+    /// Fingerprint of the handler registry the composers were bound from.
+    handler_registry_fingerprint: String,
+    /// Responses of composers that declare content-addressed results. Owned
+    /// by this registry and its clones only, so every response in it was
+    /// produced under this registry's handlers and this launch runtime: the
+    /// same isolation snapshot, mounts and scrubbed environment.
+    results: Arc<result_cache::ComposeResultCache>,
 }
 
 impl ComposerRegistry {
@@ -85,6 +128,8 @@ impl ComposerRegistry {
         Self {
             composers: HashMap::new(),
             launch_runtime: Arc::new(crate::handlers::subprocess::HandlerLaunchRuntime::disabled()),
+            handler_registry_fingerprint: String::new(),
+            results: Arc::default(),
         }
     }
 
@@ -169,6 +214,8 @@ impl ComposerRegistry {
         Ok(Self {
             composers,
             launch_runtime: Arc::clone(handlers.launch_runtime()),
+            handler_registry_fingerprint: handlers.fingerprint().to_owned(),
+            results: Arc::default(),
         })
     }
 
@@ -249,7 +296,10 @@ impl ComposerRegistry {
             });
         }
 
-        let request = HandlerRequest::Compose(ComposeRequest {
+        // The request is built here, from the items the caller has just
+        // loaded and signature-verified. The cache key is computed from this
+        // request, so a response is only reused for the same verified content.
+        let request = ComposeRequest {
             composer_config: bound.config.clone(),
             root: to_compose_input(root, root_parsed.clone()),
             ancestors: ancestors
@@ -257,33 +307,62 @@ impl ComposerRegistry {
                 .zip(ancestor_parsed.iter())
                 .map(|(a, p)| to_compose_input(a, p.clone()))
                 .collect(),
-        });
+        };
 
-        let resp = run_handler_subprocess(
+        // What a cache hit skips, because no process is launched: the
+        // per-launch check that the executable on disk still has its admitted
+        // digest, and, outside a guarded operation, the per-launch
+        // verification of the installed bundles. The executable digest in
+        // the key is the one recorded when the handler registry was loaded.
+        // A held response was produced by a launch that passed both checks
+        // for that same digest, so what is served is still the admitted
+        // binary's output for this exact request. A hit never vouches for
+        // the bundles as they are now: that remains the enclosing guarded
+        // operation's verification.
+        let success = match bound.result_cache_key(&self.handler_registry_fingerprint, &request) {
+            Some(key) => self
+                .results
+                .get_or_launch(key, || self.launch_compose(bound, request))?,
+            None => self.launch_compose(bound, request)?,
+        };
+
+        // The engine's own checks run on every compose, whether the response
+        // was just produced or was held: they depend on this kind's
+        // requirements, which are not part of the request.
+        validate_declared_capability_narrowing(
+            kind,
+            root_parsed,
+            ancestor_parsed,
+            &success.composed,
+        )?;
+        validate_composed_field_requirements(
+            kind,
+            &bound.field_requirements,
+            root_parsed,
+            ancestor_parsed,
+            &success.composed,
+        )?;
+        Ok(success_to_view(success))
+    }
+
+    /// Launch the composer subprocess for one request. Every failure, a
+    /// launch that could not start or timed out and a composer that reported
+    /// an error alike, is an `Err`, and an `Err` is never cached.
+    fn launch_compose(
+        &self,
+        bound: &BoundComposer,
+        request: ComposeRequest,
+    ) -> Result<ComposeSuccess, ResolutionError> {
+        let response = run_handler_subprocess(
             &bound.handler,
-            &request,
+            &HandlerRequest::Compose(request),
             COMPOSE_TIMEOUT,
             &self.launch_runtime,
         )
         .map_err(engine_to_resolution_error)?;
 
-        match resp {
-            HandlerResponse::ComposeOk(success) => {
-                validate_declared_capability_narrowing(
-                    kind,
-                    root_parsed,
-                    ancestor_parsed,
-                    &success.composed,
-                )?;
-                validate_composed_field_requirements(
-                    kind,
-                    &bound.field_requirements,
-                    root_parsed,
-                    ancestor_parsed,
-                    &success.composed,
-                )?;
-                Ok(success_to_view(success))
-            }
+        match response {
+            HandlerResponse::ComposeOk(success) => Ok(success),
             HandlerResponse::ComposeErr { step, reason } => Err(ResolutionError::StepFailed {
                 step: wire_step_to_engine(step),
                 class: ResolutionFailureClass::InvalidDefinition,
@@ -298,6 +377,11 @@ impl ComposerRegistry {
                 ),
             }),
         }
+    }
+
+    /// Counts of this registry's compose-result cache.
+    pub fn result_cache_stats(&self) -> ComposeResultCacheStats {
+        self.results.stats()
     }
 }
 
@@ -758,6 +842,166 @@ composer: {composer}
             vec!["ryeos.execute.tool.echo", "ryeos.execute.tool.read"],
             "extends_chain effective_caps projection must work unchanged"
         );
+    }
+
+    /// The shipped composers declare content-addressed results, so the live
+    /// registry answers a repeated request without a second launch, launches
+    /// again for changed content, and never keeps a failed compose.
+    #[test]
+    fn shipped_composers_reuse_a_response_only_for_the_same_request() {
+        let root = tempdir();
+        let (sk, ts) = signing_key_with_trust();
+        let cfg = "  extends_field: extends\n  fields: []\n";
+        write_kind(
+            &root,
+            "directive",
+            "handler:ryeos/core/extends-chain",
+            Some(cfg),
+            &sk,
+        );
+        let kinds = KindRegistry::load_base(std::slice::from_ref(&root), &ts).unwrap();
+        let handlers = load_live_handler_registry();
+        let reg = ComposerRegistry::from_kinds(&kinds, &handlers).unwrap();
+        // A clone, as a request engine holds, shares the cache.
+        let clone = reg.clone();
+
+        let item = |trust_class| ResolvedAncestor {
+            requested_id: "directive:test".into(),
+            resolved_ref: "directive:test".into(),
+            source_path: root.join("directive/test.directive.md"),
+            source_space: crate::contracts::ItemSpace::Bundle,
+            source_root: crate::contracts::ItemSourceRoot::Bundle {
+                name: "fixture".to_string(),
+            },
+            trust_class,
+            signer_fingerprint: Some("fixture-signer".to_string()),
+            alias_resolution: None,
+            added_by: ResolutionStepName::PipelineInit,
+            raw_content: String::new(),
+            source_content_digest: String::new(),
+            raw_content_digest: String::new(),
+        };
+        let trusted = item(TrustClass::TrustedBundle);
+        let original = json!({"body": "original"});
+        let edited = json!({"body": "edited in place"});
+        let counts = |registry: &ComposerRegistry| {
+            let stats = registry.result_cache_stats();
+            (stats.hits, stats.misses)
+        };
+
+        let first = reg
+            .compose("directive", &trusted, &original, &[], &[])
+            .unwrap();
+        assert_eq!(counts(&reg), (0, 1));
+        let again = clone
+            .compose("directive", &trusted, &original, &[], &[])
+            .unwrap();
+        assert_eq!(
+            counts(&reg),
+            (1, 1),
+            "the same request is not launched again"
+        );
+        assert_eq!(again.composed, first.composed);
+
+        // The same ref with different content.
+        let changed = reg
+            .compose("directive", &trusted, &edited, &[], &[])
+            .unwrap();
+        assert_eq!(counts(&reg), (1, 2));
+        assert_ne!(changed.composed, first.composed);
+
+        // The same content verified under another trust class is another
+        // request, whatever the composer then makes of it.
+        let _ = reg.compose(
+            "directive",
+            &item(TrustClass::UntrustedProject),
+            &original,
+            &[],
+            &[],
+        );
+        assert_eq!(counts(&reg), (1, 3));
+
+        // A compose the handler refuses is launched each time and never held.
+        let entries = reg.result_cache_stats().entries;
+        let malformed = json!({"extends": 7});
+        for attempt in 1..=2 {
+            assert!(
+                reg.compose("directive", &trusted, &malformed, &[], &[])
+                    .is_err()
+            );
+            assert_eq!(counts(&reg), (1, 3 + attempt));
+            assert_eq!(reg.result_cache_stats().entries, entries);
+        }
+
+        // A registry bound again from the same kinds starts with no responses.
+        let rebuilt = ComposerRegistry::from_kinds(&kinds, &handlers).unwrap();
+        rebuilt
+            .compose("directive", &trusted, &original, &[], &[])
+            .unwrap();
+        assert_eq!(counts(&rebuilt), (0, 1));
+    }
+
+    /// A composer whose launch fails is launched again on every attempt:
+    /// the failure reaches the caller and nothing is held for the request.
+    #[test]
+    fn a_composer_that_cannot_be_launched_is_never_cached() {
+        let root = tempdir();
+        let handler = VerifiedHandler::Resolved {
+            canonical_ref: "handler:test/absent-composer".into(),
+            descriptor: crate::handlers::HandlerDescriptor {
+                category: "test".into(),
+                name: "absent-composer".into(),
+                kind: "handler".into(),
+                serves: HandlerServes::Composer,
+                binary_ref: "bin/test/absent-composer".into(),
+                abi_version: "v3".into(),
+                required_caps: Vec::new(),
+                description: String::new(),
+                cache: crate::handlers::descriptor::HandlerResultCachePolicy::ContentAddressed,
+            },
+            trust_class: TrustClass::TrustedBundle,
+            bundle_root: root.clone(),
+            descriptor_path: root.join("absent-composer.yaml"),
+            descriptor_content_digest: "d".repeat(64),
+            descriptor_signer_fingerprint: "f".repeat(64),
+            // No file exists here, so the launch itself fails.
+            resolved_binary_path: root.join("absent-composer"),
+            resolved_binary_hash: "b".repeat(64),
+            resolved_binary_manifest_hash: "m".repeat(64),
+            resolved_binary_signer_fingerprint: "f".repeat(64),
+        };
+        let mut reg = ComposerRegistry::new();
+        reg.register("synthetic", Arc::new(handler), json!({}));
+
+        let item = ResolvedAncestor {
+            requested_id: "synthetic:test".into(),
+            resolved_ref: "synthetic:test".into(),
+            source_path: root.join("test.yaml"),
+            source_space: crate::contracts::ItemSpace::Bundle,
+            source_root: crate::contracts::ItemSourceRoot::Bundle {
+                name: "fixture".to_string(),
+            },
+            trust_class: TrustClass::TrustedBundle,
+            signer_fingerprint: Some("fixture-signer".to_string()),
+            alias_resolution: None,
+            added_by: ResolutionStepName::PipelineInit,
+            raw_content: String::new(),
+            source_content_digest: String::new(),
+            raw_content_digest: String::new(),
+        };
+        for attempt in 1..=3 {
+            let error = reg
+                .compose("synthetic", &item, &json!({"body": "x"}), &[], &[])
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("composer handler subprocess failed"),
+                "{error}"
+            );
+            let stats = reg.result_cache_stats();
+            assert_eq!((stats.hits, stats.misses, stats.entries), (0, attempt, 0));
+        }
     }
 
     #[test]
