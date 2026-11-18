@@ -539,6 +539,7 @@ mod tests {
                     cost_details_path: Some("cost_details".into()),
                     is_byok_path: Some("is_byok".into()),
                     reasoning_included_in_output: true,
+                    cache_included_in_input: false,
                     aggregation,
                     single_snapshot: false,
                 }),

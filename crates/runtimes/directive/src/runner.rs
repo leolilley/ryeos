@@ -6023,6 +6023,7 @@ mod tests {
             body_extra: None,
             spend_authority: None,
             image_input: None,
+            cache_marks: None,
             profiles: vec![],
         };
 
@@ -6103,6 +6104,7 @@ mod tests {
             body_extra: None,
             spend_authority: None,
             image_input: None,
+            cache_marks: None,
             profiles: vec![],
         };
 
@@ -6159,6 +6161,7 @@ mod tests {
             body_extra: None,
             spend_authority: None,
             image_input: None,
+            cache_marks: None,
             profiles: vec![],
         };
 
@@ -6214,6 +6217,7 @@ mod tests {
             body_extra: None,
             spend_authority: None,
             image_input: None,
+            cache_marks: None,
             profiles: vec![],
         };
         let outputs = Some(vec![OutputSpec {
@@ -6284,6 +6288,7 @@ mod tests {
             body_extra: None,
             spend_authority: None,
             image_input: None,
+            cache_marks: None,
             profiles: vec![],
         };
         let mut budget = BudgetTracker::new(usd("1"));
@@ -6459,6 +6464,7 @@ mod tests {
             body_extra: None,
             spend_authority: None,
             image_input: None,
+            cache_marks: None,
             profiles: vec![],
         };
 
@@ -6534,6 +6540,7 @@ mod tests {
             body_extra: None,
             spend_authority: None,
             image_input: None,
+            cache_marks: None,
             profiles: vec![],
         };
 
@@ -6606,6 +6613,7 @@ mod tests {
             body_extra: None,
             spend_authority: None,
             image_input: None,
+            cache_marks: None,
             profiles: vec![],
         };
 
@@ -6662,6 +6670,7 @@ mod tests {
             body_extra: None,
             spend_authority: None,
             image_input: None,
+            cache_marks: None,
             profiles: vec![],
         };
 
@@ -7591,6 +7600,7 @@ mod tests {
             body_extra: None,
             spend_authority: None,
             image_input: None,
+            cache_marks: None,
             profiles: vec![],
         };
         Runner::new(RunnerConfig {

@@ -19,9 +19,11 @@ use ryeos_accounting::{
     SpendBoundAuthority, SpendBoundCertificate, SpendTariffDocument, UsdNanos,
 };
 
+mod cache_marks;
 mod effective;
 mod image_input;
 
+pub use cache_marks::{CACHE_MARKS_MAX, CacheMarkPosition, CacheMarksConfig};
 pub use effective::{
     ContinuationConfig, ContinuationEnabled, DIRECTIVE_EFFECTIVE_HEADER_KEYS, DeadlineSpec,
     DirectiveEffectClass, DirectiveHeader, LimitsSpec, OutputSpec, ProviderContact, ReturnNudge,
@@ -137,6 +139,11 @@ pub struct ProviderConfig {
     /// of `schemas`, because a profile's `schemas` replaces the whole block.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_input: Option<ImageInputConfig>,
+    /// Where the request marks its cacheable prefix. A top-level field, not
+    /// part of `schemas`, for the same reason as `image_input`. Absent: the
+    /// request carries no mark.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_marks: Option<CacheMarksConfig>,
     #[serde(default)]
     pub profiles: Vec<ProviderProfile>,
 }
@@ -167,6 +174,9 @@ pub struct ProviderProfile {
     /// Replaces the config's `image_input` whole.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_input: Option<ImageInputConfig>,
+    /// Replaces the config's `cache_marks` whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_marks: Option<CacheMarksConfig>,
 }
 
 /// Provider-domain transport selection. The remote and admitted-worker paths
@@ -740,6 +750,13 @@ pub struct StreamUsageConfig {
     pub is_byok_path: Option<String>,
     #[serde(default)]
     pub reasoning_included_in_output: bool,
+    /// When true, the signed protocol declares that `input_tokens` already
+    /// contains the cache-read and cache-write counts. A report where those
+    /// counts exceed the input is then an anomaly, and a tariff may not bill
+    /// the input together with a cache dimension (the cached part would be
+    /// billed twice).
+    #[serde(default)]
+    pub cache_included_in_input: bool,
     #[serde(default)]
     pub aggregation: UsageAggregation,
     /// The signed protocol contract permits exactly one matching usage
@@ -1433,9 +1450,15 @@ impl ProviderConfig {
         if let Some(image_input) = &self.image_input {
             image_input.validate(context)?;
         }
+        if let Some(cache_marks) = &self.cache_marks {
+            cache_marks.validate(context)?;
+        }
         for profile in &self.profiles {
             if let Some(image_input) = &profile.image_input {
                 image_input.validate(&format!("{context} profile {}", profile.name))?;
+            }
+            if let Some(cache_marks) = &profile.cache_marks {
+                cache_marks.validate(&format!("{context} profile {}", profile.name))?;
             }
         }
         if self.body_template.is_none() {
@@ -1801,6 +1824,9 @@ impl ProviderConfig {
                 .map_err(|error| anyhow::anyhow!("provider config{context}: {error}"))?;
         }
 
+        self.validate_cache_marks_route(context)?;
+        self.validate_cache_included_in_input_tariff(context)?;
+
         match self.family {
             ProtocolFamily::AnthropicMessages => {
                 if let Some(messages) = self.schemas.as_ref().and_then(|s| s.messages.as_ref())
@@ -1824,6 +1850,102 @@ impl ProviderConfig {
             ProtocolFamily::ChatCompletions => {}
         }
 
+        Ok(())
+    }
+
+    /// Marks are written into the Chat Completions message list, so the route
+    /// must send that list unrenamed and unextracted, and a tariff on it must
+    /// bill the cache dimensions a marked request produces.
+    fn validate_cache_marks_route(&self, context: &str) -> Result<()> {
+        if self.cache_marks.is_none() {
+            return Ok(());
+        }
+        if self.family != ProtocolFamily::ChatCompletions {
+            bail!("provider config{context}: cache_marks requires family chat_completions");
+        }
+        if let Some(messages) = self.schemas.as_ref().and_then(|s| s.messages.as_ref()) {
+            if let Some(role_map) = &messages.role_map {
+                for role in ["system", "assistant"] {
+                    if role_map.get(role).is_some_and(|mapped| mapped != role) {
+                        bail!(
+                            "provider config{context}: cache_marks requires messages.role_map to leave the {role} role unrenamed"
+                        );
+                    }
+                }
+            }
+            if messages
+                .system_message
+                .as_ref()
+                .is_some_and(|system| system.mode != SystemMessageMode::MessageRole)
+            {
+                bail!(
+                    "provider config{context}: cache_marks requires system messages to stay inline (system_message.mode message_role)"
+                );
+            }
+            if messages
+                .content_key
+                .as_deref()
+                .is_some_and(|key| key != "content")
+            {
+                bail!(
+                    "provider config{context}: cache_marks requires messages.content_key content"
+                );
+            }
+            if messages
+                .tool_result
+                .as_ref()
+                .is_some_and(|tool| tool.wrap_mode != ToolResultWrapMode::Direct)
+            {
+                bail!(
+                    "provider config{context}: cache_marks requires messages.tool_result.wrap_mode direct"
+                );
+            }
+        }
+        if let Some(tariff) = self
+            .spend_authority
+            .as_ref()
+            .and_then(|authority| authority.tariff.as_ref())
+            && !tariff.covered_dimensions.covers(&[
+                BillableDimension::CacheReadTokens,
+                BillableDimension::CacheWriteTokens,
+            ])
+        {
+            bail!(
+                "provider config{context}: a marked request is not billed by input and output alone; the tariff must cover cache_read_tokens and cache_write_tokens"
+            );
+        }
+        Ok(())
+    }
+
+    /// When the signed usage schema says `input_tokens` already contains the
+    /// cache counts, a tariff that bills the input together with a cache
+    /// dimension would bill the cached part twice.
+    fn validate_cache_included_in_input_tariff(&self, context: &str) -> Result<()> {
+        let included = self
+            .schemas
+            .as_ref()
+            .and_then(|schemas| schemas.streaming.as_ref())
+            .and_then(|streaming| streaming.metadata.as_ref())
+            .and_then(|metadata| metadata.usage.as_ref())
+            .is_some_and(|usage| usage.cache_included_in_input);
+        if !included {
+            return Ok(());
+        }
+        if let Some(tariff) = self
+            .spend_authority
+            .as_ref()
+            .and_then(|authority| authority.tariff.as_ref())
+        {
+            let covered = &tariff.covered_dimensions;
+            if covered.contains(BillableDimension::InputTokens)
+                && (covered.contains(BillableDimension::CacheReadTokens)
+                    || covered.contains(BillableDimension::CacheWriteTokens))
+            {
+                bail!(
+                    "provider config{context}: usage.cache_included_in_input is set, so a tariff covering input_tokens together with cache_read_tokens or cache_write_tokens would bill the cached tokens twice"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -1861,6 +1983,9 @@ impl ProviderConfig {
         }
         if let Some(image_input) = &profile.image_input {
             resolved.image_input = Some(image_input.clone());
+        }
+        if let Some(cache_marks) = &profile.cache_marks {
+            resolved.cache_marks = Some(cache_marks.clone());
         }
         resolved.profiles.clear();
         resolved
@@ -2943,6 +3068,7 @@ mod reasoning_tests {
             body_template: None,
             body_extra: None,
             image_input: None,
+            cache_marks: None,
             profiles: Vec::new(),
         };
         ResolvedProviderSnapshot {
@@ -3750,5 +3876,174 @@ profiles:
             load(&BASE.replace("max_images_per_request: 3", "max_images_per_request: 0"));
         let error = provider.validate("").unwrap_err().to_string();
         assert!(error.contains("max_images_per_request"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod cache_marks_config_tests {
+    use super::*;
+
+    const MARKS: &str = r#"
+cache_marks:
+  mark: {cache_control: {type: ephemeral}}
+  text_part_template: {type: text, text: "{text}"}
+  max_marks: 4
+  positions: [system, newest, previous_tail]
+"#;
+
+    const PROFILE_MARKS: &str = r#"
+    cache_marks:
+      mark: {tag: profile}
+      text_part_template: {type: text, text: "{text}"}
+      max_marks: 2
+      positions: [newest]
+"#;
+
+    fn load(top: &str, profile: &str, extra: &str) -> ProviderConfig {
+        let yaml = format!(
+            r#"
+family: chat_completions
+transport: {{kind: remote_http, base_url: "https://example.invalid"}}
+schemas:
+  streaming:
+    mode: delta_merge
+    metadata:
+      usage:
+        path: usage
+        input_tokens_path: prompt_tokens
+        output_tokens_path: completion_tokens
+        {extra}
+  output_limit: {{path: max_tokens, semantics: provider_native_output_tokens}}
+body_template: {{model: "{{model}}", messages: "{{messages}}", stream: "{{stream}}"}}
+{top}
+profiles:
+  - name: marked
+    match: ["marked-*"]
+{profile}
+"#
+        );
+        serde_json::from_value(serde_yaml::from_str::<Value>(&yaml).expect("yaml"))
+            .expect("provider config")
+    }
+
+    fn with_tariff(covered: &str, extra_usage: &str) -> ProviderConfig {
+        let mut provider = load(MARKS, "    extra: {}", extra_usage);
+        provider.spend_authority = Some(
+            serde_json::from_value(serde_json::json!({
+                "billing_principal": "p",
+                "credential_authority_generation": "g",
+                "pricing_contract_subject": "s",
+                "tariff": {
+                    "schema_version": 1,
+                    "currency": "usd",
+                    "pricing_generation": "t",
+                    "input_per_million": "1",
+                    "output_per_million": "2",
+                    "cache_read_per_million": "0.1",
+                    "cache_write_per_million": "1.25",
+                    "covered_dimensions": serde_yaml::from_str::<Value>(covered).unwrap()
+                }
+            }))
+            .expect("spend authority"),
+        );
+        provider
+    }
+
+    #[test]
+    fn a_profile_cache_marks_replaces_the_config_value_whole() {
+        let provider = load(MARKS, PROFILE_MARKS, "");
+        let plain = provider.resolve_for_model("other");
+        assert_eq!(plain.cache_marks.expect("config value").max_marks, 4);
+        let marked = provider.resolve_for_model("marked-1").cache_marks.unwrap();
+        assert_eq!(marked.max_marks, 2);
+        assert_eq!(marked.positions, vec![CacheMarkPosition::Newest]);
+        provider.validate("").unwrap();
+    }
+
+    #[test]
+    fn no_cache_marks_is_the_default_and_serialises_nothing() {
+        let provider = load("", "    extra: {}", "");
+        assert!(provider.cache_marks.is_none());
+        provider.validate("").unwrap();
+        let value = serde_json::to_value(&provider).unwrap();
+        assert!(value.get("cache_marks").is_none());
+    }
+
+    #[test]
+    fn an_invalid_profile_cache_marks_fails_config_validation() {
+        let provider = load(
+            "",
+            &PROFILE_MARKS.replace("max_marks: 2", "max_marks: 9"),
+            "",
+        );
+        let error = provider.validate("").unwrap_err().to_string();
+        assert!(error.contains("max_marks"), "{error}");
+    }
+
+    #[test]
+    fn a_marked_route_must_be_chat_completions_unrenamed_and_inline() {
+        let mut provider = load(MARKS, "    extra: {}", "");
+        provider.family = ProtocolFamily::AnthropicMessages;
+        let error = provider.validate("").unwrap_err().to_string();
+        assert!(error.contains("chat_completions"), "{error}");
+
+        let mut provider = load(MARKS, "    extra: {}", "");
+        provider.schemas.as_mut().unwrap().messages = Some(MessageSchemas {
+            role_map: Some(HashMap::from([(
+                "assistant".to_string(),
+                "model".to_string(),
+            )])),
+            ..Default::default()
+        });
+        let error = provider.validate("").unwrap_err().to_string();
+        assert!(error.contains("role_map"), "{error}");
+
+        let mut provider = load(MARKS, "    extra: {}", "");
+        provider.schemas.as_mut().unwrap().messages = Some(MessageSchemas {
+            system_message: Some(SystemMessageConfig {
+                mode: SystemMessageMode::BodyField,
+                field: Some("system".to_string()),
+                template: None,
+            }),
+            ..Default::default()
+        });
+        let error = provider.validate("").unwrap_err().to_string();
+        assert!(error.contains("system_message"), "{error}");
+    }
+
+    #[test]
+    fn a_tariff_on_a_marked_route_must_cover_the_cache_dimensions() {
+        let covered = "[input_tokens, output_tokens, cache_read_tokens, cache_write_tokens]";
+        with_tariff(covered, "").validate("").unwrap();
+        let error = with_tariff("[input_tokens, output_tokens]", "")
+            .validate("")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cache_write_tokens"), "{error}");
+        let error = with_tariff("[input_tokens, output_tokens, cache_write_tokens]", "")
+            .validate("")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cache_read_tokens"), "{error}");
+    }
+
+    #[test]
+    fn included_in_input_refuses_a_tariff_that_bills_input_and_cache() {
+        let included = "cache_included_in_input: true";
+        let both = "[input_tokens, output_tokens, cache_read_tokens, cache_write_tokens]";
+        let error = with_tariff(both, included)
+            .validate("")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("twice"), "{error}");
+        // Without the flag the same tariff is a valid declaration.
+        with_tariff(both, "").validate("").unwrap();
+        // Output plus the cache dimensions, with no input dimension, is fine.
+        with_tariff(
+            "[output_tokens, cache_read_tokens, cache_write_tokens]",
+            included,
+        )
+        .validate("")
+        .unwrap();
     }
 }
