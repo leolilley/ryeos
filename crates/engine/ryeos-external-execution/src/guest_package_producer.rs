@@ -252,6 +252,7 @@ pub(crate) fn write_guest_package<W: Write>(
         "base",
         0o700,
         false,
+        InventoryMode::Exact,
         &mut entries,
         &mut total_regular_bytes,
         expected.maximum_regular_bytes,
@@ -283,6 +284,7 @@ pub(crate) fn write_guest_package<W: Write>(
         inventory_root_file(
             authority,
             name,
+            InventoryMode::Exact,
             &mut entries,
             &mut total_regular_bytes,
             expected.maximum_regular_bytes,
@@ -296,6 +298,7 @@ pub(crate) fn write_guest_package<W: Write>(
         inventory_root_file(
             output_authority,
             "workspace_outputs",
+            InventoryMode::Exact,
             &mut entries,
             &mut total_regular_bytes,
             expected.maximum_regular_bytes,
@@ -321,9 +324,12 @@ pub(crate) fn write_guest_package<W: Write>(
         let slot = || format!("guest {name} ({}, {:?})", input.authority_id, input.kind);
         match input.kind {
             GuestMountKind::RegularFile => {
+                // The expectation is the input's normalized mode, so a file
+                // root always enters as portable content.
                 inventory_root_file(
                     authority,
                     &name,
+                    InventoryMode::Portable,
                     &mut entries,
                     &mut total_regular_bytes,
                     expected.maximum_regular_bytes,
@@ -338,14 +344,20 @@ pub(crate) fn write_guest_package<W: Write>(
                         "<guest-package-input-{index}>"
                     )))
                     .with_context(|| format!("retain {} descriptor", slot()))?;
+                let product = matches!(
+                    input.content_authority,
+                    GuestMountContentAuthority::ProductManifest { .. }
+                );
                 inventory_tree(
                     &root,
                     &name,
                     0o700,
-                    matches!(
-                        input.content_authority,
-                        GuestMountContentAuthority::ProductManifest { .. }
-                    ),
+                    product,
+                    if product {
+                        InventoryMode::Portable
+                    } else {
+                        InventoryMode::Exact
+                    },
                     &mut entries,
                     &mut total_regular_bytes,
                     expected.maximum_regular_bytes,
@@ -365,6 +377,7 @@ pub(crate) fn write_guest_package<W: Write>(
         inventory_root_file(
             authority,
             &name,
+            InventoryMode::Exact,
             &mut entries,
             &mut total_regular_bytes,
             expected.maximum_regular_bytes,
@@ -451,9 +464,32 @@ pub(crate) fn write_guest_package<W: Write>(
     Ok((stream.finish()?, manifest))
 }
 
+/// How an inventoried regular file's mode enters the package.
+///
+/// Product content carries the portable mode its manifest declares (0644 or
+/// 0755). The node's read-only store inodes (0444, or 0555 for the shared
+/// executable inode) are a host storage fact, not the content's mode, so they
+/// never reach the wire. Private package roots (bootstrap, supervisor,
+/// launcher, records, the base transfer) keep their exact local mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InventoryMode {
+    Exact,
+    Portable,
+}
+
+impl InventoryMode {
+    fn of(self, observation: &lillux::secure_fs::OpenRegularFileObservation) -> Result<u32> {
+        match self {
+            Self::Exact => observation.permission_mode(),
+            Self::Portable => observation.portable_mode(),
+        }
+    }
+}
+
 pub(crate) fn inventory_root_file(
     authority: &lillux::InheritedDescriptorAuthority,
     path: &str,
+    file_mode: InventoryMode,
     entries: &mut Vec<GuestStagingEntry>,
     total: &mut u64,
     maximum_regular_bytes: u64,
@@ -462,7 +498,7 @@ pub(crate) fn inventory_root_file(
     require_time(deadline)?;
     let observation = authority.regular_file_observation()?;
     require_size_budget(*total, observation.size(), maximum_regular_bytes)?;
-    let mode = observation.permission_mode()?;
+    let mode = file_mode.of(&observation)?;
     match path {
         "bootstrap" => ensure!(mode == 0o600, "guest bootstrap must remain owner-private"),
         "supervisor" | "launcher" => ensure!(
@@ -488,6 +524,7 @@ pub(crate) fn inventory_tree(
     name: &str,
     root_mode: u32,
     allows_symlinks: bool,
+    file_mode: InventoryMode,
     entries: &mut Vec<GuestStagingEntry>,
     total: &mut u64,
     maximum_regular_bytes: u64,
@@ -508,6 +545,7 @@ pub(crate) fn inventory_tree(
         root,
         name,
         allows_symlinks,
+        file_mode,
         0,
         entries,
         total,
@@ -520,6 +558,7 @@ fn inventory_children(
     directory: &lillux::PinnedDirectory,
     parent: &str,
     allows_symlinks: bool,
+    file_mode: InventoryMode,
     depth: usize,
     entries: &mut Vec<GuestStagingEntry>,
     total: &mut u64,
@@ -556,6 +595,7 @@ fn inventory_children(
                     &next,
                     &path,
                     allows_symlinks,
+                    file_mode,
                     depth + 1,
                     entries,
                     total,
@@ -575,7 +615,7 @@ fn inventory_children(
                     entries,
                     total,
                     path,
-                    observation.permission_mode()?,
+                    file_mode.of(&observation)?,
                     observation.size(),
                     sha256,
                 )?;
@@ -645,4 +685,115 @@ fn require_time(deadline: lillux::time::MonotonicDeadline) -> Result<()> {
         "guest package production deadline expired"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    fn deadline() -> lillux::time::MonotonicDeadline {
+        lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30))
+    }
+
+    fn entry_mode(entries: &[GuestStagingEntry], wanted: &str) -> u32 {
+        entries
+            .iter()
+            .find_map(|entry| match entry {
+                GuestStagingEntry::RegularFile { path, mode, .. } if path == wanted => Some(*mode),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    /// Realizations bind the node store's own read-only inodes: the shared
+    /// executable inode (0555, one inode for every generation) and the plain
+    /// object (0444). As a file root and inside a product tree, the package
+    /// carries the portable 0755/0644 the staging contract expects; only a
+    /// private root keeps its exact mode.
+    #[test]
+    fn store_linked_product_content_enters_the_package_with_its_portable_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = lillux::PinnedDirectory::open_or_create(&dir.path().join("runtime")).unwrap();
+        let store = ryeos_state::LargeObjectStore::open_with_chunk_bytes(&runtime, 8).unwrap();
+        let ingest = |name: &str, bytes: &[u8]| {
+            let source = dir.path().join(name);
+            std::fs::write(&source, bytes).unwrap();
+            let file = std::fs::File::open(&source).unwrap();
+            let identity = ryeos_state::PinnedLargeObjectSourceIdentity {
+                file: lillux::pinned_regular_file_identity(&file).unwrap(),
+                size: bytes.len() as u64,
+            };
+            store
+                .ingest_open_regular(file, identity, name, None)
+                .unwrap()
+                .file_sha256
+        };
+        let tool = ingest("tool-source", &[7u8; 24]);
+        let data = ingest("data-source", &[3u8; 24]);
+        let executable = store.lease_executable_object(&tool, 24).unwrap();
+        let plain = store.lease_object(&data, 24).unwrap();
+
+        let roots = lillux::PinnedDirectory::open_or_create(&dir.path().join("roots")).unwrap();
+        store
+            .link_executable_object_into(&tool, &roots, OsStr::new("runtime"), executable.file())
+            .unwrap();
+        let product = lillux::PinnedDirectory::open_or_create(&dir.path().join("product")).unwrap();
+        let bin = product
+            .open_or_create_child(OsStr::new("bin"), 0o755)
+            .unwrap();
+        store
+            .link_executable_object_into(&tool, &bin, OsStr::new("tool"), executable.file())
+            .unwrap();
+        store
+            .link_object_into(&data, &product, OsStr::new("data"), plain.file())
+            .unwrap();
+        let root_meta = std::fs::metadata(dir.path().join("roots/runtime")).unwrap();
+        assert_eq!(root_meta.permissions().mode() & 0o777, 0o555);
+        assert!(root_meta.nlink() >= 3);
+        let data_meta = std::fs::metadata(dir.path().join("product/data")).unwrap();
+        assert_eq!(data_meta.permissions().mode() & 0o777, 0o444);
+
+        let root = roots
+            .open_inherited_regular(OsStr::new("runtime"), false)
+            .unwrap()
+            .unwrap();
+        for (file_mode, expected) in [
+            (InventoryMode::Portable, 0o755),
+            (InventoryMode::Exact, 0o555),
+        ] {
+            let mut entries = Vec::new();
+            let mut total = 0;
+            inventory_root_file(
+                &root,
+                "input-00",
+                file_mode,
+                &mut entries,
+                &mut total,
+                1024,
+                deadline(),
+            )
+            .unwrap();
+            assert_eq!(entry_mode(&entries, "input-00"), expected);
+            assert_eq!(total, 24);
+        }
+
+        let mut entries = Vec::new();
+        let mut total = 0;
+        inventory_tree(
+            &product,
+            "input-01",
+            0o700,
+            true,
+            InventoryMode::Portable,
+            &mut entries,
+            &mut total,
+            1024,
+            deadline(),
+        )
+        .unwrap();
+        assert_eq!(entry_mode(&entries, "input-01/bin/tool"), 0o755);
+        assert_eq!(entry_mode(&entries, "input-01/data"), 0o644);
+        assert_eq!(total, 48);
+    }
 }
