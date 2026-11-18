@@ -357,6 +357,24 @@ fn selected_keys(vm: &RyeOsViewModel) -> std::collections::BTreeSet<String> {
             _ => {}
         }
     }
+    // The current view-set tab and the current Surface chip, so each stays in
+    // view when its strip scrolls. The keys are the ones `shell` gives them.
+    let chrome = &vm.presentation.chrome;
+    keys.extend(
+        chrome
+            .top_bar
+            .tabs
+            .iter()
+            .filter(|tab| tab.active)
+            .map(|tab| format!("view-set:{}", tab.view_set_id)),
+    );
+    keys.extend(
+        vm.session
+            .surfaces
+            .iter()
+            .filter(|surface| surface.active)
+            .map(|surface| format!("surface:{:?}", surface.surface_instance_id)),
+    );
     keys
 }
 

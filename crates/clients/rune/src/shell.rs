@@ -187,7 +187,6 @@ fn system_bar(vm: &RyeOsViewModel, local: &Local) -> El {
     // 11, "Bar, open") is not built; the bar stays the narrow chip column.
     // look: the switcher and the sheet carry no shadow; no shadow call is used
     // in this crate.
-    // look: the current chip is not scrolled into view when the list scrolls.
     let mut chips = col()
         .w_full()
         .gap(6.0)
