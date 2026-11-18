@@ -1217,19 +1217,36 @@ pub fn composer(input: &RyeOsInputVm, local: &Local) -> El {
             );
     }
     // The composer: the input, then a strip of the route, the hint and send.
-    let chip = row()
+    let chip = |label: String, border: rune::Color| {
+        row()
+            .h(CHIP_HEIGHT)
+            .px(10.0)
+            .gap(6.0)
+            .center_y()
+            .radius(theme::radius_pill(CHIP_HEIGHT))
+            .border(1.0, border)
+            .min_w(0.0)
+            .child(
+                text(label)
+                    .font(theme::TYPE_MICRO)
+                    .color(t.ink_soft())
+                    .truncate(),
+            )
+    };
+    // A draft is pending until it is sent: the accent border and a dot.
+    let pending = row()
         .h(CHIP_HEIGHT)
         .px(10.0)
-        .center()
+        .gap(6.0)
+        .center_y()
         .radius(theme::radius_pill(CHIP_HEIGHT))
-        .border(1.0, t.control_border())
-        .min_w(0.0)
+        .border(1.0, t.accent.alpha(PENDING_BORDER))
         .child(
-            text(input.route_label.clone())
-                .font(theme::TYPE_MICRO)
-                .color(t.ink_soft())
-                .truncate(),
-        );
+            el().size(PENDING_DOT, PENDING_DOT)
+                .radius(PENDING_DOT / 2.0)
+                .fill(t.accent),
+        )
+        .child(text("DRAFT").font(theme::TYPE_MICRO).color(t.ink_soft()));
     let mut send = el()
         .key(format!("composer:{key}:submit"))
         .role("button")
@@ -1254,16 +1271,10 @@ pub fn composer(input: &RyeOsInputVm, local: &Local) -> El {
         .w_full()
         .center_y()
         .gap(8.0)
-        .child(chip)
-        .child(text("DRAFT").font(theme::TYPE_MICRO).color(t.ink_faint()))
+        .child(chip(input.route_label.clone(), t.control_border()))
+        .child(pending)
         .child(el().grow(1.0))
-        .child(
-            text(input.hint.clone())
-                .font(theme::TYPE_MICRO)
-                .color(t.ink_dim())
-                .truncate()
-                .min_w(0.0),
-        )
+        .child(chip(input.hint.clone(), t.control_border()))
         .child(send);
     let boxed = col()
         .w_full()
@@ -1294,5 +1305,8 @@ const COMPOSER_INPUT_HEIGHT: f32 = 24.0;
 /// A chip in the strip, and the send button's diameter.
 const CHIP_HEIGHT: f32 = 24.0;
 const SEND_SIZE: f32 = 30.0;
+/// A pending draft's chip: its border as an opacity of `accent`, and its dot.
+const PENDING_BORDER: f32 = 0.6;
+const PENDING_DOT: f32 = 5.0;
 /// The filter line's height.
 const FILTER_HEIGHT: f32 = 30.0;

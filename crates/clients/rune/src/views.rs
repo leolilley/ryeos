@@ -1079,6 +1079,8 @@ const TABLE_HEADER_HEIGHT: f32 = 26.0;
 /// cells. Rows sit 1 apart, inset from the tile so a selection fill has a
 /// margin.
 const TABLE_ROW_HEIGHT: f32 = 30.0;
+/// A hierarchy table's row.
+const TABLE_ROW_HEIGHT_TREE: f32 = 26.0;
 const TABLE_ROW_PAD: f32 = 10.0;
 const TABLE_CELL_GAP: f32 = 10.0;
 const TABLE_ROW_GAP: f32 = 1.0;
@@ -1239,7 +1241,11 @@ fn table_record(instance: &RyeOsViewInstanceKey, item: &RyeOsTableRowVm) -> El {
     let mut line = row()
         .w_full()
         .min_w(0.0)
-        .min_h(TABLE_ROW_HEIGHT)
+        .min_h(if item.hierarchy.is_some() {
+            TABLE_ROW_HEIGHT_TREE
+        } else {
+            TABLE_ROW_HEIGHT
+        })
         .px(TABLE_ROW_PAD)
         .gap(TABLE_CELL_GAP)
         .center_y()
@@ -1776,7 +1782,7 @@ fn timeline_entry(instance: &RyeOsViewInstanceKey, timeline: &Timeline<'_>, inde
             ..
         } => match role {
             // A boundary in the log: a rule with a word in it.
-            "marker" | "status" => marker_rule(primary, meta.as_deref()),
+            "marker" | "status" | "summary" => marker_rule(primary, meta.as_deref()),
             "cluster" => one_line(None, primary, t.ink_soft(), None, None),
             // A recap's step count stands where a state word would.
             "recap" => one_line(None, primary, t.ink_strong(), None, meta.as_deref()),
