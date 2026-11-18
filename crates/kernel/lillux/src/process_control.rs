@@ -1608,7 +1608,7 @@ mod linux {
 
     pub(super) fn read_process_stat(pid: u32) -> std::io::Result<ProcessStat> {
         let raw = std::fs::read(format!("/proc/{pid}/stat"))?;
-        let fields = proc_stat_fields_after_comm(&raw)
+        let fields = crate::process_control::proc_stat_fields_after_comm(&raw)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         let state = fields
             .first()
