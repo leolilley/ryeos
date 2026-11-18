@@ -566,6 +566,44 @@ mod tests {
         chrome::draw_status_bar(&mut wide, &vm);
         let text = surface_text(&wide);
         assert!(text.contains("need you 3 | ● rye"), "{text}");
+
+        // A long node label is cut at half the line; the keys keep their room.
+        vm.chrome.health_label = "H".repeat(200);
+        let mut long_health = TextSurface::new(40, 1);
+        chrome::draw_status_bar(&mut long_health, &vm);
+        let text = surface_text(&long_health);
+        assert!(text.contains("KEY"), "{text}");
+        assert!(text.contains('…'), "{text}");
+    }
+
+    #[test]
+    fn the_bars_fit_any_width_and_the_plus_survives_an_exact_fill() {
+        let mut vm = build_view_model(&empty_center_core());
+        vm.presentation.chrome.status_bar.key_hint = "ctrl+k open".into();
+        for width in [1, 2, 4, 9, 20, 40] {
+            for draw in [
+                chrome::draw_switcher as fn(&mut TextSurface, usize, &RyeOsViewModel),
+                chrome::draw_tab_band,
+            ] {
+                let mut line = TextSurface::new(width, 1);
+                draw(&mut line, 0, &vm);
+                assert_eq!(line.cells.len(), width);
+            }
+            let mut status = TextSurface::new(width, 1);
+            chrome::draw_status_bar(&mut status, &vm);
+            assert_eq!(status.cells.len(), width);
+        }
+        // One current tab, in widths around where it exactly fills the line.
+        let mut only = vm.presentation.chrome.top_bar.tabs[0].clone();
+        only.title = "Review".into();
+        only.active = true;
+        vm.presentation.chrome.top_bar.tabs = vec![only];
+        for width in 8..16 {
+            let mut line = TextSurface::new(width, 1);
+            chrome::draw_tab_band(&mut line, 0, &vm);
+            let text = surface_text(&line);
+            assert!(text.trim_end().ends_with('+'), "width {width}: {text:?}");
+        }
     }
 
     /// An admitted Surface with an empty center; a separate Shared Config

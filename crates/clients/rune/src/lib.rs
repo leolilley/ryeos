@@ -360,12 +360,14 @@ fn selected_keys(vm: &RyeOsViewModel) -> std::collections::BTreeSet<String> {
     // The current view-set tab and the current Surface chip, so each stays in
     // view when its strip scrolls. The keys are the ones `shell` gives them.
     let chrome = &vm.presentation.chrome;
+    // A hidden band draws no tab, so its key joins only once the band shows;
+    // then it is new and the reveal happens.
     keys.extend(
         chrome
             .top_bar
             .tabs
             .iter()
-            .filter(|tab| tab.active)
+            .filter(|tab| chrome.top_bar.visible && tab.active)
             .map(|tab| format!("view-set:{}", tab.view_set_id)),
     );
     keys.extend(

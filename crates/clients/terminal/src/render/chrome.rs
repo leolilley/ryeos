@@ -73,7 +73,9 @@ fn draw_strip(surface: &mut TextSurface, y: usize, entries: &[(String, bool)]) {
     };
     let mut x = 1usize;
     for (label, active) in entries.iter().skip(start) {
-        let available = end.saturating_sub(x);
+        // The gap after an entry stays inside `end`, so the `+` always has
+        // its columns after the last entry drawn.
+        let available = end.saturating_sub(x + GAP);
         if available < 2 {
             break;
         }
@@ -139,8 +141,9 @@ pub fn draw_status_bar(surface: &mut TextSurface, vm: &RyeOsViewModel) {
     // The node always shows; other parts drop from the left when the line is
     // short, and the keys take what is left.
     let budget = surface.width.saturating_sub(2);
+    // The node takes at most half the line, so the keys always keep room.
     let mut shown = 1;
-    let mut width = part_width(&parts[parts.len() - 1]);
+    let mut width = part_width(&parts[parts.len() - 1]).min(budget / 2);
     for part in parts.iter().rev().skip(1) {
         let wanted = width + display_width(SEP) + part_width(part);
         if wanted > budget / 2 {
