@@ -639,10 +639,14 @@ pub(crate) async fn call_timeline_service(
     let headers = signer.sign("POST", "/execute", &body_bytes, audience)?;
     let url = format!("{}/execute", base_url.trim_end_matches('/'));
     let response = crate::transport::http::post_json(&url, &headers, &body_bytes).await?;
-    response
+    let result = response
         .get("result")
         .cloned()
-        .ok_or_else(|| local(format!("the node returned no result: {response}")))
+        .ok_or_else(|| local(format!("the node returned no result: {response}")))?;
+    // The timeline contract has one version; a node speaking another is
+    // refused, not drawn.
+    ryeos_client_base::ui::timeline::require_timeline_contract(&result).map_err(local)?;
+    Ok(result)
 }
 
 /// `ryeos threads timeline <chain_root_id> [--limit N] [--json]`.
