@@ -276,6 +276,77 @@ mod tests {
     }
 
     #[test]
+    fn a_panicking_or_failing_operation_leaves_the_next_call_to_verify_for_itself() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        let verifications = Cell::new(0);
+
+        // The operation's closure panics while the marker is set.
+        let unwound = catch_unwind(AssertUnwindSafe(|| {
+            let _ = run_verified(7, counting(&verifications), |_| -> Result<(), String> {
+                assert!(is_covered(7));
+                panic!("operation panicked")
+            });
+        }));
+        assert!(unwound.is_err());
+        assert_eq!(verifications.get(), 1, "only the before-verification ran");
+        assert!(!is_covered(7), "the unwind removed the marker");
+
+        // The same thread, the same generation, no enclosing operation: the
+        // next guarded call verifies before and after, skipping nothing.
+        run_verified(7, counting(&verifications), |_| Ok::<_, String>(())).unwrap();
+        assert_eq!(verifications.get(), 3);
+
+        // The operation's closure returns an error early.
+        let failed = run_verified(7, counting(&verifications), |_| {
+            assert!(is_covered(7));
+            Err::<(), _>("operation failed".to_string())
+        });
+        assert_eq!(failed, Err("operation failed".to_string()));
+        assert_eq!(verifications.get(), 4, "only the before-verification ran");
+        assert!(!is_covered(7), "the early return removed the marker");
+
+        run_verified(7, counting(&verifications), |_| Ok::<_, String>(())).unwrap();
+        assert_eq!(verifications.get(), 6);
+    }
+
+    #[test]
+    fn a_panicking_worker_hand_off_leaves_that_worker_uncovered() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        let verifications = Cell::new(0);
+        run_verified(7, counting(&verifications), |token| {
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        // The worker's covered closure panics.
+                        let unwound = catch_unwind(AssertUnwindSafe(|| {
+                            token.cover_current_thread::<()>(|| {
+                                assert!(is_covered(7));
+                                panic!("worker panicked")
+                            })
+                        }));
+                        assert!(unwound.is_err());
+                        assert!(!is_covered(7), "the unwind removed the worker's marker");
+
+                        // The same worker thread afterwards verifies for
+                        // itself, before and after.
+                        let on_worker = Cell::new(0);
+                        run_verified(7, counting(&on_worker), |_| Ok::<_, String>(())).unwrap();
+                        assert_eq!(on_worker.get(), 2);
+                    })
+                    .join()
+                    .unwrap();
+            });
+            // The operation's own thread is still covered.
+            assert!(is_covered(7));
+            Ok::<_, String>(())
+        })
+        .unwrap();
+        assert_eq!(verifications.get(), 2);
+    }
+
+    #[test]
     fn another_thread_is_not_covered_unless_handed_the_token() {
         let verifications = Cell::new(0);
         run_verified(7, counting(&verifications), |token| {

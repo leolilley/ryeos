@@ -5562,6 +5562,74 @@ formats:
     }
 
     #[test]
+    fn a_panicking_guarded_operation_leaves_no_coverage_behind() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        let (engine, lifeline, isolation) = engine_with_counted_generation();
+
+        let unwound = catch_unwind(AssertUnwindSafe(|| {
+            let _ = engine.with_checked_bundle_generation(|_| -> Result<(), EngineError> {
+                panic!("guarded operation panicked")
+            });
+        }));
+        assert!(unwound.is_err());
+        assert_eq!(
+            lifeline.checks.load(Ordering::SeqCst),
+            1,
+            "only the before-verification ran"
+        );
+
+        // The same thread and the same generation, outside any operation: a
+        // verification point and a guarded call both verify for themselves.
+        isolation.ensure_registered_generation_current().unwrap();
+        assert_eq!(lifeline.checks.load(Ordering::SeqCst), 2);
+        engine
+            .with_checked_bundle_generation(|_| -> Result<(), EngineError> { Ok(()) })
+            .unwrap();
+        assert_eq!(lifeline.checks.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn a_panicking_batch_worker_leaves_its_thread_uncovered() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        let (engine, lifeline, isolation) = engine_with_counted_generation();
+
+        engine
+            .with_checked_bundle_generation(|generation| -> Result<(), EngineError> {
+                assert_eq!(lifeline.checks.load(Ordering::SeqCst), 1);
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| {
+                            // Covered work on the worker panics.
+                            let unwound = catch_unwind(AssertUnwindSafe(|| {
+                                generation.verified.cover_current_thread::<()>(|| {
+                                    isolation.ensure_registered_generation_current().unwrap();
+                                    assert_eq!(lifeline.checks.load(Ordering::SeqCst), 1);
+                                    panic!("batch worker panicked")
+                                })
+                            }));
+                            assert!(unwound.is_err());
+
+                            // The same worker thread afterwards is uncovered:
+                            // its verification point verifies for itself.
+                            isolation.ensure_registered_generation_current().unwrap();
+                            assert_eq!(lifeline.checks.load(Ordering::SeqCst), 2);
+                        })
+                        .join()
+                        .unwrap();
+                });
+                // The operation's own thread is still covered.
+                isolation.ensure_registered_generation_current()?;
+                assert_eq!(lifeline.checks.load(Ordering::SeqCst), 2);
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(lifeline.checks.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
     fn concurrent_operations_on_other_threads_share_no_coverage() {
         let (engine, lifeline, isolation) = engine_with_counted_generation();
         let (inside, wait_inside) = std::sync::mpsc::channel::<()>();
