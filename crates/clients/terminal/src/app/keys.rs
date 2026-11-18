@@ -28,17 +28,20 @@ pub fn handle_key(core: &mut RyeOsCore, key: KeyEvent) -> Vec<RyeOsEffect> {
         && !event.modifiers.shift;
     let context = key_context(core);
     if no_mods && matches!(event.key, RyeOsKey::ArrowLeft | RyeOsKey::ArrowRight) {
-        let expansion_wins = match event.key {
-            RyeOsKey::ArrowRight => {
-                (context.focused_tree_collapsible && context.focused_tree_collapsed)
-                    || (context.focused_row_expandable && !context.focused_row_expanded)
-            }
-            RyeOsKey::ArrowLeft => {
-                (context.focused_row_expandable && context.focused_row_expanded)
-                    || (context.focused_tree_collapsible && !context.focused_tree_collapsed)
-            }
-            _ => false,
-        };
+        // An open diff under the point owns the horizontal arrows (step in,
+        // open what the cursor is on, step out) through the shared keymap.
+        let expansion_wins = context.diff.is_some()
+            || match event.key {
+                RyeOsKey::ArrowRight => {
+                    (context.focused_tree_collapsible && context.focused_tree_collapsed)
+                        || (context.focused_row_expandable && !context.focused_row_expanded)
+                }
+                RyeOsKey::ArrowLeft => {
+                    (context.focused_row_expandable && context.focused_row_expanded)
+                        || (context.focused_tree_collapsible && !context.focused_tree_collapsed)
+                }
+                _ => false,
+            };
         if !expansion_wins && let Some((instance_key, section)) = focused_fold_section(core) {
             let collapsed = matches!(event.key, RyeOsKey::ArrowLeft);
             return core.dispatch(RyeOsEvent::Ui {

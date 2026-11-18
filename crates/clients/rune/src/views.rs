@@ -5,6 +5,7 @@
 
 use rune::{Align, El, Key, KeyEvent, ScrollSpec, Side, col, el, row, text};
 use ryeos_client_base::ids::RyeOsViewInstanceKey;
+use ryeos_client_base::ui::diff::{RyeOsBlockVm, RyeOsDiffRowKind, RyeOsDiffVm};
 use ryeos_client_base::ui::timeline::RyeOsTimelineEntryVm;
 
 use ryeos_client_base::ui::view_model::{
@@ -1276,6 +1277,7 @@ struct Timeline<'a> {
     expandable: &'a [bool],
     expanded: &'a [bool],
     details: &'a [Vec<RyeOsRowDetailVm>],
+    bodies: &'a [Vec<RyeOsBlockVm>],
 }
 
 impl<'a> Timeline<'a> {
@@ -1291,6 +1293,7 @@ impl<'a> Timeline<'a> {
                 entry_expandable,
                 entry_expanded,
                 entry_details,
+                entry_bodies,
                 ..
             } => Some(Timeline {
                 entries,
@@ -1301,6 +1304,7 @@ impl<'a> Timeline<'a> {
                 expandable: entry_expandable,
                 expanded: entry_expanded,
                 details: entry_details,
+                bodies: entry_bodies,
             }),
             _ => None,
         }
@@ -1559,7 +1563,99 @@ fn timeline_entry(instance: &RyeOsViewInstanceKey, timeline: &Timeline<'_>, inde
     if expanded && let Some(rows) = timeline.details.get(index) {
         record = record.child(details(rows));
     }
+    if expanded {
+        for block in timeline.bodies.get(index).into_iter().flatten() {
+            let RyeOsBlockVm::Diff(diff) = block;
+            record = record.child(diff_body(diff));
+        }
+    }
     record
+}
+
+/// Columns a tab in diff text is drawn as.
+const DIFF_TAB: &str = "    ";
+
+/// A diff under an expanded record. Each diff row is one line in the data
+/// face: the line numbers, the mark as a character, then the text, so the
+/// columns align and the diff reads without colour. A row carries its
+/// plain-words label, and the row under the diff's cursor is filled like a
+/// selected record.
+pub(crate) fn diff_body(diff: &RyeOsDiffVm) -> El {
+    let p = Palette::get();
+    let gutter = diff
+        .rows
+        .iter()
+        .flat_map(|row| [row.old_no, row.new_no])
+        .flatten()
+        .max()
+        .map(|number| number.to_string().len());
+    let number = |value: Option<usize>| match (gutter, value) {
+        (Some(width), Some(value)) => format!("{value:>width$} "),
+        (Some(width), None) => " ".repeat(width + 1),
+        (None, _) => String::new(),
+    };
+    let line = |content: String, ink: rune::Color, label: String, focus: bool| {
+        let mut line = row().w_full().min_w(0.0).py(1.0).child(
+            text(theme::drawable(&content, theme::Face::Data).into_owned())
+                .selectable(true)
+                .font(theme::data(9.0))
+                .color(ink)
+                .wrap_anywhere()
+                .grow(1.0)
+                .min_w(0.0)
+                .label(label),
+        );
+        if focus {
+            line = line.fill(p.plane_selected);
+        }
+        line
+    };
+    let mut block = col()
+        .w_full()
+        .pt(7.0)
+        .pb(9.0)
+        .pl(34.0)
+        .pr(12.0)
+        .fill(p.plane_raised.alpha(0.45))
+        .label(diff.label.clone());
+    if let Some(above) = &diff.above {
+        block = block.child(line(format!("… {above}"), p.faint, above.clone(), false));
+    }
+    for (offset, row_vm) in diff.rows.iter().enumerate() {
+        let focus = diff.cursor == Some(diff.first_row + offset);
+        let disclosure = match row_vm.collapsed {
+            Some(true) => "▸ ",
+            Some(false) => "▾ ",
+            None => "",
+        };
+        let (content, ink) = match row_vm.kind {
+            RyeOsDiffRowKind::Summary => (
+                format!("{disclosure}{}", row_vm.text),
+                p.tone(row_vm.tone, p.muted),
+            ),
+            RyeOsDiffRowKind::File => (format!("{disclosure}{}", row_vm.text), p.text),
+            RyeOsDiffRowKind::Hunk => (format!("@@ {}", row_vm.text), p.faint),
+            RyeOsDiffRowKind::Line => (
+                format!(
+                    "{}{}{}{}",
+                    number(row_vm.old_no),
+                    number(row_vm.new_no),
+                    row_vm.mark.unwrap_or(' '),
+                    row_vm.text.replace('\t', DIFF_TAB)
+                ),
+                p.tone(row_vm.tone, p.muted),
+            ),
+            RyeOsDiffRowKind::Fold | RyeOsDiffRowKind::More => {
+                (format!("{disclosure}… {}", row_vm.text), p.faint)
+            }
+            RyeOsDiffRowKind::NotShown => (row_vm.text.clone(), p.tone(row_vm.tone, p.muted)),
+        };
+        block = block.child(line(content, ink, row_vm.label.clone(), focus));
+    }
+    if let Some(below) = &diff.below {
+        block = block.child(line(format!("… {below}"), p.faint, below.clone(), false));
+    }
+    block
 }
 
 /// A timeline line: the primary text with its meta beside it.
@@ -2058,6 +2154,73 @@ mod tests {
             blocked.opacity,
             fine.opacity
         );
+    }
+
+    /// A timeline of one open entry whose body is the diff of a change block
+    /// as the timeline service sends it.
+    fn timeline_with_diff(cursor: Option<usize>) -> RyeOsViewVm {
+        let entry = json!({"state": "done", "blocks": [{
+            "block": "changes", "basis": "requested", "omitted_files": 0,
+            "files": [{"path": "src/a.rs", "op": "modify", "added": 1, "removed": 1,
+                       "binary": false,
+                       "hunks": [{"old_start": 9, "new_start": 9, "section": "fn a()",
+                                  "lines": [" keep", "-old\tx", "+new"]}]}]}]});
+        let projections = json!({"diff": {"words": {
+            "basis.requested": "Requested", "file": "file", "files": "files",
+            "op.modify": "modified", "unchanged_line": "unchanged line",
+            "unchanged_lines": "unchanged lines",
+            "line.added": "added", "line.removed": "removed", "line.unchanged": "unchanged",
+            "added": "added", "removed": "removed", "hunk": "hunk", "hunks": "hunks",
+            "change_to": "change to"}}});
+        let mut diff =
+            ryeos_client_base::ui::diff::diff_vm_for_entry(&entry, &projections).unwrap();
+        diff.cursor = cursor;
+        serde_json::from_value(json!({
+            "type": "timeline", "title": "Thread",
+            "entries": [{"type": "line", "primary": "src/a.rs", "tone": "neutral"}],
+            "entry_ids": ["timeline-entry:act:1"], "entry_roles": ["activity"],
+            "entry_cursors": [0], "entry_arrived_at_ms": [null], "entry_indents": [0],
+            "selected": 0, "entry_expandable": [true], "entry_expanded": [true],
+            "entry_details": [[]],
+            "entry_bodies": [[{"block": "diff",
+                               "label": diff.label, "total_rows": diff.total_rows,
+                               "first_row": diff.first_row, "rows": diff.rows,
+                               "cursor": diff.cursor}]]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn an_open_timeline_entry_draws_its_diff_rows_with_marks_and_numbers() {
+        let rt = drawn(timeline_with_diff(None));
+        for row in [
+            "↓ Requested · 1 file · +1 -1",
+            "↓ src/a.rs · modified · +1 -1",
+            "@@ 8 unchanged lines · fn a()",
+            " 9  9  keep",
+            "10    -old    x",
+            "   10 +new",
+        ] {
+            assert!(says(&rt, row), "missing diff row {row:?}");
+        }
+        // Each row is announced in plain words, and the block as a whole.
+        assert_eq!(
+            labelled_containing(&rt, "removed: old"),
+            vec!["10 removed: old\tx".to_owned()]
+        );
+        assert_eq!(
+            labelled_containing(&rt, "change to 1 file"),
+            vec!["Requested change to 1 file: src/a.rs modified, 1 added, 1 removed".to_owned(); 2]
+        );
+    }
+
+    #[test]
+    fn a_closed_timeline_entry_draws_no_diff() {
+        let mut view = serde_json::to_value(timeline_with_diff(None)).unwrap();
+        view["entry_expanded"] = json!([false]);
+        let rt = drawn(serde_json::from_value(view).unwrap());
+        assert!(!says(&rt, "10    -old    x"));
+        assert!(says(&rt, "src/a.rs"));
     }
 
     #[test]

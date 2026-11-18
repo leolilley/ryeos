@@ -249,6 +249,7 @@ fn draw_view(surface: &mut TextSurface, mut rect: Rect, view: &RyeOsViewVm, now_
         entry_expandable,
         entry_expanded,
         entry_details,
+        entry_bodies,
         ..
     } = view
     {
@@ -276,6 +277,7 @@ fn draw_view(surface: &mut TextSurface, mut rect: Rect, view: &RyeOsViewVm, now_
                 expandable: entry_expandable,
                 expanded: entry_expanded,
                 details: entry_details,
+                bodies: entry_bodies,
             },
             *selected,
             now_ms,

@@ -6,6 +6,7 @@
 
 use ryeos_client_base::layout::Rect;
 use ryeos_client_base::text_surface::{Style, TextSurface};
+use ryeos_client_base::ui::diff::{RyeOsBlockVm, RyeOsDiffRowKind, RyeOsDiffVm};
 use ryeos_client_base::ui::view_model::{
     RyeOsRowDetailVm, RyeOsTimelineDockVm, RyeOsTimelineEntryVm, RyeOsTimelineLaneVm, RyeOsTone,
 };
@@ -26,6 +27,9 @@ struct FeedLine {
     /// Call-tree indent, in columns, applied as a draw-time x-offset (not baked
     /// into `text`, so a per-keystroke re-render doesn't re-allocate the string).
     indent: usize,
+    /// The row under a cursor nested inside the entry (a diff's own cursor);
+    /// the feed scrolls to keep it in view.
+    focus: bool,
 }
 
 impl FeedLine {
@@ -37,6 +41,7 @@ impl FeedLine {
             entry,
             inline: true,
             indent: 0,
+            focus: false,
         }
     }
 
@@ -48,6 +53,7 @@ impl FeedLine {
             entry,
             inline: false,
             indent: 0,
+            focus: false,
         }
     }
 }
@@ -61,6 +67,68 @@ pub struct TimelineEntryMeta<'a> {
     pub expandable: &'a [bool],
     pub expanded: &'a [bool],
     pub details: &'a [Vec<RyeOsRowDetailVm>],
+    pub bodies: &'a [Vec<RyeOsBlockVm>],
+}
+
+/// Columns a tab in diff text is drawn as.
+const DIFF_TAB: &str = "    ";
+
+/// A diff body as literal lines: per row its text, style and whether the
+/// diff's cursor is on it. Line numbers take a gutter as wide as the largest
+/// number drawn; a diff without numbers has no gutter. Marks are characters,
+/// so the diff reads the same without colour.
+fn diff_lines(diff: &RyeOsDiffVm) -> Vec<(String, Style, bool)> {
+    let gutter = diff
+        .rows
+        .iter()
+        .flat_map(|row| [row.old_no, row.new_no])
+        .flatten()
+        .max()
+        .map(|number| number.to_string().len());
+    let number = |value: Option<usize>| match (gutter, value) {
+        (Some(width), Some(value)) => format!("{value:>width$} "),
+        (Some(width), None) => " ".repeat(width + 1),
+        (None, _) => String::new(),
+    };
+    let mut lines = Vec::with_capacity(diff.rows.len() + 2);
+    if let Some(above) = &diff.above {
+        lines.push((format!("  ⋯ {above}"), style_muted(), false));
+    }
+    for (offset, row) in diff.rows.iter().enumerate() {
+        let focus = diff.cursor == Some(diff.first_row + offset);
+        let pointer = if focus { "› " } else { "  " };
+        let disclosure = match row.collapsed {
+            Some(true) => "▸ ",
+            Some(false) => "▾ ",
+            None => "",
+        };
+        let (body, style) = match row.kind {
+            RyeOsDiffRowKind::Summary => {
+                (format!("{disclosure}{}", row.text), tone_style(row.tone))
+            }
+            RyeOsDiffRowKind::File => (format!("{disclosure}{}", row.text), style_fg()),
+            RyeOsDiffRowKind::Hunk => (format!("@@ {}", row.text), style_muted()),
+            RyeOsDiffRowKind::Line => (
+                format!(
+                    "{}{}{}{}",
+                    number(row.old_no),
+                    number(row.new_no),
+                    row.mark.unwrap_or(' '),
+                    row.text.replace('\t', DIFF_TAB)
+                ),
+                tone_style(row.tone),
+            ),
+            RyeOsDiffRowKind::Fold | RyeOsDiffRowKind::More => {
+                (format!("{disclosure}⋯ {}", row.text), style_muted())
+            }
+            RyeOsDiffRowKind::NotShown => (row.text.clone(), tone_style(row.tone)),
+        };
+        lines.push((format!("{pointer}{body}"), style, focus));
+    }
+    if let Some(below) = &diff.below {
+        lines.push((format!("  ⋯ {below}"), style_muted(), false));
+    }
+    lines
 }
 
 /// Docked asks drawn at most; the rest stay in the flow.
@@ -186,6 +254,12 @@ pub fn draw_timeline(
         }
         .min(max_start);
     }
+    // A cursor nested inside the selected entry (a diff's) decides the scroll.
+    if let Some(focus) = lines.iter().position(|line| line.focus) {
+        start = focus
+            .saturating_sub(visible / 2)
+            .min(lines.len().saturating_sub(visible));
+    }
 
     for (row, line) in lines.iter().skip(start).take(visible).enumerate() {
         let y = rect.y as usize + row;
@@ -224,6 +298,7 @@ fn push_timeline_lines(
         expandable: entry_expandable,
         expanded: entry_expanded,
         details: entry_details,
+        bodies: entry_bodies,
     } = meta;
     if entries.is_empty() {
         lines.push(FeedLine::plain(
@@ -348,6 +423,19 @@ fn push_timeline_lines(
                     if let Some(line) = lines.last_mut() {
                         line.indent = detail_indent;
                     }
+                }
+            }
+            // Typed bodies follow the details. Diff rows are literal: one
+            // feed line each, cut at the tile's edge rather than wrapped, so
+            // a row index maps to exactly one line.
+            let body_indent = (indent_cols + 2).min(width.saturating_sub(1));
+            for block in entry_bodies.get(entry_index).into_iter().flatten() {
+                let RyeOsBlockVm::Diff(diff) = block;
+                for (text, style, focus) in diff_lines(diff) {
+                    let mut line = FeedLine::plain(text, style, Some(entry_index));
+                    line.indent = body_indent;
+                    line.focus = focus;
+                    lines.push(line);
                 }
             }
         }
@@ -558,6 +646,7 @@ mod tests {
         expandable: &[],
         expanded: &[],
         details: &[],
+        bodies: &[],
     };
 
     fn line(primary: &str) -> RyeOsTimelineEntryVm {
@@ -684,6 +773,87 @@ mod tests {
             (0..20).any(|x| surface.get(x, 1).bg != PANEL),
             "non-selected rows are not highlighted"
         );
+    }
+
+    /// One timeline entry carrying a change block, as the timeline service
+    /// sends it, and the view data its words come from.
+    fn diff_fixture() -> RyeOsDiffVm {
+        let entry = serde_json::json!({"state": "done", "blocks": [{
+            "block": "changes", "basis": "requested", "omitted_files": 0,
+            "files": [{"path": "src/a.rs", "op": "modify", "added": 1, "removed": 1,
+                       "binary": false,
+                       "hunks": [{"old_start": 9, "new_start": 9, "section": "fn a()",
+                                  "lines": [" keep", "-old\tx", "+new"]}]}]}]});
+        let projections = serde_json::json!({"diff": {"words": {
+            "basis.requested": "Requested", "file": "file", "files": "files",
+            "op.modify": "modified", "unchanged_line": "unchanged line",
+            "unchanged_lines": "unchanged lines"}}});
+        ryeos_client_base::ui::diff::diff_vm_for_entry(&entry, &projections).unwrap()
+    }
+
+    fn draw_with_body(diff: RyeOsDiffVm, height: u16) -> Vec<String> {
+        let entries = [line("src/a.rs")];
+        let bodies = [vec![RyeOsBlockVm::Diff(diff)]];
+        let meta = TimelineEntryMeta {
+            expandable: &[true],
+            expanded: &[true],
+            details: &[Vec::new()],
+            bodies: &bodies,
+            ..EMPTY_META
+        };
+        let mut surface = TextSurface::new(60, height);
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            w: 60,
+            h: height,
+        };
+        draw_timeline(&mut surface, rect, &entries, meta, Some(0), 0);
+        (0..usize::from(height))
+            .map(|y| row_text(&surface, 60, y).trim_end().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn an_open_entry_draws_its_diff_as_unified_rows_with_marks_and_numbers() {
+        let rows = draw_with_body(diff_fixture(), 7);
+        assert!(rows[0].contains("src/a.rs"), "{rows:?}");
+        assert_eq!(
+            rows[1..],
+            [
+                "    ▾ Requested · 1 file · +1 -1",
+                "    ▾ src/a.rs · modified · +1 -1",
+                "    @@ 8 unchanged lines · fn a()",
+                "     9  9  keep",
+                "    10    -old    x",
+                "       10 +new",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_diff_cursor_is_marked_and_kept_in_view() {
+        let mut diff = diff_fixture();
+        diff.cursor = Some(4);
+        let rows = draw_with_body(diff.clone(), 7);
+        assert_eq!(rows[5], "  › 10    -old    x");
+        assert_eq!(rows[4], "     9  9  keep");
+        // A tile shorter than the entry scrolls to the cursor's row.
+        let short = draw_with_body(diff, 3);
+        assert!(
+            short.iter().any(|row| row == "  › 10    -old    x"),
+            "{short:?}"
+        );
+    }
+
+    #[test]
+    fn rows_the_window_leaves_out_are_counted_above_and_below() {
+        let mut diff = diff_fixture();
+        diff.above = Some("3 more rows".to_string());
+        diff.below = Some("9 more rows".to_string());
+        let rows = draw_with_body(diff, 9);
+        assert_eq!(rows[1], "    ⋯ 3 more rows");
+        assert_eq!(rows[8], "    ⋯ 9 more rows");
     }
 
     #[test]

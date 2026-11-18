@@ -730,6 +730,19 @@ pub(crate) fn diff_vm(
     }
 }
 
+/// The diff of an entry's change block as a renderer draws it, under the
+/// view's `projections` and with no operator choices applied. `None` when
+/// the entry carries no change block this client knows.
+pub fn diff_vm_for_entry(entry: &Value, projections: &Value) -> Option<RyeOsDiffVm> {
+    Some(diff_vm(
+        &entry_change_set(entry)?,
+        entry_applied(entry),
+        &DiffPolicy::from_projections(projections),
+        &DiffLocalState::default(),
+        DIFF_RENDER_WINDOW,
+    ))
+}
+
 /// What the operator can do inside a diff.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
