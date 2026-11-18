@@ -4,7 +4,10 @@
 //!     cargo run -p ryeos-client-rune --example fixture -- --snap shell.png --size 1280x800
 //!
 //! `RYEOS_FIXTURE_THEME` picks the colours (`night`, `paper` or `gruvbox`;
-//! night by default). `RYEOS_FIXTURE_SCENE` picks the presentation (`field`, `launcher`, or the
+//! night by default). `RYEOS_FIXTURE_SCENE` picks the presentation (`field`, `launcher`, `long`,
+//! `timeline` and `timeline-draft` for one timeline of every entry type with
+//! its lane, dock and composer, `states` for an empty, a loading and an
+//! unavailable table, or the
 //! default shell); `RYEOS_FIXTURE_FONTS` adds colon-separated font files
 //! (native Rune has no IBM Plex Mono of its own; without it the data face
 //! falls back).

@@ -12,8 +12,9 @@ use ryeos_client_base::ui::binding::{
 };
 use ryeos_client_base::ui::composition_identity::UiSurfaceMountManifest;
 use ryeos_client_base::ui::effect::{
-    RyeOsEffect, RyeOsEffectKind, RyeOsEffectResult, RyeOsEffectResultKind,
+    RyeOsEffect, RyeOsEffectKind, RyeOsEffectResult, RyeOsEffectResultKind, RyeOsUiError,
 };
+use ryeos_client_base::ui::event::RyeOsInputAction;
 use ryeos_client_base::ui::model::{BrowserSession, BrowserViewport, RyeOsCore};
 use ryeos_client_base::ui::presentation_initialization::{
     UiPresentationInitialSelection, UiPresentationInitialization,
@@ -38,6 +39,10 @@ const EXECUTION: &str =
 const BUILD_DEPLOY: &str = include_str!("../../base/tests/fixtures/field/build-deploy-live.json");
 const TIMELINE: &str =
     include_str!("../../../../bundles/ryeos-ui/.ai/views/ryeos/chain/timeline.yaml");
+const SCHEDULES: &str =
+    include_str!("../../../../bundles/ryeos-ui/.ai/views/ryeos/schedules/list.yaml");
+const SURFACES: &str =
+    include_str!("../../../../bundles/ryeos-ui/.ai/views/ryeos/surfaces/list.yaml");
 
 fn view(source: &str) -> Result<Value, String> {
     serde_yaml::from_str(source).map_err(|error| format!("bundle view: {error}"))
@@ -45,9 +50,15 @@ fn view(source: &str) -> Result<Value, String> {
 
 /// What each view's source answers, by view ref. A `long` scene answers with
 /// enough threads and events that lists build only the rows in view.
-fn response(view_ref: &str, long: bool) -> Option<Value> {
-    if long {
+fn response(view_ref: &str, scene: &str) -> Option<Value> {
+    if scene == "long" {
         return long_response(view_ref);
+    }
+    if is_timeline_scene(scene) {
+        return (view_ref == "view:ryeos/chain/timeline").then(demo_timeline);
+    }
+    if scene == "states" {
+        return states_response(view_ref);
     }
     Some(match view_ref {
         "view:ryeos/threads/history" => json!({ "threads": [
@@ -120,7 +131,7 @@ fn long_response(view_ref: &str) -> Option<Value> {
 }
 
 /// Answer the source fetches among `effects`; returns how many were answered.
-fn answer(core: &mut RyeOsCore, effects: Vec<RyeOsEffect>, long: bool) -> usize {
+fn answer(core: &mut RyeOsCore, effects: Vec<RyeOsEffect>, scene: &str) -> usize {
     let mut answered = 0;
     for effect in effects {
         let RyeOsEffectKind::FetchSource { request, .. } = &effect.kind else {
@@ -129,20 +140,33 @@ fn answer(core: &mut RyeOsCore, effects: Vec<RyeOsEffect>, long: bool) -> usize 
         let UiBindingCoordinate::Source { view_ref, .. } = &request.coordinate else {
             continue;
         };
-        let Some(data) = response(view_ref, long) else {
-            continue;
-        };
-        answered += 1;
-        let more = core.dispatch(RyeOsEvent::EffectResult {
-            result: RyeOsEffectResult {
+        let failure = (scene == "states" && view_ref == "view:ryeos/surfaces/list").then(|| {
+            RyeOsUiError::definite(
+                "service_cap_denied",
+                "the surface listing is not admitted here",
+            )
+        });
+        let result = match (failure, response(view_ref, scene)) {
+            (Some(error), _) => RyeOsEffectResult {
+                id: effect.id,
+                ok: false,
+                kind: RyeOsEffectResultKind::SourceData,
+                data: None,
+                error: Some(error),
+            },
+            (None, Some(data)) => RyeOsEffectResult {
                 id: effect.id,
                 ok: true,
                 kind: RyeOsEffectResultKind::SourceData,
                 data: Some(data),
                 error: None,
             },
-        });
-        answered += answer(core, more, long);
+            // A source nobody answers stays loading.
+            (None, None) => continue,
+        };
+        answered += 1;
+        let more = core.dispatch(RyeOsEvent::EffectResult { result });
+        answered += answer(core, more, scene);
     }
     answered
 }
@@ -150,12 +174,211 @@ fn answer(core: &mut RyeOsCore, effects: Vec<RyeOsEffect>, long: bool) -> usize 
 /// The chain timeline. Its source names the input route's chain, which the
 /// fixture has no route for; the `long` scene names a chain directly so the
 /// timeline has events to show.
-fn timeline(long: bool) -> Result<Value, String> {
+fn timeline(named_chain: bool) -> Result<Value, String> {
     let mut definition = view(TIMELINE)?;
-    if long {
+    if named_chain {
         definition["sources"]["default"]["params"]["chain_root_id"] = json!("chain-long");
     }
     Ok(definition)
+}
+
+/// The draft the `timeline-draft` scene types.
+const DRAFT: &str = "Retry the fetch with a longer timeout, and read the retry settings first.";
+
+/// The first input anywhere in a serialised view model.
+fn find_input(value: &Value) -> Option<ryeos_client_base::ui::view_model::RyeOsInputVm> {
+    match value {
+        Value::Object(map) => {
+            if map.contains_key("address")
+                && map.contains_key("placeholder")
+                && let Ok(input) = serde_json::from_value(value.clone())
+            {
+                return Some(input);
+            }
+            map.values().find_map(find_input)
+        }
+        Value::Array(items) => items.iter().find_map(find_input),
+        _ => None,
+    }
+}
+
+fn is_timeline_scene(scene: &str) -> bool {
+    matches!(scene, "timeline" | "timeline-draft")
+}
+
+/// The `states` scene: the first table answers with no rows, the second is
+/// never answered and stays loading, the third fails (see `answer`).
+fn states_response(view_ref: &str) -> Option<Value> {
+    match view_ref {
+        "view:ryeos/threads/history" => {
+            Some(json!({ "threads": [], "coverage": { "state": "complete", "reason": "none" } }))
+        }
+        _ => None,
+    }
+}
+
+/// A tone and state on an entry item.
+fn with_tone(mut entry: Value, tone: &str) -> Value {
+    entry["tone"] = json!(tone);
+    entry
+}
+
+/// A conversation that draws every entry type and group: an earlier exchange
+/// folded into a recap, then an operator message, a thought, prose,
+/// activities in each state, a link, long entries, an answered ask, an
+/// outcome, two pending asks, and a closing cluster. The lane waits on the
+/// first pending ask.
+fn demo_timeline() -> Value {
+    let entry = |id: &str, kind: &str, slots: Value| fixture_entry(id, kind, "x1", slots);
+    let done = |id: &str, headline: &str, detail: &str, badge: Option<&str>| {
+        let mut slots = json!({ "headline": headline, "detail": detail });
+        if let Some(badge) = badge {
+            slots["badge"] = json!(badge);
+        }
+        with_tone(with_state(entry(id, "activity", slots), "done"), "good")
+    };
+    let bare = |mut value: Value| {
+        value.as_object_mut().map(|map| map.remove("item"));
+        value
+    };
+    let long_body = "The retry loop waits a fixed interval between attempts and gives up after the          third one, so a slow response that would have arrived on the fourth is reported as a          failure. Raising the limit helps only when the server is merely slow; when it is          refusing connections the same change just delays the error. "
+        .repeat(8);
+    let pending_ask = |id: &str, headline: &str, detail: &str, allowed: bool| {
+        with_tone(
+            with_state(
+                entry(
+                    id,
+                    "ask",
+                    json!({
+                        "headline": headline, "detail": detail,
+                        "approval_id": format!("approval-{id}"),
+                        "request_digest": format!("digest-{id}"),
+                        "accept_allowed": if allowed { "true" } else { "false" }
+                    }),
+                ),
+                "pending",
+            ),
+            "warn",
+        )
+    };
+    let items = vec![
+        json!({
+            "item": "recap", "id": "rc:e0", "exchange": "x0", "work": 7, "duration_s": 124,
+            "seq": 12,
+            "members": [
+                fixture_entry("e0", "activity", "x0", json!({ "headline": "Read", "detail": "docs/overview.md" })),
+                fixture_entry("e1", "activity", "x0", json!({ "headline": "Read", "detail": "src/lib.rs" })),
+            ]
+        }),
+        with_state(
+            entry(
+                "mk1",
+                "marker",
+                json!({ "headline": "continued in a new thread" }),
+            ),
+            "noted",
+        ),
+        entry(
+            "m1",
+            "message",
+            json!({ "body": "Check why the fetch of the release notes keeps failing, and fix it if the cause is ours." }),
+        ),
+        entry(
+            "t1",
+            "thought",
+            json!({ "body": "The failure looks like a timeout rather than a missing page. I should read the retry settings before changing anything." }),
+        ),
+        entry(
+            "p1",
+            "prose",
+            json!({ "body": "I will fetch the page once more to see the failure myself, then read the retry settings.\nIf the cause is the timeout I will say so before I change it." }),
+        ),
+        with_state(
+            entry(
+                "a1",
+                "activity",
+                json!({ "headline": "Fetching the release notes", "detail": "docs.example.org/releases" }),
+            ),
+            "running",
+        ),
+        done("a2", "Read", "src/net/retry.rs", None),
+        with_tone(
+            with_state(
+                entry(
+                    "a3",
+                    "activity",
+                    json!({ "headline": "Fetch", "detail": "docs.example.org/releases: timed out after 30 s" }),
+                ),
+                "failed",
+            ),
+            "danger",
+        ),
+        done("a4", "Read", "crates/net/src/client.rs", Some("412 lines")),
+        with_tone(
+            with_state(
+                entry(
+                    "l1",
+                    "link",
+                    json!({ "headline": "review", "target": "T-e84f17c6" }),
+                ),
+                "completed",
+            ),
+            "good",
+        ),
+        done(
+            "a5",
+            "Searched the project for every place that sets a request timeout, including the defaults in the shared client configuration and the per-service overrides that the build script generates",
+            "src/**/*.rs",
+            None,
+        ),
+        entry("p2", "prose", json!({ "body": long_body })),
+        with_state(
+            entry(
+                "k0",
+                "ask",
+                json!({ "headline": "Write a file in the project", "detail": "src/net/retry.rs" }),
+            ),
+            "approved",
+        ),
+        with_tone(
+            with_state(
+                entry(
+                    "o1",
+                    "outcome",
+                    json!({ "headline": "Turn finished", "reason": "Three steps, one failed" }),
+                ),
+                "completed",
+            ),
+            "good",
+        ),
+        pending_ask(
+            "k1",
+            "Write a file outside the workspace",
+            "~/.config/example/settings.yaml",
+            true,
+        ),
+        pending_ask(
+            "k2",
+            "Run a command with network access",
+            "curl https://example.org/install.sh",
+            false,
+        ),
+        json!({
+            "item": "cluster", "id": "cl:c1", "headline": "3 reads · 2 searches",
+            "members": [
+                bare(done("c1", "Read", "src/config.rs", None)),
+                bare(done("c2", "Read", "src/net/mod.rs", None)),
+                bare(done("c3", "Searched", "retry", None)),
+            ]
+        }),
+    ];
+    json!({
+        "timeline_contract": TIMELINE_CONTRACT_VERSION, "chain_root_id": "chain-demo",
+        "older": 0, "next_limit": null, "highest_chain_seq": 40,
+        "summary": { "status": "running", "input_tokens": 184220, "output_tokens": 21840, "spend_usd": 1.62, "turns": 7 },
+        "lane": { "label": "Waiting for approval", "entry": "k1" },
+        "items": items
+    })
 }
 
 /// The execution field with its thread given directly: the fixture has no
@@ -175,6 +398,14 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
             "view:ryeos/development/execution",
             "view:ryeos/threads/history"
         ])
+    } else if is_timeline_scene(scene) {
+        json!(["view:ryeos/chain/timeline"])
+    } else if scene == "states" {
+        json!([
+            "view:ryeos/threads/history",
+            "view:ryeos/schedules/list",
+            "view:ryeos/surfaces/list"
+        ])
     } else {
         json!(["view:ryeos/threads/history", "view:ryeos/chain/timeline"])
     };
@@ -187,7 +418,9 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
         "views": {
             "view:ryeos/threads/history": view(THREADS)?,
             "view:ryeos/development/execution": execution()?,
-            "view:ryeos/chain/timeline": timeline(scene == "long")?
+            "view:ryeos/chain/timeline": timeline(scene == "long" || is_timeline_scene(scene))?,
+            "view:ryeos/schedules/list": view(SCHEDULES)?,
+            "view:ryeos/surfaces/list": view(SURFACES)?
         }
     }))
     .map_err(|error| format!("surface fixture: {error}"))?;
@@ -307,21 +540,42 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
     core.require_replayed_initialization()
         .map_err(|error| format!("fixture replay: {error}"))?;
     // As the runtime does after a start: the mounted views' first fetches.
-    let long = scene == "long";
     let effects = core.initial_effects();
-    let mut answered = answer(&mut core, effects, long);
+    let mut answered = answer(&mut core, effects, scene);
     let effects = core.dispatch(RyeOsEvent::Ui {
         event: RyeOsUiEvent::FocusInput,
     });
-    answered += answer(&mut core, effects, long);
+    answered += answer(&mut core, effects, scene);
     // The scene picks what is open when the frame is drawn.
     match scene {
-        "" | "field" | "long" => {}
+        "" | "field" | "long" | "states" => {}
+        "timeline" | "timeline-draft" => {
+            // The newest group is opened, so an opened group is drawn too.
+            core.dispatch(RyeOsEvent::Ui {
+                event: RyeOsUiEvent::ToggleTimelineFold,
+            });
+            if scene == "timeline-draft" {
+                let vm = ryeos_client_base::ui::view_model::build_view_model(&core);
+                let input = serde_json::to_value(&vm)
+                    .ok()
+                    .and_then(|vm| find_input(&vm))
+                    .ok_or("the timeline scene has no composer")?;
+                core.dispatch(RyeOsEvent::Ui {
+                    event: RyeOsUiEvent::InputAt {
+                        address: input.address,
+                        action: RyeOsInputAction::SetText {
+                            text: DRAFT.to_owned(),
+                            cursor: DRAFT.chars().count(),
+                        },
+                    },
+                });
+            }
+        }
         "launcher" => {
             let effects = core.dispatch(RyeOsEvent::Ui {
                 event: RyeOsUiEvent::OpenLauncher,
             });
-            answered += answer(&mut core, effects, long);
+            answered += answer(&mut core, effects, scene);
         }
         other => return Err(format!("unknown fixture scene {other}")),
     }
