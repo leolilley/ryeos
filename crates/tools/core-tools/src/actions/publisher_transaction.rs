@@ -376,13 +376,13 @@ fn publisher_tree_identity(path: &Path) -> Result<lillux::PinnedDirectoryIdentit
 fn is_bundle_publisher_floor_excluded(relative: &str) -> bool {
     use ryeos_state::project_sync::{
         NODE_BUNDLES_ROOT, NODE_ROUTES_ROOT, NODE_SCHEDULES_ROOT, ProjectAiPathClass,
-        classify_project_ai_path, is_durable_content_capture_floor_excluded,
+        classify_floor_path, is_durable_content_capture_floor_excluded,
     };
 
-    match classify_project_ai_path(relative, None) {
-        ProjectAiPathClass::NodeOwned {
+    match classify_floor_path(relative) {
+        Some(ProjectAiPathClass::NodeOwned {
             prefix: NODE_ROUTES_ROOT | NODE_SCHEDULES_ROOT | NODE_BUNDLES_ROOT,
-        } => false,
+        }) => false,
         _ => is_durable_content_capture_floor_excluded(relative),
     }
 }

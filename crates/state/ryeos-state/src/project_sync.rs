@@ -224,129 +224,182 @@ fn hex_sha256(bytes: &[u8]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// Kind of deployable project `.ai` surface.
+/// Namespace shape owned by one project sync-include entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProjectAiSurfaceKind {
-    /// The source and generated manifests that bind the project bundle's
-    /// identity, kind requirements, and runtime-authority ceiling.
-    ProjectManifest,
-    /// Signed RyeOS items that materialize as project content.
-    ProjectItems,
-    /// Project-authored configuration that materializes as project intent.
-    ProjectConfig,
-    /// Project-authored schedule declarations; reconciled separately into
-    /// node-owned scheduler runtime specs.
-    ScheduleDeclarations,
-    /// Project/bundle-authored node extension declarations, not runtime state.
-    NodeExtensionDeclarations,
-}
-
-/// Namespace shape owned by one project `.ai` surface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProjectAiSurfaceShape {
+pub enum SyncIncludeShape {
     /// One exact regular file.
     File,
     /// A directory and the complete subtree below it.
     Directory,
 }
 
-/// Deployable project `.ai` surface descriptor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProjectAiSurface {
-    pub root: &'static str,
-    pub kind: ProjectAiSurfaceKind,
-    pub shape: ProjectAiSurfaceShape,
+/// One part of a project's `.ai` tree that project sync carries to another
+/// node. A UI Surface (a `surface:` item) is unrelated to this.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncIncludeEntry {
+    pub root: String,
+    pub shape: SyncIncludeShape,
     pub materialize_to_project: bool,
 }
 
-const fn directory_surface(
-    root: &'static str,
-    kind: ProjectAiSurfaceKind,
-    materialize_to_project: bool,
-) -> ProjectAiSurface {
-    ProjectAiSurface {
-        root,
-        kind,
-        shape: ProjectAiSurfaceShape::Directory,
-        materialize_to_project,
+impl SyncIncludeEntry {
+    pub fn directory(root: impl Into<String>) -> Self {
+        Self {
+            root: root.into(),
+            shape: SyncIncludeShape::Directory,
+            materialize_to_project: true,
+        }
+    }
+
+    pub fn file(root: impl Into<String>) -> Self {
+        Self {
+            root: root.into(),
+            shape: SyncIncludeShape::File,
+            materialize_to_project: true,
+        }
+    }
+
+    /// True when `rel_path` is this entry's file or lies inside its directory.
+    pub fn matches_path(&self, rel_path: &str) -> bool {
+        match self.shape {
+            SyncIncludeShape::File => rel_path == self.root,
+            SyncIncludeShape::Directory => {
+                rel_path == self.root
+                    || rel_path
+                        .strip_prefix(self.root.as_str())
+                        .is_some_and(|rest| rest.starts_with('/'))
+            }
+        }
     }
 }
 
-const fn file_surface(
-    root: &'static str,
-    kind: ProjectAiSurfaceKind,
-    materialize_to_project: bool,
-) -> ProjectAiSurface {
-    ProjectAiSurface {
-        root,
-        kind,
-        shape: ProjectAiSurfaceShape::File,
-        materialize_to_project,
+/// True when `outer` equals `inner` or is a path-segment ancestor of it.
+fn path_contains(outer: &str, inner: &str) -> bool {
+    inner == outer
+        || inner
+            .strip_prefix(outer)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// Refuse a declared root that is not a safe, canonical path below `.ai`, or
+/// that equals, sits below, or sits above any floor path (secrets, node-owned
+/// state) or live-execution-denied path.
+pub fn validate_sync_include_entry(entry: &SyncIncludeEntry) -> Result<()> {
+    let root = entry.root.as_str();
+    validate_safe_relative_path(root).map_err(|error| {
+        anyhow::anyhow!("sync_include root '{root}' is not a safe path: {error}")
+    })?;
+    if !root.starts_with(".ai/") {
+        anyhow::bail!("sync_include root '{root}' must be a path below `.ai`");
+    }
+    for (label, paths) in [
+        ("never-deploy secret", NEVER_DEPLOY_SECRETS),
+        ("node-owned", NODE_OWNED),
+        ("live-execution-denied", LIVE_EXECUTION_DENIED_ONLY),
+    ] {
+        for protected in paths {
+            if path_contains(protected, root) {
+                anyhow::bail!(
+                    "sync_include root '{root}' equals or lies below {label} path '{protected}'"
+                );
+            }
+            if path_contains(root, protected) {
+                anyhow::bail!("sync_include root '{root}' contains {label} path '{protected}'");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The validated set of `.ai` roots AI-only project sync may carry. Built once
+/// by the node and handed to every function that classifies, validates,
+/// captures or applies project content. The floors stay `const` and are always
+/// checked before this table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncInclude {
+    entries: Vec<SyncIncludeEntry>,
+}
+
+impl SyncInclude {
+    /// Validate each entry against the floors and refuse overlapping or
+    /// duplicate roots. Entry order is preserved.
+    pub fn new(entries: Vec<SyncIncludeEntry>) -> Result<Self> {
+        for entry in &entries {
+            validate_sync_include_entry(entry)?;
+        }
+        for (index, a) in entries.iter().enumerate() {
+            for b in &entries[index + 1..] {
+                if path_contains(&a.root, &b.root) || path_contains(&b.root, &a.root) {
+                    anyhow::bail!("sync_include roots '{}' and '{}' overlap", a.root, b.root);
+                }
+            }
+        }
+        Ok(Self { entries })
+    }
+
+    /// The node's current built-in table. Behaviour is identical to the
+    /// former `PROJECT_AI_SURFACES` constant.
+    pub fn builtin() -> Self {
+        let mut entries = vec![
+            SyncIncludeEntry::file(".ai/manifest.source.yaml"),
+            SyncIncludeEntry::file(".ai/manifest.yaml"),
+        ];
+        entries.extend(
+            BUILTIN_SYNC_INCLUDE_DIRECTORIES
+                .iter()
+                .map(|root| SyncIncludeEntry::directory(*root)),
+        );
+        Self::new(entries).expect("built-in sync_include table is valid")
+    }
+
+    pub fn entries(&self) -> &[SyncIncludeEntry] {
+        &self.entries
+    }
+
+    /// The entry whose file or directory contains `rel_path`.
+    pub fn entry_for_path(&self, rel_path: &str) -> Option<&SyncIncludeEntry> {
+        self.entries
+            .iter()
+            .find(|entry| entry.matches_path(rel_path))
+    }
+
+    /// Entries atomically materialized to the live project during apply.
+    /// Callers must respect each entry's exact file/directory shape.
+    pub fn materialized(&self) -> impl Iterator<Item = &SyncIncludeEntry> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.materialize_to_project)
+    }
+
+    /// True when a relative path is inside one of the managed sync roots.
+    pub fn is_sync_path(&self, rel_path: &str) -> bool {
+        self.entry_for_path(rel_path).is_some()
+    }
+
+    /// True when a relative path is exactly one of the directory roots.
+    pub fn is_sync_root(&self, rel_path: &str) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| entry.shape == SyncIncludeShape::Directory && rel_path == entry.root)
     }
 }
 
-/// Deployable project `.ai` surfaces that AI-only project sync may ingest.
-///
-/// This intentionally excludes node-owned runtime state such as
-/// `.ai/node/routes`, `.ai/node/schedules`, `.ai/state`, and signing keys.
-pub const PROJECT_AI_SURFACES: &[ProjectAiSurface] = &[
-    file_surface(
-        ".ai/manifest.source.yaml",
-        ProjectAiSurfaceKind::ProjectManifest,
-        true,
-    ),
-    file_surface(
-        ".ai/manifest.yaml",
-        ProjectAiSurfaceKind::ProjectManifest,
-        true,
-    ),
-    directory_surface(".ai/directives", ProjectAiSurfaceKind::ProjectItems, true),
-    directory_surface(".ai/tools", ProjectAiSurfaceKind::ProjectItems, true),
-    directory_surface(".ai/graphs", ProjectAiSurfaceKind::ProjectItems, true),
-    directory_surface(".ai/knowledge", ProjectAiSurfaceKind::ProjectItems, true),
-    directory_surface(".ai/parsers", ProjectAiSurfaceKind::ProjectItems, true),
-    directory_surface(".ai/handlers", ProjectAiSurfaceKind::ProjectItems, true),
-    directory_surface(".ai/protocols", ProjectAiSurfaceKind::ProjectItems, true),
-    directory_surface(
-        ".ai/node/engine/kinds",
-        ProjectAiSurfaceKind::NodeExtensionDeclarations,
-        true,
-    ),
-    directory_surface(
-        ".ai/node/commands",
-        ProjectAiSurfaceKind::NodeExtensionDeclarations,
-        true,
-    ),
-    directory_surface(
-        ".ai/config/agent",
-        ProjectAiSurfaceKind::ProjectConfig,
-        true,
-    ),
-    directory_surface(
-        ".ai/config/execution",
-        ProjectAiSurfaceKind::ProjectConfig,
-        true,
-    ),
-    directory_surface(
-        ".ai/config/directive-runtime",
-        ProjectAiSurfaceKind::ProjectConfig,
-        true,
-    ),
-    directory_surface(
-        ".ai/config/ryeos-runtime",
-        ProjectAiSurfaceKind::ProjectConfig,
-        true,
-    ),
-    directory_surface(
-        ".ai/config/development",
-        ProjectAiSurfaceKind::ProjectConfig,
-        true,
-    ),
-    directory_surface(
-        ".ai/config/schedules",
-        ProjectAiSurfaceKind::ScheduleDeclarations,
-        true,
-    ),
+const BUILTIN_SYNC_INCLUDE_DIRECTORIES: &[&str] = &[
+    ".ai/directives",
+    ".ai/tools",
+    ".ai/graphs",
+    ".ai/knowledge",
+    ".ai/parsers",
+    ".ai/handlers",
+    ".ai/protocols",
+    ".ai/node/engine/kinds",
+    ".ai/node/commands",
+    ".ai/config/agent",
+    ".ai/config/execution",
+    ".ai/config/directive-runtime",
+    ".ai/config/ryeos-runtime",
+    ".ai/config/development",
+    ".ai/config/schedules",
 ];
 
 /// RyeOS-owned credential roots that must never leave the machine.
@@ -468,45 +521,26 @@ pub fn is_durable_content_capture_floor_excluded(rel_path: &str) -> bool {
     is_project_snapshot_floor_excluded(rel_path)
 }
 
-fn surface_kind_str(kind: ProjectAiSurfaceKind) -> &'static str {
-    match kind {
-        ProjectAiSurfaceKind::ProjectManifest => "project_manifest",
-        ProjectAiSurfaceKind::ProjectItems => "project_items",
-        ProjectAiSurfaceKind::ProjectConfig => "project_config",
-        ProjectAiSurfaceKind::ScheduleDeclarations => "schedule_declarations",
-        ProjectAiSurfaceKind::NodeExtensionDeclarations => "node_extension_declarations",
-    }
-}
-
-fn surface_shape_str(shape: ProjectAiSurfaceShape) -> &'static str {
+fn sync_include_shape_str(shape: SyncIncludeShape) -> &'static str {
     match shape {
-        ProjectAiSurfaceShape::File => "file",
-        ProjectAiSurfaceShape::Directory => "directory",
-    }
-}
-
-fn surface_matches_path(surface: ProjectAiSurface, rel_path: &str) -> bool {
-    match surface.shape {
-        ProjectAiSurfaceShape::File => rel_path == surface.root,
-        ProjectAiSurfaceShape::Directory => {
-            rel_path == surface.root || rel_path.starts_with(&format!("{}/", surface.root))
-        }
+        SyncIncludeShape::File => "file",
+        SyncIncludeShape::Directory => "directory",
     }
 }
 
 /// Render a read-only, human/LLM-readable view of the effective sync policy:
-/// the deployable surfaces and the two code-enforced floors, plus a pointer to
+/// the `sync_include` table and the two code-enforced floors, plus a pointer to
 /// the one editable input (`ignore_source`). This is a **discovery aid only** —
-/// editing the generated file changes nothing; floors and surfaces are enforced
-/// in code, and ignore is controlled by `ignore_source`.
-pub fn render_effective_sync_policy_yaml(ignore_source: &str) -> String {
+/// editing the generated file changes nothing; floors and the table are
+/// enforced in code, and ignore is controlled by `ignore_source`.
+pub fn render_effective_sync_policy_yaml(ignore_source: &str, include: &SyncInclude) -> String {
     let mut out = String::new();
     out.push_str("# GENERATED — read-only view of this node's effective sync policy.\n");
     out.push_str("# Editing this file does NOTHING. To change what is ignored, edit the file\n");
     out.push_str(&format!(
         "# named in `ignore_source` below ({ignore_source}).\n"
     ));
-    out.push_str("# Secrets, node-owned state, and deployable surfaces are enforced in code\n");
+    out.push_str("# Secrets, node-owned state, and sync_include are enforced in code\n");
     out.push_str("# (protocol v1) and cannot be loosened here.\n");
     out.push_str("version: 1\n");
     out.push_str(&format!("ignore_source: {ignore_source:?}\n"));
@@ -520,14 +554,13 @@ pub fn render_effective_sync_policy_yaml(ignore_source: &str) -> String {
     for p in NODE_OWNED {
         out.push_str(&format!("  - {p:?}\n"));
     }
-    out.push_str("# Deployable project content (AI-only sync).\n");
-    out.push_str("deployable_surfaces:\n");
-    for s in PROJECT_AI_SURFACES {
+    out.push_str("# Project content AI-only sync carries.\n");
+    out.push_str("sync_include:\n");
+    for s in include.entries() {
         out.push_str(&format!(
-            "  - {{ root: {:?}, kind: {}, shape: {}, materialize_to_project: {} }}\n",
+            "  - {{ root: {:?}, shape: {}, materialize_to_project: {} }}\n",
             s.root,
-            surface_kind_str(s.kind),
-            surface_shape_str(s.shape),
+            sync_include_shape_str(s.shape),
             s.materialize_to_project
         ));
     }
@@ -539,7 +572,7 @@ pub fn render_effective_sync_policy_yaml(ignore_source: &str) -> String {
 /// Order of the variants mirrors the resolution precedence used by
 /// [`classify_project_ai_path`]: `never_deploy_secrets` → `ignore` →
 /// `node_owned` → `deployable` → fall-through.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectAiPathClass {
     /// Under a [`NEVER_DEPLOY_SECRETS`] prefix — credential, never ships.
     NeverDeploySecret { prefix: &'static str },
@@ -547,9 +580,9 @@ pub enum ProjectAiPathClass {
     Ignored,
     /// Under a [`NODE_OWNED`] prefix — node runtime state, never ships.
     NodeOwned { prefix: &'static str },
-    /// A deployable project surface.
-    Deployable(ProjectAiSurface),
-    /// Under `.ai/` but not a deployable surface.
+    /// Inside a `sync_include` entry.
+    Deployable(SyncIncludeEntry),
+    /// Under `.ai/` but not inside a `sync_include` entry.
     UnknownAiPath,
     /// Not `.ai/` content at all.
     NonAiPath,
@@ -564,9 +597,10 @@ pub fn validate_project_manifest_paths(
     manifest: &SourceManifest,
     scope: ProjectSyncScope,
     ignore: Option<&IgnoreMatcher>,
+    include: &SyncInclude,
 ) -> Result<()> {
     for rel_path in manifest.item_source_hashes.keys() {
-        validate_project_manifest_path(rel_path, scope, ignore)?;
+        validate_project_manifest_path(rel_path, scope, ignore, include)?;
     }
     Ok(())
 }
@@ -574,9 +608,36 @@ pub fn validate_project_manifest_paths(
 /// Validate a complete project tree against the exact immutable policy stored
 /// beside its snapshot. Current node ignore configuration is intentionally not
 /// consulted here.
+///
+/// This is an ADMISSION check: for an AI-only policy every `.ai` path must lie
+/// inside `include`. Callers that merely re-read a tree already admitted on
+/// this node use [`validate_stored_project_tree_paths`].
 pub fn validate_project_tree_paths(
     tree: &ProjectTree,
     policy: &ProjectSnapshotPolicy,
+    include: &SyncInclude,
+) -> Result<()> {
+    validate_project_tree_paths_inner(tree, policy, Some(include))
+}
+
+/// Validate a tree that was already admitted on this node and is being read
+/// back as evidence. Checks everything [`validate_project_tree_paths`] does
+/// except membership in the node's current `sync_include` table: the floors,
+/// ignore rules, path safety and bounds still apply, and an AI-only tree must
+/// still be `.ai` content. A bundle uninstall therefore cannot make a stored
+/// head unloadable; new pushes and applies are judged against the current
+/// table at their own admission point.
+pub fn validate_stored_project_tree_paths(
+    tree: &ProjectTree,
+    policy: &ProjectSnapshotPolicy,
+) -> Result<()> {
+    validate_project_tree_paths_inner(tree, policy, None)
+}
+
+fn validate_project_tree_paths_inner(
+    tree: &ProjectTree,
+    policy: &ProjectSnapshotPolicy,
+    include: Option<&SyncInclude>,
 ) -> Result<()> {
     policy.validate()?;
     if tree.files.len() > MAX_PROJECT_TREE_FILES {
@@ -585,7 +646,7 @@ pub fn validate_project_tree_paths(
     let mut directories = std::collections::BTreeSet::new();
     let matcher = policy.matcher()?;
     for rel_path in tree.files.keys() {
-        validate_project_manifest_path(rel_path, policy.sync_scope, Some(&matcher))?;
+        validate_project_manifest_path_inner(rel_path, policy.sync_scope, Some(&matcher), include)?;
         let path = std::path::Path::new(rel_path);
         let directory_depth = path.components().count().saturating_sub(1);
         if directory_depth > MAX_PROJECT_TREE_DEPTH {
@@ -630,6 +691,26 @@ pub fn validate_project_manifest_path(
     rel_path: &str,
     scope: ProjectSyncScope,
     ignore: Option<&IgnoreMatcher>,
+    include: &SyncInclude,
+) -> Result<()> {
+    validate_project_manifest_path_inner(rel_path, scope, ignore, Some(include))
+}
+
+/// As [`validate_project_manifest_path`] for a path already admitted on this
+/// node: no `sync_include` membership check.
+pub fn validate_stored_project_manifest_path(
+    rel_path: &str,
+    scope: ProjectSyncScope,
+    ignore: Option<&IgnoreMatcher>,
+) -> Result<()> {
+    validate_project_manifest_path_inner(rel_path, scope, ignore, None)
+}
+
+fn validate_project_manifest_path_inner(
+    rel_path: &str,
+    scope: ProjectSyncScope,
+    ignore: Option<&IgnoreMatcher>,
+    include: Option<&SyncInclude>,
 ) -> Result<()> {
     validate_safe_relative_path(rel_path)?;
 
@@ -665,13 +746,12 @@ pub fn validate_project_manifest_path(
     }
 
     if scope == ProjectSyncScope::AiOnly {
-        match classify_project_ai_path(rel_path, ignore) {
-            ProjectAiPathClass::Deployable(surface)
-                if surface.shape == ProjectAiSurfaceShape::Directory
-                    && rel_path == surface.root =>
+        match classify_project_ai_path_inner(rel_path, ignore, include) {
+            ProjectAiPathClass::Deployable(entry)
+                if entry.shape == SyncIncludeShape::Directory && rel_path == entry.root =>
             {
                 anyhow::bail!(
-                    "AI-only project manifest path '{}' names a deployable .ai surface root; expected a file below the surface root",
+                    "AI-only project manifest path '{}' names a sync_include root; expected a file below the root",
                     rel_path
                 );
             }
@@ -697,9 +777,11 @@ pub fn validate_project_manifest_path(
                     rel_path
                 );
             }
+            // Already admitted here: membership is not re-judged.
+            ProjectAiPathClass::UnknownAiPath if include.is_none() => {}
             ProjectAiPathClass::UnknownAiPath => {
                 anyhow::bail!(
-                    "AI-only project manifest path '{}' is under .ai but outside deployable project surfaces",
+                    "AI-only project manifest path '{}' is under .ai but outside sync_include",
                     rel_path
                 );
             }
@@ -724,6 +806,15 @@ pub fn validate_project_manifest_path(
 pub fn classify_project_ai_path(
     rel_path: &str,
     ignore: Option<&IgnoreMatcher>,
+    include: &SyncInclude,
+) -> ProjectAiPathClass {
+    classify_project_ai_path_inner(rel_path, ignore, Some(include))
+}
+
+fn classify_project_ai_path_inner(
+    rel_path: &str,
+    ignore: Option<&IgnoreMatcher>,
+    include: Option<&SyncInclude>,
 ) -> ProjectAiPathClass {
     if let Some(prefix) = matched_prefix(rel_path, NEVER_DEPLOY_SECRETS) {
         return ProjectAiPathClass::NeverDeploySecret { prefix };
@@ -739,10 +830,8 @@ pub fn classify_project_ai_path(
         return ProjectAiPathClass::NodeOwned { prefix };
     }
 
-    for surface in PROJECT_AI_SURFACES {
-        if surface_matches_path(*surface, rel_path) {
-            return ProjectAiPathClass::Deployable(*surface);
-        }
+    if let Some(entry) = include.and_then(|include| include.entry_for_path(rel_path)) {
+        return ProjectAiPathClass::Deployable(entry.clone());
     }
 
     if rel_path == ".ai" || rel_path.starts_with(".ai/") {
@@ -752,27 +841,14 @@ pub fn classify_project_ai_path(
     }
 }
 
-/// True when a relative path is inside one of the managed AI sync roots.
-pub fn is_project_ai_sync_path(rel_path: &str) -> bool {
-    PROJECT_AI_SURFACES
-        .iter()
-        .any(|surface| surface_matches_path(*surface, rel_path))
-}
-
-/// True when a relative path is exactly one of the managed AI sync roots.
-pub fn is_project_ai_sync_root(rel_path: &str) -> bool {
-    PROJECT_AI_SURFACES.iter().any(|surface| {
-        surface.shape == ProjectAiSurfaceShape::Directory && rel_path == surface.root
-    })
-}
-
-/// Project AI surfaces atomically materialized to the live project during
-/// apply. Callers must respect each descriptor's exact file/directory shape.
-pub fn materialized_project_ai_surfaces() -> impl Iterator<Item = ProjectAiSurface> {
-    PROJECT_AI_SURFACES
-        .iter()
-        .filter(|surface| surface.materialize_to_project)
-        .copied()
+/// Classify a path by the code-enforced floors alone: never-deploy secrets,
+/// then node-owned state. No `sync_include` table or ignore matcher is
+/// consulted.
+pub fn classify_floor_path(rel_path: &str) -> Option<ProjectAiPathClass> {
+    if let Some(prefix) = matched_prefix(rel_path, NEVER_DEPLOY_SECRETS) {
+        return Some(ProjectAiPathClass::NeverDeploySecret { prefix });
+    }
+    matched_prefix(rel_path, NODE_OWNED).map(|prefix| ProjectAiPathClass::NodeOwned { prefix })
 }
 
 /// Basic relative path safety shared by full-project and AI-only snapshots.
@@ -784,6 +860,10 @@ pub fn validate_safe_relative_path(rel_path: &str) -> Result<()> {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    fn inc() -> SyncInclude {
+        SyncInclude::builtin()
+    }
 
     fn manifest(paths: &[&str]) -> SourceManifest {
         SourceManifest {
@@ -807,7 +887,7 @@ mod tests {
             ".ai/config/development/ryeos/build-profile.yaml",
             ".ai/config/schedules/snap-track.yaml",
         ]);
-        validate_project_manifest_paths(&m, ProjectSyncScope::AiOnly, None).unwrap();
+        validate_project_manifest_paths(&m, ProjectSyncScope::AiOnly, None, &inc()).unwrap();
     }
 
     #[test]
@@ -832,7 +912,7 @@ mod tests {
                 "{path} is outside the live-execution denied control paths"
             );
             assert!(matches!(
-                classify_project_ai_path(path, None),
+                classify_project_ai_path(path, None, &inc()),
                 ProjectAiPathClass::NodeOwned {
                     prefix: ".ai/state"
                 }
@@ -840,7 +920,9 @@ mod tests {
         }
         // The project manifest validator refuses a manifest that carries a home.
         let m = manifest(&[".ai/state/bundle-state/central-auth/realm-a/x"]);
-        assert!(validate_project_manifest_paths(&m, ProjectSyncScope::AiOnly, None).is_err());
+        assert!(
+            validate_project_manifest_paths(&m, ProjectSyncScope::AiOnly, None, &inc()).is_err()
+        );
     }
 
     #[test]
@@ -863,10 +945,14 @@ mod tests {
             ".ai/config/ryeos-runtime",
             ".ai/config/schedules",
         ] {
-            let err =
-                validate_project_manifest_paths(&manifest(&[path]), ProjectSyncScope::AiOnly, None)
-                    .expect_err("exact managed root path must be rejected");
-            assert!(format!("{err:#}").contains("names a deployable"));
+            let err = validate_project_manifest_paths(
+                &manifest(&[path]),
+                ProjectSyncScope::AiOnly,
+                None,
+                &inc(),
+            )
+            .expect_err("exact managed root path must be rejected");
+            assert!(format!("{err:#}").contains("names a sync_include"));
         }
     }
 
@@ -880,14 +966,15 @@ mod tests {
                 "never-deploy secret prefix",
             ),
             (".ai/node/routes/apply.yaml", "node-owned runtime prefix"),
-            (
-                ".ai/services/project/apply.yaml",
-                "outside deployable project surfaces",
-            ),
+            (".ai/services/project/apply.yaml", "outside sync_include"),
         ] {
-            let err =
-                validate_project_manifest_paths(&manifest(&[path]), ProjectSyncScope::AiOnly, None)
-                    .expect_err("path must be rejected");
+            let err = validate_project_manifest_paths(
+                &manifest(&[path]),
+                ProjectSyncScope::AiOnly,
+                None,
+                &inc(),
+            )
+            .expect_err("path must be rejected");
             assert!(
                 format!("{err:#}").contains(expected),
                 "error for {path} should contain {expected:?}, got {err:#}"
@@ -912,6 +999,7 @@ mod tests {
                 &manifest(&[path]),
                 ProjectSyncScope::FullProject,
                 None,
+                &inc(),
             )
             .expect_err("secret/node-owned path must be rejected for full_project");
         }
@@ -920,15 +1008,20 @@ mod tests {
     #[test]
     fn public_development_fixture_is_policy_data_not_secret_authority() {
         let fixture = manifest(&[".dev-keys/PUBLISHER_DEV.pem"]);
-        validate_project_manifest_paths(&fixture, ProjectSyncScope::FullProject, None)
+        validate_project_manifest_paths(&fixture, ProjectSyncScope::FullProject, None, &inc())
             .expect("tracked public development fixture is ordinary project content");
 
         let ignore = crate::ignore::IgnoreMatcher::from_config(&crate::ignore::IgnoreConfig {
             patterns: vec![".dev-keys/".to_owned()],
         })
         .unwrap();
-        validate_project_manifest_paths(&fixture, ProjectSyncScope::FullProject, Some(&ignore))
-            .expect_err("an exact signed node policy may exclude the fixture");
+        validate_project_manifest_paths(
+            &fixture,
+            ProjectSyncScope::FullProject,
+            Some(&ignore),
+            &inc(),
+        )
+        .expect_err("an exact signed node policy may exclude the fixture");
     }
 
     #[test]
@@ -961,7 +1054,7 @@ mod tests {
         // A junk file inside a deployable surface classifies as Ignored, not
         // Deployable — ignore wins over the surface allowlist.
         assert_eq!(
-            classify_project_ai_path(".ai/tools/app/__pycache__/x.pyc", Some(&ignore)),
+            classify_project_ai_path(".ai/tools/app/__pycache__/x.pyc", Some(&ignore), &inc()),
             ProjectAiPathClass::Ignored
         );
     }
@@ -969,54 +1062,45 @@ mod tests {
     #[test]
     fn classifies_project_ai_paths() {
         assert_eq!(
-            classify_project_ai_path(".env", None),
+            classify_project_ai_path(".env", None, &inc()),
             ProjectAiPathClass::NonAiPath
         );
         assert!(matches!(
-            classify_project_ai_path(".ai/.bundles.lock", None),
+            classify_project_ai_path(".ai/.bundles.lock", None, &inc()),
             ProjectAiPathClass::NodeOwned {
                 prefix: ".ai/.bundles.lock"
             }
         ));
         assert!(matches!(
-            classify_project_ai_path(".ai/config/schedules/snap-track.yaml", None),
-            ProjectAiPathClass::Deployable(ProjectAiSurface {
-                kind: ProjectAiSurfaceKind::ScheduleDeclarations,
-                ..
-            })
+            classify_project_ai_path(".ai/config/schedules/snap-track.yaml", None, &inc()),
+            ProjectAiPathClass::Deployable(_)
         ));
         assert!(matches!(
-            classify_project_ai_path(".ai/graphs/snap-track/show_rescrape.yaml", None),
-            ProjectAiPathClass::Deployable(ProjectAiSurface {
-                kind: ProjectAiSurfaceKind::ProjectItems,
-                ..
-            })
+            classify_project_ai_path(".ai/graphs/snap-track/show_rescrape.yaml", None, &inc()),
+            ProjectAiPathClass::Deployable(_)
         ));
         assert!(matches!(
-            classify_project_ai_path(".ai/config/execution/execution.yaml", None),
-            ProjectAiPathClass::Deployable(ProjectAiSurface {
-                kind: ProjectAiSurfaceKind::ProjectConfig,
-                ..
-            })
+            classify_project_ai_path(".ai/config/execution/execution.yaml", None, &inc()),
+            ProjectAiPathClass::Deployable(_)
         ));
         assert!(matches!(
-            classify_project_ai_path(".ai/node/schedules/foo.yaml", None),
+            classify_project_ai_path(".ai/node/schedules/foo.yaml", None, &inc()),
             ProjectAiPathClass::NodeOwned {
                 prefix: ".ai/node/schedules"
             }
         ));
         assert!(matches!(
-            classify_project_ai_path(".ai/node/identity/key.pem", None),
+            classify_project_ai_path(".ai/node/identity/key.pem", None, &inc()),
             ProjectAiPathClass::NeverDeploySecret {
                 prefix: ".ai/node/identity"
             }
         ));
         assert_eq!(
-            classify_project_ai_path(".ai/unknown/foo.yaml", None),
+            classify_project_ai_path(".ai/unknown/foo.yaml", None, &inc()),
             ProjectAiPathClass::UnknownAiPath
         );
         assert_eq!(
-            classify_project_ai_path("src/index.ts", None),
+            classify_project_ai_path("src/index.ts", None, &inc()),
             ProjectAiPathClass::NonAiPath
         );
     }
@@ -1028,10 +1112,16 @@ mod tests {
                 &manifest(&[path]),
                 ProjectSyncScope::FullProject,
                 None,
+                &inc(),
             )
             .expect_err("unsafe full-project path must be rejected");
-            validate_project_manifest_paths(&manifest(&[path]), ProjectSyncScope::AiOnly, None)
-                .expect_err("unsafe ai-only path must be rejected");
+            validate_project_manifest_paths(
+                &manifest(&[path]),
+                ProjectSyncScope::AiOnly,
+                None,
+                &inc(),
+            )
+            .expect_err("unsafe ai-only path must be rejected");
         }
     }
 
@@ -1042,23 +1132,29 @@ mod tests {
             ".ai/manifest.yaml/child",
             ".ai/manifest.yaml.backup",
         ] {
-            validate_project_manifest_paths(&manifest(&[path]), ProjectSyncScope::AiOnly, None)
-                .expect_err("prefix spoof must be rejected");
+            validate_project_manifest_paths(
+                &manifest(&[path]),
+                ProjectSyncScope::AiOnly,
+                None,
+                &inc(),
+            )
+            .expect_err("prefix spoof must be rejected");
         }
     }
 
     #[test]
     fn exact_file_surfaces_are_not_directory_roots() {
-        assert!(is_project_ai_sync_path(".ai/manifest.source.yaml"));
-        assert!(is_project_ai_sync_path(".ai/manifest.yaml"));
-        assert!(!is_project_ai_sync_root(".ai/manifest.source.yaml"));
-        assert!(!is_project_ai_sync_root(".ai/manifest.yaml"));
-        assert!(is_project_ai_sync_root(".ai/tools"));
+        assert!(inc().is_sync_path(".ai/manifest.source.yaml"));
+        assert!(inc().is_sync_path(".ai/manifest.yaml"));
+        assert!(!inc().is_sync_root(".ai/manifest.source.yaml"));
+        assert!(!inc().is_sync_root(".ai/manifest.yaml"));
+        assert!(inc().is_sync_root(".ai/tools"));
     }
 
     #[test]
     fn rendered_policy_is_valid_yaml_with_all_buckets() {
-        let yaml = render_effective_sync_policy_yaml(".ai/node/policies/ingest_ignore.yaml");
+        let yaml =
+            render_effective_sync_policy_yaml(".ai/node/policies/ingest_ignore.yaml", &inc());
         let v: serde_yaml::Value =
             serde_yaml::from_str(&yaml).expect("generated policy is valid YAML");
         assert_eq!(v["version"].as_u64(), Some(1));
@@ -1080,16 +1176,170 @@ mod tests {
                 .any(|x| x.as_str() == Some(BUNDLE_REGISTRY_LOCK))
         );
         assert_eq!(
-            v["deployable_surfaces"].as_sequence().unwrap().len(),
-            PROJECT_AI_SURFACES.len()
+            v["sync_include"].as_sequence().unwrap().len(),
+            inc().entries().len()
         );
-        let manifest = v["deployable_surfaces"]
+        let manifest = v["sync_include"]
             .as_sequence()
             .unwrap()
             .iter()
             .find(|entry| entry["root"].as_str() == Some(".ai/manifest.yaml"))
             .expect("generated manifest surface");
-        assert_eq!(manifest["kind"].as_str(), Some("project_manifest"));
         assert_eq!(manifest["shape"].as_str(), Some("file"));
+    }
+
+    #[test]
+    fn builtin_table_is_exactly_the_former_const_list() {
+        let expected: Vec<(&str, SyncIncludeShape)> = vec![
+            (".ai/manifest.source.yaml", SyncIncludeShape::File),
+            (".ai/manifest.yaml", SyncIncludeShape::File),
+            (".ai/directives", SyncIncludeShape::Directory),
+            (".ai/tools", SyncIncludeShape::Directory),
+            (".ai/graphs", SyncIncludeShape::Directory),
+            (".ai/knowledge", SyncIncludeShape::Directory),
+            (".ai/parsers", SyncIncludeShape::Directory),
+            (".ai/handlers", SyncIncludeShape::Directory),
+            (".ai/protocols", SyncIncludeShape::Directory),
+            (".ai/node/engine/kinds", SyncIncludeShape::Directory),
+            (".ai/node/commands", SyncIncludeShape::Directory),
+            (".ai/config/agent", SyncIncludeShape::Directory),
+            (".ai/config/execution", SyncIncludeShape::Directory),
+            (".ai/config/directive-runtime", SyncIncludeShape::Directory),
+            (".ai/config/ryeos-runtime", SyncIncludeShape::Directory),
+            (".ai/config/development", SyncIncludeShape::Directory),
+            (".ai/config/schedules", SyncIncludeShape::Directory),
+        ];
+        let table = inc();
+        let actual: Vec<(&str, SyncIncludeShape)> = table
+            .entries()
+            .iter()
+            .map(|entry| (entry.root.as_str(), entry.shape))
+            .collect();
+        assert_eq!(actual, expected);
+        assert!(table.entries().iter().all(|e| e.materialize_to_project));
+        assert_eq!(table.materialized().count(), 17);
+    }
+
+    fn refusal(entries: Vec<SyncIncludeEntry>) -> String {
+        format!(
+            "{:#}",
+            SyncInclude::new(entries).expect_err("table must be refused")
+        )
+    }
+
+    #[test]
+    fn sync_include_refuses_roots_that_touch_a_floor() {
+        for root in [
+            // equal to a floor path
+            ".ai/node/identity",
+            ".ai/state",
+            ".ai/node/trust",
+            ".ai/node/remotes",
+            // below a floor path
+            ".ai/node/vault/x",
+            ".ai/state/bundle-state",
+            ".ai/node/operator/keys",
+            // above a floor path
+            ".ai",
+            ".ai/node",
+            ".ai/config",
+            ".ai/config/keys",
+        ] {
+            let message = refusal(vec![SyncIncludeEntry::directory(root)]);
+            assert!(
+                message.contains("sync_include root") && !message.is_empty(),
+                "{root}: {message}"
+            );
+        }
+        assert!(refusal(vec![SyncIncludeEntry::file(".ai/.bundles.lock")]).contains("node-owned"));
+        assert!(refusal(vec![SyncIncludeEntry::directory(".ai/node")]).contains("contains"));
+    }
+
+    #[test]
+    fn sync_include_refuses_unsafe_or_non_ai_roots() {
+        for root in [
+            "src",
+            "ai/tools",
+            ".ai/../etc",
+            "../.ai/tools",
+            "/abs/.ai/tools",
+            ".ai//tools",
+            ".ai/./tools",
+            ".ai/tools/",
+            ".ai/a\\b",
+            "",
+        ] {
+            SyncInclude::new(vec![SyncIncludeEntry::directory(root)])
+                .expect_err(&format!("root {root:?} must be refused"));
+        }
+    }
+
+    #[test]
+    fn sync_include_refuses_overlapping_and_duplicate_roots() {
+        assert!(
+            refusal(vec![
+                SyncIncludeEntry::directory(".ai/views"),
+                SyncIncludeEntry::directory(".ai/views"),
+            ])
+            .contains("overlap")
+        );
+        assert!(
+            refusal(vec![
+                SyncIncludeEntry::directory(".ai/views"),
+                SyncIncludeEntry::directory(".ai/views/sub"),
+            ])
+            .contains("overlap")
+        );
+        assert!(
+            refusal(vec![
+                SyncIncludeEntry::file(".ai/views/x.yaml"),
+                SyncIncludeEntry::directory(".ai/views"),
+            ])
+            .contains("overlap")
+        );
+        // Sibling roots sharing a name prefix do not overlap.
+        SyncInclude::new(vec![
+            SyncIncludeEntry::directory(".ai/views"),
+            SyncIncludeEntry::directory(".ai/views-extra"),
+        ])
+        .unwrap();
+    }
+
+    #[test]
+    fn floors_are_checked_before_the_table() {
+        // Even a table entry that sits next to a floor cannot reach into it.
+        let table =
+            SyncInclude::new(vec![SyncIncludeEntry::directory(".ai/node/engine/kinds")]).unwrap();
+        assert!(matches!(
+            classify_project_ai_path(".ai/node/vault/x", None, &table),
+            ProjectAiPathClass::NeverDeploySecret { .. }
+        ));
+        assert_eq!(
+            classify_project_ai_path(".ai/tools/x.py", None, &table),
+            ProjectAiPathClass::UnknownAiPath
+        );
+    }
+
+    #[test]
+    fn rendered_policy_names_the_section_sync_include() {
+        let yaml = render_effective_sync_policy_yaml("x", &inc());
+        assert!(yaml.contains("\nsync_include:\n"));
+        assert!(!yaml.contains("deployable_surfaces"));
+    }
+
+    #[test]
+    fn stored_validation_keeps_floors_but_does_not_rejudge_membership() {
+        // A path outside any table entry: refused at admission, accepted when
+        // re-read as already-admitted evidence.
+        let outside = ".ai/views/x.yaml";
+        validate_project_manifest_path(outside, ProjectSyncScope::AiOnly, None, &inc())
+            .expect_err("admission refuses a path outside the table");
+        validate_stored_project_manifest_path(outside, ProjectSyncScope::AiOnly, None)
+            .expect("a stored tree is not re-judged against the current table");
+        // Floors, safe-path rules and the non-.ai refusal still apply.
+        for path in [".ai/node/vault/k", ".ai/state/x", "src/main.rs", "../x"] {
+            validate_stored_project_manifest_path(path, ProjectSyncScope::AiOnly, None)
+                .expect_err(path);
+        }
     }
 }

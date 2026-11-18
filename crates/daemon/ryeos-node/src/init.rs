@@ -1578,7 +1578,10 @@ fn run_init_under_lock_on_storage(
         .with_context(|| format!("write vault pubkey {}", vault_public_path.display()))?;
 
     // ── 8b. Node-owned default policies ──
-    materialize_node_derived_views(&opts.app_root)?;
+    materialize_node_derived_views(
+        &opts.app_root,
+        &ryeos_state::project_sync::SyncInclude::builtin(),
+    )?;
     // The issuance is amended before the generation that needs it is
     // published, as `policy-apply native_capacity` orders it; the completion
     // sealed below then binds the amended issuance.

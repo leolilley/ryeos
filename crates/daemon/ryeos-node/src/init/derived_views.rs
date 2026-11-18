@@ -68,7 +68,10 @@ impl NodeDerivedViewPaths {
 /// Materialize read-only derived views after the complete node-signed policy
 /// generation is selected. This function never authors policy: isolation and
 /// ingest-ignore authority exist only in `.ai/node/policies/`.
-pub(super) fn materialize_node_derived_views(app_root: &Path) -> Result<()> {
+pub(super) fn materialize_node_derived_views(
+    app_root: &Path,
+    include: &ryeos_state::project_sync::SyncInclude,
+) -> Result<()> {
     let paths = NodeDerivedViewPaths::under(app_root);
     let node_path = app_root.join(ryeos_engine::AI_DIR).join("node");
     let node = lillux::PinnedDirectory::open_or_create(&node_path)
@@ -79,6 +82,7 @@ pub(super) fn materialize_node_derived_views(app_root: &Path) -> Result<()> {
         .with_context(|| format!("create sync dir {}", paths.sync_dir.display()))?;
     let policy_yaml = ryeos_state::project_sync::render_effective_sync_policy_yaml(
         ryeos_app::ignore::INGEST_IGNORE_POLICY_RELATIVE,
+        include,
     );
     let sync_name = std::ffi::OsStr::new("policy.yaml");
     let incumbent_sync = sync.open_pinned_regular(sync_name, false)?;
@@ -110,7 +114,11 @@ mod tests {
     fn init_materializes_only_the_read_only_sync_view() {
         let root = tempfile::tempdir().unwrap();
         let paths = NodeDerivedViewPaths::under(root.path());
-        materialize_node_derived_views(root.path()).unwrap();
+        materialize_node_derived_views(
+            root.path(),
+            &ryeos_state::project_sync::SyncInclude::builtin(),
+        )
+        .unwrap();
 
         let raw = fs::read_to_string(&paths.sync_policy).unwrap();
         assert!(raw.contains(ryeos_app::ignore::INGEST_IGNORE_POLICY_RELATIVE));

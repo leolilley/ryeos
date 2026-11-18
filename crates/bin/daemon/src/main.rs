@@ -5060,6 +5060,7 @@ async fn run(
                 command_registry,
                 authorizer,
                 ignore_matcher,
+                sync_include: std::sync::Arc::new(ryeos_state::project_sync::SyncInclude::builtin()),
                 vault_fingerprint: {
                     let vault_pk_path = config
                         .app_root
@@ -8683,6 +8684,7 @@ async fn run_service_standalone(
         command_registry: standalone_command_registry,
         authorizer: standalone_auth,
         ignore_matcher: standalone_ignore_matcher,
+        sync_include: std::sync::Arc::new(ryeos_state::project_sync::SyncInclude::builtin()),
         vault_fingerprint: None,
         // Standalone service invocations perform no paid launches; hard
         // admission is uniformly unavailable here.

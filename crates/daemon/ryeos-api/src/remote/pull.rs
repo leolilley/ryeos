@@ -255,7 +255,15 @@ async fn pull_results_staged(
         .map_err(|error| PullResultsError::InvalidRemoteSnapshot(format!("{error:#}")))?;
     let policy = ProjectSnapshotPolicy::from_value(&policy_val)
         .map_err(|error| PullResultsError::InvalidRemoteSnapshot(format!("{error:#}")))?;
-    ryeos_state::project_sync::validate_project_tree_paths(&remote_tree, &policy)
+    // Pulled results come from full_project remote execution only. An AI-only
+    // tree would need this node's sync_include admission, which a pull does
+    // not perform, so it is refused rather than admitted without that check.
+    if policy.sync_scope != ryeos_state::project_sync::ProjectSyncScope::FullProject {
+        return Err(PullResultsError::InvalidRemoteSnapshot(
+            "pulled remote result is not a full_project snapshot".to_owned(),
+        ));
+    }
+    ryeos_state::project_sync::validate_stored_project_tree_paths(&remote_tree, &policy)
         .map_err(|error| PullResultsError::InvalidRemoteSnapshot(format!("{error:#}")))?;
     ryeos_state::project_sync::validate_captured_policy_source(local_cas, &remote_tree, &policy)
         .map_err(|error| PullResultsError::InvalidRemoteSnapshot(format!("{error:#}")))?;
