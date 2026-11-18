@@ -352,7 +352,7 @@ mod tests {
     #[test]
     fn invisible_formatting_characters_are_stripped() {
         let config = shipped();
-        let text = "title: \"safe\u202e txt.exe\u200b\u2066 name\ufeff\"\n";
+        let text = "title: \"safe\\u202e txt.exe\\u200b\\u2066 name\\ufeff\"\n";
         let (title, source) = yaml_title(&config, "tool", true, text);
         assert_eq!(source, SOURCE_AUTHORED);
         assert_eq!(title, "safe txt.exe name");
