@@ -299,10 +299,11 @@ async fn a_long_tool_does_not_outlive_the_run() {
 /// not restart the clock, and the last segment settles as a deadline stop.
 #[tokio::test(flavor = "multi_thread")]
 async fn continuations_share_one_deadline() {
-    // Each reply carries about 250 tokens of its own text, so the live context
-    // crosses the 2,000-token window's continuation threshold every few turns.
+    // Each reply carries about 500 tokens of its own text, so the live context
+    // crosses the 2,000-token window's continuation threshold within a few
+    // turns even when load stretches each turn.
     // (Tool results are de-duplicated by the result guard and would not grow.)
-    let padding = "padding ".repeat(125);
+    let padding = "padding ".repeat(250);
     let script = format!(
         "steps:\n  - repeat: 200\n    delay_ms: 2000\n    text: \"{padding}\"\n    tool_calls:\n      - {{ id: \"call_{{n}}\", name: noop_noop, arguments: {{}} }}\n"
     );
@@ -681,9 +682,12 @@ async fn a_restart_mid_run_keeps_the_deadline_and_the_single_wrap_up() {
     if result["phase"] == "hard_stop" {
         assert_runtime_deadline_stop(&result, before[0], 5_000);
     } else {
+        // The deadline passed while the node was down, or while the resumed
+        // launch waited for its spawn; both settle as the same typed stop.
         assert!(
-            detail.contains("deadline_elapsed_while_down"),
-            "settled by recovery as an elapsed deadline: {detail}{dump}"
+            detail.contains("deadline_elapsed_while_down")
+                || detail.contains("deadline_elapsed_before_launch"),
+            "settled as an elapsed deadline: {detail}{dump}"
         );
         assert_eq!(result["deadline_at_ms"], before[0], "{result}");
     }
