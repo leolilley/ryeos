@@ -1154,10 +1154,7 @@ async fn prepare_refuses_an_item_edited_in_place_although_composes_are_cached() 
 /// Rewrite the fixture Config in place with a different title and a valid
 /// signature, so the admission retained by a prepared seat no longer holds.
 fn edit_fixture_config_in_place(state: &ryeos_app::state::AppState) {
-    let path = state
-        .config
-        .app_root
-        .join(".ai/config/test/presentation.yaml");
+    let path = test_state::fixture_bundle_root(state).join(".ai/config/test/presentation.yaml");
     let body: String = std::fs::read_to_string(&path)
         .unwrap()
         .lines()
