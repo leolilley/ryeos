@@ -14,7 +14,7 @@ use ryeos_client_base::ui::{RyeOsUiEvent, RyeOsUiIntent};
 
 use ryeos_client_runtime::documents::{DocumentOffer, DocumentState};
 
-use crate::theme::{self, Palette, STATUS_HEIGHT, STRIP_HEIGHT, SYSTEM_HEIGHT};
+use crate::theme::{self, Palette, STATUS_HEIGHT, STRIP_HEIGHT, SYSTEM_HEIGHT, Tokens};
 use crate::views;
 use crate::{App, Local, RenameTarget};
 
@@ -689,9 +689,10 @@ fn divider(
         })
 }
 
-/// A split divider's thickness, and the gap either side of it.
-const DIVIDER: f32 = 11.0;
-const SPLIT_GAP: f32 = 3.0;
+/// A split divider's thickness, which is the gap between tiles, and the gap
+/// either side of it.
+const DIVIDER: f32 = theme::GAP_TILE;
+const SPLIT_GAP: f32 = 0.0;
 
 /// Whether the set's current tile is under `node`.
 fn holds_focus(node: &RyeOsLayoutNodeVm) -> bool {
@@ -1046,6 +1047,9 @@ fn dialog_layer(dialog: &RyeOsDialogVm, local: &Local) -> El {
         &dialog.instance_key,
         local,
     )));
+    if let Some(foot) = views::table_foot(&dialog.view) {
+        content = content.child(foot);
+    }
     if let Some(input) = dialog.input.as_ref().filter(|input| !input.live_filter) {
         content = content.child(composer(input, local));
     }
@@ -1114,7 +1118,6 @@ fn dialog_layer(dialog: &RyeOsDialogVm, local: &Local) -> El {
 /// buffer, and the submit control. A live filter is the compact form above
 /// its view: Up and Down move the selection, Enter activates it.
 pub fn composer(input: &RyeOsInputVm, local: &Local) -> El {
-    let p = Palette::get();
     let key = crate::input_key(&input.address);
     let edit_key = key.clone();
     let change_address = input.address.clone();
@@ -1123,15 +1126,16 @@ pub fn composer(input: &RyeOsInputVm, local: &Local) -> El {
     let live = input.live_filter;
     let submit_enabled = input.submit_enabled;
     let focused = input.focused;
+    let t = Tokens::get();
     let field_font = if live {
-        theme::data(11.0)
+        theme::TYPE_SMALL
     } else {
-        theme::ui(13.0)
+        theme::TYPE_PROSE
     };
     let mut field = text_input(&local.edits.edit(&key), field_font)
         .key(format!("composer:{key}"))
-        .placeholder(input.placeholder.clone(), p.faint)
-        .color(p.text)
+        .placeholder(input.placeholder.clone(), t.ink_faint())
+        .color(t.ink_body())
         .w_full()
         .on_edit(move |app: &mut App| app.edit_mut(&edit_key))
         .on_input_change(move |app: &mut App, _tx| {
@@ -1188,77 +1192,123 @@ pub fn composer(input: &RyeOsInputVm, local: &Local) -> El {
             true
         });
     field = if live {
-        field.h(38.0).px(14.0).py(10.0)
+        field.h(FILTER_HEIGHT).px(12.0)
     } else {
-        field.min_h(54.0).padding(14.0)
+        field.min_h(COMPOSER_INPUT_HEIGHT)
     };
-    let mut composer = col();
-    composer = if live {
-        composer
+    if live {
+        // The filter line: a bordered line with its key hint at the right.
+        return col()
             .w_full()
-            .fill(p.plane.alpha(0.97))
-            .border_sides([0.0, 0.0, 1.0, 0.0], p.line_strong)
-    } else {
-        composer
-            .fill(p.plane)
-            .border(1.0, p.line_strong)
-            .mt(8.0)
-            .mx(20.0)
-            .mb(18.0)
-    };
-    if !live {
-        composer = composer.child(
-            row()
-                .w_full()
-                .h(30.0)
-                .px(12.0)
-                .gap(8.0)
-                .center_y()
-                .border_sides([0.0, 0.0, 1.0, 0.0], p.line)
-                .child(crate::icons::glyph(&crate::icons::DOT, 9.0, p.green))
-                .child(
-                    text(input.route_label.clone())
-                        .font(theme::data(9.0))
-                        .color(p.muted)
-                        .truncate()
-                        .grow(1.0),
-                )
-                .child(text("DRAFT").font(theme::data(9.0)).color(p.faint)),
-        );
+            .px(theme::PAD_TILE)
+            .py(10.0)
+            .gap(6.0)
+            .border_sides([0.0, 0.0, 1.0, 0.0], t.rule())
+            .child(
+                col()
+                    .w_full()
+                    .radius(theme::RADIUS_ROW)
+                    .border(1.0, t.control_border())
+                    .child(field),
+            )
+            .child(
+                text(input.hint.clone())
+                    .font(theme::TYPE_MICRO)
+                    .color(t.ink_faint())
+                    .w_full(),
+            );
     }
-    composer = composer.child(field);
-    let mut actions = row().w_full().center_y().child(
-        text(input.hint.clone())
-            .font(theme::ui(10.0))
-            .color(p.faint)
-            .grow(1.0),
-    );
-    actions = if live {
-        actions.min_h(24.0).px(14.0).pb(6.0)
-    } else {
-        actions.min_h(34.0).pl(14.0).pr(10.0).pb(7.0)
+    // The composer: the input, then a strip of the route, the hint and send.
+    let chip = |label: String, border: rune::Color| {
+        row()
+            .h(CHIP_HEIGHT)
+            .px(10.0)
+            .gap(6.0)
+            .center_y()
+            .radius(theme::radius_pill(CHIP_HEIGHT))
+            .border(1.0, border)
+            .min_w(0.0)
+            .child(
+                text(label)
+                    .font(theme::TYPE_MICRO)
+                    .color(t.ink_soft())
+                    .truncate(),
+            )
     };
-    if !live {
-        let mut send = el()
-            .key(format!("composer:{key}:submit"))
-            .role("button")
-            .label("Send")
-            .size(27.0, 27.0)
-            .center()
-            .fill(p.accent)
-            .disabled(!submit_enabled)
-            .child(text("↑").font(theme::ui(13.0)).color(p.text));
-        send = if submit_enabled {
-            send.on_press(move |app: &mut App| {
-                app.ui(RyeOsUiEvent::InputAt {
-                    address: button_address.clone(),
-                    action: RyeOsInputAction::Submit { interrupt: false },
-                });
-            })
-        } else {
-            send.opacity(0.5)
-        };
-        actions = actions.child(send);
-    }
-    composer.child(actions)
+    // A draft is pending until it is sent: the accent border and a dot.
+    let pending = row()
+        .h(CHIP_HEIGHT)
+        .px(10.0)
+        .gap(6.0)
+        .center_y()
+        .radius(theme::radius_pill(CHIP_HEIGHT))
+        .border(1.0, t.accent.alpha(PENDING_BORDER))
+        .child(
+            el().size(PENDING_DOT, PENDING_DOT)
+                .radius(PENDING_DOT / 2.0)
+                .fill(t.accent),
+        )
+        .child(text("DRAFT").font(theme::TYPE_MICRO).color(t.ink_soft()));
+    let mut send = el()
+        .key(format!("composer:{key}:submit"))
+        .role("button")
+        .label("Send")
+        .size(SEND_SIZE, SEND_SIZE)
+        .center()
+        .radius(SEND_SIZE / 2.0)
+        .fill(t.ink)
+        .disabled(!submit_enabled)
+        .child(text("↑").font(theme::TYPE_LINE).color(t.bg));
+    send = if submit_enabled {
+        send.on_press(move |app: &mut App| {
+            app.ui(RyeOsUiEvent::InputAt {
+                address: button_address.clone(),
+                action: RyeOsInputAction::Submit { interrupt: false },
+            });
+        })
+    } else {
+        send.opacity(0.5)
+    };
+    let strip = row()
+        .w_full()
+        .center_y()
+        .gap(8.0)
+        .child(chip(input.route_label.clone(), t.control_border()))
+        .child(pending)
+        .child(el().grow(1.0))
+        .child(chip(input.hint.clone(), t.control_border()))
+        .child(send);
+    let boxed = col()
+        .w_full()
+        .max_w(COMPOSER_COLUMN)
+        .padding(COMPOSER_PAD)
+        .gap(COMPOSER_GAP)
+        .radius(theme::RADIUS_TILE)
+        .fill(t.bg_at(COMPOSER_FILL))
+        .border(1.0, t.control_border())
+        .child(field)
+        .child(strip);
+    col()
+        .w_full()
+        .px(theme::PAD_TILE + 6.0)
+        .pt(COMPOSER_GAP)
+        .pb(18.0)
+        .items_center()
+        .child(boxed)
 }
+
+/// The composer's box: its widest, its padding, the gap between its input and
+/// its strip, and its fill as an opacity of `bg`.
+const COMPOSER_COLUMN: f32 = 720.0;
+const COMPOSER_PAD: f32 = 14.0;
+const COMPOSER_GAP: f32 = 16.0;
+const COMPOSER_FILL: f32 = 0.55;
+const COMPOSER_INPUT_HEIGHT: f32 = 24.0;
+/// A chip in the strip, and the send button's diameter.
+const CHIP_HEIGHT: f32 = 24.0;
+const SEND_SIZE: f32 = 30.0;
+/// A pending draft's chip: its border as an opacity of `accent`, and its dot.
+const PENDING_BORDER: f32 = 0.6;
+const PENDING_DOT: f32 = 5.0;
+/// The filter line's height.
+const FILTER_HEIGHT: f32 = 30.0;

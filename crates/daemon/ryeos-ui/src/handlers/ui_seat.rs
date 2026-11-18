@@ -358,7 +358,7 @@ pub fn admit_seat_root(
         origin_site_id: state.threads.site_id(),
         thread_profile: seat_kind(state)?,
     };
-    match project_access {
+    let admission = match project_access {
         Some(access) => {
             ryeos_app::thread_lifecycle::admit_non_execution_root_under_project_authority(
                 &state.engine,
@@ -374,7 +374,31 @@ pub fn admit_seat_root(
             request,
         ),
     }
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))
+    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    // A shared-presentation Config root names the shell's mount, dialogs and
+    // initial Surfaces, and the session's binding reads it from installed
+    // bundles only. The seat's recorded root must be that same item: a
+    // project file that took the Config's ref would otherwise become the
+    // recorded root of a session whose binding names the node's.
+    let root = &admission.verified_subject().resolved;
+    if root.kind == "config" && root.source_space == ryeos_engine::contracts::ItemSpace::Project {
+        return Err(HandlerError::Structured {
+            code: "shell_config_from_project".to_string(),
+            status: 409,
+            body: serde_json::json!({
+                "code": "shell_config_from_project",
+                "error": format!(
+                    "shell presentation config `{surface_ref}` is also supplied by the project at {}; the shell reads it from installed bundles only, so the project file must be renamed or removed",
+                    root.source_path.display()
+                ),
+                "item_ref": surface_ref,
+                "project_path": root.source_path.display().to_string(),
+                "retryable": false,
+                "remediation": "rename or remove the project file",
+            }),
+        });
+    }
+    Ok(admission)
 }
 
 fn presentation_executor_ref(presentation_id: &str, root: &BindingAttachmentCoordinate) -> String {

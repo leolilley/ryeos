@@ -618,6 +618,9 @@ pub enum RuntimeEventType {
     /// Daemon-authored record of the root kind a launch attempt's process
     /// inputs were laid out in (no paths).
     ProcessInputRootSelected,
+    /// Daemon-authored record, in a rebound successor's birth batch, of the
+    /// ref bindings an operator replaced and the launch facts before and after.
+    LaunchBindingRebound,
     /// A `(key, value)` metadata tag stamped on a thread post-launch (cohort
     /// identity, e.g. `fleet`/`game`). Event-backed so it survives a projection
     /// rebuild, unlike a bare facet-table write.
@@ -709,6 +712,7 @@ impl RuntimeEventType {
             Self::RuntimeLaunchFacts => wire::RUNTIME_LAUNCH_FACTS,
             Self::LaunchAugmentationCacheHit => wire::LAUNCH_AUGMENTATION_CACHE_HIT,
             Self::ProcessInputRootSelected => wire::PROCESS_INPUT_ROOT_SELECTED,
+            Self::LaunchBindingRebound => wire::LAUNCH_BINDING_REBOUND,
             Self::ThreadFacetSet => wire::THREAD_FACET_SET,
             Self::CognitionIn => wire::COGNITION_IN,
             Self::CognitionOut => wire::COGNITION_OUT,
@@ -769,6 +773,7 @@ impl RuntimeEventType {
             wire::RUNTIME_LAUNCH_FACTS => Ok(Self::RuntimeLaunchFacts),
             wire::LAUNCH_AUGMENTATION_CACHE_HIT => Ok(Self::LaunchAugmentationCacheHit),
             wire::PROCESS_INPUT_ROOT_SELECTED => Ok(Self::ProcessInputRootSelected),
+            wire::LAUNCH_BINDING_REBOUND => Ok(Self::LaunchBindingRebound),
             wire::THREAD_FACET_SET => Ok(Self::ThreadFacetSet),
             wire::COGNITION_IN => Ok(Self::CognitionIn),
             wire::COGNITION_OUT => Ok(Self::CognitionOut),
@@ -877,6 +882,7 @@ impl RuntimeEventType {
             | Self::RuntimeLaunchFacts
             | Self::LaunchAugmentationCacheHit
             | Self::ProcessInputRootSelected
+            | Self::LaunchBindingRebound
             | Self::ThreadFacetSet
             | Self::CognitionIn
             | Self::CognitionOut
@@ -952,6 +958,7 @@ impl RuntimeEventType {
             | Self::RuntimeLaunchFacts
             | Self::LaunchAugmentationCacheHit
             | Self::ProcessInputRootSelected
+            | Self::LaunchBindingRebound
             | Self::ThreadFacetSet
             | Self::CognitionIn
             | Self::CognitionOut
@@ -1164,6 +1171,7 @@ mod tests {
             RuntimeEventType::RuntimeLaunchFacts,
             RuntimeEventType::LaunchAugmentationCacheHit,
             RuntimeEventType::ProcessInputRootSelected,
+            RuntimeEventType::LaunchBindingRebound,
             RuntimeEventType::ThreadFacetSet,
             RuntimeEventType::CognitionIn,
             RuntimeEventType::CognitionOut,

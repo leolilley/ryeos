@@ -105,7 +105,7 @@ fn pinned_generation_authority() -> ExecutionProjectAuthority {
         stable_project_identity: "project".to_string(),
         display_path: None,
         base_snapshot_hash: "a".repeat(64),
-        snapshot_hash: "b".repeat(64),
+        snapshot_hash: "a".repeat(64),
         realization: ryeos_state::objects::PinnedProjectRealization::ReadOnly,
         workspace_outputs: None,
         environment: EnvironmentAuthority::None,
@@ -845,10 +845,10 @@ async fn project_file_shadowing_a_bound_view_leaves_that_view_unavailable_with_i
 }
 
 /// A project file at the ref of the shell's presentation config is never
-/// read, even when it is signed by a key the node trusts. The shell config
-/// is resolved from installed bundles only, so the session's root is the
-/// node's own config, identical to the root of a project that ships no such
-/// file.
+/// read for the session's binding, even when it is signed by a key the node
+/// trusts: the root is the node's own config, identical to the root of a
+/// project that ships no such file. Seating that session is refused by name,
+/// so the file cannot become the seat's recorded root either.
 #[tokio::test]
 async fn project_config_at_the_shell_presentation_ref_is_never_read() {
     let (_state_dir, _state_owner, state) = test_state::build_test_state_with_live_bundles();
@@ -861,7 +861,7 @@ async fn project_config_at_the_shell_presentation_ref_is_never_read() {
         &ryeos_engine::test_support::workspace_root().join(".dev-keys/PUBLISHER_DEV.pem"),
     )
     .expect("established development publisher key");
-    let body = "category: test\nversion: '1'\nshared_presentation:\n  schema: 2\n  title: Decoy shell\n  launcher: launch\n  dialogs:\n    - id: launch\n      title: Launch\n      view: 'view:ryeos/ui/launcher'\n  capabilities:\n    sources: ['*']\n    affordances: ['*']\n";
+    let body = "category: ryeos/ui\nversion: '1'\nshared_presentation:\n  schema: 2\n  title: Decoy shell\n  launcher: launch\n  dialogs:\n    - id: launch\n      title: Launch\n      view: 'view:ryeos/ui/launcher'\n  capabilities:\n    sources: ['*']\n    affordances: ['*']\n";
     write_project_file(
         &decoy,
         ".ai/config/ryeos/ui/presentation.yaml",
@@ -869,19 +869,36 @@ async fn project_config_at_the_shell_presentation_ref_is_never_read() {
     );
 
     let mut roots = Vec::new();
+    let mut decoy_session = None;
     for project in [&plain, &decoy] {
-        let (session_id, _context, _producer, coordinate) =
-            test_state::live_shipped_presentation_in_project(&state, project).await;
+        let principal = test_state::register_fixture_project(&state, project).await;
+        let minted = ryeos_ui::handlers::ui_launch_mint::handle(
+            ryeos_ui::handlers::ui_launch_mint::Request {
+                ui_binding_contract_revision: ryeos_ui::UI_BINDING_CONTRACT_REVISION.into(),
+                root_ref: "config:ryeos/ui/presentation".into(),
+                project_path: Some(project.display().to_string()),
+                user_principal_id: Some(principal.clone()),
+                scopes: None,
+            },
+            HandlerContext::new(principal, vec!["*".into()], true),
+            Arc::new(state.clone()),
+        )
+        .await
+        .expect("mint the shell session");
         let session = get_ui_state(&state)
             .expect("UI state")
             .browser_sessions
-            .get_session(&session_id)
+            .get_session(minted["session_id"].as_str().expect("session id"))
             .expect("active session");
         let attachment = session
             .attachments
-            .get(&coordinate.binding_attachment_id)
-            .expect("root attachment");
+            .get(&session.root_attachment_id)
+            .expect("root attachment")
+            .clone();
         roots.push(attachment.compiled_binding.binding.surface.clone());
+        if project == &decoy {
+            decoy_session = Some(attachment);
+        }
     }
 
     assert_eq!(roots[0].canonical_ref, "config:ryeos/ui/presentation");
@@ -893,6 +910,30 @@ async fn project_config_at_the_shell_presentation_ref_is_never_read() {
         roots[1], roots[0],
         "the project's config at the shell's ref must not change the session root"
     );
+
+    let access = ryeos_ui::seat_auth::SeatCaller::Attachment(decoy_session.expect("decoy session"))
+        .project_access()
+        .expect("project access")
+        .expect("bound project");
+    let refused = ryeos_ui::handlers::ui_seat::admit_seat_root(
+        &state,
+        "config:ryeos/ui/presentation",
+        Some(&access),
+        "session:decoy",
+        Vec::new(),
+    );
+    match refused {
+        Err(ryeos_app::handler_error::HandlerError::Structured { code, body, .. }) => {
+            assert_eq!(code, "shell_config_from_project");
+            assert!(
+                body["project_path"]
+                    .as_str()
+                    .is_some_and(|path| path.ends_with(".ai/config/ryeos/ui/presentation.yaml")),
+                "{body}"
+            );
+        }
+        other => panic!("a project file at the shell config's ref must be refused, got {other:?}"),
+    }
 }
 
 /// Opening a session on a shipped Surface fails when the project holds a
@@ -932,7 +973,12 @@ async fn project_file_shadowing_a_shipped_surface_fails_the_open_with_the_named_
             assert_eq!(code, "project_shadows_bundle_item");
             assert_eq!(status, 409);
             assert_eq!(body["item_ref"], "surface:ryeos/ui/project");
-            assert_eq!(body["bundle"], "ryeos-ui");
+            assert!(
+                body["bundle_path"]
+                    .as_str()
+                    .is_some_and(|path| path.contains("bundles/ryeos-ui/")),
+                "{body}"
+            );
             assert!(
                 body["project_path"]
                     .as_str()

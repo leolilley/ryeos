@@ -3036,6 +3036,50 @@ mod tests {
                 }
             }
         }
+        // The product's executable is the node store's shared executable
+        // inode (0555, linked once per generation), as a realization binds
+        // it, not a 0755 copy: the package must still carry the portable
+        // mode its manifest declares.
+        let store_dir = tempfile::tempdir_in(source_fixture.path().parent().unwrap()).unwrap();
+        {
+            use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+            let runtime = lillux::PinnedDirectory::open_or_create(store_dir.path()).unwrap();
+            let store = ryeos_state::LargeObjectStore::open_with_chunk_bytes(&runtime, 8).unwrap();
+            let source = store_dir.path().join("tool-source");
+            std::fs::write(&source, b"tool").unwrap();
+            let file = std::fs::File::open(&source).unwrap();
+            let identity = ryeos_state::PinnedLargeObjectSourceIdentity {
+                file: lillux::pinned_regular_file_identity(&file).unwrap(),
+                size: 4,
+            };
+            let tool = store
+                .ingest_open_regular(file, identity, "tool-source", None)
+                .unwrap()
+                .file_sha256;
+            let executable = store.lease_executable_object(&tool, 4).unwrap();
+            let generation =
+                lillux::PinnedDirectory::open_or_create(&store_dir.path().join("other-generation"))
+                    .unwrap();
+            store
+                .link_executable_object_into(
+                    &tool,
+                    &generation,
+                    OsStr::new("tool"),
+                    executable.file(),
+                )
+                .unwrap();
+            std::fs::remove_file(source_fixture.path().join("input-01/bin/tool")).unwrap();
+            let bin = lillux::PinnedDirectory::open(&source_fixture.path().join("input-01/bin"))
+                .unwrap()
+                .unwrap();
+            store
+                .link_executable_object_into(&tool, &bin, OsStr::new("tool"), executable.file())
+                .unwrap();
+            let linked =
+                std::fs::metadata(source_fixture.path().join("input-01/bin/tool")).unwrap();
+            assert_eq!(linked.permissions().mode() & 0o777, 0o555);
+            assert!(linked.nlink() >= 3);
+        }
         let source_root = lillux::PinnedDirectory::open(source_fixture.path())
             .unwrap()
             .unwrap();
@@ -3140,6 +3184,10 @@ mod tests {
             produced_manifest.guest_input_identity,
             manifest.guest_input_identity
         );
+        assert!(produced_manifest.entries.iter().any(|entry| {
+            matches!(entry, GuestStagingEntry::RegularFile { path, mode: 0o755, .. }
+                if path == "input-01/bin/tool")
+        }));
         for executable in ["supervisor", "launcher"] {
             assert!(produced_manifest.entries.iter().any(|entry| {
                 matches!(entry, GuestStagingEntry::RegularFile { path, mode: 0o500, .. }

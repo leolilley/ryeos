@@ -9,7 +9,7 @@ use ryeos_client_base::ui::view_model::{RyeOsInputVm, RyeOsViewModel, RyeOsViewV
 use super::input::draw_input_tile;
 use super::primitives::{fill_line, fill_rect};
 use super::text::{display_width, letterspace, truncate};
-use super::theme::{ACCENT, BG, FG, MUTED, WARN, mix_toward, style_muted, tone_style};
+use super::theme::{ACCENT, BG, FG, MUTED, WARN, mix_toward, style_fg, style_muted, tone_style};
 
 pub fn draw_top_bar(surface: &mut TextSurface, vm: &RyeOsViewModel) {
     let tabs = &vm.presentation.chrome.top_bar.tabs;
@@ -216,7 +216,7 @@ pub fn draw_tile(
         let title_style = if focused {
             Style::new().fg(ACCENT).bg(BG).bold()
         } else {
-            style_muted()
+            style_fg().bold()
         };
         surface.draw_text(
             x + 2,
