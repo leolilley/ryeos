@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-13T13:05:39Z:f99365a4d2a881f2042e831067d50af8efb097d1b60dc3ba96c9df60bb57c7b5:ZPAdWfKW/Dma5jQPAWDp31A0o99RUSlnrDlT4oSiXZBzz/UAGQy983Gy1CGIx1I4u96mUmhTWoB2kCkQ/WjvDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T04:15:43Z:c9e7399a104fb0254d0cdf2eff1db5bd09583a51dd1f52f41be54459702cd675:G9zURS3Av9XsHacZlI7LDmBepOb0XVUWcMTGtCOcCrWDx7wB9KTC1R2hfuwkepq23w2Sfx9e1FZ1it8w2nkPCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Externally invoked host helper in the development bundle; lib/ is excluded
 # from Tool resolution, so this is signed source, not an admitted Tool. It
 # grants no RyeOS authority. Run it from a checkout of this repository.
 # Build the Rune browser renderer into the daemon's closed asset set:
-#   crates/clients/rune/pkg/{index.html, ryeos_boot.js, ryeos_rune.js, rune_bridge.js,
-#                             rune_platform.js, ryeos_rune_bg.wasm.gz, ryeos-cjk.ttf.gz,
-#                             ryeos-emoji.ttf.gz}
+#   crates/clients/rune/pkg/{index.html, ryeos_boot.js, ryeos_rune.js, ryeos_rune_bg.wasm.gz,
+#                             ryeos-cjk.ttf.gz, ryeos-emoji.ttf.gz, rune_<snippet>.js ...}
+# where the snippets are the ones listed in rune-snippets.toml.
 # then refresh the registry digests. The renderer builds in the size-first `web` profile; it
 # and the coverage fonts (crates/clients/rune/web/fonts, from browser-assets-production/lib/build-rune-fonts.py) are stored
 # gzip-encoded, which the daemon serves as is. Output is byte-identical across checkouts:
@@ -14,7 +14,7 @@
 # hashed snippet folders are flattened to fixed names so the registry never sees a rotating
 # hash.
 #
-# --out DIR writes the eight files into DIR instead and leaves pkg/ and the registry alone
+# --out DIR writes the same files into DIR instead and leaves pkg/ and the registry alone
 # (the signed browser-assets-production tool checks and publishes through it).
 #
 # Environment: CARGO (default cargo), CARGO_TARGET_DIR (default <repo>/target),
@@ -36,6 +36,8 @@ if [[ $# -gt 0 ]]; then
     fi
 fi
 
+snippet_list=$(dirname "$0")/rune-snippets.toml
+
 locked=$(python3 -I -c 'import sys, tomllib; print(next(p["version"] for p in tomllib.load(open(sys.argv[1], "rb"))["package"] if p["name"] == "wasm-bindgen"))' "$root/Cargo.lock")
 if [[ $("$bindgen" --version) != "wasm-bindgen $locked" ]]; then
     echo "wasm-bindgen CLI must be $locked (set WASM_BINDGEN): $("$bindgen" --version)" >&2
@@ -52,20 +54,26 @@ stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 "$bindgen" --target web --out-dir "$stage/out" --out-name ryeos_rune "$artifact"
 
-# Flatten the two snippet modules Rune's web platform ships and point the bindings at them.
-python3 -I - "$stage/out" <<'PY'
-import pathlib, re, sys
+# Flatten the snippet modules Rune's web platform ships (exactly those in rune-snippets.toml)
+# to rune_<file stem>.js and point the bindings at them.
+python3 -I - "$stage/out" "$snippet_list" <<'PY'
+import pathlib, re, sys, tomllib
 out = pathlib.Path(sys.argv[1])
+listed = set(tomllib.loads(pathlib.Path(sys.argv[2]).read_text())["snippets"])
 bindings = out / "ryeos_rune.js"
 source = bindings.read_text()
 specifiers = sorted(set(re.findall(r"""['"](\./snippets/[^'"]+)['"]""", source)))
-names = {"bridge.js": "rune_bridge.js", "platform.js": "rune_platform.js"}
-if len(specifiers) != 2 or {pathlib.PurePosixPath(s).name for s in specifiers} != set(names):
-    raise SystemExit(f"expected exactly Rune's bridge and platform snippets, found {specifiers}")
+# A specifier is ./snippets/<crate>-<hash>/<path relative to the crate>.
+emitted = {re.sub(r"^\./snippets/[^/]+/", "", s) for s in specifiers}
+if emitted != listed or len(emitted) != len(specifiers):
+    raise SystemExit(
+        "Rune's snippets differ from rune-snippets.toml: "
+        f"unexpected={sorted(emitted - listed)} missing={sorted(listed - emitted)} found={specifiers}"
+    )
 # Only the module specifiers move: the same path string is also the key the wasm module imports
 # under, and that key must stay as wasm-bindgen wrote it.
 for specifier in specifiers:
-    flat = names[pathlib.PurePosixPath(specifier).name]
+    flat = f"rune_{pathlib.PurePosixPath(specifier).stem}.js"
     (out / flat).write_bytes((out / specifier).read_bytes())
     source, count = re.subn(r"""(\bfrom\s*)(['"])""" + re.escape(specifier) + r"\2", rf"\1\2./{flat}\2", source)
     if count == 0:
@@ -78,7 +86,12 @@ PY
 dest=${out:-$pkg}
 mkdir -p "$dest"
 [[ -n $out ]] || find "$pkg" -maxdepth 1 -type f -delete
-cp "$stage/out/ryeos_rune.js" "$stage/out/rune_bridge.js" "$stage/out/rune_platform.js" "$dest/"
+cp "$stage/out/ryeos_rune.js" "$dest/"
+python3 -I - "$snippet_list" <<'PY' | while read -r flat; do cp "$stage/out/$flat" "$dest/"; done
+import pathlib, sys, tomllib
+for path in tomllib.loads(pathlib.Path(sys.argv[1]).read_text())["snippets"]:
+    print(f"rune_{pathlib.PurePosixPath(path).stem}.js")
+PY
 cp "$root/crates/clients/rune/web/index.html" "$root/crates/clients/rune/web/ryeos_boot.js" "$dest/"
 # Stored gzip-encoded: level 9, no file name, no time.
 python3 -I - "$dest" "$stage/out/ryeos_rune_bg.wasm" \

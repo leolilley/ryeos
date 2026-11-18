@@ -4432,6 +4432,7 @@ dependencies = [
  "bitflags 2.13.2",
  "ryeos-changeset",
  "ryeos-engine",
+ "ryeos-timeline",
  "ryeos-ui-presentation-contract",
  "serde",
  "serde_json",

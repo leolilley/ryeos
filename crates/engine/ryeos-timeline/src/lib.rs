@@ -20,6 +20,20 @@ mod path;
 
 pub use fold::{Folder, fold};
 
+/// The version of the timeline contract: the shape of the timeline response
+/// (items, ids, paging, upserts, lane, summary, definition identity) and the
+/// meaning of its fields. The response carries it as `timeline_contract`, and
+/// a client that does not speak exactly this version refuses the response; no
+/// client reads an older shape. The contract document names the same string,
+/// and a test fails when the two drift.
+pub const TIMELINE_CONTRACT_VERSION: &str = "ryeos.timeline.v2";
+
+/// Id prefix of a cluster (`cl:<id of its first member>`).
+pub const CLUSTER_ID_PREFIX: &str = "cl";
+
+/// Id prefix of a recap (`rc:<id of the first entry it folds>`).
+pub const RECAP_ID_PREFIX: &str = "rc";
+
 /// How events fold into entries. Parsed from signed data.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -399,7 +413,20 @@ pub enum EntryKind {
 }
 
 impl EntryKind {
-    pub(crate) fn prefix(self) -> &'static str {
+    /// Every entry type, in the order the contract document lists them.
+    pub const ALL: [EntryKind; 8] = [
+        Self::Message,
+        Self::Prose,
+        Self::Thought,
+        Self::Activity,
+        Self::Link,
+        Self::Marker,
+        Self::Outcome,
+        Self::Ask,
+    ];
+
+    /// The id prefix of entries of this type (`<prefix>:<key>`).
+    pub fn prefix(self) -> &'static str {
         match self {
             Self::Message => "msg",
             Self::Prose => "pro",
