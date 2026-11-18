@@ -1174,6 +1174,23 @@ fn edit_fixture_config_in_place(state: &ryeos_app::state::AppState) {
     .unwrap();
 }
 
+/// The route answers a claim on an edited Config with the binding's own typed
+/// refusal: the structured 409 `ui_binding_stale`, carried across the service
+/// boundary with its code and status, never an internal error.
+fn assert_stale_binding_refusal(refused: &anyhow::Error) {
+    let route_error = refused
+        .downcast_ref::<ryeos_api::route_error::RouteDispatchError>()
+        .unwrap_or_else(|| panic!("the refusal is a route answer: {refused:#}"));
+    assert!(
+        matches!(
+            route_error,
+            ryeos_api::route_error::RouteDispatchError::Structured { code, status: 409, .. }
+                if code == "ui_binding_stale"
+        ),
+        "{route_error:?}"
+    );
+}
+
 /// A seat whose initialization record was written but whose admission no
 /// longer holds, as after a prepare that answered an error past its writes,
 /// is refused at claim with a typed conflict, and claims nothing. An ordinary
@@ -1207,20 +1224,7 @@ async fn claim_refuses_a_seat_whose_admission_no_longer_holds() {
     let refused = route(&state, &session, &OPEN_DESCRIPTOR, request)
         .await
         .expect_err("a stale admission cannot be claimed");
-    let handler_error = refused
-        .downcast_ref::<ryeos_app::handler_error::HandlerError>()
-        .unwrap_or_else(|| panic!("the refusal is typed, not internal: {refused:#}"));
-    assert!(
-        matches!(
-            handler_error,
-            ryeos_app::handler_error::HandlerError::Structured { code, status: 409, .. }
-                if code == "ui_binding_stale"
-        ) || matches!(
-            handler_error,
-            ryeos_app::handler_error::HandlerError::Conflict(_)
-        ),
-        "{handler_error:?}"
-    );
+    assert_stale_binding_refusal(&refused);
 
     // Nothing was claimed: the seat has no producer.
     let observed = observe(&state, &session, &prepared).await.unwrap();
@@ -1279,20 +1283,7 @@ async fn a_committed_claim_is_replayed_after_the_admission_stops_holding() {
     let refused = route(&state, &session, &OPEN_DESCRIPTOR, other)
         .await
         .expect_err("a new claim on a stale admission is refused");
-    let handler_error = refused
-        .downcast_ref::<ryeos_app::handler_error::HandlerError>()
-        .unwrap_or_else(|| panic!("the refusal is typed, not internal: {refused:#}"));
-    assert!(
-        matches!(
-            handler_error,
-            ryeos_app::handler_error::HandlerError::Structured { code, status: 409, .. }
-                if code == "ui_binding_stale"
-        ) || matches!(
-            handler_error,
-            ryeos_app::handler_error::HandlerError::Conflict(_)
-        ),
-        "{handler_error:?}"
-    );
+    assert_stale_binding_refusal(&refused);
 }
 
 #[tokio::test]
