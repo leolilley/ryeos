@@ -125,10 +125,15 @@ pub fn shell(
         .h_full()
         .fill(p.bg)
         .on_layout(|app: &mut App, rect: [f32; 4]| app.set_viewport(rect[2], rect[3]))
+        // The switcher is pinned, so its place in the child list does not move
+        // it on screen; first here, keyboard focus starts at the open Surfaces.
+        .child(system_bar(vm, local))
         .child(view_set_strip(&chrome.top_bar, local))
         .child(main)
-        .child(status_bar(vm))
-        .child(system_bar(vm, local));
+        .child(status_bar(vm));
+    if let Some(dot) = hidden_health_dot(vm) {
+        page = page.child(dot);
+    }
     if !vm.notices.is_empty() || !documents.is_empty() {
         page = page.child(notices(&vm.notices, documents));
     }
@@ -180,6 +185,30 @@ fn system_bar(vm: &RyeOsViewModel, local: &Local) -> El {
         });
     for surface in &session.surfaces {
         chips = chips.child(surface_entry(surface, local));
+    }
+    // With no open Surface the session's initial stands in, as the old bar
+    // showed the session's title.
+    if session.surfaces.is_empty() {
+        let initial: String = session
+            .title
+            .chars()
+            .next()
+            .map(|c| c.to_uppercase().collect())
+            .unwrap_or_default();
+        chips = chips.child(
+            col()
+                .size(theme::SWITCHER_CHIP, theme::SWITCHER_CHIP)
+                .center()
+                .radius(theme::RADIUS_ROW)
+                .border(1.0, t.ink_at(0.14))
+                .role("tab")
+                .label(session.title.clone())
+                .child(
+                    text(initial)
+                        .font(theme::medium(theme::TYPE_MICRO))
+                        .color(t.ink_at(0.55)),
+                ),
+        );
     }
     // The column is bounded by a pin on top and bottom (clear of the status
     // bar), so a long list scrolls instead of growing over the body.
@@ -331,7 +360,8 @@ fn view_set_strip(top_bar: &RyeOsTopBarVm, local: &Local) -> El {
     let mut tabs = row()
         .h_full()
         .min_w(0.0)
-        .gap(28.0)
+        .shrink()
+        .gap(8.0)
         .center_y()
         .scroll_x();
     // look: the plus does not stay fixed at the right while the tabs scroll.
@@ -368,6 +398,8 @@ fn view_set_strip(top_bar: &RyeOsTopBarVm, local: &Local) -> El {
             // carry a 5 px warn dot, which the view model does not say.
             slot.child(
                 row()
+                    .h_full()
+                    .px(10.0)
                     .center_y()
                     .role("tab")
                     .label(tab.title.clone())
@@ -424,12 +456,13 @@ fn view_set_strip(top_bar: &RyeOsTopBarVm, local: &Local) -> El {
     row()
         .w_full()
         .h(theme::TABS_HEIGHT)
-        .px(18.0)
-        .gap(28.0)
+        // The switcher's room plus the band's own 18, so tabs clear the switcher.
+        .pl(theme::SWITCHER_ROOM + 18.0)
+        .pr(18.0)
+        .gap(20.0)
         .center_y()
         .role("navigation")
         .label("View sets")
-        .child(el().grow(1.0))
         .child(tabs)
         .child(
             col()
@@ -446,9 +479,10 @@ fn view_set_strip(top_bar: &RyeOsTopBarVm, local: &Local) -> El {
                 }),
         )
         .child(el().grow(1.0))
+        // The focus readout takes its own slot in the flow, so the tabs are
+        // bounded between the left padding and it.
         .child(
             row()
-                .pin(None, Some(0.0), Some(18.0), Some(0.0))
                 .center_y()
                 .gap(14.0)
                 .label("Focused view and layout")
@@ -871,6 +905,31 @@ pub(crate) fn menu_intents<'a>(
 
 /// The floating status bar: two islands, the launcher and key hints at the
 /// left, the core's status segments and the node's health at the right.
+/// The health dot's colour: a feed that is not current tints it warn
+/// whatever the health says.
+fn health_color(vm: &RyeOsViewModel) -> rune::Color {
+    let t = Tokens::get();
+    if vm.transport.freshness == RyeOsTransportFreshness::Current {
+        t.tone(vm.chrome.health_tone).unwrap_or(t.ink_dim())
+    } else {
+        t.warn
+    }
+}
+
+/// With the status bar hidden, a lone dot at the bottom-right keeps the
+/// node's health visible. No text, key, handler or focus.
+fn hidden_health_dot(vm: &RyeOsViewModel) -> Option<El> {
+    if vm.presentation.chrome.status_bar.visible {
+        return None;
+    }
+    Some(
+        el().size(6.0, 6.0)
+            .radius(3.0)
+            .fill(health_color(vm))
+            .pin(None, None, Some(14.0), Some(14.0)),
+    )
+}
+
 fn status_bar(vm: &RyeOsViewModel) -> El {
     let t = Tokens::get();
     let model = &vm.presentation.chrome.status_bar;
@@ -896,14 +955,13 @@ fn status_bar(vm: &RyeOsViewModel) -> El {
     };
     let dot = |color: rune::Color| el().size(6.0, 6.0).radius(3.0).fill(color);
     let rule = || el().w(1.0).h(12.0).fill(t.ink_at(0.14));
-    let launcher = row()
-        .key("shell:launch")
-        .role("button")
-        .label("Open the launcher")
+    // The pressable row takes the island's full height; the 20 high chip is
+    // drawn inside it, centred.
+    let chip = row()
         .h(20.0)
         .min_w(20.0)
         .px(6.0)
-        .center_y()
+        .center()
         .radius(5.0)
         .border(
             1.0,
@@ -914,11 +972,14 @@ fn status_bar(vm: &RyeOsViewModel) -> El {
             },
         )
         .hover(t.select_fill())
-        .child(
-            text("Launch")
-                .font(theme::medium(theme::TYPE_MICRO))
-                .color(t.ink_at(0.60)),
-        )
+        .child(crate::icons::glyph(&crate::icons::PLUS, 11.0, t.ink_at(0.60)));
+    let launcher = row()
+        .key("shell:launch")
+        .role("button")
+        .label("Open the launcher")
+        .h(theme::ISLAND_HEIGHT)
+        .center_y()
+        .child(chip)
         .on_press(|app: &mut App| app.ui(RyeOsUiEvent::OpenLauncher));
     let keys = island()
         .min_w(0.0)
@@ -958,11 +1019,7 @@ fn status_bar(vm: &RyeOsViewModel) -> El {
     }
     // The node's health, moved here from the top of the frame. A feed that is
     // not current tints the dot whatever the health says.
-    let health = if vm.transport.freshness == RyeOsTransportFreshness::Current {
-        t.tone(vm.chrome.health_tone).unwrap_or(t.ink_dim())
-    } else {
-        t.warn
-    };
+    let health = health_color(vm);
     status = status.child(
         row()
             .gap(6.0)
@@ -1186,6 +1243,7 @@ fn dialog_layer(dialog: &RyeOsDialogVm, local: &Local) -> El {
     col()
         .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
         .items_center()
+        // 120, not the spec's 150: 150 plus the 640 max height and the 18 bottom overflows an 800-high window.
         .pt(if local.narrow() { 36.0 } else { 120.0 })
         .px(if local.narrow() { 8.0 } else { 18.0 })
         .pb(if local.narrow() { 8.0 } else { 18.0 })

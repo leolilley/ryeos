@@ -346,7 +346,8 @@ fn the_chrome_never_shows_the_project_path() {
 /// carries no product name.
 #[test]
 fn the_status_bar_shows_only_its_segments() {
-    let rt = shell("", (1280.0, 800.0));
+    let (width, _) = (1280.0_f32, 800.0_f32);
+    let rt = shell("", (width, 800.0));
     let vm = model(&rt);
     let status = &vm.presentation.chrome.status_bar;
     let Some([_, top, _, height]) = keyed(&rt, "shell:launch") else {
@@ -362,9 +363,29 @@ fn the_status_bar_shows_only_its_segments() {
     let launch_right = launch_x + launch_w;
     // The islands share one row; read the whole band the launcher sits in.
     let shown = texts_in_band(&rt, top, top + height);
+    // The dialog is not open in this fixture, so no text "Launch" belongs in
+    // the status band: the launch control draws a glyph, not a word.
     assert!(
-        shown.contains(&"Launch".to_owned()),
-        "the launch control's name in {shown:?}"
+        !shown.iter().any(|text| text == "Launch"),
+        "the launch control carries no visible wording, saw {shown:?}"
+    );
+    // The left island is every text on the control's row left of the window's
+    // middle: it holds nothing but the key hint. The hint is checked by its
+    // ASCII core, since the drawn form may substitute glyphs the faces lack.
+    let left: Vec<(String, [f32; 4])> = drawn_texts(&rt)
+        .into_iter()
+        .filter(|(_, [x, y, _, h])| {
+            let middle = y + h / 2.0;
+            *x >= 0.0 && *x < width / 2.0 && middle >= launch_y && middle <= launch_y + launch_h
+        })
+        .collect();
+    assert!(
+        status.key_hint.contains("ctrl+k open"),
+        "the fixture's hint keeps its ASCII core"
+    );
+    assert!(
+        left.len() == 1 && left[0].0.contains("ctrl+k open"),
+        "only the key hint in the left island, saw {left:?}"
     );
     // A text is in the right island when it is right of the launch control and
     // its vertical centre is within the launch control's top..bottom band.
@@ -390,6 +411,13 @@ fn the_status_bar_shows_only_its_segments() {
             segment.value
         );
     }
+    assert!(
+        drawn_texts(&rt)
+            .iter()
+            .any(|(text, [x, _, _, _])| *text == vm.chrome.health_label && *x > width / 2.0),
+        "the node health {:?} sits right of the window's middle",
+        vm.chrome.health_label
+    );
     assert!(
         in_right_island(&vm.chrome.health_label),
         "the node health {:?} in the right island, saw {shown:?}",
@@ -514,11 +542,13 @@ fn the_switcher_holds_the_left_edge_and_the_status_islands_float() {
     };
     // The status row has a 10 inset at the sides and the bottom and each island
     // pads 12, so the launch control sits at x = 10 + 12. The row is 40 high
-    // with 10 beneath; its 30 high island holds the 20 high launch control
-    // centred, leaving 5 below it: bottom = height - 10 - (30 - 20) / 2.
+    // with 10 beneath; the pressable launch row takes the island's full 30
+    // height (the 20 high chip is drawn inside it), so its bottom is the
+    // island's: bottom = height - 10, and its height is the island's 30.
     let [x, y, _, tall] = keyed(&rt, "shell:launch").expect("the launch control is drawn");
     close(x, 10.0 + 12.0, "the launch control's x");
-    close(y + tall, height - 10.0 - (30.0 - 20.0) / 2.0, "the launch control's bottom");
+    close(y + tall, height - 10.0, "the launch control's bottom");
+    close(tall, 30.0, "the launch control's height");
     let vm = model(&rt);
     let current = vm
         .session
@@ -565,5 +595,33 @@ fn the_switcher_holds_the_left_edge_and_the_status_islands_float() {
         status_top >= body_bottom - 0.5,
         "the node's status at {} sits below the body, which ends at {body_bottom}",
         status_top
+    );
+}
+
+/// With the status bar hidden (Alt+B), the zero-size `status` element stays
+/// and nothing draws the launch control.
+#[test]
+fn a_hidden_status_bar_keeps_only_its_zero_size_status_element() {
+    let mut rt = shell("", (1280.0, 800.0));
+    rt.key(KeyEvent {
+        key: Key::Text("b".to_owned()),
+        mods: Mods {
+            alt: true,
+            ..Mods::default()
+        },
+    });
+    for _ in 0..30 {
+        rt.frame(FRAME);
+    }
+    assert!(
+        !model(&rt).presentation.chrome.status_bar.visible,
+        "Alt+B hid the status bar"
+    );
+    assert!(keyed(&rt, "shell:launch").is_none(), "no launch control");
+    assert!(
+        rt.elements()
+            .into_iter()
+            .any(|e| e.role == "status" && e.rect[2] == 0.0 && e.rect[3] == 0.0),
+        "a zero-size status element remains"
     );
 }
