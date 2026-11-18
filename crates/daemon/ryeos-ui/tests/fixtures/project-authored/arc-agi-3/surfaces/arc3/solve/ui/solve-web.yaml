@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-04T13:37:04Z:19c1cdf4f5285f859e992be0f80579b5d2387febe6e54f35c57516a9ba55493c:VtwXMDq2GZY+pu9kki650rcxP/kJXqPaszI8gstyCHn+JymuOYUzCBoue3wNF+wyeoSl+OVKKPZFNq5wiGCsDA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
+# ryeos:signed:2026-11-18T14:44:46Z:ac723772630368b677823d2e936ecc659495d97a43c0f4663b4aee0303cde9bc:2Js8YznxiJcmebOHHgyhxU/pBDPYFW9FGQyvMR4q8jCJCCQDXot9WixjW/g3sBXs6MKs0tArNExRt/FOWKC3Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: arc-solve-web
 version: "1.0.0"
 description: "Wide ARC execution-field workspace: project, live solve, board, evidence, and one-braid timeline."

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-04T13:37:03Z:09754ca5e9d703fc169c9f08dac763e4a3c4a9747414338a401c1ac1d9968a6c:qzSBTu7ljRspmTUhbpJNfOTBKVEUFk9BRLsGajxmmTrZCRQ4GPioF/euHM0LzToHfATLJQtNELOpPsLkUnPUAA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
+# ryeos:signed:2026-11-18T14:44:46Z:693587f0b9213652c4cceb7fb02f9ddc79176762971ed8c2037fe27075ae9eea:hl5GsVM8kLhr2bfexUcvUv/ezQMTCK7fZPWe+ju0HWByfozZCvfF5Eb4oPYXMYAEDiZCKt2X63MIv3XUgih3Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: arc-solve-terminal
 version: "1.0.0"
 description: "Terminal ARC execution-field workspace using the same views, stable identities, and shared intents as web."
