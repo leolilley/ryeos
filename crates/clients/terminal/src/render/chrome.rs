@@ -17,12 +17,21 @@ use super::theme::{ACCENT, BG, FG, MUTED, WARN, mix_toward, style_fg, style_mute
 /// session's title stands in.
 pub fn draw_switcher(surface: &mut TextSurface, y: usize, vm: &RyeOsViewModel) {
     fill_line(surface, 0, y, surface.width, Style::new().fg(FG).bg(BG));
+    // With the status line hidden, a lone dot at the right of this line keeps
+    // the node's health visible, as the Rune client's corner dot does.
+    let limit = if !vm.presentation.chrome.status_bar.visible && surface.width >= 4 {
+        let at = surface.width - 2;
+        surface.draw_text(at, y, "●", tone_style(node_tone(vm)));
+        at
+    } else {
+        surface.width
+    };
     let surfaces = &vm.session.surfaces;
     if surfaces.is_empty() {
         surface.draw_text(
             1,
             y,
-            &truncate(&vm.session.title, surface.width.saturating_sub(1)),
+            &truncate(&vm.session.title, limit.saturating_sub(1)),
             style_muted(),
         );
         return;
@@ -36,7 +45,7 @@ pub fn draw_switcher(surface: &mut TextSurface, y: usize, vm: &RyeOsViewModel) {
             )
         })
         .collect();
-    draw_strip(surface, y, &entries);
+    draw_strip(surface, y, limit, &entries);
 }
 
 /// The view-set tabs as one line: bare words, the current one reversed, then
@@ -52,16 +61,17 @@ pub fn draw_tab_band(surface: &mut TextSurface, y: usize, vm: &RyeOsViewModel) {
         .iter()
         .map(|tab| (format!(" {} ", tab.title), tab.active))
         .collect();
-    draw_strip(surface, y, &entries);
+    draw_strip(surface, y, surface.width, &entries);
 }
 
-/// One strip of entries with two spaces between them and `+` after the last.
-/// The `+` keeps its two columns at the right edge; when the entries overflow
+/// One strip of entries, a space between them and `+` after the last, drawn
+/// left of column `limit`. The `+` keeps its columns; when the entries overflow
 /// what is left, the strip starts at the current entry.
-fn draw_strip(surface: &mut TextSurface, y: usize, entries: &[(String, bool)]) {
+fn draw_strip(surface: &mut TextSurface, y: usize, limit: usize, entries: &[(String, bool)]) {
     const GAP: usize = 1;
     const PLUS: &str = " + ";
-    let end = surface.width.saturating_sub(display_width(PLUS));
+    let limit = limit.min(surface.width);
+    let end = limit.saturating_sub(display_width(PLUS));
     let full = entries
         .iter()
         .map(|(label, _)| display_width(label) + GAP)
@@ -90,7 +100,7 @@ fn draw_strip(surface: &mut TextSurface, y: usize, entries: &[(String, bool)]) {
         };
         x += surface.draw_text(x, y, &truncate(label, available), style) + GAP;
     }
-    if x + display_width(PLUS) <= surface.width {
+    if x + display_width(PLUS) <= limit {
         surface.draw_text(x, y, PLUS, style_muted());
     }
 }

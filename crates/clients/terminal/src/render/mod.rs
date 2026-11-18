@@ -577,6 +577,21 @@ mod tests {
     }
 
     #[test]
+    fn a_hidden_status_line_leaves_the_node_health_dot_on_the_switcher_line() {
+        let mut vm = build_view_model(&empty_center_core());
+        vm.presentation.chrome.status_bar.visible = false;
+        for width in [4, 9, 20, 80] {
+            let mut line = TextSurface::new(width, 1);
+            chrome::draw_switcher(&mut line, 0, &vm);
+            assert_eq!(line.get(width - 2, 0).rune, '●', "width {width}");
+        }
+        vm.presentation.chrome.status_bar.visible = true;
+        let mut line = TextSurface::new(80, 1);
+        chrome::draw_switcher(&mut line, 0, &vm);
+        assert!(!surface_text(&line).contains('●'));
+    }
+
+    #[test]
     fn the_bars_fit_any_width_and_the_plus_survives_an_exact_fill() {
         let mut vm = build_view_model(&empty_center_core());
         vm.presentation.chrome.status_bar.key_hint = "ctrl+k open".into();
