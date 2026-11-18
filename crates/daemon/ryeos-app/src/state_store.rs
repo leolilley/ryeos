@@ -84,6 +84,7 @@ pub use lifecycle::*;
 mod in_process_handlers;
 pub use in_process_handlers::*;
 mod launch_capsule;
+pub use launch_capsule::require_operator_rebindable;
 use launch_capsule::*;
 mod authoritative_reads;
 pub use authoritative_reads::*;

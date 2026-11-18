@@ -39,5 +39,6 @@ highlight = "all"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# The Rune UI toolkit, taken from its fork at an exact rev (crates/clients/rune/Cargo.toml).
+# The Rune UI toolkit, taken from its fork at an exact rev. Only the browser renderer's own
+# workspace (crates/clients/rune) uses it; the root lock names crates.io sources only.
 allow-git = ["https://github.com/leolilley/rune"]

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-11T09:41:52Z:d05d5f1745bbf7c16d46c6771b31486c4dfb8c70883784183f821d112577e127:eQ3FkZzYmY5m2niVLVur2BbB2UWOkw0OdiY/5ZqLFyaC9e9WPbLaBgLam7p6evnM96e1pCbY40zPQpJD3sPrBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T05:02:16Z:949206ca15dbc161c247a841a08ff4e17e78536c820e2bbb11753d7cc4c2752d:KKd3ociitAEfCmYYJR7rail6XHO1SNN2pjlfN6ANT0KkcHdQ96ADu3JsuGNusVAdUxXOIXKKpkZQ+ZM27Jr5DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Read-only repository validation shared by signed Tools and external CI.
 
 The resolved project Config owns rules and input selection. This module owns
@@ -64,9 +64,14 @@ def validate_config(config: dict) -> None:
     } or any(type(v) is not int or v <= 0 for v in limits.values())):
         raise ValueError("validation requires positive explicit bounds")
     dependency = config["dependency_layers"]
-    if not isinstance(dependency, dict) or set(dependency) != {"workspace_manifest", "forbidden_edges"}:
+    if not isinstance(dependency, dict) or set(dependency) != {"workspace_manifests", "forbidden_edges"}:
         raise ValueError("incomplete dependency selection")
-    relative(dependency["workspace_manifest"])
+    manifests = dependency["workspace_manifests"]
+    if (not isinstance(manifests, list) or not manifests or len(set(manifests)) != len(manifests)
+            or any(not isinstance(item, str) for item in manifests)):
+        raise ValueError("dependency selection must name distinct workspace manifests")
+    for item in manifests:
+        relative(item)
     edges = dependency["forbidden_edges"]
     if not isinstance(edges, dict) or not edges or any(
         not isinstance(k, str) or not isinstance(v, list) or not v or
@@ -150,29 +155,44 @@ def find_cycle(graph: dict[str, set[str]]) -> list[str] | None:
 
 def dependency_layers(root: Path, config: dict) -> tuple[list[str], int]:
     selection, limits = config["dependency_layers"], config["limits"]
-    root_body = read(root, selection["workspace_manifest"], limits["max_file_bytes"])
-    root_manifest = tomllib.loads(root_body)
-    packages, total = {}, len(root_body.encode())
-    if total > limits["max_total_bytes"]:
-        raise ValueError("workspace exceeds validation bounds")
-    for item in root_manifest["workspace"]["members"]:
-        # This repository authors exact workspace paths. Wildcards must not
-        # become implicit new input selection or silently skip dependencies.
-        if any(c in item for c in "*?["):
-            raise ValueError("workspace member must name an exact directory")
-        value = read(root, str(relative(item) / "Cargo.toml"), limits["max_file_bytes"])
-        total += len(value.encode())
-        data = tomllib.loads(value)
+    # Each selected manifest is a workspace root. Edges are checked across all
+    # of them together, so a crate in one workspace that depends on a crate in
+    # another by path is held to the same rules.
+    packages, inherited, total = {}, {}, 0
+
+    def admit(data: dict, workspace_dependencies: dict) -> None:
         name = data["package"]["name"]
         if name in packages:
             raise ValueError("duplicate workspace package")
         packages[name] = data
+        inherited[name] = workspace_dependencies
         if len(packages) > limits["max_files"] or total > limits["max_total_bytes"]:
             raise ValueError("workspace exceeds validation bounds")
+
+    for manifest in selection["workspace_manifests"]:
+        root_body = read(root, manifest, limits["max_file_bytes"])
+        root_manifest = tomllib.loads(root_body)
+        total += len(root_body.encode())
+        if total > limits["max_total_bytes"]:
+            raise ValueError("workspace exceeds validation bounds")
+        workspace = root_manifest.get("workspace")
+        if not isinstance(workspace, dict):
+            raise ValueError(f"selected manifest is not a workspace root: {manifest}")
+        workspace_dependencies = workspace.get("dependencies", {})
+        base = relative(manifest).parent
+        if "package" in root_manifest:
+            admit(root_manifest, workspace_dependencies)
+        for item in workspace.get("members", []):
+            # This repository authors exact workspace paths. Wildcards must not
+            # become implicit new input selection or silently skip dependencies.
+            if any(c in item for c in "*?["):
+                raise ValueError("workspace member must name an exact directory")
+            value = read(root, str(base / relative(item) / "Cargo.toml"), limits["max_file_bytes"])
+            total += len(value.encode())
+            admit(tomllib.loads(value), workspace_dependencies)
     if not packages:
         raise ValueError("empty workspace cannot establish successful validation")
-    inherited = root_manifest["workspace"].get("dependencies", {})
-    graph = {name: dependencies(data, set(packages), inherited) for name, data in packages.items()}
+    graph = {name: dependencies(data, set(packages), inherited[name]) for name, data in packages.items()}
     failures = []
     for owner, denied in selection["forbidden_edges"].items():
         if owner not in graph:

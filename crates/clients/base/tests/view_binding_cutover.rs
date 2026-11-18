@@ -81,6 +81,10 @@ const VIEW_BEHAVIOR_GOLDENS: &[(&str, &str)] = &[
         "2176a0c1e7d2f744bd62aeac898e43eb32cc7bda08c0b2b45d42ab74dbd3bead",
     ),
     (
+        "view:ryeos/node/machines",
+        "c73a89fe95ac0667f95ea023669a0122cb15ae73bb7fa7ff5aefa2b3248c097d",
+    ),
+    (
         "view:ryeos/node/remotes",
         "18c80f4430a192d3fc85c018fdff5b13590d84bfba248f328f8b6e955a7c5758",
     ),
@@ -375,6 +379,7 @@ fn node_inventory_views_have_one_origin_and_remotes_do_not_retarget_input() {
     for (origin, source) in [
         ("node/bundles", "service:bundle/list"),
         ("node/remotes", "service:ui/ryeos-ui/remotes/list"),
+        ("node/machines", "service:ui/ryeos-ui/node/machines"),
         ("node/gc", "service:ui/ryeos-ui/gc/status"),
     ] {
         let text = fs::read_to_string(views.join(format!("{origin}.yaml"))).unwrap();
@@ -683,7 +688,7 @@ fn every_bundled_view_resolves_and_validates_under_the_named_source_contract() {
     let files = yaml_files_below(&views_root);
     assert_eq!(
         files.len(),
-        52,
+        53,
         "authored inventory includes the Surfaces catalogue and session-details View"
     );
 

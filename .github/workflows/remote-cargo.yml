@@ -24,6 +24,12 @@ name: Remote cargo
 # bundles=branch instead refreshes the bundles from this branch's own sources
 # (the CI bundles job, about 45 min more): use it when bundles=next refuses.
 # bundles=none (default) runs cargo on the plain checkout.
+#
+# The browser renderer (crates/clients/rune) is its own Cargo workspace. Target
+# it with -f workspace=rune; cargo then runs with its manifest:
+#
+#   gh workflow run remote-cargo.yml --ref work/<branch> \
+#     -f workspace=rune -f command=clippy -f args="--all-targets -- -D warnings"
 on:
   workflow_dispatch:
     inputs:
@@ -51,6 +57,14 @@ on:
           - none
           - next
           - branch
+      workspace:
+        description: "root for the main workspace; rune for the browser renderer's own workspace (crates/clients/rune)"
+        required: false
+        default: root
+        type: choice
+        options:
+          - root
+          - rune
       label:
         description: "Optional short label shown in the run name"
         required: false
@@ -104,6 +118,9 @@ jobs:
           key: workspace-crates-v1
           cache-workspace-crates: true
           save-if: false
+          workspaces: |
+            . -> target
+            crates/clients/rune -> target
 
       - name: Prepare the runner
         run: ./scripts/ci/prepare-runner.sh
@@ -208,8 +225,13 @@ jobs:
         env:
           CARGO_SUBCOMMAND: ${{ inputs.command }}
           CARGO_ARGS: ${{ inputs.args }}
+          CARGO_WORKSPACE: ${{ inputs.workspace }}
         run: |
           set -euo pipefail
           read -r -a extra <<<"$CARGO_ARGS"
-          echo "cargo $CARGO_SUBCOMMAND ${extra[*]}"
-          cargo "$CARGO_SUBCOMMAND" "${extra[@]}"
+          manifest=()
+          if [[ "$CARGO_WORKSPACE" == rune ]]; then
+            manifest=(--manifest-path crates/clients/rune/Cargo.toml)
+          fi
+          echo "cargo $CARGO_SUBCOMMAND ${manifest[*]} ${extra[*]}"
+          cargo "$CARGO_SUBCOMMAND" "${manifest[@]}" "${extra[@]}"

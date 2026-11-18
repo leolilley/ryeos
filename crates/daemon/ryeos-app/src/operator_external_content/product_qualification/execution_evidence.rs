@@ -1897,6 +1897,59 @@ mod settlement_grading_tests {
         serde_json::from_value(value).unwrap()
     }
 
+    /// The shipped bundle-release and environment-qualification policies name
+    /// `trusted_process_group_absent` and run on the enforced release-authority
+    /// node: the requirement is raised to qualified containment, the launch
+    /// selects a mechanism, the settlement is graded by that mechanism, and the
+    /// signed minimum accepts it.
+    #[test]
+    fn enforced_node_with_trusted_floor_selects_containment_and_grades_admitted() {
+        use crate::thread_lifecycle::ProcessContainmentRequirement as Requirement;
+        use ryeos_engine::isolation::{
+            DescendantContainmentGuarantee as Guarantee, DescendantContainmentReadiness,
+            PidNamespaceContainmentQualification,
+        };
+        let readiness = DescendantContainmentReadiness {
+            cgroup_scope: false,
+            pid_namespace: PidNamespaceContainmentQualification {
+                qualified: true,
+                source: lillux::process_control::ProofSource::Measured,
+                detail: "fixture".into(),
+            },
+            trusted_process_group: false,
+        };
+        let floor = VerifierProcessSettlementAuthority::TrustedProcessGroupAbsent;
+        let required = Requirement::for_settlement(floor);
+        assert_eq!(required.select(&readiness).unwrap(), None);
+        let selected = required
+            .with_enforced_floor(true)
+            .select(&readiness)
+            .unwrap();
+        assert_eq!(selected, Some(Guarantee::PidNamespaceInit));
+        let namespace = recovery(serde_json::json!({
+            "version": 5, "control_timeout": {"secs": 1, "nanos": 0},
+            "configuration": {"version": 3, "backend": {"implementation": "pid_namespace_init"}},
+            "backend": {"implementation": "pid_namespace_init",
+                "boot_id": "00000000-0000-4000-8000-000000000000",
+                "init_pid": 40, "init_start_time_ticks": 200,
+                "namespace": {"device": 1, "inode": 2}}
+        }));
+        let observed =
+            verifier_settlement_authority(Kind::ReapedScopeEmpty, Some(&namespace), false, true)
+                .unwrap();
+        assert_eq!(observed, Authority::ContainmentEmpty);
+        assert!(observed.satisfies(floor));
+        // Without qualified containment the same node refuses before contact.
+        let mut none = readiness.clone();
+        none.pid_namespace.qualified = false;
+        assert!(
+            Requirement::for_settlement(floor)
+                .with_enforced_floor(true)
+                .select(&none)
+                .is_err()
+        );
+    }
+
     #[test]
     fn each_retained_mechanism_is_graded_by_what_it_is() {
         let boot = "00000000-0000-4000-8000-000000000000";
