@@ -8898,6 +8898,7 @@ pub fn execution_params_from_sealed_root_request(
         effect_authority: None,
         finalized_direct: None,
         host_access: None,
+        // A recovered root is not a callback-dispatched tool, so no caller bounds it.
         deadline_end_at_ms: None,
     })
 }

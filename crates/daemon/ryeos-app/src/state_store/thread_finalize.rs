@@ -1183,8 +1183,8 @@ impl StateStore {
     }
 }
 
-/// Whether a thread's persisted `status` is terminal. The canonical predicate —
-/// The canonical predicate for the persisted status string; callers outside
+/// Whether a thread's persisted `status` is terminal. The canonical predicate
+/// for the persisted status string; callers outside
 /// this module (e.g. the cancel cascade) reuse this rather than re-listing the
 /// statuses.
 pub fn is_terminal_status(status: &str) -> bool {

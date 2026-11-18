@@ -1603,6 +1603,20 @@ pub(crate) fn quiesce_runtime_workspace_exclusive(
     })
 }
 
+/// Whether a runtime's own terminal callback advances HEAD to its frozen
+/// result. Every terminal status does except a continuation segment, whose
+/// successor carries the work on. A run stopped by its deadline advances HEAD
+/// like any other stop: the daemon's own settlement of a stopped runtime
+/// (`capture_stopped_managed_runtime_result`) advances it with no status guard,
+/// so a deadline stop ends in the same HEAD state whichever side settles it.
+fn callback_terminal_advances_head(
+    reported_status: &ryeos_engine::contracts::ThreadTerminalStatus,
+    authoritative_status: &str,
+) -> bool {
+    *reported_status != ryeos_engine::contracts::ThreadTerminalStatus::Continued
+        && authoritative_status != ryeos_state::objects::ThreadStatus::Continued.as_str()
+}
+
 /// Seal the result generation required by a managed runtime's terminal
 /// project authority. This runs before terminal state commits and while the
 /// runtime is blocked in its authenticated callback, so no process in the
@@ -1676,15 +1690,7 @@ pub async fn prepare_managed_runtime_terminal_project_result(
         .get_thread(&thread_id)?
         .ok_or_else(|| anyhow::anyhow!("managed runtime thread disappeared during finalization"))?
         .status;
-    let is_continuation_segment = *reported_status
-        == ryeos_engine::contracts::ThreadTerminalStatus::Continued
-        || authoritative_status == ryeos_state::objects::ThreadStatus::Continued.as_str();
-    // A run stopped by its deadline keeps its frozen generation without
-    // advancing HEAD, exactly as the daemon's own deadline settlement does.
-    let is_deadline_stop =
-        *reported_status == ryeos_engine::contracts::ThreadTerminalStatus::TimedOut;
-    if !is_continuation_segment
-        && !is_deadline_stop
+    if callback_terminal_advances_head(reported_status, &authoritative_status)
         && let ryeos_state::objects::PinnedTerminalPublication::AdvanceHead {
             head_ref,
             expected_hash,
@@ -2697,6 +2703,42 @@ pub(crate) fn ensure_control_tree_unchanged(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod head_advance_on_terminal_tests {
+    use super::callback_terminal_advances_head;
+    use ryeos_engine::contracts::ThreadTerminalStatus as Reported;
+    use ryeos_state::objects::ThreadStatus;
+
+    /// The daemon's settlement of a stopped runtime advances HEAD for every
+    /// status (it has no status guard), so the runtime's own callback must
+    /// advance it for every status but a continuation. A deadline stop then
+    /// ends in the same HEAD state whichever side settles it.
+    #[test]
+    fn a_deadline_stop_advances_head_like_every_other_terminal() {
+        let running = ThreadStatus::Running.as_str();
+        for reported in [
+            Reported::Completed,
+            Reported::Failed,
+            Reported::Cancelled,
+            Reported::Killed,
+            Reported::TimedOut,
+        ] {
+            assert!(
+                callback_terminal_advances_head(&reported, running),
+                "{reported:?}"
+            );
+        }
+        assert!(!callback_terminal_advances_head(
+            &Reported::Continued,
+            running
+        ));
+        assert!(!callback_terminal_advances_head(
+            &Reported::TimedOut,
+            ThreadStatus::Continued.as_str()
+        ));
+    }
 }
 
 #[cfg(test)]

@@ -9686,6 +9686,7 @@ async fn prepare_follow_child_launch_inner(
         effect_authority: None,
         finalized_direct: None,
         host_access: None,
+        // A follow-child root is not a callback-dispatched tool, so no caller bounds it.
         deadline_end_at_ms: None,
     };
 
