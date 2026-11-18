@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-15T06:42:48Z:ca48c65f5c44ce7789a16c5ab38dfdd6773d4755c83f88254df92f0d351d72fd:/59W1qkSSCWx8ZzD8HT/EmeTNVy0G5LY2QZ5a/CrinLsnDINWjqdI06BbZ7Djs/UVPEoHHxYkvMptC8Zc54FBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T05:02:16Z:94a3c78471de1923246ba0230a9df16619c2fd68f61944fc39869cbb48aad2e1:J7w+IUWDhjye7ZYKYWiKR8ZcrANXNRrdSvV3tKP3HWHYC99qw8juIGvQgMHOuazJdnpARxWo3htx5bX2XM4FAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
 #   category: ryeos/development/repository-validation
 #   version: "1.0.0"
@@ -15,7 +15,8 @@
 
 """Client/daemon layering check over `cargo metadata --no-deps`.
 
-Reads workspace manifests only (no compilation, no network). Dependency kinds
+Covers both Cargo workspaces: the root one and the browser renderer's own
+(crates/clients/rune). Reads workspace manifests only (no compilation, no network). Dependency kinds
 are kept apart: normal, build and dev. Rules:
 
 1. A client crate has no normal or build dependency on a daemon-side crate.
@@ -84,6 +85,10 @@ CLI_ALLOWED = frozenset({
 })
 
 
+# The root workspace, then the browser renderer's own workspace.
+WORKSPACES = (None, "crates/clients/rune/Cargo.toml")
+
+
 def kind_of(raw):
     return raw if raw in ("build", "dev") else "normal"
 
@@ -117,13 +122,18 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--project-path", type=Path, default=Path.cwd())
     args = parser.parse_args()
-    result = subprocess.run(
-        ["cargo", "metadata", "--format-version", "1", "--no-deps", "--offline"],
-        cwd=args.project_path, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(result.stderr, file=sys.stderr)
-        return 2
-    failures = check(json.loads(result.stdout)["packages"])
+    packages = {}
+    for manifest in WORKSPACES:
+        command = ["cargo", "metadata", "--format-version", "1", "--no-deps", "--offline"]
+        if manifest:
+            command += ["--manifest-path", manifest]
+        result = subprocess.run(command, cwd=args.project_path, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(result.stderr, file=sys.stderr)
+            return 2
+        for package in json.loads(result.stdout)["packages"]:
+            packages.setdefault(package["name"], package)
+    failures = check(list(packages.values()))
     for line in failures:
         print("client layering: " + line, file=sys.stderr)
     if not failures:

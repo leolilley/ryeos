@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-18T04:15:43Z:0251070b91841a08b69fc0ae2d9abf3577e99533a7a36b5a2286f1464b259cd1:n5rFlZH334G9BbjUED0NO1fd7fDax3Af30v4Ayq3i2mrNcIihcC/hbGLdN7vrNYXKgrf3/O+qKPw+h3AHXihCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-18T05:02:16Z:ab01099b86a2c34e79af69e174c5e9e95abfc8751e0c0f3842445efb202bd6da:sqfCTQHEADYskSSAsH77XhMpasZdMXpQYBvJy7DIO9W+iMewggTp3SHsMFWHVw+P6HYmfRZIjMmrwLW0awIHBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-development"
@@ -474,6 +474,12 @@ The browser is a renderer, not a second application model:
   `platform/web.rs` is the only place browser APIs appear.
 - `crates/clients/rune/` (`ryeos-client-rune`) is the renderer: it projects the
   view model to Rune elements and turns presses and keys back into core events.
+  It is its own Cargo workspace with its own `Cargo.lock` (Rune and the crates
+  it patches come from git; the root lock, which the release chain vendors,
+  names crates.io sources only). Run cargo for it with
+  `--manifest-path crates/clients/rune/Cargo.toml`. Packages both locks share
+  must resolve identically: `repository-validation/rune-lock.py --check` holds
+  that in CI, and `--regenerate` rebuilds the renderer lock from the root one.
 - `crates/clients/rune/pkg/` is generated, reviewed installed output. Never edit
   it directly; `build-rune-web.sh` in the browser-assets-production tool's `lib/` writes it.
 - `crates/daemon/ryeos-ui/web-assets.json` is the closed asset manifest.
@@ -555,7 +561,7 @@ renderer over an in-memory presentation built from the bundle's own view
 definitions, with their sources answered from fixed records:
 
 ```bash
-cargo run -p ryeos-client-rune --example fixture -- --snap shell.png --size 1280x800 --at 1
+cargo run --manifest-path crates/clients/rune/Cargo.toml --example fixture -- --snap shell.png --size 1280x800 --at 1
 ```
 
 `RYEOS_FIXTURE_SCENE` selects `launcher` or `field`. Native Rune bundles Inter
@@ -570,13 +576,15 @@ admission remain unchanged. Never expose the proxy externally.
 ## Required boundary checks
 
 ```bash
-cargo clippy -p ryeos-client-rune --all-targets -- -D warnings
-cargo clippy -p ryeos-client-rune --target wasm32-unknown-unknown -- -D warnings
-cargo test -p ryeos-client-rune
+cargo clippy --manifest-path crates/clients/rune/Cargo.toml --all-targets -- -D warnings
+cargo clippy --manifest-path crates/clients/rune/Cargo.toml --target wasm32-unknown-unknown -- -D warnings
+cargo clippy -p ryeos-client-runtime --target wasm32-unknown-unknown -- -D warnings
+cargo test --manifest-path crates/clients/rune/Cargo.toml
+python3 -I .ai/tools/ryeos/development/repository-validation/rune-lock.py --check
 .ai/tools/ryeos/development/browser-assets-production/publish.sh --check
 ```
 
-The wasm32 pass is required: the page entry and the runtime's web platform
+The wasm32 passes are required: the page entry and the runtime's web platform
 compile only for that target. `publish.sh --check` rebuilds the package and
 fails unless it reproduces `pkg/` and the registry byte for byte.
 

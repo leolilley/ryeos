@@ -12,7 +12,6 @@ members = [
     "crates/daemon/ryeos-ui",
     "crates/clients/base",
     "crates/clients/presentation-contract",
-    "crates/clients/rune",
     "crates/clients/runtime",
     "crates/clients/terminal",
     "crates/clients/transport",
@@ -72,7 +71,9 @@ members = [
     "crates/state/ryeos-vault",
     "crates/host-adapters/modal-guest-launcher",
 ]
-exclude = ["vendor/libsqlite3-sys-0.28.0"]
+# The browser renderer is its own workspace with its own lock, so this lock
+# (the one the release chain vendors) names crates.io sources only.
+exclude = ["vendor/libsqlite3-sys-0.28.0", "crates/clients/rune"]
 resolver = "2"
 
 # Workspace lint policy. The four clippy shape lints below are allowed for
@@ -113,16 +114,6 @@ lto = "thin"
 # Keep the symbol table (debuginfo is already absent at debug=0) so a live
 # process can be stack-dumped with named frames; costs a few MB per binary.
 strip = "debuginfo"
-
-# The browser renderer (.ai/tools/ryeos/development/browser-assets-production/lib/build-rune-web.sh): a page downloads it, so
-# size wins. Whole-program LTO, one codegen unit, and no symbol names, which
-# the page has no use for and which cost megabytes.
-[profile.web]
-inherits = "release"
-opt-level = "s"
-lto = "fat"
-codegen-units = 1
-strip = true
 
 # Real-process integration tests repeatedly verify the signed node and bundle
 # inventory while booting debug daemons. Keep RyeOS itself in the ordinary test
@@ -246,9 +237,3 @@ zeroize = "1"
 # One maintained, pinned SQLite implementation; optional bound host backend.
 [patch.crates-io]
 libsqlite3-sys = { path = "vendor/libsqlite3-sys-0.28.0" }
-# Rune builds against its own patched copies of these crates (its `vendor/` directory). A
-# dependency's `[patch]` does not reach the workspace that depends on it, so the workspace names
-# them here, at the same revision as the `rune` dependency in `crates/clients/rune/Cargo.toml`.
-wgpu-hal = { git = "https://github.com/leolilley/rune", rev = "cc754dd38d85f0fe577d900013d4ae5e21dd649e" }
-winit = { git = "https://github.com/leolilley/rune", rev = "cc754dd38d85f0fe577d900013d4ae5e21dd649e" }
-parley_engine = { git = "https://github.com/leolilley/rune", rev = "cc754dd38d85f0fe577d900013d4ae5e21dd649e" }
