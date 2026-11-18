@@ -22,10 +22,10 @@ use ryeos_accounting::{
 mod effective;
 
 pub use effective::{
-    ContinuationConfig, ContinuationEnabled, DIRECTIVE_EFFECTIVE_HEADER_KEYS, DirectiveEffectClass,
-    DirectiveHeader, LimitsSpec, OutputSpec, ProviderContact, ReturnNudge, UnknownOutcomeClass,
-    UnknownOutcomeRetryPolicy, parse_effective_header, resolve_external_effect_authority,
-    unknown_outcome_retry_ceiling,
+    ContinuationConfig, ContinuationEnabled, DIRECTIVE_EFFECTIVE_HEADER_KEYS, DeadlineSpec,
+    DirectiveEffectClass, DirectiveHeader, LimitsSpec, OutputSpec, ProviderContact, ReturnNudge,
+    UnknownOutcomeClass, UnknownOutcomeRetryPolicy, parse_effective_header,
+    resolve_external_effect_authority, unknown_outcome_retry_ceiling,
 };
 
 pub const MODEL_BINDING: &str = "model";

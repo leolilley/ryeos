@@ -691,6 +691,9 @@ pub const PARAM_PARENT_LIMITS: &str = "parent_limits";
 pub const PARAM_PARENT_THREAD_ID: &str = "parent_thread_id";
 pub const PARAM_DEPTH: &str = "depth";
 pub const PARAM_CONTINUATION: &str = "continuation";
+/// Caller parameter carrying the run deadline of a root launch, in seconds.
+/// It is daemon control data, never model input.
+pub const PARAM_RUN_TIMEOUT: &str = "run_timeout";
 
 /// Control keys stripped from directive prompt inputs (all runtime-owned).
 pub const RESERVED_CONTROL_KEYS: &[&str] = &[
@@ -698,6 +701,7 @@ pub const RESERVED_CONTROL_KEYS: &[&str] = &[
     PARAM_PARENT_THREAD_ID,
     PARAM_DEPTH,
     PARAM_CONTINUATION,
+    PARAM_RUN_TIMEOUT,
 ];
 
 /// Request to bind one already-admitted exclusive subprocess dependency to
