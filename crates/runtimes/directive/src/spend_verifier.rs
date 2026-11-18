@@ -350,6 +350,7 @@ mod tests {
             body_template: None,
             body_extra: None,
             image_input: None,
+            cache_marks: None,
             profiles: vec![],
         }
     }

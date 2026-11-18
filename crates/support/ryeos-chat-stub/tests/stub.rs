@@ -105,6 +105,21 @@ async fn stream_parallel_tool_calls_without_index_or_ids() {
 }
 
 #[tokio::test]
+async fn streamed_usage_reports_cache_fields_top_level_and_nested() {
+    let stub = serve(
+        "steps:\n  - text: hi\n    usage:\n      prompt_tokens: 2100\n      completion_tokens: 20\n      cache_read_input_tokens: 2013\n      cache_creation_input_tokens: 0\n      prompt_tokens_details: { cached_tokens: 2013 }\n",
+    )
+    .await;
+    let raw = post(&stub, json!({"stream": true})).await;
+    let frames = data_frames(&raw);
+    let usage = &frames.last().unwrap()["usage"];
+    assert_eq!(usage["prompt_tokens"], 2100);
+    assert_eq!(usage["cache_read_input_tokens"], 2013);
+    assert_eq!(usage["cache_creation_input_tokens"], 0);
+    assert_eq!(usage["prompt_tokens_details"]["cached_tokens"], 2013);
+}
+
+#[tokio::test]
 async fn stream_tool_calls_carry_index_and_ids_by_default() {
     let stub =
         serve("steps:\n  - tool_calls:\n      - { name: a }\n      - { id: x, name: b }\n").await;
