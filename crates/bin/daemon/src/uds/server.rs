@@ -538,7 +538,9 @@ pub(crate) async fn dispatch_runtime_method_with_publication(
         "runtime.append_event" => handle_append_event(&clean_params, state),
         "runtime.append_events" => handle_append_event_batch(&clean_params, state),
         "runtime.replay_events" => handle_replay_events(&clean_params, state),
-        "runtime.read_attachment" => handle_read_attachment(&clean_params, state),
+        "runtime.read_attachment" => {
+            handle_read_attachment(&clean_params, state, callback_cap.as_ref())
+        }
         "runtime.bundle_events_append" => {
             handle_bundle_events_append(&clean_params, state, callback_cap.as_ref())
         }
@@ -1607,10 +1609,15 @@ struct ReadAttachmentParams {
 fn handle_read_attachment(
     params: &serde_json::Value,
     state: &AppState,
+    callback_cap: Option<&ryeos_app::callback_token::CallbackCapability>,
 ) -> Result<serde_json::Value> {
     use base64::Engine as _;
     let params: ReadAttachmentParams =
         serde_json::from_value(params.clone()).context("invalid runtime.read_attachment params")?;
+    // The thread the read names must sit in the caller's own chain. The check
+    // is made here on that thread alone, whatever else the request carried.
+    let cap = callback_cap.ok_or_else(|| anyhow!("runtime.read_attachment needs a callback"))?;
+    authorize_chain_read(cap, &json!({ "thread_id": params.thread_id }), state)?;
     let stored = state
         .events
         .read_attachment(&params.thread_id, &params.attachment)?;
@@ -5958,6 +5965,122 @@ mod tests {
             assert!(live.chain_seq > last_seq, "chain_seq must be monotonic");
             last_seq = live.chain_seq;
         }
+    }
+
+    /// Appends one `tool_call_result` that names a stored image on `thread_id`
+    /// and returns the attachment hash.
+    async fn append_named_image(state: &AppState, thread_id: &str, bytes: &[u8]) -> String {
+        use base64::Engine as _;
+        let upload =
+            ryeos_runtime::callback::EventAttachment::new("image/png", bytes.to_vec()).unwrap();
+        let hash = upload.object_hash().to_owned();
+        let cbt = generate_test_callback(
+            state,
+            thread_id,
+            std::path::PathBuf::from("/test"),
+            std::time::Duration::from_secs(300),
+            Vec::new(),
+            test_provenance(state, "/test"),
+            "0".repeat(64),
+        );
+        let payload = json!({
+            "operation_id": "a".repeat(64),
+            "call_id": "c1",
+            "tool": "tool:t",
+            "status": "ok",
+            "parts": [
+                {"type": "text", "text": "shot"},
+                {"type": "image", "media_type": "image/png", "attachment": hash,
+                 "byte_length": bytes.len(), "width": 1, "height": 1}
+            ],
+            "guard": {"result_size_bytes": 4, "truncated": false},
+            "attachment_refs": [hash],
+        });
+        let resp = dispatch(
+            rpc(
+                "runtime.append_events",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": thread_id,
+                    "events": [{"event_type": "tool_call_result", "payload": payload}],
+                    "attachments": [{
+                        "media_type": "image/png",
+                        "bytes_b64": base64::engine::general_purpose::STANDARD.encode(bytes),
+                    }],
+                }),
+            ),
+            state,
+        )
+        .await;
+        assert!(resp.error.is_none(), "append failed: {:?}", resp.error);
+        hash
+    }
+
+    #[test]
+    fn read_attachment_serves_only_the_callers_chain_and_only_named_hashes() {
+        on_daemon_worker_stack(read_attachment_serves_only_the_callers_chain_body);
+    }
+
+    async fn read_attachment_serves_only_the_callers_chain_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
+        create_running_test_thread(&state, "T-att-a");
+        create_running_test_thread(&state, "T-att-b");
+        let own = append_named_image(&state, "T-att-a", b"own pixels").await;
+        let other = append_named_image(&state, "T-att-b", b"other pixels").await;
+        let cbt = generate_test_callback(
+            &state,
+            "T-att-a",
+            std::path::PathBuf::from("/test"),
+            std::time::Duration::from_secs(300),
+            Vec::new(),
+            test_provenance(&state, "/test"),
+            "0".repeat(64),
+        );
+        let read = |thread: &str, attachment: &str| {
+            rpc(
+                "runtime.read_attachment",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": thread,
+                    "attachment": attachment,
+                }),
+            )
+        };
+        // A hash the chain names is served.
+        let ok = dispatch(read("T-att-a", &own), &state).await;
+        assert_eq!(rpc_ok(&ok)["media_type"], "image/png");
+        assert_eq!(rpc_ok(&ok)["byte_length"], 10);
+        // Another chain's thread is out of reach, even for a hash that chain
+        // names.
+        let across = dispatch(read("T-att-b", &other), &state).await;
+        assert!(
+            rpc_err(&across).message.contains("outside its chain"),
+            "{:?}",
+            across.error
+        );
+        // A hash that is stored, but that no event of the caller's chain
+        // names, is refused.
+        let unnamed = dispatch(read("T-att-a", &other), &state).await;
+        assert!(
+            rpc_err(&unnamed).message.contains("not named by any event"),
+            "{:?}",
+            unnamed.error
+        );
+        // A request that also claims a chain root is refused outright.
+        let claimed = dispatch(
+            rpc(
+                "runtime.read_attachment",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "T-att-b",
+                    "chain_root_id": "T-att-a",
+                    "attachment": other,
+                }),
+            ),
+            &state,
+        )
+        .await;
+        assert!(claimed.error.is_some());
     }
 
     #[test]
