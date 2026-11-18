@@ -976,6 +976,8 @@ jobs:
     # ships sudo-rs as a symlink, which that pin refuses (ELOOP).
     timeout-minutes: 120
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.installed_resume_smoke }}
+    env:
+      RYEOS_SMOKE_PREFIX: /ryeos-ci
     steps:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -998,7 +1000,12 @@ jobs:
 
       - name: Build and install standard distribution
         run: |
+          # The runner makes /usr/share and /opt world-writable (mode 777), so
+          # Lillux refuses them as a package namespace. Install under a prefix
+          # at the filesystem root, which stays root-owned and 0755.
+          mkdir -p "$RUNNER_TEMP/ryeos-node"
           CARGO="$CARGO_HOME/bin/cargo" sudo --preserve-env=CARGO ./scripts/pkg/install-local-direct.sh \
+            --prefix "$RYEOS_SMOKE_PREFIX" --app-root "$RUNNER_TEMP/ryeos-node" \
             --populate --all --bundle-set standard --no-init --no-daemon-restart
 
       - name: Prepare the runner
@@ -1012,8 +1019,10 @@ jobs:
           # The manual smoke job populates bundles with the repository's dev
           # publisher. Trust that exact document explicitly; release artifacts
           # use the hardcoded official publisher and need no override.
-          RYEOS_SMOKE_TRUST_FILE: /usr/share/ryeos/.ai/PUBLISHER_TRUST.toml
-        run: ./tests/e2e/installed-resume/smoke.sh
+          RYEOS_SMOKE_TRUST_FILE: ${{ env.RYEOS_SMOKE_PREFIX }}/share/ryeos/.ai/PUBLISHER_TRUST.toml
+          RYEOS_SMOKE_BUNDLE_SOURCE: ${{ env.RYEOS_SMOKE_PREFIX }}/share/ryeos
+        run: |
+          PATH="$RYEOS_SMOKE_PREFIX/bin:$PATH" ./tests/e2e/installed-resume/smoke.sh
 
   browser-smoke:
     name: Installed browser client smoke
