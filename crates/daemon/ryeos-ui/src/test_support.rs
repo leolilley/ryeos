@@ -417,6 +417,27 @@ pub fn mint_launch(
     (session_id, token)
 }
 
+/// Run `future` under the authority `ui.invocations.dispatch` retains for one
+/// call: the attachment, and the browser session it was resolved in. A
+/// handler that reads its session through `require_compiled_ui_session` is
+/// reachable only inside this scope, as it is in the daemon.
+pub async fn with_dispatched_session<F>(
+    state: &AppState,
+    session_id: &str,
+    attachment: Arc<crate::browser_session::AdmittedBindingAttachment>,
+    future: F,
+) -> F::Output
+where
+    F: std::future::Future,
+{
+    let session = crate::state::get_ui_state(state)
+        .expect("UI state")
+        .browser_sessions
+        .get_session(session_id)
+        .expect("live browser session");
+    crate::seat_auth::with_compiled_ui_session(&session, attachment, None, future).await
+}
+
 fn service_descriptors() -> &'static [ryeos_app::service_registry::ServiceDescriptor] {
     static DESCRIPTORS: std::sync::OnceLock<Vec<ryeos_app::service_registry::ServiceDescriptor>> =
         std::sync::OnceLock::new();

@@ -19,8 +19,9 @@
 //!   prepared here and offered through [`DocumentOffers`] when the host
 //!   installs them, else handed to the adapter too.
 //!
-//! A batch of effects runs concurrently and reports as one message, in
-//! emission order.
+//! A batch of effects runs concurrently and each result is reported as soon
+//! as its effect finishes; results that finish together are reported
+//! together, in emission order.
 
 use std::cell::Cell;
 use std::future::Future;
@@ -399,32 +400,49 @@ pub async fn execute_effect<P: Platform>(
     }
 }
 
-/// Run a batch concurrently; results come back in emission order.
+/// Run a batch concurrently, handing each result to `deliver` as soon as its
+/// effect finishes: a slow request never holds back a fast one's answer.
+/// Results that finish in the same pass are handed over together, in
+/// emission order.
 pub async fn execute_batch<P: Platform>(
     env: &EffectEnv<P>,
     effects: &[RyeOsEffect],
-) -> Vec<RyeOsEffectResult> {
-    let mut pending: Vec<Option<Pin<Box<dyn Future<Output = RyeOsEffectResult> + '_>>>> = effects
+    deliver: impl FnMut(Vec<RyeOsEffectResult>),
+) {
+    let running = effects
         .iter()
         .map(|effect| {
             let future: Pin<Box<dyn Future<Output = RyeOsEffectResult> + '_>> =
                 Box::pin(execute_effect(env, effect));
-            Some(future)
+            future
         })
         .collect();
-    let mut results: Vec<Option<RyeOsEffectResult>> = effects.iter().map(|_| None).collect();
+    deliver_as_finished(running, deliver).await;
+}
+
+/// Drive `running` concurrently. After each pass over the futures, the values
+/// of those that finished in it go to `deliver`, in the order given.
+async fn deliver_as_finished<T>(
+    running: Vec<Pin<Box<dyn Future<Output = T> + '_>>>,
+    mut deliver: impl FnMut(Vec<T>),
+) {
+    let mut running: Vec<_> = running.into_iter().map(Some).collect();
     std::future::poll_fn(|context| {
+        let mut finished = Vec::new();
         let mut waiting = false;
-        for (slot, result) in pending.iter_mut().zip(results.iter_mut()) {
+        for slot in running.iter_mut() {
             if let Some(future) = slot.as_mut() {
                 match future.as_mut().poll(context) {
                     Poll::Ready(value) => {
-                        *result = Some(value);
+                        finished.push(value);
                         *slot = None;
                     }
                     Poll::Pending => waiting = true,
                 }
             }
+        }
+        if !finished.is_empty() {
+            deliver(finished);
         }
         if waiting {
             Poll::Pending
@@ -433,7 +451,6 @@ pub async fn execute_batch<P: Platform>(
         }
     })
     .await;
-    results.into_iter().flatten().collect()
 }
 
 #[cfg(test)]
@@ -457,6 +474,51 @@ mod tests {
             json!({"result": null, "a": 1})
         );
         assert_eq!(unwrap_envelope(&json!(7)), json!(7));
+    }
+
+    /// A request that has not answered does not hold back one that has: the
+    /// fast result is delivered while the slow one is still pending.
+    #[test]
+    fn a_slow_effect_does_not_delay_a_fast_ones_result() {
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+        use std::task::{Context, Waker};
+
+        let slow_answered = Rc::new(Cell::new(false));
+        let slow: Pin<Box<dyn Future<Output = &str>>> = Box::pin({
+            let answered = slow_answered.clone();
+            std::future::poll_fn(move |_| {
+                if answered.get() {
+                    Poll::Ready("slow")
+                } else {
+                    Poll::Pending
+                }
+            })
+        });
+        let fast: Pin<Box<dyn Future<Output = &str>>> = Box::pin(std::future::ready("fast"));
+        let also_fast: Pin<Box<dyn Future<Output = &str>>> =
+            Box::pin(std::future::ready("also fast"));
+
+        let delivered = Rc::new(RefCell::new(Vec::new()));
+        let mut batch = Box::pin(deliver_as_finished(vec![slow, fast, also_fast], {
+            let delivered = delivered.clone();
+            move |results| delivered.borrow_mut().push(results)
+        }));
+        let mut context = Context::from_waker(Waker::noop());
+
+        assert!(batch.as_mut().poll(&mut context).is_pending());
+        assert_eq!(
+            *delivered.borrow(),
+            vec![vec!["fast", "also fast"]],
+            "the answered effects are delivered, in emission order, before the slow one answers"
+        );
+
+        slow_answered.set(true);
+        assert!(batch.as_mut().poll(&mut context).is_ready());
+        assert_eq!(
+            *delivered.borrow(),
+            vec![vec!["fast", "also fast"], vec!["slow"]]
+        );
     }
 
     #[test]

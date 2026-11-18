@@ -122,7 +122,14 @@ async fn ryeos_dimension_exposes_session_user_principal() {
     let principal = format!("fp:{}", "cc".repeat(32));
     let (ctx, attachment) = session_context(&state, &principal);
 
-    let dimension = ryeos_ui::seat_auth::with_compiled_ui_attachment(
+    let session_id = ctx
+        .fingerprint
+        .strip_prefix("session:")
+        .expect("session context")
+        .to_owned();
+    let dimension = test_state::with_dispatched_session(
+        &state,
+        &session_id,
         attachment,
         ryeos_ui::handlers::ui_dimension::handle(json!(null), ctx, Arc::new(state.clone())),
     )

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-18T04:15:43Z:86684ca29f7a81ec34a71ade7e0f0f83ca5ecbcb220c9c82de62e7f22c79f6e4:oLGrKmLwjdUlryqgXQK1oyK/pVnQbpfYynlWSiizHhd0kOvqpLlux+NKzA3vrRYGQlWHF9i/Q2upLFBkfaIzBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T07:43:25Z:5d237c8ebc487e41b19c6c4d9518212cad376b4989b3231b17d940ed8a48a520:2i1QCp+cQKbKzwdE8VKoqa1rYsukUcFMSpbsWQNcyjoJ/vXIfLDCLtVMyGau4D1oWU+Hl4Z+hBOEkUeXWqxNBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # The JavaScript snippet modules the pinned Rune renderer emits, as paths relative to the
 # Rune crate root. This is the one declared list: build-rune-web.sh refuses any snippet
 # outside it and flattens each to rune_<file stem>.js, check-rune-snippets.py compares it
@@ -12,4 +12,15 @@ snippets = [
   "src/platform/web/platform.js",
   "src/platform/web/platform_text.js",
   "src/platform/web/segmenter.js",
+]
+# The files the pinned Rune renderer fetches at runtime beside its bindings module, as paths
+# relative to the Rune crate root; each is served under its file name. With `embedded-fonts`
+# Rune compiles in Inter cut to Latin, Greek and Cyrillic text and fetches these full faces
+# after its first frame. build-rune-web.sh packages exactly these from the pinned Rune source,
+# check-rune-snippets.py compares them with that source, and generate_asset_registry.py
+# requires the registry to carry them.
+fetched = [
+  "assets/web/Inter-Regular.ttf",
+  "assets/web/Inter-Medium.ttf",
+  "assets/web/Inter-SemiBold.ttf",
 ]
