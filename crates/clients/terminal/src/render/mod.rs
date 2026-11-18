@@ -591,6 +591,73 @@ mod tests {
     }
 
     #[test]
+    fn work_dots_project_marks_and_key_hints_read_on_the_bars() {
+        use ryeos_client_base::ui::view_model::RyeOsKeyHintVm;
+        let mut vm = build_view_model(&empty_center_core());
+        vm.presentation.chrome.status_bar.key_hints = vec![
+            RyeOsKeyHintVm {
+                keys: "ctrl+k".into(),
+                word: "open".into(),
+            },
+            RyeOsKeyHintVm {
+                keys: "alt+t/b".into(),
+                word: "bars".into(),
+            },
+        ];
+        let mut status = TextSurface::new(80, 1);
+        chrome::draw_status_bar(&mut status, &vm);
+        assert!(
+            surface_text(&status).contains("[ctrl+k] open  [alt+t/b] bars"),
+            "{}",
+            surface_text(&status)
+        );
+
+        {
+            let template = vm
+                .session
+                .surfaces
+                .first()
+                .cloned()
+                .expect("the test core has an open Surface");
+            let mut home = template.clone();
+            home.title = "Home".into();
+            home.active = false;
+            home.needs_you = Some(2);
+            home.running = Some(1);
+            let mut project = template;
+            project.title = "ryeos".into();
+            project.active = true;
+            project.chip.authored_in_project = true;
+            project.running = Some(0);
+            vm.session.surfaces = vec![home, project];
+            let mut line = TextSurface::new(80, 1);
+            chrome::draw_switcher(&mut line, 0, &vm);
+            let text = surface_text(&line);
+            assert!(text.contains("Home ●"), "{text}");
+            assert!(text.contains("ryeos·"), "{text}");
+            assert!(!text.contains("ryeos· ●"), "a zero count draws no dot: {text}");
+            let dot = text.find('●').expect("a dot");
+            let column = text[..dot].chars().count();
+            assert_eq!(line.get(column, 0).fg, super::theme::WARN, "needing you wins");
+        }
+
+        {
+            let tab = vm
+                .presentation
+                .chrome
+                .top_bar
+                .tabs
+                .first_mut()
+                .expect("the test core has a view set");
+            tab.running = Some(true);
+            let title = tab.title.clone();
+            let mut line = TextSurface::new(80, 1);
+            chrome::draw_tab_band(&mut line, 0, &vm);
+            assert!(surface_text(&line).contains(&format!("{title} ●")));
+        }
+    }
+
+    #[test]
     fn a_hidden_status_line_leaves_the_node_health_dot_on_the_switcher_line() {
         let mut vm = build_view_model(&empty_center_core());
         vm.presentation.chrome.status_bar.visible = false;

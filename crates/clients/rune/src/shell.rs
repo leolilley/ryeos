@@ -6,7 +6,7 @@ use rune::{El, Key, KeyEvent, ScrollSpec, col, el, row, text, text_input};
 use ryeos_client_base::layout::SplitBranch;
 use ryeos_client_base::ui::event::{RyeOsInputAction, RyeOsTransportFreshness};
 use ryeos_client_base::ui::view_model::{
-    RyeOsDialogVm, RyeOsInputVm, RyeOsLayoutNodeVm, RyeOsNoticeVm, RyeOsSplitAxisVm,
+    RyeOsChipMarkVm, RyeOsDialogVm, RyeOsInputVm, RyeOsLayoutNodeVm, RyeOsNoticeVm, RyeOsSplitAxisVm,
     RyeOsSurfaceChoiceVm, RyeOsTileIntentVm, RyeOsTone, RyeOsTopBarVm, RyeOsViewModel,
     RyeOsViewSetVm,
 };
@@ -180,9 +180,6 @@ fn system_bar(vm: &RyeOsViewModel, local: &Local) -> El {
             ..
         })
     );
-    // look: the chip would show the Surface's picture or mark, and carry a
-    // warn or accent dot for work needing you or running; the view model has
-    // neither, so the chip shows the ordinal.
     // look: the switcher's open state with the Surfaces' names (spec section
     // 11, "Bar, open") is not built; the bar stays the narrow chip column.
     // look: the switcher and the sheet carry no shadow; no shadow call is used
@@ -202,12 +199,7 @@ fn system_bar(vm: &RyeOsViewModel, local: &Local) -> El {
     // With no open Surface the session's initial stands in, as the old bar
     // showed the session's title.
     if session.surfaces.is_empty() {
-        let initial: String = session
-            .title
-            .chars()
-            .next()
-            .map(|c| c.to_uppercase().collect())
-            .unwrap_or_default();
+        let initial = crate::marks::initial_of(&session.title);
         chips = chips.child(
             col()
                 .size(theme::SWITCHER_CHIP, theme::SWITCHER_CHIP)
@@ -293,16 +285,22 @@ fn surface_entry(surface: &RyeOsSurfaceChoiceVm, local: &Local) -> El {
         (1.0, t.ink_at(0.14), t.ink_at(0.55))
     };
     let select = surface.select_intent.clone();
-    let chip = col()
+    let mut chip = col()
         .size(theme::SWITCHER_CHIP, theme::SWITCHER_CHIP)
         .center()
         .radius(theme::RADIUS_ROW)
         .border(edge, edge_ink)
-        .child(
-            text(format!("{}", surface.ordinal))
-                .font(theme::medium(theme::TYPE_MICRO))
-                .color(ink),
-        );
+        .child(chip_mark(surface, ink));
+    let dot = crate::marks::WorkDot::of(
+        surface.needs_you.is_some_and(|count| count > 0),
+        surface.running.is_some_and(|count| count > 0),
+    );
+    if let Some(dot) = dot {
+        chip = chip.child(crate::marks::chip_dot(dot, format!("{}:{key}", dot.word())));
+    }
+    if surface.chip.authored_in_project {
+        chip = chip.child(crate::marks::project_chip_mark(ink, format!("project:{key}")));
+    }
     let mut entry = col()
         .key(key)
         .items_center()
@@ -339,6 +337,20 @@ fn surface_entry(surface: &RyeOsSurfaceChoiceVm, local: &Local) -> El {
         });
     }
     entry
+}
+
+/// What a Surface's chip shows: Home's grid, a node's key figure, or the
+/// title's first letter.
+fn chip_mark(surface: &RyeOsSurfaceChoiceVm, ink: rune::Color) -> El {
+    match surface.chip.mark {
+        RyeOsChipMarkVm::Grid => crate::marks::grid_mark(ink),
+        // A node whose key is not known yet shows its initial.
+        RyeOsChipMarkVm::Key => match surface.chip.fingerprint.as_deref() {
+            Some(fingerprint) => crate::marks::key_mark(fingerprint, 14.0, ink),
+            None => crate::marks::initial_mark(&surface.title, ink),
+        },
+        RyeOsChipMarkVm::Initial => crate::marks::initial_mark(&surface.title, ink),
+    }
 }
 
 /// A small action under the current Surface's chip.
@@ -408,8 +420,20 @@ fn view_set_strip(top_bar: &RyeOsTopBarVm, local: &Local) -> El {
                 ("✓", "×"),
             ))
         } else {
-            // look: the ordinal is dropped from view; a tab needing you would
-            // carry a 5 px warn dot, which the view model does not say.
+            let dot = crate::marks::WorkDot::of(
+                tab.needs_you.unwrap_or(false),
+                tab.running.unwrap_or(false),
+            );
+            let mut word_row = row()
+                .gap(6.0)
+                .center_y()
+                .child(text(tab.title.clone()).font(word).color(ink));
+            if let Some(dot) = dot {
+                word_row = word_row.child(crate::marks::tab_dot(
+                    dot,
+                    format!("{}:view-set:{view_set_id}", dot.word()),
+                ));
+            }
             slot.child(
                 row()
                     .h_full()
@@ -422,7 +446,7 @@ fn view_set_strip(top_bar: &RyeOsTopBarVm, local: &Local) -> El {
                         row()
                             .pb(6.0)
                             .border_sides([0.0, 0.0, 1.0, 0.0], mark)
-                            .child(text(tab.title.clone()).font(word).color(ink)),
+                            .child(word_row),
                     )
                     .on_press(move |app: &mut App| {
                         app.ui(RyeOsUiEvent::Activate {
@@ -1019,13 +1043,19 @@ fn status_bar(vm: &RyeOsViewModel) -> El {
         .center_y()
         .child(chip)
         .on_press(|app: &mut App| app.ui(RyeOsUiEvent::OpenLauncher));
-    let keys = island().min_w(0.0).gap(6.0).child(launcher).child(
-        text(theme::drawable(&model.key_hint_text(), theme::Face::Ui).into_owned())
-            .font(theme::TYPE_MICRO)
-            .color(t.ink_at(0.55))
-            .truncate()
-            .min_w(0.0),
-    );
+    // The hints run in priority order; the row is bounded by the island, so
+    // the last ones are the ones a narrow window loses.
+    let mut hints = row().min_w(0.0).shrink().gap(14.0).center_y().scroll_x();
+    for hint in &model.key_hints {
+        hints = hints.child(crate::marks::key_hint(&hint.keys, &hint.word));
+    }
+    let keys = island()
+        .min_w(0.0)
+        .gap(6.0)
+        .role("group")
+        .label("Keys")
+        .child(launcher)
+        .child(hints);
     let mut status = island();
     // Attention tints only a dot.
     if let Some(color) = model.attention.and_then(|tone| t.tone(tone)) {

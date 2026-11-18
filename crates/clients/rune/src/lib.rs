@@ -9,6 +9,7 @@
 mod boot;
 mod field;
 mod icons;
+mod marks;
 #[cfg(test)]
 mod probe;
 mod recovery;
@@ -41,7 +42,14 @@ pub struct App {
     /// anything that can change the core, and shared by every reader until
     /// the next such change.
     model: std::cell::RefCell<Option<std::rc::Rc<RyeOsViewModel>>>,
+    /// A fixture's finishing touch on each model it draws: counts, marks and
+    /// flags the in-memory core has no producer for. Leaves the model alone
+    /// outside fixtures.
+    dress: Dress,
 }
+
+/// A change a fixture makes to each view model before it is drawn.
+pub type Dress = fn(&mut RyeOsViewModel);
 
 /// State only this renderer keeps: the text fields, and which tile's
 /// actions menu is open. None of it is presentation state.
@@ -403,11 +411,12 @@ impl App {
             phase: Phase::Starting,
             local: Local::default(),
             model: Default::default(),
+            dress: |_| {},
         }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn fixture(core: Result<ryeos_client_base::ui::RyeOsCore, String>) -> App {
+    fn fixture(core: Result<ryeos_client_base::ui::RyeOsCore, String>, dress: Dress) -> App {
         App {
             boot: Boot::default(),
             phase: match core {
@@ -416,6 +425,7 @@ impl App {
             },
             local: Local::default(),
             model: Default::default(),
+            dress,
         }
     }
 
@@ -437,7 +447,9 @@ impl App {
         if let Some(model) = &*self.model.borrow() {
             return Some(model.clone());
         }
-        let model = std::rc::Rc::new(self.core()?.envelope(Vec::new()).view_model);
+        let mut model = self.core()?.envelope(Vec::new()).view_model;
+        (self.dress)(&mut model);
+        let model = std::rc::Rc::new(model);
         *self.model.borrow_mut() = Some(model.clone());
         Some(model)
     }
@@ -885,9 +897,10 @@ pub fn spec(fonts: &'static [&'static [u8]]) -> AppSpec<App> {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn start_fixture(
     core: Result<ryeos_client_base::ui::RyeOsCore, String>,
+    dress: Dress,
     fonts: &'static [&'static [u8]],
 ) {
-    fixture_app(core, fonts).run();
+    fixture_app(core, dress, fonts).run();
 }
 
 /// The fixture shell as a windowless runtime at `size`, for tests that press,
@@ -895,14 +908,16 @@ pub fn start_fixture(
 #[cfg(not(target_arch = "wasm32"))]
 pub fn fixture_runtime(
     core: Result<ryeos_client_base::ui::RyeOsCore, String>,
+    dress: Dress,
     size: (f32, f32),
 ) -> rune::Runtime<App> {
-    fixture_app(core, &[]).headless_runtime(size, rune::Env::new(true, 1.0))
+    fixture_app(core, dress, &[]).headless_runtime(size, rune::Env::new(true, 1.0))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn fixture_app(
     core: Result<ryeos_client_base::ui::RyeOsCore, String>,
+    dress: Dress,
     fonts: &'static [&'static [u8]],
 ) -> rune::App<App> {
     rune::App::new(AppSpec {
@@ -912,7 +927,7 @@ fn fixture_app(
         families: ("Inter", "IBM Plex Mono"),
         ..AppSpec::new("RyeOS fixture", (1280.0, 800.0), App::new, view)
     })
-    .init(move || App::fixture(core))
+    .init(move || App::fixture(core, dress))
 }
 
 /// Font files the page hands over before `start`.

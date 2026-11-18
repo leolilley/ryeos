@@ -15,7 +15,7 @@ use serde_json::Value;
 const FRAME: f64 = 1.0 / 60.0;
 
 fn shell(scene: &str, size: (f32, f32)) -> Runtime<App> {
-    let mut rt = fixture_runtime(presentation::core(scene), size);
+    let mut rt = fixture_runtime(presentation::core(scene), presentation::dress(scene), size);
     rt.frame(0.0);
     // Layout reports the viewport on the first frame and the shell redraws
     // at its next wake; a second of frames settles both, as a snapshot does.
@@ -379,13 +379,22 @@ fn the_status_bar_shows_only_its_segments() {
             *x >= 0.0 && *x < width / 2.0 && middle >= launch_y && middle <= launch_y + launch_h
         })
         .collect();
+    // Each hint draws as its key chip and its word, nothing else.
+    let left: Vec<String> = left.into_iter().map(|(text, _)| text).collect();
     assert!(
-        status.key_hint_text().contains("ctrl+k open"),
-        "the fixture's hint keeps its ASCII core"
+        status
+            .key_hints
+            .iter()
+            .any(|hint| hint.keys == "ctrl+k" && hint.word == "open"),
+        "the fixture's hints keep their ASCII core"
     );
     assert!(
-        left.len() == 1 && left[0].0.contains("ctrl+k open"),
-        "only the key hint in the left island, saw {left:?}"
+        left.windows(2).any(|pair| pair[0] == "ctrl+k" && pair[1] == "open"),
+        "the open hint as its key then its word, saw {left:?}"
+    );
+    assert!(
+        left.len() <= 2 * status.key_hints.len() && left.len() % 2 == 0,
+        "only the key hints in the left island, saw {left:?}"
     );
     // A text is in the right island when it is right of the launch control and
     // its vertical centre is within the launch control's top..bottom band.
@@ -692,4 +701,60 @@ fn the_current_view_set_tab_stays_in_view_when_the_tabs_scroll() {
         "the current tab is in view: {x}..{} in {width}",
         x + w
     );
+}
+
+#[test]
+fn surface_chips_draw_their_marks_dots_and_the_project_mark() {
+    let rt = shell("chips", (1280.0, 800.0));
+    let vm = model(&rt);
+    let surfaces = &vm.session.surfaces;
+    assert_eq!(surfaces.len(), 4, "the scene opens four Surfaces");
+    let key = |surface: &ryeos_client_base::ui::view_model::RyeOsSurfaceChoiceVm| {
+        format!("surface:{:?}", surface.surface_instance_id)
+    };
+    // Home: work needing you and running; needing you wins.
+    let home = &surfaces[0];
+    assert!(exactly_keyed(&rt, &format!("needs-you:{}", key(home))).is_some());
+    assert!(exactly_keyed(&rt, &format!("running:{}", key(home))).is_none());
+    // The node: running only.
+    let node = &surfaces[1];
+    assert!(exactly_keyed(&rt, &format!("running:{}", key(node))).is_some());
+    // The project: zero counts draw no dot; it carries the project mark.
+    let project = &surfaces[2];
+    for word in ["needs-you", "running"] {
+        assert!(exactly_keyed(&rt, &format!("{word}:{}", key(project))).is_none());
+    }
+    assert!(exactly_keyed(&rt, &format!("project:{}", key(project))).is_some());
+    // Unknown counts draw nothing, and no other chip is marked as a project's.
+    let plain = &surfaces[3];
+    for word in ["needs-you", "running", "project"] {
+        assert!(exactly_keyed(&rt, &format!("{word}:{}", key(plain))).is_none());
+    }
+    assert!(exactly_keyed(&rt, &format!("project:{}", key(home))).is_none());
+    // A dot sits inside its chip's top-right corner.
+    let [cx, cy, cw, _] = exactly_keyed(&rt, &key(home)).expect("Home's chip");
+    let [dx, dy, dw, _] =
+        exactly_keyed(&rt, &format!("needs-you:{}", key(home))).expect("Home's dot");
+    assert!(dx + dw <= cx + cw && dx > cx + cw / 2.0 && dy >= cy && dy < cy + 8.0);
+}
+
+#[test]
+fn a_tab_with_work_carries_its_dot_after_its_word() {
+    let rt = shell("tabs", (900.0, 800.0));
+    let vm = model(&rt);
+    let tabs = &vm.presentation.chrome.top_bar.tabs;
+    let needing = &tabs[2];
+    let running = &tabs[4];
+    let drawn = |word: &str, id| exactly_keyed(&rt, &format!("{word}:view-set:{id}"));
+    // Only tabs in view are drawn; the scene scrolls to the last tab, so
+    // check what is drawn against what the model says.
+    for tab in tabs {
+        let in_view = exactly_keyed(&rt, &format!("view-set:{}", tab.view_set_id)).is_some();
+        let expects_needing = tab.view_set_id == needing.view_set_id;
+        let expects_running = tab.view_set_id == running.view_set_id;
+        if in_view {
+            assert_eq!(drawn("needs-you", tab.view_set_id).is_some(), expects_needing);
+            assert_eq!(drawn("running", tab.view_set_id).is_some(), expects_running);
+        }
+    }
 }

@@ -614,7 +614,7 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
     answered += answer(&mut core, effects, scene);
     // The scene picks what is open when the frame is drawn.
     match scene {
-        "" | "field" | "long" | "states" => {}
+        "" | "field" | "long" | "states" | "chips" => {}
         "timeline" | "timeline-draft" | "timeline-top" => {
             // The newest group is opened, so an opened group is drawn too.
             if scene != "timeline-top" {
@@ -657,4 +657,59 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
     }
     eprintln!("fixture: answered {answered} source fetches");
     Ok(core)
+}
+
+/// What `scene` adds to each view model the in-memory core builds: counts,
+/// marks and flags whose producers are a node's, not the core's.
+pub fn dress(scene: &str) -> ryeos_client_rune::Dress {
+    match scene {
+        "chips" => dress_chips,
+        "tabs" => dress_tabs,
+        _ => |_| {},
+    }
+}
+
+/// Four open Surfaces, one of each chip: Home's grid with work needing you,
+/// the node's key with a run going, the project's (current, project-authored)
+/// and a plain one.
+fn dress_chips(vm: &mut ryeos_client_base::ui::view_model::RyeOsViewModel) {
+    use ryeos_client_base::ui::view_model::RyeOsChipMarkVm as Mark;
+    let Some(template) = vm.session.surfaces.first().cloned() else {
+        return;
+    };
+    let choices = [
+        ("Home", Mark::Grid, false, Some(2), Some(1)),
+        ("rye", Mark::Key, false, Some(0), Some(3)),
+        ("ryeos", Mark::Initial, true, Some(0), Some(0)),
+        ("notes", Mark::Initial, false, None, None),
+    ];
+    vm.session.surfaces = choices
+        .into_iter()
+        .enumerate()
+        .map(|(index, (title, mark, project, needs_you, running))| {
+            let mut choice = template.clone();
+            if index > 0 {
+                choice.surface_instance_id =
+                    serde_json::from_value(json!(format!("33333333-3333-4333-8333-33333333333{index}")))
+                        .expect("a fixture Surface id");
+            }
+            choice.ordinal = index as u64 + 1;
+            choice.title = title.to_owned();
+            choice.active = project;
+            choice.chip.mark = mark;
+            choice.chip.authored_in_project = project;
+            choice.chip.fingerprint = (mark == Mark::Key).then(|| "ed25519:3f9a0c71e2".to_owned());
+            choice.needs_you = needs_you;
+            choice.running = running;
+            choice
+        })
+        .collect();
+}
+
+/// The tabs scene with one tab needing you and one running.
+fn dress_tabs(vm: &mut ryeos_client_base::ui::view_model::RyeOsViewModel) {
+    for (index, tab) in vm.presentation.chrome.top_bar.tabs.iter_mut().enumerate() {
+        tab.needs_you = Some(index == 2);
+        tab.running = Some(index == 4);
+    }
 }
