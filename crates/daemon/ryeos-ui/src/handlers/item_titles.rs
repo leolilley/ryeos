@@ -180,14 +180,18 @@ fn after_frontmatter(source: &str) -> &str {
     source
 }
 
-/// Control characters dropped, whitespace runs collapsed to one space, ends
-/// trimmed, and the result cut to `max_chars` characters. `None` when nothing
-/// is left.
+/// Control characters and invisible formatting characters (bidirectional
+/// overrides and isolates, zero-width characters, the byte-order mark)
+/// dropped, so a title cannot reorder or hide what it shows; whitespace runs
+/// collapsed to one space, ends trimmed, and the result cut to `max_chars`
+/// characters. `None` when nothing is left.
 fn sanitise(text: &str, max_chars: usize) -> Option<String> {
     let spaced: String = text
         .chars()
         .filter_map(|c| {
-            if c.is_whitespace() {
+            if is_invisible_format(c) {
+                None
+            } else if c.is_whitespace() {
                 Some(' ')
             } else if c.is_control() {
                 None
@@ -200,6 +204,15 @@ fn sanitise(text: &str, max_chars: usize) -> Option<String> {
     let capped: String = collapsed.chars().take(max_chars).collect();
     let capped = capped.trim_end().to_string();
     (!capped.is_empty()).then_some(capped)
+}
+
+/// Formatting characters that change how text is ordered or shown without
+/// being visible themselves.
+fn is_invisible_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}'
+    )
 }
 
 /// Whether an item's trust class, as the list already computed it, is the
@@ -334,6 +347,15 @@ mod tests {
         assert!(title.starts_with("ab[31m c x"), "{title}");
         assert_eq!(title.chars().count(), config.limits.max_chars);
         assert!(!title.chars().any(char::is_control));
+    }
+
+    #[test]
+    fn invisible_formatting_characters_are_stripped() {
+        let config = shipped();
+        let text = "title: \"safe\u202e txt.exe\u200b\u2066 name\ufeff\"\n";
+        let (title, source) = yaml_title(&config, "tool", true, text);
+        assert_eq!(source, SOURCE_AUTHORED);
+        assert_eq!(title, "safe txt.exe name");
     }
 
     #[test]
