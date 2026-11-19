@@ -111,7 +111,7 @@ fn check_ready_network_inputs(
             input.source
         );
         ensure!(
-            input.absent == !read.present,
+            input.absent != read.present,
             "Ready network input {} is {} but the provider's file was {} when the guest half read it",
             input.source,
             if input.absent { "absent" } else { "present" },
