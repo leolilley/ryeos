@@ -127,6 +127,93 @@ fn journal_entries(surfaces: &[JournalSurface]) -> Vec<SyncIncludeEntry> {
         .collect()
 }
 
+/// One managed root as recorded in a settled job result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordedRoot {
+    root: String,
+    shape: JournalShape,
+}
+
+/// The durable result a settled apply job carries. A committed or rolled-back
+/// apply records the `sync_include` table it ran under, so journal-less
+/// recovery (the transaction was already retired) verifies the live project
+/// against that table and never against the node's current one. A job that
+/// never started swapped nothing and records no table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+enum SettledResult {
+    Committed { sync_include: Vec<RecordedRoot> },
+    RolledBack { sync_include: Vec<RecordedRoot> },
+    NotStarted {},
+}
+
+fn recorded_roots(entries: &[SyncIncludeEntry]) -> Vec<RecordedRoot> {
+    entries
+        .iter()
+        .map(|entry| RecordedRoot {
+            root: entry.root.clone(),
+            shape: entry.shape.into(),
+        })
+        .collect()
+}
+
+fn settled_result_value(result: SettledResult) -> Value {
+    serde_json::to_value(result).expect("settled result serializes")
+}
+
+fn committed_result(entries: &[SyncIncludeEntry]) -> Value {
+    settled_result_value(SettledResult::Committed {
+        sync_include: recorded_roots(entries),
+    })
+}
+
+fn rolled_back_result(entries: &[SyncIncludeEntry]) -> Value {
+    settled_result_value(SettledResult::RolledBack {
+        sync_include: recorded_roots(entries),
+    })
+}
+
+fn recovery_result(outcome: &str, entries: &[SyncIncludeEntry]) -> Value {
+    match outcome {
+        "committed" => committed_result(entries),
+        "rolled_back" => rolled_back_result(entries),
+        other => unreachable!("recovery settles only committed or rolled_back, not {other}"),
+    }
+}
+
+/// A job-intrinsic recovery failure: the job itself is unrecoverable and no
+/// retry can change that. Infrastructure failures never carry this type.
+#[derive(Debug)]
+struct ApplyRecoveryRefusal {
+    code: &'static str,
+}
+
+impl ApplyRecoveryRefusal {
+    fn new(code: &'static str) -> Self {
+        Self { code }
+    }
+}
+
+impl std::fmt::Display for ApplyRecoveryRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "project apply recovery refused ({})", self.code)
+    }
+}
+
+impl std::error::Error for ApplyRecoveryRefusal {}
+
+fn recorded_entries(roots: &[RecordedRoot]) -> Vec<SyncIncludeEntry> {
+    roots
+        .iter()
+        .map(|root| SyncIncludeEntry {
+            root: root.root.clone(),
+            shape: root.shape.into(),
+            materialize_to_project: true,
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SurfaceContentIdentity {
@@ -644,7 +731,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
                         SyncJobState::Completed,
                         "completed",
                         None,
-                        serde_json::json!({"outcome": "committed"}),
+                        committed_result(&entries),
                         true,
                     )
                 },
@@ -675,7 +762,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
                         SyncJobState::Failed,
                         "rolled_back",
                         Some(diagnostic),
-                        serde_json::json!({"outcome": "rolled_back"}),
+                        rolled_back_result(&entries),
                         true,
                     )
                 },
@@ -2085,26 +2172,40 @@ async fn recover_apply_job(
         }
         _ => None,
     };
-    let settled_resolution = match job.state {
-        SyncJobState::Completed
-            if job.result.as_ref() == Some(&serde_json::json!({"outcome": "committed"})) =>
-        {
+    let settled_result: Option<SettledResult> = match job.state {
+        SyncJobState::Completed | SyncJobState::Failed => Some(
+            job.result
+                .as_ref()
+                .and_then(|result| serde_json::from_value::<SettledResult>(result.clone()).ok())
+                .ok_or_else(|| {
+                    anyhow!("terminal project apply job has no recognized durable resolution")
+                        .context(ApplyRecoveryRefusal::new("settled_result_unrecognized"))
+                })?,
+        ),
+        _ => None,
+    };
+    let settled_resolution = match (job.state, settled_result.as_ref()) {
+        (SyncJobState::Completed, Some(SettledResult::Committed { .. })) => {
             Some(ApplyRecoveryDecision::Commit)
         }
-        SyncJobState::Failed
-            if job.result.as_ref() == Some(&serde_json::json!({"outcome": "rolled_back"})) =>
-        {
+        (SyncJobState::Failed, Some(SettledResult::RolledBack { .. })) => {
             Some(ApplyRecoveryDecision::Rollback)
         }
-        SyncJobState::Failed
-            if job.result.as_ref() == Some(&serde_json::json!({"outcome": "not_started"}))
-                && journal.is_none() =>
-        {
+        (SyncJobState::Failed, Some(SettledResult::NotStarted {})) if journal.is_none() => {
             Some(ApplyRecoveryDecision::Rollback)
         }
-        SyncJobState::Completed | SyncJobState::Failed => {
-            anyhow::bail!("terminal project apply job has no recognized durable resolution")
+        (SyncJobState::Completed | SyncJobState::Failed, _) => {
+            return Err(
+                anyhow!("terminal project apply job has no recognized durable resolution")
+                    .context(ApplyRecoveryRefusal::new("settled_result_unrecognized")),
+            );
         }
+        _ => None,
+    };
+    let recorded_table: Option<Vec<SyncIncludeEntry>> = match settled_result.as_ref() {
+        Some(
+            SettledResult::Committed { sync_include } | SettledResult::RolledBack { sync_include },
+        ) => Some(recorded_entries(sync_include)),
         _ => None,
     };
     let recovery_owners = project_deploy::recovery_owners(state)?;
@@ -2159,18 +2260,21 @@ async fn recover_apply_job(
             .await
             .context("prepare project schedule restoration before CAS recovery guard")?;
     }
+    // The roots to verify are the journal's own list when a journal
+    // exists: the apply was prepared against that table, and recovery must
+    // not depend on the node's table today. With no journal (a settled
+    // apply whose transaction was already retired) the settled result
+    // records the table the apply ran under. Only a job that never
+    // swapped anything (not started, or unsettled with no journal) has no
+    // recorded table, and the node's current table stands in.
+    let recovery_entries = match (journal.as_ref(), recorded_table.as_ref()) {
+        (Some(journal), _) => journal_entries(&journal.surfaces),
+        (None, Some(table)) => table.clone(),
+        (None, None) => state.sync_include.materialized().cloned().collect(),
+    };
     let outcome = {
         let _cas_guard = authority.acquire_shared_guard()?;
         let cas = authority.cas_store()?;
-        // The roots to verify are the journal's own list when a journal
-        // exists: the apply was prepared against that table, and recovery must
-        // not depend on the node's table today. With no journal (a settled
-        // commit whose transaction was already retired) there is nothing
-        // recorded, so the node's current table stands in.
-        let recovery_entries = match journal.as_ref() {
-            Some(journal) => journal_entries(&journal.surfaces),
-            None => state.sync_include.materialized().cloned().collect(),
-        };
         let expected_targets = expected_target_surface_identities_for_snapshot(
             &cas,
             &operation.target_snapshot_hash,
@@ -2262,7 +2366,7 @@ async fn recover_apply_job(
                 outcome.1,
                 (outcome.0 == SyncJobState::Failed)
                     .then(|| "interrupted project apply was rolled back before startup".to_owned()),
-                serde_json::json!({"outcome": outcome.2}),
+                recovery_result(outcome.2, &recovery_entries),
                 was_retained && job.state == SyncJobState::Running,
             )
         },
@@ -2715,7 +2819,7 @@ mod tests {
                         uploaded_hashes: Vec::new(),
                         fetched_hashes: Vec::new(),
                         last_error: None,
-                        result: Some(serde_json::json!({"outcome": "committed"})),
+                        result: Some(committed_result(&test_entries())),
                     },
                 )?;
                 Ok(())
@@ -2751,7 +2855,7 @@ mod tests {
                         uploaded_hashes: Vec::new(),
                         fetched_hashes: Vec::new(),
                         last_error: None,
-                        result: Some(serde_json::json!({"outcome": "committed"})),
+                        result: Some(committed_result(&test_entries())),
                     },
                 )?;
                 Ok(())
@@ -4030,5 +4134,157 @@ schedules:
             error.contains("schema 1") && error.contains("no schema 1 reader"),
             "{error}"
         );
+    }
+    #[test]
+    fn settled_results_record_the_table_and_the_old_shape_is_unrecognized() {
+        let table = vec![
+            SyncIncludeEntry::file(".ai/manifest.yaml"),
+            SyncIncludeEntry::directory(".ai/views"),
+        ];
+        let committed = committed_result(&table);
+        assert_eq!(
+            committed,
+            serde_json::json!({
+                "outcome": "committed",
+                "sync_include": [
+                    {"root": ".ai/manifest.yaml", "shape": "file"},
+                    {"root": ".ai/views", "shape": "directory"},
+                ],
+            })
+        );
+        let SettledResult::Committed { sync_include } = serde_json::from_value(committed).unwrap()
+        else {
+            panic!("committed result decodes as committed");
+        };
+        assert_eq!(recorded_entries(&sync_include), table);
+        let rolled_back: SettledResult =
+            serde_json::from_value(rolled_back_result(&table)).unwrap();
+        assert!(matches!(rolled_back, SettledResult::RolledBack { .. }));
+        let not_started: SettledResult =
+            serde_json::from_value(serde_json::json!({"outcome": "not_started"})).unwrap();
+        assert_eq!(not_started, SettledResult::NotStarted {});
+        for old in [
+            serde_json::json!({"outcome": "committed"}),
+            serde_json::json!({"outcome": "rolled_back"}),
+            serde_json::json!({"outcome": "not_started", "sync_include": []}),
+            serde_json::json!({"outcome": "quarantined", "code": "x"}),
+        ] {
+            assert!(
+                serde_json::from_value::<SettledResult>(old.clone()).is_err(),
+                "{old}"
+            );
+        }
+    }
+
+    #[test]
+    fn journal_less_verification_uses_the_recorded_table_not_the_current_one() {
+        // The apply ran under a table with `.ai/views`; the node's table has
+        // since lost it. Journal-less recovery of the settled job must still
+        // see a change under `.ai/views`.
+        let recorded = vec![
+            SyncIncludeEntry::file(".ai/manifest.yaml"),
+            SyncIncludeEntry::directory(".ai/views"),
+        ];
+        let current = vec![SyncIncludeEntry::file(".ai/manifest.yaml")];
+        let project = TempDir::new().unwrap();
+        std::fs::create_dir_all(project.path().join(".ai/views")).unwrap();
+        std::fs::write(project.path().join(".ai/manifest.yaml"), "m").unwrap();
+        std::fs::write(project.path().join(".ai/views/a.yaml"), "a").unwrap();
+        let project_root = project.path().canonicalize().unwrap();
+        let directory = PinnedDirectory::open(&project_root).unwrap().unwrap();
+        let expect = |entries: &[SyncIncludeEntry]| {
+            entries
+                .iter()
+                .map(|entry| {
+                    (
+                        entry.root.clone(),
+                        observe_surface_content(&directory, entry).unwrap(),
+                    )
+                })
+                .collect::<HashMap<_, _>>()
+        };
+        let settled = SettledResult::Committed {
+            sync_include: recorded_roots(&recorded),
+        };
+        let table = match &settled {
+            SettledResult::Committed { sync_include } => recorded_entries(sync_include),
+            _ => unreachable!(),
+        };
+        assert_eq!(table, recorded);
+        let expected = expect(&table);
+        verify_live_target_identities(&directory, &expected, &table).unwrap();
+        std::fs::write(project.path().join(".ai/views/a.yaml"), "drifted").unwrap();
+        verify_live_target_identities(&directory, &expected, &table)
+            .expect_err("drift under the recorded table is detected");
+        let expected_current = expect(&current);
+        verify_live_target_identities(&directory, &expected_current, &current)
+            .expect("the current table cannot see drift under a dropped root");
+    }
+
+    #[test]
+    fn old_settled_results_stay_readable_outside_recovery() {
+        let (_state_root, store_owner, state) = crate::test_support::build_test_state();
+        let project = TempDir::new().unwrap();
+        let operation = test_operation(
+            &project.path().canonicalize().unwrap(),
+            "00000000-0000-4000-8000-0000000000aa",
+        );
+        let job = ryeos_state::NewSyncJob {
+            job_id: operation.job_id.clone(),
+            operation_type: APPLY_OPERATION_TYPE.to_owned(),
+            operation: serde_json::to_value(&operation).unwrap(),
+            peer: None,
+            roots: vec![operation.target_snapshot_hash.clone()],
+            heads: Vec::new(),
+            max_attempts: 3,
+        };
+        state
+            .state_store
+            .with_state_db(|db| {
+                db.create_sync_job_with_initial_progress(
+                    &job,
+                    SyncJobState::Running,
+                    "applying",
+                    None,
+                )?;
+                db.update_sync_job(
+                    &operation.job_id,
+                    &SyncJobUpdate {
+                        state: SyncJobState::Completed,
+                        phase: "completed".to_owned(),
+                        roots: None,
+                        heads: None,
+                        uploaded_hashes: Vec::new(),
+                        fetched_hashes: Vec::new(),
+                        last_error: None,
+                        result: Some(serde_json::json!({"outcome": "committed"})),
+                    },
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let fetched = state
+            .state_store
+            .with_state_db(|db| db.get_sync_job(&operation.job_id))
+            .unwrap()
+            .expect("job exists");
+        assert_eq!(
+            fetched.result,
+            Some(serde_json::json!({"outcome": "committed"}))
+        );
+        let listed = state
+            .state_store
+            .with_state_db(|db| db.list_sync_jobs_by_state(Some(SyncJobState::Completed), 10))
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        let by_operation = state
+            .state_store
+            .with_state_db(|db| {
+                db.list_sync_jobs_by_operation_type_before(APPLY_OPERATION_TYPE, None, 10)
+            })
+            .unwrap();
+        assert_eq!(by_operation.len(), 1);
+        drop(state);
+        store_owner.close().unwrap();
     }
 }
