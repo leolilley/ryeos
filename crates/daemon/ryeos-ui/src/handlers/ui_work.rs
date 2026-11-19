@@ -215,10 +215,18 @@ pub async fn handle_attention(
     )?;
     let counts = crate::handlers::ui_attention::counts(&config, &attention);
     attention.truncate(limit);
+    let running = crate::handlers::ui_attention::running(
+        &state,
+        &config,
+        caller.principal_id(),
+        project_root.as_deref(),
+        limit,
+    )?;
     Ok(serde_json::json!({
-        "schema_version":"ryeos.ui.attention.v2",
+        "schema_version":"ryeos.ui.attention.v3",
         "attention":attention,
         "counts":counts,
+        "running":running,
         "next_cursor":null,
     }))
 }

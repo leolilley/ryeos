@@ -18,7 +18,7 @@ pub use super::timeline::{RyeOsTimelineDockActionVm, RyeOsTimelineDockVm, RyeOsT
 pub use dialogs::{RyeOsCommandChoice, RyeOsDialogVm, RyeOsShortcutEntryVm, RyeOsTileIntentVm};
 pub use execution::RyeOsTimelineEntryVm;
 use execution::{facet_backed_response, focused_timeline_entry, retry_intent_for_focused_row};
-pub use session::{RyeOsSessionVm, RyeOsSurfaceChoiceVm};
+pub use session::{RyeOsChipMarkVm, RyeOsSessionVm, RyeOsSurfaceChipVm, RyeOsSurfaceChoiceVm};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsViewModel {
@@ -41,6 +41,80 @@ pub struct RyeOsViewModel {
     pub transport: RyeOsTransportVm,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effect_failures: Vec<RyeOsEffectFailureVm>,
+    /// The attention overlay: what needs the user and what is running.
+    #[serde(default)]
+    pub overlay: RyeOsOverlayVm,
+}
+
+/// The attention overlay lists: rows that need the user and rows that are
+/// running, each list with the full count when the rows shown are a subset.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct RyeOsOverlayVm {
+    /// Whether the overlay sheet is open.
+    pub open: bool,
+    /// The selected row as a flat index across `needs_you` then `running`.
+    pub selected: Option<usize>,
+    pub needs_you: Vec<RyeOsOverlayRowVm>,
+    pub running: Vec<RyeOsOverlayRowVm>,
+    pub needs_you_count: Option<usize>,
+    pub running_count: Option<usize>,
+    /// Key hints for the sheet footer: move, open, acknowledge, close.
+    pub key_hints: Vec<RyeOsKeyHintVm>,
+}
+
+impl RyeOsOverlayVm {
+    /// The number of rows the selection ranges over.
+    pub fn row_count(&self) -> usize {
+        self.needs_you.len() + self.running.len()
+    }
+
+    /// The row at a flat index: `needs_you` first, then `running`.
+    pub fn row(&self, index: usize) -> Option<&RyeOsOverlayRowVm> {
+        self.needs_you
+            .get(index)
+            .or_else(|| self.running.get(index.checked_sub(self.needs_you.len())?))
+    }
+}
+
+/// One overlay row: what it is, where it lives, how urgent, how long it has
+/// been waiting, and the actions offered on it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RyeOsOverlayRowVm {
+    pub id: String,
+    pub title: String,
+    #[serde(rename = "where")]
+    pub where_: String,
+    pub tone: RyeOsTone,
+    pub since_ms: i64,
+    pub actions: Vec<RyeOsOverlayActionVm>,
+}
+
+/// One action on an overlay row: the key to show, its word, and the intent
+/// the action dispatches.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RyeOsOverlayActionVm {
+    pub keys: String,
+    pub word: String,
+    pub intent: RyeOsUiIntent,
+}
+
+/// Which edge of the shell a bar sits on, or that it is hidden.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RyeOsEdgeVm {
+    #[default]
+    Left,
+    Top,
+    Right,
+    Bottom,
+    Hidden,
+}
+
+/// Where the Surface switcher is placed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RyeOsSwitcherVm {
+    pub edge: RyeOsEdgeVm,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -117,6 +191,8 @@ pub struct RyeOsPresentationChromeVm {
     pub border: String,
     pub top_bar: RyeOsTopBarVm,
     pub status_bar: RyeOsStatusBarVm,
+    #[serde(default)]
+    pub switcher: RyeOsSwitcherVm,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -125,6 +201,9 @@ pub struct RyeOsTopBarVm {
     pub tabs: Vec<RyeOsViewSetTabVm>,
     pub focused_title: String,
     pub layout_symbol: String,
+    /// Whether the add-tab affordance is offered; the active Surface's
+    /// `style.add_tab`, true unless it declares false.
+    pub add_tab: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -134,17 +213,48 @@ pub struct RyeOsViewSetTabVm {
     pub title: String,
     pub active: bool,
     pub tile_count: usize,
+    /// Whether any of this view set's work needs the user; None when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_you: Option<bool>,
+    /// Whether any of this view set's work is running; None when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsStatusBarVm {
     pub visible: bool,
     pub segments: Vec<RyeOsStatusSegmentVm>,
-    pub key_hint: String,
+    /// Key hints for the focused context, in priority order, at most 7.
+    pub key_hints: Vec<RyeOsKeyHintVm>,
+    #[serde(default)]
+    pub edge: RyeOsEdgeVm,
+    /// Whether this is the user's first run (a fixture-set signal for now).
+    #[serde(default)]
+    pub first_run: bool,
     #[serde(default)]
     pub energy: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attention: Option<RyeOsTone>,
+}
+
+impl RyeOsStatusBarVm {
+    /// The hints as one line of text: `keys word` pieces joined by ` · `.
+    pub fn key_hint_text(&self) -> String {
+        self.key_hints
+            .iter()
+            .map(|hint| format!("{} {}", hint.keys, hint.word).trim().to_string())
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
+}
+
+/// One key hint: the keys in the shell's display notation and the word that
+/// says what they do.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RyeOsKeyHintVm {
+    pub keys: String,
+    pub word: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -775,7 +885,7 @@ pub fn build_view_model(core: &RyeOsCore) -> RyeOsViewModel {
         .as_ref()
         .map(|root| format!("/ui/events/chain/{root}"));
     RyeOsViewModel {
-        schema_version: "ryeos.ui.vm.v2".to_string(),
+        schema_version: "ryeos.ui.vm.v3".to_string(),
         generation: core.generation,
         now_ms: core.runtime.now_ms,
         tail_thread_id: route.thread,
@@ -789,7 +899,14 @@ pub fn build_view_model(core: &RyeOsCore) -> RyeOsViewModel {
         notices: core.notices_vm(),
         transport: transport_vm(core),
         effect_failures: effect_failures_vm(core),
+        overlay: overlay_vm(core),
     }
+}
+
+fn overlay_vm(core: &RyeOsCore) -> RyeOsOverlayVm {
+    let mut overlay = core.ui.overlay.clone();
+    overlay.key_hints = super::keymap::overlay_key_hints();
+    overlay
 }
 
 fn transport_vm(core: &RyeOsCore) -> RyeOsTransportVm {
@@ -847,6 +964,7 @@ fn presentation_vm(
             border: border.name().to_string(),
             top_bar: top_bar_vm(core),
             status_bar: status_bar_vm(chrome, core),
+            switcher: switcher_vm(core),
         },
         metrics: presentation_metrics_vm(core, view_set),
         frame: RyeOsFrameVm {
@@ -856,6 +974,53 @@ fn presentation_vm(
             },
         },
         motion: core.ui.motion.clone(),
+    }
+}
+
+/// The active Surface's declared style, or the defaults when there is none.
+fn active_surface_style(core: &RyeOsCore) -> crate::surface::SurfaceStyleSpec {
+    core.active_surface_attachment()
+        .and_then(|attachment| attachment.presentation.definition.surface())
+        .map(|surface| surface.style)
+        .unwrap_or_default()
+}
+
+/// Whether the work selected in a view set is in one of the daemon's chain
+/// lists. None when attention is unavailable, the view set has no selected
+/// work, or the list was cut short (no claim rather than a wrong one).
+fn tab_has_work<'a>(
+    core: &'a RyeOsCore,
+    view_set_id: crate::ids::ViewSetId,
+    list: impl Fn(&'a crate::ui::dto::RyeOsAttentionDto) -> (&'a Vec<String>, bool),
+) -> Option<bool> {
+    let attention = core.data.attention.as_ref()?;
+    let (chains, truncated) = list(attention);
+    if truncated {
+        return None;
+    }
+    let work = core.selection_value_in_view_set(view_set_id, "selection.work")?;
+    let chain = work.get("chain_root")?.as_str()?;
+    Some(chains.iter().any(|candidate| candidate == chain))
+}
+
+fn switcher_vm(core: &RyeOsCore) -> RyeOsSwitcherVm {
+    use crate::surface::SwitcherEdgeSpec;
+    RyeOsSwitcherVm {
+        edge: match active_surface_style(core).switcher {
+            SwitcherEdgeSpec::Left => RyeOsEdgeVm::Left,
+            SwitcherEdgeSpec::Top => RyeOsEdgeVm::Top,
+            SwitcherEdgeSpec::Right => RyeOsEdgeVm::Right,
+            SwitcherEdgeSpec::Hidden => RyeOsEdgeVm::Hidden,
+        },
+    }
+}
+
+fn status_bar_edge(core: &RyeOsCore) -> RyeOsEdgeVm {
+    use crate::surface::StatusBarEdgeSpec;
+    match active_surface_style(core).status_bar {
+        StatusBarEdgeSpec::Bottom => RyeOsEdgeVm::Bottom,
+        StatusBarEdgeSpec::Top => RyeOsEdgeVm::Top,
+        StatusBarEdgeSpec::Hidden => RyeOsEdgeVm::Hidden,
     }
 }
 
@@ -879,10 +1044,17 @@ fn top_bar_vm(core: &RyeOsCore) -> RyeOsTopBarVm {
                     .active_view_set()
                     .is_some_and(|active| active.id == view_set.id),
                 tile_count: view_set.tile_ids().len(),
+                needs_you: tab_has_work(core, view_set.id, |counts| {
+                    (&counts.counts.chains, counts.counts.chains_truncated)
+                }),
+                running: tab_has_work(core, view_set.id, |counts| {
+                    (&counts.running.chains, counts.running.chains_truncated)
+                }),
             })
             .collect(),
         focused_title: focused_tile_title(core),
         layout_symbol: layout_symbol(core),
+        add_tab: active_surface_style(core).add_tab,
     }
 }
 
@@ -1001,16 +1173,12 @@ fn presentation_activity_level(
 }
 
 fn status_bar_vm(_chrome: &RyeOsChromeVm, core: &RyeOsCore) -> RyeOsStatusBarVm {
-    let key_hint = if core
-        .focused_view_instance_key()
-        .and_then(|instance| core.retained_lens_frames.get(&instance))
-        .is_none_or(|frames| frames.is_empty())
-    {
-        "ctrl+k open · alt+t/b bars · ctrl+←/→ tab · ctrl+↑/↓ move".to_string()
-    } else {
-        "⌫ back · alt+← back · ctrl+k open · alt+t/b bars · ctrl+←/→ tab · ctrl+↑/↓ move"
-            .to_string()
-    };
+    let edge = status_bar_edge(core);
+    let key_hints = super::keymap::key_hints(
+        core.focused_view_instance_key()
+            .and_then(|instance| core.retained_lens_frames.get(&instance))
+            .is_some_and(|frames| !frames.is_empty()),
+    );
     // This is quiet interaction chrome, not a second diagnostics dashboard.
     // Root-session project and execution counters become actively misleading
     // once exact mounted attachments span projects.
@@ -1043,9 +1211,13 @@ fn status_bar_vm(_chrome: &RyeOsChromeVm, core: &RyeOsCore) -> RyeOsStatusBarVm 
         (None, false) => Vec::new(),
     };
     RyeOsStatusBarVm {
-        visible: core.ui.bottom_status_visible,
+        // The operator's toggle can hide the bar; it never reveals one the
+        // Surface hides.
+        visible: core.ui.bottom_status_visible && edge != RyeOsEdgeVm::Hidden,
         segments,
-        key_hint,
+        key_hints,
+        edge,
+        first_run: false,
         energy: core.runtime.activity_pulse.clamp(0.0, 1.0),
         attention: (core.runtime.now_ms < core.runtime.attention_until_ms)
             .then_some(RyeOsTone::Warn),
@@ -2689,7 +2861,63 @@ fn view_vm(core: &RyeOsCore, tile_id: TileId, tile: &TileState) -> RyeOsViewVm {
     bound_view_vm(core, tile_id, &tile.view.view_ref)
 }
 
+/// The switcher chip for one Surface: the declared mark, whether the Surface
+/// is project-authored (the daemon's authorship marker), and the node key
+/// fingerprint when the mark is Key and the fingerprint is known.
+fn surface_chip_vm(
+    spec: Option<&crate::surface::SurfaceSpec>,
+    node_fingerprint: Option<&str>,
+) -> RyeOsSurfaceChipVm {
+    use crate::surface::SurfaceChipMarkSpec;
+    let mark = match spec.map(|spec| spec.chip.mark).unwrap_or_default() {
+        SurfaceChipMarkSpec::Grid => RyeOsChipMarkVm::Grid,
+        SurfaceChipMarkSpec::Key => RyeOsChipMarkVm::Key,
+        SurfaceChipMarkSpec::Initial => RyeOsChipMarkVm::Initial,
+    };
+    RyeOsSurfaceChipVm {
+        mark,
+        authored_in_project: spec.is_some_and(|spec| spec.authorship.is_some()),
+        fingerprint: (mark == RyeOsChipMarkVm::Key)
+            .then_some(node_fingerprint)
+            .flatten()
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+    }
+}
+
+/// The needs-you and running counts for one Surface, as the daemon counted
+/// them: the entry for the Surface's project when it has one, the totals when
+/// it has none. None when the attention queue is not available; a project the
+/// daemon lists nothing for has nothing raised, so zero.
+fn surface_attention_counts(
+    core: &RyeOsCore,
+    surface: &crate::ui::presentation_state::SurfaceComposition,
+) -> (Option<usize>, Option<usize>) {
+    let Some(attention) = core.data.attention.as_ref() else {
+        return (None, None);
+    };
+    let project_path = core
+        .binding_attachment(&surface.binding().binding_attachment_id)
+        .and_then(|attachment| attachment.project_path.as_deref());
+    let of = |entries: &[crate::ui::dto::RyeOsProjectCountDto], total: usize| match project_path {
+        None => total,
+        Some(path) => entries
+            .iter()
+            .find(|entry| entry.project_root.as_deref() == Some(path))
+            .map_or(0, |entry| entry.count),
+    };
+    (
+        Some(of(&attention.counts.by_project, attention.counts.total)),
+        Some(of(&attention.running.by_project, attention.running.count)),
+    )
+}
+
 fn session_vm(core: &RyeOsCore) -> RyeOsSessionVm {
+    let fingerprint = core
+        .data
+        .dimension
+        .as_ref()
+        .map(|dimension| dimension.local_node.identity.fingerprint.clone());
     let browser = core.data.session.as_ref();
     let surface = core.binding_attachment(&core.root_attachment_id);
     RyeOsSessionVm {
@@ -2736,6 +2964,13 @@ fn session_vm(core: &RyeOsCore) -> RyeOsSessionVm {
                         binding: surface.binding().clone(),
                     }
                 }),
+                chip: surface_chip_vm(
+                    core.binding_attachment(&surface.binding().binding_attachment_id)
+                        .and_then(|attachment| attachment.presentation.definition.surface()),
+                    fingerprint.as_deref(),
+                ),
+                needs_you: surface_attention_counts(core, surface).0,
+                running: surface_attention_counts(core, surface).1,
             })
             .collect(),
         user_principal_id: browser.and_then(|session| session.user_principal_id.clone()),
@@ -3954,6 +4189,60 @@ fn tile_id_text(id: TileId) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::keymap::{RyeOsKey, RyeOsKeyEvent, RyeOsKeyModifiers, ryeos_key_command};
+
+    fn spec_with_mark(mark: crate::surface::SurfaceChipMarkSpec) -> crate::surface::SurfaceSpec {
+        let mut spec = crate::surface::builtin_default();
+        spec.chip.mark = mark;
+        spec
+    }
+
+    #[test]
+    fn key_chip_carries_the_node_fingerprint() {
+        let spec = spec_with_mark(crate::surface::SurfaceChipMarkSpec::Key);
+        let chip = surface_chip_vm(Some(&spec), Some("fp:abc123"));
+        assert_eq!(chip.mark, RyeOsChipMarkVm::Key);
+        assert_eq!(chip.fingerprint.as_deref(), Some("fp:abc123"));
+        assert!(!chip.authored_in_project);
+    }
+
+    #[test]
+    fn key_chip_without_a_fingerprint_has_none() {
+        let spec = spec_with_mark(crate::surface::SurfaceChipMarkSpec::Key);
+        assert_eq!(surface_chip_vm(Some(&spec), None).fingerprint, None);
+        assert_eq!(surface_chip_vm(Some(&spec), Some("")).fingerprint, None);
+    }
+
+    #[test]
+    fn non_key_chips_never_carry_a_fingerprint() {
+        for mark in [
+            crate::surface::SurfaceChipMarkSpec::Grid,
+            crate::surface::SurfaceChipMarkSpec::Initial,
+        ] {
+            let spec = spec_with_mark(mark);
+            assert_eq!(
+                surface_chip_vm(Some(&spec), Some("fp:abc123")).fingerprint,
+                None
+            );
+        }
+        assert_eq!(
+            surface_chip_vm(None, Some("fp:abc123")).mark,
+            RyeOsChipMarkVm::Initial
+        );
+    }
+
+    #[test]
+    fn chip_marks_project_authorship_from_the_daemon_marker() {
+        let mut spec = crate::surface::builtin_default();
+        spec.authorship = Some(crate::ui::content::ItemAuthorship {
+            space: "project".into(),
+            trust_class: "untrusted_project".into(),
+            item_ref: None,
+            signer: None,
+            source_refs: Vec::new(),
+        });
+        assert!(surface_chip_vm(Some(&spec), None).authored_in_project);
+    }
     use crate::ui::reducer::test_support::core as test_support_core;
     use crate::ui::reducer::test_support::*;
     use crate::ui::{RyeOsEffect, RyeOsEffectKind, RyeOsEvent, RyeOsUiEvent};
@@ -4751,6 +5040,545 @@ mod tests {
                 .chrome
                 .top_bar
                 .visible
+        );
+    }
+
+    fn core_with_surface_yaml(yaml: &str) -> RyeOsCore {
+        test_support_core(session_with_surface(serde_yaml::from_str(yaml).unwrap()))
+    }
+
+    #[test]
+    fn surface_chip_mark_and_authorship_reach_the_session_surfaces() {
+        let key = build_view_model(&core_with_surface_yaml("name: Node\nchip:\n  mark: key\n"));
+        assert_eq!(key.session.surfaces[0].chip.mark, RyeOsChipMarkVm::Key);
+        assert!(!key.session.surfaces[0].chip.authored_in_project);
+
+        let plain = build_view_model(&core_with_surface_yaml("name: Plain\n"));
+        assert_eq!(
+            plain.session.surfaces[0].chip.mark,
+            RyeOsChipMarkVm::Initial
+        );
+
+        let authored = build_view_model(&core_with_surface_yaml(
+            "name: Mine\nauthorship:\n  space: project\n  trust_class: untrusted_project\n",
+        ));
+        assert!(authored.session.surfaces[0].chip.authored_in_project);
+    }
+
+    #[test]
+    fn surface_style_edges_reach_the_switcher_and_status_bar() {
+        let defaults = build_view_model(&core_with_surface_yaml("name: Plain\n"));
+        assert_eq!(
+            defaults.presentation.chrome.switcher.edge,
+            RyeOsEdgeVm::Left
+        );
+        assert_eq!(
+            defaults.presentation.chrome.status_bar.edge,
+            RyeOsEdgeVm::Bottom
+        );
+
+        let moved = build_view_model(&core_with_surface_yaml(
+            "name: Moved\nstyle:\n  switcher: right\n  status_bar: top\n",
+        ));
+        assert_eq!(moved.presentation.chrome.switcher.edge, RyeOsEdgeVm::Right);
+        assert_eq!(moved.presentation.chrome.status_bar.edge, RyeOsEdgeVm::Top);
+
+        let hidden = build_view_model(&core_with_surface_yaml(
+            "name: Hidden\nstyle:\n  switcher: hidden\n  status_bar: hidden\n",
+        ));
+        assert_eq!(
+            hidden.presentation.chrome.switcher.edge,
+            RyeOsEdgeVm::Hidden
+        );
+        assert_eq!(
+            hidden.presentation.chrome.status_bar.edge,
+            RyeOsEdgeVm::Hidden
+        );
+    }
+
+    #[test]
+    fn the_bar_toggle_hides_a_status_bar_but_never_reveals_a_hidden_one() {
+        let mut shown = core_with_surface_yaml("name: Plain\n");
+        shown.ui.bottom_status_visible = true;
+        assert!(
+            build_view_model(&shown)
+                .presentation
+                .chrome
+                .status_bar
+                .visible
+        );
+        shown.ui.bottom_status_visible = false;
+        assert!(
+            !build_view_model(&shown)
+                .presentation
+                .chrome
+                .status_bar
+                .visible
+        );
+
+        let mut hidden = core_with_surface_yaml("name: Hidden\nstyle:\n  status_bar: hidden\n");
+        hidden.ui.bottom_status_visible = true;
+        assert!(
+            !build_view_model(&hidden)
+                .presentation
+                .chrome
+                .status_bar
+                .visible
+        );
+    }
+
+    #[test]
+    fn surface_style_add_tab_reaches_the_top_bar() {
+        let declared_off = build_view_model(&core_with_surface_yaml(
+            "name: No add\nstyle:\n  add_tab: false\n",
+        ));
+        assert!(!declared_off.presentation.chrome.top_bar.add_tab);
+
+        let undeclared = build_view_model(&core_with_surface_yaml("name: Plain\n"));
+        assert!(undeclared.presentation.chrome.top_bar.add_tab);
+    }
+
+    fn overlay_row(id: &str, keys: &str) -> RyeOsOverlayRowVm {
+        RyeOsOverlayRowVm {
+            id: id.to_string(),
+            title: id.to_string(),
+            where_: "here".to_string(),
+            tone: RyeOsTone::Neutral,
+            since_ms: 0,
+            actions: vec![RyeOsOverlayActionVm {
+                keys: keys.to_string(),
+                word: "do".to_string(),
+                intent: RyeOsUiIntent::ToggleBottomStatusBar,
+            }],
+        }
+    }
+
+    fn core_with_overlay_rows() -> RyeOsCore {
+        let mut core = core_with_surface_yaml("name: Plain\n");
+        core.ui.overlay.needs_you = vec![overlay_row("ask", "a")];
+        core.ui.overlay.running = vec![overlay_row("run", "x")];
+        core
+    }
+
+    fn overlay_of(core: &RyeOsCore) -> RyeOsOverlayVm {
+        build_view_model(core).overlay
+    }
+
+    #[test]
+    fn overlay_toggle_selection_and_navigation_work_over_fixture_rows() {
+        let mut core = core_with_overlay_rows();
+        assert!(!overlay_of(&core).open);
+        core.dispatch_ui(RyeOsUiEvent::ToggleOverlay);
+        let open = overlay_of(&core);
+        assert!(open.open);
+        assert_eq!(open.selected, Some(0));
+        assert_eq!(open.key_hints.len(), 4);
+
+        core.dispatch_ui(RyeOsUiEvent::MoveOverlay { delta: 1 });
+        assert_eq!(overlay_of(&core).selected, Some(1));
+        core.dispatch_ui(RyeOsUiEvent::MoveOverlay { delta: 5 });
+        assert_eq!(overlay_of(&core).selected, Some(1));
+        core.dispatch_ui(RyeOsUiEvent::MoveOverlay { delta: -9 });
+        assert_eq!(overlay_of(&core).selected, Some(0));
+
+        core.dispatch_ui(RyeOsUiEvent::ToggleOverlay);
+        let closed = overlay_of(&core);
+        assert!(!closed.open);
+        assert_eq!(closed.selected, None);
+    }
+
+    #[test]
+    fn an_empty_overlay_opens_with_nothing_selected_and_ignores_movement() {
+        let mut core = core_with_surface_yaml("name: Plain\n");
+        core.dispatch_ui(RyeOsUiEvent::ToggleOverlay);
+        core.dispatch_ui(RyeOsUiEvent::MoveOverlay { delta: 1 });
+        let overlay = overlay_of(&core);
+        assert!(overlay.open);
+        assert_eq!(overlay.selected, None);
+        assert!(core.dispatch_ui(RyeOsUiEvent::ActivateOverlay).is_empty());
+    }
+
+    #[test]
+    fn escape_closes_the_overlay_and_changes_nothing_else() {
+        let mut core = core_with_overlay_rows();
+        core.dispatch_ui(RyeOsUiEvent::ToggleOverlay);
+        let before = build_view_model(&core);
+        let command = ryeos_key_command(
+            RyeOsKeyEvent {
+                key: RyeOsKey::Escape,
+                modifiers: RyeOsKeyModifiers::default(),
+            },
+            core.key_context(),
+        );
+        core.apply_key_command(command);
+        let mut after = build_view_model(&core);
+        assert!(!after.overlay.open);
+        after.overlay.open = true;
+        after.overlay.selected = before.overlay.selected;
+        after.generation = before.generation;
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn activating_a_row_dispatches_its_intent_and_closes_the_overlay() {
+        for event in [
+            RyeOsUiEvent::ActivateOverlay,
+            RyeOsUiEvent::ActivateOverlayKey { ch: 'a' },
+        ] {
+            let mut core = core_with_overlay_rows();
+            core.dispatch_ui(RyeOsUiEvent::ToggleOverlay);
+            assert!(core.ui.bottom_status_visible);
+            core.dispatch_ui(event);
+            assert!(!core.ui.bottom_status_visible, "the row's intent ran");
+            assert!(!overlay_of(&core).open);
+        }
+        let mut core = core_with_overlay_rows();
+        core.dispatch_ui(RyeOsUiEvent::ToggleOverlay);
+        core.dispatch_ui(RyeOsUiEvent::ActivateOverlayKey { ch: 'z' });
+        assert!(overlay_of(&core).open, "no action has that key");
+    }
+
+    #[test]
+    fn a_row_intent_dispatched_by_the_client_closes_the_overlay() {
+        let mut core = core_with_overlay_rows();
+        core.dispatch_ui(RyeOsUiEvent::ToggleOverlay);
+        core.dispatch_ui(RyeOsUiEvent::Activate {
+            intent: RyeOsUiIntent::ToggleBottomStatusBar,
+        });
+        assert!(!overlay_of(&core).open);
+    }
+
+    #[test]
+    fn selecting_a_surface_card_closes_the_overlay() {
+        let mut core = core_with_overlay_rows();
+        core.dispatch_ui(RyeOsUiEvent::ToggleOverlay);
+        let select = build_view_model(&core).session.surfaces[0]
+            .select_intent
+            .clone();
+        core.dispatch_ui(RyeOsUiEvent::Activate { intent: select });
+        assert!(!overlay_of(&core).open);
+    }
+
+    #[test]
+    fn an_unrelated_intent_leaves_the_overlay_open() {
+        let mut core = core_with_overlay_rows();
+        core.dispatch_ui(RyeOsUiEvent::ToggleOverlay);
+        core.dispatch_ui(RyeOsUiEvent::Activate {
+            intent: RyeOsUiIntent::ToggleTopStatusBar,
+        });
+        assert!(overlay_of(&core).open);
+    }
+
+    #[test]
+    fn the_overlay_key_opens_over_a_surface_that_hides_every_edge() {
+        let mut core = core_with_surface_yaml(
+            "name: Bare\nstyle:\n  switcher: hidden\n  status_bar: hidden\n  add_tab: false\n",
+        );
+        let vm = build_view_model(&core);
+        assert_eq!(vm.presentation.chrome.switcher.edge, RyeOsEdgeVm::Hidden);
+        assert_eq!(vm.presentation.chrome.status_bar.edge, RyeOsEdgeVm::Hidden);
+        assert!(!vm.presentation.chrome.top_bar.add_tab);
+        let alt_o = RyeOsKeyEvent {
+            key: RyeOsKey::Char('o'),
+            modifiers: RyeOsKeyModifiers {
+                alt: true,
+                ..Default::default()
+            },
+        };
+        let command = ryeos_key_command(alt_o, core.key_context());
+        core.apply_key_command(command);
+        assert!(overlay_of(&core).open);
+    }
+
+    fn attention_fixture() -> crate::ui::dto::RyeOsAttentionDto {
+        serde_json::from_value(json!({
+            "schema_version": "ryeos.ui.attention.v3",
+            "attention": [
+                {"id": "approval:A", "kind": "approval", "title": "Approval requested",
+                 "tone": "warn", "state": "pending", "since_ms": 10,
+                 "project_root": "/work/alpha",
+                 "subject": {"chain_root_id": "c-a", "thread_id": "t-a"},
+                 "actions": {"open": true, "accept": true, "decline": true,
+                             "acknowledge": false}},
+                {"id": "failed_run:F", "kind": "failed_run", "title": "Run failed",
+                 "tone": "danger", "state": "failed", "since_ms": 20,
+                 "project_root": null,
+                 "subject": {"chain_root_id": "c-f", "thread_id": "t-f"},
+                 "actions": {"open": true, "acknowledge": true}}
+            ],
+            "counts": {
+                "total": 5, "by_kind": [],
+                "by_project": [
+                    {"project_root": null, "count": 2},
+                    {"project_root": "/work/alpha", "count": 3}
+                ],
+                "chains": ["c-a", "c-f"], "chains_truncated": false
+            },
+            "running": {
+                "count": 4, "label": "running", "tone": "accent",
+                "by_project": [{"project_root": "/work/alpha", "count": 4}],
+                "chains": ["c-run"], "chains_truncated": false,
+                "items": [
+                    {"id": "running:t-run", "title": "directive:x", "tone": "accent",
+                     "state": "running", "since_ms": 5, "project_root": "/work/alpha",
+                     "subject": {"chain_root_id": "c-run", "thread_id": "t-run"}}
+                ]
+            }
+        }))
+        .unwrap()
+    }
+
+    fn core_with_attention() -> RyeOsCore {
+        let mut core = core_with_surface_yaml("name: Plain\n");
+        core.data.attention = Some(attention_fixture());
+        core.rebuild_overlay_rows();
+        core
+    }
+
+    fn set_surface_project(core: &mut RyeOsCore, project: Option<&str>) {
+        let id = core
+            .active_surface()
+            .unwrap()
+            .binding()
+            .binding_attachment_id
+            .clone();
+        core.binding_attachments
+            .get_mut(&id)
+            .unwrap()
+            .descriptor
+            .project_path = project.map(str::to_string);
+    }
+
+    #[test]
+    fn a_projectless_surface_takes_the_attention_totals() {
+        let mut core = core_with_attention();
+        set_surface_project(&mut core, None);
+        let surface = &build_view_model(&core).session.surfaces[0];
+        assert_eq!(surface.needs_you, Some(5));
+        assert_eq!(surface.running, Some(4));
+    }
+
+    #[test]
+    fn a_project_surface_takes_its_projects_entry_and_zero_when_unlisted() {
+        let mut core = core_with_attention();
+        set_surface_project(&mut core, Some("/work/alpha"));
+        let surface = &build_view_model(&core).session.surfaces[0];
+        assert_eq!(surface.needs_you, Some(3));
+        assert_eq!(surface.running, Some(4));
+        set_surface_project(&mut core, Some("/work/beta"));
+        let surface = &build_view_model(&core).session.surfaces[0];
+        assert_eq!(surface.needs_you, Some(0));
+        assert_eq!(surface.running, Some(0));
+    }
+
+    #[test]
+    fn unavailable_attention_leaves_every_count_and_flag_unset() {
+        let core = core_with_surface_yaml("name: Plain\n");
+        let vm = build_view_model(&core);
+        assert_eq!(vm.session.surfaces[0].needs_you, None);
+        assert_eq!(vm.session.surfaces[0].running, None);
+        assert!(
+            vm.presentation
+                .chrome
+                .top_bar
+                .tabs
+                .iter()
+                .all(|tab| tab.needs_you.is_none() && tab.running.is_none())
+        );
+        assert_eq!(vm.overlay.needs_you_count, None);
+        assert!(vm.overlay.needs_you.is_empty());
+    }
+
+    #[test]
+    fn a_tab_flags_work_found_in_the_daemons_chain_lists() {
+        let mut core = core_with_attention();
+        let tab_id = build_view_model(&core).presentation.chrome.top_bar.tabs[0].view_set_id;
+        let flags = |core: &RyeOsCore| {
+            let tab = &build_view_model(core).presentation.chrome.top_bar.tabs[0];
+            (tab.needs_you, tab.running)
+        };
+        assert_eq!(flags(&core), (None, None), "no selected work, no claim");
+
+        core.retained_work_selections
+            .insert(tab_id, json!({"thread": "t-a", "chain_root": "c-a"}));
+        assert_eq!(flags(&core), (Some(true), Some(false)));
+        core.retained_work_selections
+            .insert(tab_id, json!({"thread": "t-run", "chain_root": "c-run"}));
+        assert_eq!(flags(&core), (Some(false), Some(true)));
+        core.retained_work_selections
+            .insert(tab_id, json!({"thread": "t-x", "chain_root": "c-none"}));
+        assert_eq!(flags(&core), (Some(false), Some(false)));
+
+        core.data
+            .attention
+            .as_mut()
+            .unwrap()
+            .counts
+            .chains_truncated = true;
+        assert_eq!(
+            flags(&core),
+            (None, Some(false)),
+            "a truncated list makes no claim"
+        );
+    }
+
+    #[test]
+    fn overlay_rows_come_from_the_retained_response() {
+        let mut core = core_with_attention();
+        let overlay = overlay_of(&core);
+        assert_eq!(overlay.needs_you_count, Some(5));
+        assert_eq!(overlay.running_count, Some(4));
+        assert_eq!(overlay.needs_you.len(), 2);
+        assert_eq!(overlay.running.len(), 1);
+        let approval = &overlay.needs_you[0];
+        assert_eq!(approval.title, "Approval requested");
+        assert_eq!(approval.tone, RyeOsTone::Warn);
+        assert_eq!(approval.since_ms, 10);
+        assert_eq!(
+            approval.where_, "alpha",
+            "no registered project: the path tail"
+        );
+        let actions = |row: &RyeOsOverlayRowVm| {
+            row.actions
+                .iter()
+                .map(|action| (action.keys.clone(), action.word.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            actions(approval),
+            [("enter".to_string(), "open".to_string())]
+        );
+        let failed = &overlay.needs_you[1];
+        assert_eq!(failed.where_, "this node");
+        assert_eq!(
+            actions(failed),
+            [
+                ("enter".to_string(), "open".to_string()),
+                ("a".to_string(), "acknowledge".to_string())
+            ]
+        );
+        assert_eq!(
+            failed.actions[1].intent,
+            RyeOsUiIntent::AcknowledgeAttentionItem {
+                item_id: "failed_run:F".to_string()
+            }
+        );
+        assert_eq!(
+            overlay.running[0].actions[0].intent,
+            RyeOsUiIntent::OpenAttentionItem {
+                chain_root_id: "c-run".to_string()
+            }
+        );
+
+        core.data.projects = Some(
+            serde_json::from_value(json!({
+                "version": 1,
+                "projects": [{"local_id": "p1", "name": "Alpha", "root": "/work/alpha"}]
+            }))
+            .unwrap(),
+        );
+        core.rebuild_overlay_rows();
+        assert_eq!(overlay_of(&core).needs_you[0].where_, "Alpha");
+    }
+
+    #[test]
+    fn the_overlay_selection_stays_valid_when_the_rows_change() {
+        let mut core = core_with_attention();
+        core.dispatch_ui(RyeOsUiEvent::ToggleOverlay);
+        core.dispatch_ui(RyeOsUiEvent::MoveOverlay { delta: 2 });
+        assert_eq!(overlay_of(&core).selected, Some(2));
+
+        let mut shorter = attention_fixture();
+        shorter.items.truncate(1);
+        shorter.running.items.clear();
+        core.data.attention = Some(shorter);
+        core.rebuild_overlay_rows();
+        assert_eq!(
+            overlay_of(&core).selected,
+            Some(0),
+            "clamped onto the last row"
+        );
+
+        let mut none = attention_fixture();
+        none.items.clear();
+        none.running.items.clear();
+        core.data.attention = Some(none);
+        core.rebuild_overlay_rows();
+        let overlay = overlay_of(&core);
+        assert!(overlay.open);
+        assert_eq!(overlay.selected, None);
+
+        core.data.attention = Some(attention_fixture());
+        core.rebuild_overlay_rows();
+        assert_eq!(
+            overlay_of(&core).selected,
+            Some(0),
+            "rows arrived under an open sheet"
+        );
+    }
+
+    #[test]
+    fn attention_going_unavailable_empties_the_overlay() {
+        let mut core = core_with_attention();
+        core.data.attention = None;
+        core.rebuild_overlay_rows();
+        let overlay = overlay_of(&core);
+        assert!(overlay.needs_you.is_empty() && overlay.running.is_empty());
+        assert_eq!(
+            (overlay.needs_you_count, overlay.running_count),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn opening_work_that_is_open_nowhere_says_so_and_changes_nothing_else() {
+        let mut core = core_with_attention();
+        let before = build_view_model(&core).session.surfaces[0].active;
+        let effects = core.dispatch_intent(RyeOsUiIntent::OpenAttentionItem {
+            chain_root_id: "c-nowhere".to_string(),
+        });
+        assert!(effects.is_empty());
+        assert_eq!(build_view_model(&core).session.surfaces[0].active, before);
+        assert!(
+            core.ui
+                .notices
+                .iter()
+                .any(|notice| notice.message.contains("not open in this session"))
+        );
+    }
+
+    #[test]
+    fn opening_work_held_by_a_view_set_brings_that_view_set_forward() {
+        let mut core = core_with_attention();
+        let tab_id = build_view_model(&core).presentation.chrome.top_bar.tabs[0].view_set_id;
+        core.retained_work_selections
+            .insert(tab_id, json!({"thread": "t-a", "chain_root": "c-a"}));
+        core.dispatch_intent(RyeOsUiIntent::OpenAttentionItem {
+            chain_root_id: "c-a".to_string(),
+        });
+        assert_eq!(core.active_view_set().map(|set| set.id), Some(tab_id));
+        assert!(
+            !core
+                .ui
+                .notices
+                .iter()
+                .any(|notice| notice.message.contains("not open in this session")),
+            "found work raises no such notice"
+        );
+    }
+
+    #[test]
+    fn acknowledging_with_no_acknowledge_affordance_mounted_says_so() {
+        let mut core = core_with_attention();
+        let effects = core.dispatch_intent(RyeOsUiIntent::AcknowledgeAttentionItem {
+            item_id: "failed_run:F".to_string(),
+        });
+        assert!(effects.is_empty());
+        assert!(
+            core.ui
+                .notices
+                .iter()
+                .any(|notice| notice.message.contains("Attention panel"))
         );
     }
 
