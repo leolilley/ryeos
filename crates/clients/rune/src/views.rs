@@ -617,6 +617,7 @@ fn body_in(
             column_roles,
             total_rows,
             rows,
+            empty,
             ..
         } => table_view(
             instance,
@@ -629,6 +630,7 @@ fn body_in(
             },
             *total_rows,
             rows,
+            empty.as_deref(),
         ),
         RyeOsViewVm::Timeline {
             title,
@@ -1221,6 +1223,7 @@ fn table_view(
     shape: TableShape<'_>,
     total_rows: usize,
     rows: &[RyeOsTableRowVm],
+    empty: Option<&str>,
 ) -> El {
     let t = Tokens::get();
     let action = table_has_action(rows);
@@ -1269,9 +1272,10 @@ fn table_view(
         })
         .children(table_head(status, shape, &plan, action));
     // A source that could not be read is never drawn as an empty page.
-    if total_rows == 0 && !unreadable(status) {
+    // What an empty table says is signed wording; none loaded, none drawn.
+    if let Some(empty) = empty.filter(|_| total_rows == 0 && !unreadable(status)) {
         body = body.child(
-            text("Nothing observed yet.")
+            text(empty.to_owned())
                 .font(theme::TYPE_SMALL)
                 .color(t.ink_dim())
                 .px(TABLE_ROW_PAD)
@@ -1433,19 +1437,35 @@ fn role_width(role: ColumnRole, has_ref: bool, has_time: bool) -> ColumnWidth {
 /// A ref or path column's width beside a time column.
 const REF_FIXED: f32 = 150.0;
 
+/// Which of two field-pair choices a narrow table makes. When true, a table
+/// keeps what a row is (its kind and item) and drops its id and time first;
+/// the project review's History tile reads this way. When false it keeps
+/// which run and when (id and time) and drops kind and item first, as the
+/// Runs list of the graphs tab does. This constant is the only place the
+/// choice is made: flip it and the drop order below follows.
+const KEEP_KIND_AND_ITEM: bool = true;
+
 /// When a tile is too narrow for every column, columns go in this order,
-/// lowest first. A status says what happened to a row and never goes; an id
-/// goes after the text columns, since the item says what the row is.
+/// lowest first. A status says what happened to a row and never goes. With
+/// `KEEP_KIND_AND_ITEM` an id goes after the text columns, since the item says
+/// what the row is, and a time goes first of the data columns.
 fn drop_rank(role: ColumnRole) -> Option<u8> {
-    match role {
-        ColumnRole::Hash => Some(0),
-        ColumnRole::Time => Some(1),
-        ColumnRole::Count => Some(2),
-        ColumnRole::Text | ColumnRole::Id => Some(3),
-        ColumnRole::Kind => Some(4),
-        ColumnRole::Path => Some(5),
-        ColumnRole::Ref => Some(6),
-        ColumnRole::Status | ColumnRole::Action => None,
+    match (role, KEEP_KIND_AND_ITEM) {
+        (ColumnRole::Hash, _) => Some(0),
+        (ColumnRole::Time, true) => Some(1),
+        (ColumnRole::Count, _) => Some(2),
+        (ColumnRole::Text, _) => Some(3),
+        (ColumnRole::Id, true) => Some(3),
+        (ColumnRole::Kind, true) => Some(4),
+        (ColumnRole::Path, true) => Some(5),
+        (ColumnRole::Ref, true) => Some(6),
+        // Kind and item leave before the id and the time.
+        (ColumnRole::Kind, false) => Some(1),
+        (ColumnRole::Path, false) => Some(1),
+        (ColumnRole::Ref, false) => Some(1),
+        (ColumnRole::Time, false) => Some(5),
+        (ColumnRole::Id, false) => Some(6),
+        (ColumnRole::Status | ColumnRole::Action, _) => None,
     }
 }
 
@@ -1981,8 +2001,7 @@ fn timeline_foot(
         .w_full()
         .max_w(TIMELINE_COLUMN)
         .min_w(0.0)
-        .gap(DOCK_STACK_GAP)
-        .child(lane_row);
+        .gap(DOCK_STACK_GAP);
     let mut cards = col().w_full().min_w(0.0).gap(DOCK_STACK_GAP);
     for ask in dock {
         let (primary, meta) = match &ask.entry {
@@ -2046,6 +2065,8 @@ fn timeline_foot(
         }
         foot = foot.child(cards);
     }
+    // The lane reads below the cards: the status of what the cards ask.
+    foot = foot.child(lane_row);
     // The space above the lane belongs to the foot, not to the scrolled feed,
     // so it is there whatever entry is selected.
     col()
@@ -2795,7 +2816,8 @@ mod tests {
     fn table(rows: Vec<Value>, total_rows: usize, coverage: Value) -> RyeOsViewVm {
         serde_json::from_value(json!({
             "type": "table", "title": "Threads", "columns": ["name", "kind"],
-            "total_rows": total_rows, "coverage": coverage, "rows": rows
+            "total_rows": total_rows, "coverage": coverage, "rows": rows,
+            "empty": "Nothing observed yet."
         }))
         .unwrap()
     }
@@ -3058,6 +3080,12 @@ mod tests {
             Value::Null,
         ));
         assert!(!says(&populated, "Nothing observed yet."));
+        // With no wording the page says nothing of its own.
+        let mut unworded = table(Vec::new(), 0, Value::Null);
+        if let RyeOsViewVm::Table { empty, .. } = &mut unworded {
+            *empty = None;
+        }
+        assert!(!says(&drawn(unworded), "Nothing observed yet."));
         // The page window can be empty while the collection is not.
         let windowed = drawn(table(Vec::new(), 5, Value::Null));
         assert!(!says(&windowed, "Nothing observed yet."));

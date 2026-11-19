@@ -52,11 +52,34 @@ const PROJECT_SURFACE: &str =
     include_str!("../../../../bundles/ryeos-ui/.ai/surfaces/ryeos/ui/project.yaml");
 const THREAD_DETAIL: &str =
     include_str!("../../../../bundles/ryeos-ui/.ai/views/ryeos/threads/detail.yaml");
+const COVERAGE_WORDING: &str =
+    include_str!("../../../../bundles/ryeos-ui/.ai/config/ryeos/ui/coverage-wording.yaml");
+/// 2026-11-12T14:40:00Z: the fixture's clock, so the sample rows' relative
+/// times read the same on every run.
+const FIXTURE_NOW_MS: u64 = 1_794_494_400_000;
 const DETAIL_REF: &str = "view:ryeos/threads/detail";
 const HISTORY_REF: &str = "view:ryeos/threads/history";
 
 fn view(source: &str) -> Result<Value, String> {
     serde_yaml::from_str(source).map_err(|error| format!("bundle view: {error}"))
+}
+
+/// The signed coverage wording, read as the daemon serves it: the config body
+/// without its envelope fields, under the wording contract.
+fn coverage_wording() -> Result<ryeos_client_base::ui::dto::RyeOsCoverageWordingDto, String> {
+    let mut body: Value = serde_yaml::from_str(COVERAGE_WORDING)
+        .map_err(|error| format!("coverage wording: {error}"))?;
+    let object = body
+        .as_object_mut()
+        .ok_or("coverage wording is not a mapping")?;
+    for envelope in ["category", "version", "description"] {
+        object.remove(envelope);
+    }
+    object.insert(
+        "schema_version".into(),
+        json!(ryeos_client_base::ui::dto::COVERAGE_WORDING_CONTRACT),
+    );
+    ryeos_client_base::ui::dto::RyeOsCoverageWordingDto::from_response(&body)
 }
 
 /// What each view's source answers, by view ref. A `long` scene answers with
@@ -82,7 +105,7 @@ fn response(view_ref: &str, scene: &str) -> Option<Value> {
               "project": { "name": "ryeos-next" }, "status": "completed", "created_at": "2026-11-12T08:40:00Z" },
             { "thread_id": "T-5d21", "kind": "directive_run", "item_ref": "directive:ryeos/review/diff",
               "project": { "name": "ryeos-next" }, "status": "failed", "created_at": "2026-11-12T07:03:00Z" }
-        ], "coverage": { "complete": false, "returned": 3 } }),
+        ], "coverage": { "state": "observed", "reason": "projection_locator_not_exhaustive" } }),
         "view:ryeos/development/execution" => serde_json::from_str(BUILD_DEPLOY).ok()?,
         "view:ryeos/chain/timeline" => {
             json!({ "timeline_contract": TIMELINE_CONTRACT_VERSION, "older": 0, "items": [
@@ -140,7 +163,7 @@ fn project_response(view_ref: &str) -> Option<Value> {
             thread("T-2e07", "directive_run", "directive:ryeos/ops/plan", "completed", "2026-11-12T06:30:00Z"),
             thread("T-18d9", "schedule_run", "schedule:nightly-check", "completed", "2026-11-12T03:00:00Z"),
             thread("T-0a55", "worker_run", "worker:codex", "cancelled", "2026-11-11T22:12:00Z")
-        ], "coverage": { "complete": false, "returned": 8 } }),
+        ], "coverage": { "state": "observed", "reason": "projection_locator_not_exhaustive" } }),
         CONVERSATION_REF => demo_timeline("timeline-top"),
         DETAIL_REF => json!({
             "thread": {
@@ -235,7 +258,7 @@ fn long_response(view_ref: &str) -> Option<Value> {
                     })
                 })
                 .collect();
-            json!({ "threads": threads, "coverage": { "complete": true, "returned": LONG_ROWS } })
+            json!({ "threads": threads, "coverage": { "state": "observed", "reason": "projection_locator_not_exhaustive" } })
         }
         "view:ryeos/chain/timeline" => {
             let items: Vec<Value> = (0..LONG_ROWS)
@@ -355,9 +378,9 @@ fn is_timeline_scene(scene: &str) -> bool {
 /// never answered and stays loading, the third fails (see `answer`).
 fn states_response(view_ref: &str) -> Option<Value> {
     match view_ref {
-        "view:ryeos/threads/history" => {
-            Some(json!({ "threads": [], "coverage": { "state": "complete", "reason": "none" } }))
-        }
+        "view:ryeos/threads/history" => Some(
+            json!({ "threads": [], "coverage": { "state": "observed", "reason": "projection_locator_not_exhaustive" } }),
+        ),
         _ => None,
     }
 }
@@ -733,7 +756,13 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
         .map_err(|error| format!("fixture initialization: {error}"))?;
     membership.initialization_digest =
         initialization.digest().map_err(|error| error.to_string())?;
-    let mut core = RyeOsCore::new(session, PRESENTATION, BrowserViewport::default(), 0);
+    let mut core = RyeOsCore::new(
+        session,
+        PRESENTATION,
+        BrowserViewport::default(),
+        FIXTURE_NOW_MS,
+    );
+    core.data.coverage_wording = Some(coverage_wording()?);
     core.replay_seat_events([SeatEvent {
         producer_engine_seq: None,
         seq: 0,
@@ -828,6 +857,14 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
                     },
                 });
                 answered += answer(&mut core, effects, scene);
+            }
+            // The find line holds a query, as it does once a person has typed.
+            // The second stage keeps the whole list, so the staged view's row
+            // is among those drawn.
+            for ch in "tree".chars().filter(|_| scene != "launcher-stage") {
+                core.dispatch(RyeOsEvent::Ui {
+                    event: RyeOsUiEvent::InsertInputChar { ch },
+                });
             }
         }
         other => return Err(format!("unknown fixture scene {other}")),

@@ -91,7 +91,8 @@ fn an_opened_launcher_takes_typing_without_a_click() {
         .input
         .as_ref()
         .expect("the launcher's query");
-    assert_eq!(query.text, "new");
+    // The scene's own query is already in the find line.
+    assert_eq!(query.text, "treenew");
     assert_ne!(
         serde_json::to_value(&before.dialogs[0].view).unwrap(),
         serde_json::to_value(&after.dialogs[0].view).unwrap(),

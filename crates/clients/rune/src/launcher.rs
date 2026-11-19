@@ -191,12 +191,14 @@ fn view_row(instance: &RyeOsViewInstanceKey, item: &RyeOsRowVm) -> El {
         .as_ref()
         .and_then(|launch| launch.reason.as_deref());
     let quiet = is_command(item);
+    let staged = item.launch.as_ref().is_some_and(|launch| launch.staged);
+    let marked = item.selected || staged;
     let mut words = col().grow(1.0).min_w(0.0).gap(3.0);
     if let Some(description) = &item.secondary {
         words = words.child(
             text(description.clone())
                 .font(theme::TYPE_CELL)
-                .color(t.ink_at(if item.selected { 0.90 } else { 0.68 }))
+                .color(t.ink_at(if marked { 0.90 } else { 0.68 }))
                 .truncate()
                 .w_full(),
         );
@@ -225,7 +227,7 @@ fn view_row(instance: &RyeOsViewInstanceKey, item: &RyeOsRowVm) -> El {
             col().w(NAME_WIDTH).child(
                 text(item.primary.clone())
                     .font(theme::TYPE_TITLE)
-                    .color(t.ink_at(if item.selected {
+                    .color(t.ink_at(if marked {
                         1.0
                     } else if quiet {
                         COMMAND_NAME_INK
@@ -243,7 +245,7 @@ fn view_row(instance: &RyeOsViewInstanceKey, item: &RyeOsRowVm) -> El {
                 .color(t.ink_at(0.40)),
         );
     }
-    if item.selected {
+    if marked {
         line = line.fill(t.ink_at(0.09));
     }
     if unavailable {

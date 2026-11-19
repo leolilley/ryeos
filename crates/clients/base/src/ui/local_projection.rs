@@ -42,6 +42,8 @@ struct CandidateLaunch {
     meta: Option<String>,
     reason: Option<String>,
     place: bool,
+    /// The view whose places are showing.
+    staged: bool,
 }
 
 fn candidate(
@@ -70,6 +72,7 @@ fn command_candidate(
             meta: None,
             reason: None,
             place: false,
+            staged: false,
         }),
     )
 }
@@ -104,6 +107,7 @@ fn place_launch(group: &str, key: &str) -> CandidateLaunch {
         meta: Some(key.to_owned()),
         reason: None,
         place: true,
+        staged: false,
     }
 }
 
@@ -413,6 +417,7 @@ fn candidates(
                                 meta: Some(view.widget.clone()).filter(|kind| !kind.is_empty()),
                                 reason: (!usable).then(|| needs_reason(&missing)),
                                 place: false,
+                                staged: staged.as_ref() == Some(&view_ref),
                             }),
                         )?;
                         if usable {
@@ -634,6 +639,7 @@ pub(crate) fn project(
                         group: launch.group,
                         reason: launch.reason,
                         place: launch.place,
+                        staged: launch.staged,
                     }),
                     changed_at_ms: None,
                     changed_tone: None,

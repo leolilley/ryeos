@@ -509,6 +509,26 @@ pub struct RyeOsTableCoverageVm {
 /// whenever the wording is loaded.
 pub const COVERAGE_UNKNOWN_LABEL: &str = "This page's coverage is not known.";
 
+/// The wording entry an authored view names for its empty state: `body.empty`
+/// is the key of an entry under the signed wording's `reasons`, and `empty`
+/// when it names none. Nothing is said when the table has rows, or the wording
+/// is not loaded or has no such entry; a client holds no sentence of its own.
+fn table_empty_words(
+    binding: &ViewBinding,
+    total_rows: usize,
+    wording: Option<&super::dto::RyeOsCoverageWordingDto>,
+) -> Option<String> {
+    if total_rows != 0 {
+        return None;
+    }
+    let key = binding
+        .body
+        .get("empty")
+        .and_then(Value::as_str)
+        .unwrap_or("empty");
+    wording?.reasons.get(key).map(|entry| entry.label.clone())
+}
+
 fn table_source_coverage(
     binding: &ViewBinding,
     response: &Value,
@@ -753,6 +773,12 @@ pub enum RyeOsViewVm {
         /// count. An absent or malformed report never implies completeness.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         coverage: Option<RyeOsTableCoverageVm>,
+        /// What an empty table says in place of rows: a sentence of the signed
+        /// wording, named by the view's `body.empty` (the wording's `empty`
+        /// entry when the view names none). Present only when the table has no
+        /// rows and the wording is loaded and holds the entry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        empty: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provenance: Option<String>,
         #[serde(default)]
@@ -878,6 +904,10 @@ pub struct RyeOsLaunchRowVm {
     /// A choice of where the staged view lands, not a view of its own.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub place: bool,
+    /// The view whose places are showing: its row stays marked while the
+    /// choice moves to a place.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub staged: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -1983,7 +2013,12 @@ fn bound_view_vm_keyed(
                 .map(|(offset, (source_index, hierarchy))| {
                     let index = start + offset;
                     let raw = &records[*source_index];
-                    let record = super::content::project_table_record(binding, raw, &columns);
+                    let record = super::content::project_table_record(
+                        binding,
+                        raw,
+                        &columns,
+                        core.runtime.now_ms,
+                    );
                     let key = hierarchy
                         .as_ref()
                         .map(|tree| tree.key.clone())
@@ -2060,6 +2095,7 @@ fn bound_view_vm_keyed(
                     response,
                     core.data.coverage_wording.as_ref(),
                 ),
+                empty: table_empty_words(binding, total_rows, core.data.coverage_wording.as_ref()),
                 provenance: Some(view_ref.to_string()),
                 affordance_hints: affordance_hints(binding),
                 rows,
@@ -5953,6 +5989,7 @@ mod tests {
                 { "thread_id": "T-cd", "kind": "graph", "item_ref": "directive:ops/scan", "status": "failed",  "requested_by": "fp:amp", "created_at": "2026-06-28T00:00:00Z" }
             ]}),
             &columns,
+            0,
         );
         assert_eq!(rows.len(), 2);
         assert_eq!(
@@ -6123,7 +6160,7 @@ mod tests {
             "space": "bundle",
             "trust": { "class": "trusted" }
         });
-        let rows = project_table(&binding, &json!({ "items": [record.clone()] }), &columns);
+        let rows = project_table(&binding, &json!({ "items": [record.clone()] }), &columns, 0);
         assert_eq!(rows.len(), 1);
         // The real field is `item_kind` (not `kind`) and trust is a nested
         // object (`trust.class`, not a bare string) — both were silently dead
