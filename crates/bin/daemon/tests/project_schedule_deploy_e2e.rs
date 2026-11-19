@@ -569,6 +569,18 @@ mod crash {
     /// on the same project still succeeds without touching that directory.
     #[tokio::test(flavor = "multi_thread")]
     async fn an_unreadable_journal_is_quarantined_and_does_not_block_start() -> Result<()> {
+        poisoned_journal_scenario(false).await
+    }
+
+    /// The same scenario, plus the real `ryeos node doctor` binary reading the
+    /// report. It needs the prepared CLI artifact, which a validation queue
+    /// builds; a bare runner has none.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_quarantined_apply_is_named_by_node_doctor() -> Result<()> {
+        poisoned_journal_scenario(true).await
+    }
+
+    async fn poisoned_journal_scenario(with_doctor: bool) -> Result<()> {
         let boundary = "journal_published";
         let (mut h, _fixture) = DaemonHarness::start_fast_core_scheduling().await?;
         let project = ProjectFixture::new()?;
@@ -648,11 +660,13 @@ mod crash {
         assert_eq!(job["phase"], "quarantined", "{job}");
         assert_eq!(job["result"]["outcome"], "quarantined", "{job}");
 
-        let check = doctor_check(&h, "sync_apply_quarantine")?;
-        assert_eq!(check["status"], "warning", "{check}");
-        let detail = serde_json::to_string(&check["detail"])?;
-        assert!(detail.contains(transaction.to_str().unwrap()), "{detail}");
-        assert!(detail.contains("never restored"), "{detail}");
+        if with_doctor {
+            let check = doctor_check(&h, "sync_apply_quarantine")?;
+            assert_eq!(check["status"], "warning", "{check}");
+            let detail = serde_json::to_string(&check["detail"])?;
+            assert!(detail.contains(transaction.to_str().unwrap()), "{detail}");
+            assert!(detail.contains("never restored"), "{detail}");
+        }
 
         // Nothing blocks the project: a new apply succeeds and leaves the
         // quarantined directory untouched.
