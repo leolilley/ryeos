@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-17T01:21:17Z:23625251267f9e2645945fd7e7d38993eb9d42dccd3738623f22223e4d2fe3ed:KtpHhf1F5gembgjxiBj6iFXJW4CPBw5KjuerpdIo+EyqP2szIUGQVpL9rZjhsbShoqe5La9RakXf1DVfwswhDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-19T05:44:26Z:5cc71508095ec3b3836147bbd9e87c30f4be8eec9968149661a1b653db827527:7WZbGtD+yd+pGJvvmzoW29P4onSDD3m0kaM8P4UvKg1Uxjs+pX4Po1pyowUumXFwNENfpbsjCa+JU9Gm+d9yBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - core
@@ -411,6 +411,7 @@ policies:
       - ".svn/"
       - ".tmp/"
       - ".venv/"
+      - "/.ai/node/machines/"
       - "/.ai/node/remotes/"
       - "/.ai/state/"
       - "__pycache__/"
