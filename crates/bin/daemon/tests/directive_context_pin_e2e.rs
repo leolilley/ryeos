@@ -494,3 +494,79 @@ async fn a_refusal_the_entry_does_not_name_stays_generic() {
     assert_eq!(failure_code(&rig, &id).await, "directive_failed");
     assert_eq!(rig.marker_count(), 0, "no hook for an unnamed refusal");
 }
+
+/// E6, graph side. A parent graph that follows the refused directive reads the
+/// child's failure code as `state._outcome.failure_code` on its `on_error`
+/// path.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_parent_graph_branches_on_the_childs_failure_code() {
+    let script = "steps:\n  - fail: { status: 413, body: \"request entity too large: prompt is too long\" }\n";
+    let rig = start_rig(
+        script,
+        RigOptions {
+            provider_top_extra: REJECTION_ROWS.to_string(),
+            graph_vault: true,
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    plant_graph(
+        &rig,
+        "recover",
+        r#"category: test
+version: "1.0.0"
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.directive.probe/run
+      - "ryeos.execute.tool.*"
+config:
+  start: work
+  nodes:
+    work:
+      node_type: action
+      follow: true
+      action:
+        item_id: "directive:probe/run"
+        ref_bindings: { model: "directive:probe/run" }
+        params: { name: probe }
+      on_error: recover
+      next: { type: unconditional, to: done }
+    recover:
+      node_type: return
+      output:
+        route: "recover"
+        failure_code: "${state._outcome.failure_code}"
+    done:
+      node_type: return
+      output:
+        route: "done"
+"#,
+    )
+    .expect("plant graph");
+    let id = launch_graph_on(&rig, "graph:recover", serde_json::json!({}))
+        .await
+        .expect("launch graph");
+    let give_up = std::time::Instant::now() + Duration::from_secs(180);
+    let mut chain;
+    loop {
+        chain = chain_threads(&rig, &id).await;
+        let finished = chain.iter().any(|(_, s)| s == "completed")
+            && chain.iter().all(|(_, s)| TERMINAL.contains(&s.as_str()));
+        if finished || std::time::Instant::now() > give_up {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let mut result_text = String::new();
+    for (thread, status) in &chain {
+        if status == "completed" {
+            result_text.push_str(&thread_detail(&rig.h, thread, 6000).await);
+        }
+    }
+    assert!(
+        result_text.contains("recover") && result_text.contains("provider_context_length_exceeded"),
+        "the recovery node read the failure code: chain={chain:?} {result_text}"
+    );
+}

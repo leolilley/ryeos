@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-18T07:27:10Z:994cde2d18df6ab6d51475b7bba4d277fe1bd8d2935d74eb29baeb2d0be77267:RnBymX4LD0Dbr+DhTcXX5sn79wnYKb5AKHrdy5zc0GM5iGjU1lqkrHZQvGjy04L6iCGEAewnryOPdeaZAXTbBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-19T05:28:29Z:3af8b98ff0d536aa70991446d814a98cbae824d25862642a8f2a168fc9f837c2:kkZDJPj2Gh+1sunUqXS+CXFYKP2hbWo9LMjOsh5wh+SPioPYiisx7NSqY8z+9Xgxs9d+HrbKkoLj2K9GHOF8Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [fundamentals, directives, workflows, prompts]
 version: "2.1.0"
@@ -222,10 +222,17 @@ are appended after the parent's.
 
 ### Hooks
 
-Directive frontmatter may declare `hooks` for `after_step` and `continuation`.
+Directive frontmatter may declare `hooks` for `after_step`, `continuation` and
+`provider_error`.
 Each hook has `id`, `event`, required `result`, optional `condition`, and
 `action`. `discard` and `observation` are observers; `control` is accepted only
 where the signed event and layer permit directive control.
+
+`provider_error` fires when the provider refused a request and the provider
+entry names the refusal with a code (see `request_rejections` in the model
+provider guide). Its context root is `event` with `code`, `status`, `turn` and
+`retryable`. It admits only `discard` and `observation` results: the failure is
+already typed and a hook cannot turn it into a retry or another outcome.
 
 Authored hook inheritance is atomic. Omitting `hooks` inherits the nearest
 ancestor's complete list. `hooks: []` clears it. A declared non-empty list
@@ -237,6 +244,31 @@ signed configured policy into the finalized effective program. Authored hooks
 use the directive's admitted caps; configured hooks use only their signed
 source's grants. The directive runtime compiles that captured plan and never
 loads hook policy from the live filesystem.
+
+## Pinned context and continuation
+
+The `before` and `after` context positions are recorded as inputs when the run
+launches, each with the acknowledgement the model was shown after it. They and
+the launch task are **pinned**, and so is an operator follow-up on a continued
+chain. A crash recovery of the same thread rebuilds every recorded input and turn
+in order, so the request after a crash is the one the dead process would have
+sent. A continuation successor starts with its pinned inputs, in their original
+order, followed by the most recent `carry_turns` turns that fit; the pinned
+prefix is byte-identical to its predecessor's. The wrap-up notice is not pinned:
+a successor whose carried start lacks it is told again, with the time left now.
+
+The size of a successor's start is signed runtime config
+(`ryeos-runtime/continuation`): `successor_start_tokens` (default 16000) is the
+estimated-token budget for pinned inputs plus recent turns. Pinned inputs over
+that budget are carried alone, with no recent turns; pinned inputs over the model
+window times `context_threshold_ratio` fail the successor with
+`resume_pinned_exceeds_window`. A rebuilt conversation that does not begin with a
+user message, or that holds a tool call without its result (or the reverse),
+fails with `resume_start_not_user`, `resume_unanswered_tool_call` or
+`resume_orphan_tool_result`; the failure is a settled thread with that code, not a
+request the provider would reject. The runtime descriptor's context-window
+rebind floor is the default budget; a node that raises `successor_start_tokens`
+should raise the floor with it.
 
 ## Inheritance (Extends)
 

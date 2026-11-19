@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-18T11:24:51Z:79cf91b6e2fb18661101e29e47e23c6e337224bb2fb189591121741bd1af9eb8:RU2M4/qTo9nsFQCbPviokNksBUljAALhtojtiT1EQiVeQ+qt5XwVzwYkfEaMN28hEBUrZteEfses1gf+U7Y7Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-19T05:28:29Z:b8072da5d1c1315c34121453e4f2f405361d61c22712bb276621fe3fa4aa4a50:gexxhZLPr1nmaaTliplDXYvQnmKOTQz89t05dgAJAv975skd38WxTWpOv/d5KvlxsyLmzi7ngciuEisXhaTNBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/standard
@@ -357,6 +357,40 @@ Marks do not change what the run costs where no tariff exists: cached tokens are
 recorded, and priced only where a tariff covers their dimension. A change to the
 tool list, the system prompt or any earlier message starts a new cache entry, so
 the next request pays one full miss.
+
+## Request rejections
+
+A provider can refuse a request before it streams anything: the status alone is
+too coarse to say why (a bare 400 is also a malformed request). `request_rejections`
+sits at the top level of the provider entry, and a profile's value replaces the
+entry's whole. An entry without it reports every refusal as the generic
+`directive_failed`.
+
+```yaml
+request_rejections:
+  - code: provider_context_length_exceeded
+    statuses: [400, 413]
+    body_contains_any: ["context length", "too long"]
+```
+
+A row matches a refused response when its status is listed and the response body
+(the first 4 KiB) contains any phrase, compared without regard to case; the
+first matching row wins. A match makes the thread fail with that `code`, and a
+refusal a row names is never retried, whatever `retry_status_codes` says. A
+refusal no row matches stays `directive_failed` and follows the ordinary retry
+rules. Only a response that carried a status can match, so an uncertain outcome
+(a timeout, a cut stream) is never reclassified.
+
+`code` is an opaque token chosen by the entry: lowercase letters, digits and
+underscores, at most 64 bytes, and it must start with `provider_`. The runtime
+gives no code a meaning. A parent graph that follows the directive reads it as
+`state._outcome.failure_code`, and the directive's own `provider_error` hooks
+(observation only) receive it as `event.code` beside `event.status` and
+`event.turn`. At most 16 rows of at most 16 phrases each; statuses are 400 to 599.
+
+The runtime reads `request_rejections` with `deny_unknown_fields`, so a runtime
+payload older than a bundle config that declares it refuses the config. Refresh
+the runtime payload and the bundle's provider configs together.
 
 ## Provider cache usage
 

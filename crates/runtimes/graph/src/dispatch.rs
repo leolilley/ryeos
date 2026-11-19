@@ -679,6 +679,27 @@ fn deadline_outcome(
     })
 }
 
+/// A followed child that failed with a structured runtime failure and has no
+/// outcome record of its own is given a generic one: the status classification
+/// and the failure's own `failure_code`, beside the child thread and the
+/// failure value. A recovery node can branch on `state._outcome.failure_code`
+/// without the graph runtime knowing what any code means.
+fn failure_code_outcome(
+    status: RuntimeResultStatus,
+    child_thread_id: &str,
+    result: &Value,
+    failure: Option<&ryeos_runtime::RuntimeFailure>,
+) -> Option<Value> {
+    let failure = failure?;
+    Some(json!({
+        "outcome_kind": ryeos_runtime::envelope::status_outcome_kind(status),
+        "failure_code": failure.code,
+        "child_thread_id": child_thread_id,
+        "status": status.as_str(),
+        "result": result,
+    }))
+}
+
 /// Exact cohort wrapper written by the daemon's follow join. Every field is
 /// required and unknown fields are rejected before graph execution resumes.
 #[derive(Debug, Deserialize)]
@@ -771,9 +792,17 @@ fn classify_follow_envelope_value(value: Value) -> Result<ClassifiedFollowEnvelo
             dispatch: None,
         })
     } else {
-        let failure_outcome = worker_outcome(&result)
-            .or_else(|| deadline_outcome(status, &envelope_child_thread_id, &result));
         let structured_failure = parse_runtime_failure(&result);
+        let failure_outcome = worker_outcome(&result)
+            .or_else(|| deadline_outcome(status, &envelope_child_thread_id, &result))
+            .or_else(|| {
+                failure_code_outcome(
+                    status,
+                    &envelope_child_thread_id,
+                    &result,
+                    structured_failure.as_ref(),
+                )
+            });
         let mut runtime_failure_contract_error = runtime_failure_contract_error(&result);
         if let Some(failure) = structured_failure.as_ref()
             && failure.diagnostic_locator.thread_id != envelope_child_thread_id
@@ -2630,6 +2659,67 @@ mod tests {
         ))
         .expect("canonical failed follow envelope");
         assert!(expect_action_failure(failed.outcome).outcome.is_none());
+    }
+
+    fn structured_failure_value(code: &str) -> Value {
+        json!({
+            "kind": ryeos_runtime::RUNTIME_FAILURE_KIND,
+            "version": 1,
+            "code": code,
+            "summary": "the provider refused the request",
+            "diagnostic_locator": {
+                "thread_id": "T-follow-child",
+                "event_type": "thread_failed",
+            },
+            "retryable": false,
+        })
+    }
+
+    #[test]
+    fn a_child_failing_with_a_structured_failure_exposes_its_failure_code() {
+        let result = structured_failure_value("provider_context_length_exceeded");
+        let classified = classify_follow_envelope(canonical_follow_envelope(
+            false,
+            RuntimeResultStatus::Failed,
+            result.clone(),
+        ))
+        .expect("canonical failed follow envelope");
+        let outcome = expect_action_failure(classified.outcome)
+            .outcome
+            .expect("a failure-code outcome record");
+        assert_eq!(outcome["outcome_kind"], "failed");
+        assert_eq!(outcome["failure_code"], "provider_context_length_exceeded");
+        assert_eq!(outcome["status"], "failed");
+        assert_eq!(outcome["child_thread_id"], "T-follow-child");
+        assert_eq!(outcome["result"], result);
+    }
+
+    #[test]
+    fn worker_and_deadline_outcomes_keep_their_shapes_over_a_failure_code() {
+        // A worker outcome record is surfaced whole, as before.
+        let worker = json!({"outcome_kind": "worker_failure", "child_thread_id": "T-follow-child"});
+        let classified = classify_follow_envelope(canonical_follow_envelope(
+            false,
+            RuntimeResultStatus::Failed,
+            worker.clone(),
+        ))
+        .expect("canonical failed follow envelope");
+        assert_eq!(
+            expect_action_failure(classified.outcome).outcome,
+            Some(worker)
+        );
+        // A deadline stop keeps its classification even with a failure value.
+        let classified = classify_follow_envelope(canonical_follow_envelope(
+            false,
+            RuntimeResultStatus::TimedOut,
+            structured_failure_value("some_code"),
+        ))
+        .expect("canonical timed-out follow envelope");
+        let outcome = expect_action_failure(classified.outcome)
+            .outcome
+            .expect("a deadline outcome record");
+        assert_eq!(outcome["outcome_kind"], "deadline");
+        assert!(outcome.get("failure_code").is_none());
     }
 
     #[test]
