@@ -401,6 +401,50 @@ fn reconcile_accounting(state: &AppState) -> Result<()> {
     Ok(())
 }
 
+/// Why a non-terminal thread with no attached process group is dead.
+///
+/// A thread is marked `running` only after its process attached, and a
+/// graceful stop kills each attached group and clears its pid/pgid, leaving a
+/// non-resumable thread `running` with no group. A thread that never left
+/// `created` never had a process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoProcessCause {
+    /// Outcome code `interrupted_spawn`: the spawn never attached.
+    InterruptedSpawn,
+    /// Outcome code `interrupted_by_restart`: the process attached and the
+    /// daemon's stop ended it.
+    InterruptedByRestart,
+}
+
+impl NoProcessCause {
+    fn outcome_code(self) -> &'static str {
+        match self {
+            Self::InterruptedSpawn => "interrupted_spawn",
+            Self::InterruptedByRestart => "interrupted_by_restart",
+        }
+    }
+
+    fn details(self) -> serde_json::Value {
+        match self {
+            Self::InterruptedSpawn => json!({"reason": "no pid/pgid attached"}),
+            Self::InterruptedByRestart => {
+                json!({"reason": "the daemon stopped while the process was running"})
+            }
+        }
+    }
+}
+
+fn no_process_cause(pgid: Option<i64>, status: &str) -> Option<NoProcessCause> {
+    if pgid.is_some() {
+        return None;
+    }
+    Some(if status == "created" {
+        NoProcessCause::InterruptedSpawn
+    } else {
+        NoProcessCause::InterruptedByRestart
+    })
+}
+
 /// Finalize a dead thread as failed. Centralized so the `Finalize` /
 /// `FinalizeExhausted` / orphan branches share identical bookkeeping.
 fn finalize_dead(
@@ -1912,7 +1956,7 @@ async fn reconcile_active_threads_inner(
             &thread.thread_id,
         )?;
 
-        let interrupted_spawn = pgid.is_none();
+        let no_process_cause = no_process_cause(pgid, &thread.status);
 
         if let Some(resume) = thread
             .runtime
@@ -2283,20 +2327,13 @@ async fn reconcile_active_threads_inner(
 
         match decision {
             ResumeDecision::NoResumePolicy => {
-                let extra = if interrupted_spawn {
-                    Some((
-                        "interrupted_spawn",
-                        json!({"reason": "no pid/pgid attached"}),
-                    ))
-                } else {
-                    None
-                };
+                let extra = no_process_cause.map(|cause| (cause.outcome_code(), cause.details()));
                 tracing::info!(
                     thread_id = %thread.thread_id,
                     kind = %thread.kind,
                     status = %thread.status,
                     pgid = ?pgid,
-                    interrupted_spawn,
+                    no_process_cause = ?no_process_cause,
                     "dead process, no native_resume policy — finalizing failed"
                 );
                 finalize_dead(
@@ -4443,6 +4480,23 @@ fn converge_reserved_follow(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_drained_running_thread_is_interrupted_by_restart_not_spawn() {
+        use super::{NoProcessCause, no_process_cause};
+        assert_eq!(no_process_cause(Some(7), "running"), None);
+        assert_eq!(
+            no_process_cause(None, "created"),
+            Some(NoProcessCause::InterruptedSpawn)
+        );
+        let drained = no_process_cause(None, "running").unwrap();
+        assert_eq!(drained, NoProcessCause::InterruptedByRestart);
+        assert_eq!(drained.outcome_code(), "interrupted_by_restart");
+        assert_eq!(
+            NoProcessCause::InterruptedSpawn.outcome_code(),
+            "interrupted_spawn"
+        );
+    }
+
     use super::*;
 
     fn lineage_thread(thread_id: &str) -> ryeos_app::state_store::NewThreadRecord {

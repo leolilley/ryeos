@@ -396,6 +396,35 @@ fn retained(
     Ok((Some(retained), anchor))
 }
 
+/// Refuse a claim whose retained admission no longer holds.
+///
+/// Prepare publishes the membership and writes the initialization record
+/// before its closing check, so a prepare that answered an error may have left
+/// both behind. A claim therefore re-resolves every initial closure under one
+/// checked generation, exactly as prepare does, and is refused as a typed
+/// conflict when the admission is stale or the installed bundles changed.
+pub(crate) fn require_current_admission(
+    state: &AppState,
+    session: &BrowserSession,
+    presentation_id: &str,
+) -> Result<(), HandlerError> {
+    let membership = session
+        .presentations
+        .get(presentation_id)
+        .ok_or_else(|| HandlerError::Forbidden("presentation is absent".into()))?;
+    state
+        .engine
+        .with_checked_bundle_generation(|generation| {
+            revalidate_current_admission(generation, state, &session.session_id, membership)
+        })
+        .map_err(|error| match error.downcast::<HandlerError>() {
+            Ok(typed) => typed,
+            Err(other) => HandlerError::Conflict(format!(
+                "retained presentation admission no longer holds: {other:#}"
+            )),
+        })
+}
+
 pub(crate) fn require(
     state: &AppState,
     session: &BrowserSession,
