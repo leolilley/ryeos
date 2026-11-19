@@ -87,6 +87,9 @@ impl LaunchSandboxNetworkPolicy {
 pub struct LaunchNetworkInput {
     pub source: String,
     pub max_bytes: u64,
+    /// Whether the file must exist on the target; an optional input that is
+    /// missing is captured as absent.
+    pub required: bool,
 }
 
 impl LaunchNetworkInput {
@@ -128,10 +131,12 @@ impl LaunchNetworkInputs {
             resolver: LaunchNetworkInput {
                 source: sources.resolver_source.into(),
                 max_bytes: sources.resolver_max_bytes,
+                required: true,
             },
             hosts: LaunchNetworkInput {
                 source: sources.hosts_source.into(),
                 max_bytes: sources.hosts_max_bytes,
+                required: true,
             },
         }
     }
@@ -158,6 +163,12 @@ impl LaunchNetworkInputs {
                 return Some(format!(
                     "launch_shape.network_inputs.{label}.max_bytes: {} versus {}",
                     qualified.max_bytes, launch.max_bytes
+                ));
+            }
+            if qualified.required != launch.required {
+                return Some(format!(
+                    "launch_shape.network_inputs.{label}.required: {} versus {}",
+                    qualified.required, launch.required
                 ));
             }
         }
@@ -1380,6 +1391,13 @@ mod tests {
             text.contains("network_inputs.hosts.source")
                 && text.contains("/etc/hosts")
                 && text.contains("/etc/other-hosts"),
+            "{text}"
+        );
+        let mut optional = shape.clone();
+        optional.network_inputs.as_mut().unwrap().hosts.required = false;
+        let text = shape.first_difference(&optional).unwrap();
+        assert!(
+            text.contains("network_inputs.hosts.required") && text.contains("true versus false"),
             "{text}"
         );
         let mut shapeless = shape.clone();

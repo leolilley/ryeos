@@ -233,6 +233,17 @@ pub struct ObservedNetworkInput {
     pub source: String,
     pub bytes: u64,
     pub sha256: String,
+    /// True when the source file did not exist. An absent input carries zero
+    /// bytes and the digest of empty bytes, and is a different observation
+    /// from a present empty file. The field is omitted when false, so a
+    /// present input serializes exactly as it did before the field existed
+    /// and a reader that predates it refuses an absent one.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub absent: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl ObservedNetworkInput {
@@ -240,6 +251,7 @@ impl ObservedNetworkInput {
         transport::ExternalNetworkInputSelection {
             source: self.source.clone(),
             max_bytes: transport::MAX_EXTERNAL_NETWORK_INPUT_BYTES,
+            required: false,
         }
         .validate()?;
         ensure!(
@@ -247,6 +259,10 @@ impl ObservedNetworkInput {
             "supervisor Ready network input exceeds its byte bound"
         );
         hash(&self.sha256)?;
+        ensure!(
+            !self.absent || (self.bytes == 0 && self.sha256 == lillux::sha256_hex(b"")),
+            "supervisor Ready absent network input carries bytes"
+        );
         Ok(())
     }
 }
@@ -1143,6 +1159,57 @@ mod tests {
     use lillux::process_control::ProofSource;
 
     use super::*;
+
+    fn observed(absent: bool, bytes: u64, sha256: String) -> ObservedNetworkInput {
+        ObservedNetworkInput {
+            source: "/etc/hosts".into(),
+            bytes,
+            sha256,
+            absent,
+        }
+    }
+
+    #[test]
+    fn observed_absent_input_is_distinct_from_a_present_empty_file() {
+        let empty = lillux::sha256_hex(b"");
+        let present_empty = observed(false, 0, empty.clone());
+        let absent = observed(true, 0, empty.clone());
+        present_empty.validate().unwrap();
+        absent.validate().unwrap();
+        assert_ne!(present_empty, absent);
+        // A present input serializes without the field, byte for byte as it
+        // did before the field existed; an absent one carries it.
+        let present_json = serde_json::to_value(&present_empty).unwrap();
+        assert!(present_json.get("absent").is_none());
+        assert_eq!(
+            serde_json::from_value::<ObservedNetworkInput>(present_json).unwrap(),
+            present_empty
+        );
+        let absent_json = serde_json::to_value(&absent).unwrap();
+        assert_eq!(absent_json["absent"], true);
+        assert_eq!(
+            serde_json::from_value::<ObservedNetworkInput>(absent_json.clone()).unwrap(),
+            absent
+        );
+        // A reader that denies unknown fields, as the previous shape did,
+        // fails closed on an absent observation.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct Previous {
+            source: String,
+            bytes: u64,
+            sha256: String,
+        }
+        assert!(serde_json::from_value::<Previous>(absent_json).is_err());
+        // An absent observation cannot carry bytes.
+        assert!(
+            observed(true, 3, lillux::sha256_hex(b"abc"))
+                .validate()
+                .is_err()
+        );
+        assert!(observed(true, 0, "1".repeat(64)).validate().is_err());
+    }
 
     #[test]
     fn q_settlement_and_cleanup_survive_full_ordinary_budget() {
