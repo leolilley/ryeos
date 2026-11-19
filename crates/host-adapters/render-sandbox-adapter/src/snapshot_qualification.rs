@@ -544,6 +544,45 @@ pub(crate) fn terminate_restored_sandbox(
         spec.termination_terminal_proof_enabled() && spec.reconciliation_terminal_proof_enabled(),
         "signed provider spec has no exact terminal observation profile"
     );
+    let network = crate::network_context_from_captured_inputs()?;
+    let cancellation = lillux::network::NetworkCancellation::default();
+    let _signal_cancellation = crate::SignalCancellation::install(cancellation.clone())?;
+    let credential = crate::read_credential()?;
+    let mut transport = |method: &str, url: &url::Url| -> Option<(u16, Vec<u8>)> {
+        crate::send_api_request(
+            &network,
+            url,
+            method,
+            None,
+            &credential,
+            deadline,
+            &settings,
+            &cancellation,
+        )
+        .ok()
+        .and_then(|response| crate::read_response(response).ok())
+    };
+    let result = settle_qualification_termination(
+        &request,
+        &spec,
+        &settings,
+        first_contact,
+        &mut transport,
+    )?;
+    crate::write_response(&result)
+}
+
+/// The post-setup half of qualification termination. `transport` performs one
+/// request and returns the status and body, or `None` for a transport failure.
+/// Only a 200 echo of the exact terminated sandbox with the egress policy the
+/// occurrence was created with settles; anything else stays pending.
+fn settle_qualification_termination(
+    request: &RuntimeSnapshotQualificationTerminationAdapterRequest,
+    spec: &ProviderSpec,
+    settings: &Settings,
+    first_contact: bool,
+    transport: &mut dyn FnMut(&str, &url::Url) -> Option<(u16, Vec<u8>)>,
+) -> Result<RuntimeSnapshotQualificationTerminationAdapterResponse> {
     let mutation = spec
         .termination_mutation_route()
         .context("signed provider spec has no qualification termination route")?;
@@ -555,10 +594,10 @@ pub(crate) fn terminate_restored_sandbox(
     .context("signed provider spec has no qualification terminal observation route")?;
     for route in [mutation, observation] {
         let (url, target) = crate::api_url(
-            &spec,
+            spec,
             route,
             Some(&request.intent.occurrence_id),
-            &settings,
+            settings,
             None,
         )?;
         crate::validate_api_url(
@@ -569,86 +608,62 @@ pub(crate) fn terminate_restored_sandbox(
         )?;
     }
     let expected_egress =
-        qualification_expected_egress(&spec, &request.qualification_intent.launch_shape)?;
-    let network = crate::network_context_from_captured_inputs()?;
-    let cancellation = lillux::network::NetworkCancellation::default();
-    let _signal_cancellation = crate::SignalCancellation::install(cancellation.clone())?;
-    let credential = crate::read_credential()?;
+        qualification_expected_egress(spec, &request.qualification_intent.launch_shape)?;
     if first_contact {
         let (url, _) = crate::api_url(
-            &spec,
+            spec,
             mutation,
             Some(&request.intent.occurrence_id),
-            &settings,
+            settings,
             None,
         )?;
         // The acknowledgement is never terminal. A lost response remains
         // under this already-claimed attempt; recovery is GET-only.
-        let _ = crate::send_api_request(
-            &network,
-            &url,
-            "POST",
-            None,
-            &credential,
-            deadline,
-            &settings,
-            &cancellation,
-        );
+        let _ = transport("POST", &url);
     }
     let pending = || RuntimeSnapshotQualificationTerminationAdapterResponse::Pending {
         operation_id: request.intent.operation_id.clone(),
     };
     let (url, _) = crate::api_url(
-        &spec,
+        spec,
         observation,
         Some(&request.intent.occurrence_id),
-        &settings,
+        settings,
         None,
     )?;
-    let result = crate::send_api_request(
-        &network,
-        &url,
-        "GET",
-        None,
-        &credential,
-        deadline,
-        &settings,
-        &cancellation,
-    )
-    .ok()
-    .and_then(|response| crate::read_response(response).ok())
-    .and_then(|(status, body)| {
-        if status != 200 {
-            return None;
-        }
-        let sandbox: crate::RenderSandbox =
-            ryeos_external_execution_contract::from_json_slice_strict(
-                &body,
-                usize::try_from(crate::MAX_API_RESPONSE_BYTES).ok()?,
-            )
-            .ok()?;
-        let terminated_at = crate::exact_terminal_timestamp(
-            &sandbox,
-            &request.intent.occurrence_id,
-            &settings,
-            &expected_egress,
-        )?;
-        Some(
-            RuntimeSnapshotQualificationTerminationAdapterResponse::Terminal {
-                observation: RuntimeSnapshotQualificationTerminalObservation {
-                    schema: 1,
-                    operation_id: request.intent.operation_id.clone(),
-                    occurrence_id: request.intent.occurrence_id.clone(),
-                    provider_response_sha256: lillux::sha256_hex(&body),
-                    terminated_at: terminated_at.into(),
-                    contact_deadline_exceeded: false,
+    let result = transport("GET", &url)
+        .and_then(|(status, body)| {
+            if status != 200 {
+                return None;
+            }
+            let sandbox: crate::RenderSandbox =
+                ryeos_external_execution_contract::from_json_slice_strict(
+                    &body,
+                    usize::try_from(crate::MAX_API_RESPONSE_BYTES).ok()?,
+                )
+                .ok()?;
+            let terminated_at = crate::exact_terminal_timestamp(
+                &sandbox,
+                &request.intent.occurrence_id,
+                settings,
+                &expected_egress,
+            )?;
+            Some(
+                RuntimeSnapshotQualificationTerminationAdapterResponse::Terminal {
+                    observation: RuntimeSnapshotQualificationTerminalObservation {
+                        schema: 1,
+                        operation_id: request.intent.operation_id.clone(),
+                        occurrence_id: request.intent.occurrence_id.clone(),
+                        provider_response_sha256: lillux::sha256_hex(&body),
+                        terminated_at: terminated_at.into(),
+                        contact_deadline_exceeded: false,
+                    },
                 },
-            },
-        )
-    })
-    .unwrap_or_else(pending);
-    result.validate_for(&request)?;
-    crate::write_response(&result)
+            )
+        })
+        .unwrap_or_else(pending);
+    result.validate_for(request)?;
+    Ok(result)
 }
 
 fn preflight_verifier_upload_and_routes(
@@ -1063,6 +1078,179 @@ mod tests {
                 "rules": [{"domain": "other.example.com", "protocol": "https"}]
             })
         ));
+    }
+
+    fn termination_request(
+        shape: ryeos_external_execution_contract::runtime_snapshot::LaunchShape,
+    ) -> RuntimeSnapshotQualificationTerminationAdapterRequest {
+        use ryeos_external_execution_contract::runtime_snapshot::{
+            RUNTIME_SNAPSHOT_QUALIFICATION_SCHEMA,
+            RUNTIME_SNAPSHOT_QUALIFICATION_TERMINATION_PROTOCOL,
+            RuntimeSnapshotQualificationIntent, RuntimeSnapshotQualificationTerminationIntent,
+        };
+        let mut qualification = RuntimeSnapshotQualificationIntent {
+            schema: RUNTIME_SNAPSHOT_QUALIFICATION_SCHEMA,
+            operation_id: String::new(),
+            owner_principal: format!("fp:{}", "a".repeat(64)),
+            snapshot_operation_id: "b".repeat(64),
+            snapshot_intent_digest: "c".repeat(64),
+            snapshot_id: "snp-fixture-001".into(),
+            provider_id: ADAPTER_ID.into(),
+            provider_group_id: "sbg-fixture-001".into(),
+            qualification_profile_digest: "d".repeat(64),
+            adapter_artifact_hash: "e".repeat(64),
+            provider_spec_digest: "f".repeat(64),
+            settings_digest: "1".repeat(64),
+            verifier_artifact_hash: "2".repeat(64),
+            maximum_lifetime_seconds: 900,
+            attempt_deadline_ms: 42,
+            launch_shape: shape,
+        };
+        qualification.operation_id = qualification.derived_operation_id().unwrap();
+        let occurrence = RuntimeSnapshotQualificationOccurrence {
+            schema: 1,
+            operation_id: qualification.operation_id.clone(),
+            occurrence_id: "sbx-fixture-001".into(),
+            provider_response_sha256: "3".repeat(64),
+            contact_deadline_exceeded: false,
+        };
+        let mut intent = RuntimeSnapshotQualificationTerminationIntent {
+            schema: 1,
+            operation_id: String::new(),
+            qualification_operation_id: qualification.operation_id.clone(),
+            occurrence_id: occurrence.occurrence_id.clone(),
+            owner_principal: qualification.owner_principal.clone(),
+            provider_id: qualification.provider_id.clone(),
+            provider_spec_digest: qualification.provider_spec_digest.clone(),
+            attempt_deadline_ms: 44,
+        };
+        intent.operation_id = intent.derived_operation_id().unwrap();
+        let request = RuntimeSnapshotQualificationTerminationAdapterRequest {
+            protocol: RUNTIME_SNAPSHOT_QUALIFICATION_TERMINATION_PROTOCOL.into(),
+            provider_spec_digest: intent.provider_spec_digest.clone(),
+            intent,
+            qualification_intent: qualification,
+            occurrence,
+        };
+        request.validate().unwrap();
+        request
+    }
+
+    #[test]
+    fn termination_settles_only_on_the_occurrence_egress_for_both_contacts() {
+        use ryeos_external_execution_contract::runtime_snapshot::{
+            LaunchNetworkInputs, LaunchShape,
+        };
+        let spec = ProviderSpec::parse(
+            include_bytes!("../fixtures/provider-spec.json"),
+            &lillux::sha256_hex(include_bytes!("../fixtures/settings.schema.json")),
+        )
+        .unwrap();
+        let settings = Settings {
+            schema: 2,
+            owner_id: "owner-fixture".into(),
+            plan: RenderPlan::Standard,
+            region: "oregon".into(),
+            snapshot_id: "snp-fixture-001".into(),
+            tls_roots_der_base64: vec!["AA==".into()],
+        };
+        let allow = || {
+            LaunchShape::https_allow_list(
+                ["controller.example.com".to_owned()],
+                LaunchNetworkInputs::operator(),
+            )
+        };
+        let allow_echo = serde_json::json!({
+            "type": "allow-list", "default": "allow-list",
+            "rules": [{"domain": "controller.example.com", "protocol": "https"}]
+        });
+        let other_host_echo = serde_json::json!({
+            "type": "allow-list", "default": "allow-list",
+            "rules": [{"domain": "other.example.com", "protocol": "https"}]
+        });
+        let deny_echo = serde_json::json!({"type": "deny-all", "default": "deny-all"});
+        let body = |network_policy: &serde_json::Value| {
+            let mut value: serde_json::Value =
+                serde_json::from_slice(include_bytes!("../fixtures/terminated-response.json"))
+                    .unwrap();
+            value["networkPolicy"] = network_policy.clone();
+            serde_json::to_vec(&value).unwrap()
+        };
+        // Runs one settlement; returns the response and the recorded calls.
+        let run = |shape: LaunchShape, first_contact: bool, reply: Option<(u16, Vec<u8>)>| {
+            let request = termination_request(shape);
+            let mut calls: Vec<(String, String)> = Vec::new();
+            let response = settle_qualification_termination(
+                &request,
+                &spec,
+                &settings,
+                first_contact,
+                &mut |method: &str, url: &url::Url| {
+                    calls.push((method.to_owned(), url.path().to_owned()));
+                    if method == "GET" {
+                        reply.clone()
+                    } else {
+                        Some((200, b"{}".to_vec()))
+                    }
+                },
+            )
+            .unwrap();
+            (response, calls)
+        };
+        let is_terminal = |response: &RuntimeSnapshotQualificationTerminationAdapterResponse| {
+            matches!(
+                response,
+                RuntimeSnapshotQualificationTerminationAdapterResponse::Terminal { .. }
+            )
+        };
+        for first_contact in [true, false] {
+            // (a) allow-list occurrence echoing its allow-list.
+            let (response, calls) = run(allow(), first_contact, Some((200, body(&allow_echo))));
+            assert!(is_terminal(&response));
+            let methods: Vec<&str> = calls.iter().map(|(m, _)| m.as_str()).collect();
+            if first_contact {
+                assert_eq!(methods, ["POST", "GET"]);
+                assert!(
+                    calls[0].1.ends_with("/sbx-fixture-001/terminate"),
+                    "{calls:?}"
+                );
+                assert!(calls[1].1.ends_with("/sbx-fixture-001"), "{calls:?}");
+            } else {
+                assert_eq!(methods, ["GET"]);
+                assert!(calls[0].1.ends_with("/sbx-fixture-001"), "{calls:?}");
+            }
+            // (b) deny-all occurrence echoing deny-all.
+            let (response, _) = run(
+                LaunchShape::relay_deny_all(),
+                first_contact,
+                Some((200, body(&deny_echo))),
+            );
+            assert!(is_terminal(&response));
+            // (c) allow-list occurrence with a deny-all or other-host echo.
+            for echo in [&deny_echo, &other_host_echo] {
+                let (response, _) = run(allow(), first_contact, Some((200, body(echo))));
+                assert!(!is_terminal(&response));
+            }
+            // A deny-all occurrence never trusts an allow-list echo.
+            let (response, _) = run(
+                LaunchShape::relay_deny_all(),
+                first_contact,
+                Some((200, body(&allow_echo))),
+            );
+            assert!(!is_terminal(&response));
+            // (d) transport failure or non-200 stays pending.
+            for reply in [
+                None,
+                Some((500, body(&allow_echo))),
+                Some((404, b"{}".to_vec())),
+            ] {
+                let (response, _) = run(allow(), first_contact, reply);
+                assert!(matches!(
+                    response,
+                    RuntimeSnapshotQualificationTerminationAdapterResponse::Pending { .. }
+                ));
+            }
+        }
     }
 
     fn restored_stream_fixture() -> (
