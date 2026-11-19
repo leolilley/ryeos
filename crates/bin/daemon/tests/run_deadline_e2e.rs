@@ -767,9 +767,15 @@ async fn a_restart_after_the_deadline_settles_without_spawning() {
 /// two notices.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_successor_in_the_wrap_up_window_is_told_once() {
-    let script = "steps:\n  - repeat: 300\n    delay_ms: 1000\n    tool_calls:\n      - { id: \"call_{n}\", name: bulk_bulk, arguments: {} }\n";
+    // Each reply carries about 500 tokens of its own text, so the live context
+    // crosses the 2,000-token window's continuation threshold within a few
+    // turns (tool results alone are de-duplicated and would not grow).
+    let padding = "padding ".repeat(250);
+    let script = format!(
+        "steps:\n  - repeat: 200\n    delay_ms: 2000\n    text: \"{padding}\"\n    tool_calls:\n      - {{ id: \"call_{{n}}\", name: noop_noop, arguments: {{}} }}\n"
+    );
     let rig = start_rig(
-        script,
+        &script,
         RigOptions {
             context_window: 2000,
             header_extra: "limits:\n  wrap_up_seconds: 20\n  deadline:\n    reserve_seconds: 5\ncontinuation:\n  carry_turns: 0\n",
