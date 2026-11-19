@@ -25,7 +25,8 @@ use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::handler_error::HandlerError;
 use ryeos_app::state::AppState;
 use ryeos_effect_contract::locality::{
-    LocalityGrade, LocalityGroup, LocalityGroups, MemberAnswer, MemberKind, MemberRow,
+    InvalidDeclaration, LocalityGrade, LocalityGroup, LocalityGroups, MemberAnswer, MemberKind,
+    MemberRow,
 };
 use ryeos_executor::executor::ServiceAvailability;
 
@@ -36,6 +37,9 @@ const SCHEMA: &str = "ryeos.ui.node.machines.v1";
 /// What a caller needs to see locality at all: the node service's own
 /// capability.
 pub const NODE_CAPABILITY: &str = "ryeos.execute.service.node/locality/groups";
+
+/// The state key of a declaration record that could not be used.
+const STATE_DECLARATION_INVALID: &str = "declaration_invalid";
 
 /// The key a member row carries as its status when its boot disagrees with the
 /// rest of a declared machine.
@@ -246,6 +250,32 @@ fn group_row(group: &LocalityGroup, as_of: &str, words: &MachinesWords) -> Value
     Value::Object(row)
 }
 
+/// A declaration record the node could not use, as a group row of its own: its
+/// stable code rides on the row and its message is the detail.
+fn invalid_declaration_row(
+    entry: &InvalidDeclaration,
+    as_of: &str,
+    words: &MachinesWords,
+) -> Value {
+    json!({
+        "id": format!("invalid:{}", entry.label),
+        "kind": "group",
+        "name": entry.label,
+        "label": entry.label,
+        "state": STATE_DECLARATION_INVALID,
+        "status": STATE_DECLARATION_INVALID,
+        "state_text": words.state(STATE_DECLARATION_INVALID),
+        "this_computer": false,
+        "place": "",
+        "as_of": as_of,
+        "declared": true,
+        "disagreeing": [],
+        "declared_missing": [],
+        "code": entry.code,
+        "relations_text": entry.message,
+    })
+}
+
 fn member_row(group: &LocalityGroup, member: &MemberRow, words: &MachinesWords) -> Value {
     let (answer_key, reason, as_of) = match &member.answer {
         MemberAnswer::Answered { as_of } => ("answered", None, Some(as_of)),
@@ -341,6 +371,9 @@ pub fn machines_response(groups: &LocalityGroups, words: &MachinesWords) -> Valu
         for member in &group.members {
             rows.push(member_row(group, member, words));
         }
+    }
+    for entry in &groups.invalid_declarations {
+        rows.push(invalid_declaration_row(entry, &groups.as_of, words));
     }
     json!({
         "schema": SCHEMA,

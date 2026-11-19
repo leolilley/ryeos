@@ -151,6 +151,12 @@ impl RuntimeRoot {
         self.node().join("remotes")
     }
 
+    /// Node-signed machine declaration records, one `<label>.yaml` per
+    /// machine (`.ai/node/machines`).
+    pub fn machine_declarations_dir(&self) -> PathBuf {
+        self.node().join("machines")
+    }
+
     /// Node-owned signer registry root (`.ai/node/trust`).
     pub fn trust_dir(&self) -> PathBuf {
         self.ai().join(crate::trust::NODE_TRUST_DIR)

@@ -10,10 +10,11 @@ use ryeos_client_base::ui::content::{
     ViewBinding, project_table, table_columns, table_hierarchy_rows, views_from_surface,
 };
 use ryeos_effect_contract::locality::{
-    LocalityGroups, MachineDeclaration, MemberKind, NodeAnswer, NodeInput, NodeLocalityFacts,
-    REASON_EMULATED_KERNEL, REASON_INBOUND_ONLY, REASON_INVALID_ANSWER, REASON_NOT_MEASURABLE,
-    REASON_NOT_REPORTED, REASON_REMOTE_ERROR, REASON_REMOTE_INVALID, REASON_SERVICE_NOT_INSTALLED,
-    REASON_TIMEOUT, REASON_UNREACHABLE, REASON_USER_NAMESPACE, RelationFact, compare_locality,
+    InvalidDeclaration, LocalityGroups, MachineDeclaration, MemberKind, NodeAnswer, NodeInput,
+    NodeLocalityFacts, REASON_EMULATED_KERNEL, REASON_INBOUND_ONLY, REASON_INVALID_ANSWER,
+    REASON_NOT_MEASURABLE, REASON_NOT_REPORTED, REASON_REMOTE_ERROR, REASON_REMOTE_INVALID,
+    REASON_SERVICE_NOT_INSTALLED, REASON_SITE_MISMATCH, REASON_TIMEOUT, REASON_UNREACHABLE,
+    REASON_UNRECOGNISED, REASON_USER_NAMESPACE, RelationFact, compare_locality,
 };
 use ryeos_ui::handlers::ui_machines::{
     MachinesWords, NODE_CAPABILITY, machines_response, require_node_capability,
@@ -58,6 +59,8 @@ fn measured(seed: char) -> RelationFact {
 
 fn facts(relations: &[(&str, RelationFact)]) -> NodeLocalityFacts {
     NodeLocalityFacts::new(
+        "site:fixture",
+        AS_OF,
         relations
             .iter()
             .map(|(name, fact)| ((*name).to_owned(), fact.clone()))
@@ -192,7 +195,12 @@ fn fixture_groups() -> LocalityGroups {
                 as_of: AS_OF.to_owned(),
             }),
         ),
-        node("svc-m", "svc-m", MemberKind::InstalledNotConnected, None),
+        node(
+            "installed:svc-m",
+            "svc-m",
+            MemberKind::InstalledNotConnected,
+            None,
+        ),
     ];
     let declarations = [
         declare("desk", &["site:this", "site:b"]),
@@ -290,6 +298,33 @@ fn every_group_state_draws_its_words_and_tone() {
 }
 
 #[test]
+fn an_unusable_declaration_is_a_row_with_its_code_not_a_failure() {
+    let mut groups = fixture_groups();
+    groups.invalid_declarations = vec![InvalidDeclaration {
+        label: "broken".to_owned(),
+        code: "machine_declaration_tampered".to_owned(),
+        message: "machine_declaration_tampered: edited after signing".to_owned(),
+    }];
+    let drawn = draw(&groups);
+    assert_eq!(
+        drawn.cell("invalid:broken", "state"),
+        "Declaration unusable"
+    );
+    assert_eq!(drawn.cell("invalid:broken", "machine"), "broken");
+    assert_eq!(drawn.tone("invalid:broken"), Some("danger"));
+    let row = drawn.response["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == "invalid:broken")
+        .unwrap();
+    assert_eq!(row["code"], "machine_declaration_tampered");
+    assert_eq!(row["kind"], "group");
+    // The other groups are drawn as before.
+    assert_eq!(drawn.cell("machine:desk", "machine"), "desk");
+}
+
+#[test]
 fn this_computer_is_marked_on_its_group_and_the_group_name_is_the_label() {
     let drawn = draw(&fixture_groups());
     assert_eq!(drawn.cell("machine:desk", "machine"), "desk");
@@ -298,7 +333,7 @@ fn this_computer_is_marked_on_its_group_and_the_group_name_is_the_label() {
     assert_eq!(drawn.cell("machine:desk/site:this", "place"), "This node");
     assert_eq!(drawn.cell("machine:desk/site:b", "place"), "Remote");
     assert_eq!(
-        drawn.cell("node:svc-m/svc-m", "place"),
+        drawn.cell("node:installed:svc-m/installed:svc-m", "place"),
         "Installed here, not connected"
     );
     // An unnamed group is named by the nodes in it.
@@ -355,7 +390,12 @@ fn every_answer_state_is_its_own_row_state_with_its_time() {
             Some("warn"),
             "01:45 · 18 Nov",
         ),
-        ("node:svc-m/svc-m", "Not asked", None, ""),
+        (
+            "node:installed:svc-m/installed:svc-m",
+            "Not asked",
+            None,
+            "",
+        ),
     ];
     for (row, text, tone, as_of) in cases {
         assert_eq!(drawn.cell(row, "state"), text, "{row}");
@@ -393,7 +433,7 @@ fn an_unknown_reason_key_is_shown_as_itself() {
 #[test]
 fn relations_name_who_shares_and_what_cannot_be_told() {
     let drawn = draw(&fixture_groups());
-    for column in ["boot", "storage", "account"] {
+    for column in ["boot", "filesystem", "account"] {
         assert_eq!(
             drawn.cell("machine:desk/site:this", column),
             "Shared with desktop",
@@ -405,10 +445,10 @@ fn relations_name_who_shares_and_what_cannot_be_told() {
         );
         assert_eq!(drawn.cell_tone("machine:desk/site:b", column), Some("good"));
     }
-    // Measured on its own: not shared with anyone.
+    // Measured, and no other node matches: that says nothing about disks.
     assert_eq!(
         drawn.cell("node:site:i/site:i", "boot"),
-        "Measured, not shared"
+        "Measured, no other node matches"
     );
     // A relation this wording has no name for is carried, with its key.
     let this = drawn.response["rows"]
@@ -503,6 +543,7 @@ fn the_wording_covers_every_state_answer_kind_and_reason_the_comparison_names() 
                 "observed",
                 "alone",
                 "cannot_tell",
+                "declaration_invalid",
             ],
         ),
         (
@@ -531,6 +572,8 @@ fn the_wording_covers_every_state_answer_kind_and_reason_the_comparison_names() 
                 REASON_REMOTE_INVALID,
                 REASON_REMOTE_ERROR,
                 REASON_INVALID_ANSWER,
+                REASON_SITE_MISMATCH,
+                REASON_UNRECOGNISED,
             ],
         ),
     ] {
