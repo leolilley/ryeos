@@ -958,6 +958,214 @@ async fn resumes_once_across_every_durable_directive_cut() {
     }
 }
 
+/// The text of a recorded tool result's first part, as the model reads it.
+fn tool_result_text(payload: &Value) -> String {
+    payload
+        .get("parts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+/// A batch of `[directive_return (fails output validation), marker tool]`,
+/// then a valid return. The call after the failed return must never run, but
+/// must be answered in the record, in the next provider request, and across a
+/// crash cut between the return's result and the call's result.
+async fn run_failed_return(crash_between_results: bool) {
+    const REFUSED_CALL: &str = "refused-marker-call";
+    let mock = MockProvider::start(vec![
+        MockResponse::ToolCall {
+            id: "marker-call".to_string(),
+            name: TOOL_NAME.to_string(),
+            arguments: "{}".to_string(),
+        },
+        MockResponse::ToolCalls(vec![
+            MockToolCallSpec {
+                id: "failing-return-call".to_string(),
+                name: DIRECTIVE_RETURN_NAME.to_string(),
+                arguments: "{}".to_string(),
+            },
+            MockToolCallSpec {
+                id: REFUSED_CALL.to_string(),
+                name: TOOL_NAME.to_string(),
+                arguments: "{}".to_string(),
+            },
+        ]),
+        MockResponse::ToolCall {
+            id: "valid-return-call".to_string(),
+            name: DIRECTIVE_RETURN_NAME.to_string(),
+            arguments: r#"{"answer":"recovery complete"}"#.to_string(),
+        },
+    ])
+    .await;
+    let mock_url = mock.base_url.clone();
+    let plant =
+        move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+            register_workflow_bundles(state_path, fixture)?;
+            register_recorded_mock_provider_bundle(state_path, &mock_url, fixture)
+        };
+    let stage = "failed_directive_return_recorded";
+    let (mut phase_gate, mut phase_child) = if crash_between_results {
+        let (gate, child) =
+            RuntimePhaseCutGate::pair(stage).expect("create exact directive phase-cut gate");
+        (Some(gate), Some(child))
+    } else {
+        (None, None)
+    };
+    let (mut harness, fixture) = DaemonHarness::start_fast_with(plant, |command| {
+        if let Some(child) = phase_child.as_mut() {
+            child
+                .configure_command(command, stage)
+                .expect("configure exact directive phase-cut channel");
+            command.env("RYEOS_DIRECTIVE_TEST_BLOCK_AT", stage);
+        }
+        command.env(
+            "RUST_LOG",
+            std::env::var("RUST_LOG")
+                .unwrap_or_else(|_| "info,ryeos_directive_runtime=debug,ryeosd=debug".into()),
+        );
+    })
+    .await
+    .expect("start directive recovery daemon");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    let marker_dir = tempfile::tempdir().expect("marker tempdir");
+    let marker_path = marker_dir.path().join("executions.log");
+    plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
+    plant_recovery_directive(project.path(), &fixture.publisher, 2, true).expect("plant directive");
+    plant_marker_tool(
+        project.path(),
+        &marker_path,
+        Duration::ZERO,
+        &fixture.publisher,
+    )
+    .expect("plant marker tool");
+
+    let mut execute_request = start_execute_request(&harness, project.path()).await;
+    let root_thread_id = await_root_thread(&mut harness, &mut execute_request).await;
+    if let Some(gate) = phase_gate.as_mut() {
+        tokio::select! {
+            result = gate.wait_reached() => {
+                if let Err(error) = result {
+                    let stderr = harness.drain_stderr_nonblocking().await;
+                    panic!("directive did not report the failed-return boundary: {error:#}\n--- daemon stderr ---\n{stderr}");
+                }
+            }
+            result = &mut execute_request => {
+                let stderr = harness.drain_stderr_nonblocking().await;
+                panic!("execute request settled before the failed-return boundary: {result:?}\n--- daemon stderr ---\n{stderr}");
+            }
+        }
+        harness.kill_daemon().await.expect("kill daemon at cut");
+        execute_request.abort();
+        harness
+            .respawn_with(|command| {
+                command.env(
+                    "RUST_LOG",
+                    std::env::var("RUST_LOG").unwrap_or_else(|_| {
+                        "info,ryeos_directive_runtime=debug,ryeosd=debug".into()
+                    }),
+                );
+            })
+            .await
+            .expect("respawn daemon without cut hook");
+    }
+    await_completed(&mut harness, &root_thread_id).await;
+    let events = match projection_events(&harness, &root_thread_id).await {
+        Ok(events) => events,
+        Err(error) => {
+            let stderr = harness.drain_stderr_nonblocking().await;
+            panic!("read the directive's events: {error:#}\n--- daemon stderr ---\n{stderr}");
+        }
+    };
+    harness
+        .kill_daemon()
+        .await
+        .expect("stop daemon before evidence inspection");
+
+    // Starts and results: the marker, the failing return, the refused call,
+    // and the valid return, each exactly once.
+    assert_eq!(
+        event_count(&events, "tool_call_start"),
+        4,
+        "events={events:#?}"
+    );
+    assert_eq!(
+        event_count(&events, "tool_call_result"),
+        4,
+        "events={events:#?}"
+    );
+    let for_call = |kind: &str, call_id: &str| {
+        events
+            .iter()
+            .filter(|(event_kind, payload)| {
+                event_kind == kind
+                    && payload.get("call_id").and_then(Value::as_str) == Some(call_id)
+            })
+            .map(|(_, payload)| payload)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(for_call("tool_call_start", REFUSED_CALL).len(), 1);
+    let refusal = for_call("tool_call_result", REFUSED_CALL);
+    assert_eq!(refusal.len(), 1, "events={events:#?}");
+    assert_eq!(
+        refusal[0].get("status").and_then(Value::as_str),
+        Some("error")
+    );
+    assert!(
+        tool_result_text(refusal[0]).contains("tool_not_run_after_failed_return"),
+        "refusal={:#?}",
+        refusal[0]
+    );
+    // The refused call never ran: one child, one marker execution.
+    assert_eq!(
+        marker_execution_count(&marker_path),
+        1,
+        "the call after the failed return must not run"
+    );
+    assert_eq!(
+        runtime_action_intents(&harness.state_path, &root_thread_id).len(),
+        1,
+        "only the first marker call owns a child"
+    );
+
+    // The request after the failed return carries a result for every call the
+    // assistant message named, in proposal order, and the recovered run issued
+    // no provider request the uninterrupted run would not have.
+    let bodies = mock.captured_bodies().await;
+    assert_eq!(bodies.len(), 3, "bodies={bodies:#?}");
+    let second = bodies[1]["messages"].as_array().expect("second messages");
+    let third = bodies[2]["messages"].as_array().expect("third messages");
+    assert!(
+        third.len() > second.len() && third[..second.len()] == second[..],
+        "the request after the failed return must extend the previous request"
+    );
+    let appended = &third[second.len()..];
+    let tool_ids = appended
+        .iter()
+        .filter(|message| message.get("role").and_then(Value::as_str) == Some("tool"))
+        .map(|message| message.get("tool_call_id").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tool_ids,
+        vec![Some("failing-return-call"), Some(REFUSED_CALL)],
+        "appended={appended:#?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_return_answers_the_calls_after_it_without_running_them() {
+    run_failed_return(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_crash_between_a_failed_return_and_its_siblings_still_refuses_them_unrun() {
+    run_failed_return(true).await;
+}
+
 /// How the first daemon incarnation ends while a tool child is in flight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MidflightStop {

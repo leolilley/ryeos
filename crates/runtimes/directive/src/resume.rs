@@ -24,6 +24,9 @@ pub struct ResumeState {
     /// These resume before another provider request and reuse their exact
     /// logical operation identities.
     pub pending_tools: Vec<ToolOccurrence>,
+    /// Calls after a failed `directive_return` in the same batch that have no
+    /// refusal result yet. Each is owed one, and is never run.
+    pub owed_siblings: Vec<ToolOccurrence>,
     /// Runtime-owned next state reconstructed from the retained event braid.
     /// This is process-local recovery data, not a new persisted authority.
     pub disposition: ResumeDisposition,
@@ -86,6 +89,9 @@ pub enum ResumeDisposition {
         turn: u32,
     },
     CheckContinuation,
+    /// A failed `directive_return` settled and later calls of its batch are
+    /// still owed their refusal results (`ResumeState::owed_siblings`).
+    SettleOwedSiblings,
     FinalizeDirectiveReturn {
         outputs: Value,
     },
@@ -114,6 +120,20 @@ pub(crate) fn directive_tool_operation_id(
     let canonical = lillux::canonical_json(&identity)
         .expect("directive tool occurrence identity is canonical JSON");
     lillux::sha256_hex(canonical.as_bytes())
+}
+
+/// Code of the refusal result a call gets when an earlier `directive_return`
+/// call of the same batch failed, so the call was never run.
+pub(crate) const TOOL_NOT_RUN_AFTER_FAILED_RETURN: &str = "tool_not_run_after_failed_return";
+
+/// Whether a recorded tool result is the refusal a call after a failed
+/// `directive_return` is owed: an error result carrying exactly that code.
+fn is_failed_return_refusal(result: &ToolResultPayload) -> bool {
+    result.status == ToolResultStatus::Error
+        && serde_json::from_str::<Value>(&result.text()).is_ok_and(|body| {
+            body.pointer("/error/code").and_then(Value::as_str)
+                == Some(TOOL_NOT_RUN_AFTER_FAILED_RETURN)
+        })
 }
 
 /// Backstop on the continuation-path walk — far above any real conversation
@@ -193,6 +213,23 @@ pub async fn load_resume_state(
             ResumeMode::NativeSameThread => {}
         }
     }
+    if !recovered_tools.owed.is_empty() {
+        let owed_source = recovered_tools
+            .owed_source_thread_id
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("resume: owed refusals lost their source thread"))?;
+        match mode {
+            ResumeMode::NativeSameThread if owed_source != previous_thread_id => {
+                anyhow::bail!(
+                    "resume: unsettled refusals belong to predecessor thread {owed_source}, not native-resume thread {previous_thread_id}"
+                );
+            }
+            ResumeMode::Continuation => {
+                anyhow::bail!("resume: continuation predecessor contains an unresolved tool batch");
+            }
+            ResumeMode::NativeSameThread => {}
+        }
+    }
     let result_guard = if mode == ResumeMode::NativeSameThread {
         recover_result_guard(&events, &source_thread_ids, previous_thread_id)?
     } else {
@@ -237,12 +274,14 @@ pub async fn load_resume_state(
     // be one a provider accepts. A failed check is a typed refusal, not a
     // request that would be sent and rejected.
     // Calls unanswered at the very end are tolerated only when the record
-    // accounts for them: a pending tool batch (still to run), or calls a
-    // settled `directive_return` abandoned. Any other unanswered call is a
-    // record defect and is refused.
+    // accounts for them: a pending tool batch (still to run), calls a
+    // successful `directive_return` abandoned, or calls a failed one still
+    // owes a refusal. Any other unanswered call is a record defect and is
+    // refused.
     let tolerated_open: Vec<String> = recovered_tools
         .pending
         .iter()
+        .chain(recovered_tools.owed.iter())
         .map(|occurrence| occurrence.call.id.clone().unwrap_or_default())
         .chain(recovered_tools.abandoned_call_ids.iter().cloned())
         .collect();
@@ -251,6 +290,7 @@ pub async fn load_resume_state(
     Ok(ResumeState {
         messages,
         pending_tools: recovered_tools.pending,
+        owed_siblings: recovered_tools.owed,
         disposition,
         last_turn_coordinate: turn_progress.last_coordinate,
         active_provider_turn,
@@ -389,9 +429,14 @@ fn recover_result_guard(
 #[derive(Debug)]
 struct RecoveredToolState {
     pending: Vec<ToolOccurrence>,
-    /// Call ids of calls a settled lifecycle call abandoned: they were never
-    /// started and never get a result, by design.
+    /// Call ids of calls a successful lifecycle call abandoned: they were
+    /// never started and never get a result, by design. A successful return is
+    /// terminal, so nothing follows them.
     abandoned_call_ids: Vec<String>,
+    /// Calls after a failed lifecycle call in its batch that have no result
+    /// yet. The run answers each with a refusal and never runs it.
+    owed: Vec<ToolOccurrence>,
+    owed_source_thread_id: Option<String>,
     pending_source_thread_id: Option<String>,
     started: Vec<StartedToolOccurrence>,
     current_batch: Option<RecoveredToolBatch>,
@@ -409,7 +454,11 @@ struct ReplayedToolOccurrence {
     /// its opaque operation ID.
     source_thread_id: String,
     settled: bool,
+    /// Settled by a successful `directive_return` ahead of it: never started,
+    /// never answered.
     abandoned: bool,
+    /// Follows a failed `directive_return` in its batch: owed a refusal result.
+    owed: bool,
 }
 
 #[derive(Debug)]
@@ -441,7 +490,6 @@ fn recover_tool_state(
     let mut started = Vec::new();
     let mut current_batch: Option<RecoveredToolBatch> = None;
     let mut terminal_lifecycle_settlement = None;
-    let mut abandoned_call_ids: Vec<String> = Vec::new();
     for (event_index, (event, source_thread_id)) in events.iter().zip(source_thread_ids).enumerate()
     {
         if terminal_lifecycle_settlement.is_some()
@@ -474,11 +522,6 @@ fn recover_tool_state(
                     );
                 }
                 current_batch = None;
-                abandoned_call_ids.extend(
-                    open.iter()
-                        .filter(|entry| !entry.settled && entry.abandoned)
-                        .map(|entry| entry.occurrence.call.id.clone().unwrap_or_default()),
-                );
                 let cognition = replayed_cognition_out(event)?;
                 let tool_calls = cognition.message().calls();
                 if tool_calls.is_empty() {
@@ -520,6 +563,7 @@ fn recover_tool_state(
                         source_thread_id: source_thread_id.clone(),
                         settled: false,
                         abandoned: false,
+                        owed: false,
                     })
                     .collect();
                 current_batch = Some(RecoveredToolBatch {
@@ -574,9 +618,11 @@ fn recover_tool_state(
                 }
                 validate_replayed_tool_event(event, &open[occurrence_index].occurrence.call)?;
                 open[occurrence_index].occurrence.start_recorded = true;
-                // The lifecycle return and the in-process time-left tool take no
-                // tool-call budget, so their starts never count against it.
-                if open[occurrence_index].occurrence.call.name != DIRECTIVE_RETURN_TOOL
+                // The lifecycle return, the in-process time-left tool and a
+                // refusal owed after a failed return take no tool-call budget,
+                // so their starts never count against it.
+                if !open[occurrence_index].owed
+                    && open[occurrence_index].occurrence.call.name != DIRECTIVE_RETURN_TOOL
                     && open[occurrence_index].occurrence.call.name != TIME_LEFT_TOOL
                 {
                     started.push(StartedToolOccurrence {
@@ -617,6 +663,13 @@ fn recover_tool_state(
                     );
                 }
                 validate_replayed_tool_event(event, &open[occurrence_index].occurrence.call)?;
+                if open[occurrence_index].owed
+                    && !is_failed_return_refusal(&replayed_tool_result(event)?)
+                {
+                    anyhow::bail!(
+                        "resume: tool_call_result for operation {operation_id} after a failed directive_return is not the {TOOL_NOT_RUN_AFTER_FAILED_RETURN} refusal"
+                    );
+                }
                 if open[occurrence_index].occurrence.call.name == DIRECTIVE_RETURN_TOOL {
                     if open[..occurrence_index].iter().any(|entry| !entry.settled) {
                         anyhow::bail!(
@@ -634,12 +687,21 @@ fn recover_tool_state(
                         &open[occurrence_index].occurrence.call,
                         event_index,
                     )?;
-                    if matches!(settlement, RecoveredLifecycleSettlement::Succeeded { .. }) {
+                    // A successful return is terminal: the calls after it are
+                    // abandoned and nothing follows. A failed one is not, so
+                    // the calls after it are each owed a refusal.
+                    let succeeded =
+                        matches!(settlement, RecoveredLifecycleSettlement::Succeeded { .. });
+                    if succeeded {
                         terminal_lifecycle_settlement = Some(settlement.clone());
                     }
                     batch.lifecycle_settlement = Some(settlement);
                     for entry in &mut open[occurrence_index + 1..] {
-                        entry.abandoned = true;
+                        if succeeded {
+                            entry.abandoned = true;
+                        } else {
+                            entry.owed = true;
+                        }
                     }
                 }
                 open[occurrence_index].settled = true;
@@ -648,21 +710,31 @@ fn recover_tool_state(
         }
     }
 
-    abandoned_call_ids.extend(
-        open.iter()
-            .filter(|entry| !entry.settled && entry.abandoned)
-            .map(|entry| entry.occurrence.call.id.clone().unwrap_or_default()),
-    );
+    let abandoned_call_ids: Vec<String> = open
+        .iter()
+        .filter(|entry| !entry.settled && entry.abandoned)
+        .map(|entry| entry.occurrence.call.id.clone().unwrap_or_default())
+        .collect();
     let pending_source_thread_id = open
         .iter()
-        .find(|entry| !entry.settled && !entry.abandoned)
+        .find(|entry| !entry.settled && !entry.abandoned && !entry.owed)
+        .map(|entry| entry.source_thread_id.clone());
+    let owed_source_thread_id = open
+        .iter()
+        .find(|entry| !entry.settled && entry.owed)
         .map(|entry| entry.source_thread_id.clone());
     Ok(RecoveredToolState {
         pending: open
             .iter()
-            .filter(|entry| !entry.settled && !entry.abandoned)
+            .filter(|entry| !entry.settled && !entry.abandoned && !entry.owed)
             .map(|entry| entry.occurrence.clone())
             .collect(),
+        owed: open
+            .iter()
+            .filter(|entry| !entry.settled && entry.owed)
+            .map(|entry| entry.occurrence.clone())
+            .collect(),
+        owed_source_thread_id,
         abandoned_call_ids,
         pending_source_thread_id,
         started,
@@ -1096,6 +1168,9 @@ fn recover_resume_disposition(
             }
             RecoveredLifecycleSettlement::Failed { event_index } => {
                 let _ = event_index;
+                if !tools.owed.is_empty() {
+                    return Ok(ResumeDisposition::SettleOwedSiblings);
+                }
                 return Ok(if later_cognition_input {
                     ResumeDisposition::ContinueProvider
                 } else {
@@ -2086,21 +2161,122 @@ mod tests {
         }
     }
 
+    /// The refusal a call after a failed `directive_return` is owed.
+    fn refusal_text() -> String {
+        json!({"error": {"code": TOOL_NOT_RUN_AFTER_FAILED_RETURN, "message": "not run"}})
+            .to_string()
+    }
+
+    /// The batch of `lifecycle_batch_events(0, false)` (a failed return, then
+    /// one sibling call) with the sibling's start, and its result when
+    /// `settled`.
+    fn failed_return_batch(
+        sibling_start: bool,
+        sibling_result: Option<String>,
+    ) -> (Vec<ReplayedEventRecord>, Vec<String>) {
+        let (mut events, mut sources) = lifecycle_batch_events(0, false);
+        let sibling = directive_tool_operation_id("T-lifecycle", 1, 1);
+        if sibling_start {
+            events.push(ReplayedEventRecord {
+                event_type: "tool_call_start".to_string(),
+                payload: json!({"operation_id":sibling,"call_id":"call-b","tool":"tool:b"}),
+            });
+            sources.push("T-lifecycle".to_string());
+        }
+        if let Some(text) = sibling_result {
+            events.push(ReplayedEventRecord {
+                event_type: "tool_call_result".to_string(),
+                payload: error_result(&sibling, "call-b", "tool:b", &text),
+            });
+            sources.push("T-lifecycle".to_string());
+        }
+        (events, sources)
+    }
+
     #[test]
-    fn lifecycle_failure_checks_continuation_and_abandons_later_siblings() {
+    fn a_failed_lifecycle_return_owes_its_later_siblings_a_refusal() {
         let (events, sources) = lifecycle_batch_events(0, false);
         let recovered = recover_tool_state(&events, &sources).unwrap();
         assert!(recovered.pending.is_empty());
+        assert!(recovered.abandoned_call_ids.is_empty());
+        assert_eq!(recovered.owed.len(), 1);
+        assert_eq!(recovered.owed[0].call.id.as_deref(), Some("call-b"));
+        assert!(!recovered.owed[0].start_recorded);
+        assert_eq!(
+            recovered.owed_source_thread_id.as_deref(),
+            Some("T-lifecycle")
+        );
+        assert_eq!(
+            recover_resume_disposition(&events, &recovered).unwrap(),
+            ResumeDisposition::SettleOwedSiblings
+        );
+        // A start already recorded is carried so only the result is owed.
+        let (events, sources) = failed_return_batch(true, None);
+        let recovered = recover_tool_state(&events, &sources).unwrap();
+        assert_eq!(recovered.owed.len(), 1);
+        assert!(recovered.owed[0].start_recorded);
+        // The refusal's start takes no tool-call budget.
+        assert!(recovered.started.is_empty());
+    }
+
+    #[test]
+    fn a_failed_lifecycle_return_with_every_refusal_recorded_checks_continuation() {
+        let (events, sources) = failed_return_batch(true, Some(refusal_text()));
+        let recovered = recover_tool_state(&events, &sources).unwrap();
+        assert!(recovered.pending.is_empty());
+        assert!(recovered.owed.is_empty());
+        assert!(recovered.abandoned_call_ids.is_empty());
         assert_eq!(
             recover_resume_disposition(&events, &recovered).unwrap(),
             ResumeDisposition::CheckContinuation
         );
     }
 
+    #[test]
+    fn a_call_owed_a_refusal_accepts_nothing_else() {
+        // Any result for it other than the refusal is a record defect.
+        let (events, sources) = failed_return_batch(true, Some("{\"ok\":true}".to_string()));
+        assert!(
+            recover_tool_state(&events, &sources)
+                .unwrap_err()
+                .to_string()
+                .contains("is not the tool_not_run_after_failed_return refusal")
+        );
+        // An ok-status result carrying the code is not the refusal either.
+        let (mut events, sources) = failed_return_batch(true, Some(refusal_text()));
+        let last = events.len() - 1;
+        events[last].payload["status"] = json!("ok");
+        assert!(recover_tool_state(&events, &sources).is_err());
+        // The next proposal cannot begin while a refusal is still owed.
+        let (mut events, mut sources) = failed_return_batch(true, None);
+        events.push(ReplayedEventRecord {
+            event_type: "cognition_out".to_string(),
+            payload: out(2, "next"),
+        });
+        sources.push("T-lifecycle".to_string());
+        assert!(recover_tool_state(&events, &sources).is_err());
+    }
+
+    #[test]
+    fn a_successful_return_still_abandons_and_accepts_no_evidence_for_its_siblings() {
+        let (mut events, mut sources) = lifecycle_batch_events(0, true);
+        let recovered = recover_tool_state(&events, &sources).unwrap();
+        assert_eq!(recovered.abandoned_call_ids, ["call-b"]);
+        assert!(recovered.owed.is_empty());
+        let sibling = directive_tool_operation_id("T-lifecycle", 1, 1);
+        events.push(ReplayedEventRecord {
+            event_type: "tool_call_start".to_string(),
+            payload: json!({"operation_id":sibling,"call_id":"call-b","tool":"tool:b"}),
+        });
+        sources.push("T-lifecycle".to_string());
+        assert!(recover_tool_state(&events, &sources).is_err());
+    }
+
     /// The launch input, then a batch whose `directive_return` failed
-    /// validation: the sibling call after it is abandoned and never answered.
+    /// validation and whose sibling call after it was answered with the
+    /// refusal.
     fn failed_return_events() -> Vec<ReplayedEventRecord> {
-        let (mut batch, _) = lifecycle_batch_events(0, false);
+        let (mut batch, _) = failed_return_batch(true, Some(refusal_text()));
         batch[0].payload["provider_accounting"] = json!({"replayed_from": "ab".repeat(32)});
         let mut events = vec![ReplayedEventRecord {
             event_type: "cognition_in".to_string(),
@@ -2110,8 +2286,34 @@ mod tests {
         events
     }
 
+    /// As `failed_return_events`, cut before the sibling's start and result.
+    fn failed_return_events_before_refusal() -> Vec<ReplayedEventRecord> {
+        let mut events = failed_return_events();
+        events.truncate(events.len() - 2);
+        events
+    }
+
     #[tokio::test]
-    async fn a_same_thread_rebuild_tolerates_the_calls_a_failed_return_abandoned() {
+    async fn a_same_thread_rebuild_hands_back_the_refusals_a_crash_left_owed() {
+        let callback = make_callback(failed_return_events_before_refusal());
+        let state = load_resume_state(
+            &callback,
+            "T-lifecycle",
+            CarryPolicy::turns(8),
+            ResumeMode::NativeSameThread,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.disposition, ResumeDisposition::SettleOwedSiblings);
+        assert!(state.pending_tools.is_empty());
+        assert_eq!(state.owed_siblings.len(), 1);
+        let roles: Vec<&str> = state.messages.iter().map(|m| m.role()).collect();
+        assert_eq!(roles, ["user", "assistant", "tool"]);
+    }
+
+    #[tokio::test]
+    async fn a_same_thread_rebuild_of_a_fully_answered_failed_return_checks_continuation() {
         let callback = make_callback(failed_return_events());
         let state = load_resume_state(
             &callback,
@@ -2123,19 +2325,33 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(state.disposition, ResumeDisposition::CheckContinuation);
-        assert!(state.pending_tools.is_empty());
+        assert!(state.owed_siblings.is_empty());
         let roles: Vec<&str> = state.messages.iter().map(|m| m.role()).collect();
-        assert_eq!(roles, ["user", "assistant", "tool"]);
+        assert_eq!(roles, ["user", "assistant", "tool", "tool"]);
     }
 
     #[tokio::test]
-    async fn a_successor_cannot_start_from_a_tail_with_abandoned_calls() {
-        // The predecessor's last assistant turn proposed a call that a failed
-        // `directive_return` abandoned, so the call has no result anywhere. A
-        // successor carries that turn (it is the most recent), and a provider
-        // would refuse the start: the rebuild fails with the typed code rather
-        // than sending it.
+    async fn a_successor_starts_from_a_tail_whose_failed_return_siblings_were_answered() {
+        // Every call of the predecessor's last assistant turn has a result: the
+        // failed return's error and the sibling's refusal. A successor carries
+        // that turn whole and the rebuilt conversation is well formed.
         let callback = make_callback(failed_return_events());
+        let state = load_resume_state(
+            &callback,
+            "T-lifecycle",
+            CarryPolicy::turns(8),
+            ResumeMode::Continuation,
+            None,
+        )
+        .await
+        .unwrap();
+        let roles: Vec<&str> = state.messages.iter().map(|m| m.role()).collect();
+        assert_eq!(roles, ["user", "assistant", "tool", "tool"]);
+    }
+
+    #[tokio::test]
+    async fn a_successor_cannot_start_while_a_failed_return_still_owes_refusals() {
+        let callback = make_callback(failed_return_events_before_refusal());
         let error = load_resume_state(
             &callback,
             "T-lifecycle",
@@ -2145,10 +2361,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        let typed = error
-            .downcast_ref::<ResumeFoldError>()
-            .expect("a typed refusal");
-        assert_eq!(typed.code(), "resume_unanswered_tool_call");
+        assert!(error.to_string().contains("unresolved tool batch"));
     }
 
     #[tokio::test]
