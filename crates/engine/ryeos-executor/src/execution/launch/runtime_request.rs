@@ -362,34 +362,26 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         Ok((spec, request, isolation_daemon_socket_path))
     })()
     .map_err(|error| {
-        if let Some(elapsed) = error.downcast_ref::<RunEndElapsedAtSpawn>() {
-            let end_at_ms = elapsed.end_at_ms;
-            // A successor's elapsed end is a deadline stop; a fresh launch
-            // keeps the plain budget refusal.
-            return match successor_end_at_ms {
-                Some(_) => settle_unattached_runtime(
-                    state,
-                    thread_id,
-                    launch_owner,
-                    deadline_elapsed_refusal(),
-                    UnattachedSettlement::DeadlineElapsed { end_at_ms },
-                ),
-                None => settle_unattached_runtime_failure(
-                    state,
-                    thread_id,
-                    launch_owner,
-                    anyhow::Error::new(DispatchError::LaunchPreparationFailed {
-                        code: "budget_exhausted".to_owned(),
-                        message: "aggregate execution duration elapsed before runtime spawn"
-                            .to_owned(),
-                        classification: "policy".to_owned(),
-                        binding: None,
-                        details: Box::new(BTreeMap::new()),
-                    }),
-                ),
-            };
-        }
-        settle_unattached_runtime_failure(state, thread_id, launch_owner, error)
+        let elapsed_end = error
+            .downcast_ref::<RunEndElapsedAtSpawn>()
+            .map(|elapsed| elapsed.end_at_ms);
+        let settlement = settlement_for(elapsed_end, successor_end_at_ms);
+        let error = match (&settlement, elapsed_end) {
+            (UnattachedSettlement::DeadlineElapsed { .. }, _) => deadline_elapsed_refusal(),
+            // A fresh launch keeps the plain budget refusal.
+            (UnattachedSettlement::Failed, Some(_)) => {
+                anyhow::Error::new(DispatchError::LaunchPreparationFailed {
+                    code: "budget_exhausted".to_owned(),
+                    message: "aggregate execution duration elapsed before runtime spawn"
+                        .to_owned(),
+                    classification: "policy".to_owned(),
+                    binding: None,
+                    details: Box::new(BTreeMap::new()),
+                })
+            }
+            (UnattachedSettlement::Failed, None) => error,
+        };
+        settle_unattached_runtime(state, thread_id, launch_owner, error, settlement)
     })?;
     let isolation_item_ref = item_ref.to_string();
     let mut admitted_mounts = external_realizations
@@ -846,6 +838,18 @@ enum UnattachedSettlement {
     /// The run end passed before anything spawned: `timed_out` / `deadline`
     /// in the elapsed-before-launch phase.
     DeadlineElapsed { end_at_ms: i64 },
+}
+
+/// A successor whose run end passed before spawn settles as a deadline stop;
+/// anything else, including a successor without an end, settles `failed`.
+fn settlement_for(
+    elapsed_end_at_ms: Option<i64>,
+    successor_end_at_ms: Option<i64>,
+) -> UnattachedSettlement {
+    match (elapsed_end_at_ms, successor_end_at_ms) {
+        (Some(end_at_ms), Some(_)) => UnattachedSettlement::DeadlineElapsed { end_at_ms },
+        _ => UnattachedSettlement::Failed,
+    }
 }
 
 /// The typed refusal a successor returns when its end passed before launch.
@@ -1327,6 +1331,22 @@ mod tests {
             effective_runtime_timeout_at(0, Some(1_001), 1_000).unwrap(),
             std::time::Duration::from_millis(1)
         );
+    }
+
+    #[test]
+    fn only_a_successor_with_an_end_settles_as_a_deadline_stop() {
+        assert!(matches!(
+            settlement_for(Some(7), Some(7)),
+            UnattachedSettlement::DeadlineElapsed { end_at_ms: 7 }
+        ));
+        assert!(matches!(
+            settlement_for(Some(7), None),
+            UnattachedSettlement::Failed
+        ));
+        assert!(matches!(
+            settlement_for(None, Some(7)),
+            UnattachedSettlement::Failed
+        ));
     }
 
     #[test]
