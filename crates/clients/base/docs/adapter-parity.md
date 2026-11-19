@@ -81,6 +81,8 @@ producers of the same intents, not a second command vocabulary.
 | [x] `InvokeAffordance` | shared | shared | content-declared affordance |
 | [x] `ActivateLocalProjection` | shared | shared | guarded Rust-projected local row activation |
 | [x] `OpenView` | shared | shared | compiled view activation |
+| [x] `OpenAttentionItem` | shared | shared | Overlay row action (Enter): opens the item's chain. Rune draws the selected row's actions as buttons; the terminal draws them on the row; the shared overlay keymap sends the key. |
+| [x] `AcknowledgeAttentionItem` | shared | shared | Overlay row action (`a`) on items that admit acknowledgement. Same overlay drawing and shared key in both clients. |
 | [x] `StageLauncherView` | shared | shared | Launcher row chosen with more than one place to go; the places show under the list and Esc closes them first. |
 | [x] `BeginRename` | shared | shared | Launcher rename commands hand the name to the client that edits text: Rune opens its inline field, the terminal edits it on its last line. |
 | [x] `OpenViewInNewTab` | shared | shared | Launcher row captures exact insertion tab/binding; existing retained InsertTab publishes only after ACK, with fresh required subjects. |
