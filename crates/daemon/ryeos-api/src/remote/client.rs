@@ -2215,7 +2215,9 @@ impl RemoteClient {
         let nonce = base64::engine::general_purpose::STANDARD.encode(nonce_bytes);
 
         let body_hash = lillux::cas::sha256_hex(body);
-        let canon_path = canonicalize_path(path_and_query);
+        let canon_path = ryeos_ui_presentation_contract::request_signing::canonical_path_and_query(
+            path_and_query,
+        );
 
         let content_hash = crate::auth::request_content_hash(
             method,
@@ -2473,40 +2475,6 @@ impl SignedHeaders {
             );
         }
         request
-    }
-}
-
-/// Sort query parameters alphabetically and normalise the path.
-/// Matches `crates/bin/daemon/src/auth.rs::canonical_path` — uses a Vec to
-/// preserve repeated keys, matching server canonicalization exactly.
-fn canonicalize_path(path_and_query: &str) -> String {
-    if let Some((path, query)) = path_and_query.split_once('?') {
-        let mut params: Vec<(&str, &str)> = query
-            .split('&')
-            .filter_map(|pair| {
-                pair.split_once('=').or({
-                    if pair.is_empty() {
-                        None
-                    } else {
-                        Some((pair, ""))
-                    }
-                })
-            })
-            .collect();
-        params.sort();
-        let sorted: Vec<String> = params
-            .iter()
-            .map(|(k, v)| {
-                if v.is_empty() {
-                    k.to_string()
-                } else {
-                    format!("{k}={v}")
-                }
-            })
-            .collect();
-        format!("{}?{}", path, sorted.join("&"))
-    } else {
-        path_and_query.to_string()
     }
 }
 
@@ -4639,22 +4607,6 @@ impl RawObjectUpload {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn old_canonicalize_path_matches_recorded_vectors() {
-        let vectors: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../clients/presentation-contract/tests/vectors/request_signing.json"
-        ))
-        .unwrap();
-        for v in vectors["vectors"].as_array().unwrap() {
-            assert_eq!(
-                canonicalize_path(v["path_and_query"].as_str().unwrap()),
-                v["canonical_path"].as_str().unwrap(),
-                "{}",
-                v["name"]
-            );
-        }
-    }
-
     use super::*;
 
     fn chunk_response(

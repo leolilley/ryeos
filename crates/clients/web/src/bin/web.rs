@@ -7,7 +7,6 @@
 //! 4. Calls `POST /ui/api/launch/mint` with the launch context.
 //! 5. Opens the browser at the daemon-returned `launch_url`.
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -297,50 +296,38 @@ impl WebSigner {
         let nonce_bytes = rand::Rng::r#gen::<[u8; 16]>(&mut rand::thread_rng());
         let nonce = hex::encode(nonce_bytes);
 
-        let body_hash = lillux::cas::sha256_hex(body);
-        let canon_path = canonicalize_path(path_and_query);
+        self.sign_with(method, path_and_query, body, audience, timestamp, &nonce)
+    }
 
-        let string_to_sign = format!(
-            "ryeos-request-v1\n{}\n{}\n{}\n{}\n{}\n{}",
-            method.to_uppercase(),
-            canon_path,
-            body_hash,
-            timestamp,
+    /// [`WebSigner::sign`] with the timestamp and nonce supplied, so the exact
+    /// bytes signed can be pinned by fixed vectors.
+    fn sign_with(
+        &self,
+        method: &str,
+        path_and_query: &str,
+        body: &[u8],
+        audience: &str,
+        timestamp: u64,
+        nonce: &str,
+    ) -> Result<SignedHeaders> {
+        use ryeos_ui_presentation_contract::request_signing as rs;
+        let content_hash = rs::content_hash(
+            method,
+            &rs::canonical_path_and_query(path_and_query),
+            &rs::body_digest(body),
+            &timestamp.to_string(),
             nonce,
             audience,
         );
-
-        let content_hash = lillux::cas::sha256_hex(string_to_sign.as_bytes());
         let sig = lillux::crypto::Signer::sign(&self.signing_key, content_hash.as_bytes());
         let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.to_bytes());
 
         Ok(SignedHeaders {
             key_id: format!("fp:{}", self.fingerprint),
             timestamp: timestamp.to_string(),
-            nonce,
+            nonce: nonce.to_string(),
             signature: sig_b64,
         })
-    }
-}
-
-/// Sort query parameters alphabetically and normalise the path.
-fn canonicalize_path(path_and_query: &str) -> String {
-    if let Some((path, query)) = path_and_query.split_once('?') {
-        let mut params: BTreeMap<String, String> = BTreeMap::new();
-        for pair in query.split('&') {
-            if let Some((k, v)) = pair.split_once('=') {
-                params.insert(k.to_string(), v.to_string());
-            } else if !pair.is_empty() {
-                params.insert(pair.to_string(), String::new());
-            }
-        }
-        let sorted: Vec<String> = params
-            .into_iter()
-            .map(|(k, v)| if v.is_empty() { k } else { format!("{k}={v}") })
-            .collect();
-        format!("{}?{}", path, sorted.join("&"))
-    } else {
-        path_and_query.to_string()
     }
 }
 
@@ -370,43 +357,36 @@ fn open_browser(url: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
-    fn old_canonicalize_path_matches_recorded_vectors() {
+    fn signed_headers_match_shared_vectors() {
         let vectors: serde_json::Value = serde_json::from_str(include_str!(
             "../../../presentation-contract/tests/vectors/request_signing.json"
         ))
         .unwrap();
+        let seed = vectors["signing_key_seed_byte"].as_u64().unwrap() as u8;
+        let key = lillux::crypto::SigningKey::from_bytes(&[seed; 32]);
+        let signer = WebSigner {
+            fingerprint: lillux::crypto::fingerprint(&key.verifying_key()),
+            signing_key: key,
+        };
         for v in vectors["vectors"].as_array().unwrap() {
-            assert_eq!(
-                canonicalize_path(v["path_and_query"].as_str().unwrap()),
-                v["canonical_path"].as_str().unwrap(),
-                "{}",
-                v["name"]
-            );
+            let s = |k: &str| v[k].as_str().unwrap();
+            let headers = signer
+                .sign_with(
+                    s("method"),
+                    s("path_and_query"),
+                    s("body").as_bytes(),
+                    s("audience"),
+                    v["timestamp"].as_u64().unwrap(),
+                    s("nonce"),
+                )
+                .unwrap();
+            assert_eq!(headers.signature, s("signature"), "{}", s("name"));
+            assert_eq!(headers.nonce, s("nonce"));
+            assert_eq!(headers.timestamp, v["timestamp"].to_string());
         }
-    }
-
-    use super::*;
-
-    #[test]
-    fn canonicalize_path_no_query() {
-        assert_eq!(canonicalize_path("/execute"), "/execute");
-    }
-
-    #[test]
-    fn canonicalize_path_sorted_query() {
-        assert_eq!(
-            canonicalize_path("/threads/abc/events/stream?after=42&limit=10"),
-            "/threads/abc/events/stream?after=42&limit=10"
-        );
-    }
-
-    #[test]
-    fn canonicalize_path_unsorted_query() {
-        assert_eq!(
-            canonicalize_path("/threads/abc?limit=10&after=42"),
-            "/threads/abc?after=42&limit=10"
-        );
     }
 
     #[test]

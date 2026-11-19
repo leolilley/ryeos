@@ -6,6 +6,7 @@ pub mod identity;
 pub mod initialization;
 pub mod move_freeze_lifecycle;
 pub mod payload_digest;
+pub mod request_signing;
 pub mod seat_control;
 pub mod transfer;
 pub mod transfer_lifecycle;

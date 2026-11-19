@@ -98,6 +98,20 @@
       "string_to_sign": "ryeos-request-v1\nPOST\n/execute?y=2&z=1\n40793ac06ff20eb2e739a4a2e50e97ae6cfff98adf434a96207da5a78b23fe99\n1700000006\nbm9uY2U=\nfp:other-node",
       "content_hash": "e3f3562b837108935a913cb7dde4635a9f40d42cf5669f481e243b559dd4b6ec",
       "signature": "MKYBOB4XEfnMC2Z7fatANVyo7txo+TXzlZBfZLHaoQhD1g5YlbDRPmBLe6dFNSwIr7Xki3R1Wh1tT/JTWKreDA=="
+    },
+    {
+      "name": "repeated_keys_query",
+      "method": "GET",
+      "path_and_query": "/x?a=2&a=1&b=0",
+      "body": "",
+      "timestamp": 1700000007,
+      "nonce": "nonce-f",
+      "audience": "fp:audience-node",
+      "canonical_path": "/x?a=1&a=2&b=0",
+      "body_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "string_to_sign": "ryeos-request-v1\nGET\n/x?a=1&a=2&b=0\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n1700000007\nnonce-f\nfp:audience-node",
+      "content_hash": "11f0c759c322e4e6ebcc93887a32cbfd7dfcf74f3243fdcfe7fa8eb7df3c75e1",
+      "signature": "P5BEhL+DW28+Q+EH4k43mrRuudHpqkLBrxsph/nC1s77AjFfHPPPy7Vju/L6X2PVLtsitWAoGdQAF1rlY96mDA=="
     }
   ]
 }

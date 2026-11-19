@@ -110,6 +110,7 @@ ryeos-scheduler = { workspace = true, features = ["test-support"] }
 ryeos-core-tools = { workspace = true, features = ["test-support"] }
 ryeos-runtime = { workspace = true }
 ryeos-client-base = { workspace = true }
+ryeos-ui-presentation-contract = { workspace = true }
 uuid = { workspace = true }
 ryeos-tracing = { workspace = true, features = ["test-harness"] }
 ryeos-chat-stub = { workspace = true }
