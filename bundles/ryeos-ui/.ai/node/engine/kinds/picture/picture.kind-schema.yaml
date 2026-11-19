@@ -1,0 +1,71 @@
+# ryeos:signed:2026-11-19T06:28:49Z:b9408a0c0d36ed5f0341a1b41b66662b2fa32ecc3f1dfffbe0917549fd74db4d:dfGl3RSeEr8U/YACs38tDg6q79FB0cib6h5Uy0FntWAa/ra4uryR0JOlkHF+owxdpmEA6VwcEEabZIc4NwSYBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "engine/kinds/picture"
+version: "1.0.0"
+# A project file may not take the ref of a picture an installed bundle
+# supplies.
+project_shadowing: refuse
+location:
+  directory: pictures
+effective_trust:
+  include_references: false
+resolution: []
+formats:
+  - extensions: [".yaml", ".yml"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: "#"
+# A picture is a signed, non-executable record naming image bytes by content
+# hash: title, artist, date, where the picture came from (`source_url`), the
+# licence it is shipped under, what it was `derived_from`, and one or more
+# renditions (the same picture at different sizes). The bytes live beside the
+# records under `.ai/pictures/blobs/<sha256>.<ext>` and are covered by the
+# bundle's signed picture manifest; the publisher refuses a record without a
+# source URL or with a licence outside the enum below, a blob no record
+# names, and bytes whose hash, type or size differ from the record. Only PNG,
+# JPEG and WebP are accepted media types.
+composer: handler:ryeos/core/identity
+composed_value_contract:
+  root_type: mapping
+  required:
+    title: { type: single, prim: string }
+    source_url: { type: single, prim: string }
+    licence:
+      type: single
+      prim: string
+      enum: [cc0, public-domain]
+    renditions:
+      type: single
+      prim: sequence
+      elements:
+        type: single
+        prim: mapping
+        contract:
+          root_type: mapping
+          required:
+            role: { type: single, prim: string }
+            sha256: { type: single, prim: string }
+            media_type:
+              type: single
+              prim: string
+              enum: [image/png, image/jpeg, image/webp]
+            width: { type: single, prim: integer }
+            height: { type: single, prim: integer }
+            bytes: { type: single, prim: integer }
+          optional: {}
+  optional:
+    artist: { type: single, prim: string }
+    date: { type: single, prim: string }
+    derived_from:
+      type: single
+      prim: sequence
+      elements: { type: single, prim: string }
+    transform: { type: single, prim: string }
+metadata:
+  rules:
+    name:
+      from: filename
+      required: true
+      match: filename
+    category:
+      from: relative_dir
+      required: true

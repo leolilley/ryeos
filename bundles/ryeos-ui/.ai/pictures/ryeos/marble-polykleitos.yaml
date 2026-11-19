@@ -1,0 +1,22 @@
+# ryeos:signed:2026-11-19T07:00:16Z:7473f94b037cf38e99ec39925b3d7d7a7f99354e3367d37cdba035a2796a999b:VQbRAQ4YM8Gso/wXARautPqZ8+sCuNUx8FZmUbQ8md3+bP5cV43U9bwf98MBgwGGEZ+aeaZJ/iY6v1FeBv+CDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+title: "Marble head of a youth"
+artist: "Polykleitos"
+date: "ca. 41–54 CE"
+source_url: https://www.metmuseum.org/art/collection/search/247994
+licence: cc0
+derived_from:
+  - "Met object 247994, Marble head of a youth (https://www.metmuseum.org/art/collection/search/247994)"
+transform: "greyscale tight crop of the Met open-access image; re-encoded as WebP"
+renditions:
+  - role: hero
+    sha256: "febfb92bf92d421cffbd11c3d1320bfebc432bfe4aad84b00d4deb658de4dad4"
+    media_type: image/webp
+    width: 1600
+    height: 1000
+    bytes: 130678
+  - role: card
+    sha256: "63df8f531c67f2381dc4a4b43c29e94dae28fc39c7981728c45d85fe3bd05d87"
+    media_type: image/webp
+    width: 480
+    height: 300
+    bytes: 13616

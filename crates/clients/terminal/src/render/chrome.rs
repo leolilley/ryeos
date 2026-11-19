@@ -433,6 +433,7 @@ mod tests {
             column_roles: Vec::new(),
             total_rows: 1,
             coverage: None,
+            empty: None,
             provenance: None,
             affordance_hints: vec![],
             rows: vec![RyeOsTableRowVm {

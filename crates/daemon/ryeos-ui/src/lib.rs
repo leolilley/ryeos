@@ -5,6 +5,7 @@
 
 #[cfg(test)]
 extern crate self as ryeos_ui;
+pub mod art;
 pub mod assets;
 pub mod browser_session;
 pub mod compiled_binding;
@@ -73,4 +74,7 @@ pub fn register_extensions(
         "embedded_asset",
         std::sync::Arc::new(assets::WebAssetProvider),
     );
+    // The signed-picture route: bytes only from verified bundle content, only
+    // for hashes the calling session's bindings (or grant set) name.
+    response_modes.register(std::sync::Arc::new(art::ArtMode { ui }));
 }

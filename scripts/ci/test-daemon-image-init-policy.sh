@@ -959,8 +959,10 @@ fi
 # authoring/ until they can be admitted. The check reads the authored tree
 # (tracked files), not the objects/, refs/ and bin/ outputs a local populate
 # leaves there. No file may be marked UNSIGNED, and every file must carry a
-# signature line except the manifest source and the runtime support trees
-# (lib/, __pycache__/) that signed items load.
+# signature line except the manifest source, the runtime support trees
+# (lib/, __pycache__/) that signed items load, and picture blobs, which are
+# raw content-addressed image bytes that carry no header; the signed picture
+# records name each blob by digest and the picture manifest binds them.
 shipped_bundle_tree_violations() {
     local tree_root="$1" path
     while IFS= read -r -d '' path; do
@@ -972,6 +974,7 @@ shipped_bundle_tree_violations() {
         fi
         case "/$path/" in
             */lib/* | */__pycache__/* | */.ai/manifest.source.yaml/) continue ;;
+            */.ai/pictures/blobs/*) continue ;;
         esac
         grep -Fq 'ryeos:signed:' <<<"$(head -n 2 -- "$tree_root/$path")" ||
             printf '%s: no signature line\n' "$path"
@@ -999,6 +1002,7 @@ shipped_bundle_tree_violations() {
     fixture_file bundles/x/.ai/manifest.source.yaml 'name: x\n'
     fixture_file bundles/x/.ai/config/x/item.yaml '# ryeos:signed:fixture\ncategory: x\n'
     fixture_file bundles/x/.ai/tools/x/run/lib/helper.py 'VALUE = 1\n'
+    fixture_file bundles/x/.ai/pictures/blobs/aa.webp 'RIFFfixture\n'
     fixture_file bundles/x/authoring/drafts/config/x/draft.yaml '# UNSIGNED DRAFT: fixture\ncategory: x\n'
     mkdir -p "$fixture/bundles/x/.ai/objects/aa"
     printf 'populated output\n' >"$fixture/bundles/x/.ai/objects/aa/object"
@@ -1014,6 +1018,7 @@ shipped_bundle_tree_violations() {
     expect_violation bundles/x/.ai/tools/x/run/lib/draft.py \
         '# UNSIGNED DRAFT: fixture\n' 'marked UNSIGNED'
     expect_violation bundles/x/.ai/graphs/x/plain.yaml 'category: x\n' 'no signature line'
+    expect_violation bundles/x/.ai/pictures/ryeos/plain.yaml 'category: x\n' 'no signature line'
     expect_violation bundles/x/.ai/tools/x/run/tool.py \
         'print(1)\nprint(2)\n# ryeos:signed:fixture\n' 'no signature line'
 )

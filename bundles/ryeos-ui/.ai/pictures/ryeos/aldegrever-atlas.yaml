@@ -1,0 +1,22 @@
+# ryeos:signed:2026-11-19T07:00:14Z:f159bd09289f3e569afaec11a260ef8072c487ddcbf46b30551467e6b6263f00:zmTxoIEbNsCHsJ840oBmFk5kw81RYIn3MFvZG80B4U+77GGohiP36+PJRgChfDEwF4ZbOYvUOd+qBBUEAnmACA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+title: "Hercules and Atlas, from \"The Labors of Hercules\""
+artist: "Heinrich Aldegrever"
+date: "1550"
+source_url: https://www.metmuseum.org/art/collection/search/428681
+licence: cc0
+derived_from:
+  - "Met object 428681, Hercules and Atlas, from \"The Labors of Hercules\" (https://www.metmuseum.org/art/collection/search/428681)"
+transform: "greyscale crop of the top of the sheet of the Met open-access image; re-encoded as WebP"
+renditions:
+  - role: hero
+    sha256: "e00a3e313b77477766d14a95e14c31924d1692f2a9926d27ca42dff42efc5209"
+    media_type: image/webp
+    width: 1600
+    height: 1000
+    bytes: 518664
+  - role: card
+    sha256: "208a17e46aa451e765af538fe24144b46cc1dec11917941ae73d7d265df21a95"
+    media_type: image/webp
+    width: 480
+    height: 300
+    bytes: 44938

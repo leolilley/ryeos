@@ -435,6 +435,127 @@ async fn lifecycle(harness: &DaemonHarness) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The signed-picture route over real HTTP: it answers only a live session,
+/// serves nothing a binding does not name (no shipped Surface names a
+/// picture), answers every key shape that is not an allowed hash with the same
+/// 404, and answers a revoked session the revoked code like every other
+/// session route.
+#[tokio::test]
+async fn picture_route_serves_nothing_a_session_binding_does_not_name() -> anyhow::Result<()> {
+    let (harness, _fixture) = DaemonHarness::start_fast_with(|_, _, _| Ok(()), |_| {}).await?;
+    let unnamed = "ab".repeat(32);
+    let url = format!("http://{}/ui/art/{unnamed}", harness.bind);
+
+    // No cookie, and a cookie that names no session, are the auth layer's 401.
+    let anonymous = reqwest::Client::new().get(&url).send().await?;
+    anyhow::ensure!(
+        anonymous.status() == StatusCode::UNAUTHORIZED,
+        "no cookie: {}",
+        anonymous.status()
+    );
+    let (status, _) = cookie_request(
+        &harness,
+        reqwest::Method::GET,
+        &format!("/ui/art/{unnamed}"),
+        "no-such-session",
+        None,
+    )
+    .await?;
+    anyhow::ensure!(
+        status == StatusCode::UNAUTHORIZED,
+        "unknown cookie: {status}"
+    );
+
+    let (status, minted) = harness
+        .post_json(
+            "/ui/api/launch/mint",
+            json!({
+                "ui_binding_contract_revision": ryeos_ui::UI_BINDING_CONTRACT_REVISION,
+                "root_ref": "config:ryeos/ui/presentation",
+            }),
+        )
+        .await?;
+    anyhow::ensure!(status == StatusCode::OK, "mint: {minted}");
+    let session_id = activate_launch(
+        minted["launch_url"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("mint returned no launch url"))?,
+    )
+    .await?;
+
+    // A live session is told a hash no binding names is not found, in the
+    // route's own body.
+    let (status, body) = cookie_request(
+        &harness,
+        reqwest::Method::GET,
+        &format!("/ui/art/{unnamed}"),
+        &session_id,
+        None,
+    )
+    .await?;
+    anyhow::ensure!(
+        status == StatusCode::NOT_FOUND,
+        "unnamed hash: {status} {body}"
+    );
+    anyhow::ensure!(body["error"] == "not found", "unnamed hash body: {body}");
+
+    // Keys that are not a lowercase hex SHA-256 never reach a lookup.
+    for key in [
+        "..%2F..%2Fetc%2Fpasswd".to_owned(),
+        "%2e%2e%2f%2e%2e%2fetc%2fpasswd".to_owned(),
+        unnamed.to_uppercase(),
+        format!("{unnamed}.webp"),
+        unnamed[..63].to_owned(),
+    ] {
+        let (status, _) = cookie_request(
+            &harness,
+            reqwest::Method::GET,
+            &format!("/ui/art/{key}"),
+            &session_id,
+            None,
+        )
+        .await?;
+        anyhow::ensure!(status == StatusCode::NOT_FOUND, "key {key}: {status}");
+    }
+
+    // Only GET is served.
+    let (status, _) = cookie_request(
+        &harness,
+        reqwest::Method::POST,
+        &format!("/ui/art/{unnamed}"),
+        &session_id,
+        Some(json!({})),
+    )
+    .await?;
+    anyhow::ensure!(
+        status.is_client_error(),
+        "a POST to the picture route must be refused, got {status}"
+    );
+
+    // Revocation reaches this route like every other session route.
+    let (status, revoked) = harness
+        .post_json(
+            "/ui/api/sessions/revoke",
+            json!({ "session_id": session_id }),
+        )
+        .await?;
+    anyhow::ensure!(status == StatusCode::OK, "revoke: {revoked}");
+    let (status, answer) = cookie_request(
+        &harness,
+        reqwest::Method::GET,
+        &format!("/ui/art/{unnamed}"),
+        &session_id,
+        None,
+    )
+    .await?;
+    anyhow::ensure!(status == StatusCode::UNAUTHORIZED, "revoked: {status}");
+    anyhow::ensure!(
+        answer["error_code"] == "browser_session_revoked",
+        "revoked body: {answer}"
+    );
+    Ok(())
+}
+
 /// Every source the initial Surfaces of the shipped presentation declare for
 /// themselves is answered through the dispatch route, under the context that
 /// route builds for the source's service.

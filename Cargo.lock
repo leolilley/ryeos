@@ -3813,6 +3813,7 @@ dependencies = [
  "ryeos-accounting",
  "ryeos-api",
  "ryeos-app",
+ "ryeos-bundle",
  "ryeos-client-base",
  "ryeos-effect-contract",
  "ryeos-engine",

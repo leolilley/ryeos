@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-19T10:10:12Z:4a8cafbcbfafb4849726ca019ee6ad3bda3fe881b1a329035a69a8ab5538e20a:eSaXX54x8AEhdiDi9tEN34s8npbBj1MDHBLRml2UEf7BSCEG7T1R+vCHik5kjuvRVW+mOVVKyFtOvMaX7ukVCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-19T19:57:14Z:b761d2ebca0c02cde85add8a4ffbaa8ec36636bc3b961cd4f464b04c328a46b8:q7uiBOsYC4qUqk8xdWepRqS++L2Ua/cEP9Jkst/GQf7bu6kK5GO/+LlvCIjX/o1zPk99WTM6y73PGvAScyaWDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: project-threads
 title: Observed Project Threads
 version: "1.0.0"
@@ -12,6 +12,7 @@ description: >-
 widget: table
 # The tile's right note: how the page is bounded and ordered, said plainly.
 body:
+  empty: empty_project
   supplement:
     frame_detail: "200 at most · sorted by watch"
 sources:
@@ -34,6 +35,13 @@ projections:
       field: kind
       role: kind
       present: words
+      # The wire kind names the run; the table says what ran.
+      labels:
+        directive_run: directive
+        graph_run: graph
+        schedule_run: schedule
+        tool_run: tool
+        worker_run: worker
     # The table carries the readable leaf; the full canonical ref remains in
     # expanded detail.
     - label: item
@@ -51,7 +59,11 @@ projections:
     - label: created
       field: created_at
       role: time
-      present: time_date
+      # Today reads as the time of day, the day before as the word below,
+      # older rows as time and date.
+      present: time_relative
+      labels:
+        yesterday: yesterday
   expand:
     fields: [thread_id, chain_root_id, project.name, project.path, item_ref, requested_by, created_at]
   tone:

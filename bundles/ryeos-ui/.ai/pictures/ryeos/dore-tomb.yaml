@@ -1,0 +1,22 @@
+# ryeos:signed:2026-11-19T07:00:15Z:6056862dc9bb8c4ce39213d336dadd156c5a31382f2b7245e758d84efae2e81b:xvK3vH22mbg+oFHHktuAvXunYXjZDk+Gae4jmF51f5K7dPp3+DnM2Qcp0hB7iMuwxro9Lg5noKBrIiqWvQsxAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+title: "Christ Leaving the Tomb"
+artist: "Gustave Doré"
+date: "1869"
+source_url: https://www.metmuseum.org/art/collection/search/334213
+licence: cc0
+derived_from:
+  - "Met object 334213, Christ Leaving the Tomb (https://www.metmuseum.org/art/collection/search/334213)"
+transform: "greyscale crop of the Met open-access image; re-encoded as WebP"
+renditions:
+  - role: hero
+    sha256: "df7ccc2abec098bed441654ba4e66dd93c2990448dba463821643744c1f2d99f"
+    media_type: image/webp
+    width: 1600
+    height: 1000
+    bytes: 356950
+  - role: card
+    sha256: "6b53988a6c350082602cf23a11d196834b201bae14f3640a6317d24c8440d5fa"
+    media_type: image/webp
+    width: 480
+    height: 300
+    bytes: 32784

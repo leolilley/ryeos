@@ -313,11 +313,15 @@ pub enum StatusBarEdgeSpec {
 }
 
 /// The Surface's switcher chip: which mark the client draws for it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SurfaceChipSpec {
     #[serde(default)]
     pub mark: SurfaceChipMarkSpec,
+    /// The signed picture the `picture` mark draws. Only a node-authored
+    /// Surface may name one; the daemon drops it from a project-authored one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub art: Option<crate::art::ArtRef>,
 }
 
 /// Closed vocabulary of chip marks; each value is a client drawing.
@@ -328,6 +332,8 @@ pub enum SurfaceChipMarkSpec {
     Key,
     #[default]
     Initial,
+    /// A picture named by the chip's `art`.
+    Picture,
 }
 
 /// Closed border vocabulary. Renderers map names to local glyph/pixel

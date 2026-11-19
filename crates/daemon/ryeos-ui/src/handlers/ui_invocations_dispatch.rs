@@ -2045,6 +2045,7 @@ mod tests {
             presentations: Default::default(),
             next_attachment_generation: 1,
             next_surface_ordinal: 1,
+            art_grants: Default::default(),
         }
     }
 

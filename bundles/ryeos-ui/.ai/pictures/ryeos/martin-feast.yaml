@@ -1,0 +1,22 @@
+# ryeos:signed:2026-11-19T07:00:16Z:e5a40c4d84546ca7e7a446f743fa783a879d51141ff583b761aec3924dfe5317:FYh3ndcH+lpCtS+pA4IAP4tglLrNLF2s9HcKqjp3uny50fjMV6fTlb/YROY+t4jTzJayxbqHwnbEQowgd062Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+title: "Belshazzar's Feast (First Plate)"
+artist: "John Martin"
+date: "June 1, 1826"
+source_url: https://www.metmuseum.org/art/collection/search/373640
+licence: cc0
+derived_from:
+  - "Met object 373640, Belshazzar's Feast (First Plate) (https://www.metmuseum.org/art/collection/search/373640)"
+transform: "greyscale crop with contrast adjustment of the Met open-access image; re-encoded as WebP"
+renditions:
+  - role: hero
+    sha256: "fdadb2d6432e3e98824de7e4e50f0963cc46813ce47c20069504723fd1139bb6"
+    media_type: image/webp
+    width: 1600
+    height: 1000
+    bytes: 278308
+  - role: card
+    sha256: "c5f800c6aff7a5e866d1d50b3befba4774df97e13391441b581e1a46b79ee872"
+    media_type: image/webp
+    width: 480
+    height: 300
+    bytes: 29716
