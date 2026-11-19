@@ -1,17 +1,17 @@
-<!-- ryeos:signed:2026-11-18T01:18:54Z:0aca88d749ce22b3c05d392605ebe63b6ac3f53a24d90939e338447479446c1a:TcuoavDRHevXGql1sHgrVuyo2kck2GyKZZ4ktI4Qx99h/UBtzsItmpfgQUBmoWbP3APS07JJqQVvBChVpUdVDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-18T23:26:19Z:a0747e83b6e0346d470f516f0caf1e08f8596e51f892a425a3f93eea55021f17:WHdUOQVkvvTje0JF6v2zO5zM+iitHFNzwHeTJ59b0Em5uxp4FWn3YavZxyZKSd2jZE0A2fy3sjK1K/gs55IKBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "frame-v2"
 title: "RyeOS UI Frame Contract v2"
 description: "The closed widget-primitive set and view-binding schema renderers implement; content composes against this, never against client source"
 entry_type: reference
-version: "2.0.0"
+version: "2.1.0"
 ```
 
 # RyeOS UI Frame Contract v2
 
-Frame contract version `2.0.0`, implemented with UI binding contract
-`ryeos.ui.binding.v13` and timeline contract `ryeos.timeline.v1` (the
+Frame contract version `2.1.0`, implemented with UI binding contract
+`ryeos.ui.binding.v14` and timeline contract `ryeos.timeline.v1` (the
 `timeline-v1` document). A renderer and the daemon cut over together: the
 frame, the binding contract and the timeline contract each have exactly one
 version in force, and there is no reader for an earlier one.
@@ -252,6 +252,64 @@ The renderer receives a `Timeline` view model, not the response. Besides
   `request_digest` and `accept_allowed`; an ask without `approval_id` and
   `request_digest` has no actions, and a surface that admits no affordance
   shows the ask without buttons.
+
+## Surface chrome (`chip` and `style`)
+
+A Surface declares how its switcher chip is marked and where its chrome sits.
+Every value is a closed word; an unknown value is refused when the Surface is
+composed.
+
+```yaml
+chip:
+  mark: grid | key | initial        # default initial
+style:
+  switcher: left | top | right | hidden     # default left
+  status_bar: bottom | top | hidden         # default bottom
+  add_tab: true | false                     # default true
+```
+
+- `chip.mark` picks one of three client drawings: the Home grid, the node's
+  key (drawn from the node key fingerprint the view model carries on the
+  chip), or the title's first letter. There is no picture or art field.
+- `style.switcher` and `style.status_bar` place a bar on an edge or hide it.
+  The operator's `alt+t` and `alt+b` toggles can hide a bar for the session;
+  they never reveal one the Surface hides. The overlay key and the number keys
+  work whatever the Surface declares.
+- A Surface authored in a project is clamped by the daemon: `chip.mark` becomes
+  `initial`, `switcher: hidden` becomes `left`, `status_bar: hidden` becomes
+  `bottom`, `add_tab: false` becomes `true`. Each change is recorded as an
+  attenuated entry (`surface/chip`, `surface/style.switcher`,
+  `surface/style.status_bar`, `surface/style.add_tab`). A project may still
+  choose `top` or `right`. Its chip carries `authored_in_project` from the
+  daemon's authorship marker, which the item cannot remove.
+
+The view model (`ryeos.ui.vm.v3`) carries the result as the Surface chip on each
+switcher entry (`mark`, `authored_in_project`, `fingerprint`), `chrome.switcher.edge`,
+`status_bar.edge`, and `status_bar.key_hints` (at most seven `{keys, word}` pairs
+for the focused context, replacing the single hint string).
+
+## Attention (`ryeos.ui.attention.v3`)
+
+The `work/attention` service answers one response, which the shell reads whole;
+a response of any other version is refused and its counts and rows are dropped.
+
+- `attention[]` is a page of the needs-you queue, oldest first, in the item shape
+  `ryeos.ui.attention_item.v3`: the v2 fields plus `project_root`, the project
+  the item's work ran in or null. The page length is the source's `limit`.
+- `counts` holds `total`, `by_kind`, `by_project` (`{project_root, count}`, null
+  for projectless) and `chains`, the distinct chain ids of the whole queue
+  (capped at 500, with `chains_truncated`). The daemon counts; a client only
+  tests membership in the id lists.
+- `running` is what the principal launched or follows (never scheduled or child
+  runs): `count`, `label`, `tone`, `by_project`, `chains`, `chains_truncated`
+  and a page of `items` (`id`, `title`, `item_ref`, `project_root`, `subject`,
+  `state`, `since_ms` as the head thread's start). Its statuses are the ones the
+  attention config maps to the `running` category.
+
+The shell fills each Surface chip's counts from `by_project` by the Surface's
+project (a projectless Surface takes the totals), each tab's flags from its
+selected work's chain, and the overlay rows from the two item lists. Counts and
+flags are None when attention is unavailable or a chain list was cut short.
 
 ## Backdrop
 
