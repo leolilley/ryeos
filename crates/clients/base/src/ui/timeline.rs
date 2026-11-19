@@ -2916,7 +2916,7 @@ mod tests {
         );
         assert_eq!(link.entries[0].label(), "study, child thread T-child");
         let thought = layout(vec![entry("t", "thought", json!({"body": "hmm"}))], 0);
-        assert_eq!(thought.entries[0].label(), "hmm");
+        assert_eq!(thought.entries[0].label(), "Thought");
     }
 
     #[test]
