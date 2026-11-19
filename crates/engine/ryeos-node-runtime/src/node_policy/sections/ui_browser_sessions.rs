@@ -211,7 +211,7 @@ impl UiBrowserSessionPolicy {
 
     /// The absolute URL of a node-relative launch path: on the configured
     /// public origin when there is one, else on the daemon's bind address.
-    pub fn launch_url(&self, bind: &str, launch_path: &str) -> String {
+    pub fn launch_url(&self, bind: impl std::fmt::Display, launch_path: &str) -> String {
         match &self.public_origin {
             Some(origin) => format!("{origin}{launch_path}"),
             None => format!("http://{bind}{launch_path}"),

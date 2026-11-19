@@ -491,6 +491,7 @@ fn test_node_policy(
                             max_replay_frame_events: 64,
                             max_replay_frame_bytes: 4194304,
                         },
+                        public_origin,
                     },
                 ),
                 Arc::new(
