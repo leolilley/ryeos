@@ -86,7 +86,7 @@ pub(crate) fn layer(dialog: &RyeOsDialogVm, local: &Local) -> El {
         .py(if local.narrow() { 8.0 } else { 18.0 })
         .fill(t.bg_at(theme::SCRIM_FILL))
         .modal(true, move |app: &mut App| {
-            app.ui(RyeOsUiEvent::CloseDialog {
+            app.ui(RyeOsUiEvent::DismissDialog {
                 instance_key: close.clone(),
             });
         })

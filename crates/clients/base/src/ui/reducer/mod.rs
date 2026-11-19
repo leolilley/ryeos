@@ -401,6 +401,13 @@ impl RyeOsCore {
             }
             RyeOsUiEvent::OpenDialog { dialog_id } => self.open_dialog(&dialog_id),
             RyeOsUiEvent::CloseDialog { instance_key } => self.close_dialog(&instance_key),
+            RyeOsUiEvent::DismissDialog { instance_key } => {
+                if self.leave_launcher_stage(&instance_key) {
+                    Vec::new()
+                } else {
+                    self.close_dialog(&instance_key)
+                }
+            }
             RyeOsUiEvent::FocusInput => {
                 if self.focus_default_input() {
                     self.bump_generation();

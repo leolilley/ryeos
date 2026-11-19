@@ -408,6 +408,11 @@ pub enum RyeOsUiEvent {
     CloseDialog {
         instance_key: RyeOsViewInstanceKey,
     },
+    /// Dismiss a dialog by one step: the launcher's second stage first, then
+    /// the dialog itself.
+    DismissDialog {
+        instance_key: RyeOsViewInstanceKey,
+    },
     FocusInput,
     BlurInput,
     InsertInputChar {

@@ -183,6 +183,7 @@ exact `InputAt` addresses; character-level events remain shared keymap paths.
 | [x] `SetTreeRowCollapsed` | shared | shared | shared keymap |
 | [x] `SetViewTreeItemCollapsed` | native | gap | Browser hierarchy button addresses exact visible mount and stable row identity; terminal uses focused tree-fold keys. |
 | [x] `ActivateFocused` | shared | shared | shared keymap |
+| [x] `DismissDialog` | shared | shared | Esc and the scrim: the launcher's second stage closes before its sheet |
 | [x] `ChooseLauncherPlace` | shared | shared | T and S while the launcher shows where a view can land; shared keymap |
 | [x] `RenameActive` | shared | shared | Alt+R renames the active view set, Alt+Shift+R the active Surface; shared keymap |
 | [x] `ResolveRename` | shared | shared | ends a requested rename: Rune hands it to its inline field, the terminal commits or abandons it |

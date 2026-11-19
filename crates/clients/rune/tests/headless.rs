@@ -275,9 +275,10 @@ fn launcher_sheet(rt: &Runtime<App>) -> Option<[f32; 4]> {
     rt.elements()
         .into_iter()
         .find(|element| {
-            element.key.as_deref().is_some_and(|key| {
-                key.starts_with("dialog:") && !key.ends_with(":close")
-            })
+            element
+                .key
+                .as_deref()
+                .is_some_and(|key| key.starts_with("dialog:") && !key.ends_with(":close"))
         })
         .map(|element| element.rect)
 }
@@ -341,7 +342,10 @@ fn enter_chooses_a_view_then_a_place_and_escape_closes_the_second_stage_first() 
         RyeOsViewVm::Rows { rows, .. } => rows.iter().any(|row| {
             row.selected
                 && row.intent.is_some()
-                && row.launch.as_ref().is_some_and(|launch| launch.group != "Commands")
+                && row
+                    .launch
+                    .as_ref()
+                    .is_some_and(|launch| launch.group != "Commands")
         }),
         _ => false,
     };
