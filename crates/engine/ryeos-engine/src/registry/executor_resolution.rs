@@ -18,6 +18,10 @@ use crate::resolution::TrustClass;
 
 /// Domain separator for the only accepted executor-manifest ref format.
 pub const EXECUTOR_MANIFEST_REF_DOMAIN: &str = "ryeos:bundle-executor-manifest";
+/// Domain separator for the signed picture-manifest ref. A signature made for
+/// the executor manifest can never be replayed as a picture authorization, and
+/// the reverse.
+pub const PICTURE_MANIFEST_REF_DOMAIN: &str = "ryeos:bundle-picture-manifest";
 /// Maximum encoded size of the signed manifest-reference envelope. The body
 /// contains only the fixed domain and one SHA-256 digest; the remaining room
 /// is deliberately generous for the canonical signature metadata.
@@ -152,6 +156,23 @@ pub fn verify_signed_executor_manifest_ref(
     trusted_verifying_key: impl Fn(&str) -> Option<VerifyingKey>,
     root_trust_class: TrustClass,
 ) -> Result<VerifiedExecutorManifestRef, ExecutorResolutionError> {
+    verify_signed_manifest_ref_in_domain(
+        signed_ref,
+        EXECUTOR_MANIFEST_REF_DOMAIN,
+        trusted_verifying_key,
+        root_trust_class,
+    )
+}
+
+/// [`verify_signed_executor_manifest_ref`] for any one signing domain. The
+/// body must be exactly `<domain>\n<manifest hash>\n`, so a ref signed in one
+/// domain is refused in every other.
+pub fn verify_signed_manifest_ref_in_domain(
+    signed_ref: &str,
+    domain: &str,
+    trusted_verifying_key: impl Fn(&str) -> Option<VerifyingKey>,
+    root_trust_class: TrustClass,
+) -> Result<VerifiedExecutorManifestRef, ExecutorResolutionError> {
     let (signature_line, body) =
         signed_ref
             .split_once('\n')
@@ -172,10 +193,10 @@ pub fn verify_signed_executor_manifest_ref(
             }
         })?;
 
-    let expected_prefix = format!("{EXECUTOR_MANIFEST_REF_DOMAIN}\n");
+    let expected_prefix = format!("{domain}\n");
     let hash_body = body.strip_prefix(&expected_prefix).ok_or_else(|| {
         ExecutorResolutionError::ManifestRefInvalid {
-            detail: "missing executor-manifest domain separator".to_string(),
+            detail: "missing manifest domain separator".to_string(),
         }
     })?;
     let manifest_hash = hash_body.strip_suffix('\n').ok_or_else(|| {
@@ -183,7 +204,7 @@ pub fn verify_signed_executor_manifest_ref(
             detail: "manifest-hash body must end with one newline".to_string(),
         }
     })?;
-    if body != format!("{EXECUTOR_MANIFEST_REF_DOMAIN}\n{manifest_hash}\n")
+    if body != format!("{domain}\n{manifest_hash}\n")
         || !is_lower_sha256(manifest_hash)
     {
         return Err(ExecutorResolutionError::ManifestRefInvalid {
@@ -303,6 +324,44 @@ pub fn verify_executor_item_source(
     expected_hash: &str,
     expected_item_ref: &str,
 ) -> Result<(String, u32), ExecutorResolutionError> {
+    verify_item_source_with_mode(
+        item_source_value,
+        expected_hash,
+        expected_item_ref,
+        |mode| mode & 0o111 != 0,
+        "mode must contain an execute bit and no special permission bits",
+    )
+}
+
+/// Mode every picture item source carries: readable data, never executable.
+pub const PICTURE_ITEM_SOURCE_MODE: u32 = 0o644;
+
+/// Verify one exact ItemSource object selected by an authenticated picture
+/// manifest. Same shape as an executor item source, but the signed mode must
+/// be exactly [`PICTURE_ITEM_SOURCE_MODE`]: picture bytes are data and an
+/// execute bit is refused.
+pub fn verify_picture_item_source(
+    item_source_value: &Value,
+    expected_hash: &str,
+    expected_item_ref: &str,
+) -> Result<String, ExecutorResolutionError> {
+    verify_item_source_with_mode(
+        item_source_value,
+        expected_hash,
+        expected_item_ref,
+        |mode| mode == u64::from(PICTURE_ITEM_SOURCE_MODE),
+        "mode must be exactly 0644",
+    )
+    .map(|(blob_hash, _)| blob_hash)
+}
+
+fn verify_item_source_with_mode(
+    item_source_value: &Value,
+    expected_hash: &str,
+    expected_item_ref: &str,
+    mode_allowed: impl FnOnce(u64) -> bool,
+    mode_detail: &str,
+) -> Result<(String, u32), ExecutorResolutionError> {
     verify_cas_object_hash("ItemSource", item_source_value, expected_hash)?;
     let object = item_source_value.as_object().ok_or_else(|| {
         ExecutorResolutionError::InvalidItemSource {
@@ -367,10 +426,10 @@ pub fn verify_executor_item_source(
             detail: "mode must be an integer".to_string(),
         }
     })?;
-    if mode_u64 > 0o777 || mode_u64 & 0o111 == 0 {
+    if mode_u64 > 0o777 || !mode_allowed(mode_u64) {
         return Err(ExecutorResolutionError::InvalidItemSource {
             item_ref: expected_item_ref.to_string(),
-            detail: "mode must contain an execute bit and no special permission bits".to_string(),
+            detail: mode_detail.to_string(),
         });
     }
 

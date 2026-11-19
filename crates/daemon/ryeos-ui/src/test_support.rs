@@ -366,6 +366,7 @@ pub fn launch_context(
                 affordances: BTreeMap::new(),
                 surface_route: None,
                 attenuated: Vec::new(),
+                art: BTreeMap::new(),
                 project_source_ceiling_digest: String::new(),
             },
         }),

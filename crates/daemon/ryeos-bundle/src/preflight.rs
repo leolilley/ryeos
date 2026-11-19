@@ -365,6 +365,8 @@ fn preflight_verify_bundle_in_context_inner(
 
     ryeos_engine::binary_resolver::verify_bundle_executor_manifest(source_path, &trust_store)
         .context("preflight: verify node-authorized bundle executables")?;
+    crate::pictures::verify_bundle_pictures(source_path, &trust_store, true)
+        .context("preflight: verify signed bundle pictures")?;
 
     let kinds = KindRegistry::load_base(&schema_roots, &trust_store)
         .context("preflight: load kind schemas")?;

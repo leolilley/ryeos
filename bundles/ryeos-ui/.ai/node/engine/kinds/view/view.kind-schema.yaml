@@ -1,6 +1,6 @@
-# ryeos:signed:2026-11-18T06:08:47Z:5281fda90a0a4afe506724e12f00e4b776c9a20cc09f055a814ca622127c6903:KIjIOg7ViD1XiVxZLX1NjOpZ/RMt7W8M36kXj1eILecQ7eVEUsgskByrAd4jnEaFvAScQsHfjEekUENJlaZAAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-19T06:28:49Z:1a370866f170ee4e19d3841114ad9a268ea6f064cade32b7eab7df18cbfc404d:kOq2Zrkej0bC5ztEQ50Fx1imrAcoXPf2AJZuvDsAoDtsRsC+qO3KsdA+ubIDivoPJR7qDaHzDkf+B3zSZlExBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/view"
-version: "1.1.0"
+version: "1.2.0"
 # A project file may not take the ref of a view an installed bundle
 # supplies. Resolution refuses the ref, naming both files, so a project can
 # add its own views but never replace the node's.
@@ -62,6 +62,11 @@ composer_config:
       strategy: dict_merge_root_last
       expect_value_type: mapping
     - name: field_state
+      strategy: replace_root_last
+      expect_value_type: mapping
+    # The signed picture a view draws behind its content. The mapping composes
+    # atomically: a child never inherits half of a picture reference.
+    - name: picture
       strategy: replace_root_last
       expect_value_type: mapping
     # Input declarations are authored view behavior. They must participate in
@@ -132,6 +137,20 @@ composed_value_contract:
     body:
       type: single
       prim: any
+    # Only a node-authored view may name a picture; the daemon drops it from
+    # a project-authored view and records the attenuation.
+    picture:
+      type: single
+      prim: mapping
+      contract:
+        root_type: mapping
+        required:
+          sha256: { type: single, prim: string }
+          media_type:
+            type: single
+            prim: string
+            enum: [image/png, image/jpeg, image/webp]
+        optional: {}
     presentation:
       type: single
       prim: mapping
