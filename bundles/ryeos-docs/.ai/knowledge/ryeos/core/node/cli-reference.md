@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-19T04:23:34Z:e8051bbe9b3a4f188a37e6a9dd5ac8c99d3b1e9e8a0bf542d5f08485f01d13ef:tbzckAx+K4pc873aMMtoHsSL87sPY6rTMFtcLkeS9rEZStSoApwiLKwTuMfJ+mIGAUj8wSy8b++4k4cYlZEqCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-19T16:51:25Z:199acfdc5858524da3d29c5cfe4c4d6fa0b5346597c089fe909bda4a9a9986f6:IsOVQtnn6bl1B49YQ2kGtS3tb85XH43lhy9xSwVij5N6lbI+jCeT1kyg1TmlF71GPZpOfBYrDflWcjPzjstpAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -246,6 +246,10 @@ Policy edits require a daemon restart; see
 [Execution Isolation](execution-isolation.md). Its `process_quarantine` row
 warns about threads whose attached process group recovery cannot prove gone,
 from the report the daemon writes after each recovery pass. Its
+`sync_apply_quarantine` row warns about project snapshot applies that startup
+recovery could not resolve and kept quarantined: it names each apply's full
+transaction directory, which may hold originals that were never restored (see
+[Execution Isolation](execution-isolation.md)). Its
 `stale_publication` row lists `publish_ready` hosted candidates whose base HEAD
 has moved (session, candidate, base and current HEAD); each settles to
 `base_superseded` on its owner's next publish.
