@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-17T11:14:08Z:46f6938d9fc50f93597efe40edc1c7beebecc048b826e406dae3e1553247cc24:5aH6vMCNDOrcKxzHHtNpmxZUJqz1jfTJY9KUzSZ98VesPUgVi2KeW3saAP7l3wynScfO1gp6jLsOU1OXe0hDCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-19T05:26:30Z:5cd6e7f04872ddd202c271f5936e33a9ad9b919fc9fbbfc6e783d2debacb69a3:YZC+GzB9KnHPBR6+LJC13dnt47RtvJaAh/todj8iWUCB2TAFVzVL2OoIt1Q7BFd5CgPBNVB+3m006Nak5UuUBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/directive"
 inventory_policy:
   admission:
@@ -60,6 +60,16 @@ execution:
           schema: ryeos.hooks.context.v1
           allowed_roots: [event]
         allowed_results: [discard, observation, control]
+      # Fired when the provider refused a request and the provider entry
+      # names the refusal with a code (its `request_rejections` rows). The
+      # event root carries `code`, `status`, `turn` and `retryable`. Observation
+      # only: the failure is already typed and a hook cannot turn it into a
+      # retry or a different outcome.
+      provider_error:
+        context_contract:
+          schema: ryeos.hooks.context.v1
+          allowed_roots: [event]
+        allowed_results: [discard, observation]
 formats:
   - extensions: [".md"]
     parser: parser:ryeos/core/markdown/directive

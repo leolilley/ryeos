@@ -170,6 +170,11 @@ inputs:
     required: true
 model:
   tier: general
+context:
+  before:
+    - "knowledge:recovery/before"
+  after:
+    - "knowledge:recovery/after"
 requires:
   capabilities:
     declared:
@@ -183,6 +188,33 @@ Call the marker tool exactly once, then report completion.
 "#
     );
     let signed = lillux::signature::sign_content(&body, signer, "<!--", Some("-->"));
+    std::fs::write(path, signed)?;
+    plant_knowledge_item(root, "recovery/before", RECOVERY_BEFORE_TEXT, signer)?;
+    plant_knowledge_item(root, "recovery/after", RECOVERY_AFTER_TEXT, signer)
+}
+
+const RECOVERY_BEFORE_TEXT: &str = "RECOVERY-BEFORE: keep the marker tool to one call.";
+const RECOVERY_AFTER_TEXT: &str = "RECOVERY-AFTER: report completion plainly.";
+
+/// Plant a knowledge item at `<root>/.ai/knowledge/<rel>.md`.
+fn plant_knowledge_item(
+    root: &Path,
+    rel: &str,
+    body: &str,
+    signer: &SigningKey,
+) -> anyhow::Result<()> {
+    let path = root.join(format!(".ai/knowledge/{rel}.md"));
+    std::fs::create_dir_all(path.parent().expect("knowledge parent"))?;
+    let stem = Path::new(rel)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(rel);
+    let category = Path::new(rel)
+        .parent()
+        .and_then(|p| p.to_str())
+        .unwrap_or("");
+    let content = format!("```yaml\nname: {stem}\ncategory: \"{category}\"\n```\n\n{body}\n");
+    let signed = lillux::signature::sign_content(&content, signer, "<!--", Some("-->"));
     std::fs::write(path, signed)?;
     Ok(())
 }
@@ -806,6 +838,42 @@ async fn run_crash_cut(cut: CrashCut) {
             })),
         "the final request must consume the one retained tool observation; body={:#?}",
         bodies[final_body_index]
+    );
+    // The context positions are in the record and the resumed run rebuilds
+    // them: the first request carries them in order (before, its
+    // acknowledgement, the task, after, its acknowledgement), and the request
+    // after recovery starts with exactly the first request's whole message
+    // list, system text included.
+    let first_messages = bodies[0]
+        .get("messages")
+        .and_then(Value::as_array)
+        .expect("first request messages");
+    let final_messages = bodies[final_body_index]
+        .get("messages")
+        .and_then(Value::as_array)
+        .expect("final request messages");
+    let texts = first_messages
+        .iter()
+        .map(|message| {
+            message
+                .get("content")
+                .map(Value::to_string)
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>();
+    let before_at = texts
+        .iter()
+        .position(|text| text.contains(RECOVERY_BEFORE_TEXT))
+        .expect("the first request carries the before context");
+    let after_at = texts
+        .iter()
+        .position(|text| text.contains(RECOVERY_AFTER_TEXT))
+        .expect("the first request carries the after context");
+    assert!(before_at < after_at, "texts={texts:?}");
+    assert!(
+        final_messages.len() > first_messages.len()
+            && final_messages[..first_messages.len()] == first_messages[..],
+        "the request after recovery must start with the first request's messages; first={first_messages:#?} final={final_messages:#?}"
     );
     let provider_observations = events
         .iter()

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-18T08:12:05Z:bc0f46aac7db76b28f0f1bf1e8ae8504b3120ccd7b1a87aab550c3fa13b822e2:JkTo6ectQw7yqEunfe8cth7zTwvDezk8FP38vOh21DawYwZCXsVGOKK1NbV9Yv3QA87iPyVxuj7Yv6i0eDlOCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-19T05:28:29Z:f96f3c5176c68ed650056a01619e34330e20e41ea439c9870cffcc1fd6246aec:lSJAqmwG92yT2YnZEcGtZq40b5ZUnL6fSanwdhBZReExDadZWCCRoZMgCSWxUnDmkqsrsy2rTtWvlHLttDW+Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/graphs
 tags: [graph, follow, authoring, lineage, budget]
@@ -195,7 +195,12 @@ On failure the record is still produced. Under a node-level `on_error` target,
 or under `continue`, it is written to graph state as `state._outcome` before
 routing, so the recovery node can branch on `state._outcome.outcome_kind` and
 read a partial `state._outcome.result`; the next failed worker node overwrites
-it. Under `fail` the graph terminates as before. In a cohort follow, a failed
+it. A followed child that failed with a structured runtime failure and has no
+worker record of its own (a directive that ended on a typed failure) gets a
+generic record: `outcome_kind`, `failure_code` (the failure's own code, which the
+graph runtime does not interpret), `child_thread_id`, `status` and `result`, so
+a recovery node can branch on `state._outcome.failure_code`. Under `fail` the
+graph terminates as before. In a cohort follow, a failed
 worker child's slot holds its record (not `null`), so
 `${state.reviews[0].outcome_kind}` is readable after a `continue` policy.
 

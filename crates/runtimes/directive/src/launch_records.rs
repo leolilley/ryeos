@@ -64,8 +64,10 @@ pub fn build_frame(frame_seq: u32, source: &FrameSource<'_>) -> Result<FrameReco
 }
 
 /// The launch inputs in the order the model is given them. A context input
-/// carries the acknowledgement the runtime writes after it; the stimulus is
-/// pinned.
+/// carries the acknowledgement the runtime writes after it. All three inputs
+/// are pinned: the context positions are bounded by the kind schema's
+/// per-position budget, and a task framing or output contract must not fall
+/// off a successor's carried tail.
 pub fn launch_inputs(
     before: Option<&str>,
     stimulus: &str,
@@ -73,13 +75,28 @@ pub fn launch_inputs(
 ) -> Vec<CognitionInput> {
     let mut inputs = Vec::new();
     if let Some(before) = before {
-        inputs.push(CognitionInput::text(CONTEXT_ORIGIN, before).with_ack(BEFORE_CONTEXT_ACK));
+        inputs.push(
+            CognitionInput::text(CONTEXT_ORIGIN, before)
+                .with_ack(BEFORE_CONTEXT_ACK)
+                .pinned(),
+        );
     }
     inputs.push(CognitionInput::text(LAUNCH_ORIGIN, stimulus).pinned());
     if let Some(after) = after {
-        inputs.push(CognitionInput::text(CONTEXT_ORIGIN, after).with_ack(AFTER_CONTEXT_ACK));
+        inputs.push(
+            CognitionInput::text(CONTEXT_ORIGIN, after)
+                .with_ack(AFTER_CONTEXT_ACK)
+                .pinned(),
+        );
     }
     inputs
+}
+
+/// An operator's follow-up stimulus on a continued chain. Pinned: it is the
+/// new task of this chain, so a long chain's successors keep it as they keep
+/// the original task.
+pub fn operator_follow_up_input(text: &str) -> CognitionInput {
+    CognitionInput::text("operator", text).pinned()
 }
 
 /// The messages a recorded input becomes: the user message, then the
@@ -120,7 +137,7 @@ mod tests {
         let inputs = launch_inputs(Some("before"), "go", Some("after"));
         let origins: Vec<_> = inputs.iter().map(|input| input.origin.as_str()).collect();
         assert_eq!(origins, ["context", "launch", "context"]);
-        assert!(!inputs[0].pinned && inputs[1].pinned && !inputs[2].pinned);
+        assert!(inputs.iter().all(|input| input.pinned));
         let texts: Vec<_> = messages_of(&inputs)
             .iter()
             .map(|message| {
@@ -140,6 +157,13 @@ mod tests {
                 ("assistant".to_string(), AFTER_CONTEXT_ACK.to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn an_operator_follow_up_is_pinned() {
+        let input = operator_follow_up_input("next");
+        assert_eq!(input.origin, "operator");
+        assert!(input.pinned);
     }
 
     #[test]
