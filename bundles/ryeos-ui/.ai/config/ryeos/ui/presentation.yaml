@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-17T22:59:57Z:5c3a2fae3a6babd43d9bed5378d50653289a3e8dbc1170bf8b6142422e1b6856:b3RVPlbuaJkWNbAkJ9CcrQcOH7SWrBMqHMmSrmucthn67JOzFL/7dSNu1HLUwClNOdfoNC1RINbMH3NxN2haCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-19T05:58:46Z:6cc4cd02f3b24043aa6001dc7c639e33a206f093cbf7c55dab1357c8ad574200:82R5aMW2tfX4UeU4AZzwZ2zF7y6aXzMYifhu9sUpLb8QOQLh096UpnJ/mtvwuXT1JAidlRM5IJP82/UYW/biAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/ui
 version: "1.1.0"
 description: Shared RyeOS browser presentation; Surface contents retain their own independent admission.

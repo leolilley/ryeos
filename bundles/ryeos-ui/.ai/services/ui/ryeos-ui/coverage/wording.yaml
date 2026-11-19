@@ -1,3 +1,4 @@
+# ryeos:signed:2026-11-19T05:58:46Z:7a3dd2cb1df243d037cf7919956ed779a0a9c5f7513ab2be17cd6208c851dfa3:SrdIZFxAphZaA75BNPsyC50twYowXqlxxIb6yE/CgZevqox64w3YTVJGcPgPQYNSRfhExwC9f2/sY9RRSGiHDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/coverage/wording
 version: "1.0.0"
