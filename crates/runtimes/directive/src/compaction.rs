@@ -329,8 +329,8 @@ mod tests {
         // The cut lands on an assistant message.
         assert_eq!(folded[plan.cut].message.role(), "assistant");
         assert_eq!(plan.pinned_inputs.len(), 1);
-        // Ten unpinned messages precede the cut: five inputs, five answers.
-        assert_eq!(plan.replaced_messages, 10);
+        // Eleven unpinned messages precede the cut: six inputs, five answers.
+        assert_eq!(plan.replaced_messages, 11);
     }
 
     #[test]

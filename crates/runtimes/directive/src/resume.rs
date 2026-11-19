@@ -446,11 +446,10 @@ async fn replay_window(callback: &CallbackClient, path: &[String]) -> Result<Rep
                     &mut replay_budget,
                 )
                 .await?;
-            for event in page
-                .events
-                .into_iter()
-                .filter(|event| index < first_thread || event.chain_seq <= after_seq)
-            {
+            for event in page.events.into_iter().filter(|event| {
+                event.event_type == "cognition_frame"
+                    && (index < first_thread || event.chain_seq <= after_seq)
+            }) {
                 source_thread_ids.push(thread_id.clone());
                 events.push(event);
             }
@@ -503,7 +502,12 @@ async fn locate_window(
                 &mut RuntimeReplayBudget::default(),
             )
             .await?;
-        if let Some(event) = page.events.last() {
+        if let Some(event) = page
+            .events
+            .iter()
+            .rev()
+            .find(|event| event.event_type == "cognition_compaction")
+        {
             let payload: ryeos_runtime::CompactionPayload =
                 serde_json::from_value(event.payload.clone())
                     .context("resume: cognition_compaction is not a recorded compaction")?;
@@ -533,7 +537,8 @@ async fn locate_window(
             )
             .await?;
         if let Some(marker) = page.events.iter().rev().find(|event| {
-            event.chain_seq < anchor.chain_seq
+            event.event_type == "cognition_in"
+                && event.chain_seq < anchor.chain_seq
                 && turn_start_coordinate(event).ok().flatten() == Some(kept)
         }) {
             return Ok(Some((index, marker.chain_seq, anchor)));
