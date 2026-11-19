@@ -693,7 +693,11 @@ fn a_corrupt_copy_in_one_bundle_falls_through_to_a_good_copy_in_another() {
     assert_eq!(body.bytes, WEBP_16X10.to_vec());
 
     // With no good copy anywhere the integrity failure is returned.
-    std::fs::write(second.join(format!(".ai/pictures/blobs/{sha}.webp")), [0u8; 52]).unwrap();
+    std::fs::write(
+        second.join(format!(".ai/pictures/blobs/{sha}.webp")),
+        [0u8; 52],
+    )
+    .unwrap();
     assert!(matches!(
         ryeos_ui::art::read_art(&index, &sha, Some("image/webp")),
         Err(ryeos_ui::art::ArtFailure::Integrity(_))
