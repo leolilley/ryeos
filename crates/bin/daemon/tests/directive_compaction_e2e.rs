@@ -31,7 +31,7 @@ fn continuation_yaml(compaction: &str) -> String {
 /// The threads of one chain with their statuses.
 async fn chain_threads(rig: &Rig, root: &str) -> Vec<(String, String)> {
     rig.h
-        .list_threads(2000)
+        .list_threads(200)
         .await
         .map(|listed| {
             listed
@@ -417,8 +417,10 @@ async fn a_chain_of_fifteen_continuations_runs_under_a_raised_limit() {
     let chain = wait_chain_settled_for(&rig, &id, 900).await;
     assert!(
         chain.len() >= 16,
-        "fifteen continuations: {} {chain:?} root={}",
+        "fifteen continuations: {} {chain:?} list={:?} requests={} root={}",
         chain.len(),
+        rig.h.list_threads(200).await.map(|t| t.len()),
+        rig.stub.requests().await.len(),
         thread_text(&rig, &id).await
     );
     assert!(
