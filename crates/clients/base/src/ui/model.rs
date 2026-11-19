@@ -8,7 +8,6 @@ use super::effect::{RyeOsEffect, RyeOsEffectKind, RyeOsUiError};
 use super::event::{RyeOsTransportChannel, RyeOsTransportFreshness};
 use super::view_model::{RyeOsMotionEventVm, RyeOsNoticeVm, RyeOsTone, RyeOsViewModel};
 use crate::ids::RyeOsViewInstanceKey;
-use crate::surface::SurfaceStyleSpec;
 use crate::view_set::{FieldCursorScopeState, ViewLocalState, ViewSet};
 use std::collections::HashMap;
 
@@ -714,8 +713,6 @@ pub struct RyeOsCore {
     pub(crate) retained_input_routes:
         BTreeMap<RyeOsViewInstanceKey, (u64, Option<serde_json::Value>)>,
     pub(crate) retained_lens_labels: BTreeMap<RyeOsViewInstanceKey, Option<String>>,
-    /// Surface-declared chrome style (border treatment).
-    pub style: SurfaceStyleSpec,
     pub presentation: Option<super::presentation_state::PresentationComposition>,
     /// Draft writes stay inside Core's exact-instance mutation guards. Platform
     /// adapters use the focused input accessors, not a mutable draft registry.

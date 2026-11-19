@@ -7767,6 +7767,9 @@ async fn run_claimed_thread_row_inner(
     // callbacks require it and terminal fencing closes it atomically.
     // This execution's absolute end: the tree deadline minus its hold-back.
     let mut run_end_at_ms = None;
+    // The end of a continuation, resume or follow successor, so a refusal at
+    // the spawn boundary that finds it passed settles as a deadline stop.
+    let mut successor_end_at_ms = None;
     if let (Some(scope), Some(accounting)) = (accounting_scope.as_ref(), state.accounting.as_ref())
     {
         let account_limit = (!hard_limits.spend_usd.is_zero()).then_some(hard_limits.spend_usd);
@@ -7829,8 +7832,11 @@ async fn run_claimed_thread_row_inner(
         // A continuation, resume or follow successor that finds its end
         // already passed settles as a typed deadline stop and spawns nothing.
         // A fresh launch keeps the plain refusal below.
+        // A same-thread recovery of a runtime that replays its chain (so it
+        // runs no native checkpoint resume) is a successor all the same.
         let successor_launch = previous_thread_id.is_some()
             || is_resume
+            || matches!(checkpoint_resume_mode, CheckpointResumeMode::SameThread)
             || launch_metadata.as_ref().is_some_and(|metadata| {
                 metadata.continuation_source_thread_id.is_some()
                     || metadata.follow_parent_context.is_some()
@@ -7873,6 +7879,9 @@ async fn run_claimed_thread_row_inner(
             ));
         }
         run_end_at_ms = end_at_ms;
+        if successor_launch {
+            successor_end_at_ms = end_at_ms;
+        }
         accounting
             .activate_account(
                 &scope.execution_budget_id,
@@ -8369,7 +8378,44 @@ async fn run_claimed_thread_row_inner(
         // The blocking owner performs any proved pre-contact/checked-abort
         // borrower settlement while it still holds the request lifelines.
         // Neither an arbitrary error nor a JoinError supplies that proof here.
-        Ok(result) => result?,
+        Ok(Ok(spawned)) => spawned,
+        Ok(Err(error)) => {
+            // A successor whose end passed between its launch admission and
+            // the spawn (the spawn waits for a blocking worker, which load
+            // lengthens) is a deadline stop like one found elapsed at
+            // admission, not a failed launch.
+            let now_ms = lillux::time::timestamp_millis();
+            let elapsed_end_at_ms = successor_end_at_ms.filter(|end| {
+                now_ms >= *end
+                    && error
+                        .downcast_ref::<DispatchError>()
+                        .is_some_and(|refusal| refusal.code() == "budget_exhausted")
+            });
+            if let Some(end_at_ms) = elapsed_end_at_ms {
+                crate::dispatch::finalize_method_thread_with_params(
+                    state,
+                    launch_owner,
+                    ryeos_app::run_deadline::elapsed_finalize_params(
+                        &thread_id,
+                        ryeos_app::run_deadline::REASON_ELAPSED_BEFORE_LAUNCH,
+                        end_at_ms,
+                        now_ms,
+                    ),
+                )?;
+                return Err(BuildAndLaunchError::from(
+                    DispatchError::LaunchPreparationFailed {
+                        code: "deadline_elapsed".to_owned(),
+                        message: "the run deadline passed before this thread could launch; it \
+                                  settled as a deadline stop"
+                            .to_owned(),
+                        classification: "policy".to_owned(),
+                        binding: None,
+                        details: Box::new(BTreeMap::new()),
+                    },
+                ));
+            }
+            return Err(error.into());
+        }
         Err(error) => {
             lifecycle_owner.revoke_tokens_after_unsettled_wait();
             return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
@@ -9640,6 +9686,8 @@ async fn prepare_follow_child_launch_inner(
         effect_authority: None,
         finalized_direct: None,
         host_access: None,
+        // A follow-child root is not a callback-dispatched tool, so no caller bounds it.
+        deadline_end_at_ms: None,
     };
 
     let project_path = execution.provenance.effective_path().to_path_buf();

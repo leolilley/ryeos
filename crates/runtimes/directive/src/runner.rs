@@ -334,6 +334,55 @@ fn tool_call_limit_error() -> String {
 /// into the provider transcript.
 const MAX_ERROR_ENVELOPE_BYTES: usize = 32 * 1024;
 
+/// Outcome code the daemon records for a tool it stopped at the run deadline.
+const TOOL_INTERRUPTED_OUTCOME: &str =
+    ryeos_runtime::callback_contract::TOOL_INTERRUPTED_AT_DEADLINE_OUTCOME;
+
+/// What the model sees for a tool cut at the run deadline: an interrupted call
+/// with an unknown outcome. The call is not retried, and its side effects may
+/// have partially happened.
+fn tool_interrupted_envelope() -> String {
+    serde_json::to_string(&json!({
+        "error": {
+            "code": TOOL_INTERRUPTED_OUTCOME,
+            "outcome": "unknown",
+            "message": "The tool was stopped at the run deadline while it was running. \
+                        Its outcome is unknown and its side effects may have partially \
+                        happened. It was not retried.",
+            "retryable": false,
+        }
+    }))
+    .expect("fixed interrupted-tool envelope serializes")
+}
+
+/// The runtime's result for its own deadline stop. The status is `TimedOut`
+/// whether or not the callback finalize landed: when it did not (an older
+/// daemon rejects the status, or the callback failed), the daemon settles the
+/// thread from this stdout result, and a deadline stop must not turn into a
+/// failure on that route. The finalize error rides as a warning.
+fn deadline_stop_result(
+    thread_id: &str,
+    result: Value,
+    cost: ryeos_runtime::envelope::RuntimeCost,
+    finalized: Result<(), String>,
+    warnings: &mut Vec<String>,
+) -> RuntimeResult {
+    if let Err(error) = finalized {
+        warnings.push(format!(
+            "callback finalize_thread for the deadline stop failed: {error}"
+        ));
+    }
+    RuntimeResult {
+        success: false,
+        status: RuntimeResultStatus::TimedOut,
+        thread_id: thread_id.to_string(),
+        result: Some(result),
+        outputs: json!({}),
+        cost: Some(cost),
+        warnings: Vec::new(),
+    }
+}
+
 /// The error envelope the model reads when a tool result is refused for a
 /// stable reason.
 fn tool_error_body(code: &str, message: &str) -> String {
@@ -4259,15 +4308,35 @@ impl Runner {
                         "turn": turn,
                         "wrap_up_delivered": self.wrap_up_delivered,
                     });
-                    let runtime_result = RuntimeResult {
-                        success: false,
-                        status: RuntimeResultStatus::TimedOut,
-                        thread_id: self.thread_id.clone(),
-                        result: Some(result),
+                    // The runtime settles its own deadline stop over the
+                    // callback, so the thread records the structured result
+                    // as the runtime's testimony rather than a fallback
+                    // wrapper. The callback and stdout carry the identical
+                    // result, cost and warnings, which the daemon cross-checks.
+                    let cost = self.budget.cost();
+                    let completion = TerminalCompletion {
+                        status: ThreadTerminalStatus::TimedOut,
+                        outcome_code: Some("deadline".to_string()),
+                        result: Some(result.clone()),
+                        error: None,
+                        cost: Some(serde_json::to_value(&cost).expect(
+                            "validated directive cost must serialize for terminal settlement",
+                        )),
                         outputs: json!({}),
-                        cost: Some(self.budget.cost()),
-                        warnings: Vec::new(),
+                        warnings: warnings.clone(),
                     };
+                    let finalized = self
+                        .callback
+                        .finalize_thread(completion)
+                        .await
+                        .map_err(|error| error.to_string());
+                    let runtime_result = deadline_stop_result(
+                        &self.thread_id,
+                        result,
+                        cost,
+                        finalized,
+                        &mut warnings,
+                    );
                     guard.finalized = true;
                     return Ok(Self::attach_warnings(runtime_result, &mut warnings));
                 }
@@ -4423,6 +4492,14 @@ impl Runner {
     /// Applies the cross-result guard (truncation + duplicate collapse), so it
     /// MUST be called in call order — the guard is ordering-sensitive state.
     fn rendered_success(&mut self, tool_name: &str, response_result: &Value) -> RenderedToolResult {
+        // A tool the daemon stopped at the run deadline did not succeed and did
+        // not plainly fail: it was cut mid-run. The model sees that as an
+        // error whose outcome is unknown, never as a result.
+        if response_result.get("outcome_code").and_then(Value::as_str)
+            == Some(TOOL_INTERRUPTED_OUTCOME)
+        {
+            return Self::rendered_error_envelope(tool_name, tool_interrupted_envelope());
+        }
         // Model-visible bytes are ONLY the leaf dispatcher's `result` — never
         // the wrapping `thread` snapshot. Without this, the LLM saw the whole
         // {thread, result} envelope and the child-thread metadata leaked into
@@ -5875,6 +5952,44 @@ mod tests {
         assert!(lillux::valid_hash(
             parsed["error"]["response_digest"].as_str().unwrap()
         ));
+    }
+
+    #[test]
+    fn a_failed_callback_finalize_keeps_the_deadline_stop_timed_out() {
+        let result = json!({"outcome": "deadline", "phase": "hard_stop"});
+        let cost = || provider_reported_spend_runtime_cost(usd("0.125"));
+        let mut warnings = vec!["earlier".to_string()];
+        let stopped = deadline_stop_result(
+            "T-1",
+            result.clone(),
+            cost(),
+            Err("unknown variant `timed_out`".to_string()),
+            &mut warnings,
+        );
+        assert_eq!(stopped.status, RuntimeResultStatus::TimedOut);
+        assert!(!stopped.success);
+        assert_eq!(stopped.result, Some(result.clone()));
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings[1].contains("unknown variant `timed_out`"));
+        // A landed finalize adds no warning and reports the same status.
+        let mut clean = Vec::new();
+        let landed = deadline_stop_result("T-1", result, cost(), Ok(()), &mut clean);
+        assert_eq!(landed.status, RuntimeResultStatus::TimedOut);
+        assert!(clean.is_empty());
+    }
+
+    #[test]
+    fn a_tool_cut_at_the_deadline_reaches_the_model_as_an_interrupted_unknown_outcome() {
+        let body: Value = serde_json::from_str(&tool_interrupted_envelope()).unwrap();
+        assert_eq!(body["error"]["code"], "tool_interrupted_at_deadline");
+        assert_eq!(body["error"]["outcome"], "unknown");
+        assert_eq!(body["error"]["retryable"], false);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("side effects may have partially happened")
+        );
     }
 
     #[test]
