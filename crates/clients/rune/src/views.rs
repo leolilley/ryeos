@@ -3135,7 +3135,7 @@ mod tests {
     }
 
     /// The columns of the threads table, by role.
-    fn thread_roles() -> (Vec<String>, Vec<ColumnRole>) {
+    fn thread_roles() -> (Vec<String>, Vec<super::ColumnRole>) {
         use ryeos_client_base::ui::content::ColumnRole as R;
         (
             ["thread", "kind", "item", "project", "status", "created"]
