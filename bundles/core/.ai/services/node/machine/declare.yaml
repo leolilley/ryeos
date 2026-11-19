@@ -1,0 +1,8 @@
+# ryeos:signed:2026-11-19T05:15:46Z:4e34632f8e5405780023e9bd717d36021fbc9f8aba5252e0dea41d28cc8170b7:E1erfhqqhundpTC4lv949Eo5X9Zw7LFazHB/eLJnOIVV/cTpZOmfjZ2AsIbax4W2b9FdZ2rX585viBF6J4xlBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: node.machine.declare
+required_caps: ["ryeos.execute.service.node/machine/declare"]
+schema:
+  label: string
+  members: string[]
+description: "Declare that these nodes (site ids) are one machine, as a node-signed record under .ai/node/machines. The declaration is the operator's word, graded declared: no node admits anything on it. Only the configured local operator may declare. A node can be on one machine only."

@@ -20,9 +20,9 @@ use anyhow::{Context, Result, ensure};
 use base64::Engine as _;
 use lillux::crypto::SigningKey;
 use ryeos_effect_contract::locality::{
-    GroupState, LocalityGrade, LocalityGroup, LocalityGroups, MemberAnswer, MemberKind,
-    NodeLocalityFacts, REASON_EMULATED_KERNEL, REASON_UNREACHABLE, RELATION_ACCOUNT, RELATION_BOOT,
-    RELATION_STORAGE,
+    GroupState, LocalityGrade, LocalityGroup, LocalityGroups, MachineDeclaration, MemberAnswer,
+    MemberKind, NodeLocalityFacts, REASON_EMULATED_KERNEL, REASON_UNREACHABLE, RELATION_ACCOUNT,
+    RELATION_BOOT, RELATION_STORAGE,
 };
 use serde_json::json;
 
@@ -267,7 +267,7 @@ fn group_of<'a>(groups: &'a LocalityGroups, id: &str) -> &'a LocalityGroup {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_node_serves_digests_and_never_a_raw_fact() -> Result<()> {
-    let (h, _fixture) = DaemonHarness::start_fast().await?;
+    let (h, fixture) = DaemonHarness::start_fast().await?;
     let (status, body) = h
         .post_execute("service:node/locality", ".", json!({}))
         .await?;
@@ -278,6 +278,7 @@ async fn a_node_serves_digests_and_never_a_raw_fact() -> Result<()> {
         .with_context(|| format!("no result: {body}"))?;
     let facts: NodeLocalityFacts = serde_json::from_value(result.clone())?;
     facts.validate()?;
+    assert_eq!(facts.site_id, fixture.site_id());
     for relation in [RELATION_BOOT, RELATION_ACCOUNT, RELATION_STORAGE] {
         assert!(facts.relations.contains_key(relation), "{relation}");
     }
@@ -457,5 +458,58 @@ async fn a_remote_that_has_not_granted_the_capability_is_not_granted() -> Result
         origin.state,
         GroupState::Alone | GroupState::CannotTell
     ));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_signed_declaration_names_a_machine_and_a_bad_record_is_reported_beside_it() -> Result<()>
+{
+    let pair = start_pair(&[LOCALITY_CAP]).await?;
+    let origin_site = pair.origin_fixture.site_id();
+    let hosted_site = pair.hosted_fixture.site_id();
+    let state_path = &pair.origin.state_path;
+    let node = ryeos_node_runtime::identity::NodeIdentity::load(
+        &ryeos_engine::roots::RuntimeRoot::new(state_path.to_path_buf()).node_signing_key_path(),
+    )?;
+    ryeos_api::machine_declaration::write_declaration(
+        state_path,
+        node.signing_key(),
+        &MachineDeclaration {
+            label: "desk".to_owned(),
+            members: vec![origin_site.clone(), hosted_site.clone()],
+        },
+        None,
+    )?;
+    // A record that does not verify is reported; it does not fail the view.
+    std::fs::write(
+        ryeos_api::machine_declaration::machine_declarations_dir(state_path).join("broken.yaml"),
+        "schema: nope\n",
+    )?;
+
+    let groups = pair.groups().await?;
+    let desk = groups
+        .groups
+        .iter()
+        .find(|group| group.key == "machine:desk")
+        .with_context(|| format!("no declared group: {groups:?}"))?;
+    assert_eq!(desk.label.as_deref(), Some("desk"));
+    assert!(desk.this_computer);
+    assert!(desk.members.iter().all(|member| member.declared));
+    let mut ids: Vec<&str> = desk.members.iter().map(|m| m.id.as_str()).collect();
+    ids.sort();
+    let mut expected = vec![origin_site.as_str(), hosted_site.as_str()];
+    expected.sort();
+    assert_eq!(ids, expected);
+    if gvisor() {
+        assert_eq!(desk.state, GroupState::Declared, "{groups:?}");
+    } else {
+        assert_eq!(desk.state, GroupState::DeclaredConfirmed, "{groups:?}");
+    }
+    assert_eq!(groups.invalid_declarations.len(), 1, "{groups:?}");
+    assert_eq!(groups.invalid_declarations[0].label, "broken");
+    assert_eq!(
+        groups.invalid_declarations[0].code,
+        "machine_declaration_unsigned"
+    );
     Ok(())
 }

@@ -355,6 +355,38 @@ fn tool_interrupted_envelope() -> String {
     .expect("fixed interrupted-tool envelope serializes")
 }
 
+/// Code of a tool dispatch refused because the run's hard stop was reached.
+const TOOL_DEADLINE_ELAPSED: &str = "tool_deadline_elapsed";
+
+/// What the model sees for a tool call that arrived at or after the run's hard
+/// stop: the tool did not start, and the call is not retried. A tool started
+/// inside the reserve window would run toward the tree end and leave the
+/// runtime no time to settle itself.
+fn tool_deadline_elapsed_error() -> String {
+    serde_json::to_string(&json!({
+        "error": {
+            "code": TOOL_DEADLINE_ELAPSED,
+            "message": "The run's hard stop is reached, so this tool did not start. It \
+                        was not retried. Do not call further tools; finish with what you \
+                        have.",
+            "retryable": false,
+        }
+    }))
+    .expect("fixed tool-deadline refusal envelope serializes")
+}
+
+/// Whether a tool dispatch at `now_ms` is refused because the hard stop is
+/// reached. This is the comparison the turn-start boundary uses
+/// (`RunClock::phase_at`). `time_left` is a local read and always runs.
+fn refuse_tool_at_hard_stop(
+    clock: Option<&crate::run_clock::RunClock>,
+    tool_name: &str,
+    now_ms: i64,
+) -> bool {
+    tool_name != TIME_LEFT_TOOL
+        && clock.is_some_and(|clock| clock.phase_at(now_ms) == RunPhase::HardStop)
+}
+
 /// The runtime's result for its own deadline stop. The status is `TimedOut`
 /// whether or not the callback finalize landed: when it did not (an older
 /// daemon rejects the status, or the callback failed), the daemon settles the
@@ -1598,6 +1630,15 @@ impl Runner {
     fn time_left_report(&self) -> Value {
         crate::run_clock::time_left_report(
             self.harness.run_clock().as_ref(),
+            lillux::time::timestamp_millis(),
+        )
+    }
+
+    /// Whether a call to `tool_name` arriving now is refused at the hard stop.
+    fn tool_refused_at_hard_stop(&self, tool_name: &str) -> bool {
+        refuse_tool_at_hard_stop(
+            self.harness.run_clock().as_ref(),
+            tool_name,
             lillux::time::timestamp_millis(),
         )
     }
@@ -3491,6 +3532,31 @@ impl Runner {
                                 raw_args: tc.arguments.to_string(),
                                 malformed: occurrence.malformed,
                             }
+                        } else if self.tool_refused_at_hard_stop(&tc.name) {
+                            // Refused before it takes tool-call budget; the
+                            // settled result keeps the turn input complete and
+                            // the next turn start stops at the hard stop.
+                            let call_id = tc.id.clone().unwrap_or_default();
+                            let tool_name = tc.name.clone();
+                            let rendered = Self::rendered_error_envelope(
+                                &tool_name,
+                                tool_deadline_elapsed_error(),
+                            );
+                            if let Err(error) = self
+                                .settle_tool_result(occurrence.operation_id, call_id, rendered)
+                                .await
+                            {
+                                state = State::RecoveryRequired { error };
+                                continue;
+                            }
+                            state_after_serial_tool_result(
+                                pending,
+                                index,
+                                turn,
+                                &self.definition_ref,
+                                &self.root_raw_content_digest,
+                                &self.effective_definition_digest,
+                            )
                         } else if tc.name != TIME_LEFT_TOOL
                             && !occurrence.counted
                             && !self.harness.try_record_tool_call()
@@ -3669,6 +3735,8 @@ impl Runner {
                         // `time_left` is free: it neither needs nor takes tool-call budget.
                         let work = if tc.name == TIME_LEFT_TOOL {
                             BatchWork::Local(self.time_left_report())
+                        } else if self.tool_refused_at_hard_stop(&tc.name) {
+                            BatchWork::Immediate(tool_deadline_elapsed_error())
                         } else if occurrence.counted || self.harness.try_record_tool_call() {
                             {
                                 match self
@@ -6064,6 +6132,40 @@ mod tests {
                 .unwrap()
                 .contains("side effects may have partially happened")
         );
+    }
+
+    #[test]
+    fn a_tool_refused_at_the_hard_stop_is_distinct_and_not_retryable() {
+        let body: Value = serde_json::from_str(&tool_deadline_elapsed_error()).unwrap();
+        assert_eq!(body["error"]["code"], "tool_deadline_elapsed");
+        assert_ne!(body["error"]["code"], TOOL_INTERRUPTED_OUTCOME);
+        assert_eq!(body["error"]["retryable"], false);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("not retried")
+        );
+    }
+
+    #[test]
+    fn tool_dispatch_is_refused_from_the_hard_stop_on_with_the_injected_clock() {
+        use crate::run_clock::RunClock;
+        // Run end 100_000 ms, reserve 10_000 ms: the hard stop is 90_000 ms.
+        let mut limits = HardLimits::default();
+        limits.deadline.reserve_seconds = 10;
+        limits.deadline.at_ms = Some(100_000);
+        let clock = RunClock::from_limits(&limits).expect("a run clock");
+        assert_eq!(clock.hard_stop_at_ms(), 90_000);
+        let refuse = |tool: &str, now: i64| refuse_tool_at_hard_stop(Some(&clock), tool, now);
+        assert!(!refuse("marker", 89_999));
+        // At the boundary and after it, the same comparison as the turn start.
+        assert!(refuse("marker", 90_000));
+        assert!(refuse("marker", 99_999));
+        // `time_left` is local and always answers.
+        assert!(!refuse(TIME_LEFT_TOOL, 95_000));
+        // A run without a deadline never refuses.
+        assert!(!refuse_tool_at_hard_stop(None, "marker", i64::MAX));
     }
 
     #[test]

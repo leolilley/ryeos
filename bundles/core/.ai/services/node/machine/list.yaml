@@ -1,0 +1,10 @@
+# ryeos:signed:2026-11-19T05:15:46Z:2153068b6eb644b6c8eaed08c0c07fad66f562af659ca045ef44c9b90b5ed7b2:i0NJ+XaEcUMd4xQ0LUCbOu5j6S1Z3aOAK1l+wlXI2U+TdA6ZNB9Cu6n7J0yyCKb5sWQ+SEtuT3IVWwCaMLioAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: node.machine.list
+ui_read_only: true
+state_access: read_only_existing
+record_thread: false
+availability: daemon_only
+required_caps:
+  - ryeos.execute.service.node/machine/list
+description: "List the declared machines (label, member site ids, when declared) and, under invalid_machines, each record that could not be used with a stable code: unsigned, edited, signed by another key, malformed, or naming a node another record names"
