@@ -1,0 +1,22 @@
+# ryeos:signed:2026-11-19T07:00:16Z:8944b53e8cebeb3dea980306c716e2c61b2726d06c5e03525b7d5af129a16b94:sL1P3iUccJ7zFK7mlETgWW14XAf6e/bqhZOGoQPSDiEwmmk7z9EOD/AdFQ8/liclUFFLKEo6PpnpXLS1YdbXDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+title: "Studies for the Libyan Sibyl (recto); Studies for the Libyan Sibyl and a small Sketch for a Seated Figure (verso)"
+artist: "Michelangelo Buonarroti"
+date: "ca. 1510–11"
+source_url: https://www.metmuseum.org/art/collection/search/337497
+licence: cc0
+derived_from:
+  - "Met object 337497, Studies for the Libyan Sibyl (recto); Studies for the Libyan Sibyl and a small Sketch for a Seated Figure (verso) (https://www.metmuseum.org/art/collection/search/337497)"
+transform: "greyscale crop of the main study of the Met open-access image; re-encoded as WebP"
+renditions:
+  - role: hero
+    sha256: "b438a5a25b33c7906973965e8799f21c79f90cd171b4de8b4aa4dfd8381f0805"
+    media_type: image/webp
+    width: 1600
+    height: 1000
+    bytes: 589960
+  - role: card
+    sha256: "883dae8f18d3f95498d9fb70f466cddf84efcddca30e1b8dbafc20101f6dcc13"
+    media_type: image/webp
+    width: 480
+    height: 300
+    bytes: 43980

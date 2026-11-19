@@ -1,0 +1,22 @@
+# ryeos:signed:2026-11-19T07:00:16Z:6c157c183c4dfda8a73f2267465531cb0b2ed5a451bde967acd3473aaffb4fd9:e0YLuq68J0yRPL8bKO5tc6BJ3e4rxrhfApAT9YyRmr3WUYCXO/UvH1f3MeoYWnEdVkg/B+zqaz8ZUKVJN4+aDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+title: "The Paradise Lost of John Milton with Illustrations by John Martin"
+artist: "John Martin"
+date: "1846"
+source_url: https://www.metmuseum.org/art/collection/search/334091
+licence: cc0
+derived_from:
+  - "Met object 334091, The Paradise Lost of John Milton with Illustrations by John Martin (https://www.metmuseum.org/art/collection/search/334091)"
+transform: "greyscale crop of one plate (Adam and Eve leaving Paradise) of the Met open-access book image; the Met catalogues the whole book as one object, so the plate title is not the Met title; re-encoded as WebP"
+renditions:
+  - role: hero
+    sha256: "287228f15f8edf57f39f883b421cac71aa3fda0b7455e6c0ef77e0a1e176bd77"
+    media_type: image/webp
+    width: 1600
+    height: 1000
+    bytes: 196716
+  - role: card
+    sha256: "74e65bede8a2dfb42d8e8588e2b7fe9da8f2dc67909c936e828b3c13360f0103"
+    media_type: image/webp
+    width: 480
+    height: 300
+    bytes: 16926

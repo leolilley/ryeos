@@ -1,0 +1,22 @@
+# ryeos:signed:2026-11-19T07:00:15Z:d9bd8008eea7d0ff64df6b1f0bb9fef3988274094e4e208362dfc8a0979158bf:2BEEUrGaBKsDLBvCnDBTlEY2r6pK72F6XF1SbXCdjSdgkyXlXANRhq5zT4UDUW9TARGnv7XithyN335fVPs8AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+title: "Marble statue of Dionysus"
+date: "1st–2nd century CE"
+source_url: https://www.metmuseum.org/art/collection/search/256879
+licence: cc0
+derived_from:
+  - "Met object 256879, Marble statue of Dionysus (https://www.metmuseum.org/art/collection/search/256879)"
+  - "Met object 247903, Terracotta statuette of Nike, the personification of victory (https://www.metmuseum.org/art/collection/search/247903)"
+transform: "greyscale; two sculptures (Met 247903 left, Met 256879 right) cut out and composed onto a grey gradient background; re-encoded as WebP"
+renditions:
+  - role: hero
+    sha256: "85af910d292e389ce5e4ee21d7a5df528217b89af3459251c3bf378eb5291afc"
+    media_type: image/webp
+    width: 1600
+    height: 1000
+    bytes: 41612
+  - role: card
+    sha256: "517c591b19a6e417556ae9276acba0bd00e89c7b9193b4f6b0ff61a94be6a862"
+    media_type: image/webp
+    width: 480
+    height: 300
+    bytes: 5500

@@ -1,0 +1,21 @@
+# ryeos:signed:2026-11-19T07:00:16Z:1edcd374cc361d85500237ee48364e6e484da5c7d83a5a629ef6a3ccf463cad8:pBvHufDRA85a4URpQDjl5/QTN1UAeOs0ysh1fvw2bIRWR5qDebfgLMfddenEbOAsNYCH5E8C8KxPKY/DIX+nDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+title: "Marble head of a youth"
+date: "117–161 CE"
+source_url: https://www.metmuseum.org/art/collection/search/248895
+licence: cc0
+derived_from:
+  - "Met object 248895, Marble head of a youth (https://www.metmuseum.org/art/collection/search/248895)"
+transform: "greyscale crop; sculpture cut out onto a grey gradient background; re-encoded as WebP"
+renditions:
+  - role: hero
+    sha256: "101699a21b8d3b6b9860fc3f72fb69e65059c8d0d36ef21e6430dc07db9c1cc0"
+    media_type: image/webp
+    width: 1600
+    height: 1000
+    bytes: 93996
+  - role: card
+    sha256: "c1749742750e59455e6d49b37250eb9de7b41abc96fc8a69457e09bd3e7b7b68"
+    media_type: image/webp
+    width: 480
+    height: 300
+    bytes: 11976
