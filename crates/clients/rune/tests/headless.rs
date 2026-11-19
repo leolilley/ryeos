@@ -1167,3 +1167,27 @@ fn a_narrow_overlay_wraps_its_cards_inside_the_sheet() {
         );
     }
 }
+
+#[test]
+fn the_project_scenes_mount_the_project_surface_with_threads_in_view() {
+    for scene in ["project", "project-review", "project-launcher"] {
+        let rt = shell(scene, (1440.0, 900.0));
+        let vm = model(&rt);
+        let text = serde_json::to_string(&*vm).unwrap();
+        assert!(text.contains("Project"), "{scene}: the project Surface is active");
+        assert!(text.contains("T-7f3a"), "{scene}: thread rows are present");
+        assert!(text.contains("T-0a55"), "{scene}: the last of eight threads is present");
+        let drawn = drawn_texts(&rt);
+        assert!(
+            drawn.iter().any(|(text, _)| text.contains("T-7f3a")),
+            "{scene}: the thread rows are drawn"
+        );
+    }
+    let rt = shell("project-review", (1440.0, 900.0));
+    assert!(
+        drawn_texts(&rt)
+            .iter()
+            .any(|(text, _)| text.contains("Write a file outside the workspace")),
+        "the Review tab draws the pending ask"
+    );
+}
