@@ -145,21 +145,22 @@ fn list(dialog: &RyeOsDialogVm, rows: &[RyeOsRowVm]) -> El {
         }
     }
     for (group, items) in groups {
-        body = body
-            .child(
+        if !group.is_empty() {
+            body = body.child(
                 row().w_full().px(24.0).pt(14.0).pb(6.0).child(
                     text(group.to_uppercase())
                         .font(theme::TYPE_LABEL)
                         .color(t.ink_at(0.45)),
                 ),
-            )
-            .child(
-                col().w_full().px(10.0).gap(2.0).children(
-                    items
-                        .into_iter()
-                        .map(|item| view_row(&dialog.instance_key, item)),
-                ),
             );
+        }
+        body = body.child(
+            col().w_full().px(10.0).gap(2.0).children(
+                items
+                    .into_iter()
+                    .map(|item| view_row(&dialog.instance_key, item)),
+            ),
+        );
     }
     body
 }
