@@ -786,8 +786,15 @@ fn center(view_set: Option<&RyeOsViewSetVm>, local: &Local) -> El {
                 guard: &set.layout_guard,
                 min: set.split_min_ratio,
                 max: set.split_max_ratio,
+                sole: local.narrow() || tile_count(root) == 1,
             };
-            layout(root, local, &splits, &mut Vec::new())
+            layout(
+                root,
+                local,
+                &splits,
+                &mut Vec::new(),
+                local.width() - SIDE_RESERVE,
+            )
         }
         None => el(),
     };
@@ -804,6 +811,22 @@ struct Splits<'a> {
     guard: &'a str,
     min: f32,
     max: f32,
+    /// Whether the set shows one tile only: it has no other tile to be
+    /// focused against.
+    sole: bool,
+}
+
+/// The room a window gives the tiles' row before the tiles: both sides'
+/// margins, and so an estimate of a tile's width. Tables use the estimate to
+/// decide which columns fit.
+const SIDE_RESERVE: f32 = 32.0;
+
+/// How many tiles the layout holds.
+fn tile_count(node: &RyeOsLayoutNodeVm) -> usize {
+    match node {
+        RyeOsLayoutNodeVm::Split { first, second, .. } => tile_count(first) + tile_count(second),
+        RyeOsLayoutNodeVm::Tile { .. } => 1,
+    }
 }
 
 /// One split's stable key: its branch path from the root.
@@ -928,6 +951,7 @@ fn layout(
     local: &Local,
     splits: &Splits<'_>,
     path: &mut Vec<SplitBranch>,
+    width: f32,
 ) -> El {
     match node {
         RyeOsLayoutNodeVm::Split { first, second, .. } if local.narrow() => {
@@ -939,7 +963,13 @@ fn layout(
             } else {
                 SplitBranch::Second
             });
-            let shown = layout(if into_first { first } else { second }, local, splits, path);
+            let shown = layout(
+                if into_first { first } else { second },
+                local,
+                splits,
+                path,
+                width,
+            );
             path.pop();
             shown
         }
@@ -954,21 +984,28 @@ fn layout(
                 Some((preview_key, preview)) if *preview_key == key => *preview,
                 _ => ratio.clamp(splits.min, splits.max),
             };
+            let horizontal = *axis == RyeOsSplitAxisVm::Horizontal;
+            // Side by side, the panes share the width less the divider.
+            let (first_width, second_width) = if horizontal {
+                let shared = (width - DIVIDER).max(0.0);
+                (shared * ratio, shared * (1.0 - ratio))
+            } else {
+                (width, width)
+            };
             path.push(SplitBranch::First);
             let first = col()
                 .grow(ratio)
                 .min_w(0.0)
                 .min_h(0.0)
-                .child(layout(first, local, splits, path));
+                .child(layout(first, local, splits, path, first_width));
             path.pop();
             path.push(SplitBranch::Second);
             let second = col()
                 .grow(1.0 - ratio)
                 .min_w(0.0)
                 .min_h(0.0)
-                .child(layout(second, local, splits, path));
+                .child(layout(second, local, splits, path, second_width));
             path.pop();
-            let horizontal = *axis == RyeOsSplitAxisVm::Horizontal;
             let handle = divider(*axis, &key, ratio, path, splits);
             let extent_key = key.clone();
             let container = if horizontal { row() } else { col() };
@@ -1024,6 +1061,8 @@ fn layout(
                         .filter(|detail| !detail.is_empty()),
                     attachment: attachment_label.as_deref(),
                     focused: *focused,
+                    sole: splits.sole,
+                    width,
                     transparent: *background_transparent,
                     chrome_hidden: *chrome_hidden,
                     tile: Some(views::TileChrome {

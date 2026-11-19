@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-19T05:58:47Z:ca54713374048a047fb2ec916e6fb3b16d42c7f611ef4fb128df058b0198242a:2Gfjqfb8JZnjtft/3lh61pJ7iLvdosQK81w5z14f+C9ZhKO8mcwly3K9kzQhfq99m5Rg2JJndTmqzqW9EDhUCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-19T10:10:12Z:4a8cafbcbfafb4849726ca019ee6ad3bda3fe881b1a329035a69a8ab5538e20a:eSaXX54x8AEhdiDi9tEN34s8npbBj1MDHBLRml2UEf7BSCEG7T1R+vCHik5kjuvRVW+mOVVKyFtOvMaX7ukVCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: project-threads
 title: Observed Project Threads
 version: "1.0.0"
@@ -10,6 +10,10 @@ description: >-
   active-only views.
 
 widget: table
+# The tile's right note: how the page is bounded and ordered, said plainly.
+body:
+  supplement:
+    frame_detail: "200 at most · sorted by watch"
 sources:
   default:
     ref: service:ui/ryeos-ui/threads/list

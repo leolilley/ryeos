@@ -201,6 +201,14 @@ fn conversation() -> Result<Value, String> {
 /// The draft the `timeline-draft` scene types.
 const DRAFT: &str = "Retry the fetch with a longer timeout, and read the retry settings first.";
 
+/// Whether choosing a launcher row stages a view for its place.
+fn stages_a_view(intent: &ryeos_client_base::ui::event::RyeOsUiIntent) -> bool {
+    matches!(
+        intent,
+        ryeos_client_base::ui::event::RyeOsUiIntent::StageLauncherView { .. }
+    )
+}
+
 /// The first input anywhere in a serialised view model.
 fn find_input(value: &Value) -> Option<ryeos_client_base::ui::view_model::RyeOsInputVm> {
     match value {
@@ -430,7 +438,8 @@ fn execution() -> Result<Value, String> {
 }
 
 /// The presentation for `scene`: `"field"` tiles the execution field,
-/// `"launcher"` opens the launcher, anything else is the default shell.
+/// `"launcher"` opens the launcher and `"launcher-stage"` also chooses its first
+/// view, so the second stage is drawn; anything else is the default shell.
 pub fn core(scene: &str) -> Result<RyeOsCore, String> {
     let field = scene == "field";
     let tiles = if field {
@@ -650,11 +659,33 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
                 },
             });
         }
-        "launcher" => {
+        "launcher" | "launcher-stage" => {
             let effects = core.dispatch(RyeOsEvent::Ui {
                 event: RyeOsUiEvent::OpenLauncher,
             });
             answered += answer(&mut core, effects, scene);
+            if scene == "launcher-stage" {
+                // The first view that can be chosen is chosen, which stages
+                // it and draws where it lands.
+                use ryeos_client_base::ui::view_model::{RyeOsViewVm, build_view_model};
+                let vm = build_view_model(&core);
+                let dialog = vm.dialogs.first().ok_or("the launcher did not open")?;
+                let RyeOsViewVm::Rows { rows, .. } = &dialog.view else {
+                    return Err("the launcher is not a list".into());
+                };
+                let staging = rows
+                    .iter()
+                    .find(|row| row.intent.as_ref().is_some_and(stages_a_view))
+                    .ok_or("the launcher lists no view that can be staged")?;
+                let effects = core.dispatch(RyeOsEvent::Ui {
+                    event: RyeOsUiEvent::ChooseViewItem {
+                        instance_key: dialog.instance_key.clone(),
+                        item_id: staging.id.clone(),
+                        activate: true,
+                    },
+                });
+                answered += answer(&mut core, effects, scene);
+            }
         }
         other => return Err(format!("unknown fixture scene {other}")),
     }

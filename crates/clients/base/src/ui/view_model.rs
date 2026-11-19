@@ -583,7 +583,9 @@ fn source_status(core: &RyeOsCore, key: &str) -> Option<RyeOsSourceStatusVm> {
     if let Some(error) = core.data.source_errors.get(key) {
         return Some(RyeOsSourceStatusVm {
             state: "failed".into(),
-            message: format!("{}: {}", error.code, error.message),
+            // The service's own sentence; its code is for logs, not for the
+            // person reading the tile.
+            message: error.message.clone(),
             stale: cached,
         });
     }
@@ -4772,7 +4774,7 @@ mod tests {
         assert!(sections[0].source_status.is_none());
         let denied = sections[1].source_status.as_ref().unwrap();
         assert_eq!(denied.state, "failed");
-        assert!(denied.message.contains("service_cap_denied"));
+        assert_eq!(denied.message, "Access denied");
         assert!(!denied.stale);
         assert!(sections[1].rows.is_empty());
         assert_eq!(

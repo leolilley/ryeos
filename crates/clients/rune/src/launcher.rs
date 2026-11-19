@@ -21,6 +21,12 @@ const ROW_PAD_X: f32 = 14.0;
 const ROW_PAD_Y: f32 = 10.0;
 const ROW_GAP: f32 = 14.0;
 const ROW_RADIUS: f32 = 11.0;
+/// A view's row is at least this tall, whatever lines it carries.
+const ROW_HEIGHT: f32 = 34.0;
+/// The ink of the commands' label and of a command's name at rest: quieter
+/// than the views', which they follow.
+const COMMAND_LABEL_INK: f32 = 0.30;
+const COMMAND_NAME_INK: f32 = 0.60;
 /// The title column's width.
 const NAME_WIDTH: f32 = 190.0;
 /// A place's height and radius.
@@ -36,6 +42,12 @@ const COMMANDS: &str = "Commands";
 
 fn is_place(row: &RyeOsRowVm) -> bool {
     row.launch.as_ref().is_some_and(|launch| launch.place)
+}
+
+fn is_command(row: &RyeOsRowVm) -> bool {
+    row.launch
+        .as_ref()
+        .is_some_and(|launch| !launch.place && launch.group == COMMANDS)
 }
 
 fn is_view(row: &RyeOsRowVm) -> bool {
@@ -150,7 +162,11 @@ fn list(dialog: &RyeOsDialogVm, rows: &[RyeOsRowVm]) -> El {
                 row().w_full().px(24.0).pt(14.0).pb(6.0).child(
                     text(group.to_uppercase())
                         .font(theme::TYPE_LABEL)
-                        .color(t.ink_at(0.45)),
+                        .color(t.ink_at(if group == COMMANDS {
+                            COMMAND_LABEL_INK
+                        } else {
+                            0.45
+                        })),
                 ),
             );
         }
@@ -174,6 +190,7 @@ fn view_row(instance: &RyeOsViewInstanceKey, item: &RyeOsRowVm) -> El {
         .launch
         .as_ref()
         .and_then(|launch| launch.reason.as_deref());
+    let quiet = is_command(item);
     let mut words = col().grow(1.0).min_w(0.0).gap(3.0);
     if let Some(description) = &item.secondary {
         words = words.child(
@@ -196,6 +213,7 @@ fn view_row(instance: &RyeOsViewInstanceKey, item: &RyeOsRowVm) -> El {
         .role("button")
         .label(item.primary.clone())
         .w_full()
+        .min_h(ROW_HEIGHT)
         .px(ROW_PAD_X)
         .py(ROW_PAD_Y)
         .gap(ROW_GAP)
@@ -207,7 +225,13 @@ fn view_row(instance: &RyeOsViewInstanceKey, item: &RyeOsRowVm) -> El {
             col().w(NAME_WIDTH).child(
                 text(item.primary.clone())
                     .font(theme::TYPE_TITLE)
-                    .color(t.ink_at(if item.selected { 1.0 } else { 0.85 }))
+                    .color(t.ink_at(if item.selected {
+                        1.0
+                    } else if quiet {
+                        COMMAND_NAME_INK
+                    } else {
+                        0.85
+                    }))
                     .truncate(),
             ),
         )

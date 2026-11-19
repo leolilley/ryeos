@@ -381,6 +381,54 @@ fn enter_chooses_a_view_then_a_place_and_escape_closes_the_second_stage_first() 
 }
 
 #[test]
+fn the_launcher_stage_scene_draws_where_the_chosen_view_lands() {
+    let rt = shell("launcher-stage", (1280.0, 800.0));
+    let vm = model(&rt);
+    assert_eq!(vm.dialogs.len(), 1, "the launcher stays open");
+    let places = launcher_places(&vm);
+    assert_eq!(
+        places.first().map(String::as_str),
+        Some("In this tile, as a tab")
+    );
+    let drawn = drawn_texts(&rt);
+    for word in ["WHERE IT LANDS", "In this tile, as a tab", "New tab"] {
+        assert!(
+            drawn.iter().any(|(text, _)| text == word),
+            "the second stage draws {word:?}"
+        );
+    }
+}
+
+#[test]
+fn the_launcher_lists_no_selection_command_beside_its_views() {
+    let rt = shell("launcher", (1280.0, 800.0));
+    let RyeOsViewVm::Rows { rows, .. } = &model(&rt).dialogs[0].view else {
+        panic!("the launcher is a rows view");
+    };
+    for row in rows {
+        for command in ["Tree", "Inspect", "Compare as left", "Compare as right"] {
+            assert_ne!(row.primary, command, "{command} is not listed unsearched");
+        }
+    }
+}
+
+#[test]
+fn a_table_tile_draws_its_note_and_no_detail_column() {
+    let rt = shell("", (1280.0, 800.0));
+    let drawn = drawn_texts(&rt);
+    assert!(
+        drawn
+            .iter()
+            .any(|(text, _)| text == "200 at most · sorted by watch"),
+        "the table's tile says how the page is bounded"
+    );
+    assert!(
+        !drawn.iter().any(|(text, _)| text == "DETAIL"),
+        "rows that open on activation have no disclosure column"
+    );
+}
+
+#[test]
 fn the_launcher_opens_from_the_switcher_and_closes_from_its_control() {
     let mut rt = shell("", (1280.0, 800.0));
     assert!(model(&rt).dialogs.is_empty());

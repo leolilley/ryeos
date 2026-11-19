@@ -96,6 +96,11 @@ pub struct FrameSpec<'a> {
     pub detail: Option<&'a str>,
     pub attachment: Option<&'a str>,
     pub focused: bool,
+    /// The set shows this tile alone: there is no other tile for focus to
+    /// tell it from, so it draws no focus edge and keeps its tools at rest.
+    pub sole: bool,
+    /// An estimate of the tile's width, which tables fit their columns to.
+    pub width: f32,
     pub transparent: bool,
     pub chrome_hidden: bool,
     /// `None` for a frame without tile tools.
@@ -135,7 +140,7 @@ pub fn frame(spec: FrameSpec<'_>, local: &crate::Local) -> El {
         .radius(theme::RADIUS_TILE)
         .border(
             1.0,
-            if spec.focused {
+            if spec.focused && !spec.sole {
                 t.sheet_focus()
             } else {
                 t.sheet_border()
@@ -153,11 +158,13 @@ pub fn frame(spec: FrameSpec<'_>, local: &crate::Local) -> El {
     if let Some(input) = filter {
         frame = frame.child(crate::shell::composer(input, local));
     }
-    frame = frame.child(col().w_full().grow(1.0).min_h(0.0).child(body(
-        spec.view,
-        spec.instance,
-        local,
-    )));
+    frame = frame.child(
+        col()
+            .w_full()
+            .grow(1.0)
+            .min_h(0.0)
+            .child(body_in(spec.view, spec.instance, local, spec.width)),
+    );
     // The status lane and the pending asks close the feed, directly above the
     // composer in the same tile.
     if let RyeOsViewVm::Timeline { lane, dock, .. } = spec.view {
@@ -200,9 +207,7 @@ fn frame_header(spec: &FrameSpec<'_>, local: &crate::Local) -> El {
             .or(spec.detail)
             .map(str::to_owned)
             .unwrap_or_default();
-        return title_row
-            .child(frame_detail(&aside))
-            .border_sides([0.0, 0.0, 1.0, 0.0], t.rule());
+        return title_row.child(frame_detail(&aside));
     };
     let tabs = (tile.tabs.len() > 1).then(|| view_tabs(tile.tabs, tile.grouped));
     if !tile.grouped
@@ -228,17 +233,24 @@ fn frame_header(spec: &FrameSpec<'_>, local: &crate::Local) -> El {
     }
     let tile_id = tile.tile_id.to_owned();
     let maximized = tile.maximized;
-    // The tools sit at the mute step until their tile is focused.
-    let tool_ink = if spec.focused {
+    // The tools are drawn only on a tile that holds focus among others; at
+    // rest they keep their place and stay pressable, and a hover shows their
+    // pad.
+    let tool_ink = if spec.focused && !spec.sole {
         t.ink_dim()
     } else {
-        t.ink_at(theme::INK_MUTE)
+        Color::TRANSPARENT
     };
     tools = tools.child(
-        text(if maximized { "↙" } else { "↗" })
-            .font(theme::TYPE_LINE)
-            .color(tool_ink)
+        col()
+            .child(
+                text(if maximized { "↙" } else { "↗" })
+                    .font(theme::TYPE_LINE)
+                    .color(tool_ink),
+            )
             .padding(2.0)
+            .radius(theme::RADIUS_ROW)
+            .hover(t.select_fill())
             .role("button")
             .label(if maximized {
                 "Restore view"
@@ -266,6 +278,8 @@ fn frame_header(spec: &FrameSpec<'_>, local: &crate::Local) -> El {
                     if open { t.accent } else { tool_ink },
                 ))
                 .padding(5.0)
+                .radius(theme::RADIUS_ROW)
+                .hover(t.select_fill())
                 .role("button")
                 .label(format!("Actions for {}", spec.label))
                 .expanded(open)
@@ -273,10 +287,7 @@ fn frame_header(spec: &FrameSpec<'_>, local: &crate::Local) -> El {
         );
     }
     title_row = title_row.child(tools);
-    let mut header = col()
-        .w_full()
-        .border_sides([0.0, 0.0, 1.0, 0.0], t.rule())
-        .child(title_row);
+    let mut header = col().w_full().child(title_row);
     if tile.grouped
         && let Some(tabs) = tabs
     {
@@ -546,6 +557,17 @@ pub fn actions_menu(key: &str, intents: &[RyeOsTileIntentVm]) -> El {
 
 /// The body of one mounted view instance.
 pub fn body(view: &RyeOsViewVm, instance: &RyeOsViewInstanceKey, local: &crate::Local) -> El {
+    body_in(view, instance, local, f32::MAX)
+}
+
+/// The view's body in a tile about `width` wide: a table fits its columns to
+/// the width.
+fn body_in(
+    view: &RyeOsViewVm,
+    instance: &RyeOsViewInstanceKey,
+    local: &crate::Local,
+    width: f32,
+) -> El {
     match view {
         RyeOsViewVm::Placeholder { title, message } => empty_state(title, message),
         RyeOsViewVm::RequiredSubject {
@@ -591,8 +613,11 @@ pub fn body(view: &RyeOsViewVm, instance: &RyeOsViewInstanceKey, local: &crate::
             instance,
             title,
             source_status.as_ref(),
-            columns,
-            column_roles,
+            TableShape {
+                columns,
+                roles: column_roles,
+                width,
+            },
             *total_rows,
             rows,
         ),
@@ -707,7 +732,7 @@ fn virtual_list(
     estimate: f32,
     follow: bool,
     pad: ListPad,
-    build: fn(&RyeOsViewVm, &RyeOsViewInstanceKey, usize) -> Option<El>,
+    build: impl Fn(&RyeOsViewVm, &RyeOsViewInstanceKey, usize) -> Option<El> + 'static,
 ) -> El {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -815,11 +840,6 @@ fn sections_view(instance: &RyeOsViewInstanceKey, title: &str, sections: &[RyeOs
 
 fn section_block(instance: &RyeOsViewInstanceKey, section: &RyeOsSectionVm) -> El {
     let t = Tokens::get();
-    let count = if section.source_status.is_some() {
-        "—".to_owned()
-    } else {
-        format!("{:02}", section.count)
-    };
     let ink = if section.header_selected {
         t.ink_strong()
     } else {
@@ -842,7 +862,6 @@ fn section_block(instance: &RyeOsViewInstanceKey, section: &RyeOsSectionVm) -> E
         .hover(t.select_fill())
         .role("button")
         .expanded(!section.collapsed)
-        .child(crate::icons::glyph(fold, 10.0, t.ink_mute()))
         .child(
             text(section.title.to_uppercase())
                 .font(theme::TYPE_LABEL)
@@ -850,7 +869,6 @@ fn section_block(instance: &RyeOsViewInstanceKey, section: &RyeOsSectionVm) -> E
                 .truncate()
                 .grow(1.0),
         )
-        .child(text(count).font(theme::TYPE_SMALL).color(t.ink_mute()))
         .on_press(move |app: &mut App| {
             app.ui(RyeOsUiEvent::ToggleViewSection {
                 instance_key: toggle_key.clone(),
@@ -859,6 +877,11 @@ fn section_block(instance: &RyeOsViewInstanceKey, section: &RyeOsSectionVm) -> E
         });
     if section.header_selected {
         header = header.fill(t.select_fill()).radius(theme::RADIUS_ROW);
+    }
+    // The fold mark shows only where the fold is not the usual state: a
+    // folded section, or the one the point is on.
+    if section.collapsed || section.header_selected {
+        header = header.child(crate::icons::glyph(fold, 10.0, t.ink_mute()));
     }
     let mut block = col().w_full().child(header);
     if let Some(status) = &section.source_status {
@@ -960,11 +983,12 @@ fn record(instance: &RyeOsViewInstanceKey, item: &RyeOsRowVm, style: RowStyle) -
             if let Some(dot) = tone_dot(t.tone(item.tone), TONE_DOT) {
                 value = value.child(dot);
             }
+            // A value is read whole: it wraps rather than truncates.
             let words = |what: &String| {
                 text(what.clone())
                     .font(theme::TYPE_CELL)
                     .color(t.ink_body())
-                    .truncate()
+                    .wrap_anywhere()
                     .grow(1.0)
                     .min_w(0.0)
             };
@@ -1004,7 +1028,10 @@ fn record(instance: &RyeOsViewInstanceKey, item: &RyeOsRowVm, style: RowStyle) -
         });
     }
     let mut head = row().w_full().min_w(0.0).child(line);
-    if item.expandable {
+    // A field row shows its disclosure only while it is the one the point is
+    // on, or open, and as a bare mark rather than a button.
+    let rows_style = style == RowStyle::Rows;
+    if item.expandable && (rows_style || item.selected || item.expanded) {
         let expand_key = instance.clone();
         let item_id = item.id.clone();
         let expanded = item.expanded;
@@ -1012,8 +1039,17 @@ fn record(instance: &RyeOsViewInstanceKey, item: &RyeOsRowVm, style: RowStyle) -
             col()
                 .w(34.0)
                 .center()
-                .border_sides([0.0, 0.0, 0.0, 1.0], p.line)
-                .fill(if expanded { p.plane_selected } else { p.plane })
+                .border_sides(
+                    [0.0, 0.0, 0.0, if rows_style { 1.0 } else { 0.0 }],
+                    p.line,
+                )
+                .fill(if !rows_style {
+                    Color::TRANSPARENT
+                } else if expanded {
+                    p.plane_selected
+                } else {
+                    p.plane
+                })
                 .hover(p.plane_selected)
                 .role("button")
                 .label(format!(
@@ -1123,19 +1159,20 @@ fn document_view(
     )
 }
 
-/// The detail column every table carries at its right edge.
-const TABLE_ACTION_WIDTH: f32 = 50.0;
+/// The disclosure column of a table whose rows do not open on activation.
+const TABLE_ACTION_WIDTH: f32 = 24.0;
 
-/// A table's header row.
-const TABLE_HEADER_HEIGHT: f32 = 26.0;
+/// A table's header row, and the ink of its labels.
+const TABLE_HEADER_HEIGHT: f32 = 28.0;
+const TABLE_HEADER_INK: f32 = 0.40;
 /// A table row: its height, its padding either side, and the gap between its
 /// cells. Rows sit 1 apart, inset from the tile so a selection fill has a
 /// margin.
-const TABLE_ROW_HEIGHT: f32 = 30.0;
+const TABLE_ROW_HEIGHT: f32 = 28.0;
 /// A hierarchy table's row.
 const TABLE_ROW_HEIGHT_TREE: f32 = 26.0;
 const TABLE_ROW_PAD: f32 = 10.0;
-const TABLE_CELL_GAP: f32 = 10.0;
+const TABLE_CELL_GAP: f32 = 12.0;
 const TABLE_ROW_GAP: f32 = 1.0;
 const TABLE_INSET: f32 = 8.0;
 /// Indent per level of a hierarchical table.
@@ -1161,18 +1198,28 @@ fn is_unreadable(state: &str) -> bool {
     matches!(state, "failed" | "unavailable" | "unresolved")
 }
 
+/// What a table is drawn from besides its rows: the headings, what each
+/// column holds, and about how wide the tile is.
+#[derive(Clone, Copy)]
+struct TableShape<'a> {
+    columns: &'a [String],
+    roles: &'a [ColumnRole],
+    width: f32,
+}
+
 fn table_view(
     instance: &RyeOsViewInstanceKey,
     title: &str,
     status: Option<&RyeOsSourceStatusVm>,
-    columns: &[String],
-    roles: &[ColumnRole],
+    shape: TableShape<'_>,
     total_rows: usize,
     rows: &[RyeOsTableRowVm],
 ) -> El {
     let t = Tokens::get();
+    let action = table_has_action(rows);
+    let plan = table_plan(shape, action);
     if rows.len() > VIRTUAL_ROWS_FROM {
-        let head = col().w_full().children(table_head(status, columns, roles));
+        let head = col().w_full().children(table_head(status, shape, &plan, action));
         let keys = rows
             .iter()
             .map(|item| format!("item:{instance:?}:{}", item.id))
@@ -1187,12 +1234,12 @@ fn table_view(
             TABLE_ROW_ESTIMATE,
             false,
             TABLE_PAD,
-            |view, instance, index| match view {
+            move |view, instance, index| match view {
                 RyeOsViewVm::Table {
                     rows, column_roles, ..
                 } => rows
                     .get(index)
-                    .map(|item| table_record(instance, item, column_roles)),
+                    .map(|item| table_record(instance, item, column_roles, &plan, action)),
                 _ => None,
             },
         );
@@ -1211,11 +1258,11 @@ fn table_view(
         .scroll(ScrollSpec {
             stick_bottom: false,
         })
-        .children(table_head(status, columns, roles));
+        .children(table_head(status, shape, &plan, action));
     // A source that could not be read is never drawn as an empty page.
     if total_rows == 0 && !unreadable(status) {
         body = body.child(
-            text("No rows in this page.")
+            text("Nothing observed yet.")
                 .font(theme::TYPE_SMALL)
                 .color(t.ink_dim())
                 .px(TABLE_ROW_PAD)
@@ -1224,9 +1271,16 @@ fn table_view(
         );
     }
     for item in rows {
-        body = body.child(table_record(instance, item, roles));
+        body = body.child(table_record(instance, item, shape.roles, &plan, action));
     }
     body
+}
+
+/// Whether a table draws its disclosure column. Rows that open on activation
+/// are their own affordance (the key that expands the selected row still
+/// works); a table whose rows only expand keeps the column.
+fn table_has_action(rows: &[RyeOsTableRowVm]) -> bool {
+    rows.iter().any(|row| row.expandable) && rows.iter().all(|row| row.intent.is_none())
 }
 
 /// The coverage sentence at the foot of a table's tile, above a rule.
@@ -1247,7 +1301,8 @@ pub fn table_foot(view: &RyeOsViewVm) -> Option<El> {
                 text(coverage.label.clone())
                     .font(theme::TYPE_NOTE)
                     .color(t.tone(coverage.tone).unwrap_or_else(|| t.ink_faint()))
-                    .wrap_anywhere()
+                    .truncate()
+                    .w_full()
                     .px(theme::PAD_TILE)
                     .py(11.0)
                     .role("status"),
@@ -1258,8 +1313,9 @@ pub fn table_foot(view: &RyeOsViewVm) -> Option<El> {
 /// What a table shows above its rows: source status and the column headings.
 fn table_head(
     status: Option<&RyeOsSourceStatusVm>,
-    columns: &[String],
-    roles: &[ColumnRole],
+    shape: TableShape<'_>,
+    plan: &[Option<ColumnWidth>],
+    action: bool,
 ) -> Vec<El> {
     let t = Tokens::get();
     let mut head = Vec::new();
@@ -1273,11 +1329,14 @@ fn table_head(
         .gap(TABLE_CELL_GAP)
         .center_y()
         .role("row");
-    for (index, column) in columns.iter().enumerate() {
-        let role = role_at(roles, index);
+    for (index, column) in shape.columns.iter().enumerate() {
+        let Some(width) = plan.get(index).copied().flatten() else {
+            continue;
+        };
+        let role = role_at(shape.roles, index);
         let label = text(column.to_uppercase())
             .font(theme::TYPE_LABEL)
-            .color(t.ink_dim())
+            .color(t.ink_at(TABLE_HEADER_INK))
             .truncate()
             .min_w(0.0);
         // A right-aligned column's heading sits over its figures.
@@ -1286,15 +1345,11 @@ fn table_head(
         } else {
             row().child(label)
         };
-        columns_row = columns_row.child(sized(cell, role).min_w(0.0).role("columnheader"));
+        columns_row = columns_row.child(sized(cell, width).min_w(0.0).role("columnheader"));
     }
-    columns_row = columns_row.child(
-        col()
-            .w(TABLE_ACTION_WIDTH)
-            .center()
-            .role("columnheader")
-            .child(text("DETAIL").font(theme::TYPE_LABEL).color(t.ink_dim())),
-    );
+    if action {
+        columns_row = columns_row.child(col().w(TABLE_ACTION_WIDTH).role("columnheader"));
+    }
     head.push(columns_row);
     head
 }
@@ -1304,22 +1359,123 @@ fn role_at(roles: &[ColumnRole], index: usize) -> ColumnRole {
     roles.get(index).copied().unwrap_or_default()
 }
 
-/// The width a role asks for in pixels; `None` takes the room left over.
-fn role_width(role: ColumnRole) -> Option<f32> {
-    match role {
-        ColumnRole::Id | ColumnRole::Status => Some(100.0),
-        ColumnRole::Kind | ColumnRole::Time | ColumnRole::Hash => Some(84.0),
-        ColumnRole::Count => Some(56.0),
-        ColumnRole::Action => Some(TABLE_ACTION_WIDTH),
-        ColumnRole::Text | ColumnRole::Ref | ColumnRole::Path => None,
+/// How wide a column is: a fixed width, or a share of the room left over.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ColumnWidth {
+    Fixed(f32),
+    Grow {
+        min: f32,
+        weight: f32,
+        max: Option<f32>,
+    },
+}
+
+impl ColumnWidth {
+    /// The least room the column needs.
+    fn least(self) -> f32 {
+        match self {
+            Self::Fixed(width) => width,
+            Self::Grow { min, .. } => min,
+        }
     }
 }
 
-/// Give a cell its role's width, or let it grow.
-fn sized(cell: El, role: ColumnRole) -> El {
-    match role_width(role) {
-        Some(width) => cell.w(width),
-        None => cell.grow(1.0),
+/// A text column's least width, and the widest it grows beside a ref or path
+/// column, which takes the room instead.
+const TEXT_LEAST: f32 = 80.0;
+const TEXT_MOST: f32 = 160.0;
+/// A ref or path column's least width.
+const REF_LEAST: f32 = 150.0;
+
+/// The width a role asks for. Ids, kinds, statuses, times, counts and hashes
+/// are fixed so rows line up; refs and paths take the room left over, with
+/// text columns beside them held to a bounded share. With no ref or path
+/// column, text columns share the room equally.
+fn role_width(role: ColumnRole, has_ref: bool) -> ColumnWidth {
+    match role {
+        ColumnRole::Id => ColumnWidth::Fixed(112.0),
+        ColumnRole::Kind => ColumnWidth::Fixed(78.0),
+        ColumnRole::Status => ColumnWidth::Fixed(104.0),
+        ColumnRole::Time => ColumnWidth::Fixed(100.0),
+        ColumnRole::Hash => ColumnWidth::Fixed(84.0),
+        ColumnRole::Count => ColumnWidth::Fixed(56.0),
+        ColumnRole::Action => ColumnWidth::Fixed(TABLE_ACTION_WIDTH),
+        ColumnRole::Ref | ColumnRole::Path => ColumnWidth::Grow {
+            min: REF_LEAST,
+            weight: 2.0,
+            max: None,
+        },
+        ColumnRole::Text => ColumnWidth::Grow {
+            min: TEXT_LEAST,
+            weight: 1.0,
+            max: has_ref.then_some(TEXT_MOST),
+        },
+    }
+}
+
+/// When a tile is too narrow for every column, columns go in this order,
+/// lowest first. `None` never goes: an id says which row it is and a status
+/// says what happened to it.
+fn drop_rank(role: ColumnRole) -> Option<u8> {
+    match role {
+        ColumnRole::Hash => Some(0),
+        ColumnRole::Time => Some(1),
+        ColumnRole::Count => Some(2),
+        ColumnRole::Text => Some(3),
+        ColumnRole::Kind => Some(4),
+        ColumnRole::Path => Some(5),
+        ColumnRole::Ref => Some(6),
+        ColumnRole::Id | ColumnRole::Status | ColumnRole::Action => None,
+    }
+}
+
+/// Each column's width, or `None` for one the tile has no room for. Columns
+/// leave by rank, the later of two equals first, until the rest fit the width
+/// (less the table's inset, the rows' padding and gaps, and the disclosure
+/// column).
+fn table_plan(shape: TableShape<'_>, action: bool) -> Vec<Option<ColumnWidth>> {
+    let has_ref = shape
+        .roles
+        .iter()
+        .any(|role| matches!(role, ColumnRole::Ref | ColumnRole::Path));
+    let mut plan: Vec<Option<ColumnWidth>> = (0..shape.columns.len())
+        .map(|index| Some(role_width(role_at(shape.roles, index), has_ref)))
+        .collect();
+    let disclosure = if action {
+        TABLE_ACTION_WIDTH + TABLE_CELL_GAP
+    } else {
+        0.0
+    };
+    let room = shape.width - 2.0 * (TABLE_INSET + TABLE_ROW_PAD) - disclosure;
+    let needed = |plan: &[Option<ColumnWidth>]| {
+        let shown: Vec<f32> = plan.iter().flatten().map(|width| width.least()).collect();
+        shown.iter().sum::<f32>() + shown.len().saturating_sub(1) as f32 * TABLE_CELL_GAP
+    };
+    while needed(&plan) > room {
+        let rank = |index: usize| drop_rank(role_at(shape.roles, index));
+        let leaving = (0..plan.len())
+            .filter(|index| plan[*index].is_some())
+            .filter_map(|index| rank(index).map(|rank| (rank, index)))
+            .min_by_key(|(rank, index)| (*rank, std::cmp::Reverse(*index)));
+        match leaving {
+            Some((_, index)) => plan[index] = None,
+            None => break,
+        }
+    }
+    plan
+}
+
+/// Give a cell its column's width.
+fn sized(cell: El, width: ColumnWidth) -> El {
+    match width {
+        ColumnWidth::Fixed(width) => cell.w(width),
+        ColumnWidth::Grow { min, weight, max } => {
+            let cell = cell.grow(weight).min_w(min);
+            match max {
+                Some(max) => cell.max_w(max),
+                None => cell,
+            }
+        }
     }
 }
 
@@ -1369,6 +1525,8 @@ fn table_record(
     instance: &RyeOsViewInstanceKey,
     item: &RyeOsTableRowVm,
     roles: &[ColumnRole],
+    plan: &[Option<ColumnWidth>],
+    action: bool,
 ) -> El {
     let p = Palette::get();
     let t = Tokens::get();
@@ -1397,12 +1555,15 @@ fn table_record(
         None
     };
     for (index, cell) in item.cells.iter().enumerate() {
+        let Some(width) = plan.get(index).copied().flatten() else {
+            continue;
+        };
         let choose_key = instance.clone();
         let item_id = item.id.clone();
         let cell_tone = item.cell_tones.get(index).copied().flatten();
         let name = index == 0 && item.selected;
         let role = role_at(roles, index);
-        let mut slot = sized(row(), role)
+        let mut slot = sized(row(), width)
             .min_w(0.0)
             .h_full()
             .center_y()
@@ -1469,17 +1630,19 @@ fn table_record(
         );
         line = line.child(slot);
     }
-    let mut action = col().w(TABLE_ACTION_WIDTH).h_full().role("cell");
-    if item.expandable {
-        action = action.child(chevron(
-            instance,
-            &item.id,
-            item.expanded,
-            "row".to_owned(),
-            TABLE_ACTION_WIDTH,
-        ));
+    if action {
+        let mut disclosure = col().w(TABLE_ACTION_WIDTH).h_full().role("cell");
+        if item.expandable {
+            disclosure = disclosure.child(chevron(
+                instance,
+                &item.id,
+                item.expanded,
+                "row".to_owned(),
+                TABLE_ACTION_WIDTH,
+            ));
+        }
+        line = line.child(disclosure);
     }
-    line = line.child(action);
     let mut record = col()
         .key(format!("item:{instance:?}:{}", item.id))
         .w_full()
@@ -2857,16 +3020,16 @@ mod tests {
     #[test]
     fn an_empty_table_page_says_so_and_a_populated_one_does_not() {
         let empty = drawn(table(Vec::new(), 0, Value::Null));
-        assert!(says(&empty, "No rows in this page."));
+        assert!(says(&empty, "Nothing observed yet."));
         let populated = drawn(table(
             vec![table_row("t1", ["Alpha", "beta"], json!({}))],
             1,
             Value::Null,
         ));
-        assert!(!says(&populated, "No rows in this page."));
+        assert!(!says(&populated, "Nothing observed yet."));
         // The page window can be empty while the collection is not.
         let windowed = drawn(table(Vec::new(), 5, Value::Null));
-        assert!(!says(&windowed, "No rows in this page."));
+        assert!(!says(&windowed, "Nothing observed yet."));
     }
 
     /// A view's body with the foot a frame adds under it.
@@ -2891,7 +3054,7 @@ mod tests {
         });
         let empty = drawn(table(Vec::new(), 0, coverage.clone()));
         assert!(says(&empty, "Part of what exists is shown."));
-        assert!(says(&empty, "No rows in this page."));
+        assert!(says(&empty, "Nothing observed yet."));
         let populated = drawn(table(
             vec![table_row("t1", ["Alpha", "beta"], json!({}))],
             1,
@@ -2940,27 +3103,126 @@ mod tests {
 
     #[test]
     fn each_role_asks_for_its_width_and_the_flexible_roles_grow() {
+        use super::ColumnWidth::{Fixed, Grow};
         use ryeos_client_base::ui::content::ColumnRole as R;
         for (role, width) in [
-            (R::Id, 100.0),
-            (R::Status, 100.0),
-            (R::Kind, 84.0),
-            (R::Time, 84.0),
+            (R::Id, 112.0),
+            (R::Kind, 78.0),
+            (R::Status, 104.0),
+            (R::Time, 100.0),
             (R::Hash, 84.0),
             (R::Count, 56.0),
-            (R::Action, 50.0),
+            (R::Action, 24.0),
         ] {
-            assert_eq!(super::role_width(role), Some(width), "{role:?}");
+            assert_eq!(super::role_width(role, true), Fixed(width), "{role:?}");
         }
-        for role in [R::Text, R::Ref, R::Path] {
-            assert_eq!(super::role_width(role), None, "{role:?}");
+        for role in [R::Ref, R::Path] {
+            assert!(matches!(super::role_width(role, true), Grow { .. }));
         }
+        // Beside a ref column text is bounded; alone it takes its share.
+        assert!(matches!(
+            super::role_width(R::Text, true),
+            Grow { max: Some(_), .. }
+        ));
+        assert!(matches!(
+            super::role_width(R::Text, false),
+            Grow { max: None, .. }
+        ));
         for role in [R::Id, R::Ref, R::Path, R::Hash] {
             assert!(super::role_is_mono(role), "{role:?}");
         }
         for role in [R::Text, R::Kind, R::Status, R::Time, R::Count, R::Action] {
             assert!(!super::role_is_mono(role), "{role:?}");
         }
+    }
+
+    /// The columns of the threads table, by role.
+    fn thread_roles() -> (Vec<String>, Vec<ColumnRole>) {
+        use ryeos_client_base::ui::content::ColumnRole as R;
+        (
+            ["thread", "kind", "item", "project", "status", "created"]
+                .map(String::from)
+                .to_vec(),
+            vec![R::Id, R::Kind, R::Ref, R::Text, R::Status, R::Time],
+        )
+    }
+
+    fn shown(width: f32) -> Vec<bool> {
+        let (columns, roles) = thread_roles();
+        let shape = super::TableShape {
+            columns: &columns,
+            roles: &roles,
+            width,
+        };
+        super::table_plan(shape, false)
+            .iter()
+            .map(Option::is_some)
+            .collect()
+    }
+
+    #[test]
+    fn a_narrow_tile_drops_columns_by_rank_and_keeps_id_and_status() {
+        // Room for every column.
+        assert_eq!(shown(940.0), vec![true; 6]);
+        // The tile of a three-column page: time, project and kind go.
+        assert_eq!(
+            shown(450.0),
+            vec![true, false, true, false, true, false],
+            "id, item and status stay"
+        );
+        // Narrower still: the item goes before the id or the status do.
+        assert_eq!(shown(190.0), vec![true, false, false, false, true, false]);
+        // A window with no width yet keeps every column.
+        assert_eq!(shown(f32::MAX), vec![true; 6]);
+    }
+
+    #[test]
+    fn a_dropped_column_has_no_header_and_no_cell() {
+        let columns = ["thread", "kind", "status"];
+        let view: RyeOsViewVm = serde_json::from_value(json!({
+            "type": "table", "title": "Threads", "columns": columns,
+            "column_roles": ["id", "kind", "status"], "total_rows": 1,
+            "rows": [{
+                "id": "t1", "cells": ["T-1", "directive", "running"], "tone": "good",
+                "selected": false, "expandable": false, "expanded": false, "detail": []
+            }]
+        }))
+        .unwrap();
+        let instance = instance();
+        let local = std::rc::Rc::new(crate::Local::default());
+        let rt = runtime((900.0, 700.0), move || {
+            super::body_in(&view, &instance, &local, 200.0)
+        });
+        assert!(says(&rt, "T-1"));
+        assert!(says(&rt, "running"));
+        assert!(!says(&rt, "directive"));
+        assert!(!says(&rt, "KIND"));
+        assert!(says(&rt, "STATUS"));
+    }
+
+    #[test]
+    fn rows_that_open_on_activation_draw_no_disclosure_column() {
+        let expandable = |intent: Value| {
+            let view: RyeOsViewVm = serde_json::from_value(json!({
+                "type": "table", "title": "Threads", "columns": ["name", "kind"],
+                "total_rows": 1,
+                "rows": [table_row(
+                    "t1", ["Alpha", "beta"],
+                    json!({"expandable": true, "intent": intent})
+                )]
+            }))
+            .unwrap();
+            drawn(view)
+        };
+        let opening = expandable(json!({"type": "toggle_top_status_bar"}));
+        assert!(!says(&opening, "DETAIL"));
+        assert!(labelled_containing(&opening, "Expand row").is_empty());
+        let plain = expandable(Value::Null);
+        assert!(!says(&plain, "DETAIL"));
+        assert_eq!(
+            labelled_containing(&plain, "Expand row"),
+            vec!["Expand row".to_owned()]
+        );
     }
 
     #[test]
@@ -3100,7 +3362,7 @@ mod tests {
         }))
         .unwrap();
         let rt = drawn(view);
-        assert!(!says(&rt, "No rows in this page."));
+        assert!(!says(&rt, "Nothing observed yet."));
         assert!(says(&rt, "Could not be read."));
         assert!(says(&rt, "denied"));
         assert!(!says(&rt, "failed: denied"));

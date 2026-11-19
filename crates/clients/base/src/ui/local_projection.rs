@@ -170,6 +170,35 @@ fn global_or_exact_command(
     }
 }
 
+/// Whether a listed command acts on the focused tile's selection or the tile
+/// itself, rather than on the shell, the Surface or its view sets.
+fn acts_on_selection(record: &Candidate) -> bool {
+    let is_command = record
+        .launch
+        .as_ref()
+        .is_some_and(|launch| launch.group == COMMAND_GROUP);
+    is_command
+        && matches!(
+            record.intent,
+            Some(
+                RyeOsUiIntent::InvokeAffordance { .. }
+                    | RyeOsUiIntent::InspectItem { .. }
+                    | RyeOsUiIntent::InspectThread { .. }
+                    | RyeOsUiIntent::InspectSummary { .. }
+                    | RyeOsUiIntent::ReadFile { .. }
+                    | RyeOsUiIntent::PinViewSelection { .. }
+                    | RyeOsUiIntent::SupplyRequiredSubject { .. }
+                    | RyeOsUiIntent::OpenPinnedViewAlongside { .. }
+                    | RyeOsUiIntent::FollowViewSetSelection { .. }
+                    | RyeOsUiIntent::MoveTileToViewSet { .. }
+                    | RyeOsUiIntent::MoveTileToSurfaceViewSet { .. }
+                    | RyeOsUiIntent::PromoteTileToMaster { .. }
+                    | RyeOsUiIntent::MoveTileBeside { .. }
+                    | RyeOsUiIntent::MoveTileToGroup { .. }
+            )
+        )
+}
+
 /// A local projection cannot be its own contextual row source: asking for its
 /// selected row would project it again. Keep global commands available while
 /// failing closed on contextual commands for that focus.
@@ -502,6 +531,13 @@ fn candidates(
             .get(&key.storage_key())
             .map(|buffer| buffer.text.trim().to_lowercase())
             .unwrap_or_default();
+        // The view finder lists views and the commands that stand alone.
+        // A command that acts on the focused tile's selected row (inspect,
+        // compare, move the tile) is found by typing for it, and is not
+        // listed beside the views while the find line is empty.
+        if query.is_empty() && projection == ViewLocalProjection::Launcher {
+            records.retain(|record| !acts_on_selection(record));
+        }
         if !query.is_empty() {
             records.retain(|record| {
                 let group = record
