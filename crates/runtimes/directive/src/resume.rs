@@ -2763,10 +2763,12 @@ mod tests {
         );
         let mut events = vec![
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_in".to_string(),
                 payload: input("task"),
             },
             ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "cognition_out".to_string(),
                 payload: {
                     let mut out = out_calls(1, json!(calls));
@@ -2777,10 +2779,12 @@ mod tests {
         ];
         let first = directive_tool_operation_id(&source, 1, 0);
         events.push(ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "tool_call_start".to_string(),
             payload: json!({"operation_id":first,"call_id":"call-r1","tool":DIRECTIVE_RETURN_TOOL}),
         });
         events.push(ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "tool_call_result".to_string(),
             payload: error_result(
                 &first,
@@ -2794,10 +2798,12 @@ mod tests {
             let id = call["id"].as_str().unwrap();
             let tool = call["name"].as_str().unwrap();
             events.push(ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "tool_call_start".to_string(),
                 payload: json!({"operation_id":operation,"call_id":id,"tool":tool}),
             });
             events.push(ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: "tool_call_result".to_string(),
                 payload: error_result(&operation, id, tool, &refusal_text()),
             });
@@ -2869,6 +2875,7 @@ mod tests {
         // start and no result and the run went on.
         let mut events = failed_return_events_before_refusal();
         events.push(ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "cognition_in".to_string(),
             payload: input("later"),
         });
