@@ -240,10 +240,11 @@ fn predecessor_reset_clears_a_stale_launch_metadata_schema_row() {
 
 /// A stored launch row pins its own schema and the admitted launch capsule
 /// schema it seals, and a store at the current epoch is strictly decoded on
-/// every open and by the reset's own inspection. A contract that moves without
-/// an epoch bump therefore leaves a node that neither opens nor resets. Move
-/// the epoch with either version, add its "Epoch N" line, then update this
-/// triple.
+/// every open and by the reset's own inspection, as is a retained external
+/// binding, which embeds the controller transport contract. A contract that
+/// moves without an epoch bump therefore leaves a node that neither opens nor
+/// resets. Move the epoch with any of these versions, add its "Epoch N" line,
+/// then update this tuple.
 #[test]
 fn stored_launch_contract_versions_and_runtime_epoch_move_together() {
     assert_eq!(
@@ -251,9 +252,10 @@ fn stored_launch_contract_versions_and_runtime_epoch_move_together() {
             LAUNCH_METADATA_SCHEMA_VERSION,
             ryeos_state::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
             RUNTIME_OPERATOR_SCHEMA_EPOCH,
+            ryeos_state::external_execution::transport::EXTERNAL_CONTROLLER_TRANSPORT_CONTRACT_SCHEMA,
         ),
-        (38, 39, 140),
-        "a change to a stored launch contract version needs a runtime operator epoch bump"
+        (38, 39, 141, 3),
+        "a change to a stored launch or transport contract version needs a runtime operator epoch bump"
     );
 }
 
