@@ -9755,7 +9755,9 @@ mod shutdown_custody_tests {
     #[tokio::test]
     async fn unreadable_registry_stays_held() {
         assert!(!registry_reading_empty::<String, _>(Err("poisoned")));
-        assert!(!registry_reading_empty(Ok(vec!["t".to_owned()])));
+        assert!(!registry_reading_empty::<String, &str>(Ok(vec![
+            "t".to_owned()
+        ])));
         assert!(registry_reading_empty::<String, &str>(Ok(Vec::new())));
         // A re-check that reads the registry as unreadable reports held.
         let (released, calls) = run_hold(
