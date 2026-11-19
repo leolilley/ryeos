@@ -271,14 +271,14 @@ fn a_launcher_dialog_opens_moves_chooses_and_closes() {
 }
 
 #[test]
-fn the_launcher_opens_from_the_status_bar_and_closes_from_its_control() {
+fn the_launcher_opens_from_the_switcher_and_closes_from_its_control() {
     let mut rt = shell("", (1280.0, 800.0));
     assert!(model(&rt).dialogs.is_empty());
-    press(&mut rt, "shell:launch");
+    press(&mut rt, "switcher:add");
     assert_eq!(
         model(&rt).dialogs.len(),
         1,
-        "the status bar opened the launcher"
+        "the switcher's plus opened the launcher"
     );
     assert!(
         keyed_between(&rt, "dialog:", ":close").is_some(),
@@ -340,9 +340,9 @@ fn the_chrome_never_shows_the_project_path() {
     }
 }
 
-/// The status bar is two floating islands: the launcher with the key hint, and
-/// the core's segments with the node's health. It shows exactly the segments
-/// (as the core words them, not upper-cased) and the launcher's name, and
+/// The status bar is two floating islands: the key hints, and the core's
+/// segments with the node's health. It shows exactly the segments (as the
+/// core words them, not upper-cased), and
 /// carries no product name.
 #[test]
 fn the_status_bar_shows_only_its_segments() {
@@ -350,27 +350,27 @@ fn the_status_bar_shows_only_its_segments() {
     let rt = shell("", (width, 800.0));
     let vm = model(&rt);
     let status = &vm.presentation.chrome.status_bar;
-    let Some([_, top, _, height]) = keyed(&rt, "shell:launch") else {
+    let Some([_, top, _, height]) = keyed(&rt, "shell:keys") else {
         assert!(
-            !status.visible,
-            "a visible status bar draws its launch control"
+            !status.visible || status.key_hints.is_empty(),
+            "a visible status bar with hints draws its keys island"
         );
         return;
     };
     assert!(status.visible);
     let [launch_x, launch_y, launch_w, launch_h] =
-        keyed(&rt, "shell:launch").expect("the launch control");
+        keyed(&rt, "shell:keys").expect("the keys island");
     let launch_right = launch_x + launch_w;
     // The islands share one row; read the whole band the launcher sits in.
     let shown = texts_in_band(&rt, top, top + height);
     // The dialog is not open in this fixture, so no text "Launch" belongs in
-    // the status band: the launch control draws a glyph, not a word.
+    // the status band.
     assert!(
         !shown.iter().any(|text| text == "Launch"),
-        "the launch control carries no visible wording, saw {shown:?}"
+        "the status bar carries no launcher wording, saw {shown:?}"
     );
-    // The left island is every text on the control's row left of the window's
-    // middle: it holds nothing but the key hint. The hint is checked by its
+    // The left island is every text on the keys island's row left of the
+    // window's middle: it holds nothing but the key hints. The hint is checked by its
     // ASCII core, since the drawn form may substitute glyphs the faces lack.
     let left: Vec<(String, [f32; 4])> = drawn_texts(&rt)
         .into_iter()
@@ -397,8 +397,8 @@ fn the_status_bar_shows_only_its_segments() {
         left.len() <= 2 * status.key_hints.len() && left.len().is_multiple_of(2),
         "only the key hints in the left island, saw {left:?}"
     );
-    // A text is in the right island when it is right of the launch control and
-    // its vertical centre is within the launch control's top..bottom band.
+    // A text is in the right island when it is right of the keys island and
+    // its vertical centre is within the island's top..bottom band.
     let in_right_island = |wanted: &str| {
         drawn_texts(&rt).into_iter().any(|(text, [x, y, _, h])| {
             let middle = y + h / 2.0;
@@ -550,15 +550,13 @@ fn the_switcher_holds_the_left_edge_and_the_status_islands_float() {
             "{what}: {value}, wanted about {wanted}"
         );
     };
-    // The status row has a 10 inset at the sides and the bottom and each island
-    // pads 12, so the launch control sits at x = 10 + 12. The row is 40 high
-    // with 10 beneath; the pressable launch row takes the island's full 30
-    // height (the 20 high chip is drawn inside it), so its bottom is the
-    // island's: bottom = height - 10, and its height is the island's 30.
-    let [x, y, _, tall] = keyed(&rt, "shell:launch").expect("the launch control is drawn");
-    close(x, 10.0 + 12.0, "the launch control's x");
-    close(y + tall, height - 10.0, "the launch control's bottom");
-    close(tall, 30.0, "the launch control's height");
+    // The status row has a 10 inset at the sides and the bottom, so the keys
+    // island sits at x = 10. The row is 40 high with 10 beneath; the island is
+    // 30 high: bottom = height - 10.
+    let [x, y, _, tall] = keyed(&rt, "shell:keys").expect("the keys island is drawn");
+    close(x, 10.0, "the keys island's x");
+    close(y + tall, height - 10.0, "the keys island's bottom");
+    close(tall, 30.0, "the keys island's height");
     let vm = model(&rt);
     let current = vm
         .session
@@ -608,7 +606,7 @@ fn the_switcher_holds_the_left_edge_and_the_status_islands_float() {
     );
 }
 
-/// With the status bar hidden (Alt+B), nothing draws the launch control and
+/// With the status bar hidden (Alt+B), nothing draws the keys island and
 /// the node's health remains as a 6-point dot at the bottom-right, keyed
 /// `shell:health`.
 #[test]
@@ -628,7 +626,7 @@ fn a_hidden_status_bar_keeps_only_the_health_dot() {
         !model(&rt).presentation.chrome.status_bar.visible,
         "Alt+B hid the status bar"
     );
-    assert!(keyed(&rt, "shell:launch").is_none(), "no launch control");
+    assert!(keyed(&rt, "shell:keys").is_none(), "no keys island");
     let [x, y, w, h] = keyed(&rt, "shell:health").expect("the health dot remains");
     assert!(
         (w - 6.0).abs() < 0.5 && (h - 6.0).abs() < 0.5,
@@ -705,7 +703,7 @@ fn the_current_view_set_tab_stays_in_view_when_the_tabs_scroll() {
 }
 
 #[test]
-fn surface_chips_draw_their_marks_dots_and_the_project_mark() {
+fn surface_chips_draw_their_marks_and_dots() {
     let rt = shell("chips", (1280.0, 800.0));
     let vm = model(&rt);
     let surfaces = &vm.session.surfaces;
@@ -720,18 +718,16 @@ fn surface_chips_draw_their_marks_dots_and_the_project_mark() {
     // The node: running only.
     let node = &surfaces[1];
     assert!(exactly_keyed(&rt, &format!("running:{}", key(node))).is_some());
-    // The project: zero counts draw no dot; it carries the project mark.
+    // The project: zero counts draw no dot, and no chip carries a project mark.
     let project = &surfaces[2];
-    for word in ["needs-you", "running"] {
+    for word in ["needs-you", "running", "project"] {
         assert!(exactly_keyed(&rt, &format!("{word}:{}", key(project))).is_none());
     }
-    assert!(exactly_keyed(&rt, &format!("project:{}", key(project))).is_some());
-    // Unknown counts draw nothing, and no other chip is marked as a project's.
+    // Unknown counts draw nothing.
     let plain = &surfaces[3];
     for word in ["needs-you", "running", "project"] {
         assert!(exactly_keyed(&rt, &format!("{word}:{}", key(plain))).is_none());
     }
-    assert!(exactly_keyed(&rt, &format!("project:{}", key(home))).is_none());
     // A dot sits inside its chip's top-right corner.
     let [cx, cy, cw, _] = exactly_keyed(&rt, &key(home)).expect("Home's chip");
     let [dx, dy, dw, _] =
@@ -744,7 +740,7 @@ fn a_tab_with_work_carries_its_dot_after_its_word() {
     let rt = shell("tabs", (900.0, 800.0));
     let vm = model(&rt);
     let tabs = &vm.presentation.chrome.top_bar.tabs;
-    let needing = &tabs[2];
+    let needing = tabs.last().expect("the scene has tabs");
     let running = &tabs[4];
     let drawn = |word: &str, id| exactly_keyed(&rt, &format!("{word}:view-set:{id}"));
     // Only tabs in view are drawn; the scene scrolls to the last tab, so
@@ -800,7 +796,7 @@ fn a_switcher_on_the_right_and_a_status_bar_on_top_move_their_room() {
         sx + sw <= width - 10.0 + 0.5 && sx >= width - 60.0,
         "switcher at the right: {sx}"
     );
-    let [_, ly, _, lh] = keyed(&rt, "shell:launch").expect("the status bar draws");
+    let [_, ly, _, lh] = keyed(&rt, "shell:keys").expect("the status bar draws");
     assert!(ly + lh <= 45.0, "the status bar is at the top: {ly}");
     assert!(
         sy >= 40.0,
@@ -836,8 +832,12 @@ fn a_switcher_along_the_top_is_a_band_of_named_pills() {
     let texts: Vec<String> = drawn_texts(&rt).into_iter().map(|(text, _)| text).collect();
     assert!(texts.iter().any(|text| text == "Home"), "{texts:?}");
     assert!(
-        texts.iter().any(|text| text == "ryeos·"),
-        "the project mark: {texts:?}"
+        texts.iter().any(|text| text == "ryeos"),
+        "the project's tag carries no mark: {texts:?}"
+    );
+    assert!(
+        !texts.iter().any(|text| text == "ryeos·"),
+        "no project mark on the tag: {texts:?}"
     );
     let home = &vm.session.surfaces[0];
     assert!(
@@ -856,7 +856,7 @@ fn a_bare_surface_draws_no_switcher_and_no_status_bar_but_keeps_the_health_dot()
     let (width, height) = (1280.0, 800.0);
     let rt = shell("bare", (width, height));
     assert!(keyed(&rt, "surface:").is_none(), "no switcher");
-    assert!(keyed(&rt, "shell:launch").is_none(), "no status bar");
+    assert!(keyed(&rt, "shell:keys").is_none(), "no status bar");
     let [x, y, w, h] = exactly_keyed(&rt, "shell:health").expect("the health dot");
     assert!(w <= 6.5 && h <= 6.5 && x > width - 30.0 && y > height - 30.0);
     let (left, _) = tile_extent(&rt);
@@ -896,13 +896,13 @@ fn the_overlay_draws_its_sections_rows_and_the_selected_rows_actions() {
     // Needs-you rows take the first indices; running continues after them.
     assert!(exactly_keyed(&rt, "overlay:needs-you:0").is_some());
     assert!(exactly_keyed(&rt, "overlay:needs-you:1").is_some());
-    assert!(exactly_keyed(&rt, "overlay:running:2").is_some());
+    assert!(exactly_keyed(&rt, "overlay:needs-you:2").is_some());
+    assert!(exactly_keyed(&rt, "overlay:running:3").is_some());
     let texts: Vec<String> = drawn_texts(&rt).into_iter().map(|(text, _)| text).collect();
     for wanted in [
         "Approve the deploy",
         "this node",
         "acknowledge",
-        "3 more",
         "12m",
         "2h",
     ] {
@@ -918,5 +918,92 @@ fn the_overlay_draws_its_sections_rows_and_the_selected_rows_actions() {
     );
     for hint in &vm.overlay.key_hints {
         assert!(texts.contains(&hint.word), "footer hint {:?}", hint.word);
+    }
+}
+
+#[test]
+fn the_tab_band_carries_no_layout_readout_and_sets_its_words_level_with_the_chips() {
+    let rt = shell("chips", (1280.0, 800.0));
+    let vm = model(&rt);
+    let top_bar = &vm.presentation.chrome.top_bar;
+    assert!(top_bar.visible, "the chips scene shows the tab band");
+    let texts = drawn_texts(&rt);
+    assert!(
+        !texts.iter().any(|(text, _)| text.contains('|') || text.contains('│')),
+        "no layout readout in the band: {texts:?}"
+    );
+    let current = top_bar
+        .tabs
+        .iter()
+        .find(|tab| tab.active)
+        .expect("a current tab");
+    let (_, [_, y, _, h]) = texts
+        .iter()
+        .find(|(text, _)| *text == current.title)
+        .expect("the current tab's word is drawn");
+    assert!(
+        (y + h / 2.0 - 28.0).abs() <= 2.0,
+        "the word's centre is level with the chips: {}",
+        y + h / 2.0
+    );
+}
+
+#[test]
+fn the_draft_chip_shows_only_with_a_draft_and_the_field_shows_the_draft() {
+    let empty = shell("timeline", (1280.0, 800.0));
+    let drawn = |rt: &Runtime<App>, wanted: &str| {
+        drawn_texts(rt)
+            .iter()
+            .any(|(text, _)| text.starts_with(wanted))
+    };
+    assert!(!drawn(&empty, "DRAFT"), "no draft chip over an empty box");
+    let typed = shell("timeline-draft", (1280.0, 800.0));
+    assert!(drawn(&typed, "DRAFT"), "the draft chip shows with a draft");
+    assert!(
+        drawn(&typed, "Retry the fetch"),
+        "the pre-typed draft is in the field from the first frame"
+    );
+}
+
+#[test]
+fn the_overlay_draws_a_find_line_and_cards_at_the_reference_size() {
+    let rt = shell("overlay", (1280.0, 800.0));
+    let vm = model(&rt);
+    let texts = drawn_texts(&rt);
+    assert!(
+        texts
+            .iter()
+            .any(|(text, _)| text.starts_with("Find a view")),
+        "the find line's prompt"
+    );
+    for surface in &vm.session.surfaces {
+        let [_, _, w, h] = exactly_keyed(
+            &rt,
+            &format!("overlay:surface:{:?}", surface.surface_instance_id),
+        )
+        .expect("a card per open Surface");
+        assert!(
+            (w - 206.0).abs() < 0.5 && (h - 118.0).abs() < 0.5,
+            "card {w}x{h}"
+        );
+    }
+}
+
+#[test]
+fn a_narrow_overlay_wraps_its_cards_inside_the_sheet() {
+    let rt = shell("overlay", (900.0, 800.0));
+    let vm = model(&rt);
+    let [sx, _, sw, _] = exactly_keyed(&rt, "overlay").expect("the sheet");
+    for surface in &vm.session.surfaces {
+        let [x, _, w, _] = exactly_keyed(
+            &rt,
+            &format!("overlay:surface:{:?}", surface.surface_instance_id),
+        )
+        .expect("a card per open Surface");
+        assert!(
+            x >= sx && x + w <= sx + sw + 0.5,
+            "the card sits inside the sheet: {x}..{}",
+            x + w
+        );
     }
 }

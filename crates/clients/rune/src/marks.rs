@@ -8,7 +8,7 @@ use crate::theme::{self, Tokens};
 
 /// Home's mark: a 2 by 2 grid of 5 px squares.
 pub(crate) fn grid_mark(ink: Color) -> El {
-    let square = || el().size(5.0, 5.0).radius(1.0).fill(ink);
+    let square = || el().size(5.0, 5.0).radius(1.5).fill(ink);
     col()
         .gap(3.0)
         .child(row().gap(3.0).child(square()).child(square()))
@@ -137,22 +137,15 @@ pub(crate) fn tab_dot(dot: WorkDot, key: String) -> El {
         .label(dot.label())
 }
 
-/// The project mark on a chip: a middle dot at the bottom-right, the mark's
-/// own ink, never a warning tone. A project-authored Surface is not a fault.
-pub(crate) fn project_chip_mark(ink: Color, key: String) -> El {
-    el().key(key)
-        .size(3.0, 3.0)
-        .radius(1.5)
-        .fill(ink)
-        .pin(None, None, Some(4.0), Some(4.0))
-        .role("img")
-        .label("from the project")
-}
+/// A key hint's word at the status bar's ink.
+pub(crate) const HINT_WORD_STATUS: f32 = 0.55;
+/// A key hint's word at the overlay's footer ink.
+pub(crate) const HINT_WORD_SHEET: f32 = 0.45;
 
-/// One key hint: the key chip, then its word.
-pub(crate) fn key_hint(keys: &str, word: &str) -> El {
+/// A key's cap: a 20 high chip with the key's name.
+pub(crate) fn key_chip(keys: &str) -> El {
     let t = Tokens::get();
-    let chip = row()
+    row()
         .h(20.0)
         .min_w(20.0)
         .px(6.0)
@@ -163,12 +156,21 @@ pub(crate) fn key_hint(keys: &str, word: &str) -> El {
             text(theme::drawable(keys, theme::Face::Ui).into_owned())
                 .font(theme::TYPE_KEY)
                 .color(t.ink_at(0.60)),
-        );
-    row().gap(6.0).center_y().child(chip).child(
-        text(theme::drawable(word, theme::Face::Ui).into_owned())
-            .font(theme::TYPE_MICRO)
-            .color(t.ink_at(0.55)),
-    )
+        )
+}
+
+/// One key hint: the key chip, then its word at `word_ink` of `ink`.
+pub(crate) fn key_hint(keys: &str, word: &str, word_ink: f32) -> El {
+    let t = Tokens::get();
+    row()
+        .gap(6.0)
+        .center_y()
+        .child(key_chip(keys))
+        .child(
+            text(theme::drawable(word, theme::Face::Ui).into_owned())
+                .font(theme::TYPE_MICRO)
+                .color(t.ink_at(word_ink)),
+        )
 }
 
 #[cfg(test)]

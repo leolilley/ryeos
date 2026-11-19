@@ -470,13 +470,18 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
         }
     });
     if scene == "tabs" {
-        // More view sets than the band fits, each empty.
+        // More view sets than the band fits, each holding one view.
         surface_json["view_sets"] = (1..=15)
             .map(|n| {
                 json!({
                     "schema": ryeos_client_base::surface::view_sets::VIEW_SET_COMPOSITION_SCHEMA,
                     "id": format!("set_{n}"),
                     "title": format!("View set {n}"),
+                    "root": {
+                        "type": "group",
+                        "views": ["view:ryeos/threads/history"],
+                        "active": 0
+                    },
                 })
             })
             .collect();
@@ -614,7 +619,7 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
     answered += answer(&mut core, effects, scene);
     // The scene picks what is open when the frame is drawn.
     match scene {
-        "" | "field" | "long" | "states" | "chips" | "switcher-right" | "switcher-top" | "bare"
+        "" | "field" | "long" | "states" | "switcher-right" | "switcher-top" | "bare"
         | "overlay" => {}
         "timeline" | "timeline-draft" | "timeline-top" => {
             // The newest group is opened, so an opened group is drawn too.
@@ -640,7 +645,7 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
                 });
             }
         }
-        "tabs" => {
+        "tabs" | "chips" => {
             // The tab band shown, as Alt+T leaves it.
             core.dispatch(RyeOsEvent::Ui {
                 event: RyeOsUiEvent::Activate {
@@ -665,7 +670,10 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
 pub fn dress(scene: &str) -> ryeos_client_rune::Dress {
     use ryeos_client_base::ui::view_model::RyeOsEdgeVm as Edge;
     match scene {
-        "chips" => dress_chips,
+        "chips" => |vm| {
+            dress_chips(vm);
+            dress_status(vm);
+        },
         "tabs" => dress_tabs,
         "switcher-right" => |vm| {
             vm.presentation.chrome.switcher.edge = Edge::Right;
@@ -726,16 +734,37 @@ fn dress_chips(vm: &mut ryeos_client_base::ui::view_model::RyeOsViewModel) {
         .collect();
 }
 
-/// The tabs scene with one tab needing you and one running.
+/// The status island's segments: what is running, what needs you, the
+/// operator and the time.
+fn dress_status(vm: &mut ryeos_client_base::ui::view_model::RyeOsViewModel) {
+    use ryeos_client_base::ui::view_model::{RyeOsStatusSegmentVm, RyeOsTone};
+    let segment = |id: &str, value: &str, tone| RyeOsStatusSegmentVm {
+        id: id.to_owned(),
+        label: None,
+        value: value.to_owned(),
+        tone,
+        grow: false,
+    };
+    vm.presentation.chrome.status_bar.segments = vec![
+        segment("running", "3 running", RyeOsTone::Accent),
+        segment("needs-you", "3 need you", RyeOsTone::Warn),
+        segment("operator", "leo", RyeOsTone::Neutral),
+        segment("time", "14:32", RyeOsTone::Neutral),
+    ];
+}
+
+/// The tabs scene with the last tab (the current one) needing you and one
+/// running.
 fn dress_tabs(vm: &mut ryeos_client_base::ui::view_model::RyeOsViewModel) {
+    let last = vm.presentation.chrome.top_bar.tabs.len().saturating_sub(1);
     for (index, tab) in vm.presentation.chrome.top_bar.tabs.iter_mut().enumerate() {
-        tab.needs_you = Some(index == 2);
+        tab.needs_you = Some(index == last);
         tab.running = Some(index == 4);
     }
 }
 
-/// The overlay open over the chips scene: two rows needing you (the first
-/// selected, with its actions), more than are shown, and one running.
+/// The overlay open over the chips scene: three rows needing you (the first
+/// selected, with its actions) and three running.
 fn dress_overlay(vm: &mut ryeos_client_base::ui::view_model::RyeOsViewModel) {
     use ryeos_client_base::ui::event::RyeOsUiIntent;
     use ryeos_client_base::ui::view_model::{RyeOsOverlayActionVm, RyeOsOverlayRowVm, RyeOsTone};
@@ -771,15 +800,14 @@ fn dress_overlay(vm: &mut ryeos_client_base::ui::view_model::RyeOsViewModel) {
             RyeOsTone::Danger,
             130,
         ),
+        row("ask-2", "Allow network access", "rye", RyeOsTone::Warn, 25),
     ];
-    overlay.needs_you_count = Some(5);
-    overlay.running = vec![row(
-        "run-1",
-        "Review the branch",
-        "rye",
-        RyeOsTone::Accent,
-        12,
-    )];
-    overlay.running_count = Some(1);
+    overlay.needs_you_count = Some(3);
+    overlay.running = vec![
+        row("run-1", "Review the branch", "rye", RyeOsTone::Accent, 12),
+        row("run-2", "Index the project", "ryeos", RyeOsTone::Accent, 47),
+        row("run-3", "Build the bundle", "rye", RyeOsTone::Accent, 61),
+    ];
+    overlay.running_count = Some(3);
     overlay.selected = Some(0);
 }

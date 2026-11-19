@@ -17,6 +17,19 @@ const SHEET_WIDTH: f32 = 920.0;
 const SHEET_TOP: f32 = 150.0;
 const SHEET_RADIUS: f32 = 22.0;
 const ROW_HEIGHT: f32 = 46.0;
+/// A work row's corner radius.
+const ROW_RADIUS: f32 = 10.0;
+/// The find line's height, and a Surface card's size.
+const FIND_HEIGHT: f32 = 60.0;
+const CARD_WIDTH: f32 = 206.0;
+const CARD_HEIGHT: f32 = 118.0;
+/// A window narrower than this cannot hold the sheet at its width with four
+/// cards in a row (four cards, three gaps, the sheet's padding and border, and
+/// 16 either side): the cards wrap and the two work columns stack.
+const TIGHT_WIDTH: f32 = 4.0 * CARD_WIDTH + 3.0 * 12.0 + 48.0 + 2.0 + 32.0;
+/// The find line's prompt. The line is a place to type that finds anything;
+/// until the core carries a query the prompt is all it draws.
+const FIND_PROMPT: &str = "Find a view, a bundle, a thread, a command";
 
 /// The overlay's layer: the scrim and the sheet. Pressing the scrim closes it.
 pub(crate) fn layer(vm: &RyeOsViewModel, local: &Local) -> El {
@@ -36,18 +49,25 @@ pub(crate) fn layer(vm: &RyeOsViewModel, local: &Local) -> El {
         .fill(t.sheet_solid())
         .border(1.0, t.ink_at(0.14))
         .shadow(30.0, 90.0, t.bg_at(0.7));
-    sheet = sheet.child(surfaces_section(&vm.session.surfaces));
-    // The selection runs across needs-you, then running.
+    let narrow = local.narrow();
+    let tight = local.width() < TIGHT_WIDTH;
+    sheet = sheet
+        .child(find_line())
+        .child(el().w_full().h(1.0).fill(t.ink_at(0.08)))
+        .child(surfaces_section(&vm.session.surfaces, tight))
+        .child(el().h(24.0));
+    // The selection runs across needs-you, then running; in a tight
+    // window the two columns stack.
     let selected = overlay.selected;
     let offset = overlay.needs_you.len();
+    let columns = if tight { col() } else { row() };
     sheet = sheet.child(
-        row()
+        columns
             .w_full()
             .shrink()
             .min_h(0.0)
-            .px(24.0)
-            .pb(18.0)
-            .gap(24.0)
+            .px(12.0)
+            .gap(8.0)
             .child(work_column(
                 "Needs you",
                 "overlay:needs-you",
@@ -56,6 +76,7 @@ pub(crate) fn layer(vm: &RyeOsViewModel, local: &Local) -> El {
                 selected,
                 now_ms,
                 0,
+                tight,
             ))
             .child(work_column(
                 "Running",
@@ -65,19 +86,36 @@ pub(crate) fn layer(vm: &RyeOsViewModel, local: &Local) -> El {
                 selected.and_then(|index| index.checked_sub(offset)),
                 now_ms,
                 offset,
+                tight,
             )),
     );
-    sheet = sheet.child(footer(&overlay.key_hints));
-    let narrow = local.narrow();
+    sheet = sheet.child(el().h(16.0)).child(footer(&overlay.key_hints));
     col()
         .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
         .items_center()
         .pt(if narrow { 36.0 } else { SHEET_TOP })
-        .px(if narrow { 16.0 } else { 18.0 })
+        .px(16.0)
         .pb(18.0)
         .fill(t.bg_at(0.62))
         .modal(true, |app: &mut App| app.ui(RyeOsUiEvent::ToggleOverlay))
         .child(sheet)
+}
+
+/// The find line: a prompt in a 60 high row.
+fn find_line() -> El {
+    let t = Tokens::get();
+    row()
+        .w_full()
+        .h(FIND_HEIGHT)
+        .px(24.0)
+        .gap(12.0)
+        .center_y()
+        .child(
+            text(FIND_PROMPT)
+                .font(theme::ui(18.0))
+                .color(t.ink_at(0.40))
+                .truncate(),
+        )
 }
 
 /// A section's label, with its count in the accent when there is one.
@@ -99,57 +137,55 @@ fn section_label(label: &str, count: Option<usize>) -> El {
 }
 
 /// The open Surfaces as cards in a row; the current one has the strong edge.
-fn surfaces_section(surfaces: &[RyeOsSurfaceChoiceVm]) -> El {
+/// In a tight window the row wraps so no card is cut at the sheet's edge.
+fn surfaces_section(surfaces: &[RyeOsSurfaceChoiceVm], tight: bool) -> El {
     let t = Tokens::get();
-    let mut cards = row().w_full().gap(12.0).scroll_x();
+    let mut cards = row().w_full().gap(12.0);
+    cards = if tight {
+        cards.flex_wrap()
+    } else {
+        cards.scroll_x()
+    };
     for surface in surfaces {
-        let (edge, edge_ink, ink) = if surface.active {
-            (1.5, t.ink_at(0.95), t.ink)
+        let (edge, edge_ink, name_ink, mark_ink) = if surface.active {
+            (1.5, t.ink_at(0.95), t.ink, t.ink_at(0.95))
         } else {
-            (1.0, t.ink_at(0.14), t.ink_at(0.70))
+            (1.0, t.ink_at(0.10), t.ink_at(0.78), t.ink_at(0.60))
         };
         let mark = match surface.chip.mark {
-            ryeos_client_base::ui::view_model::RyeOsChipMarkVm::Grid => marks::grid_mark(ink),
+            ryeos_client_base::ui::view_model::RyeOsChipMarkVm::Grid => {
+                marks::grid_mark(mark_ink)
+            }
             ryeos_client_base::ui::view_model::RyeOsChipMarkVm::Key => {
                 match surface.chip.fingerprint.as_deref() {
-                    Some(fingerprint) => marks::key_mark(fingerprint, 20.0, ink),
-                    None => marks::initial_mark(&surface.title, ink),
+                    Some(fingerprint) => marks::key_mark(fingerprint, 20.0, mark_ink),
+                    None => marks::initial_mark(&surface.title, mark_ink),
                 }
             }
             ryeos_client_base::ui::view_model::RyeOsChipMarkVm::Initial => {
-                marks::initial_mark(&surface.title, ink)
+                marks::initial_mark(&surface.title, mark_ink)
             }
         };
-        let mut name = surface.title.clone();
-        if surface.chip.authored_in_project {
-            name.push('·');
-        }
         let key = format!("overlay:surface:{:?}", surface.surface_instance_id);
         let mut card = col()
             .key(key.clone())
-            .w(206.0)
-            .h(84.0)
-            .padding(12.0)
-            .gap(10.0)
-            .radius(theme::RADIUS_ROW)
+            .size(CARD_WIDTH, CARD_HEIGHT)
+            .radius(theme::RADIUS_CARD)
+            .clip_rounded(theme::RADIUS_CARD)
+            .fill(t.bg)
             .border(edge, edge_ink)
             .role("button")
             .label(surface.title.clone())
             .hover(t.select_fill())
-            .child(mark)
+            .child(mark.pin(Some(12.0), Some(12.0), None, None))
             .child(
-                row()
-                    .gap(6.0)
-                    .center_y()
+                col()
+                    .pin(Some(12.0), None, Some(12.0), Some(10.0))
+                    .gap(2.0)
                     .child(
-                        text(format!("{}", surface.ordinal))
-                            .font(theme::ui(10.5))
-                            .color(t.ink_at(0.35)),
-                    )
-                    .child(
-                        text(name)
+                        text(surface.title.clone())
                             .font(theme::medium(theme::TYPE_CELL))
-                            .color(ink)
+                            .color(name_ink)
                             .truncate()
                             .min_w(0.0),
                     ),
@@ -173,9 +209,8 @@ fn surfaces_section(surfaces: &[RyeOsSurfaceChoiceVm]) -> El {
         .w_full()
         .px(24.0)
         .pt(20.0)
-        .pb(18.0)
-        .gap(10.0)
-        .child(section_label("Open Surfaces", Some(surfaces.len())))
+        .gap(12.0)
+        .child(section_label("Open", Some(surfaces.len())))
         .child(cards)
 }
 
@@ -189,20 +224,23 @@ fn work_column(
     selected: Option<usize>,
     now_ms: i64,
     offset: usize,
+    stacked: bool,
 ) -> El {
     let t = Tokens::get();
-    let mut column = col()
-        .key(key.to_owned())
-        .grow(1.0)
-        .w(0.0)
-        .min_w(0.0)
-        .gap(4.0)
-        .child(section_label(label, count));
+    let mut column = col().key(key.to_owned()).min_w(0.0).gap(8.0);
+    column = if stacked {
+        column.w_full()
+    } else {
+        column.grow(1.0).w(0.0)
+    };
+    // The label sits 12 in from the rows' own edge, level with the cards.
+    column = column.child(section_label(label, count).px(12.0));
     if count.is_none() {
         return column.child(
             text("unavailable")
                 .font(theme::TYPE_MICRO)
                 .color(t.ink_dim())
+                .px(12.0)
                 .py(8.0),
         );
     }
@@ -211,11 +249,13 @@ fn work_column(
             text("nothing here")
                 .font(theme::TYPE_MICRO)
                 .color(t.ink_dim())
+                .px(12.0)
                 .py(8.0),
         );
     }
+    let mut list = col().w_full().gap(2.0);
     for (index, item) in rows.iter().enumerate() {
-        column = column.child(work_row(
+        list = list.child(work_row(
             item,
             selected == Some(index),
             now_ms,
@@ -223,14 +263,14 @@ fn work_column(
         ));
     }
     if let Some(count) = count.filter(|count| *count > rows.len()) {
-        column = column.child(
+        list = list.child(
             text(format!("{} more", count - rows.len()))
                 .font(theme::TYPE_MICRO)
                 .color(t.ink_dim())
                 .px(12.0),
         );
     }
-    column
+    column.child(list)
 }
 
 /// One row: tone dot, title over where, then the action keys (or, with none,
@@ -242,9 +282,9 @@ fn work_row(item: &RyeOsOverlayRowVm, selected: bool, now_ms: i64, key: String) 
         .w_full()
         .h(ROW_HEIGHT)
         .px(12.0)
-        .gap(10.0)
+        .gap(12.0)
         .center_y()
-        .radius(theme::RADIUS_ROW)
+        .radius(ROW_RADIUS)
         .role("option")
         .label(item.title.clone())
         .focus_selected(selected);
@@ -275,8 +315,8 @@ fn work_row(item: &RyeOsOverlayRowVm, selected: bool, now_ms: i64, key: String) 
     if item.actions.is_empty() || !selected {
         line = line.child(
             text(elapsed(now_ms.saturating_sub(item.since_ms)))
-                .font(theme::TYPE_MICRO)
-                .color(t.ink_dim()),
+                .font(theme::TYPE_SMALL)
+                .color(t.ink_at(0.60)),
         );
     } else {
         for action in &item.actions {
@@ -285,7 +325,11 @@ fn work_row(item: &RyeOsOverlayRowVm, selected: bool, now_ms: i64, key: String) 
                 row()
                     .role("button")
                     .label(action.word.clone())
-                    .child(marks::key_hint(&action.keys, &action.word))
+                    .child(marks::key_hint(
+                        &action.keys,
+                        &action.word,
+                        marks::HINT_WORD_SHEET,
+                    ))
                     .on_press(move |app: &mut App| {
                         app.ui(RyeOsUiEvent::Activate {
                             intent: intent.clone(),
@@ -297,18 +341,25 @@ fn work_row(item: &RyeOsOverlayRowVm, selected: bool, now_ms: i64, key: String) 
     line
 }
 
-/// The sheet's footer: its key hints over a rule.
+/// The sheet's footer: its key hints over a rule, the last one at the right.
 fn footer(hints: &[ryeos_client_base::ui::view_model::RyeOsKeyHintVm]) -> El {
     let t = Tokens::get();
     let mut line = row()
         .w_full()
         .h(44.0)
         .px(24.0)
-        .gap(14.0)
+        .gap(18.0)
         .center_y()
-        .border_sides([1.0, 0.0, 0.0, 0.0], t.rule());
-    for hint in hints {
-        line = line.child(marks::key_hint(&hint.keys, &hint.word));
+        .border_sides([1.0, 0.0, 0.0, 0.0], t.ink_at(0.08));
+    for (index, hint) in hints.iter().enumerate() {
+        if index > 0 && index + 1 == hints.len() {
+            line = line.child(el().grow(1.0));
+        }
+        line = line.child(marks::key_hint(
+            &hint.keys,
+            &hint.word,
+            marks::HINT_WORD_SHEET,
+        ));
     }
     line
 }
