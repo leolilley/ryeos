@@ -3715,6 +3715,7 @@ mod tests {
                     cost_details_path: None,
                     is_byok_path: None,
                     reasoning_included_in_output: false,
+                    cache_included_in_input: false,
                     aggregation: UsageAggregation::LatestSnapshot,
                     single_snapshot: true,
                 }),
@@ -4613,6 +4614,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             body_extra: None,
             spend_authority: None,
             image_input: None,
+            cache_marks: None,
             profiles: vec![],
         };
         let msgs = vec![json!({"role": "user", "parts": [{"text": "hi"}]})];
@@ -4649,6 +4651,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             body_extra: Some(json!({"generationConfig": {"maxOutputTokens": 1024}})),
             spend_authority: None,
             image_input: None,
+            cache_marks: None,
             profiles: vec![],
         };
         let body = super::build_request_body(
@@ -4695,6 +4698,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             body_extra: None,
             spend_authority: None,
             image_input: None,
+            cache_marks: None,
             profiles: vec![],
         };
 
@@ -4786,6 +4790,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             body_extra: None,
             spend_authority: None,
             image_input: None,
+            cache_marks: None,
             profiles: vec![],
         };
         let _ =
@@ -4814,6 +4819,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             body_extra: None,
             spend_authority: None,
             image_input: None,
+            cache_marks: None,
             profiles: vec![],
         };
         let msgs = vec![json!({"role": "user", "parts": [{"text": "hi"}]})];
@@ -4863,6 +4869,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             body_extra: None,
             spend_authority: None,
             image_input: None,
+            cache_marks: None,
             profiles: vec![],
         };
         let mut body = json!({});
@@ -4912,6 +4919,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             body_extra: None,
             spend_authority: None,
             image_input: None,
+            cache_marks: None,
             profiles: vec![],
         };
         let mut body = json!({"contents": []});
