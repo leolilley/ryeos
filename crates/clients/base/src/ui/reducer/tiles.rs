@@ -82,6 +82,122 @@ impl RyeOsCore {
         );
     }
 
+    /// Hand a rename to the client that edits text: remember what it names and
+    /// the name it starts from, and leave any open dialog out of its way.
+    pub(crate) fn begin_rename(
+        &mut self,
+        target: crate::ui::event::RyeOsRenameTarget,
+    ) -> Vec<RyeOsEffect> {
+        use crate::ui::event::RyeOsRenameTarget;
+        let title = match &target {
+            RyeOsRenameTarget::Surface {
+                surface_instance_id,
+                ..
+            } => self
+                .presentation
+                .as_ref()
+                .and_then(|presentation| {
+                    presentation
+                        .ordered_surfaces()
+                        .find(|surface| surface.id() == surface_instance_id)
+                })
+                .map(|surface| surface.title().to_owned()),
+            RyeOsRenameTarget::ViewSet { view_set_id } => {
+                self.active_surface_view_sets().and_then(|sets| {
+                    sets.iter()
+                        .find(|set| set.id == *view_set_id)
+                        .map(|set| set.title.clone())
+                })
+            }
+        };
+        let Some(title) = title else {
+            return Vec::new();
+        };
+        let open: Vec<_> = self
+            .presentation
+            .iter()
+            .flat_map(|presentation| presentation.dialogs().values())
+            .filter(|dialog| dialog.is_open())
+            .map(|dialog| dialog.view().instance_key().clone())
+            .collect();
+        for instance in open {
+            self.close_dialog(&instance);
+        }
+        self.rename_request = Some(crate::ui::view_model::RyeOsRenameVm { target, title });
+        self.bump_generation();
+        Vec::new()
+    }
+
+    /// Rename what is in front: the active view set, or the active Surface.
+    pub(crate) fn begin_rename_active(&mut self, surface: bool) -> Vec<RyeOsEffect> {
+        use crate::ui::event::RyeOsRenameTarget;
+        if !self.composition_write_available() {
+            return Vec::new();
+        }
+        let target = if surface {
+            self.active_surface()
+                .map(|active| RyeOsRenameTarget::Surface {
+                    surface_instance_id: active.id().clone(),
+                    binding: active.binding().clone(),
+                })
+        } else {
+            self.active_view_set()
+                .map(|set| RyeOsRenameTarget::ViewSet {
+                    view_set_id: set.id,
+                })
+        };
+        match target {
+            Some(target) => self.begin_rename(target),
+            None => Vec::new(),
+        }
+    }
+
+    /// Edit the name of a requested rename: append a character, or with none
+    /// delete the last.
+    pub(crate) fn edit_rename(&mut self, ch: Option<char>) -> Vec<RyeOsEffect> {
+        let Some(request) = self.rename_request.as_mut() else {
+            return Vec::new();
+        };
+        match ch {
+            Some(ch) => request.title.push(ch),
+            None => {
+                request.title.pop();
+            }
+        }
+        self.bump_generation();
+        Vec::new()
+    }
+
+    /// End a requested rename. A name commits through the ordinary rename
+    /// intent for what was asked; none abandons it.
+    pub(crate) fn resolve_rename(&mut self, title: Option<String>) -> Vec<RyeOsEffect> {
+        use crate::ui::event::{RyeOsRenameTarget, RyeOsUiIntent};
+        let Some(request) = self.rename_request.take() else {
+            return Vec::new();
+        };
+        self.bump_generation();
+        let Some(title) = title
+            .map(|title| title.trim().to_owned())
+            .filter(|title| !title.is_empty())
+        else {
+            return Vec::new();
+        };
+        match request.target {
+            RyeOsRenameTarget::Surface {
+                surface_instance_id,
+                binding,
+            } => self.dispatch_intent(RyeOsUiIntent::RenameSurface {
+                surface_instance_id,
+                binding,
+                title,
+            }),
+            RyeOsRenameTarget::ViewSet { view_set_id } => {
+                self.rename_view_set(view_set_id, &title);
+                Vec::new()
+            }
+        }
+    }
+
     /// Duplicate presentation composition without duplicating mounted
     /// identity, transient observations or drafts. The new set follows the
     /// same authored views and arrangement, but every mounted view receives a

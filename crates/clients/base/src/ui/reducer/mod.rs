@@ -401,6 +401,13 @@ impl RyeOsCore {
             }
             RyeOsUiEvent::OpenDialog { dialog_id } => self.open_dialog(&dialog_id),
             RyeOsUiEvent::CloseDialog { instance_key } => self.close_dialog(&instance_key),
+            RyeOsUiEvent::DismissDialog { instance_key } => {
+                if self.leave_launcher_stage(&instance_key) {
+                    Vec::new()
+                } else {
+                    self.close_dialog(&instance_key)
+                }
+            }
             RyeOsUiEvent::FocusInput => {
                 if self.focus_default_input() {
                     self.bump_generation();
@@ -694,6 +701,18 @@ impl RyeOsCore {
             }
             RyeOsUiEvent::ActivateFocused => intent_for_focused_row(self)
                 .map_or_else(Vec::new, |intent| self.dispatch_intent(intent)),
+            RyeOsUiEvent::ChooseLauncherPlace { key } => self.choose_launcher_place(key),
+            RyeOsUiEvent::RenameActive { surface } => self.begin_rename_active(surface),
+            RyeOsUiEvent::ResolveRename { title } => self.resolve_rename(title),
+            RyeOsUiEvent::RenameInsert { ch } => self.edit_rename(Some(ch)),
+            RyeOsUiEvent::RenameBackspace => self.edit_rename(None),
+            RyeOsUiEvent::CommitRename => {
+                let title = self
+                    .rename_request
+                    .as_ref()
+                    .map(|request| request.title.clone());
+                self.resolve_rename(title)
+            }
             RyeOsUiEvent::TimelineEntry { action } => self.timeline_entry_action(action),
             RyeOsUiEvent::ToggleTimelineFold => self.toggle_timeline_fold(),
             RyeOsUiEvent::AnswerDockAsk { ch } => self.answer_dock_ask(ch),
@@ -854,10 +873,20 @@ impl RyeOsCore {
                     &record_id,
                     &projection_guard,
                 ) {
-                    Some(intent) => self.dispatch_intent(intent),
+                    Some(intent) => {
+                        if !matches!(intent, RyeOsUiIntent::StageLauncherView { .. }) {
+                            self.launcher_stage = None;
+                        }
+                        self.dispatch_intent(intent)
+                    }
                     None => Vec::new(),
                 }
             }
+            RyeOsUiIntent::StageLauncherView {
+                instance_key,
+                view_ref,
+            } => self.stage_launcher_view(instance_key, view_ref),
+            RyeOsUiIntent::BeginRename { target } => self.begin_rename(target),
             RyeOsUiIntent::InvokeAffordance {
                 instance_key,
                 view_ref,

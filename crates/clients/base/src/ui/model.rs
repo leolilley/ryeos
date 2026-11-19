@@ -728,6 +728,11 @@ pub struct RyeOsCore {
     pub(crate) input_buffers: BTreeMap<String, RyeOsInputState>,
     pub focused_input: Option<RyeOsViewInstanceKey>,
     pub(crate) dialog_return_focus: Option<RyeOsViewInstanceKey>,
+    /// The launcher's second stage: the dialog showing it and the view whose
+    /// place is being chosen. Local to the open launcher; never persisted.
+    pub(crate) launcher_stage: Option<(RyeOsViewInstanceKey, String)>,
+    /// A rename a command asked for, until a client takes it.
+    pub(crate) rename_request: Option<super::view_model::RyeOsRenameVm>,
     pub field_query_editing: Option<RyeOsViewInstanceKey>,
     pub runtime: RyeOsRuntimeState,
     pub pending_effects: BTreeMap<u64, RyeOsEffectKind>,
@@ -2620,6 +2625,10 @@ impl RyeOsCore {
         if self.field_query_editing.as_ref() == Some(instance_key) {
             self.field_query_editing = None;
         }
+        self.launcher_stage = self
+            .launcher_stage
+            .take()
+            .filter(|(instance, _)| instance != instance_key);
         self.bump_generation();
         Vec::new()
     }
@@ -2855,6 +2864,8 @@ impl RyeOsCore {
                         .any(|dialog| dialog.is_open() && dialog.view().instance_key() == &key)
                 })
             }),
+            launcher_places_open: self.launcher_places_open(),
+            rename_open: self.rename_request.is_some(),
             input_visible: focused.is_some() || self.default_input_instance().is_some(),
             input_focused: focused.is_some(),
             input_has_text: !text.is_empty(),

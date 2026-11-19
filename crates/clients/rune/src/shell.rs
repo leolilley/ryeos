@@ -1363,6 +1363,9 @@ fn document_offer(offer: &DocumentOffer, link: Option<&str>) -> El {
 }
 
 fn dialog_layer(dialog: &RyeOsDialogVm, local: &Local) -> El {
+    if dialog.launcher {
+        return crate::launcher::layer(dialog, local);
+    }
     let p = Palette::get();
     let t = Tokens::get();
     let close = dialog.instance_key.clone();
@@ -1446,25 +1449,23 @@ fn dialog_layer(dialog: &RyeOsDialogVm, local: &Local) -> El {
         .child(panel)
 }
 
-/// The input composer: route strip, the text field bound to the core's
-/// buffer, and the submit control. A live filter is the compact form above
-/// its view: Up and Down move the selection, Enter activates it.
-pub fn composer(input: &RyeOsInputVm, local: &Local) -> El {
+/// The text field bound to an input's buffer. With `place_keys` the keys that
+/// choose where a launcher view lands reach the core instead of the field.
+pub(crate) fn input_field(
+    input: &RyeOsInputVm,
+    local: &Local,
+    field_font: rune::tok::TextStyle,
+    place_keys: bool,
+) -> El {
     let key = crate::input_key(&input.address);
     let edit_key = key.clone();
     let change_address = input.address.clone();
     let key_address = input.address.clone();
-    let button_address = input.address.clone();
     let live = input.live_filter;
     let submit_enabled = input.submit_enabled;
     let focused = input.focused;
     let t = Tokens::get();
-    let field_font = if live {
-        theme::TYPE_SMALL
-    } else {
-        theme::TYPE_PROSE
-    };
-    let field = text_input(&local.edits.edit(&key), field_font)
+    text_input(&local.edits.edit(&key), field_font)
         .key(format!("composer:{key}"))
         .placeholder(input.placeholder.clone(), t.ink_faint())
         .color(t.ink_body())
@@ -1489,6 +1490,10 @@ pub fn composer(input: &RyeOsInputVm, local: &Local) -> El {
                 return app.core_key(event);
             }
             let mods = &event.mods;
+            // With the launcher's places showing, T and S choose one.
+            if place_keys && !(mods.ctrl || mods.alt || mods.logo) && is_place_key(event) {
+                return app.core_key(event);
+            }
             let bare = !(mods.shift || mods.alt || mods.ctrl || mods.logo);
             let action = match &event.key {
                 Key::Up if live && bare => RyeOsInputAction::NavigateSelection { delta: -1 },
@@ -1521,7 +1526,32 @@ pub fn composer(input: &RyeOsInputVm, local: &Local) -> El {
                 action,
             });
             true
-        });
+        })
+}
+
+/// T or S: the keys that choose where a launcher view lands.
+fn is_place_key(event: &KeyEvent) -> bool {
+    match &event.key {
+        Key::Text(typed) => typed.eq_ignore_ascii_case("t") || typed.eq_ignore_ascii_case("s"),
+        _ => false,
+    }
+}
+
+/// The input composer: route strip, the text field bound to the core's
+/// buffer, and the submit control. A live filter is the compact form above
+/// its view: Up and Down move the selection, Enter activates it.
+pub fn composer(input: &RyeOsInputVm, local: &Local) -> El {
+    let key = crate::input_key(&input.address);
+    let button_address = input.address.clone();
+    let live = input.live_filter;
+    let submit_enabled = input.submit_enabled;
+    let t = Tokens::get();
+    let field_font = if live {
+        theme::TYPE_SMALL
+    } else {
+        theme::TYPE_PROSE
+    };
+    let field = input_field(input, local, field_font, false);
     if live {
         // The filter line: a bordered box, the field centred in it and the
         // key that reaches it as a cap at the right.

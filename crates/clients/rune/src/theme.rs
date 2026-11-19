@@ -221,6 +221,8 @@ impl Tokens {
 
 // ---- Type ----
 
+/// The launcher's find line.
+pub const TYPE_FIND: TextStyle = TextStyle::new(19.0, 400.0);
 /// Prose, message, composer placeholder.
 pub const TYPE_PROSE: TextStyle = TextStyle::new(15.0, 400.0);
 /// Tile title, dock title.

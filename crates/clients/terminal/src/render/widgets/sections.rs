@@ -162,6 +162,7 @@ mod tests {
             expandable: false,
             expanded: false,
             detail: Vec::new(),
+            launch: None,
             changed_at_ms: None,
             changed_tone: None,
         }

@@ -1,11 +1,11 @@
-# ryeos:signed:2026-10-19T22:29:41Z:2cdd279cecff6a94fae7e1142a3305b33411ac132c723f5fe808cd45e2f6fc29:fzn+60OSOM4Tb91VZiYHMkJeJmg5Z2lEhxAyS23yv2ybZnb7vuTIapTVso6JwRewlmffc4AtM5n0jQkC/S1kCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-19T07:12:31Z:916da2ef0467c34ab1d213fcacd7f92bca9ff04e7375e11c13381e516ef02d8d:5nx90+kimXeDvv/9bGeDq2ddU7czuw0fyIDAsEeQQcBjyyUMwdxc3k/Sv47aWL/7pc8mn4fYbn3l8vDE88T0DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: presentation-launcher
 title: Launch
 version: "1.0.0"
-description: Rust-projected presentation actions from exact admitted mounts and the captured insertion destination.
+description: Opening a view runs nothing. It shows what you are already allowed to see.
 widget: rows
 local_projection: launcher
 input:
   id: filter
-  placeholder: Find a view or presentation action
+  placeholder: Find a view
   local_filter: true
