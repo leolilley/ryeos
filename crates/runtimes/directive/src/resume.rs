@@ -236,7 +236,19 @@ pub async fn load_resume_state(
     // The whole rebuilt conversation, predecessors' carry and own part, must
     // be one a provider accepts. A failed check is a typed refusal, not a
     // request that would be sent and rejected.
-    check_well_formed(&messages, !recovered_tools.pending.is_empty())?;
+    check_well_formed(
+        &messages,
+        // Calls left unanswered at the end are expected when a tool batch is
+        // pending, and when the batch was cut short on purpose (a settled
+        // `directive_return` or a failed lifecycle call abandons the calls
+        // after it); neither sends a request with them.
+        !recovered_tools.pending.is_empty()
+            || matches!(
+                disposition,
+                ResumeDisposition::FinalizeDirectiveReturn { .. }
+                    | ResumeDisposition::CheckContinuation
+            ),
+    )?;
 
     Ok(ResumeState {
         messages,

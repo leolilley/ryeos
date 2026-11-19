@@ -189,7 +189,8 @@ Call the marker tool exactly once, then report completion.
     );
     let signed = lillux::signature::sign_content(&body, signer, "<!--", Some("-->"));
     std::fs::write(path, signed)?;
-    Ok(())
+    plant_knowledge_item(root, "recovery/before", RECOVERY_BEFORE_TEXT, signer)?;
+    plant_knowledge_item(root, "recovery/after", RECOVERY_AFTER_TEXT, signer)
 }
 
 const RECOVERY_BEFORE_TEXT: &str = "RECOVERY-BEFORE: keep the marker tool to one call.";
@@ -672,20 +673,6 @@ async fn run_crash_cut(cut: CrashCut) {
         cut == CrashCut::DirectiveReturnRecorded,
     )
     .expect("plant directive");
-    plant_knowledge_item(
-        project.path(),
-        "recovery/before",
-        RECOVERY_BEFORE_TEXT,
-        &fixture.publisher,
-    )
-    .expect("plant before context");
-    plant_knowledge_item(
-        project.path(),
-        "recovery/after",
-        RECOVERY_AFTER_TEXT,
-        &fixture.publisher,
-    )
-    .expect("plant after context");
     plant_marker_tool(
         project.path(),
         &marker_path,
