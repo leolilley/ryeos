@@ -603,8 +603,7 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
         let mut inputs = Vec::new();
         if !same_thread_resume && !envelope.request.suppress_stimulus {
             let rendered_prompt = operator_follow_up_stimulus(&envelope.request.inputs)?;
-            inputs.push(ryeos_runtime::CognitionInput::text(
-                "operator",
+            inputs.push(launch_records::operator_follow_up_input(
                 rendered_prompt.as_str(),
             ));
         }

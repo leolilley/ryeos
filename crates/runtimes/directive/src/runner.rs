@@ -1595,7 +1595,9 @@ impl Runner {
                         .as_deref()
                         .is_some_and(|outputs| !outputs.is_empty()),
                 );
-                // Pinned so a continuation's trimmed start still carries it.
+                // Deliberately not pinned: its text is a time-left figure, which
+                // is stale in a successor. A successor whose carried conversation
+                // lacks the notice is told again.
                 let input = ryeos_runtime::CognitionInput::text("harness", &text)
                     .with_kind(ryeos_runtime::cognition::KIND_DEADLINE_WRAP_UP);
                 self.callback

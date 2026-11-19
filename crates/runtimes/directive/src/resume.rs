@@ -3255,6 +3255,74 @@ mod tests {
         assert_eq!(carried[0].role(), "user");
     }
 
+    /// A twenty-turn path that starts with the launch batch (before, task,
+    /// after, each pinned with its acknowledgement) and an operator follow-up
+    /// input in the middle.
+    fn long_path_with_context() -> Vec<FoldedMessage> {
+        let mut path: Vec<FoldedMessage> = Vec::new();
+        for input in crate::launch_records::launch_inputs(Some("before"), "task", Some("after")) {
+            for message in crate::launch_records::input_messages(&input) {
+                path.push(folded(message, input.pinned));
+            }
+        }
+        for turn in 1..=20 {
+            if turn == 10 {
+                let follow_up = crate::launch_records::operator_follow_up_input("follow-up");
+                path.push(folded(follow_up.message(), follow_up.pinned));
+            } else {
+                path.push(folded(ProviderMessage::user(format!("u{turn}")), false));
+            }
+            path.push(folded(
+                ProviderMessage::assistant_text(format!("a{turn}")),
+                false,
+            ));
+        }
+        path
+    }
+
+    #[test]
+    fn a_successor_start_is_the_pinned_prefix_then_the_recent_turns_in_path_order() {
+        let carried = carry_into_successor(long_path_with_context(), 2, None).unwrap();
+        let texts: Vec<String> = carried.iter().filter_map(|m| m.text()).collect();
+        let ack_before = crate::launch_records::BEFORE_CONTEXT_ACK;
+        let ack_after = crate::launch_records::AFTER_CONTEXT_ACK;
+        assert_eq!(
+            texts,
+            [
+                "before",
+                ack_before,
+                "task",
+                "after",
+                ack_after,
+                "follow-up",
+                "u19",
+                "a19",
+                "u20",
+                "a20"
+            ]
+        );
+        assert_eq!(carried[0].role(), "user");
+    }
+
+    #[test]
+    fn a_zero_carry_keeps_the_whole_pinned_prefix() {
+        let carried = carry_into_successor(long_path_with_context(), 0, None).unwrap();
+        let texts: Vec<String> = carried.iter().filter_map(|m| m.text()).collect();
+        let ack_before = crate::launch_records::BEFORE_CONTEXT_ACK;
+        let ack_after = crate::launch_records::AFTER_CONTEXT_ACK;
+        assert_eq!(
+            texts,
+            [
+                "before",
+                ack_before,
+                "task",
+                "after",
+                ack_after,
+                "follow-up"
+            ]
+        );
+    }
+
     fn assistant_with_artefact(text: &str, artefact: Value) -> ProviderMessage {
         ProviderMessage::new(
             ryeos_provider_contract::Role::Assistant,
@@ -3468,9 +3536,9 @@ mod tests {
         let folded = fold_messages(&events).unwrap();
         let messages: Vec<ProviderMessage> = folded.iter().map(|f| f.message.clone()).collect();
         assert_eq!(messages, crate::launch_records::messages_of(&inputs));
-        // Only the stimulus is pinned; the acknowledgements follow their input.
+        // All three inputs are pinned; the acknowledgements follow their input.
         let pinned: Vec<bool> = folded.iter().map(|f| f.pinned).collect();
-        assert_eq!(pinned, [false, false, true, false, false]);
+        assert_eq!(pinned, [true; 5]);
 
         let frame = latest_frame(&events).unwrap().unwrap();
         assert_eq!(frame.system_text().as_deref(), Some("system text"));
