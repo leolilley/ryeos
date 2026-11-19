@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-17T01:21:16Z:990e9094d312a578b8743abf52d46e31db7c69ddcadf4cd873acba960068b302:NTEtM+ppfT7xlzSdStgwMrE+ycG2AG39MF89+z7L64dzwz1ZVoWPBOuvmOvSeB49LK/gNii6w8m+RFzqtEbkBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-19T05:44:26Z:1df074bae4b6deabc156781003f154f17d7dd631900300dd5bb360c06d1727b2:yq4poPAjzz+56cGjpMSNLY7/+nVi460llhCEY1/N3nQ6BF5RCKiVikCDkuhqdbp7qPK4tNfJRvVoG/tKLyCfBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - central-auth
@@ -397,6 +397,7 @@ policies:
       - ".svn/"
       - ".tmp/"
       - ".venv/"
+      - "/.ai/node/machines/"
       - "/.ai/node/remotes/"
       - "/.ai/state/"
       - "__pycache__/"
