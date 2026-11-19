@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-19T17:30:07Z:41a55dc2b5a7e03fc38693ff35c2cd68fd474efc9049c71414e6d4bc1a94de2f:qroY9cYHNcpdjDzG8Du5C7rqoR1rqZJC4NaNYyMaFK2SSSJslxBZxDMfzoOzGoVoF9dFuxkquvgR2rlO19MiBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-19T18:09:46Z:a05ff8f0767def416ceea26c62dc81d19ab884dedb849f8f967cb89d2ec5d9fc:fvY3YMzLYM/W9TYHdwcn9PBdkjN/a0Oc6Rs3Gm1yLkd3KtI9VxjP4zGc7bPF9bNPuAWb/iLBt2BWPgMI0ReDAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [fundamentals, directives, workflows, prompts]
 version: "2.1.0"
@@ -140,11 +140,12 @@ removes that subtree's authority.
   Routes without a proven bound reject a finite hard limit at launch.
   Conservative reserved-maximum charges are reported distinctly from
   provider-reported cost.
-- `limits.duration_seconds` — wall-clock timeout of one process, enforced by
-  the node itself (not by the runtime): at the limit the node kills the
-  process and the run's status is `timed_out`. A
-  continuation or a resume starts a new process with a new clock, so this is
-  not a limit on the whole run; use the run deadline below for that.
+- `limits.duration_seconds` — wall-clock limit that applies per process. The
+  node itself enforces it (not the runtime): at the limit the node kills that
+  process and the run's status is `timed_out`. Each resume or continuation
+  starts a fresh process with a fresh limit, so the limit does not bound the
+  whole run unless an aggregate duration is configured; use the run deadline
+  below for a bound on the whole run.
 - `limits.deadline.reserve_seconds` — time this directive keeps for itself to
   settle after its work is stopped (see Run deadline). Defaults to the signed
   directive limits config.
