@@ -79,8 +79,9 @@ jobs:
       - name: Check workspace crate versions match the release version
         env:
           VERSION: ${{ steps.release.outputs.version }}
-        run: python3 -B scripts/release/check-workspace-versions.py "$VERSION" \
-          --manifests scripts/release/versioned-crates.txt
+        run: |
+          python3 -B scripts/release/check-workspace-versions.py "$VERSION" \
+            --manifests scripts/release/versioned-crates.txt
 
       - name: Resolve and verify source revision
         id: source
