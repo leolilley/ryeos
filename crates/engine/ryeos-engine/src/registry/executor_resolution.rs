@@ -204,9 +204,7 @@ pub fn verify_signed_manifest_ref_in_domain(
             detail: "manifest-hash body must end with one newline".to_string(),
         }
     })?;
-    if body != format!("{domain}\n{manifest_hash}\n")
-        || !is_lower_sha256(manifest_hash)
-    {
+    if body != format!("{domain}\n{manifest_hash}\n") || !is_lower_sha256(manifest_hash) {
         return Err(ExecutorResolutionError::ManifestRefInvalid {
             detail: "body must be exactly one lowercase SHA-256 hash".to_string(),
         });

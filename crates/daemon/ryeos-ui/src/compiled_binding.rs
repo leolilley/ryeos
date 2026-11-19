@@ -640,9 +640,13 @@ impl SessionCompiledUiBinding {
         );
         if Authority::of(&self.binding.surface) != Authority::Node {
             clamp_surface_chrome(surface_fields);
-        } else if let Some(chip) = surface_fields.get_mut("chip").and_then(Value::as_object_mut) {
+        } else if let Some(chip) = surface_fields
+            .get_mut("chip")
+            .and_then(Value::as_object_mut)
+        {
             drop_unlisted_art(chip, "art", &self.binding.art);
-            if !chip.contains_key("art") && chip.get("mark").and_then(Value::as_str) == Some("picture")
+            if !chip.contains_key("art")
+                && chip.get("mark").and_then(Value::as_str) == Some("picture")
             {
                 chip.insert("mark".to_string(), Value::from("initial"));
             }
@@ -769,24 +773,24 @@ fn compile_art(
     let Some(declaration) = declaration else {
         return;
     };
-    let refusal = match serde_json::from_value::<ryeos_client_base::art::ArtRef>(declaration.clone())
-    {
-        Err(error) => error.to_string(),
-        Ok(reference) => match art.get(&reference.sha256) {
-            Some(listed) if listed.media_type != reference.media_type => {
-                "the picture is named with two media types".to_string()
-            }
-            _ => {
-                art.insert(
-                    reference.sha256,
-                    CompiledUiArt {
-                        media_type: reference.media_type,
-                    },
-                );
-                return;
-            }
-        },
-    };
+    let refusal =
+        match serde_json::from_value::<ryeos_client_base::art::ArtRef>(declaration.clone()) {
+            Err(error) => error.to_string(),
+            Ok(reference) => match art.get(&reference.sha256) {
+                Some(listed) if listed.media_type != reference.media_type => {
+                    "the picture is named with two media types".to_string()
+                }
+                _ => {
+                    art.insert(
+                        reference.sha256,
+                        CompiledUiArt {
+                            media_type: reference.media_type,
+                        },
+                    );
+                    return;
+                }
+            },
+        };
     attenuated.push(AttenuatedUiBinding {
         coordinate: coordinate.to_string(),
         reason: refusal,
@@ -2057,7 +2061,12 @@ mod tests {
         let authored = art_surface();
         let compiled = compile_chrome(TrustClass::TrustedBundle, &authored);
         assert_eq!(
-            compiled.binding.art.keys().map(String::as_str).collect::<Vec<_>>(),
+            compiled
+                .binding
+                .art
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
             [ART_HASH, VIEW_ART_HASH]
         );
         assert_eq!(compiled.binding.art[ART_HASH].media_type, "image/webp");
@@ -2068,7 +2077,10 @@ mod tests {
         let presentation = compiled.sanitize_effective_surface(&authored).unwrap();
         assert_eq!(presentation["chip"]["mark"], "picture");
         assert_eq!(presentation["chip"]["art"]["sha256"], ART_HASH);
-        assert_eq!(presentation["views"][VIEW_REF]["picture"]["sha256"], VIEW_ART_HASH);
+        assert_eq!(
+            presentation["views"][VIEW_REF]["picture"]["sha256"],
+            VIEW_ART_HASH
+        );
     }
 
     #[test]
@@ -2103,7 +2115,12 @@ mod tests {
         );
         // The surface's own picture is listed; the project view's is not.
         assert_eq!(
-            compiled.binding.art.keys().map(String::as_str).collect::<Vec<_>>(),
+            compiled
+                .binding
+                .art
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
             [ART_HASH]
         );
         assert_eq!(

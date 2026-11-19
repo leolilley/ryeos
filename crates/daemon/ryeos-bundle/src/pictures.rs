@@ -108,13 +108,21 @@ pub struct ImageFacts {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImageRefusal {
     Empty,
-    TooLarge { bytes: u64, max: u64 },
+    TooLarge {
+        bytes: u64,
+        max: u64,
+    },
     /// The bytes do not start with the magic of the declared type.
-    MagicMismatch { declared: &'static str },
+    MagicMismatch {
+        declared: &'static str,
+    },
     /// The image is animated or carries animation chunks.
     Animated,
     Malformed(&'static str),
-    DimensionsOutOfBounds { width: u32, height: u32 },
+    DimensionsOutOfBounds {
+        width: u32,
+        height: u32,
+    },
 }
 
 impl ImageRefusal {
@@ -154,10 +162,7 @@ impl std::error::Error for ImageRefusal {}
 
 /// Check image bytes against the declared type and the size caps, reading
 /// only headers. Never decodes pixels.
-pub fn inspect_image(
-    bytes: &[u8],
-    declared: PictureMediaType,
-) -> Result<ImageFacts, ImageRefusal> {
+pub fn inspect_image(bytes: &[u8], declared: PictureMediaType) -> Result<ImageFacts, ImageRefusal> {
     if bytes.is_empty() {
         return Err(ImageRefusal::Empty);
     }
@@ -339,14 +344,13 @@ fn inspect_webp(bytes: &[u8]) -> Result<(u32, u32), ImageRefusal> {
                 if data[0] & 0x02 != 0 {
                     return Err(ImageRefusal::Animated);
                 }
-                set((
-                    1 + webp_le24(&data[4..7]),
-                    1 + webp_le24(&data[7..10]),
-                ))?;
+                set((1 + webp_le24(&data[4..7]), 1 + webp_le24(&data[7..10])))?;
             }
             b"VP8 " => {
                 if size < 10 || data[3..6] != [0x9D, 0x01, 0x2A] {
-                    return Err(ImageRefusal::Malformed("webp lossy frame header is invalid"));
+                    return Err(ImageRefusal::Malformed(
+                        "webp lossy frame header is invalid",
+                    ));
                 }
                 set((
                     u32::from(u16::from_le_bytes([data[6], data[7]]) & 0x3FFF),
@@ -420,7 +424,10 @@ impl PictureRecord {
         }
         if !self.source_url.starts_with("https://")
             || self.source_url.len() > 2048
-            || self.source_url.chars().any(|c| c.is_whitespace() || c.is_control())
+            || self
+                .source_url
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control())
         {
             bail!("source_url must be an https URL");
         }
@@ -431,13 +438,15 @@ impl PictureRecord {
                 ACCEPTED_LICENCES.join(", ")
             );
         }
-        if self.derived_from.iter().any(|entry| entry.trim().is_empty()) {
+        if self
+            .derived_from
+            .iter()
+            .any(|entry| entry.trim().is_empty())
+        {
             bail!("derived_from names an empty entry");
         }
         if self.renditions.is_empty() || self.renditions.len() > MAX_RENDITIONS_PER_RECORD {
-            bail!(
-                "a picture names between 1 and {MAX_RENDITIONS_PER_RECORD} renditions"
-            );
+            bail!("a picture names between 1 and {MAX_RENDITIONS_PER_RECORD} renditions");
         }
         let mut roles = BTreeSet::new();
         for rendition in &self.renditions {
@@ -455,7 +464,10 @@ impl PictureRecord {
                 );
             }
             if rendition.bytes == 0 || rendition.bytes > MAX_PICTURE_BYTES {
-                bail!("rendition `{}` byte size is outside the cap", rendition.role);
+                bail!(
+                    "rendition `{}` byte size is outside the cap",
+                    rendition.role
+                );
             }
             if rendition.width == 0
                 || rendition.height == 0
@@ -463,7 +475,10 @@ impl PictureRecord {
                 || rendition.height > MAX_PICTURE_DIMENSION
                 || u64::from(rendition.width) * u64::from(rendition.height) > MAX_PICTURE_PIXELS
             {
-                bail!("rendition `{}` dimensions are outside the cap", rendition.role);
+                bail!(
+                    "rendition `{}` dimensions are outside the cap",
+                    rendition.role
+                );
             }
         }
         Ok(())
@@ -555,7 +570,10 @@ fn walk_records(dir: &Path, relative: &str, out: &mut Vec<(String, PathBuf)>) ->
             }
             out.push((child_relative, path));
         } else {
-            bail!("pictures tree contains a special file at {}", path.display());
+            bail!(
+                "pictures tree contains a special file at {}",
+                path.display()
+            );
         }
     }
     Ok(())
@@ -798,10 +816,8 @@ pub fn verify_bundle_pictures(
         (true, true) => {}
     }
 
-    let signed_ref = lillux::read_regular_file_bounded_no_follow(
-        &ref_path,
-        MAX_EXECUTOR_MANIFEST_REF_BYTES,
-    )?;
+    let signed_ref =
+        lillux::read_regular_file_bounded_no_follow(&ref_path, MAX_EXECUTOR_MANIFEST_REF_BYTES)?;
     let signed_ref =
         String::from_utf8(signed_ref).map_err(|_| anyhow!("picture manifest ref is not UTF-8"))?;
     let verified = verify_signed_manifest_ref_in_domain(
@@ -1127,7 +1143,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let sha = write_blob(root.path(), &WEBP_16X10, "webp");
 
-        let no_source = record_yaml(&sha, "").replace("source_url: https://example.test/object/1\n", "");
+        let no_source =
+            record_yaml(&sha, "").replace("source_url: https://example.test/object/1\n", "");
         write_record(root.path(), "one", &no_source);
         assert!(check_picture_sources(root.path()).is_err());
 
@@ -1142,9 +1159,7 @@ mod tests {
 
         // A blob whose bytes no longer hash to its name.
         write_record(root.path(), "one", &record_yaml(&sha, ""));
-        let path = root
-            .path()
-            .join(format!(".ai/pictures/blobs/{sha}.webp"));
+        let path = root.path().join(format!(".ai/pictures/blobs/{sha}.webp"));
         let mut tampered = WEBP_16X10.to_vec();
         tampered[30] ^= 1;
         fs::write(path, tampered).unwrap();
@@ -1159,7 +1174,10 @@ mod tests {
         write_record(root.path(), "one", &record_yaml(&sha, ""));
         let stray = write_blob(root.path(), &PNG_16X10, "png");
         let error = format!("{:#}", check_picture_sources(root.path()).unwrap_err());
-        assert!(error.contains(&stray) && error.contains("no record"), "{error}");
+        assert!(
+            error.contains(&stray) && error.contains("no record"),
+            "{error}"
+        );
         fs::remove_file(root.path().join(format!(".ai/pictures/blobs/{stray}.png"))).unwrap();
 
         // A record that declares PNG for WebP bytes.

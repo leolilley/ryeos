@@ -461,7 +461,10 @@ async fn picture_route_serves_nothing_a_session_binding_does_not_name() -> anyho
         None,
     )
     .await?;
-    anyhow::ensure!(status == StatusCode::UNAUTHORIZED, "unknown cookie: {status}");
+    anyhow::ensure!(
+        status == StatusCode::UNAUTHORIZED,
+        "unknown cookie: {status}"
+    );
 
     let (status, minted) = harness
         .post_json(
@@ -490,7 +493,10 @@ async fn picture_route_serves_nothing_a_session_binding_does_not_name() -> anyho
         None,
     )
     .await?;
-    anyhow::ensure!(status == StatusCode::NOT_FOUND, "unnamed hash: {status} {body}");
+    anyhow::ensure!(
+        status == StatusCode::NOT_FOUND,
+        "unnamed hash: {status} {body}"
+    );
     anyhow::ensure!(body["error"] == "not found", "unnamed hash body: {body}");
 
     // Keys that are not a lowercase hex SHA-256 never reach a lookup.

@@ -282,8 +282,16 @@ async fn a_hash_only_another_sessions_binding_names_is_a_404_for_this_session() 
     let nothing = session_naming(&state, &[]);
     let mode = art_mode(&state);
 
-    assert!(serve(mode.as_ref(), &state, &first, &webp_sha).await.is_ok());
-    assert!(serve(mode.as_ref(), &state, &second, &png_sha).await.is_ok());
+    assert!(
+        serve(mode.as_ref(), &state, &first, &webp_sha)
+            .await
+            .is_ok()
+    );
+    assert!(
+        serve(mode.as_ref(), &state, &second, &png_sha)
+            .await
+            .is_ok()
+    );
     for (session, hash) in [
         (&first, &png_sha),
         (&second, &webp_sha),
@@ -570,7 +578,11 @@ async fn pictures_without_a_verifying_signed_manifest_are_not_served() {
     // The signed ref names a different manifest: nothing verifies.
     let ref_path = ai_dir(&state).join("refs/bundles/pictures");
     let signed = std::fs::read_to_string(&ref_path).unwrap();
-    std::fs::write(&ref_path, signed.replace("ryeos:bundle-picture-manifest", "x")).unwrap();
+    std::fs::write(
+        &ref_path,
+        signed.replace("ryeos:bundle-picture-manifest", "x"),
+    )
+    .unwrap();
     assert!(matches!(
         serve(mode.as_ref(), &state, &session, &sha).await,
         Err(RouteDispatchError::NotFound)
@@ -614,7 +626,14 @@ fn the_route_compiles_only_for_browser_session_get_with_the_hash_capture() {
         .unwrap();
         ArtMode { ui: ui.clone() }.compile(&raw).map(|_| ())
     };
-    assert!(compile("browser_session", serde_json::json!(["GET"]), "/ui/art/{sha256}").is_ok());
+    assert!(
+        compile(
+            "browser_session",
+            serde_json::json!(["GET"]),
+            "/ui/art/{sha256}"
+        )
+        .is_ok()
+    );
     assert!(compile("none", serde_json::json!(["GET"]), "/ui/art/{sha256}").is_err());
     assert!(
         compile(
@@ -624,6 +643,20 @@ fn the_route_compiles_only_for_browser_session_get_with_the_hash_capture() {
         )
         .is_err()
     );
-    assert!(compile("browser_session", serde_json::json!(["POST"]), "/ui/art/{sha256}").is_err());
-    assert!(compile("browser_session", serde_json::json!(["GET"]), "/ui/art/{name}").is_err());
+    assert!(
+        compile(
+            "browser_session",
+            serde_json::json!(["POST"]),
+            "/ui/art/{sha256}"
+        )
+        .is_err()
+    );
+    assert!(
+        compile(
+            "browser_session",
+            serde_json::json!(["GET"]),
+            "/ui/art/{name}"
+        )
+        .is_err()
+    );
 }

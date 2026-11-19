@@ -279,7 +279,10 @@ fn rebuild_picture_manifest(
 
     let mut item_source_hashes: HashMap<String, String> = HashMap::new();
     for sha256 in pictures.entries.keys() {
-        let item_ref = format!("{}{sha256}", ryeos_bundle::pictures::PICTURE_ITEM_REF_PREFIX);
+        let item_ref = format!(
+            "{}{sha256}",
+            ryeos_bundle::pictures::PICTURE_ITEM_REF_PREFIX
+        );
         let item_source = ItemSource {
             item_ref: item_ref.clone(),
             content_blob_hash: sha256.clone(),
@@ -638,8 +641,7 @@ mod tests {
         assert!(bundle.join(".ai/refs/bundles/pictures").is_file());
 
         let pictures =
-            ryeos_bundle::pictures::verify_bundle_pictures(&bundle, &trust_of(&key), true)
-                .unwrap();
+            ryeos_bundle::pictures::verify_bundle_pictures(&bundle, &trust_of(&key), true).unwrap();
         assert_eq!(pictures.entries.len(), 1);
         assert_eq!(pictures.entries[&sha].width, 16);
 
@@ -720,8 +722,7 @@ mod tests {
         tampered[30] ^= 1;
         fs::write(&blob, tampered).unwrap();
         assert!(
-            ryeos_bundle::pictures::verify_bundle_pictures(&bundle, &trust_of(&key), true)
-                .is_err()
+            ryeos_bundle::pictures::verify_bundle_pictures(&bundle, &trust_of(&key), true).is_err()
         );
         fs::write(&blob, WEBP_16X10).unwrap();
 
