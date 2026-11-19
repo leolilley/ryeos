@@ -195,7 +195,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
 
     let bind = &state.config.bind;
     let launch_path = launch_path_for_token(&state, &token)?;
-    let launch_url = format!("http://{bind}{launch_path}");
+    let launch_url = session_policy.launch_url(bind, &launch_path);
 
     let response = Response {
         ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION,
@@ -946,6 +946,7 @@ mod tests {
                 max_replay_frame_events: 64,
                 max_replay_frame_bytes: 4194304,
             },
+            public_origin: None,
         }
     }
 
