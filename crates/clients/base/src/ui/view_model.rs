@@ -625,10 +625,6 @@ pub enum RyeOsViewVm {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_status: Option<RyeOsSourceStatusVm>,
         columns: Vec<String>,
-        /// What each column holds, parallel to `columns`; clients choose font,
-        /// dimming, alignment and width from it.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        column_roles: Vec<super::content::ColumnRole>,
         /// Total selectable rows in the source collection. `rows` may be a
         /// render window around the cursor for large lists.
         #[serde(default)]
@@ -727,6 +723,10 @@ pub enum RyeOsViewVm {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_status: Option<RyeOsSourceStatusVm>,
         columns: Vec<String>,
+        /// What each column holds, parallel to `columns`; clients choose font,
+        /// dimming, alignment and width from it.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        column_roles: Vec<super::content::ColumnRole>,
         /// Total selectable rows in the source collection. `rows` may be a
         /// render window around the cursor for large lists.
         #[serde(default)]
