@@ -271,12 +271,7 @@ fn draw_row(
         let role = roles.get(i).copied().unwrap_or_default();
         if role == ColumnRole::Status {
             // The mark in the row's tone, then the word, in one cell.
-            let tone = row
-                .cell_tones
-                .get(i)
-                .copied()
-                .flatten()
-                .unwrap_or(row.tone);
+            let tone = row.cell_tones.get(i).copied().flatten().unwrap_or(row.tone);
             let mark_style = if row.selected {
                 style
             } else {

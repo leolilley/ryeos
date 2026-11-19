@@ -307,7 +307,10 @@ impl RyeOsCoverageWordingDto {
                 return Err("coverage wording has an empty sentence".into());
             }
             if !WORDING_TONES.contains(&entry.tone.as_str()) {
-                return Err(format!("coverage wording has an unknown tone {}", entry.tone));
+                return Err(format!(
+                    "coverage wording has an unknown tone {}",
+                    entry.tone
+                ));
             }
         }
         Ok(wording)

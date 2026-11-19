@@ -1384,7 +1384,11 @@ fn table_record(
         let cell_tone = item.cell_tones.get(index).copied().flatten();
         let name = index == 0 && item.selected;
         let role = role_at(roles, index);
-        let mut slot = sized(row(), role).min_w(0.0).h_full().center_y().role("cell");
+        let mut slot = sized(row(), role)
+            .min_w(0.0)
+            .h_full()
+            .center_y()
+            .role("cell");
         if index == 0
             && let Some(hierarchy) = &item.hierarchy
         {
@@ -2722,8 +2726,16 @@ mod tests {
         // The sentence is drawn as written, never upper-cased and never as
         // the codes.
         assert!(says(&populated, "Part of what exists is shown."));
-        assert!(!texts(&populated).iter().any(|text| text.contains("PAGE_LIMIT")));
-        assert!(!texts(&populated).iter().any(|text| text.contains("page_limit")));
+        assert!(
+            !texts(&populated)
+                .iter()
+                .any(|text| text.contains("PAGE_LIMIT"))
+        );
+        assert!(
+            !texts(&populated)
+                .iter()
+                .any(|text| text.contains("page_limit"))
+        );
         let unreported = drawn(table(
             vec![table_row("t1", ["Alpha", "beta"], json!({}))],
             1,

@@ -1641,7 +1641,11 @@ mod tests {
                 "reasons": {},
             }),
         );
-        let stored = core.data.coverage_wording.as_ref().expect("wording arrives");
+        let stored = core
+            .data
+            .coverage_wording
+            .as_ref()
+            .expect("wording arrives");
         assert_eq!(stored.resolve("partial", "x").label, "Part is shown.");
 
         let id = wording_fetch(&core.initial_effects()).expect("surface source fetch");
