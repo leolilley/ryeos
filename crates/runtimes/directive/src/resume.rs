@@ -555,8 +555,6 @@ pub(crate) struct CompactionBasis {
     anchor: Option<AnchorRecord>,
     /// Completed model turns on the path.
     pub completed_turns: u32,
-    /// The last turn coordinate used.
-    pub last_coordinate: u32,
 }
 
 impl CompactionBasis {
@@ -635,7 +633,6 @@ pub(crate) async fn load_compaction_basis(
         seed,
         anchor,
         completed_turns: progress.completed,
-        last_coordinate: progress.last_coordinate,
     })
 }
 
