@@ -3481,7 +3481,7 @@ fn composed_controller_attachment_on(
             hosts: ExternalNetworkInputSelection {
                 source: "/etc/hosts".into(),
                 max_bytes: 64 * 1024,
-                required: true,
+                required: false,
             },
         },
     };
@@ -3923,7 +3923,7 @@ impl LeaseLaneController {
             hosts: LaunchNetworkInput {
                 source: self.hosts_source(),
                 max_bytes: 64 * 1024,
-                required: true,
+                required: false,
             },
         }
     }
@@ -4870,7 +4870,7 @@ async fn run_production_tls_candidate(
             hosts: ExternalNetworkInputSelection {
                 source: lease_lane.hosts_source(),
                 max_bytes: 64 * 1024,
-                required: true,
+                required: false,
             },
         },
     };
@@ -6930,7 +6930,7 @@ fn exercise_activation_fault(fault: &str) {
                 hosts: ExternalNetworkInputSelection {
                     source: "/etc/hosts".into(),
                     max_bytes: 64 * 1024,
-                    required: true,
+                    required: false,
                 },
             },
         }
