@@ -425,10 +425,12 @@ pub(crate) fn operator_network_inputs() -> ExternalNetworkInputPolicy {
         resolver: ExternalNetworkInputSelection {
             source: sources.resolver_source.into(),
             max_bytes: sources.resolver_max_bytes,
+            required: true,
         },
         hosts: ExternalNetworkInputSelection {
             source: sources.hosts_source.into(),
             max_bytes: sources.hosts_max_bytes,
+            required: true,
         },
     }
 }
@@ -446,7 +448,7 @@ pub(super) fn select_transport(request: &ComposeTransportRequest) -> Result<Sele
             let https_origin = canonical_https_origin(origin)?;
             let tls_roots = parse_tls_root_pem(roots_pem)?;
             let contract = ExternalControllerTransportContract {
-                schema: 2,
+                schema: 3,
                 network_inputs: network_inputs.clone(),
                 https_origin,
                 route_contract: EXTERNAL_CHANNEL_ROUTE_CONTRACT.into(),

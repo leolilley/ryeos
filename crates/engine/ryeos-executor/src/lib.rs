@@ -139,7 +139,7 @@ pub mod test_support {
         let tls_roots = vec!["Zml4dHVyZSBjb250cm9sbGVyIFRMUyByb290".to_owned()];
         let controller =
             ryeos_state::external_execution::transport::ExternalControllerTransportContract {
-                schema: 2,
+                schema: 3,
                 https_origin: "https://controller.example:7443".to_owned(),
                 route_contract:
                     ryeos_state::external_execution::transport::EXTERNAL_CHANNEL_ROUTE_CONTRACT
@@ -156,10 +156,12 @@ pub mod test_support {
                     resolver: ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
                         source: "/etc/resolv.conf".into(),
                         max_bytes: 64 * 1024,
+                        required: true,
                     },
                     hosts: ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
                         source: "/etc/hosts".into(),
                         max_bytes: 64 * 1024,
+                        required: true,
                     },
                 },
             };

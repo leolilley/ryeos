@@ -30,12 +30,18 @@ use crate::loopback_tls::{HttpReply, HttpsRequest};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderNetworkInput {
     pub source: String,
+    /// Digest of the bytes read; the digest of empty bytes when the file is
+    /// absent.
     pub sha256: String,
+    /// False when the file did not exist. A present empty file is a different
+    /// reading from an absent one.
+    pub present: bool,
 }
 
 /// Read the provider sandbox's real files at the declared sources, each
 /// within its byte bound. A file that cannot be read is an error; nothing
-/// stands in for it.
+/// stands in for it. Only a file that does not exist and is declared
+/// optional is recorded as absent.
 pub fn read_provider_network_inputs(
     declared: &LaunchNetworkInputs,
 ) -> Result<Vec<ProviderNetworkInput>> {
@@ -45,9 +51,18 @@ pub fn read_provider_network_inputs(
         .map(|input| {
             let (source, max_bytes) = (input.source.as_str(), input.max_bytes);
             let mut bytes = Vec::new();
-            std::fs::File::open(source)
+            let present = match std::fs::File::open(source)
                 .and_then(|file| file.take(max_bytes + 1).read_to_end(&mut bytes))
-                .with_context(|| format!("provider network input {source} cannot be read"))?;
+            {
+                Ok(_) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound && !input.required => {
+                    false
+                }
+                Err(error) => {
+                    return Err(anyhow::Error::new(error)
+                        .context(format!("provider network input {source} cannot be read")));
+                }
+            };
             ensure!(
                 bytes.len() as u64 <= max_bytes,
                 "provider network input {source} exceeds its {max_bytes}-byte bound"
@@ -55,14 +70,17 @@ pub fn read_provider_network_inputs(
             Ok(ProviderNetworkInput {
                 source: source.to_owned(),
                 sha256: lillux::sha256_hex(&bytes),
+                present,
             })
         })
         .collect()
 }
 
 /// Refuse unless the supervisor's observed network inputs are exactly the
-/// sources the declared launch shape names and each digest equals what the
-/// guest half read from the provider's real file at that source.
+/// sources the declared launch shape names and each presence and digest
+/// equals what the guest half read from the provider's real file at that
+/// source. A file that appeared or vanished between the guest half's read and
+/// the supervisor's capture is a presence mismatch.
 fn check_ready_network_inputs(
     declared: &LaunchNetworkInputs,
     observed: &[ObservedNetworkInput],
@@ -77,7 +95,7 @@ fn check_ready_network_inputs(
         observed_sources == expected,
         "Ready network-input sources differ from the declared launch shape's: expected {expected:?}, observed {observed_sources:?}"
     );
-    for input in observed {
+    for (input, declaration) in observed.iter().zip([&declared.resolver, &declared.hosts]) {
         let read = provider
             .iter()
             .find(|read| read.source == input.source)
@@ -87,6 +105,18 @@ fn check_ready_network_inputs(
                     input.source
                 )
             })?;
+        ensure!(
+            !input.absent || !declaration.required,
+            "Ready reports required network input {} absent",
+            input.source
+        );
+        ensure!(
+            input.absent == !read.present,
+            "Ready network input {} is {} but the provider's file was {} when the guest half read it",
+            input.source,
+            if input.absent { "absent" } else { "present" },
+            if read.present { "present" } else { "absent" }
+        );
         ensure!(
             input.sha256 == read.sha256,
             "Ready network input {} has sha256 {} but the provider's file has sha256 {}",
@@ -547,10 +577,12 @@ mod tests {
             ProviderNetworkInput {
                 source: sources.resolver.source,
                 sha256: lillux::sha256_hex(b"provider resolver"),
+                present: true,
             },
             ProviderNetworkInput {
                 source: sources.hosts.source,
                 sha256: lillux::sha256_hex(b"provider hosts"),
+                present: true,
             },
         ]
     }
@@ -560,8 +592,9 @@ mod tests {
             .iter()
             .map(|read| ObservedNetworkInput {
                 source: read.source.clone(),
-                bytes: 1,
+                bytes: if read.present { 1 } else { 0 },
                 sha256: read.sha256.clone(),
+                absent: !read.present,
             })
             .collect()
     }
@@ -576,6 +609,87 @@ mod tests {
                 && error.contains("cannot be read"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn an_absent_provider_network_file_is_accepted_only_when_not_required() {
+        let root = tempfile::tempdir().unwrap();
+        let resolver = root.path().join("resolv.conf");
+        std::fs::write(&resolver, b"nameserver 10.0.0.2\n").unwrap();
+        let mut sources = declared();
+        sources.resolver.source = resolver.to_str().unwrap().into();
+        sources.hosts.source = root.path().join("hosts").to_str().unwrap().into();
+        // Required and missing: refused, naming the source.
+        let error = format!("{:#}", read_provider_network_inputs(&sources).unwrap_err());
+        assert!(error.contains("cannot be read"), "{error}");
+        // Optional and missing: absent, with the digest of empty bytes.
+        sources.hosts.required = false;
+        let read = read_provider_network_inputs(&sources).unwrap();
+        assert!(read[0].present && !read[1].present);
+        assert_eq!(read[1].sha256, lillux::sha256_hex(b""));
+        // Optional and present but empty: present, a different reading.
+        std::fs::write(root.path().join("hosts"), b"").unwrap();
+        let empty = read_provider_network_inputs(&sources).unwrap();
+        assert!(empty[1].present);
+        assert_eq!(empty[1].sha256, read[1].sha256);
+        assert_ne!(empty[1], read[1]);
+        // A missing required resolver stays an error even with optional hosts.
+        std::fs::remove_file(&resolver).unwrap();
+        assert!(read_provider_network_inputs(&sources).is_err());
+    }
+
+    #[test]
+    fn ready_refuses_presence_that_differs_from_the_provider_reading() {
+        let mut declared = declared();
+        declared.hosts.required = false;
+        let empty = lillux::sha256_hex(b"");
+        let absent_provider = {
+            let mut provider = provider_inputs();
+            provider[1].sha256 = empty.clone();
+            provider[1].present = false;
+            provider
+        };
+        // Both sides absent: accepted.
+        check_ready_network_inputs(
+            &declared,
+            &observed_from(&absent_provider),
+            &absent_provider,
+        )
+        .unwrap();
+        // A file that appeared after the guest half read it: the supervisor
+        // observes bytes where the guest half saw none.
+        let mut appeared = observed_from(&absent_provider);
+        appeared[1].absent = false;
+        let error = check_ready_network_inputs(&declared, &appeared, &absent_provider)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("/etc/hosts") && error.contains("present"),
+            "{error}"
+        );
+        // A file that vanished after the guest half read it: even an empty
+        // present file is not an absent one.
+        let mut present_empty = absent_provider.clone();
+        present_empty[1].present = true;
+        let error =
+            check_ready_network_inputs(&declared, &observed_from(&absent_provider), &present_empty)
+                .unwrap_err()
+                .to_string();
+        assert!(
+            error.contains("/etc/hosts") && error.contains("absent"),
+            "{error}"
+        );
+        // An absent observation of a required input is refused outright.
+        let mut required = declared.clone();
+        required.hosts.required = true;
+        let error = check_ready_network_inputs(
+            &required,
+            &observed_from(&absent_provider),
+            &absent_provider,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("required"), "{error}");
     }
 
     #[test]
@@ -694,15 +808,17 @@ mod tests {
         ExternalSupervisorBootstrap {
             schema: EXTERNAL_SUPERVISOR_HTTP_BOOTSTRAP_SCHEMA,
             controller: ExternalControllerTransportContract {
-                schema: 2,
+                schema: 3,
                 network_inputs: ExternalNetworkInputPolicy {
                     resolver: ExternalNetworkInputSelection {
                         source: "/etc/resolv.conf".into(),
                         max_bytes: 64 * 1024,
+                        required: true,
                     },
                     hosts: ExternalNetworkInputSelection {
                         source: "/etc/hosts".into(),
                         max_bytes: 64 * 1024,
+                        required: true,
                     },
                 },
                 https_origin: format!("https://127.0.0.1:{port}"),

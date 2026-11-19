@@ -2338,6 +2338,7 @@ fn binding_launch_shape(contract: &ExternalPlacementBackendContract) -> BindingL
                 LaunchNetworkInput {
                     source: selection.source.clone(),
                     max_bytes: selection.max_bytes,
+                    required: selection.required,
                 }
             };
             BindingLaunchShape {

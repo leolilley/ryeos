@@ -3464,7 +3464,7 @@ fn composed_controller_attachment_on(
     let roots =
         vec![ryeos_external_candidate_supervisor::test_support::TEST_CA_DER_BASE64.to_owned()];
     let controller = ExternalControllerTransportContract {
-        schema: 2,
+        schema: 3,
         https_origin: format!("https://localhost:{controller_port}"),
         route_contract: EXTERNAL_CHANNEL_ROUTE_CONTRACT.into(),
         tls_root_bundle_digest: external_tls_root_bundle_digest(&roots).unwrap(),
@@ -3476,10 +3476,12 @@ fn composed_controller_attachment_on(
             resolver: ExternalNetworkInputSelection {
                 source: "/etc/resolv.conf".into(),
                 max_bytes: 64 * 1024,
+                required: true,
             },
             hosts: ExternalNetworkInputSelection {
                 source: "/etc/hosts".into(),
                 max_bytes: 64 * 1024,
+                required: true,
             },
         },
     };
@@ -3916,10 +3918,12 @@ impl LeaseLaneController {
             resolver: LaunchNetworkInput {
                 source: self.resolver_source(),
                 max_bytes: 64 * 1024,
+                required: true,
             },
             hosts: LaunchNetworkInput {
                 source: self.hosts_source(),
                 max_bytes: 64 * 1024,
+                required: true,
             },
         }
     }
@@ -4849,7 +4853,7 @@ async fn run_production_tls_candidate(
     let controller_port = listener.local_addr().unwrap().port();
     let roots = lease_lane.roots();
     let controller_contract = ExternalControllerTransportContract {
-        schema: 2,
+        schema: 3,
         https_origin: lease_lane.origin(controller_port),
         route_contract: EXTERNAL_CHANNEL_ROUTE_CONTRACT.into(),
         tls_root_bundle_digest: external_tls_root_bundle_digest(&roots).unwrap(),
@@ -4861,10 +4865,12 @@ async fn run_production_tls_candidate(
             resolver: ExternalNetworkInputSelection {
                 source: lease_lane.resolver_source(),
                 max_bytes: 64 * 1024,
+                required: true,
             },
             hosts: ExternalNetworkInputSelection {
                 source: lease_lane.hosts_source(),
                 max_bytes: 64 * 1024,
+                required: true,
             },
         },
     };
@@ -6907,7 +6913,7 @@ fn exercise_activation_fault(fault: &str) {
     let bootstrap = ExternalSupervisorBootstrap {
         schema: EXTERNAL_SUPERVISOR_HTTP_BOOTSTRAP_SCHEMA,
         controller: ExternalControllerTransportContract {
-            schema: 2,
+            schema: 3,
             https_origin: format!("https://localhost:{controller_port}"),
             route_contract: EXTERNAL_CHANNEL_ROUTE_CONTRACT.into(),
             tls_root_bundle_digest: external_tls_root_bundle_digest(&roots).unwrap(),
@@ -6919,10 +6925,12 @@ fn exercise_activation_fault(fault: &str) {
                 resolver: ExternalNetworkInputSelection {
                     source: "/etc/resolv.conf".into(),
                     max_bytes: 64 * 1024,
+                    required: true,
                 },
                 hosts: ExternalNetworkInputSelection {
                     source: "/etc/hosts".into(),
                     max_bytes: 64 * 1024,
+                    required: true,
                 },
             },
         }

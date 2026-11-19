@@ -342,15 +342,17 @@ pub fn prepare(inputs: &FixtureInputs<'_>) -> Result<Prepared> {
     let bootstrap = ExternalSupervisorBootstrap {
         schema: EXTERNAL_SUPERVISOR_HTTP_BOOTSTRAP_SCHEMA,
         controller: ExternalControllerTransportContract {
-            schema: 2,
+            schema: 3,
             network_inputs: ExternalNetworkInputPolicy {
                 resolver: ExternalNetworkInputSelection {
                     source: network_sources.resolver.source.clone(),
                     max_bytes: network_sources.resolver.max_bytes,
+                    required: network_sources.resolver.required,
                 },
                 hosts: ExternalNetworkInputSelection {
                     source: network_sources.hosts.source.clone(),
                     max_bytes: network_sources.hosts.max_bytes,
+                    required: network_sources.hosts.required,
                 },
             },
             https_origin: format!("https://127.0.0.1:{}", inputs.port),
