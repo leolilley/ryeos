@@ -494,6 +494,11 @@ pub enum RyeOsUiEvent {
     },
     /// Fold or unfold the cluster under the point in the focused feed.
     ToggleTimelineFold,
+    /// Answer the focused feed's first pending ask with the action whose
+    /// key cap is `ch`.
+    AnswerDockAsk {
+        ch: char,
+    },
     /// Step back up the execution-drill stack: restore the view a step-in left
     /// and the facet context it read. The "return" half of the debugger drill;
     /// no-op at the top of the tree.

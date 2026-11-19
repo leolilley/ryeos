@@ -75,7 +75,11 @@ pub fn draw_input_tile(
     if !input.route_label.is_empty() {
         let budget = w.saturating_sub(cwd_w + 6);
         if budget >= 6 {
-            let label = truncate(&format!(" {} ", input.route_label), budget);
+            let strip = match &input.usage {
+                Some(usage) => format!(" {} · {} ", input.route_label, usage),
+                None => format!(" {} ", input.route_label),
+            };
+            let label = truncate(&strip, budget);
             surface.draw_text(x + 2, bottom_y, &label, Style::new().fg(MUTED).bg(BG));
         }
     }
@@ -314,6 +318,7 @@ mod tests {
             completion: Vec::new(),
             live_filter: false,
             text: String::new(),
+            usage: None,
         }
     }
 

@@ -2888,6 +2888,7 @@ impl RyeOsCore {
             focused_timeline_entry: timeline_keys.entry,
             focused_timeline_foldable: timeline_keys.foldable,
             focused_source_failed: timeline_keys.source_failed,
+            focused_dock_answer: timeline_keys.dock_answer,
             field: super::keymap::focused_field_key_context(self),
         }
     }

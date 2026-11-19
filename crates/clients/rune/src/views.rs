@@ -210,8 +210,16 @@ fn frame_header(spec: &FrameSpec<'_>, local: &crate::Local) -> El {
     {
         title_row = title_row.child(tabs);
     }
-    // The right note: what the view says about itself.
-    if let Some(detail) = spec.detail.filter(|detail| !detail.is_empty()) {
+    // The right note: what the view says about itself, else the thread a
+    // timeline follows.
+    let note = spec
+        .detail
+        .filter(|detail| !detail.is_empty())
+        .or(match spec.view {
+            RyeOsViewVm::Timeline { thread_id, .. } => thread_id.as_deref(),
+            _ => None,
+        });
+    if let Some(detail) = note {
         title_row = title_row.child(frame_detail(detail));
     }
     let mut tools = row().center_y().gap(8.0);
@@ -751,7 +759,11 @@ fn virtual_list(
             stick_bottom: follow,
         });
     if pad.column.is_some() {
-        scroll = scroll.px(pad.x).items_center();
+        // A feed's first visible line is usually cut by the viewport: fade it.
+        scroll = scroll
+            .px(pad.x)
+            .items_center()
+            .scroll_edge_fade(TIMELINE_FADE);
     }
     body.child(scroll.child(rows))
 }
@@ -1637,6 +1649,8 @@ const TIMELINE_LANE_SPACE: f32 = 16.0;
 /// The tallest the dock grows once it holds more than one card; the cards
 /// scroll inside it.
 const DOCK_STACK_MAX: f32 = 260.0;
+/// How far a feed fades where its lines run out of view.
+const TIMELINE_FADE: f32 = 16.0;
 /// Between entries.
 const TIMELINE_GAP: f32 = 16.0;
 /// A selected line's fill reaches this far past the column on either side.
@@ -1701,6 +1715,7 @@ fn timeline_view(
             .items_center()
             .label(title.to_owned())
             .scroll(ScrollSpec { stick_bottom: true })
+            .scroll_edge_fade(TIMELINE_FADE)
             .child(column),
     )
 }
@@ -2089,6 +2104,10 @@ fn undecorated(text: &str) -> &str {
     text.trim_start_matches(&LEADING_MARKS[..]).trim_start()
 }
 
+/// The least width a one-line entry's detail keeps: a long headline wraps
+/// before the detail is squeezed to a bare ellipsis against the state word.
+const DETAIL_FLOOR: f32 = 72.0;
+
 /// A one-line entry: a tone dot or nothing, the headline, detail taking the
 /// remaining width and truncating, a state word. The headline never truncates.
 fn one_line(
@@ -2123,7 +2142,7 @@ fn one_line(
                 .color(t.ink_dim())
                 .truncate()
                 .grow(1.0)
-                .min_w(0.0),
+                .min_w(DETAIL_FLOOR),
         ),
         None => line.child(el().grow(1.0)),
     };
@@ -2463,12 +2482,16 @@ fn loading_skeleton() -> El {
         let mut line = row()
             .key(format!("skeleton:{index}"))
             .w_full()
+            .min_w(0.0)
             .h(SKELETON_ROW_HEIGHT)
             .gap(12.0)
             .center_y();
         for width in SKELETON_BARS {
+            // The bars give way, so a narrow tile never clips the last one.
             line = line.child(
                 el().size(width, SKELETON_BAR_HEIGHT)
+                    .min_w(0.0)
+                    .shrink()
                     .radius(SKELETON_BAR_HEIGHT / 2.0)
                     .fill(t.ink_at(SKELETON_FILL)),
             );

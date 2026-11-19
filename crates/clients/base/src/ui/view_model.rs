@@ -350,6 +350,11 @@ pub struct RyeOsInputVm {
     /// replacing the widget, and Enter activates the focused row.
     #[serde(default)]
     pub live_filter: bool,
+    /// The conversation's usage totals ("184K in · 21K out · $1.62 · 7
+    /// turns"), drawn as quiet text in the strip. Present only on an input
+    /// whose view is a timeline over a response that carries a summary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -649,6 +654,9 @@ pub enum RyeOsViewVm {
         /// Pending asks docked below the lane, directly above the composer.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         dock: Vec<RyeOsTimelineDockVm>,
+        /// The thread the timeline follows, for the tile's right note.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
         /// Stable semantic identity per visible entry. Source-backed entries
         /// use their source event key; presentation-only entries use a digest
         /// of their semantic content.
@@ -1632,6 +1640,7 @@ fn bound_view_vm_keyed(
             entries: Vec::new(),
             lane: None,
             dock: Vec::new(),
+            thread_id: None,
             entry_ids: Vec::new(),
             entry_roles: Vec::new(),
             entry_cursors: Vec::new(),
@@ -1895,6 +1904,11 @@ fn bound_view_vm_keyed(
                     instance_key,
                     view_ref,
                 ),
+                thread_id: response
+                    .get("chain_root_id")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_string),
                 entry_ids,
                 entry_roles,
                 entry_cursors,
@@ -2582,7 +2596,25 @@ fn input_vm(
         completion,
         live_filter,
         text,
+        usage: timeline_usage(core, &key.view_instance_key, view_ref),
     })
+}
+
+/// The usage line of the timeline an input belongs to: its source response's
+/// summary, when the view is a timeline that has one.
+fn timeline_usage(
+    core: &RyeOsCore,
+    instance: &RyeOsViewInstanceKey,
+    view_ref: &str,
+) -> Option<String> {
+    let binding = core.binding_for_instance(instance, view_ref)?;
+    if binding.widget != "timeline" {
+        return None;
+    }
+    let channel = binding.primary_source()?.0;
+    let source_key =
+        super::source_key::RyeOsSourceInstanceKey::named(instance.clone(), channel).encode();
+    super::timeline::usage_text(core.data.sources.get(&source_key)?)
 }
 
 /// Derive the target strip when the author gives no `target_label`.
@@ -2616,7 +2648,7 @@ fn derived_target_label(
     // (e.g. graph) is not a conversation. No keybinding copy here; an author
     // overrides the whole strip via `target_label`.
     match (&route.invoke, &route.thread) {
-        (None, _) => "no target — surface declares no route".to_string(),
+        (None, _) => "no target".to_string(),
         (Some(_), Some(thread))
             if input.target.is_some()
                 && core.thread_supports_operator_followup(thread) != Some(false) =>
@@ -6385,6 +6417,10 @@ mod tests {
     /// A single focused timeline tile over a timeline-service response, with
     /// the point on the newest entry.
     fn feed_core(items: serde_json::Value) -> RyeOsCore {
+        feed_core_with(items, json!({}))
+    }
+
+    fn feed_core_with(items: serde_json::Value, projections: serde_json::Value) -> RyeOsCore {
         let session = session_with_surface(json!({
             "name": "t",
             "tiles": ["view:ryeos/chain/timeline"],
@@ -6393,7 +6429,8 @@ mod tests {
                     "widget": "timeline",
                     "sources": { "default": {
                         "ref": "service:ui/ryeos-ui/timeline/thread", "collection": "items"
-                    } }
+                    } },
+                    "projections": projections
                 }
             }
         }));
@@ -6453,6 +6490,46 @@ mod tests {
         };
         let command = crate::ui::ryeos_key_command(event, core.key_context());
         core.apply_key_command(command)
+    }
+
+    #[test]
+    fn messages_and_prose_are_never_expandable() {
+        let entry = |id: &str, kind: &str, state: &str| {
+            json!({
+                "item": "entry", "id": id, "type": kind, "state": state,
+                "tone": null, "thread": "T-1", "parent": null, "exchange": null,
+                "counts_as": null, "slots": {"headline": id, "body": id},
+                "seq": [1, 1], "ts": ["t", "t"]
+            })
+        };
+        let core = feed_core_with(
+            json!([
+                entry("said", "message", "done"),
+                entry("wrote", "prose", "done"),
+                activity("read", [3, 3]),
+            ]),
+            json!({"expand": {"fields": ["state"]}}),
+        );
+        let instance = core.focused_view_instance_key().unwrap();
+        let RyeOsViewVm::Timeline {
+            entry_roles,
+            entry_expandable,
+            ..
+        } = view_vm_for_instance(&core, &instance).unwrap()
+        else {
+            panic!("expected a timeline");
+        };
+        let expandable = |role: &str| {
+            entry_roles
+                .iter()
+                .zip(&entry_expandable)
+                .filter(|(entry_role, _)| entry_role.as_str() == role)
+                .map(|(_, expandable)| *expandable)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(expandable("message"), [false]);
+        assert_eq!(expandable("prose"), [false]);
+        assert_eq!(expandable("activity"), [true]);
     }
 
     #[test]
