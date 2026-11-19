@@ -1052,7 +1052,10 @@ max_seat_append_bytes:64*1024,
             "an unavailable view says why, not what it shows: {text}"
         );
         assert!(!text.contains("Unavailable"), "{text}");
-        assert!(!text.contains("New tab"), "no places before a choice: {text}");
+        assert!(
+            !text.contains("New tab"),
+            "no places before a choice: {text}"
+        );
     }
 
     #[test]
@@ -1062,9 +1065,14 @@ max_seat_append_bytes:64*1024,
             .lines()
             .find(|line| line.contains("In this tile, as a tab"))
             .expect("the places line");
-        assert!(line.contains("\u{21b5} In this tile, as a tab  T New tab"), "{line}");
         assert!(
-            !text.lines().any(|other| other != line && other.contains("New tab")),
+            line.contains("\u{21b5} In this tile, as a tab  T New tab"),
+            "{line}"
+        );
+        assert!(
+            !text
+                .lines()
+                .any(|other| other != line && other.contains("New tab")),
             "the places are not also list rows: {text}"
         );
     }

@@ -335,6 +335,23 @@ fn the_launcher_sheet_has_a_find_line_group_labels_and_a_footer_but_no_title_bar
 fn enter_chooses_a_view_then_a_place_and_escape_closes_the_second_stage_first() {
     let mut rt = shell("launcher", (1280.0, 800.0));
     assert!(launcher_places(&model(&rt)).is_empty());
+    // Down to the first view that can be chosen: commands and views that
+    // need a selection do not stage anything.
+    let chosen = |rt: &Runtime<App>| match &model(rt).dialogs[0].view {
+        RyeOsViewVm::Rows { rows, .. } => rows.iter().any(|row| {
+            row.selected
+                && row.intent.is_some()
+                && row.launch.as_ref().is_some_and(|launch| launch.group != "Commands")
+        }),
+        _ => false,
+    };
+    for _ in 0..60 {
+        if chosen(&rt) {
+            break;
+        }
+        bare_key(&mut rt, Key::Down);
+    }
+    assert!(chosen(&rt), "the launcher lists a view that can be chosen");
     bare_key(&mut rt, Key::Enter);
     let vm = model(&rt);
     assert_eq!(vm.dialogs.len(), 1, "choosing a view keeps the sheet");
