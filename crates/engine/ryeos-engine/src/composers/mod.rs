@@ -114,6 +114,12 @@ pub struct ComposerRegistry {
     launch_runtime: Arc<crate::handlers::subprocess::HandlerLaunchRuntime>,
     /// Fingerprint of the handler registry the composers were bound from.
     handler_registry_fingerprint: String,
+    // Follow-up for any future runtime isolation-policy apply: the launch
+    // runtime, and with it the isolation snapshot, is fixed when this registry
+    // is built, and no running daemon replaces it, so the cache below never
+    // outlives a policy change. A runtime apply must rebuild this registry
+    // (and so start an empty cache) or add the isolation snapshot's identity
+    // to the cache key.
     /// Responses of composers that declare content-addressed results. Owned
     /// by this registry and its clones only, so every response in it was
     /// produced under this registry's handlers and this launch runtime: the

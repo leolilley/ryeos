@@ -8447,6 +8447,28 @@ fn settle_standalone_setup_failure(
     }
 }
 
+/// The exact body a typed service refusal carries, as pretty JSON.
+fn structured_service_body(error: &anyhow::Error) -> Option<String> {
+    error.chain().find_map(|cause| {
+        match cause.downcast_ref::<ryeos_executor::dispatch_error::DispatchError>() {
+            Some(ryeos_executor::dispatch_error::DispatchError::StructuredService {
+                body, ..
+            }) => serde_json::to_string_pretty(body).ok(),
+            _ => None,
+        }
+    })
+}
+
+/// A stopped node has no HTTP route, so a typed refusal's body (stranded
+/// bindings, the fix to apply) would otherwise never reach the operator. The
+/// body follows the unchanged one-line error text.
+fn with_structured_service_body(error: anyhow::Error) -> anyhow::Error {
+    match structured_service_body(&error) {
+        Some(body) => anyhow::anyhow!("{error:#}\n{body}"),
+        None => error,
+    }
+}
+
 /// Run a service in standalone mode (daemon is not running).
 ///
 /// Performs bootstrap: load config, build engine + trust store,
@@ -9034,7 +9056,10 @@ async fn run_service_standalone(
             }
         }
     }
-    let result = outcome?;
+    let result = match outcome {
+        Ok(result) => result,
+        Err(error) => return Err(with_structured_service_body(error)),
+    };
 
     tracing::info!(
         endpoint = %result.endpoint,
@@ -9049,6 +9074,34 @@ async fn run_service_standalone(
     println!("{}", serde_json::to_string_pretty(&result.value)?);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod structured_service_body_tests {
+    use super::*;
+
+    #[test]
+    fn a_structured_refusal_keeps_its_line_and_gains_its_body() {
+        let error: anyhow::Error =
+            ryeos_executor::dispatch_error::DispatchError::StructuredService {
+                code: "replacement_strands_bindings".into(),
+                status: 409,
+                body: serde_json::json!({"unnamed": ["external_execution/x"]}),
+            }
+            .into();
+        let text = format!("{:#}", with_structured_service_body(error));
+        assert!(text.starts_with("structured service error: replacement_strands_bindings\n"));
+        assert!(text.contains("\"unnamed\"") && text.contains("external_execution/x"));
+    }
+
+    #[test]
+    fn other_errors_are_unchanged() {
+        let error = anyhow::anyhow!("plain failure");
+        assert_eq!(
+            format!("{:#}", with_structured_service_body(error)),
+            "plain failure"
+        );
+    }
 }
 
 #[cfg(test)]
