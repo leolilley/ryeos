@@ -735,6 +735,10 @@ pub struct Runner {
     pressure_hook: Option<PressureHook>,
     /// The compaction's summary call in flight.
     summary_job: Option<SummaryJob>,
+    /// No compaction is attempted before this many turns have been used: a
+    /// conversation with nothing yet to replace is looked at again once it has
+    /// grown by the kept turns.
+    compaction_retry_at_turn: u32,
 }
 
 /// The two states a `context_pressure` hook chooses between.
@@ -1580,6 +1584,7 @@ impl Runner {
             start_with_overflow_compaction: false,
             pressure_hook: None,
             summary_job: None,
+            compaction_retry_at_turn: 0,
         }
     }
 
@@ -1749,7 +1754,10 @@ impl Runner {
     /// and a last one that failed to shrink the conversation has been outgrown
     /// by the same share. All of it is read from the record's compaction.
     fn compaction_due(&self, live_context: u64) -> bool {
-        if !self.compaction.enabled || live_context < self.compaction_trigger_tokens() {
+        if !self.compaction.enabled
+            || live_context < self.compaction_trigger_tokens()
+            || self.harness.turns_used() < self.compaction_retry_at_turn
+        {
             return false;
         }
         let Some(memo) = &self.compaction_memo else {
@@ -1954,7 +1962,7 @@ impl Runner {
 
     /// Where a run goes after a compaction attempt.
     fn after_compaction(
-        &self,
+        &mut self,
         trigger: &str,
         outcome: Result<CompactionOutcome, CompactionFailure>,
     ) -> State {
@@ -1980,7 +1988,13 @@ impl Runner {
                     self.compaction.keep_turns
                 ),
             },
-            Ok(CompactionOutcome::NothingToReplace) => onward,
+            Ok(CompactionOutcome::NothingToReplace) => {
+                self.compaction_retry_at_turn = self
+                    .harness
+                    .turns_used()
+                    .saturating_add(self.compaction.keep_turns.max(1));
+                onward
+            }
             Err(CompactionFailure::Unknown(error)) => State::RecoveryRequired { error },
             Err(CompactionFailure::Failed(error)) if overflow => State::Errored {
                 error: format!("{}: compaction failed: {error}", overflow_code()),
@@ -3250,7 +3264,29 @@ impl Runner {
                                 "response_id": &resp.response_id,
                                 "replayed_from": &turn_replayed_from,
                             }));
-                            let malformed_calls =
+                            // A summary call is recorded as its text alone: it
+                            // offered no tools, so a call in its answer is not
+                            // carried and never owed a result.
+                            let recorded_parts: Vec<Part> = if self.summary_job.is_some() {
+                                resp.message
+                                    .parts
+                                    .iter()
+                                    .filter(|part| matches!(part, Part::Text(_)))
+                                    .cloned()
+                                    .collect()
+                            } else {
+                                resp.message.parts.clone()
+                            };
+                            if self.summary_job.is_some() && recorded_parts.is_empty() {
+                                state = State::Errored {
+                                    error: "compaction_summary_failed: the summary call returned no text"
+                                        .to_string(),
+                                };
+                                continue;
+                            }
+                            let malformed_calls = if self.summary_job.is_some() {
+                                Vec::new()
+                            } else {
                                 match malformed_calls_of_turn(&events, &resp.message) {
                                     Ok(calls) => calls,
                                     Err(error) => {
@@ -3259,14 +3295,15 @@ impl Runner {
                                         };
                                         continue;
                                     }
-                                };
+                                }
+                            };
                             if let Err(e) = self
                                 .callback
                                 .emit_turn_complete(
                                     turn,
                                     finish,
                                     token_counts,
-                                    resp.message.parts.clone(),
+                                    recorded_parts.clone(),
                                     provider_accounting,
                                     malformed_calls.clone(),
                                 )
@@ -3283,7 +3320,7 @@ impl Runner {
                                 // The summary is not a conversation turn: it
                                 // goes into the compaction record, not into the
                                 // conversation.
-                                job.result = Some(resp.message.parts.clone());
+                                job.result = Some(recorded_parts);
                                 state = State::FinishingCompaction;
                                 continue;
                             }

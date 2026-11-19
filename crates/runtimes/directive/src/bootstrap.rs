@@ -377,6 +377,7 @@ pub(super) fn compile_directive_hook_sources(
         ryeos_runtime::HookContextSchema::new("after_step", ["turn"]),
         ryeos_runtime::HookContextSchema::new("continuation", ["event"]),
         ryeos_runtime::HookContextSchema::new("provider_error", ["event"]),
+        ryeos_runtime::HookContextSchema::new("context_pressure", ["event"]),
     ];
     ryeos_runtime::compile_hooks(
         sources,

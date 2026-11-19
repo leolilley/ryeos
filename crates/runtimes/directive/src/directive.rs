@@ -918,6 +918,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_compaction_policy_is_off_by_default_and_every_field_is_defaulted() {
+        let config: ContinuationRuntimeConfig = serde_yaml::from_str("{}").unwrap();
+        assert!(!config.compaction.enabled);
+        assert_eq!(config.compaction.trigger_ratio, 0.70);
+        assert_eq!(config.compaction.keep_turns, 6);
+        assert_eq!(config.compaction.min_turns_between, 4);
+        assert_eq!(config.compaction.max_overflow_recoveries_per_chain, 2);
+        assert_eq!(
+            config.compaction.overflow_codes,
+            ["provider_context_length_exceeded"]
+        );
+        assert_eq!(config.compaction.summary.mode, SummaryMode::Model);
+        assert_eq!(config.compaction.on_pressure, CompactionOnPressure::Compact);
+
+        let tuned: ContinuationRuntimeConfig = serde_yaml::from_str(
+            "compaction:\n  enabled: true\n  on_pressure: observe\n  summary:\n    mode: none\n",
+        )
+        .unwrap();
+        assert!(tuned.compaction.enabled);
+        assert_eq!(tuned.compaction.on_pressure, CompactionOnPressure::Observe);
+        assert_eq!(tuned.compaction.summary.mode, SummaryMode::None);
+        // The section refuses fields it does not know.
+        assert!(
+            serde_yaml::from_str::<ContinuationRuntimeConfig>("compaction:\n  trigger: 1\n")
+                .is_err()
+        );
+    }
+
+    #[test]
     fn an_assistant_message_keeps_reasoning_text_then_calls_in_order() {
         let message = ProviderMessage::assistant(
             Some("checking".to_string()),

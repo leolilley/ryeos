@@ -467,6 +467,21 @@ pub struct RiskAssessment {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_compaction_actions_parse_and_unknown_actions_do_not() {
+        use super::HookAction;
+        use serde_json::json;
+        assert_eq!(
+            HookAction::from_value(&json!({"action": "compact"})),
+            Ok(HookAction::Compact)
+        );
+        assert_eq!(
+            HookAction::from_value(&json!({"action": "skip_compaction"})),
+            Ok(HookAction::SkipCompaction)
+        );
+        assert!(HookAction::from_value(&json!({"action": "compacting"})).is_err());
+    }
+
     use super::*;
     use std::collections::BTreeMap;
 
