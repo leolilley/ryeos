@@ -133,7 +133,6 @@ pub enum ResumeDisposition {
     /// write it from the retained summary. No second model call is made.
     FinishCompaction {
         trigger: String,
-        turn: u32,
         summary: Vec<ryeos_provider_contract::Part>,
     },
 }
@@ -1510,7 +1509,6 @@ fn recover_resume_disposition(
             .to_string();
         return Ok(ResumeDisposition::FinishCompaction {
             trigger,
-            turn: out.turn,
             summary: out.parts,
         });
     }
@@ -4782,5 +4780,167 @@ mod tests {
             .filter_map(|m| m.text())
             .collect::<Vec<String>>();
         assert_eq!(contents, vec!["u2", "a2"]);
+    }
+
+    fn event_at(event_type: &str, chain_seq: i64, payload: Value) -> ReplayedEventRecord {
+        ReplayedEventRecord {
+            chain_seq,
+            event_type: event_type.to_string(),
+            payload,
+        }
+    }
+
+    /// A compaction record keeping turns 3 and on, with one pinned task.
+    fn compaction_record(trigger: &str) -> ryeos_runtime::CompactionPayload {
+        ryeos_runtime::CompactionPayload {
+            turn: 0,
+            trigger: trigger.to_string(),
+            replaces_from_turn: 1,
+            replaces_to_turn: 2,
+            kept_from_turn: 3,
+            summary: vec![ryeos_provider_contract::Part::text("THE SUMMARY")],
+            summary_model_call: false,
+            omitted_from_input: 0,
+            pinned: vec![ryeos_runtime::CognitionInput::text("launch", "THE TASK").pinned()],
+            seed: ryeos_runtime::WindowSeed {
+                last_coordinate: 2,
+                completed: 2,
+                tool_starts: 5,
+                spawns: 1,
+                images: 2,
+                image_bytes: 300,
+                image_stored: vec!["att-1".to_string()],
+            },
+            settled_turns: 4,
+            size_before: 1000,
+            size_after: 400,
+            ineffective: false,
+            compactions: 1,
+            overflow_recoveries: 0,
+        }
+    }
+
+    /// The window of a compaction: the kept turns 3 and 4, a summary call at
+    /// turn 5, the record, then turn 6.
+    fn windowed_events() -> Vec<ReplayedEventRecord> {
+        vec![
+            event_at("cognition_in", 20, json!({"turn": 3})),
+            event_at("cognition_out", 21, out(3, "kept three")),
+            event_at("cognition_in", 22, json!({"turn": 4})),
+            event_at("cognition_out", 23, out(4, "kept four")),
+            event_at("cognition_in", 24, json!({"turn": 5})),
+            event_at(
+                "cognition_out",
+                25,
+                json!({
+                    "turn": 5,
+                    "parts": text_parts("THE SUMMARY"),
+                    "finish": "compaction_summary_pressure",
+                }),
+            ),
+            event_at(
+                "cognition_compaction",
+                26,
+                serde_json::to_value(compaction_record("pressure")).unwrap(),
+            ),
+            event_at("cognition_in", 27, json!({"turn": 6})),
+            event_at("cognition_out", 28, out(6, "after")),
+        ]
+    }
+
+    #[test]
+    fn a_compaction_folds_to_pinned_inputs_the_summary_and_the_kept_turns() {
+        let folded = fold_messages_anchored(&windowed_events(), Some(26)).unwrap();
+        let texts: Vec<String> = folded
+            .iter()
+            .map(|f| f.message.text().unwrap_or_default())
+            .collect();
+        // The summary call's own turn is not a conversation turn.
+        assert_eq!(
+            texts,
+            [
+                "THE TASK",
+                "THE SUMMARY",
+                "kept three",
+                "kept four",
+                "after"
+            ]
+        );
+        assert!(folded[0].pinned);
+        assert!(folded[0].input.is_some());
+        assert_eq!(
+            folded[1].kind.as_deref(),
+            Some(ryeos_runtime::cognition::KIND_COMPACTION_SUMMARY)
+        );
+        assert_eq!(
+            folded.iter().map(|f| f.turn).collect::<Vec<_>>(),
+            [None, None, Some(3), Some(4), Some(6)]
+        );
+        // A different anchor leaves the record out: older compactions add nothing.
+        let unanchored = fold_messages_anchored(&windowed_events(), Some(99)).unwrap();
+        assert_eq!(unanchored.len(), 3);
+    }
+
+    #[test]
+    fn recovery_readers_start_from_the_window_seed() {
+        let events = windowed_events();
+        let seed = compaction_record("pressure").seed;
+        let progress = recover_turn_progress_from(&events, &seed).unwrap();
+        // Turns 3, 4 and 6 complete; the summary call at 5 takes a coordinate
+        // and is not a completed turn.
+        assert_eq!(progress.last_coordinate, 6);
+        assert_eq!(progress.completed, 2 + 3);
+        // Without the seed the window's first turn does not follow turn 0.
+        assert!(recover_turn_progress(&events).is_err());
+        let images = recover_image_run_from(&events, &seed).unwrap();
+        assert_eq!(images.images, 2);
+        assert_eq!(images.bytes, 300);
+        assert!(images.stored.contains("att-1"));
+        let sources = vec!["T".to_string(); events.len()];
+        assert_eq!(
+            recover_unfinished_provider_turn(&events, &sources, "T", seed.last_coordinate).unwrap(),
+            None
+        );
+        assert!(recover_unfinished_provider_turn(&events, &sources, "T", 0).is_err());
+    }
+
+    #[test]
+    fn a_summary_turn_without_its_record_is_finished_from_the_retained_summary() {
+        let mut events = windowed_events();
+        events.truncate(6);
+        let sources = vec!["T".to_string(); events.len()];
+        let tools = recover_tool_state(&events, &sources).unwrap();
+        match recover_resume_disposition(&events, &tools).unwrap() {
+            ResumeDisposition::FinishCompaction { trigger, summary } => {
+                assert_eq!(trigger, "pressure");
+                assert_eq!(
+                    summary,
+                    vec![ryeos_provider_contract::Part::text("THE SUMMARY")]
+                );
+            }
+            other => panic!("expected FinishCompaction, got {other:?}"),
+        }
+        // With the record written, the run goes on from its last turn.
+        let events = windowed_events();
+        let tools = recover_tool_state(&events, &vec!["T".to_string(); events.len()]).unwrap();
+        assert!(!matches!(
+            recover_resume_disposition(&events, &tools).unwrap(),
+            ResumeDisposition::FinishCompaction { .. }
+        ));
+    }
+
+    #[test]
+    fn a_predecessor_that_ended_on_a_refused_request_is_read_not_refused() {
+        // Turn 2's marker with no completed turn after it: a refused request.
+        let events = vec![
+            event_at("cognition_in", 1, json!({"turn": 1})),
+            event_at("cognition_out", 2, out(1, "one")),
+            event_at("cognition_in", 3, json!({"turn": 2})),
+        ];
+        let sources = vec!["T-old".to_string(); events.len()];
+        assert_eq!(
+            recover_unfinished_provider_turn(&events, &sources, "T-old", 0).unwrap(),
+            Some(2)
+        );
     }
 }

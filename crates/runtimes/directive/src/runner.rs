@@ -2202,11 +2202,7 @@ impl Runner {
                 ResumeDisposition::FinalizeDirectiveReturn { outputs } => {
                     State::FinalizingDirectiveReturn { outputs }
                 }
-                ResumeDisposition::FinishCompaction {
-                    trigger,
-                    turn: _,
-                    summary,
-                } => {
+                ResumeDisposition::FinishCompaction { trigger, summary } => {
                     self.summary_job = Some(SummaryJob {
                         trigger,
                         messages: Vec::new(),
@@ -3367,7 +3363,7 @@ impl Runner {
                                     .await;
                                 state = State::Errored {
                                     error: match settled {
-                                        Ok(()) => "interrupted: the compaction summary call was interrupted".to_string(),
+                                        Ok(_) => "interrupted: the compaction summary call was interrupted".to_string(),
                                         Err(error) => format!(
                                             "interrupted: the compaction summary call was interrupted; its accounting settlement failed: {error:#}"
                                         ),
@@ -4789,7 +4785,14 @@ impl Runner {
                         };
                         continue;
                     };
-                    let parts = job.result.unwrap_or_default();
+                    // Only text is a summary: a call the model made although no
+                    // tools were offered is not carried.
+                    let parts: Vec<Part> = job
+                        .result
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|part| matches!(part, Part::Text(_)))
+                        .collect();
                     let has_text = parts.iter().any(
                         |part| matches!(part, Part::Text(text) if !text.text.trim().is_empty()),
                     );
@@ -5019,6 +5022,16 @@ impl Runner {
                         .request_continuation(Some(CONTINUATION_LOG_REASON), completion)
                         .await
                     {
+                        // The daemon's refusal at the chain's depth limit carries
+                        // its code: the run fails with it, typed.
+                        if format!("{e}").contains("continuation_chain_limit:") {
+                            state = State::Errored {
+                                error: format!(
+                                    "continuation_chain_limit: the chain reached its continuation depth limit and will not continue: {e}"
+                                ),
+                            };
+                            continue;
+                        }
                         let runtime_result = RuntimeResult {
                             success: false,
                             status: RuntimeResultStatus::Failed,

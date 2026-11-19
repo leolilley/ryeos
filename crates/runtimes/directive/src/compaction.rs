@@ -16,7 +16,7 @@ use crate::directive::{CompactionConfig, ProviderMessage, ProviderMessageExt};
 use crate::resume::{CompactionBasis, FoldedMessage};
 
 /// Where a conversation is cut.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Plan {
     /// Index of the first kept message.
     pub cut: usize,
@@ -31,7 +31,7 @@ pub struct Plan {
 }
 
 /// What stands for the replaced range in the rebuilt conversation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Summary {
     pub parts: Vec<Part>,
     /// A model wrote it, in the summary call at `turn`.

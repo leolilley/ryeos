@@ -45,6 +45,24 @@ pub const TOOL_RESULT_INLINE_MAX_BYTES: usize = 256 * 1024;
 /// same wire limit; clients paginate until `next_cursor` is absent.
 pub const MAX_RUNTIME_REPLAY_PAGE_LIMIT: usize = 32;
 
+/// A recovery's replay is larger than the ceiling. The text starts with the
+/// stable failure code, which is how the failure reaches the thread's record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayCeilingExceeded(pub String);
+
+impl ReplayCeilingExceeded {
+    /// The stable failure code of this refusal.
+    pub const CODE: &'static str = "replay_ceiling_exceeded";
+}
+
+impl std::fmt::Display for ReplayCeilingExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", Self::CODE, self.0)
+    }
+}
+
+impl std::error::Error for ReplayCeilingExceeded {}
+
 /// Process-local safety ceilings for one complete native-runtime recovery
 /// fold. Authored graph/directive limits remain the semantic execution
 /// authority; these bounds prevent an unexpectedly long or malformed daemon
@@ -105,7 +123,10 @@ fn append_replay_page(
         .checked_add(page.events.len())
         .ok_or_else(|| anyhow::anyhow!("runtime replay event count overflow"))?;
     if next_event_count > max_events {
-        anyhow::bail!("runtime replay contains {next_event_count} events; maximum is {max_events}");
+        return Err(ReplayCeilingExceeded(format!(
+            "runtime replay contains {next_event_count} events; maximum is {max_events}"
+        ))
+        .into());
     }
 
     let mut next_serialized_bytes = budget.total_serialized_bytes;
@@ -123,9 +144,10 @@ fn append_replay_page(
             .ok_or_else(|| anyhow::anyhow!("runtime replay byte count overflow"))?;
     }
     if next_serialized_bytes > max_serialized_bytes {
-        anyhow::bail!(
+        return Err(ReplayCeilingExceeded(format!(
             "runtime replay serializes to {next_serialized_bytes} bytes; maximum is {max_serialized_bytes}"
-        );
+        ))
+        .into());
     }
 
     let next_cursor = page.next_cursor;

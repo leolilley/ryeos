@@ -196,6 +196,16 @@ pub fn plant_execution(root: &Path, yaml: &str, signer: &SigningKey) -> anyhow::
     Ok(())
 }
 
+/// Plant the directive runtime's continuation config (the context threshold,
+/// the carry bounds and the compaction policy) in the project.
+pub fn plant_continuation(root: &Path, yaml: &str, signer: &SigningKey) -> anyhow::Result<()> {
+    let dir = root.join(".ai/config/ryeos-runtime");
+    std::fs::create_dir_all(&dir)?;
+    let signed = lillux::signature::sign_content(yaml, signer, "#", None);
+    std::fs::write(dir.join("continuation.yaml"), signed)?;
+    Ok(())
+}
+
 /// The shipped execution defaults with only the request timeout changed.
 pub fn execution_with_timeout(timeout_seconds: u64) -> String {
     format!(
@@ -366,6 +376,8 @@ pub const DIRECTIVE_REF: &str = "directive:probe/run";
 
 pub struct RigOptions {
     pub exec_yaml: Option<String>,
+    /// The continuation runtime config, including the compaction policy.
+    pub continuation_yaml: Option<String>,
     pub context_window: u64,
     pub header_extra: &'static str,
     pub limits: Option<(u64, u64)>,
@@ -399,6 +411,7 @@ impl Default for RigOptions {
     fn default() -> Self {
         Self {
             exec_yaml: None,
+            continuation_yaml: None,
             context_window: 200_000,
             header_extra: "",
             limits: None,
@@ -501,6 +514,9 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
     plant_routing(root, opts.context_window, &fixture.publisher)?;
     if let Some(yaml) = &opts.exec_yaml {
         plant_execution(root, yaml, &fixture.publisher)?;
+    }
+    if let Some(yaml) = &opts.continuation_yaml {
+        plant_continuation(root, yaml, &fixture.publisher)?;
     }
     plant_python_tool(
         root,

@@ -554,6 +554,17 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
                 // settled on the thread, not a process error the daemon can
                 // only report as an exit without finalization.
                 Err(error) => {
+                    if let Some(ceiling) = error
+                        .downcast_ref::<ryeos_runtime::callback_client::ReplayCeilingExceeded>(
+                    ) {
+                        return runner::refuse_launch(
+                            &callback,
+                            &envelope.thread_id,
+                            &ceiling.to_string(),
+                            budget.cost(),
+                        )
+                        .await;
+                    }
                     if let Some(refusal) = error.downcast_ref::<resume::ResumeFoldError>() {
                         return runner::refuse_launch(
                             &callback,
