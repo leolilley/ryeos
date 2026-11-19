@@ -16,6 +16,7 @@ pub mod auth;
 pub mod handler_context;
 pub mod handler_error;
 pub mod handlers;
+pub mod machine_declaration;
 pub mod maintenance;
 pub mod objects_read_scope;
 pub mod project_deploy;

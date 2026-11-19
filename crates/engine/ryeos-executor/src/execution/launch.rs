@@ -286,6 +286,24 @@ impl From<DispatchError> for BuildAndLaunchError {
     }
 }
 
+/// Classify a `spawn_runtime` failure. A successor that settled as a deadline
+/// stop keeps its typed `deadline_elapsed` refusal (a launch-preparation
+/// stage), even when settlement added context to the chain; every other
+/// failure is internal.
+fn spawn_error_into_launch_error(error: anyhow::Error) -> BuildAndLaunchError {
+    let is_deadline_elapsed = error
+        .downcast_ref::<DispatchError>()
+        .is_some_and(|refusal| refusal.code() == "deadline_elapsed");
+    if is_deadline_elapsed {
+        match error.downcast::<DispatchError>() {
+            Ok(refusal) => BuildAndLaunchError::from(refusal),
+            Err(error) => error.into(),
+        }
+    } else {
+        error.into()
+    }
+}
+
 impl From<ryeos_engine::error::EngineError> for BuildAndLaunchError {
     fn from(error: ryeos_engine::error::EngineError) -> Self {
         // A signed kind validator rejecting the composed definition is an
@@ -8330,6 +8348,7 @@ async fn run_claimed_thread_row_inner(
             envelope: &envelope,
             timeout_secs: duration,
             aggregate_deadline_at_ms: run_end_at_ms,
+            successor_end_at_ms,
             callback: &callback_owned,
             thread_id: &thread_id_owned,
             launch_owner: &launch_owner_owned,
@@ -8379,43 +8398,7 @@ async fn run_claimed_thread_row_inner(
         // borrower settlement while it still holds the request lifelines.
         // Neither an arbitrary error nor a JoinError supplies that proof here.
         Ok(Ok(spawned)) => spawned,
-        Ok(Err(error)) => {
-            // A successor whose end passed between its launch admission and
-            // the spawn (the spawn waits for a blocking worker, which load
-            // lengthens) is a deadline stop like one found elapsed at
-            // admission, not a failed launch.
-            let now_ms = lillux::time::timestamp_millis();
-            let elapsed_end_at_ms = successor_end_at_ms.filter(|end| {
-                now_ms >= *end
-                    && error
-                        .downcast_ref::<DispatchError>()
-                        .is_some_and(|refusal| refusal.code() == "budget_exhausted")
-            });
-            if let Some(end_at_ms) = elapsed_end_at_ms {
-                crate::dispatch::finalize_method_thread_with_params(
-                    state,
-                    launch_owner,
-                    ryeos_app::run_deadline::elapsed_finalize_params(
-                        &thread_id,
-                        ryeos_app::run_deadline::REASON_ELAPSED_BEFORE_LAUNCH,
-                        end_at_ms,
-                        now_ms,
-                    ),
-                )?;
-                return Err(BuildAndLaunchError::from(
-                    DispatchError::LaunchPreparationFailed {
-                        code: "deadline_elapsed".to_owned(),
-                        message: "the run deadline passed before this thread could launch; it \
-                                  settled as a deadline stop"
-                            .to_owned(),
-                        classification: "policy".to_owned(),
-                        binding: None,
-                        details: Box::new(BTreeMap::new()),
-                    },
-                ));
-            }
-            return Err(error.into());
-        }
+        Ok(Err(error)) => return Err(spawn_error_into_launch_error(error)),
         Err(error) => {
             lifecycle_owner.revoke_tokens_after_unsettled_wait();
             return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
@@ -15645,6 +15628,52 @@ mod tests {
         assert_eq!(
             prompt_inputs_from_parameters(&params),
             json!({"task": "keep this"})
+        );
+    }
+}
+
+#[cfg(test)]
+mod spawn_error_classification_tests {
+    use super::*;
+
+    fn refusal(code: &str) -> DispatchError {
+        DispatchError::LaunchPreparationFailed {
+            code: code.to_owned(),
+            message: "m".to_owned(),
+            classification: "policy".to_owned(),
+            binding: None,
+            details: Box::new(BTreeMap::new()),
+        }
+    }
+
+    fn stage_code(error: anyhow::Error) -> (ryeos_app::admission_events::AdmissionStage, String) {
+        admission_stage_for(&spawn_error_into_launch_error(error))
+    }
+
+    #[test]
+    fn a_deadline_elapsed_refusal_classifies_as_preparation() {
+        use ryeos_app::admission_events::AdmissionStage as Stage;
+        let plain = anyhow::Error::new(refusal("deadline_elapsed"));
+        assert_eq!(
+            stage_code(plain),
+            (Stage::Preparation, "deadline_elapsed".to_owned())
+        );
+        let contexted = anyhow::Error::new(refusal("deadline_elapsed"))
+            .context("managed runtime failure settlement retained authority: x");
+        assert_eq!(
+            stage_code(contexted),
+            (Stage::Preparation, "deadline_elapsed".to_owned())
+        );
+    }
+
+    #[test]
+    fn other_spawn_failures_stay_internal() {
+        use ryeos_app::admission_events::AdmissionStage as Stage;
+        let budget = anyhow::Error::new(refusal("budget_exhausted"));
+        assert_eq!(stage_code(budget), (Stage::Internal, "internal".to_owned()));
+        assert_eq!(
+            stage_code(anyhow::anyhow!("boom")),
+            (Stage::Internal, "internal".to_owned())
         );
     }
 }

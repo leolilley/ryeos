@@ -3268,6 +3268,12 @@ struct DeferredRows {
 enum DrainOutcome {
     Clean,
     Unproved,
+    /// Normal-mode drain whose only open leg was the launch-owner wait: every
+    /// process, pool, worker and import leg proved clean and the registry
+    /// legs held at the time. The hold may re-read the registry legs and, if
+    /// they now read empty, finish as `Clean`. Nothing is carried, so a
+    /// recovered verdict never needs facts the drain did not record.
+    UnprovedLaunchOwnersOnly,
     ProcessCleanRowsDeferred(DeferredRows),
 }
 
@@ -3279,7 +3285,28 @@ enum ShutdownDrainDisposition {
     HoldUnproved {
         drain_error: String,
         prior_daemon_error: Option<String>,
+        /// The hold may re-read the registry legs and recover to `Clean`.
+        recheck: bool,
     },
+}
+
+/// One re-read of the registry legs by a hold.
+#[derive(Debug, PartialEq, Eq)]
+enum HoldRecheck {
+    /// A leg is still open, or could not be read. Keep holding.
+    StillHeld,
+    /// Every registry leg reads empty in Normal mode.
+    Cleared,
+    /// The stop is no longer in Normal mode. Facts a latched stop must record
+    /// were not recorded for this verdict, so stop re-reading and hold.
+    StopRechecking,
+}
+
+/// Wait deadline for launch owners: the budget starts at the later of the kill
+/// drain's deadline and `now`, so an owner that unwinds right after the kill
+/// still has its whole budget.
+fn launch_owner_wait_deadline(drain_deadline: Instant, now: Instant) -> Instant {
+    drain_deadline.max(now) + process::LAUNCH_OWNER_UNWIND_BUDGET
 }
 
 fn map_shutdown_drain_join(
@@ -3304,36 +3331,94 @@ fn shutdown_drain_disposition(
         Ok(DrainOutcome::Unproved) => ShutdownDrainDisposition::HoldUnproved {
             drain_error: "shutdown coordinator reported unresolved process custody".to_owned(),
             prior_daemon_error,
+            recheck: false,
         },
+        Ok(DrainOutcome::UnprovedLaunchOwnersOnly) => ShutdownDrainDisposition::HoldUnproved {
+            drain_error: "shutdown coordinator timed out waiting for launch owners to unwind"
+                .to_owned(),
+            prior_daemon_error,
+            recheck: true,
+        },
+        // No re-check on a coordinator failure: its state is unknown.
         Err(error) => ShutdownDrainDisposition::HoldUnproved {
             drain_error: format!("shutdown coordinator task failed: {error}"),
             prior_daemon_error,
+            recheck: false,
         },
     }
 }
 
-/// Holds the custody owners for the life of the process. The hold never
-/// exits and never releases the owners; the periodic log only reports what is
-/// still held so a hung shutdown is visible in the daemon's stderr.
+/// Holds the custody owners until the verdict recovers, or for the life of
+/// the process. Without `recheck` the hold never exits and never releases the
+/// owners; the periodic log only reports what is still held so a hung
+/// shutdown is visible in the daemon's stderr. With `recheck` the hold also
+/// re-reads the registry legs (launch owners, attachments, in-process
+/// handlers) every 250 ms and returns `true` once they read empty, so the
+/// caller can drop custody and exit through the normal path. The re-read is
+/// race-free: launch-owner inserts and releases hold the Store mutex and check
+/// admission, which was closed before the drain began, so an empty reading is
+/// final. The pool and worker legs are one-shot proofs that cannot re-open,
+/// and they were already proved when the verdict was set.
 async fn hold_shutdown_owners<T>(
     owners: T,
     drain_error: &str,
     describe_held: impl Fn(&T) -> String,
-) -> ! {
-    // The awaited future owns this tuple forever. This intentionally has no
-    // retry or endpoint contact; the interval only logs.
-    let _retained_owners = owners;
-    let held_since = Instant::now();
-    let mut interval = tokio::time::interval(Duration::from_secs(5));
+    recheck: bool,
+    mut reverify: impl FnMut(&T) -> HoldRecheck,
+) -> bool {
+    let retained_owners = owners;
+    let held_since = tokio::time::Instant::now();
+    let mut rechecking = recheck;
+    let mut last_log: Option<tokio::time::Instant> = None;
+    let log_every = Duration::from_secs(5);
+    let tick = if rechecking {
+        Duration::from_millis(250)
+    } else {
+        log_every
+    };
+    let mut interval = tokio::time::interval(tick);
     loop {
         interval.tick().await;
-        tracing::warn!(
-            shutdown_outcome = "cleanup_unproved_holding",
-            held_for_secs = held_since.elapsed().as_secs(),
-            drain_error = %drain_error,
-            held = %describe_held(&_retained_owners),
-            "daemon still holding shutdown custody owners"
-        );
+        if rechecking {
+            // A panicking re-check keeps holding: unwinding would drop custody.
+            let verdict = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                reverify(&retained_owners)
+            }))
+            .unwrap_or_else(|_| {
+                tracing::error!("shutdown hold re-check panicked; the hold keeps custody");
+                HoldRecheck::StillHeld
+            });
+            match verdict {
+                HoldRecheck::Cleared => {
+                    tracing::warn!(
+                        shutdown_outcome = "cleanup_reproved",
+                        held_for_secs = held_since.elapsed().as_secs(),
+                        held = %describe_held(&retained_owners),
+                        "launch owners unwound after the drain deadline; shutdown custody is released"
+                    );
+                    return true;
+                }
+                HoldRecheck::StopRechecking => {
+                    rechecking = false;
+                    tracing::error!(
+                        shutdown_outcome = "cleanup_unproved",
+                        "stop is no longer in normal mode; the hold stops re-checking and holds"
+                    );
+                }
+                HoldRecheck::StillHeld => {}
+            }
+        }
+        if last_log.is_none_or(|at| at.elapsed() >= log_every) {
+            last_log = Some(tokio::time::Instant::now());
+            tracing::warn!(
+                shutdown_outcome = "cleanup_unproved_holding",
+                held_for_secs = held_since.elapsed().as_secs(),
+                drain_error = %drain_error,
+                rechecking,
+                held = %describe_held(&retained_owners),
+                "daemon still holding shutdown custody owners"
+            );
+        }
     }
 }
 
@@ -3342,6 +3427,7 @@ async fn complete_shutdown_drain<T>(
     prior_daemon_result: &Result<()>,
     custody: &mut Option<T>,
     describe_held: impl Fn(&T) -> String,
+    reverify: impl FnMut(&T) -> HoldRecheck,
 ) {
     match shutdown_drain_disposition(drain, prior_daemon_result) {
         ShutdownDrainDisposition::Drained => {
@@ -3373,21 +3459,20 @@ async fn complete_shutdown_drain<T>(
         ShutdownDrainDisposition::HoldUnproved {
             drain_error,
             prior_daemon_error,
+            recheck,
         } => {
             tracing::error!(
                 shutdown_outcome = "cleanup_unproved",
                 drain_error = %drain_error,
                 prior_daemon_error = ?prior_daemon_error,
+                recheck,
                 "daemon remains alive holding persistent-session cleanup custody"
             );
-            hold_shutdown_owners(
-                custody
-                    .take()
-                    .expect("shutdown custody owner remains present until drain disposition"),
-                &drain_error,
-                describe_held,
-            )
-            .await;
+            let owners = custody
+                .take()
+                .expect("shutdown custody owner remains present until drain disposition");
+            // Recovery drops the owners inside the hold when it returns.
+            hold_shutdown_owners(owners, &drain_error, describe_held, recheck, reverify).await;
         }
     }
 }
@@ -5691,6 +5776,8 @@ async fn run(
             let drain_result = map_shutdown_drain_join(drain_task.await)
                 .map(|outcome| composition.record_latched_drain_facts(outcome));
             let mut custody = Some((held_state, &*composition));
+            let recheck_latch = composition.service_stop.drain_latch();
+            let mut recheck_mode = DrainMode::Normal;
             complete_shutdown_drain(drain_result, &result, &mut custody, |(state, _)| {
                 let attached = state.state_store.attached_process_snapshot();
                 let in_process = state
@@ -5698,15 +5785,20 @@ async fn run(
                     .active_in_process_handler_controls()
                     .map(|handlers| handlers.len().to_string())
                     .unwrap_or_else(|error| format!("unreadable: {error}"));
+                let launch_owner_threads = state
+                    .state_store
+                    .active_launch_owner_threads()
+                    .map(|threads| format!("{threads:?}"))
+                    .unwrap_or_else(|error| format!("unreadable: {error}"));
                 format!(
-                    "launch_owners={} attached_thread_ids={:?} in_process_handlers={in_process}",
+                    "attached={} attached_thread_ids={:?} launch_owner_threads={launch_owner_threads} in_process_handlers={in_process}",
                     attached.len(),
                     attached
                         .iter()
                         .map(|a| a.thread_id.as_str())
                         .collect::<Vec<_>>()
                 )
-            })
+            }, |(state, _)| recheck_registry_legs(state, &recheck_latch, &mut recheck_mode))
             .await;
             drop(custody);
             #[cfg(feature = "scheduling")]
@@ -7391,6 +7483,13 @@ async fn drain_running_threads(state: &AppState, latch: &DrainLatch) -> DrainOut
     let persistent_session_workers_drained =
         drain_persistent_session_workers(state, latch, &mut mode, &mut deferred).await;
 
+    // Worst case before this deadline is set: the external-import drain waits
+    // up to the graceful grace, the pool drain up to the same grace plus its
+    // kill proofs, and each exclusive worker is reaped through its own kill
+    // proof with no shared cap. The kill and in-process legs below get their
+    // grace from this point, so a stop can take roughly three graces before
+    // the owner wait even begins; the owner budget is capped for the force-stop
+    // window of the supervisor, not for those earlier legs.
     let drain_deadline = Instant::now()
         .checked_add(Duration::from_secs(
             process::MAX_GRACEFUL_SHUTDOWN_GRACE_SECS,
@@ -7413,7 +7512,7 @@ async fn drain_running_threads(state: &AppState, latch: &DrainLatch) -> DrainOut
         );
     }
 
-    const HARD_KILL_PROOF_RESERVE: Duration = Duration::from_millis(250);
+    const HARD_KILL_PROOF_RESERVE: Duration = process::HARD_KILL_PROOF_RESERVE;
     let mut pending = Vec::with_capacity(attached.len());
     for item in attached {
         let kill_identity = item.identity.clone();
@@ -7552,11 +7651,13 @@ async fn drain_running_threads(state: &AppState, latch: &DrainLatch) -> DrainOut
     // Killing a runtime wakes its launch future, which unwinds and releases its
     // claim and the AppState clones it holds. The live Store can close only
     // once those futures are gone, and nothing else awaits them, so wait here
-    // on the shared drain deadline. Admission is already closed, so no new
-    // launch can register and the set only shrinks.
+    // on the drain deadline extended by the launch-owner budget: the owner
+    // only unwinds after its runtime is killed, and the kill consumes the
+    // drain deadline itself. Admission is already closed, so no new launch can
+    // register and the set only shrinks.
     let launch_owners_drained = match state
         .state_store
-        .wait_for_launch_owners_quiesced(drain_deadline)
+        .wait_for_launch_owners_quiesced(launch_owner_wait_deadline(drain_deadline, Instant::now()))
         .await
     {
         Ok(()) => true,
@@ -7650,19 +7751,89 @@ async fn drain_running_threads(state: &AppState, latch: &DrainLatch) -> DrainOut
             }
         }
     };
-    let clean = external_candidate_imports_drained
-        && persistent_session_pool_drained
-        && persistent_session_workers_drained
-        && attached_snapshot_clean
-        && attached_drained
-        && in_process_drained
-        && launch_owners_drained
-        && in_process_authoritative_clean;
+    drain_verdict(
+        DrainLegs {
+            external_candidate_imports_drained,
+            persistent_session_pool_drained,
+            persistent_session_workers_drained,
+            attached_snapshot_clean,
+            attached_drained,
+            in_process_drained,
+            in_process_authoritative_clean,
+            launch_owners_drained,
+        },
+        mode,
+        deferred,
+    )
+}
+
+/// The legs of a finished drain, each true when proved.
+#[derive(Clone, Copy)]
+struct DrainLegs {
+    external_candidate_imports_drained: bool,
+    persistent_session_pool_drained: bool,
+    persistent_session_workers_drained: bool,
+    attached_snapshot_clean: bool,
+    attached_drained: bool,
+    in_process_drained: bool,
+    in_process_authoritative_clean: bool,
+    launch_owners_drained: bool,
+}
+
+/// Selects the drain outcome from its legs. Only a Normal stop whose sole
+/// open leg is the launch-owner wait may recover later; any other false leg,
+/// or a Latched stop, is plain `Unproved`.
+fn drain_verdict(legs: DrainLegs, mode: DrainMode, deferred: DeferredRows) -> DrainOutcome {
+    let other_legs_clean = legs.external_candidate_imports_drained
+        && legs.persistent_session_pool_drained
+        && legs.persistent_session_workers_drained
+        && legs.attached_snapshot_clean
+        && legs.attached_drained
+        && legs.in_process_drained
+        && legs.in_process_authoritative_clean;
+    let clean = other_legs_clean && legs.launch_owners_drained;
     match (clean, mode) {
+        (false, DrainMode::Normal) if other_legs_clean => DrainOutcome::UnprovedLaunchOwnersOnly,
         (false, _) => DrainOutcome::Unproved,
         (true, DrainMode::Normal) => DrainOutcome::Clean,
         (true, DrainMode::Latched) => DrainOutcome::ProcessCleanRowsDeferred(deferred),
     }
+}
+
+/// One hold re-read of the registry legs. Fails closed: an unreadable or
+/// poisoned registry is held, never read as empty. The verdict is recovered
+/// only if the stop was in Normal mode before and after the read, because a
+/// latched stop must record facts this verdict never wrote.
+fn recheck_registry_legs(
+    state: &AppState,
+    latch: &DrainLatch,
+    mode: &mut DrainMode,
+) -> HoldRecheck {
+    if latch.refresh(mode) == DrainMode::Latched {
+        return HoldRecheck::StopRechecking;
+    }
+    let cleared = registry_legs_clear(state);
+    if latch.refresh(mode) == DrainMode::Latched {
+        return HoldRecheck::StopRechecking;
+    }
+    if cleared {
+        HoldRecheck::Cleared
+    } else {
+        HoldRecheck::StillHeld
+    }
+}
+
+/// A registry reading counts as empty only when it was read and is empty. An
+/// unreadable or poisoned registry is never empty.
+fn registry_reading_empty<T, E>(reading: std::result::Result<Vec<T>, E>) -> bool {
+    matches!(reading, Ok(items) if items.is_empty())
+}
+
+fn registry_legs_clear(state: &AppState) -> bool {
+    registry_reading_empty(state.state_store.active_launch_owner_threads())
+        && registry_reading_empty(state.state_store.list_attached_thread_ids())
+        && registry_reading_empty(state.state_store.active_in_process_handler_controls())
+        && matches!(audit_ownerless_in_process_reservations(state), Ok(true))
 }
 
 async fn drain_external_candidate_imports(state: &AppState) -> bool {
@@ -9543,11 +9714,15 @@ mod shutdown_mapping_tests {
 
 #[cfg(test)]
 mod shutdown_custody_tests {
-    use super::{DrainOutcome, complete_shutdown_drain, map_shutdown_drain_join};
+    use super::{
+        DeferredRows, DrainLegs, DrainMode, DrainOutcome, HoldRecheck, complete_shutdown_drain,
+        drain_verdict, launch_owner_wait_deadline, map_shutdown_drain_join, registry_reading_empty,
+    };
     use std::future::Future as _;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::task::{Context, Poll, Wake, Waker};
+    use std::time::{Duration, Instant};
 
     struct DropObserved(Arc<AtomicBool>);
 
@@ -9573,6 +9748,7 @@ mod shutdown_custody_tests {
             &prior,
             &mut custody,
             |_| String::new(),
+            |_| HoldRecheck::StillHeld,
         ));
         let waker = Waker::from(Arc::new(NoopWake));
         let mut context = Context::from_waker(&waker);
@@ -9594,6 +9770,7 @@ mod shutdown_custody_tests {
             &prior,
             &mut custody,
             |_| String::new(),
+            |_| HoldRecheck::StillHeld,
         ));
         let waker = Waker::from(Arc::new(NoopWake));
         let mut context = Context::from_waker(&waker);
@@ -9608,12 +9785,228 @@ mod shutdown_custody_tests {
         let prior = Err(anyhow::anyhow!("listener failed first"));
         let dropped = Arc::new(AtomicBool::new(false));
         let mut custody = Some(DropObserved(Arc::clone(&dropped)));
-        complete_shutdown_drain(Ok(DrainOutcome::Clean), &prior, &mut custody, |_| {
-            String::new()
-        })
+        complete_shutdown_drain(
+            Ok(DrainOutcome::Clean),
+            &prior,
+            &mut custody,
+            |_| String::new(),
+            |_| HoldRecheck::StillHeld,
+        )
         .await;
         assert!(custody.is_none());
         assert!(dropped.load(Ordering::Acquire));
+    }
+
+    /// Runs the hold for `window` against a scripted re-check and reports
+    /// whether custody was released and how many re-checks ran.
+    async fn run_hold(
+        outcome: DrainOutcome,
+        window: Duration,
+        mut script: impl FnMut(usize) -> HoldRecheck,
+    ) -> (bool, usize) {
+        let prior = Ok(());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut custody = Some(DropObserved(Arc::clone(&dropped)));
+        let calls = std::cell::Cell::new(0usize);
+        let finished = tokio::time::timeout(
+            window,
+            complete_shutdown_drain(
+                Ok(outcome),
+                &prior,
+                &mut custody,
+                |_| String::new(),
+                |_| {
+                    let n = calls.get();
+                    calls.set(n + 1);
+                    script(n)
+                },
+            ),
+        )
+        .await
+        .is_ok();
+        (finished && dropped.load(Ordering::Acquire), calls.get())
+    }
+
+    #[tokio::test]
+    async fn normal_launch_owner_hold_recovers_and_releases_custody() {
+        let (released, calls) = run_hold(
+            DrainOutcome::UnprovedLaunchOwnersOnly,
+            Duration::from_secs(5),
+            |n| {
+                if n < 2 {
+                    HoldRecheck::StillHeld
+                } else {
+                    HoldRecheck::Cleared
+                }
+            },
+        )
+        .await;
+        assert!(released);
+        assert_eq!(calls, 3);
+    }
+
+    #[tokio::test]
+    async fn unreadable_registry_stays_held() {
+        assert!(!registry_reading_empty::<String, _>(Err("poisoned")));
+        assert!(!registry_reading_empty::<String, &str>(Ok(vec![
+            "t".to_owned()
+        ])));
+        assert!(registry_reading_empty::<String, &str>(Ok(Vec::new())));
+        // A re-check that reads the registry as unreadable reports held.
+        let (released, calls) = run_hold(
+            DrainOutcome::UnprovedLaunchOwnersOnly,
+            Duration::from_millis(900),
+            |_| HoldRecheck::StillHeld,
+        )
+        .await;
+        assert!(!released);
+        assert!(calls >= 2);
+    }
+
+    #[tokio::test]
+    async fn normal_to_latched_flip_stops_rechecking_and_holds() {
+        let (released, calls) = run_hold(
+            DrainOutcome::UnprovedLaunchOwnersOnly,
+            Duration::from_millis(1200),
+            |n| {
+                if n == 1 {
+                    HoldRecheck::StopRechecking
+                } else {
+                    HoldRecheck::StillHeld
+                }
+            },
+        )
+        .await;
+        assert!(!released);
+        assert_eq!(calls, 2, "no re-check runs after the flip");
+    }
+
+    #[tokio::test]
+    async fn latched_or_plain_unproved_never_rechecks() {
+        let (released, calls) =
+            run_hold(DrainOutcome::Unproved, Duration::from_millis(700), |_| {
+                HoldRecheck::Cleared
+            })
+            .await;
+        assert!(!released);
+        assert_eq!(calls, 0);
+    }
+
+    #[tokio::test]
+    async fn coordinator_error_never_rechecks() {
+        let prior = Ok(());
+        let mut custody = Some(DropObserved(Arc::new(AtomicBool::new(false))));
+        let finished = tokio::time::timeout(
+            Duration::from_millis(700),
+            complete_shutdown_drain(
+                Err("coordinator failed".to_owned()),
+                &prior,
+                &mut custody,
+                |_| String::new(),
+                |_| HoldRecheck::Cleared,
+            ),
+        )
+        .await
+        .is_ok();
+        assert!(!finished);
+    }
+
+    #[test]
+    fn launch_owner_wait_deadline_boundaries() {
+        let budget = ryeos_app::process::LAUNCH_OWNER_UNWIND_BUDGET;
+        let base = Instant::now();
+        // Before the drain deadline: the budget starts at the deadline.
+        assert_eq!(
+            launch_owner_wait_deadline(base + Duration::from_secs(2), base),
+            base + Duration::from_secs(2) + budget
+        );
+        // Exactly at the deadline.
+        assert_eq!(launch_owner_wait_deadline(base, base), base + budget);
+        // Past the deadline: the budget starts at now, never earlier.
+        let late = base + Duration::from_secs(3);
+        assert_eq!(launch_owner_wait_deadline(base, late), late + budget);
+    }
+
+    fn all_legs() -> DrainLegs {
+        DrainLegs {
+            external_candidate_imports_drained: true,
+            persistent_session_pool_drained: true,
+            persistent_session_workers_drained: true,
+            attached_snapshot_clean: true,
+            attached_drained: true,
+            in_process_drained: true,
+            in_process_authoritative_clean: true,
+            launch_owners_drained: true,
+        }
+    }
+
+    #[test]
+    fn drain_verdict_recovers_only_from_the_launch_owner_leg_alone() {
+        let verdict = |legs, mode| drain_verdict(legs, mode, DeferredRows::default());
+        assert!(matches!(
+            verdict(all_legs(), DrainMode::Normal),
+            DrainOutcome::Clean
+        ));
+        assert!(matches!(
+            verdict(all_legs(), DrainMode::Latched),
+            DrainOutcome::ProcessCleanRowsDeferred(_)
+        ));
+        let mut only_owners = all_legs();
+        only_owners.launch_owners_drained = false;
+        assert!(matches!(
+            verdict(only_owners, DrainMode::Normal),
+            DrainOutcome::UnprovedLaunchOwnersOnly
+        ));
+        assert!(matches!(
+            verdict(only_owners, DrainMode::Latched),
+            DrainOutcome::Unproved
+        ));
+        let others: [fn(&mut DrainLegs); 7] = [
+            |l| l.external_candidate_imports_drained = false,
+            |l| l.persistent_session_pool_drained = false,
+            |l| l.persistent_session_workers_drained = false,
+            |l| l.attached_snapshot_clean = false,
+            |l| l.attached_drained = false,
+            |l| l.in_process_drained = false,
+            |l| l.in_process_authoritative_clean = false,
+        ];
+        for break_leg in others {
+            for owners_drained in [true, false] {
+                for mode in [DrainMode::Normal, DrainMode::Latched] {
+                    let mut legs = all_legs();
+                    break_leg(&mut legs);
+                    legs.launch_owners_drained = owners_drained;
+                    assert!(
+                        matches!(verdict(legs, mode), DrainOutcome::Unproved),
+                        "another false leg is plain Unproved"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn panicking_recheck_keeps_custody() {
+        let (released, calls) = run_hold(
+            DrainOutcome::UnprovedLaunchOwnersOnly,
+            Duration::from_millis(900),
+            |_| panic!("injected re-check panic"),
+        )
+        .await;
+        assert!(!released);
+        assert!(calls >= 2, "the hold kept re-checking after the panic");
+    }
+
+    #[test]
+    fn launch_owner_budget_fits_below_the_smallest_force_stop_window() {
+        let budget = ryeos_app::process::LAUNCH_OWNER_UNWIND_BUDGET;
+        let grace = Duration::from_secs(ryeos_app::process::MAX_GRACEFUL_SHUTDOWN_GRACE_SECS);
+        // runit force-stops a service 10 s after the stop request. This only
+        // pins the owner wait itself: the import, pool and worker drains that
+        // run before the kill deadline can take about three graces on their
+        // own, and a stop that overruns the window ends as Unproved.
+        assert!(grace + budget < Duration::from_secs(10));
+        assert!(budget > Duration::ZERO);
     }
 }
 

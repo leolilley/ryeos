@@ -713,6 +713,13 @@ impl RyeOsCore {
                             self.bump_generation();
                             return Vec::new();
                         }
+                        // An attention response of another contract version is
+                        // refused whole too; its counts and rows are dropped.
+                        if let Some(message) = self.attention_refusal(request, &data) {
+                            self.refuse_attention_source(tile_id, result_id, message);
+                            self.bump_generation();
+                            return Vec::new();
+                        }
                         // An incremental window update is applied to the
                         // stored window; one the window cannot absorb is
                         // replaced by a full refetch.
@@ -757,6 +764,48 @@ impl RyeOsCore {
 
         self.bump_generation();
         raw_followup
+    }
+
+    /// Why a response to a signed `attention` source is not one this client can
+    /// read: only the contract version it speaks is accepted.
+    fn attention_refusal(
+        &self,
+        request: &crate::ui::binding::UiBindingRequest,
+        data: &serde_json::Value,
+    ) -> Option<String> {
+        let crate::ui::binding::UiBindingCoordinate::Source { view_ref, channel } =
+            &request.coordinate
+        else {
+            return None;
+        };
+        let context = self
+            .binding_attachments
+            .get(&request.binding_attachment_id)?;
+        let role = (context.descriptor.root_ref == *view_ref)
+            .then(|| context.surface_sources.get(channel))
+            .flatten()
+            .or_else(|| context.views.get(view_ref)?.sources.get(channel))
+            .and_then(|source| source.role.as_deref());
+        if role != Some("attention") {
+            return None;
+        }
+        crate::ui::dto::RyeOsAttentionDto::from_response(data).err()
+    }
+
+    /// An attention response this client cannot read: nothing of it is stored,
+    /// the counts and rows held before are dropped, and the source reads as
+    /// failed with the reason.
+    fn refuse_attention_source(&mut self, source_key: &str, result_id: u64, message: String) {
+        self.data.sources.remove(source_key);
+        self.data.attention = None;
+        self.rebuild_overlay_rows();
+        self.data
+            .source_stored_epoch
+            .insert(source_key.to_string(), result_id);
+        self.data.source_errors.insert(
+            source_key.to_string(),
+            crate::ui::effect::RyeOsUiError::definite("attention_contract_mismatch", message),
+        );
     }
 
     /// Project signed source roles without admitting another executable source.
@@ -804,13 +853,15 @@ impl RyeOsCore {
             // The queue is the principal's, not a project's, so any admitted
             // Surface may report it.
             Some("attention") => {
-                if let Ok(value) = serde_json::from_value(data.clone()) {
+                if let Ok(value) = crate::ui::dto::RyeOsAttentionDto::from_response(data) {
                     self.data.attention = Some(value);
+                    self.rebuild_overlay_rows();
                 }
             }
             Some("projects") => {
                 if let Ok(value) = serde_json::from_value(data.clone()) {
                     self.data.projects = Some(value);
+                    self.rebuild_overlay_rows();
                 }
             }
             // File reads remain under their exact source-instance key in
@@ -1447,6 +1498,7 @@ mod tests {
                 ok: true,
                 kind: RyeOsEffectResultKind::SourceData,
                 data: Some(serde_json::json!({
+                    "schema_version": "ryeos.ui.attention.v3",
                     "attention": [],
                     "counts": {"total": 3, "by_kind": [
                         {"kind": "approval", "label": "approvals", "tone": "warn", "count": 3}
@@ -1463,6 +1515,68 @@ mod tests {
         assert!(attention_fetch(&core.effects_for_hint("thread")).is_some());
         assert!(attention_fetch(&core.effects_for_hint("activity")).is_some());
         assert!(attention_fetch(&core.effects_for_hint("project")).is_none());
+    }
+
+    #[test]
+    fn an_attention_response_of_another_version_is_refused_with_no_legacy_reader() {
+        let mut session = writable_session();
+        let crate::presentation::UiCompositionDefinition::Surface { surface } =
+            &mut session.binding_attachments[0].presentation.definition
+        else {
+            panic!("Surface fixture required")
+        };
+        surface.sources = serde_json::from_value(serde_json::json!({
+            "attention": {
+                "ref": "service:ui/ryeos-ui/work/attention",
+                "role": "attention",
+                "params": {"limit": 25}
+            }
+        }))
+        .unwrap();
+        let mut core = core(session);
+        let attention_fetch = |effects: &[RyeOsEffect]| {
+            effects
+                .iter()
+                .find(|effect| {
+                    matches!(
+                        &effect.kind,
+                        RyeOsEffectKind::FetchSource { request, .. }
+                            if matches!(
+                                &request.coordinate,
+                                crate::ui::binding::UiBindingCoordinate::Source { channel, .. }
+                                    if channel == "attention"
+                            )
+                    )
+                })
+                .map(|effect| effect.id)
+        };
+        for (label, version) in [("v2", Some("ryeos.ui.attention.v2")), ("unversioned", None)] {
+            let id = attention_fetch(&core.initial_effects()).expect("surface source fetch");
+            let mut data = serde_json::json!({
+                "attention": [],
+                "counts": {"total": 3, "by_kind": []},
+            });
+            if let Some(version) = version {
+                data["schema_version"] = version.into();
+            }
+            core.dispatch(RyeOsEvent::EffectResult {
+                result: RyeOsEffectResult {
+                    id,
+                    ok: true,
+                    kind: RyeOsEffectResultKind::SourceData,
+                    data: Some(data),
+                    error: None,
+                },
+            });
+            assert!(core.data.attention.is_none(), "{label}: nothing is read");
+            assert!(
+                core.data
+                    .source_errors
+                    .values()
+                    .any(|error| error.code == "attention_contract_mismatch"),
+                "{label}: the refusal is a failed source"
+            );
+        }
     }
 
     #[test]
@@ -1544,6 +1658,7 @@ mod tests {
                 ok: true,
                 kind: RyeOsEffectResultKind::SourceData,
                 data: Some(serde_json::json!({
+                    "schema_version": "ryeos.ui.attention.v3",
                     "attention": [],
                     "counts": {"total": 0, "by_kind": []},
                 })),

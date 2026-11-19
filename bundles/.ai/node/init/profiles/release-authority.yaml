@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-17T01:21:17Z:95cbcb6a44fc654a8985928972361592dadab2a313af32e9b753f5bb970072cf:MDm3RztYRP24VdmW5nHoRWmRBixTcl8NFF2crindushxEQYsf2ay7N1YZwNWhklHdVfRRZtS81Q19dM1f5bEBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-19T05:44:26Z:bb249e4d2fda1d407a559a55b537c6c85aa8863edf17218314057633e59ac576:M8GcyQRjGergtC2L4YTh0vX/gUDHl+FTvkO0utfQmrg8BjP+RunmAvstmWNR8eBVpaTuyyJNt7XVHwaH57B2Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - bundle-release
@@ -422,6 +422,7 @@ policies:
       - ".svn/"
       - ".tmp/"
       - ".venv/"
+      - "/.ai/node/machines/"
       - "/.ai/node/remotes/"
       - "/.ai/state/"
       # Exclude this project's build output, not package source directories

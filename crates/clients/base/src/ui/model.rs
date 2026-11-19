@@ -434,6 +434,9 @@ pub struct RyeOsUiState {
     pub top_status_visible: bool,
     #[serde(default = "default_true")]
     pub bottom_status_visible: bool,
+    /// The attention overlay: open state, selection and the rows it lists.
+    #[serde(default)]
+    pub overlay: super::view_model::RyeOsOverlayVm,
 }
 
 impl Default for RyeOsUiState {
@@ -451,6 +454,7 @@ impl Default for RyeOsUiState {
             // works if we decide on content later.
             top_status_visible: false,
             bottom_status_visible: true,
+            overlay: Default::default(),
         }
     }
 }
@@ -2319,6 +2323,92 @@ impl RyeOsCore {
         );
     }
 
+    /// Rebuild the overlay rows from the retained attention response and the
+    /// known projects. Open state stays; the selection stays on its index while
+    /// that index still names a row, and moves to the last row when the list
+    /// shrank under it.
+    pub(crate) fn rebuild_overlay_rows(&mut self) {
+        use super::dto::RyeOsAttentionItemDto;
+        use super::event::RyeOsUiIntent;
+        use super::view_model::{RyeOsOverlayActionVm, RyeOsOverlayRowVm};
+        let projects = self.data.projects.as_ref();
+        let where_ = |project_root: Option<&str>| -> String {
+            let Some(root) = project_root.filter(|root| !root.is_empty()) else {
+                return "this node".to_string();
+            };
+            projects
+                .and_then(|known| known.projects.iter().find(|project| project.root == root))
+                .map(|project| project.name.clone())
+                .filter(|name| !name.is_empty())
+                .or_else(|| {
+                    std::path::Path::new(root)
+                        .file_name()
+                        .map(|tail| tail.to_string_lossy().into_owned())
+                })
+                .unwrap_or_else(|| "this node".to_string())
+        };
+        let row = |item: &RyeOsAttentionItemDto, running: bool| -> RyeOsOverlayRowVm {
+            let mut actions = Vec::new();
+            if running || item.actions.get("open").copied().unwrap_or(false) {
+                actions.push(RyeOsOverlayActionVm {
+                    keys: "enter".to_string(),
+                    word: "open".to_string(),
+                    intent: RyeOsUiIntent::OpenAttentionItem {
+                        chain_root_id: item.subject.chain_root_id.clone(),
+                    },
+                });
+            }
+            if !running && item.actions.get("acknowledge").copied().unwrap_or(false) {
+                actions.push(RyeOsOverlayActionVm {
+                    keys: "a".to_string(),
+                    word: "acknowledge".to_string(),
+                    intent: RyeOsUiIntent::AcknowledgeAttentionItem {
+                        item_id: item.id.clone(),
+                    },
+                });
+            }
+            RyeOsOverlayRowVm {
+                id: item.id.clone(),
+                title: item.title.clone(),
+                where_: where_(item.project_root.as_deref()),
+                tone: super::view_model::tone_from_name(Some(&item.tone)),
+                since_ms: item.since_ms,
+                actions,
+            }
+        };
+        let (needs_you, running, needs_you_count, running_count) = match &self.data.attention {
+            Some(attention) => (
+                attention
+                    .items
+                    .iter()
+                    .map(|item| row(item, false))
+                    .collect(),
+                attention
+                    .running
+                    .items
+                    .iter()
+                    .map(|item| row(item, true))
+                    .collect(),
+                Some(attention.counts.total),
+                Some(attention.running.count),
+            ),
+            None => (Vec::new(), Vec::new(), None, None),
+        };
+        let overlay = &mut self.ui.overlay;
+        overlay.needs_you = needs_you;
+        overlay.running = running;
+        overlay.needs_you_count = needs_you_count;
+        overlay.running_count = running_count;
+        let rows = overlay.row_count();
+        overlay.selected = match (overlay.open, overlay.selected, rows) {
+            (_, _, 0) => None,
+            (true, None, _) => Some(0),
+            (_, Some(index), rows) => Some(index.min(rows - 1)),
+            (false, None, _) => None,
+        };
+        self.bump_generation();
+    }
+
     pub(crate) fn rebuild_timeline_source_cache(&mut self, source_key: &str) {
         let previous = self.data.timeline_sources.remove(source_key);
         let Some(instance) = super::source_key::RyeOsSourceInstanceKey::decode(source_key)
@@ -2751,6 +2841,7 @@ impl RyeOsCore {
         let timeline_keys = self.focused_timeline_key_state();
 
         super::keymap::RyeOsKeyContext {
+            overlay_open: self.ui.overlay.open,
             dialog_open: self.focused_view_instance_key().is_some_and(|key| {
                 self.presentation.as_ref().is_some_and(|presentation| {
                     presentation

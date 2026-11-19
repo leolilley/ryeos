@@ -49,6 +49,11 @@ pub(super) struct SpawnRuntimeParams<'a> {
     /// queueing and launch preparation cannot restart or extend the remaining
     /// window.
     pub aggregate_deadline_at_ms: Option<i64>,
+    /// The same absolute end when this launch is a continuation, resume,
+    /// follow or same-thread recovery successor; `None` for a fresh launch. A
+    /// successor that finds the end passed at the spawn boundary settles as a
+    /// deadline stop instead of a failed launch.
+    pub successor_end_at_ms: Option<i64>,
     pub callback: &'a EnvelopeCallback,
     pub thread_id: &'a str,
     pub launch_owner: &'a str,
@@ -224,6 +229,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         rearm_native_resume_budget_after_attach,
         selected_resources,
         stop_policy,
+        successor_end_at_ms,
     } = params;
     // Only this bounded protocol/environment construction precedes all
     // isolation setup and process contact. An arbitrary error returned later
@@ -355,7 +361,28 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         })?;
         Ok((spec, request, isolation_daemon_socket_path))
     })()
-    .map_err(|error| settle_unattached_runtime_failure(state, thread_id, launch_owner, error))?;
+    .map_err(|error| {
+        let elapsed_end = error
+            .downcast_ref::<RunEndElapsedAtSpawn>()
+            .map(|elapsed| elapsed.end_at_ms);
+        let settlement = settlement_for(elapsed_end, successor_end_at_ms);
+        let error = match (&settlement, elapsed_end) {
+            (UnattachedSettlement::DeadlineElapsed { .. }, _) => deadline_elapsed_refusal(),
+            // A fresh launch keeps the plain budget refusal.
+            (UnattachedSettlement::Failed, Some(_)) => {
+                anyhow::Error::new(DispatchError::LaunchPreparationFailed {
+                    code: "budget_exhausted".to_owned(),
+                    message: "aggregate execution duration elapsed before runtime spawn"
+                        .to_owned(),
+                    classification: "policy".to_owned(),
+                    binding: None,
+                    details: Box::new(BTreeMap::new()),
+                })
+            }
+            (UnattachedSettlement::Failed, None) => error,
+        };
+        settle_unattached_runtime(state, thread_id, launch_owner, error, settlement)
+    })?;
     let isolation_item_ref = item_ref.to_string();
     let mut admitted_mounts = external_realizations
         .as_ref()
@@ -795,6 +822,56 @@ fn settle_unattached_runtime_failure(
     launch_owner: &str,
     error: anyhow::Error,
 ) -> anyhow::Error {
+    settle_unattached_runtime(
+        state,
+        thread_id,
+        launch_owner,
+        error,
+        UnattachedSettlement::Failed,
+    )
+}
+
+/// How an unattached launch's thread is finalized.
+enum UnattachedSettlement {
+    /// `failed`, with the error's code as the outcome.
+    Failed,
+    /// The run end passed before anything spawned: `timed_out` / `deadline`
+    /// in the elapsed-before-launch phase.
+    DeadlineElapsed { end_at_ms: i64 },
+}
+
+/// A successor whose run end passed before spawn settles as a deadline stop;
+/// anything else, including a successor without an end, settles `failed`.
+fn settlement_for(
+    elapsed_end_at_ms: Option<i64>,
+    successor_end_at_ms: Option<i64>,
+) -> UnattachedSettlement {
+    match (elapsed_end_at_ms, successor_end_at_ms) {
+        (Some(end_at_ms), Some(_)) => UnattachedSettlement::DeadlineElapsed { end_at_ms },
+        _ => UnattachedSettlement::Failed,
+    }
+}
+
+/// The typed refusal a successor returns when its end passed before launch.
+fn deadline_elapsed_refusal() -> anyhow::Error {
+    anyhow::Error::new(DispatchError::LaunchPreparationFailed {
+        code: "deadline_elapsed".to_owned(),
+        message: "the run deadline passed before this thread could launch; it settled as a \
+                  deadline stop"
+            .to_owned(),
+        classification: "policy".to_owned(),
+        binding: None,
+        details: Box::new(BTreeMap::new()),
+    })
+}
+
+fn settle_unattached_runtime(
+    state: &ryeos_app::state::AppState,
+    thread_id: &str,
+    launch_owner: &str,
+    error: anyhow::Error,
+    how: UnattachedSettlement,
+) -> anyhow::Error {
     let settlement = (|| -> Result<()> {
         // Shutdown owns recovery once attachment admission closes. An active
         // request must not erase the coordinator's retained obligations.
@@ -806,27 +883,39 @@ fn settle_unattached_runtime_failure(
             .assert_launch_owner(thread_id, launch_owner)?;
         if !super::super::process_attachment::finalize_requested_stop_if_present(state, thread_id)?
         {
-            let code = error
-                .downcast_ref::<DispatchError>()
-                .map(DispatchError::code)
-                .unwrap_or("pre_runtime_failure");
-            if let Err(finalize_error) = state.threads.finalize_thread_owned(
-                &ryeos_app::thread_lifecycle::ThreadFinalizeParams {
-                    thread_id: thread_id.to_owned(),
-                    status: "failed".to_owned(),
-                    outcome_code: Some(code.to_owned()),
-                    result: None,
-                    error: Some(json!({"code": code, "message": format!("{error:#}")})),
-                    metadata: None,
-                    artifacts: Vec::new(),
-                    final_cost: None,
-                    summary_json: None,
-                },
-                launch_owner,
-            ) && !state
+            let finalize_params = match how {
+                UnattachedSettlement::Failed => {
+                    let code = error
+                        .downcast_ref::<DispatchError>()
+                        .map(DispatchError::code)
+                        .unwrap_or("pre_runtime_failure");
+                    ryeos_app::thread_lifecycle::ThreadFinalizeParams {
+                        thread_id: thread_id.to_owned(),
+                        status: "failed".to_owned(),
+                        outcome_code: Some(code.to_owned()),
+                        result: None,
+                        error: Some(json!({"code": code, "message": format!("{error:#}")})),
+                        metadata: None,
+                        artifacts: Vec::new(),
+                        final_cost: None,
+                        summary_json: None,
+                    }
+                }
+                UnattachedSettlement::DeadlineElapsed { end_at_ms } => {
+                    ryeos_app::run_deadline::elapsed_finalize_params(
+                        thread_id,
+                        ryeos_app::run_deadline::REASON_ELAPSED_BEFORE_LAUNCH,
+                        end_at_ms,
+                        lillux::time::timestamp_millis(),
+                    )
+                }
+            };
+            if let Err(finalize_error) = state
                 .threads
-                .get_thread(thread_id)?
-                .is_some_and(|thread| ryeos_app::state_store::is_terminal_status(&thread.status))
+                .finalize_thread_owned(&finalize_params, launch_owner)
+                && !state.threads.get_thread(thread_id)?.is_some_and(|thread| {
+                    ryeos_app::state_store::is_terminal_status(&thread.status)
+                })
             {
                 return Err(finalize_error);
             }
@@ -857,24 +946,50 @@ fn settle_unattached_runtime_failure(
     }
 }
 
+/// The run end passed before the runtime could spawn.
+#[derive(Debug)]
+struct RunEndElapsedAtSpawn {
+    end_at_ms: i64,
+}
+
+impl std::fmt::Display for RunEndElapsedAtSpawn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "aggregate execution duration elapsed before runtime spawn"
+        )
+    }
+}
+
+impl std::error::Error for RunEndElapsedAtSpawn {}
+
+/// `aggregate_end_at_ms` is the run's effective end (tree deadline less this
+/// execution's hold-back), the value launch admission compares against, so
+/// both clocks agree. An end at or before now is a `RunEndElapsedAtSpawn`.
 fn effective_runtime_timeout(
     execution_timeout_secs: u64,
-    aggregate_deadline_at_ms: Option<i64>,
+    aggregate_end_at_ms: Option<i64>,
+) -> Result<std::time::Duration> {
+    effective_runtime_timeout_at(
+        execution_timeout_secs,
+        aggregate_end_at_ms,
+        lillux::time::timestamp_millis(),
+    )
+}
+
+fn effective_runtime_timeout_at(
+    execution_timeout_secs: u64,
+    aggregate_end_at_ms: Option<i64>,
+    now_ms: i64,
 ) -> Result<std::time::Duration> {
     let execution = (execution_timeout_secs != 0)
         .then(|| std::time::Duration::from_secs(execution_timeout_secs));
-    let aggregate = aggregate_deadline_at_ms
-        .map(|deadline| {
-            let remaining_ms = deadline
-                .checked_sub(lillux::time::timestamp_millis())
+    let aggregate = aggregate_end_at_ms
+        .map(|end_at_ms| {
+            let remaining_ms = end_at_ms
+                .checked_sub(now_ms)
                 .filter(|remaining| *remaining > 0)
-                .ok_or_else(|| DispatchError::LaunchPreparationFailed {
-                    code: "budget_exhausted".to_owned(),
-                    message: "aggregate execution duration elapsed before runtime spawn".to_owned(),
-                    classification: "policy".to_owned(),
-                    binding: None,
-                    details: Box::new(BTreeMap::new()),
-                })?;
+                .ok_or(RunEndElapsedAtSpawn { end_at_ms })?;
             Ok::<_, anyhow::Error>(std::time::Duration::from_millis(u64::try_from(
                 remaining_ms,
             )?))
@@ -1182,6 +1297,72 @@ mod tests {
     fn a_run_end_that_has_passed_refuses_the_spawn() {
         let past = Some(lillux::time::timestamp_millis() - 1);
         assert!(effective_runtime_timeout(60, past).is_err());
+    }
+
+    fn elapsed_end(result: Result<std::time::Duration>) -> Option<i64> {
+        result
+            .unwrap_err()
+            .downcast_ref::<RunEndElapsedAtSpawn>()
+            .map(|elapsed| elapsed.end_at_ms)
+    }
+
+    #[test]
+    fn an_elapsed_run_end_is_a_typed_error_carrying_the_end() {
+        // Exactly at the end counts as elapsed, as launch admission does.
+        assert_eq!(
+            elapsed_end(effective_runtime_timeout_at(60, Some(1_000), 1_000)),
+            Some(1_000)
+        );
+        assert_eq!(
+            elapsed_end(effective_runtime_timeout_at(0, Some(1_000), 5_000)),
+            Some(1_000)
+        );
+        // Zero and negative ends are elapsed too.
+        assert_eq!(
+            elapsed_end(effective_runtime_timeout_at(60, Some(0), 1)),
+            Some(0)
+        );
+        assert_eq!(
+            elapsed_end(effective_runtime_timeout_at(60, Some(-5), 1)),
+            Some(-5)
+        );
+        // One millisecond left still spawns.
+        assert_eq!(
+            effective_runtime_timeout_at(0, Some(1_001), 1_000).unwrap(),
+            std::time::Duration::from_millis(1)
+        );
+    }
+
+    #[test]
+    fn only_a_successor_with_an_end_settles_as_a_deadline_stop() {
+        assert!(matches!(
+            settlement_for(Some(7), Some(7)),
+            UnattachedSettlement::DeadlineElapsed { end_at_ms: 7 }
+        ));
+        assert!(matches!(
+            settlement_for(Some(7), None),
+            UnattachedSettlement::Failed
+        ));
+        assert!(matches!(
+            settlement_for(None, Some(7)),
+            UnattachedSettlement::Failed
+        ));
+    }
+
+    #[test]
+    fn a_subtraction_overflow_is_the_elapsed_error() {
+        assert_eq!(
+            elapsed_end(effective_runtime_timeout_at(60, Some(i64::MIN), 1)),
+            Some(i64::MIN)
+        );
+    }
+
+    #[test]
+    fn a_far_end_is_bounded_by_the_segment_cap() {
+        assert_eq!(
+            effective_runtime_timeout_at(30, Some(i64::MAX), 0).unwrap(),
+            std::time::Duration::from_secs(30)
+        );
     }
 
     #[test]

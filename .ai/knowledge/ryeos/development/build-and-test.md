@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-18T23:37:00Z:24a2d0657a8c1ad1915f065d9ddc93046d9fe5d9100854d7ecc631fe78a9402f:NM9Ndz5ziU0cRXAkwq9kXt+nDnt0CiTxm5mdRG+k4mItuc8543eTjfHdLr3PmuJGjHOMNIoIkb7DDhCcrFWPAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-19T05:14:40Z:cddab1257bce3d33326ce1259cf74021508691ce3abfa0517c5c3ffd4e6dd615:6JLqKh4xT6r3AcWwfo7CnB0K/8s6MpsIMiFagVyAPkDdh/SBL0G7qKLwhFFCHvEoP05HGZANLnrLShQJj/teBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "build-and-test"
@@ -175,11 +175,33 @@ dispatched ref and bundle set, and uploads one artifact (kept 3 days):
 `ryeos-node-<set>-<sha12>.tar.zst` holding `manifest.json` (commit, bundle set,
 sha256 of each binary), `target/release/` (the binaries the installer copies)
 and `bundle-state.tar.zst` (the populated bundle state). Dispatch only works
-once the workflow file is on `main`. Dispatch, then find the run id:
+once the workflow file is on `main`. Inputs besides `bundle_set` and `label`:
+
+- `base` (`runner`, the default, or `bookworm`). `runner` builds on the
+  ubuntu-latest runner, so the binaries need that runner's glibc (2.39).
+  `bookworm` runs the populate and every Rust build as root in the pinned
+  `rust:1.95-slim-bookworm` image `Dockerfile.release` uses (checkout and target
+  directory mounted, no sccache), then proves the packed binaries start in the
+  pinned `debian:bookworm-slim` with no dev libraries (`ryeos --version`,
+  `ryeosd build-info --revision` equal to the 12-character commit, each extra
+  binary's `--help`) and that no binary needs a glibc symbol newer than 2.36.
+  Use `bookworm` for anything that runs in a Debian 12 container.
+- `extra_bins` (default empty): space-separated cargo packages built with
+  `cargo build --release -p <pkg>` in the same environment, for example
+  `ryeos-chat-stub`. Each must produce a binary of its own name or the job
+  fails. The binary rides in the same archive under `target/release/<name>` and
+  is listed in `manifest.json` (which then also records `base` and
+  `extra_bins`). After the unpack below, run `$d/target/release/ryeos-chat-stub
+  <script.yaml>`.
+
+The job summary also prints the glibc claim and the stub's location. Dispatch,
+then find the run id:
 
 ```bash
 gh workflow run remote-node-build.yml --repo leolilley/ryeos \
   --ref work/<branch> -f bundle_set=standard -f label=<thread>
+# Debian 12 compatible binaries plus the stub model server:
+#   -f base=bookworm -f extra_bins=ryeos-chat-stub
 gh run list --repo leolilley/ryeos --workflow remote-node-build.yml -L 3
 ```
 
