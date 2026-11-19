@@ -5980,9 +5980,10 @@ mod tests {
         ]});
         let usage = project_section(section("Usage"), &with_usage);
         assert_eq!(usage.len(), 2);
-        assert_eq!(usage[0].primary, "1200");
-        assert_eq!(usage[0].meta.as_deref(), Some("input tokens"));
-        assert_eq!(usage[1].primary, "0.5000");
+        assert_eq!(usage[0].primary, "input tokens");
+        assert_eq!(usage[0].meta.as_deref(), Some("1200"));
+        assert_eq!(usage[1].primary, "spend (USD)");
+        assert_eq!(usage[1].meta.as_deref(), Some("0.5000"));
 
         // Re-fetches on the selection facet; each section pulls the selected
         // thread via @facet, so an unset selection SUPPRESSES the fetch (D8)
