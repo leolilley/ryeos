@@ -125,6 +125,7 @@ pub mod standalone_native;
 pub mod state;
 pub mod state_store;
 pub mod stream_envelope;
+pub mod sync_apply_quarantine_report;
 pub mod temp_dir_guard;
 pub mod thread_lifecycle;
 pub mod vault;
