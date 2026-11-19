@@ -57,6 +57,11 @@ pub fn shortcut_entries() -> Vec<super::view_model::RyeOsShortcutEntryVm> {
         entry("Feed", "v", "Inspect the raw events behind the entry"),
         entry("Feed", "f", "Fold or unfold the cluster under the point"),
         entry("Feed", "r", "Retry a failed fetch in the focused view"),
+        entry(
+            "Feed",
+            "a / d",
+            "Answer the first pending ask with the key shown on its button",
+        ),
         entry("Views", "Alt+←", "Return from a drill-in view"),
         entry(
             "Input",
@@ -168,6 +173,9 @@ pub struct RyeOsKeyContext {
     pub focused_timeline_foldable: bool,
     /// The focused view's source fetch failed, so it can be retried.
     pub focused_source_failed: bool,
+    /// The focused timeline's first pending ask has an answer a key cap
+    /// names.
+    pub focused_dock_answer: bool,
     /// Capabilities of the focused semantic field, if the focused instance is
     /// one. The keymap consumes capabilities rather than widget names or
     /// project roles, so every renderer gets the same actions.
@@ -410,6 +418,15 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
                 && event.modifiers.none() =>
         {
             intent(RyeOsUiIntent::Refresh)
+        }
+        // The key caps on a docked ask's buttons answer it; never while typing.
+        RyeOsKey::Char(c)
+            if context.focused_dock_answer
+                && !context.input_focused
+                && event.modifiers.none_or_shift()
+                && c.is_alphanumeric() =>
+        {
+            ui(RyeOsUiEvent::AnswerDockAsk { ch: c })
         }
         RyeOsKey::ArrowUp if event.modifiers.ctrl_only() => {
             move_focused_tile(RyeOsStackMoveDirection::Up)
@@ -1217,6 +1234,48 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn dock_keys_answer_only_when_a_pending_ask_is_docked_and_nothing_is_typed() {
+        let docked = RyeOsKeyContext {
+            focused_dock_answer: true,
+            ..Default::default()
+        };
+        for ch in ['a', 'd', 'A', 'D'] {
+            let event = RyeOsKeyEvent {
+                key: RyeOsKey::Char(ch),
+                modifiers: RyeOsKeyModifiers::default(),
+            };
+            assert_eq!(
+                ryeos_key_command(event, docked),
+                ui(RyeOsUiEvent::AnswerDockAsk { ch })
+            );
+            assert_eq!(
+                ryeos_key_command(event, RyeOsKeyContext::default()),
+                RyeOsKeyCommand::Ignore
+            );
+            let typing = RyeOsKeyContext {
+                input_focused: true,
+                ..docked
+            };
+            assert_eq!(
+                ryeos_key_command(event, typing),
+                ui(RyeOsUiEvent::InsertInputChar { ch })
+            );
+        }
+        // Ctrl+D keeps paging the rows.
+        let page = RyeOsKeyEvent {
+            key: RyeOsKey::Char('d'),
+            modifiers: RyeOsKeyModifiers {
+                ctrl: true,
+                ..Default::default()
+            },
+        };
+        assert_eq!(
+            ryeos_key_command(page, docked),
+            RyeOsKeyCommand::MoveFocusedRowPage { direction: 1 }
+        );
     }
 
     #[test]

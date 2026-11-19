@@ -493,6 +493,7 @@ mod tests {
             completion: vec![],
             live_filter: true,
             text: "run".into(),
+            usage: None,
         };
         let mut surface = TextSurface::new(40, 10);
         draw_tile(

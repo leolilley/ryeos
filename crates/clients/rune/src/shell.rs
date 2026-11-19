@@ -1605,6 +1605,16 @@ pub fn composer(input: &RyeOsInputVm, local: &Local) -> El {
     if !local.narrow() {
         strip = strip.child(chip(input.hint.clone(), t.control_border()).shrink());
     }
+    // The conversation's usage is quiet text, not a chip.
+    if let Some(usage) = &input.usage {
+        strip = strip.child(
+            text(usage.clone())
+                .font(theme::TYPE_MICRO)
+                .color(t.ink_dim())
+                .truncate()
+                .min_w(0.0),
+        );
+    }
     strip = strip.child(send);
     let boxed = col()
         .w_full()
