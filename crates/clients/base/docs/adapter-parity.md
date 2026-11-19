@@ -81,6 +81,8 @@ producers of the same intents, not a second command vocabulary.
 | [x] `InvokeAffordance` | shared | shared | content-declared affordance |
 | [x] `ActivateLocalProjection` | shared | shared | guarded Rust-projected local row activation |
 | [x] `OpenView` | shared | shared | compiled view activation |
+| [x] `StageLauncherView` | shared | shared | Launcher row chosen with more than one place to go; the places show under the list and Esc closes them first. |
+| [x] `BeginRename` | shared | shared | Launcher rename commands hand the name to the client that edits text: Rune opens its inline field, the terminal edits it on its last line. |
 | [x] `OpenViewInNewTab` | shared | shared | Launcher row captures exact insertion tab/binding; existing retained InsertTab publishes only after ACK, with fresh required subjects. |
 | [x] `OpenCompositionInNewSurface` | shared | shared | Exact source tab/binding is recaptured portably; ordinary shared catalogue dialog invokes its signed composed-opening affordance. Admission remains ACK-gated. |
 | [x] `OpenSurfaceInNewPresentation` | shared | gap | Captures the exact selected Surface and each portable tab origin under ordinary signed admission. Only completed ACK reveals a prepared independent-document link; native document hosting remains unsupported. |
@@ -181,6 +183,12 @@ exact `InputAt` addresses; character-level events remain shared keymap paths.
 | [x] `SetTreeRowCollapsed` | shared | shared | shared keymap |
 | [x] `SetViewTreeItemCollapsed` | native | gap | Browser hierarchy button addresses exact visible mount and stable row identity; terminal uses focused tree-fold keys. |
 | [x] `ActivateFocused` | shared | shared | shared keymap |
+| [x] `ChooseLauncherPlace` | shared | shared | T and S while the launcher shows where a view can land; shared keymap |
+| [x] `RenameActive` | shared | shared | Alt+R renames the active view set, Alt+Shift+R the active Surface; shared keymap |
+| [x] `ResolveRename` | shared | shared | ends a requested rename: Rune hands it to its inline field, the terminal commits or abandons it |
+| [x] `RenameInsert` | shared | shared | core-edited rename name, terminal; Rune takes the request before any key reaches it |
+| [x] `RenameBackspace` | shared | shared | core-edited rename name, terminal; Rune takes the request before any key reaches it |
+| [x] `CommitRename` | shared | shared | Enter in the core-edited rename name, terminal |
 | [x] `TimelineEntry` | shared | shared | shared keymap |
 | [x] `ToggleTimelineFold` | shared | shared | shared keymap |
 | [x] `PopLens` | shared | shared | drill return |
