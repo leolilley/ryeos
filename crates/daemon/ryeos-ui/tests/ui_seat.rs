@@ -1286,6 +1286,62 @@ async fn a_committed_claim_is_replayed_after_the_admission_stops_holding() {
     assert_stale_binding_refusal(&refused);
 }
 
+/// A project file placed at the shell Config's ref after prepare does not
+/// stop the claim. The seat's recorded root was fixed when prepare admitted
+/// it, and the claim revalidates the retained binding, which resolves the
+/// shell Config from installed bundles with no project root, so the project
+/// file is never read and the binding is unchanged. Re-running root admission
+/// at claim would instead see the project file and refuse a seat that was
+/// prepared legitimately.
+#[tokio::test]
+async fn claim_succeeds_after_a_project_file_appears_at_the_shell_config_ref() {
+    use ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR;
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let state = Arc::new(state);
+    let session = activate(&state);
+    let prepared = prepare(&state, &session).await;
+
+    // The session's project is the application root. Give it a validly
+    // signed Config at the shell Config's ref, with different content.
+    let key = lillux::crypto::load_signing_key(
+        &ryeos_engine::test_support::workspace_root().join(".dev-keys/PUBLISHER_DEV.pem"),
+    )
+    .unwrap();
+    let body = "category: test\nversion: '1'\nshared_presentation:\n  schema: 2\n  title: Project presentation\n  launcher: launch\n  dialogs:\n    - id: launch\n      title: Launch\n      view: 'view:ryeos/home'\n  capabilities:\n    sources: ['*']\n    affordances: ['*']\n";
+    let dir = state.config.app_root.join(".ai/config/test");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("presentation.yaml"),
+        lillux::signature::sign_content(body, &key, "#", None),
+    )
+    .unwrap();
+
+    let request = claim_request(
+        &state,
+        &session,
+        &prepared,
+        "00000000-0000-4000-8000-000000000013",
+        json!({"kind":"fresh"}),
+    )
+    .await
+    .unwrap();
+    let opened = route(&state, &session, &OPEN_DESCRIPTOR, request.clone())
+        .await
+        .expect("a project file at the shell Config's ref does not refuse the claim");
+    assert_eq!(opened["presentation_id"], prepared["presentation_id"]);
+    assert_eq!(opened["thread_id"], prepared["thread_id"]);
+    assert!(opened["producer_incarnation"].is_string(), "{opened}");
+
+    // The retry of the same claim is answered with the same producer.
+    let replayed = route(&state, &session, &OPEN_DESCRIPTOR, request)
+        .await
+        .expect("the committed claim is replayed");
+    assert_eq!(
+        replayed["producer_incarnation"],
+        opened["producer_incarnation"]
+    );
+}
+
 #[tokio::test]
 async fn forged_presentation_operation_records_do_not_change_the_seat() {
     use ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR;
