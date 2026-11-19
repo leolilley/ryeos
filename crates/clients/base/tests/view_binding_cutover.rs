@@ -186,7 +186,7 @@ const VIEW_BEHAVIOR_GOLDENS: &[(&str, &str)] = &[
     ),
     (
         "view:ryeos/ui/launcher",
-        "3a94c680e8cc972933b4317bb91968a556906d3d8184d496ad7d5f681ff8a48b",
+        "3e2e3382b366437ff9aae674a6b42e4520f6929953ed6091de6a6425e5820a27",
     ),
     (
         "view:ryeos/ui/session-details",
