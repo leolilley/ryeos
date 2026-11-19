@@ -294,7 +294,7 @@ pub fn build_record(
         .iter()
         .map(|folded| folded.message.clone())
         .collect();
-    let clip = (policy.clip.tool_results == crate::directive::ClipMode::Clip).then(|| {
+    let clip = (policy.clip.tool_results == crate::directive::ClipMode::Clip).then_some({
         ryeos_runtime::ClipRule {
             over_bytes: policy.clip.over_bytes,
             head_bytes: policy.clip.head_bytes,

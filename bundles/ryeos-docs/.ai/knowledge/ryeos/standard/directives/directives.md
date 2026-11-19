@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-19T18:43:22Z:b49f357dffd9a02eedf652b781eacacf1b46806df041bd64bda2a4380ab69e12:l29MVWWDgtV3a8W4zRV8TjPGrmOsxt1gN1GMIIQQp+i8464FAPgeQnVkUd0pUAJfSENoy7C3pwwpL0uHym4OCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-19T18:46:59Z:436be7c6f23647b8752a2d73c158a623df4da9a6280f51b9aa5d818ce45cd66a:D+eFPJJO5NZ52MjRoVlqXFx12CgbxKDyHFmlF/w9RiO1PIgFDRdDu0/USbDl8nY6/7NLcJi1kxXkstRYFEW+BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [fundamentals, directives, workflows, prompts]
 version: "2.1.0"
@@ -307,6 +307,7 @@ pinned inputs survive unchanged. The policy is signed runtime config, the
 | `summary.instruction` | neutral text | System text of the summary call |
 | `summary.max_output_tokens` | 2000 | Output cap of the summary call |
 | `summary.input_ratio` | 0.6 | Share of the window the summary call's input may fill; the oldest part beyond it is left out and the rendering says so |
+| `clip.tool_results` | `clip` | `clip` or `keep`: after a compaction, every kept tool result but the newest `clip.keep_recent` (4) that is longer than `clip.over_bytes` (8192) is read as its first `clip.head_bytes` (2048), a marker naming what was left out, and its last `clip.tail_bytes` (2048). The events are not edited; the rule is in the record and the fold applies it |
 
 The compaction is a `cognition_compaction` record written once the summary is
 settled. It carries the pinned inputs, the summary, the range it replaces, the
@@ -330,8 +331,9 @@ compacted conversation. A retried request refused again is the typed failure
 `max_overflow_recoveries_per_chain` is `compaction_recovery_exhausted`. With
 continuation off, a conversation over the continuation threshold fails with
 `context_window_exhausted` instead of finalising with its last message. A chain
-that reaches the daemon's continuation depth limit fails with
-`continuation_chain_limit`, and a recovery whose replay is over the ceiling with
+that reaches the signed `chain_depth_limit` of `ryeos-runtime/continuation`
+(default 12 continuation predecessors; the daemon keeps a higher backstop of its
+own) fails with `continuation_chain_limit`, and a recovery whose replay is over the ceiling with
 `replay_ceiling_exceeded`; a parent graph branches on them through
 `state._outcome.failure_code`.
 

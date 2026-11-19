@@ -2689,6 +2689,13 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{count_error:#}").contains("2 events; maximum is 1"));
+        // The ceiling is a typed failure with a stable code.
+        assert!(
+            count_error
+                .downcast_ref::<ReplayCeilingExceeded>()
+                .is_some()
+        );
+        assert!(format!("{count_error}").starts_with("replay_ceiling_exceeded: "));
 
         let exact_bytes = serde_json::to_vec(&two_events).unwrap().len();
         let byte_error = append_replay_page(

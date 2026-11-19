@@ -580,23 +580,20 @@ fn plant_control_tool(rig: &Rig, name: &str, action: &str) {
     .expect("plant control tool");
 }
 
-fn control_hook(tool: &str) -> String {
-    format!(
-        "hooks:\n  - id: pressure-choice\n    event: context_pressure\n    result: control\n    action:\n      primary: execute\n      item_id: \"tool:{tool}/{tool}\"\n      ref_bindings: {{}}\n      params: {{}}\n"
-    )
-}
+/// A `context_pressure` hook that runs the named control tool.
+const VETO_HOOK: &str = "hooks:\n  - id: pressure-choice\n    event: context_pressure\n    result: control\n    action:\n      primary: execute\n      item_id: \"tool:veto/veto\"\n      ref_bindings: {}\n      params: {}\n";
+const PRESSING_HOOK: &str = "hooks:\n  - id: pressure-choice\n    event: context_pressure\n    result: control\n    action:\n      primary: execute\n      item_id: \"tool:pressing/pressing\"\n      ref_bindings: {}\n      params: {}\n";
 
 /// E13. A `context_pressure` hook that answers `skip_compaction` prevents the
 /// compaction: no record and no summary request.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_hook_can_veto_a_compaction() {
     let script = format!("steps:\n  - repeat: 8\n    {TURN}  - text: done\n");
-    let hook: &'static str = Box::leak(control_hook("veto").into_boxed_str());
     let rig = start_rig(
         &script,
         RigOptions {
             context_window: 2000,
-            header_extra: hook,
+            header_extra: VETO_HOOK,
             continuation_yaml: Some(continuation_yaml(
                 "  trigger_ratio: 0.4\n  keep_turns: 2\n  min_turns_between: 2\n",
             )),
@@ -627,12 +624,11 @@ async fn a_hook_can_veto_a_compaction() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_hook_can_trigger_a_compaction_when_the_policy_only_observes() {
     let script = format!("steps:\n  - repeat: 14\n    {TURN}  - text: done\n");
-    let hook: &'static str = Box::leak(control_hook("pressing").into_boxed_str());
     let rig = start_rig(
         &script,
         RigOptions {
             context_window: 2000,
-            header_extra: hook,
+            header_extra: PRESSING_HOOK,
             continuation_yaml: Some(continuation_yaml(
                 "  trigger_ratio: 0.4\n  keep_turns: 2\n  min_turns_between: 100\n  on_pressure: observe\n  summary:\n    mode: none\n",
             )),
