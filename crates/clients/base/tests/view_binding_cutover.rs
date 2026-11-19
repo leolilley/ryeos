@@ -22,7 +22,7 @@ const VIEW_BEHAVIOR_GOLDENS: &[(&str, &str)] = &[
     ),
     (
         "view:ryeos/chain/timeline",
-        "e59cace5ea9bad2161617d5f814d69acea1d35af5aa75ea382f0789c1daec37c",
+        "899d6a47763ec0b9f489ea40e7ffd5a0abc76d395fcaa81b02320060f53c051e",
     ),
     (
         "view:ryeos/commands/grammar",
@@ -186,7 +186,7 @@ const VIEW_BEHAVIOR_GOLDENS: &[(&str, &str)] = &[
     ),
     (
         "view:ryeos/ui/launcher",
-        "3e2e3382b366437ff9aae674a6b42e4520f6929953ed6091de6a6425e5820a27",
+        "7d9a23fc366ea71107e9c43a1773940acfd29e7a86ebf574369545a46b7fc287",
     ),
     (
         "view:ryeos/ui/session-details",
