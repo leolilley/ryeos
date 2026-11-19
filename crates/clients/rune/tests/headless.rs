@@ -70,6 +70,13 @@ fn press(rt: &mut Runtime<App>, prefix: &str) {
     rt.frame(FRAME);
 }
 
+/// Empty the find line the launcher scenes open with.
+fn clear_query(rt: &mut Runtime<App>) {
+    for _ in 0..8 {
+        bare_key(rt, Key::Backspace);
+    }
+}
+
 fn type_text(rt: &mut Runtime<App>, text: &str) {
     for ch in text.chars() {
         rt.key(KeyEvent {
@@ -336,6 +343,7 @@ fn the_launcher_sheet_has_a_find_line_group_labels_and_a_footer_but_no_title_bar
 #[test]
 fn enter_chooses_a_view_then_a_place_and_escape_closes_the_second_stage_first() {
     let mut rt = shell("launcher", (1280.0, 800.0));
+    clear_query(&mut rt);
     assert!(launcher_places(&model(&rt)).is_empty());
     // Down to the first view that can be chosen: commands and views that
     // need a selection do not stage anything.
@@ -402,7 +410,8 @@ fn the_launcher_stage_scene_draws_where_the_chosen_view_lands() {
 
 #[test]
 fn the_launcher_lists_no_selection_command_beside_its_views() {
-    let rt = shell("launcher", (1280.0, 800.0));
+    let mut rt = shell("launcher", (1280.0, 800.0));
+    clear_query(&mut rt);
     let RyeOsViewVm::Rows { rows, .. } = &model(&rt).dialogs[0].view else {
         panic!("the launcher is a rows view");
     };

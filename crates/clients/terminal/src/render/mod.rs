@@ -974,6 +974,7 @@ max_seat_append_bytes:64*1024,
             group: group.into(),
             reason: reason.map(Into::into),
             place,
+            staged: false,
         }
     }
 
@@ -1027,6 +1028,7 @@ max_seat_append_bytes:64*1024,
             .unwrap(),
             title: "Launch".into(),
             description: None,
+            note: None,
             launcher: true,
             view: RyeOsViewVm::Rows {
                 title: "Launch".into(),
