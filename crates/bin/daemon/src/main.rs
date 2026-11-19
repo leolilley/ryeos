@@ -5250,6 +5250,22 @@ async fn run(
                     "recovered project snapshot applies before enabling dispatch"
                 );
             }
+            // Mirror the applies startup recovery quarantined into the report
+            // `ryeos node doctor` reads. Advisory: the job rows are the
+            // authority, so a failed mirror only leaves the doctor's view stale.
+            match ryeos_api::handlers::project_apply_snapshot::refresh_apply_quarantine_report(
+                app_state,
+            ) {
+                Ok(0) => {}
+                Ok(quarantined_project_applies) => tracing::warn!(
+                    quarantined_project_applies,
+                    "project snapshot applies are quarantined; their transaction directories are kept for inspection (see `ryeos node doctor`)"
+                ),
+                Err(error) => tracing::warn!(
+                    error = %format!("{error:#}"),
+                    "failed to mirror the sync apply quarantine report for node doctor"
+                ),
+            }
             let admission_store = app_state.state_store.clone();
             tokio::spawn(async move {
                 shutdown_signal().await;
