@@ -47,19 +47,8 @@ async fn standalone_rebuild_runs_on_fresh_state() {
     );
 }
 
-// ── 5.2 bundle/install then list then remove ─────────────────────────────
-
-#[tokio::test(flavor = "multi_thread")]
-async fn standalone_bundle_install_then_list_then_remove() {
-    // Persistent harness: core is installed under .ai/bundles/core/
-    // so preflight's discover_installed_bundle_roots finds it.
-    // `testbundle` is granted explicit (empty) command-registration
-    // authority in the sealed node policy; install refuses any active bundle
-    // the node policy does not name.
-    let harness = StandaloneHarness::new_initialized_authorizing(&["testbundle"])
-        .await
-        .expect("standalone harness init");
-
+/// A minimal published candidate with its own kind namespace.
+fn write_testbundle_source(harness: &StandaloneHarness) -> tempfile::TempDir {
     // Build a minimal published candidate with its own kind namespace. Reusing
     // a core kind would create two providers in the prospective graph, while an
     // unsigned or manifest-less source is intentionally not installable.
@@ -97,6 +86,23 @@ async fn standalone_bundle_install_then_list_then_remove() {
     );
     std::fs::write(src.path().join(".ai/manifest.yaml"), signed_manifest)
         .expect("write signed bundle manifest");
+    src
+}
+
+// ── 5.2 bundle/install then list then remove ─────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn standalone_bundle_install_then_list_then_remove() {
+    // Persistent harness: core is installed under .ai/bundles/core/
+    // so preflight's discover_installed_bundle_roots finds it.
+    // `testbundle` is granted explicit (empty) command-registration
+    // authority in the sealed node policy; install refuses any active bundle
+    // the node policy does not name.
+    let harness = StandaloneHarness::new_initialized_authorizing(&["testbundle"])
+        .await
+        .expect("standalone harness init");
+
+    let src = write_testbundle_source(&harness);
     let src_path = src.path().to_str().unwrap().to_string();
 
     // 1. Install testbundle.
@@ -156,4 +162,47 @@ async fn standalone_bundle_install_then_list_then_remove() {
 
     // Keep tempdirs alive through all assertions.
     let _ = harness;
+}
+
+/// A stopped node has no HTTP route: the refusal's exact body must reach
+/// stderr after the one-line error.
+#[tokio::test(flavor = "multi_thread")]
+async fn standalone_structured_refusal_prints_its_body() {
+    let harness = StandaloneHarness::new_initialized_authorizing(&["testbundle"])
+        .await
+        .expect("standalone harness init");
+    let src = write_testbundle_source(&harness);
+    let src_path = src.path().to_str().unwrap().to_string();
+    let install = harness
+        .run_service(
+            "service:bundle/install",
+            Some(&format!(
+                r#"{{"name":"testbundle","source_path":"{src_path}"}}"#
+            )),
+        )
+        .await
+        .expect("install spawn");
+    assert!(install.status.success());
+
+    // Nothing is pinned, so naming a binding is a typed refusal.
+    let refused = harness
+        .run_service(
+            "service:bundle/install",
+            Some(&format!(
+                r#"{{"name":"testbundle","source_path":"{src_path}","replace":true,"invalidate_bindings":["runtime_snapshot_production/render-snapshot"]}}"#
+            )),
+        )
+        .await
+        .expect("replace spawn");
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("structured service error: invalidated_binding_not_stranded"),
+        "one-line error kept:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("\"not_stranded\"")
+            && stderr.contains("runtime_snapshot_production/render-snapshot"),
+        "body printed:\n{stderr}"
+    );
 }
