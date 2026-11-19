@@ -17,6 +17,43 @@ const KILL_POLL_INTERVAL_MS: u64 = 100;
 /// escalating the exact process group.
 pub const MAX_GRACEFUL_SHUTDOWN_GRACE_SECS: u64 = 5;
 
+/// Time reserved at the end of a graceful kill's budget for the SIGKILL and
+/// the death proof that follow it.
+pub const HARD_KILL_PROOF_RESERVE: Duration = Duration::from_millis(250);
+
+/// The smallest window a supervisor is known to give a stopping daemon before
+/// it force-kills it: runit's `SERVICE_STOP_TIMEOUT` is 10 s. The windows of
+/// hosted platforms are not known here, so this is the conservative floor.
+const SMALLEST_KNOWN_FORCE_STOP_WINDOW_MILLIS: u64 = 10_000;
+
+/// Margin kept below the force-stop window for the work after the owner wait
+/// (store close, locks, exit).
+const FORCE_STOP_MARGIN_MILLIS: u64 = 2_000;
+
+/// What a launch owner needs to unwind after its runtime is killed: the
+/// longest attached grace plus the proof reserve.
+const LAUNCH_OWNER_UNWIND_NEEDED_MILLIS: u64 =
+    MAX_GRACEFUL_SHUTDOWN_GRACE_SECS * 1_000 + HARD_KILL_PROOF_RESERVE.as_millis() as u64;
+
+/// What is left of the force-stop window once the kill drain has used its own
+/// grace and the margin is held back.
+const LAUNCH_OWNER_UNWIND_CAP_MILLIS: u64 = SMALLEST_KNOWN_FORCE_STOP_WINDOW_MILLIS
+    - FORCE_STOP_MARGIN_MILLIS
+    - MAX_GRACEFUL_SHUTDOWN_GRACE_SECS * 1_000;
+
+/// Extra time, after the kill drain's deadline, to wait for in-process launch
+/// owners to unwind. A launch owner can only unwind after its runtime is
+/// killed, and the kill consumes the drain deadline, so the owner needs its
+/// own budget. It is the need, capped so the whole stop still ends before the
+/// smallest known force-stop window.
+pub const LAUNCH_OWNER_UNWIND_BUDGET: Duration = Duration::from_millis(
+    if LAUNCH_OWNER_UNWIND_NEEDED_MILLIS < LAUNCH_OWNER_UNWIND_CAP_MILLIS {
+        LAUNCH_OWNER_UNWIND_NEEDED_MILLIS
+    } else {
+        LAUNCH_OWNER_UNWIND_CAP_MILLIS
+    },
+);
+
 /// Bound on proving the pinned group empty after SIGKILL. The proof polls every
 /// [`KILL_POLL_INTERVAL_MS`], so a group that dies quickly returns quickly;
 /// the bound only lets slow kernel teardown (large unmaps, exit through

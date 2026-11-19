@@ -75,6 +75,9 @@ pub mod maintenance_gc;
 pub mod model_providers_validate;
 pub mod node_locality;
 pub mod node_locality_groups;
+pub mod node_machine_declare;
+pub mod node_machine_list;
+pub mod node_machine_remove;
 pub mod node_status;
 pub mod objects_closure_describe;
 pub mod objects_closure_get;
@@ -183,6 +186,9 @@ pub const ALL: &[ServiceDescriptor] = &[
     node_status::DESCRIPTOR,
     node_locality::DESCRIPTOR,
     node_locality_groups::DESCRIPTOR,
+    node_machine_declare::DESCRIPTOR,
+    node_machine_list::DESCRIPTOR,
+    node_machine_remove::DESCRIPTOR,
     #[cfg(feature = "model-provider-setup")]
     model_providers_validate::DESCRIPTOR,
     system_routes::DESCRIPTOR,
