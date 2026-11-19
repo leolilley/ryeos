@@ -2630,7 +2630,18 @@ config:
             "{refusal}"
         );
 
-        // Stating the logical project admits the signer.
+        // A logical project the signer's scope does not list admits nothing:
+        // stating some other project is not a way in.
+        let by_other = by_checkout
+            .clone()
+            .with_logical_project_root(Some(PathBuf::from("/work/other-project")));
+        let refusal = resolve(&by_other).unwrap_err().to_string();
+        assert!(
+            refusal.contains("source_scope owner is not signed by an admitted trusted principal"),
+            "{refusal}"
+        );
+
+        // Stating the logical project the scope lists admits the signer.
         let by_logical = by_checkout.with_logical_project_root(Some(logical));
         assert!(resolve(&by_logical).unwrap().is_some());
     }
