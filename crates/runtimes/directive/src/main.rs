@@ -519,17 +519,47 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
             } else {
                 resume::ResumeMode::Continuation
             };
-            let loaded = resume::load_resume_state(
+            let carry = resume::CarryPolicy {
+                carry_turns,
+                start_tokens: bootstrap_output
+                    .config
+                    .continuation_runtime
+                    .successor_start_tokens,
+                ceiling_tokens: (context_window as f64
+                    * bootstrap_output
+                        .config
+                        .continuation_runtime
+                        .context_threshold_ratio) as u64,
+            };
+            let loaded = match resume::load_resume_state(
                 &callback,
                 resume_id,
-                carry_turns,
+                carry,
                 resume_mode,
                 provider
                     .image_input
                     .as_ref()
                     .and_then(|image_input| image_input.accepts.as_ref()),
             )
-            .await?;
+            .await
+            {
+                Ok(loaded) => loaded,
+                // A conversation the provider would reject is a typed refusal
+                // settled on the thread, not a process error the daemon can
+                // only report as an exit without finalization.
+                Err(error) => {
+                    if let Some(refusal) = error.downcast_ref::<resume::ResumeFoldError>() {
+                        return runner::refuse_launch(
+                            &callback,
+                            &envelope.thread_id,
+                            &refusal.to_string(),
+                            budget.cost(),
+                        )
+                        .await;
+                    }
+                    return Err(error);
+                }
+            };
             (!(same_thread_resume && loaded.has_no_launch_records())).then_some(loaded)
         }
         None => None,

@@ -139,7 +139,7 @@ const RECOVERY_EVENT_TYPES: [&str; 7] = [
 pub async fn load_resume_state(
     callback: &CallbackClient,
     previous_thread_id: &str,
-    carry_turns: u32,
+    carry: CarryPolicy,
     mode: ResumeMode,
     images: Option<&ImageAcceptConfig>,
 ) -> Result<ResumeState> {
@@ -218,8 +218,12 @@ pub async fn load_resume_state(
     let frame = latest_frame(&events)?;
     let predecessor = fold_messages(&events[..own_start])?;
     let own = fold_messages(&events[own_start..])?;
-    let mut messages = carry_into_successor(predecessor, carry_turns, images)?;
+    let mut messages = carry_into_successor(predecessor, &carry, images)?;
     messages.extend(own.into_iter().map(|folded| folded.message));
+    // The whole rebuilt conversation, predecessors' carry and own part, must
+    // be one a provider accepts. A failed check is a typed refusal, not a
+    // request that would be sent and rejected.
+    check_well_formed(&messages, !recovered_tools.pending.is_empty())?;
 
     Ok(ResumeState {
         messages,
@@ -1302,10 +1306,38 @@ fn reconstruct_messages(events: &[ReplayedEventRecord]) -> Result<Vec<ProviderMe
         .collect())
 }
 
-/// Token budget of the conversation a successor starts from.
-const SUCCESSOR_START_TOKEN_BUDGET: u64 = 16_000;
+/// The default token budget of the conversation a successor starts from.
+pub const DEFAULT_SUCCESSOR_START_TOKENS: u64 = 16_000;
 
-/// A rebuilt starting conversation that a provider would reject.
+/// How a successor's start is cut from its predecessors' part of the path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CarryPolicy {
+    /// Recent turns carried after the pinned inputs.
+    pub carry_turns: u32,
+    /// Estimated tokens the start (pinned inputs plus recent turns) should
+    /// fit. Pinned inputs over this budget are carried alone.
+    pub start_tokens: u64,
+    /// Estimated tokens above which even the pinned inputs alone are refused:
+    /// the model window times the continuation threshold ratio.
+    pub ceiling_tokens: u64,
+}
+
+impl CarryPolicy {
+    /// A policy with the default start budget and no ceiling, for tests that
+    /// exercise only the turn count.
+    #[cfg(test)]
+    fn turns(carry_turns: u32) -> Self {
+        Self {
+            carry_turns,
+            start_tokens: DEFAULT_SUCCESSOR_START_TOKENS,
+            ceiling_tokens: u64::MAX,
+        }
+    }
+}
+
+/// A rebuilt conversation that a provider would reject. Each variant has a
+/// stable code that is the prefix of its message, which is how the failure
+/// reaches the thread's failure record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResumeFoldError {
     /// The conversation does not begin with a user message.
@@ -1314,28 +1346,41 @@ pub enum ResumeFoldError {
     UnansweredToolCall { call_id: String },
     /// A tool result names a call that is not in the conversation.
     OrphanToolResult { call_id: String },
-    /// The pinned inputs alone are larger than the starting budget.
-    PinnedInputsExceedBudget { budget: u64 },
+    /// The pinned inputs alone are larger than the ceiling.
+    PinnedInputsExceedWindow { ceiling: u64 },
+}
+
+impl ResumeFoldError {
+    /// The stable failure code of this refusal.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::DoesNotStartWithUser { .. } => "resume_start_not_user",
+            Self::UnansweredToolCall { .. } => "resume_unanswered_tool_call",
+            Self::OrphanToolResult { .. } => "resume_orphan_tool_result",
+            Self::PinnedInputsExceedWindow { .. } => "resume_pinned_exceeds_window",
+        }
+    }
 }
 
 impl std::fmt::Display for ResumeFoldError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let code = self.code();
         match self {
             Self::DoesNotStartWithUser { role } => write!(
                 f,
-                "resume: the successor's starting conversation begins with a {role} message, not a user message"
+                "{code}: the rebuilt conversation begins with a {role} message, not a user message"
             ),
             Self::UnansweredToolCall { call_id } => write!(
                 f,
-                "resume: tool call {call_id:?} in the successor's starting conversation has no result"
+                "{code}: tool call {call_id:?} in the rebuilt conversation has no result"
             ),
             Self::OrphanToolResult { call_id } => write!(
                 f,
-                "resume: tool result {call_id:?} in the successor's starting conversation has no call"
+                "{code}: tool result {call_id:?} in the rebuilt conversation has no call"
             ),
-            Self::PinnedInputsExceedBudget { budget } => write!(
+            Self::PinnedInputsExceedWindow { ceiling } => write!(
                 f,
-                "resume: pinned inputs alone exceed the {budget}-token starting budget"
+                "{code}: pinned inputs alone exceed the {ceiling}-token ceiling of the model window"
             ),
         }
     }
@@ -1345,13 +1390,15 @@ impl std::error::Error for ResumeFoldError {}
 
 /// The conversation a successor starts from, taken from its predecessors'
 /// part of the path: the pinned inputs in their original order, then the most
-/// recent `carry_turns` turns and as many of them as fit the token budget.
+/// recent `carry_turns` turns and as many of them as fit the start budget.
 /// When nothing needs dropping the conversation keeps its original order.
-/// The result begins with a user message and every tool call in it has its
-/// result, or the rebuild fails with a [`ResumeFoldError`].
+/// Pinned inputs larger than the start budget are carried alone (no recent
+/// turns); pinned inputs larger than the ceiling are refused. The result
+/// begins with a user message and every tool call in it has its result, or
+/// the rebuild fails with a [`ResumeFoldError`].
 fn carry_into_successor(
     folded: Vec<FoldedMessage>,
-    carry_turns: u32,
+    policy: &CarryPolicy,
     images: Option<&ImageAcceptConfig>,
 ) -> Result<Vec<ProviderMessage>> {
     if folded.is_empty() {
@@ -1363,16 +1410,19 @@ fn carry_into_successor(
     let rest: Vec<ProviderMessage> = rest.into_iter().map(|f| f.message).collect();
     let rest_len = rest.len();
 
-    let recent = trim_to_recent_turns(rest, carry_turns);
     let pinned_tokens = crate::estimate::estimate_tokens(&pinned, images);
-    if pinned_tokens > SUCCESSOR_START_TOKEN_BUDGET {
-        return Err(ResumeFoldError::PinnedInputsExceedBudget {
-            budget: SUCCESSOR_START_TOKEN_BUDGET,
+    if pinned_tokens > policy.ceiling_tokens {
+        return Err(ResumeFoldError::PinnedInputsExceedWindow {
+            ceiling: policy.ceiling_tokens,
         }
         .into());
     }
-    let recent =
-        trim_to_token_budget(recent, SUCCESSOR_START_TOKEN_BUDGET - pinned_tokens, images)?;
+    let recent = if pinned_tokens > policy.start_tokens {
+        Vec::new()
+    } else {
+        let recent = trim_to_recent_turns(rest, policy.carry_turns);
+        trim_to_token_budget(recent, policy.start_tokens - pinned_tokens, images)?
+    };
 
     let mut messages = if recent.len() == rest_len {
         whole
@@ -1389,13 +1439,20 @@ fn carry_into_successor(
     {
         messages.remove(0);
     }
-    check_well_formed(&messages)?;
+    check_well_formed(&messages, false)?;
     Ok(messages)
 }
 
-/// Checks that a starting conversation begins with a user message and that
-/// every tool call is answered by a result and every result has its call.
-fn check_well_formed(messages: &[ProviderMessage]) -> Result<(), ResumeFoldError> {
+/// Checks that a conversation begins with a user message and that every tool
+/// call is answered by a result and every result has its call. With
+/// `allow_open_tail`, calls still unanswered at the very end are accepted:
+/// that is a tool batch a same-thread recovery has yet to settle. The end of
+/// the conversation is otherwise unchecked, because a rebuild legitimately
+/// ends on an assistant message (a retained answer or a settled return).
+fn check_well_formed(
+    messages: &[ProviderMessage],
+    allow_open_tail: bool,
+) -> Result<(), ResumeFoldError> {
     if let Some(first) = messages.first()
         && first.role() != "user"
     {
@@ -1429,7 +1486,7 @@ fn check_well_formed(messages: &[ProviderMessage]) -> Result<(), ResumeFoldError
         }
         open.extend(message.tool_calls().map(|call| call.call_id.clone()));
     }
-    if let Some(call_id) = open.first() {
+    if !allow_open_tail && let Some(call_id) = open.first() {
         return Err(ResumeFoldError::UnansweredToolCall {
             call_id: call_id.clone(),
         });
@@ -1733,7 +1790,7 @@ mod tests {
         let state = load_resume_state(
             &callback,
             "nonexistent",
-            8,
+            CarryPolicy::turns(8),
             ResumeMode::NativeSameThread,
             None,
         )
@@ -1758,7 +1815,7 @@ mod tests {
         let error = load_resume_state(
             &callback,
             "T-predecessor",
-            8,
+            CarryPolicy::turns(8),
             ResumeMode::Continuation,
             None,
         )
@@ -2365,35 +2422,41 @@ mod tests {
 
     #[tokio::test]
     async fn a_large_pending_proposal_is_kept_whole_by_same_thread_recovery() {
-        let callback = make_callback(vec![ReplayedEventRecord {
-            event_type: "cognition_out".to_string(),
-            payload: {
-                let mut payload = out_calls(
-                    1,
-                    json!([{
-                        "id":"large-call",
-                        "name":"tool:large",
-                        "arguments":{"payload":"x".repeat(70_000)}
-                    }]),
-                );
-                payload["provider_accounting"] = json!({"replayed_from":"ef".repeat(32)});
-                payload
+        let callback = make_callback(vec![
+            ReplayedEventRecord {
+                event_type: "cognition_in".to_string(),
+                payload: input("Do task"),
             },
-        }]);
+            ReplayedEventRecord {
+                event_type: "cognition_out".to_string(),
+                payload: {
+                    let mut payload = out_calls(
+                        1,
+                        json!([{
+                            "id":"large-call",
+                            "name":"tool:large",
+                            "arguments":{"payload":"x".repeat(70_000)}
+                        }]),
+                    );
+                    payload["provider_accounting"] = json!({"replayed_from":"ef".repeat(32)});
+                    payload
+                },
+            },
+        ]);
         // The thread's own turns are never trimmed, so the proposal that the
         // old recovery budget would have refused is rebuilt with its call
         // still pending.
         let state = load_resume_state(
             &callback,
             "nonexistent",
-            0,
+            CarryPolicy::turns(0),
             ResumeMode::NativeSameThread,
             None,
         )
         .await
         .unwrap();
-        assert_eq!(state.messages.len(), 1);
-        assert!(state.messages[0].has_tool_calls());
+        assert_eq!(state.messages.len(), 2);
+        assert!(state.messages[1].has_tool_calls());
         assert_eq!(state.pending_tools.len(), 1);
     }
 
@@ -3041,9 +3104,15 @@ mod tests {
             },
         ];
         let callback = make_callback(events);
-        let state = load_resume_state(&callback, "T-prev", 8, ResumeMode::NativeSameThread, None)
-            .await
-            .unwrap();
+        let state = load_resume_state(
+            &callback,
+            "T-prev",
+            CarryPolicy::turns(8),
+            ResumeMode::NativeSameThread,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(state.messages.len(), 2);
         assert_eq!(state.turns_completed, 1);
         assert!(state.started_tool_occurrences.is_empty());
@@ -3191,9 +3260,15 @@ mod tests {
     async fn resume_folds_only_continuation_path_not_chain_children() {
         let inner: Arc<dyn RuntimeCallbackAPI> = Arc::new(PathMock);
         let callback = CallbackClient::from_inner(inner, "T3", "/tmp/test", "tat-test");
-        let state = load_resume_state(&callback, "T2", 8, ResumeMode::Continuation, None)
-            .await
-            .unwrap();
+        let state = load_resume_state(
+            &callback,
+            "T2",
+            CarryPolicy::turns(8),
+            ResumeMode::Continuation,
+            None,
+        )
+        .await
+        .unwrap();
 
         let contents: Vec<String> = state.messages.iter().filter_map(|m| m.text()).collect();
         // Both turns, root-first, in order; the chain-sharing child is excluded.
@@ -3217,21 +3292,38 @@ mod tests {
         let inner: Arc<dyn RuntimeCallbackAPI> = Arc::new(PathMock);
         let callback = CallbackClient::from_inner(inner, "T2", "/tmp/test", "tat-test");
         for carry in [0, 1, 8] {
-            let state =
-                load_resume_state(&callback, "T2", carry, ResumeMode::NativeSameThread, None)
-                    .await
-                    .unwrap();
+            let state = load_resume_state(
+                &callback,
+                "T2",
+                CarryPolicy::turns(carry),
+                ResumeMode::NativeSameThread,
+                None,
+            )
+            .await
+            .unwrap();
             let texts: Vec<String> = state.messages.iter().filter_map(|m| m.text()).collect();
             let own = ["turn2 in".to_string(), "turn2 out".to_string()];
             assert!(texts.ends_with(&own), "carry {carry}: {texts:?}");
         }
-        let all = load_resume_state(&callback, "T2", 8, ResumeMode::NativeSameThread, None)
-            .await
-            .unwrap();
+        let all = load_resume_state(
+            &callback,
+            "T2",
+            CarryPolicy::turns(8),
+            ResumeMode::NativeSameThread,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(all.messages.len(), 4);
-        let own_only = load_resume_state(&callback, "T2", 0, ResumeMode::NativeSameThread, None)
-            .await
-            .unwrap();
+        let own_only = load_resume_state(
+            &callback,
+            "T2",
+            CarryPolicy::turns(0),
+            ResumeMode::NativeSameThread,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(own_only.messages.len(), 2);
     }
 
@@ -3249,7 +3341,7 @@ mod tests {
             folded(ProviderMessage::user("u3"), false),
             folded(ProviderMessage::assistant_text("a3"), false),
         ];
-        let carried = carry_into_successor(conversation, 1, None).unwrap();
+        let carried = carry_into_successor(conversation, &CarryPolicy::turns(1), None).unwrap();
         let texts: Vec<String> = carried.iter().filter_map(|m| m.text()).collect();
         assert_eq!(texts, ["launch", "u3", "a3"]);
         assert_eq!(carried[0].role(), "user");
@@ -3282,7 +3374,8 @@ mod tests {
 
     #[test]
     fn a_successor_start_is_the_pinned_prefix_then_the_recent_turns_in_path_order() {
-        let carried = carry_into_successor(long_path_with_context(), 2, None).unwrap();
+        let carried =
+            carry_into_successor(long_path_with_context(), &CarryPolicy::turns(2), None).unwrap();
         let texts: Vec<String> = carried.iter().filter_map(|m| m.text()).collect();
         let ack_before = crate::launch_records::BEFORE_CONTEXT_ACK;
         let ack_after = crate::launch_records::AFTER_CONTEXT_ACK;
@@ -3306,7 +3399,8 @@ mod tests {
 
     #[test]
     fn a_zero_carry_keeps_the_whole_pinned_prefix() {
-        let carried = carry_into_successor(long_path_with_context(), 0, None).unwrap();
+        let carried =
+            carry_into_successor(long_path_with_context(), &CarryPolicy::turns(0), None).unwrap();
         let texts: Vec<String> = carried.iter().filter_map(|m| m.text()).collect();
         let ack_before = crate::launch_records::BEFORE_CONTEXT_ACK;
         let ack_after = crate::launch_records::AFTER_CONTEXT_ACK;
@@ -3359,9 +3453,9 @@ mod tests {
             folded(ProviderMessage::user("u2"), false),
             folded(assistant_with_artefact("a2", envelope(2)), false),
         ];
-        let all = carry_into_successor(conversation.clone(), 8, None).unwrap();
+        let all = carry_into_successor(conversation.clone(), &CarryPolicy::turns(8), None).unwrap();
         assert_eq!(artefacts_of(&all), [envelope(1), envelope(2)]);
-        let recent = carry_into_successor(conversation, 1, None).unwrap();
+        let recent = carry_into_successor(conversation, &CarryPolicy::turns(1), None).unwrap();
         assert_eq!(artefacts_of(&recent), [envelope(2)]);
     }
 
@@ -3414,7 +3508,7 @@ mod tests {
                 .expect("shipped directive runtime descriptor");
         assert_eq!(
             runtime.launch_contract.runtime_facts["context_window"].rebind_minimum,
-            Some(SUCCESSOR_START_TOKEN_BUDGET)
+            Some(DEFAULT_SUCCESSOR_START_TOKENS)
         );
     }
 
@@ -3424,7 +3518,7 @@ mod tests {
             folded(ProviderMessage::user("launch"), true),
             folded(ProviderMessage::assistant_text("a1"), false),
         ];
-        let carried = carry_into_successor(conversation, 0, None).unwrap();
+        let carried = carry_into_successor(conversation, &CarryPolicy::turns(0), None).unwrap();
         let texts: Vec<String> = carried.iter().filter_map(|m| m.text()).collect();
         assert_eq!(texts, ["launch"]);
     }
@@ -3437,7 +3531,7 @@ mod tests {
             folded(ProviderMessage::user("pinned later"), true),
             folded(ProviderMessage::assistant_text("a2"), false),
         ];
-        let carried = carry_into_successor(conversation, 8, None).unwrap();
+        let carried = carry_into_successor(conversation, &CarryPolicy::turns(8), None).unwrap();
         let texts: Vec<String> = carried.iter().filter_map(|m| m.text()).collect();
         assert_eq!(texts, ["u1", "a1", "pinned later", "a2"]);
     }
@@ -3450,7 +3544,7 @@ mod tests {
             folded(ProviderMessage::user("u2"), false),
             folded(ProviderMessage::assistant_text("a2"), false),
         ];
-        let carried = carry_into_successor(conversation, 1, None).unwrap();
+        let carried = carry_into_successor(conversation, &CarryPolicy::turns(1), None).unwrap();
         let texts: Vec<String> = carried.iter().filter_map(|m| m.text()).collect();
         assert_eq!(texts, ["u2", "a2"]);
     }
@@ -3468,7 +3562,7 @@ mod tests {
             ProviderMessage::user("and then"),
         ];
         assert_eq!(
-            check_well_formed(&unanswered),
+            check_well_formed(&unanswered, false),
             Err(ResumeFoldError::UnansweredToolCall {
                 call_id: "c1".to_string()
             })
@@ -3478,21 +3572,152 @@ mod tests {
             ProviderMessage::tool_result("c9", "result"),
         ];
         assert_eq!(
-            check_well_formed(&orphan),
+            check_well_formed(&orphan, false),
             Err(ResumeFoldError::OrphanToolResult {
                 call_id: "c9".to_string()
             })
         );
         let assistant_first = vec![ProviderMessage::assistant_text("hi")];
         assert_eq!(
-            check_well_formed(&assistant_first),
+            check_well_formed(&assistant_first, false),
             Err(ResumeFoldError::DoesNotStartWithUser {
                 role: "assistant".to_string()
             })
         );
         // A typed error survives the anyhow boundary.
-        let error: anyhow::Error = ResumeFoldError::PinnedInputsExceedBudget { budget: 1 }.into();
+        let error: anyhow::Error = ResumeFoldError::PinnedInputsExceedWindow { ceiling: 1 }.into();
         assert!(error.downcast_ref::<ResumeFoldError>().is_some());
+    }
+
+    #[test]
+    fn each_refusal_has_a_stable_code_that_prefixes_its_message() {
+        let errors = [
+            (
+                ResumeFoldError::DoesNotStartWithUser {
+                    role: "assistant".to_string(),
+                },
+                "resume_start_not_user",
+            ),
+            (
+                ResumeFoldError::UnansweredToolCall {
+                    call_id: "c".to_string(),
+                },
+                "resume_unanswered_tool_call",
+            ),
+            (
+                ResumeFoldError::OrphanToolResult {
+                    call_id: "c".to_string(),
+                },
+                "resume_orphan_tool_result",
+            ),
+            (
+                ResumeFoldError::PinnedInputsExceedWindow { ceiling: 9 },
+                "resume_pinned_exceeds_window",
+            ),
+        ];
+        for (error, code) in errors {
+            assert_eq!(error.code(), code);
+            assert!(error.to_string().starts_with(&format!("{code}: ")));
+        }
+    }
+
+    #[test]
+    fn an_unanswered_call_at_the_end_is_accepted_only_for_a_pending_batch() {
+        let call = crate::directive::ToolCall {
+            id: Some("c1".to_string()),
+            name: "tool:a".to_string(),
+            arguments: json!({}),
+        };
+        let open_tail = vec![
+            ProviderMessage::user("go"),
+            ProviderMessage::assistant(None, vec![call], None),
+        ];
+        assert_eq!(
+            check_well_formed(&open_tail, false),
+            Err(ResumeFoldError::UnansweredToolCall {
+                call_id: "c1".to_string()
+            })
+        );
+        assert_eq!(check_well_formed(&open_tail, true), Ok(()));
+        // An assistant message may end a rebuilt conversation.
+        let answered = vec![
+            ProviderMessage::user("go"),
+            ProviderMessage::assistant_text("done"),
+        ];
+        assert_eq!(check_well_formed(&answered, false), Ok(()));
+    }
+
+    /// A pinned launch input of `chars` characters (four per estimated token)
+    /// followed by two turns.
+    fn conversation_with_pinned_chars(chars: usize) -> Vec<FoldedMessage> {
+        vec![
+            folded(ProviderMessage::user("x".repeat(chars)), true),
+            folded(ProviderMessage::assistant_text("a1"), false),
+            folded(ProviderMessage::user("u2"), false),
+            folded(ProviderMessage::assistant_text("a2"), false),
+        ]
+    }
+
+    #[test]
+    fn pinned_inputs_within_the_start_budget_carry_the_recent_turns_too() {
+        let policy = CarryPolicy {
+            carry_turns: 1,
+            start_tokens: 1_000,
+            ceiling_tokens: 10_000,
+        };
+        let carried =
+            carry_into_successor(conversation_with_pinned_chars(400), &policy, None).unwrap();
+        let roles: Vec<&str> = carried.iter().map(|m| m.role()).collect();
+        assert_eq!(roles, ["user", "user", "assistant"]);
+    }
+
+    #[test]
+    fn pinned_inputs_over_the_start_budget_but_within_the_ceiling_are_carried_alone() {
+        let policy = CarryPolicy {
+            carry_turns: 8,
+            start_tokens: 100,
+            ceiling_tokens: 10_000,
+        };
+        let carried =
+            carry_into_successor(conversation_with_pinned_chars(4_000), &policy, None).unwrap();
+        assert_eq!(carried.len(), 1);
+        assert_eq!(carried[0].role(), "user");
+    }
+
+    #[test]
+    fn pinned_inputs_over_the_ceiling_are_refused_with_their_code() {
+        let policy = CarryPolicy {
+            carry_turns: 8,
+            start_tokens: 100,
+            ceiling_tokens: 500,
+        };
+        let error =
+            carry_into_successor(conversation_with_pinned_chars(4_000), &policy, None).unwrap_err();
+        let typed = error
+            .downcast_ref::<ResumeFoldError>()
+            .expect("a typed refusal");
+        assert_eq!(typed.code(), "resume_pinned_exceeds_window");
+    }
+
+    #[tokio::test]
+    async fn a_whole_conversation_that_does_not_start_with_a_user_message_is_refused() {
+        let callback = make_callback(vec![ReplayedEventRecord {
+            event_type: "cognition_out".to_string(),
+            payload: out(1, "orphan answer"),
+        }]);
+        let error = load_resume_state(
+            &callback,
+            "T-own",
+            CarryPolicy::turns(8),
+            ResumeMode::NativeSameThread,
+            None,
+        )
+        .await
+        .unwrap_err();
+        let typed = error
+            .downcast_ref::<ResumeFoldError>()
+            .expect("a typed refusal");
+        assert_eq!(typed.code(), "resume_start_not_user");
     }
 
     fn frame_event(frame_seq: u32, system: &str) -> ReplayedEventRecord {
@@ -3561,16 +3786,22 @@ mod tests {
     #[tokio::test]
     async fn a_thread_that_recorded_nothing_resumes_as_a_fresh_launch() {
         let empty = make_callback(vec![]);
-        let state = load_resume_state(&empty, "T-empty", 8, ResumeMode::NativeSameThread, None)
-            .await
-            .unwrap();
+        let state = load_resume_state(
+            &empty,
+            "T-empty",
+            CarryPolicy::turns(8),
+            ResumeMode::NativeSameThread,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(state.has_no_launch_records());
 
         let with_frame = make_callback(vec![frame_event(1, "system text")]);
         let state = load_resume_state(
             &with_frame,
             "T-framed",
-            8,
+            CarryPolicy::turns(8),
             ResumeMode::NativeSameThread,
             None,
         )
@@ -3584,9 +3815,15 @@ mod tests {
     async fn zero_carry_still_preserves_cumulative_turn_coordinate() {
         let inner: Arc<dyn RuntimeCallbackAPI> = Arc::new(PathMock);
         let callback = CallbackClient::from_inner(inner, "T3", "/tmp/test", "tat-test");
-        let state = load_resume_state(&callback, "T2", 0, ResumeMode::Continuation, None)
-            .await
-            .unwrap();
+        let state = load_resume_state(
+            &callback,
+            "T2",
+            CarryPolicy::turns(0),
+            ResumeMode::Continuation,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(state.messages.is_empty());
         assert_eq!(state.turns_completed, 2);
     }
