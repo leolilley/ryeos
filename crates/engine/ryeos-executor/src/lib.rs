@@ -137,9 +137,10 @@ pub mod test_support {
         qualification: &ryeos_app::external_placement::test_support::PlacementQualificationSelection,
     ) -> Result<String> {
         let tls_roots = vec!["Zml4dHVyZSBjb250cm9sbGVyIFRMUyByb290".to_owned()];
+        let operator_inputs = ryeos_external_execution_contract::operator_network_inputs();
         let controller =
             ryeos_state::external_execution::transport::ExternalControllerTransportContract {
-                schema: 2,
+                schema: 3,
                 https_origin: "https://controller.example:7443".to_owned(),
                 route_contract:
                     ryeos_state::external_execution::transport::EXTERNAL_CHANNEL_ROUTE_CONTRACT
@@ -154,12 +155,14 @@ pub mod test_support {
                 max_clock_skew_ms: None,
                 network_inputs: ryeos_state::external_execution::transport::ExternalNetworkInputPolicy {
                     resolver: ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
-                        source: "/etc/resolv.conf".into(),
-                        max_bytes: 64 * 1024,
+                        source: operator_inputs.resolver_source.into(),
+                        max_bytes: operator_inputs.resolver_max_bytes,
+                        required: operator_inputs.resolver_required,
                     },
                     hosts: ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
-                        source: "/etc/hosts".into(),
-                        max_bytes: 64 * 1024,
+                        source: operator_inputs.hosts_source.into(),
+                        max_bytes: operator_inputs.hosts_max_bytes,
+                        required: operator_inputs.hosts_required,
                     },
                 },
             };

@@ -251,10 +251,12 @@ impl InstalledRuntimeSnapshotProductionBinding {
                     ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
                         source: "/etc/resolv.conf".into(),
                         max_bytes: 4096,
+                        required: true,
                     },
                 hosts: ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
                     source: "/etc/hosts".into(),
                     max_bytes: 4096,
+                    required: true,
                 },
             },
             contact_timeout_seconds: 60,
@@ -455,10 +457,12 @@ mod tests {
                     ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
                         source: "/etc/resolv.conf".into(),
                         max_bytes: 4096,
+                        required: true,
                     },
                 hosts: ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
                     source: "/etc/hosts".into(),
                     max_bytes: 4096,
+                    required: true,
                 },
             },
             contact_timeout_seconds: 60,

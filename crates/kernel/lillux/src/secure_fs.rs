@@ -8622,6 +8622,39 @@ pub fn canonicalize_existing_path(path: &Path) -> Result<PathBuf> {
         .with_context(|| format!("canonicalize existing path {}", path.display()))
 }
 
+/// Resolve `path` once, pin the exact regular file and seal its bounded
+/// bytes, or report that the file does not exist. Only a missing path
+/// (including a missing parent) is `Ok(None)`: any other failure to resolve,
+/// open, read or bound the file is an error, and an existing file that is
+/// empty is `Some` with no bytes, never `None`.
+pub fn capture_optional_sealed_regular_file(
+    path: &Path,
+    max_bytes: u64,
+) -> Result<Option<CapturedRegularFile>> {
+    let resolved = match std::fs::canonicalize(path) {
+        Ok(resolved) => resolved,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(anyhow::Error::new(error)
+                .context(format!("canonicalize existing path {}", path.display())));
+        }
+    };
+    let parent = resolved
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("regular file has no parent: {}", resolved.display()))?;
+    let name = resolved
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("regular file has no name: {}", resolved.display()))?;
+    let Some(directory) = PinnedDirectory::open(parent)? else {
+        return Ok(None);
+    };
+    let Some(file) = directory.open_pinned_regular(name, false)? else {
+        return Ok(None);
+    };
+    file.capture_sealed_bounded(&file.observation()?, max_bytes)
+        .map(Some)
+}
+
 /// Existing host roots that a same-UID sandbox must never receive as a broad
 /// writable mount. This is a Linux/host-layout safety floor, not authored
 /// workload policy; callers may add narrower protected roots but cannot make
@@ -10268,6 +10301,31 @@ mod tests {
         let observed = observe_open_regular_file(&file).unwrap();
         std::fs::write(&path, b"second-value").unwrap();
         assert!(read_open_regular_file_stable_bounded(&file, &observed, 1024).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn optional_sealed_capture_separates_missing_from_empty() {
+        let root = tempfile::tempdir().unwrap();
+        let empty = root.path().join("empty");
+        std::fs::write(&empty, b"").unwrap();
+        let captured = capture_optional_sealed_regular_file(&empty, 16)
+            .unwrap()
+            .expect("an empty file is present");
+        assert!(captured.bytes().is_empty());
+        assert!(
+            capture_optional_sealed_regular_file(&root.path().join("missing"), 16)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            capture_optional_sealed_regular_file(&root.path().join("no/such/parent"), 16)
+                .unwrap()
+                .is_none()
+        );
+        let full = root.path().join("full");
+        std::fs::write(&full, b"0123456789").unwrap();
+        assert!(capture_optional_sealed_regular_file(&full, 4).is_err());
     }
 
     #[cfg(target_os = "linux")]

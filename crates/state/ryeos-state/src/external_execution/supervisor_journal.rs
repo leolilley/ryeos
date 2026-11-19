@@ -33,19 +33,21 @@ use crate::sqlite_schema::SchemaSqlDefinition;
 
 const DATABASE_NAME: &str = "external-supervisor.sqlite3";
 const APPLICATION_ID: i32 = 0x5259_4553; // RYES
-// HTTP epoch 6 retains the exact policy-bound network capture. Relay epoch 7
-// binds the original mailbox inode and exact authenticated attach response and
+// HTTP epoch 8 retains the exact policy-bound network capture, including
+// whether each captured input was present or absent on the target (epoch 6
+// stored captures that could not say absent; epoch 7 belongs to the relay
+// store, so the HTTP store skips it). Relay epoch 7 binds the original mailbox inode and exact authenticated attach response and
 // is shared by the Q and ordinary-session relay bootstrap schemas. Relay store
 // identity schema 4 and mailbox capture schema 1 stay unchanged; bootstrap
 // validation, not a journal migration, enforces the workload pair. Predecessor
 // stores remain historical evidence; recovery never recaptures.
-const HTTP_SCHEMA_EPOCH: i64 = 6;
+const HTTP_SCHEMA_EPOCH: i64 = 8;
 const RELAY_SCHEMA_EPOCH: i64 = 7;
 
 const SCHEMA: &str = r#"
 CREATE TABLE external_supervisor_meta (
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-    schema_epoch INTEGER NOT NULL CHECK(schema_epoch=6),
+    schema_epoch INTEGER NOT NULL CHECK(schema_epoch=8),
     journal_nonce TEXT NOT NULL UNIQUE,
     directory_identity_json TEXT NOT NULL,
     database_identity_json TEXT NOT NULL,
@@ -1127,7 +1129,7 @@ fn schema_for(epoch: i64) -> Result<String> {
                 "relay schema lost its binding table anchor"
             );
             Ok(SCHEMA
-                .replace("CHECK(schema_epoch=6)", "CHECK(schema_epoch=7)")
+                .replace("CHECK(schema_epoch=8)", "CHECK(schema_epoch=7)")
                 .replace(
                     binding_column,
                     "binding_json TEXT NOT NULL,\n    attach_response_digest TEXT NOT NULL\n);",
@@ -1547,15 +1549,17 @@ mod tests {
         ExternalSupervisorBootstrap {
             schema: super::super::transport::EXTERNAL_SUPERVISOR_HTTP_BOOTSTRAP_SCHEMA,
             controller: ExternalControllerTransportContract {
-                schema: 2,
+                schema: 3,
                 network_inputs: super::super::transport::ExternalNetworkInputPolicy {
                     resolver: super::super::transport::ExternalNetworkInputSelection {
                         source: "/etc/resolv.conf".into(),
                         max_bytes: 65536,
+                        required: true,
                     },
                     hosts: super::super::transport::ExternalNetworkInputSelection {
                         source: "/etc/hosts".into(),
                         max_bytes: 65536,
+                        required: true,
                     },
                 },
                 https_origin: "https://controller.example".into(),
@@ -2116,6 +2120,62 @@ mod tests {
         refusal(&host, recover(&host, &outer, &other_identity));
     }
 
+    /// The stored network-input contract versions move together. A change to
+    /// the capture schema, the transport contract schema or either digest
+    /// domain needs the HTTP journal epoch bumped with it (relay epoch 7 does
+    /// not store a network capture), then this tuple updated.
+    #[test]
+    fn network_input_contract_versions_and_journal_epochs_move_together() {
+        use super::super::transport::{
+            EXTERNAL_CAPTURED_NETWORK_INPUTS_SCHEMA, EXTERNAL_CONTROLLER_TRANSPORT_CONTRACT_SCHEMA,
+        };
+        assert_eq!(
+            (
+                HTTP_SCHEMA_EPOCH,
+                RELAY_SCHEMA_EPOCH,
+                EXTERNAL_CAPTURED_NETWORK_INPUTS_SCHEMA,
+                EXTERNAL_CONTROLLER_TRANSPORT_CONTRACT_SCHEMA,
+            ),
+            (8, 7, 2, 3),
+            "a change to a stored network-input version needs a journal epoch bump"
+        );
+        // The Ready frame has no version of its own: it rides under the channel
+        // binding schema, which is stored in the runtime store. Its
+        // `ObservedNetworkInput` stays additive, and an old reader must refuse
+        // the field an absent input adds.
+        assert_eq!(super::super::EXECUTION_CHANNEL_BINDING_SCHEMA, 5);
+        let mut observed = serde_json::to_value(super::super::ObservedNetworkInput {
+            source: "/etc/hosts".into(),
+            bytes: 0,
+            sha256: lillux::sha256_hex(b""),
+            absent: false,
+        })
+        .unwrap();
+        assert!(observed.get("absent").is_none());
+        observed["unknown_field"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<super::super::ObservedNetworkInput>(observed).is_err());
+        let bootstrap = bootstrap();
+        let policy = &bootstrap.controller.http().unwrap().network_inputs;
+        assert_eq!(
+            policy.digest().unwrap(),
+            crate::objects::canonical_value_digest(&serde_json::json!({
+                "domain": "ryeos.external-network-input-policy.v2",
+                "policy": policy,
+            }))
+            .unwrap()
+        );
+        let captured = capture();
+        assert_eq!(captured.schema, 2);
+        assert_eq!(
+            captured.digest().unwrap(),
+            crate::objects::canonical_value_digest(&serde_json::json!({
+                "domain": "ryeos.external-captured-network-inputs.v2",
+                "capture": captured,
+            }))
+            .unwrap()
+        );
+    }
+
     #[test]
     fn relay_bootstrap_versions_do_not_change_the_journal_epoch() {
         assert_eq!(RELAY_SCHEMA_EPOCH, 7);
@@ -2130,7 +2190,7 @@ mod tests {
         let relay_schema = schema_for(RELAY_SCHEMA_EPOCH).unwrap();
         assert!(relay_schema.contains("CHECK(schema_epoch=7)"));
         assert!(relay_schema.contains("attach_response_digest TEXT NOT NULL"));
-        assert!(schema_for(8).is_err());
+        assert!(schema_for(6).is_err());
         assert!(schema_for(9).is_err());
     }
 

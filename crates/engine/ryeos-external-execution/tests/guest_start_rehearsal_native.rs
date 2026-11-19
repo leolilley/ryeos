@@ -562,8 +562,8 @@ fn synthetic_relay() -> ExternalControllerFileRelayContract {
 
 fn synthetic_network() -> ExternalNetworkInputPolicy {
     serde_json::from_value(serde_json::json!({
-        "resolver": {"source": "/etc/resolv.conf", "max_bytes": 65536},
-        "hosts": {"source": "/etc/hosts", "max_bytes": 65536}
+        "resolver": {"source": "/etc/resolv.conf", "max_bytes": 65536, "required": true},
+        "hosts": {"source": "/etc/hosts", "max_bytes": 65536, "required": true}
     }))
     .unwrap()
 }

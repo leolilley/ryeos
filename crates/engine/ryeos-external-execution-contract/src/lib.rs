@@ -52,8 +52,13 @@ pub const GUEST_OCCURRENCES_ROOT: &str = "/ryeos/occurrences";
 pub struct OperatorNetworkInputSources {
     pub resolver_source: &'static str,
     pub resolver_max_bytes: u64,
+    /// A launch without a resolver cannot resolve names, so it is refused.
+    pub resolver_required: bool,
     pub hosts_source: &'static str,
     pub hosts_max_bytes: u64,
+    /// Some provider sandboxes carry no hosts file; names resolve through the
+    /// captured resolver alone, so a missing one is recorded as absent.
+    pub hosts_required: bool,
 }
 
 /// The network inputs an operator binding captures from the sandbox it runs in.
@@ -61,8 +66,10 @@ pub const fn operator_network_inputs() -> OperatorNetworkInputSources {
     OperatorNetworkInputSources {
         resolver_source: "/etc/resolv.conf",
         resolver_max_bytes: 64 * 1024,
+        resolver_required: true,
         hosts_source: "/etc/hosts",
         hosts_max_bytes: 64 * 1024,
+        hosts_required: false,
     }
 }
 
@@ -117,6 +124,22 @@ pub const LIFECYCLE_RESOLVER_FD_ENV: &str = "RYEOS_LIFECYCLE_RESOLVER_FD";
 pub const LIFECYCLE_HOSTS_FD_ENV: &str = "RYEOS_LIFECYCLE_HOSTS_FD";
 pub const LIFECYCLE_RESOLVER_SHA256_ENV: &str = "RYEOS_LIFECYCLE_RESOLVER_SHA256";
 pub const LIFECYCLE_HOSTS_SHA256_ENV: &str = "RYEOS_LIFECYCLE_HOSTS_SHA256";
+/// "1" when the resolver (hosts) file existed on the controller when captured,
+/// "0" when it was absent. An absent input is delivered as empty bytes with
+/// the digest of empty bytes; this tells it apart from a present empty file.
+pub const LIFECYCLE_RESOLVER_PRESENT_ENV: &str = "RYEOS_LIFECYCLE_RESOLVER_PRESENT";
+pub const LIFECYCLE_HOSTS_PRESENT_ENV: &str = "RYEOS_LIFECYCLE_HOSTS_PRESENT";
+
+/// Read the presence spelling of [`LIFECYCLE_RESOLVER_PRESENT_ENV`] and
+/// [`LIFECYCLE_HOSTS_PRESENT_ENV`]: exactly "1" or "0".
+pub fn parse_lifecycle_input_presence(value: &str) -> anyhow::Result<bool> {
+    match value {
+        "1" => Ok(true),
+        "0" => Ok(false),
+        _ => anyhow::bail!("captured network input presence is neither 1 nor 0"),
+    }
+}
+
 pub const LIFECYCLE_NETWORK_POLICY_SHA256_ENV: &str = "RYEOS_LIFECYCLE_NETWORK_POLICY_SHA256";
 pub const LIFECYCLE_REMAINING_TIMEOUT_MS_ENV: &str = "RYEOS_LIFECYCLE_REMAINING_TIMEOUT_MS";
 /// Sealed descriptor carrying the exact canonical request bytes the adapter

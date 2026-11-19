@@ -88,16 +88,18 @@ fn supervisor_bootstrap(
         resolver: ExternalNetworkInputSelection {
             source: resolver_source.into(),
             max_bytes: 65_536,
+            required: true,
         },
         hosts: ExternalNetworkInputSelection {
             source: hosts_source.into(),
             max_bytes: 65_536,
+            required: true,
         },
     };
     ExternalSupervisorBootstrap {
         schema: ryeos_state::external_execution::transport::EXTERNAL_SUPERVISOR_HTTP_BOOTSTRAP_SCHEMA,
         controller: ExternalControllerTransportContract {
-            schema: 2,
+            schema: 3,
             network_inputs,
             https_origin: "https://controller.example:7443".into(),
             route_contract: EXTERNAL_CHANNEL_ROUTE_CONTRACT.into(),

@@ -823,10 +823,14 @@ fn require_held_supervisor_mounts(mounts: &[lillux::LinuxSandboxMount]) -> Resul
 /// Capture only the two guest-local files selected by the sealed bootstrap.
 /// Lillux resolves symlinks once, pins exact regular files and seals bounded
 /// bytes; the mounted supervisor sees those bytes at the original policy
-/// paths, not ambient files from a controller or a later namespace.
+/// paths, not ambient files from a controller or a later namespace. A source
+/// that does not exist is mounted as nothing: only an input the policy does
+/// not require may be missing, and the supervisor then finds it absent too.
+/// The returned descriptors and destinations cover the present inputs only,
+/// in policy order.
 fn capture_supervisor_network_mounts(
     policy: &ryeos_state::external_execution::transport::ExternalNetworkInputPolicy,
-) -> Result<([lillux::InheritedDescriptorAuthority; 2], [PathBuf; 2])> {
+) -> Result<(Vec<lillux::InheritedDescriptorAuthority>, Vec<PathBuf>)> {
     policy.validate()?;
     let destinations = [
         std::path::Path::new(&policy.resolver.source),
@@ -844,26 +848,44 @@ fn capture_supervisor_network_mounts(
     let capture =
         |selection: &ryeos_state::external_execution::transport::ExternalNetworkInputSelection,
          name: &std::ffi::CStr|
-         -> Result<(lillux::InheritedDescriptorAuthority, PathBuf, Vec<u8>)> {
-            let source =
-                lillux::canonicalize_existing_path(std::path::Path::new(&selection.source))?;
-            let file = lillux::open_pinned_regular_file_no_follow(&source)?;
-            let captured =
-                file.capture_sealed_bounded(&file.observation()?, selection.max_bytes)?;
+         -> Result<Option<(lillux::InheritedDescriptorAuthority, PathBuf, Vec<u8>)>> {
+            let Some(captured) = lillux::capture_optional_sealed_regular_file(
+                std::path::Path::new(&selection.source),
+                selection.max_bytes,
+            )?
+            else {
+                ensure!(
+                    !selection.required,
+                    "required network input {} does not exist",
+                    selection.source
+                );
+                return Ok(None);
+            };
             let bytes = captured.bytes().to_vec();
             let sealed = lillux::sealed_memfd(name, &bytes)
                 .map_err(anyhow::Error::msg)?
                 .duplicate_at_or_above(59)
                 .map_err(anyhow::Error::msg)?;
-            Ok((sealed, PathBuf::from(&selection.source), bytes))
+            Ok(Some((sealed, PathBuf::from(&selection.source), bytes)))
         };
-    let (resolver, resolver_path, resolver_bytes) =
-        capture(&policy.resolver, c"ryeos-guest-resolver")?;
-    let (hosts, hosts_path, hosts_bytes) = capture(&policy.hosts, c"ryeos-guest-hosts")?;
-    lillux::network::NetworkContext::from_config_bytes(&resolver_bytes, &hosts_bytes)
-        .map_err(anyhow::Error::from)
-        .at_site(GuestOwnerSite::NetworkInputParse)?;
-    Ok(([resolver, hosts], [resolver_path, hosts_path]))
+    let resolver = capture(&policy.resolver, c"ryeos-guest-resolver")?;
+    let hosts = capture(&policy.hosts, c"ryeos-guest-hosts")?;
+    lillux::network::NetworkContext::from_config_bytes(
+        resolver
+            .as_ref()
+            .map_or(&[][..], |(_, _, bytes)| bytes.as_slice()),
+        hosts
+            .as_ref()
+            .map_or(&[][..], |(_, _, bytes)| bytes.as_slice()),
+    )
+    .map_err(anyhow::Error::from)
+    .at_site(GuestOwnerSite::NetworkInputParse)?;
+    let (mut sealed, mut paths) = (Vec::new(), Vec::new());
+    for (descriptor, path, _) in [resolver, hosts].into_iter().flatten() {
+        sealed.push(descriptor);
+        paths.push(path);
+    }
+    Ok((sealed, paths))
 }
 
 impl CommittedGuestSupervisorLaunchIntent {
@@ -997,7 +1019,7 @@ impl CommittedGuestSupervisorLaunchIntent {
         {
             let (inputs, destinations) = capture_supervisor_network_mounts(&http.network_inputs)
                 .at_site(GuestOwnerSite::NetworkInputCapture)?;
-            (Vec::from(inputs), Vec::from(destinations))
+            (inputs, destinations)
         } else {
             parsed_bootstrap.controller.relay()?;
             (Vec::new(), Vec::new())
@@ -2956,10 +2978,12 @@ mod recovery_binding_tests {
             resolver: ExternalNetworkInputSelection {
                 source: resolver.to_str().unwrap().into(),
                 max_bytes: 64 * 1024,
+                required: true,
             },
             hosts: ExternalNetworkInputSelection {
                 source: hosts.to_str().unwrap().into(),
                 max_bytes: 64 * 1024,
+                required: true,
             },
         }
     }
@@ -2977,7 +3001,8 @@ mod recovery_binding_tests {
         std::fs::write(&hosts, hosts_bytes).unwrap();
         let (mounted, destinations) =
             capture_supervisor_network_mounts(&network_policy(&resolver_link, &hosts)).unwrap();
-        assert_eq!(destinations, [resolver_link, hosts.clone()]);
+        assert_eq!(destinations, vec![resolver_link, hosts.clone()]);
+        assert_eq!(mounted.len(), 2);
         std::fs::write(&resolver, b"nameserver 192.0.2.1\n").unwrap();
         std::fs::write(&hosts, b"192.0.2.1 changed\n").unwrap();
         assert_eq!(
@@ -2996,6 +3021,26 @@ mod recovery_binding_tests {
             .unwrap(),
             hosts_bytes
         );
+    }
+
+    #[test]
+    fn supervisor_network_mounts_skip_an_absent_optional_input_and_refuse_a_required_one() {
+        let temporary = tempfile::tempdir().unwrap();
+        let resolver = temporary.path().join("resolver");
+        let hosts = temporary.path().join("hosts");
+        std::fs::write(&resolver, b"nameserver 127.0.0.1\n").unwrap();
+        let mut policy = network_policy(&resolver, &hosts);
+        assert!(capture_supervisor_network_mounts(&policy).is_err());
+        policy.hosts.required = false;
+        let (mounted, destinations) = capture_supervisor_network_mounts(&policy).unwrap();
+        assert_eq!((mounted.len(), destinations), (1, vec![resolver.clone()]));
+        // An existing empty file is present and mounted, not skipped.
+        std::fs::write(&hosts, b"").unwrap();
+        let (mounted, destinations) = capture_supervisor_network_mounts(&policy).unwrap();
+        assert_eq!((mounted.len(), destinations), (2, vec![resolver, hosts]));
+        // The resolver stays required.
+        std::fs::remove_file(temporary.path().join("resolver")).unwrap();
+        assert!(capture_supervisor_network_mounts(&policy).is_err());
     }
 
     #[test]

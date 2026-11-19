@@ -41,9 +41,10 @@ use ryeos_external_execution_contract::{
     AllocationReservation, BoundOccurrence, LEASE_ADMISSION_FD_ENV, LIFECYCLE_ADAPTER_PROTOCOL,
     LIFECYCLE_BOOTSTRAP_FD_ENV, LIFECYCLE_CREDENTIAL_FD_ENV, LIFECYCLE_GUEST_FRAMES_FD_ENV,
     LIFECYCLE_GUEST_PACKAGE_FD_ENV, LIFECYCLE_GUEST_RUNTIME_FD_ENV, LIFECYCLE_HOSTS_FD_ENV,
-    LIFECYCLE_HOSTS_SHA256_ENV, LIFECYCLE_LAUNCHER_FD_ENV, LIFECYCLE_NETWORK_POLICY_SHA256_ENV,
-    LIFECYCLE_PROVIDER_SPEC_FD_ENV, LIFECYCLE_PROVIDER_SPEC_SHA256_ENV,
-    LIFECYCLE_REMAINING_TIMEOUT_MS_ENV, LIFECYCLE_RESOLVER_FD_ENV, LIFECYCLE_RESOLVER_SHA256_ENV,
+    LIFECYCLE_HOSTS_PRESENT_ENV, LIFECYCLE_HOSTS_SHA256_ENV, LIFECYCLE_LAUNCHER_FD_ENV,
+    LIFECYCLE_NETWORK_POLICY_SHA256_ENV, LIFECYCLE_PROVIDER_SPEC_FD_ENV,
+    LIFECYCLE_PROVIDER_SPEC_SHA256_ENV, LIFECYCLE_REMAINING_TIMEOUT_MS_ENV,
+    LIFECYCLE_RESOLVER_FD_ENV, LIFECYCLE_RESOLVER_PRESENT_ENV, LIFECYCLE_RESOLVER_SHA256_ENV,
     LIFECYCLE_SETTINGS_FD_ENV, LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV, LIFECYCLE_SIGNED_IMPORT_FD_ENV,
     LIFECYCLE_SUPERVISOR_FD_ENV, LifecycleAdapterInspectionRequest,
     LifecycleAdapterInspectionResponse, LifecycleAdapterRequest, LifecycleAdapterResponse,
@@ -80,10 +81,17 @@ use crate::vault::placement::PlacementCredential;
 const LIFECYCLE_ADAPTER_INSPECTION_TIMEOUT_SECONDS: f64 = 60.0;
 
 struct CapturedLifecycleNetworkInputs {
-    resolver: lillux::secure_fs::CapturedRegularFile,
-    hosts: lillux::secure_fs::CapturedRegularFile,
+    /// Sealed bytes of each input; an empty sealed descriptor for an absent
+    /// one, so the adapter always receives two descriptors.
+    resolver: lillux::InheritedDescriptorAuthority,
+    hosts: lillux::InheritedDescriptorAuthority,
     resolver_sha256: String,
     hosts_sha256: String,
+    /// Whether each input existed. An absent input is delivered as empty
+    /// bytes with the digest of empty bytes, and this flag is what tells it
+    /// apart from a present empty file.
+    resolver_present: bool,
+    hosts_present: bool,
     policy_sha256: String,
 }
 
@@ -101,6 +109,11 @@ pub(crate) struct CapturedLifecycleSourceEvidence {
     pub restoration_verifier: Option<BundlePayloadSourceProof>,
 }
 
+/// The wire spelling of an input's presence for the adapter environment.
+fn present_env(present: bool) -> String {
+    if present { "1" } else { "0" }.to_owned()
+}
+
 fn capture_lifecycle_network_inputs(
     policy: &ryeos_state::external_execution::transport::ExternalNetworkInputPolicy,
 ) -> Result<CapturedLifecycleNetworkInputs> {
@@ -109,32 +122,49 @@ fn capture_lifecycle_network_inputs(
     };
 
     policy.validate()?;
-    let capture = |selection: &ExternalNetworkInputSelection| -> Result<
-        lillux::secure_fs::CapturedRegularFile,
-    > {
-        let path = lillux::canonicalize_existing_path(std::path::Path::new(&selection.source))
-            .with_context(|| "canonicalize signed lifecycle network input")?;
-        let file = lillux::secure_fs::open_pinned_regular_file_no_follow(&path)
-            .with_context(|| "open pinned lifecycle network input")?;
-        let observation = file.observation()?;
-        file.capture_sealed_bounded(&observation, selection.max_bytes)
-            .with_context(|| "capture bounded lifecycle network input")
+    let capture = |selection: &ExternalNetworkInputSelection| -> Result<Option<Vec<u8>>> {
+        let captured = lillux::capture_optional_sealed_regular_file(
+            std::path::Path::new(&selection.source),
+            selection.max_bytes,
+        )
+        .with_context(|| "capture bounded lifecycle network input")?;
+        ensure!(
+            captured.is_some() || !selection.required,
+            "required lifecycle network input {} does not exist",
+            selection.source
+        );
+        Ok(captured.map(|file| file.bytes().to_vec()))
     };
 
     let resolver = capture(&policy.resolver)?;
     let hosts = capture(&policy.hosts)?;
-    lillux::network::NetworkContext::from_config_bytes(resolver.bytes(), hosts.bytes())
-        .context("validate captured lifecycle network inputs")?;
-    let captured =
-        ExternalCapturedNetworkInputs::from_bytes(policy, resolver.bytes(), hosts.bytes())?;
+    lillux::network::NetworkContext::from_config_bytes(
+        resolver.as_deref().unwrap_or_default(),
+        hosts.as_deref().unwrap_or_default(),
+    )
+    .context("validate captured lifecycle network inputs")?;
+    let captured = ExternalCapturedNetworkInputs::from_captures(
+        policy,
+        resolver.as_deref(),
+        hosts.as_deref(),
+    )?;
     captured.validate_for(policy)?;
     let policy_sha256 = policy.digest()?;
 
+    let seal = |bytes: Option<Vec<u8>>| -> Result<lillux::InheritedDescriptorAuthority> {
+        lillux::sealed_memfd(
+            c"ryeos-lifecycle-network-input",
+            bytes.as_deref().unwrap_or_default(),
+        )
+        .map_err(anyhow::Error::msg)
+    };
     Ok(CapturedLifecycleNetworkInputs {
-        resolver,
-        hosts,
+        resolver: seal(resolver)?,
+        hosts: seal(hosts)?,
         resolver_sha256: captured.resolver_digest,
         hosts_sha256: captured.hosts_digest,
+        resolver_present: captured.resolver_present,
+        hosts_present: captured.hosts_present,
         policy_sha256,
     })
 }
@@ -523,8 +553,8 @@ impl ExecutableExternalPlacementBackend {
             self.provider_spec.authority.clone(),
             settings_handle.clone(),
             credential_handle.clone(),
-            network_inputs.resolver.authority().clone(),
-            network_inputs.hosts.authority().clone(),
+            network_inputs.resolver.clone(),
+            network_inputs.hosts.clone(),
         ];
         let mut envs = vec![
             (
@@ -571,7 +601,6 @@ impl ExecutableExternalPlacementBackend {
                 LIFECYCLE_RESOLVER_FD_ENV.into(),
                 network_inputs
                     .resolver
-                    .authority()
                     .inherited_descriptor()
                     .map_err(anyhow::Error::msg)?
                     .to_string(),
@@ -580,7 +609,6 @@ impl ExecutableExternalPlacementBackend {
                 LIFECYCLE_HOSTS_FD_ENV.into(),
                 network_inputs
                     .hosts
-                    .authority()
                     .inherited_descriptor()
                     .map_err(anyhow::Error::msg)?
                     .to_string(),
@@ -592,6 +620,14 @@ impl ExecutableExternalPlacementBackend {
             (
                 LIFECYCLE_HOSTS_SHA256_ENV.into(),
                 network_inputs.hosts_sha256.clone(),
+            ),
+            (
+                LIFECYCLE_RESOLVER_PRESENT_ENV.into(),
+                present_env(network_inputs.resolver_present),
+            ),
+            (
+                LIFECYCLE_HOSTS_PRESENT_ENV.into(),
+                present_env(network_inputs.hosts_present),
             ),
             (
                 LIFECYCLE_NETWORK_POLICY_SHA256_ENV.into(),
@@ -773,8 +809,8 @@ impl ExecutableExternalPlacementBackend {
             bootstrap_handle.clone(),
             settings_handle.clone(),
             credential_handle.clone(),
-            network.resolver.authority().clone(),
-            network.hosts.authority().clone(),
+            network.resolver.clone(),
+            network.hosts.clone(),
         ];
         let mut envs = vec![
             (LIFECYCLE_BOOTSTRAP_FD_ENV.into(), fd(&bootstrap_handle)?),
@@ -788,19 +824,21 @@ impl ExecutableExternalPlacementBackend {
                 LIFECYCLE_PROVIDER_SPEC_SHA256_ENV.into(),
                 self.provider_spec.sha256.clone(),
             ),
-            (
-                LIFECYCLE_RESOLVER_FD_ENV.into(),
-                fd(network.resolver.authority())?,
-            ),
-            (
-                LIFECYCLE_HOSTS_FD_ENV.into(),
-                fd(network.hosts.authority())?,
-            ),
+            (LIFECYCLE_RESOLVER_FD_ENV.into(), fd(&network.resolver)?),
+            (LIFECYCLE_HOSTS_FD_ENV.into(), fd(&network.hosts)?),
             (
                 LIFECYCLE_RESOLVER_SHA256_ENV.into(),
                 network.resolver_sha256,
             ),
             (LIFECYCLE_HOSTS_SHA256_ENV.into(), network.hosts_sha256),
+            (
+                LIFECYCLE_RESOLVER_PRESENT_ENV.into(),
+                present_env(network.resolver_present),
+            ),
+            (
+                LIFECYCLE_HOSTS_PRESENT_ENV.into(),
+                present_env(network.hosts_present),
+            ),
             (
                 LIFECYCLE_NETWORK_POLICY_SHA256_ENV.into(),
                 network.policy_sha256,
@@ -931,8 +969,8 @@ impl ExecutableExternalPlacementBackend {
             spec.authority.clone(),
             settings_handle.clone(),
             credential_handle.clone(),
-            network_inputs.resolver.authority().clone(),
-            network_inputs.hosts.authority().clone(),
+            network_inputs.resolver.clone(),
+            network_inputs.hosts.clone(),
         ];
         if let Some(upload) = upload {
             refuse_credential_home_upload(&self.credential_home_root, upload)?;
@@ -948,12 +986,9 @@ impl ExecutableExternalPlacementBackend {
             (LIFECYCLE_CREDENTIAL_FD_ENV.into(), fd(&credential_handle)?),
             (
                 LIFECYCLE_RESOLVER_FD_ENV.into(),
-                fd(network_inputs.resolver.authority())?,
+                fd(&network_inputs.resolver)?,
             ),
-            (
-                LIFECYCLE_HOSTS_FD_ENV.into(),
-                fd(network_inputs.hosts.authority())?,
-            ),
+            (LIFECYCLE_HOSTS_FD_ENV.into(), fd(&network_inputs.hosts)?),
             (
                 LIFECYCLE_RESOLVER_SHA256_ENV.into(),
                 network_inputs.resolver_sha256,
@@ -961,6 +996,14 @@ impl ExecutableExternalPlacementBackend {
             (
                 LIFECYCLE_HOSTS_SHA256_ENV.into(),
                 network_inputs.hosts_sha256,
+            ),
+            (
+                LIFECYCLE_RESOLVER_PRESENT_ENV.into(),
+                present_env(network_inputs.resolver_present),
+            ),
+            (
+                LIFECYCLE_HOSTS_PRESENT_ENV.into(),
+                present_env(network_inputs.hosts_present),
             ),
             (
                 LIFECYCLE_NETWORK_POLICY_SHA256_ENV.into(),

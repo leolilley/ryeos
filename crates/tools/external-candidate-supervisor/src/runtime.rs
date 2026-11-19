@@ -1054,20 +1054,32 @@ fn capture_network_inputs(
     policy: &ExternalNetworkInputPolicy,
 ) -> Result<ExternalCapturedNetworkInputs> {
     policy.validate()?;
-    let capture =
-        |selection: &ExternalNetworkInputSelection| -> Result<lillux::CapturedRegularFile> {
-            // Operator-selected system names may be symlinks. Resolve once, then
-            // read and seal the observed exact regular descriptor through Lillux.
-            let path = lillux::canonicalize_existing_path(std::path::Path::new(&selection.source))?;
-            let file = lillux::open_pinned_regular_file_no_follow(&path)?;
-            file.capture_sealed_bounded(&file.observation()?, selection.max_bytes)
-        };
+    let capture = |selection: &ExternalNetworkInputSelection| -> Result<Option<Vec<u8>>> {
+        // Operator-selected system names may be symlinks. Resolve once, then
+        // read and seal the observed exact regular descriptor through Lillux.
+        // A missing file is absent, never empty; only an optional input may
+        // be absent.
+        let captured = lillux::capture_optional_sealed_regular_file(
+            std::path::Path::new(&selection.source),
+            selection.max_bytes,
+        )?;
+        ensure!(
+            captured.is_some() || !selection.required,
+            "required network input {} does not exist",
+            selection.source
+        );
+        Ok(captured.map(|file| file.bytes().to_vec()))
+    };
     let resolver = capture(&policy.resolver)?;
     let hosts = capture(&policy.hosts)?;
-    // Parse before creating the journal or contacting the controller. Sealed
-    // captures are supervisor-only and never become candidate descriptors.
-    lillux::network::NetworkContext::from_config_bytes(resolver.bytes(), hosts.bytes())?;
-    ExternalCapturedNetworkInputs::from_bytes(policy, resolver.bytes(), hosts.bytes())
+    // Parse before creating the journal or contacting the controller. An
+    // absent input parses as empty bytes. Sealed captures are
+    // supervisor-only and never become candidate descriptors.
+    lillux::network::NetworkContext::from_config_bytes(
+        resolver.as_deref().unwrap_or_default(),
+        hosts.as_deref().unwrap_or_default(),
+    )?;
+    ExternalCapturedNetworkInputs::from_captures(policy, resolver.as_deref(), hosts.as_deref())
 }
 
 /// The network inputs this supervisor resolves names with, as it holds them
@@ -1079,15 +1091,25 @@ fn observe_network_inputs(
     captured: &ExternalCapturedNetworkInputs,
 ) -> Result<Vec<ObservedNetworkInput>> {
     captured.validate_for(policy)?;
-    let observe =
-        |selection: &ExternalNetworkInputSelection, bytes: Vec<u8>| ObservedNetworkInput {
+    let observe = |selection: &ExternalNetworkInputSelection, bytes: Vec<u8>, present: bool| {
+        ObservedNetworkInput {
             source: selection.source.clone(),
             bytes: bytes.len() as u64,
             sha256: lillux::sha256_hex(&bytes),
-        };
+            absent: !present,
+        }
+    };
     Ok(vec![
-        observe(&policy.resolver, captured.resolver_bytes()?),
-        observe(&policy.hosts, captured.hosts_bytes()?),
+        observe(
+            &policy.resolver,
+            captured.resolver_bytes()?,
+            captured.resolver_present,
+        ),
+        observe(
+            &policy.hosts,
+            captured.hosts_bytes()?,
+            captured.hosts_present,
+        ),
     ])
 }
 
@@ -1809,15 +1831,17 @@ mod tests {
         ExternalSupervisorBootstrap {
             schema: ryeos_state::external_execution::transport::EXTERNAL_SUPERVISOR_HTTP_BOOTSTRAP_SCHEMA,
             controller: ExternalControllerTransportContract {
-                schema: 2,
+                schema: 3,
                 network_inputs: ExternalNetworkInputPolicy {
                     resolver: ExternalNetworkInputSelection {
                         source: "/etc/resolv.conf".into(),
                         max_bytes: 64 * 1024,
+                        required: true,
                     },
                     hosts: ExternalNetworkInputSelection {
                         source: "/etc/hosts".into(),
                         max_bytes: 64 * 1024,
+                        required: true,
                     },
                 },
                 https_origin: "https://controller.invalid".into(),
@@ -1907,10 +1931,12 @@ mod tests {
             resolver: ExternalNetworkInputSelection {
                 source: resolver.to_str().unwrap().into(),
                 max_bytes: 4096,
+                required: true,
             },
             hosts: ExternalNetworkInputSelection {
                 source: hosts.to_str().unwrap().into(),
                 max_bytes: 4096,
+                required: true,
             },
         };
         let captured = capture_network_inputs(&policy).unwrap();
@@ -1922,11 +1948,13 @@ mod tests {
                     source: policy.resolver.source.clone(),
                     bytes: 20,
                     sha256: lillux::sha256_hex(b"nameserver 10.1.2.3\n"),
+                    absent: false,
                 },
                 ObservedNetworkInput {
                     source: policy.hosts.source.clone(),
                     bytes: 40,
                     sha256: lillux::sha256_hex(b"127.0.0.1 localhost\n10.9.9.9 controller\n"),
+                    absent: false,
                 },
             ]
         );
@@ -1937,6 +1965,50 @@ mod tests {
             observe_network_inputs(&policy, &capture_network_inputs(&policy).unwrap()).unwrap();
         assert_ne!(again[0].sha256, observed[0].sha256);
         assert_eq!(again[1], observed[1]);
+    }
+
+    #[test]
+    fn missing_network_input_is_absent_only_when_optional_and_never_empty() {
+        let root = tempfile::tempdir().unwrap();
+        let resolver = root.path().join("resolv.conf");
+        let hosts = root.path().join("hosts");
+        std::fs::write(&resolver, b"nameserver 10.1.2.3\n").unwrap();
+        let mut policy = ExternalNetworkInputPolicy {
+            resolver: ExternalNetworkInputSelection {
+                source: resolver.to_str().unwrap().into(),
+                max_bytes: 4096,
+                required: true,
+            },
+            hosts: ExternalNetworkInputSelection {
+                source: hosts.to_str().unwrap().into(),
+                max_bytes: 4096,
+                required: true,
+            },
+        };
+        // Required and missing: refused.
+        assert!(capture_network_inputs(&policy).is_err());
+        // Optional and missing: absent, observed as absent, resolved empty.
+        policy.hosts.required = false;
+        let absent = capture_network_inputs(&policy).unwrap();
+        assert!(absent.resolver_present && !absent.hosts_present);
+        assert!(absent.hosts_bytes().unwrap().is_empty());
+        let observed_absent = observe_network_inputs(&policy, &absent).unwrap();
+        assert!(!observed_absent[0].absent && observed_absent[1].absent);
+        // Optional and present but empty: present, a different observation
+        // and a different capture identity from absent.
+        std::fs::write(&hosts, b"").unwrap();
+        let empty = capture_network_inputs(&policy).unwrap();
+        assert!(empty.hosts_present);
+        let observed_empty = observe_network_inputs(&policy, &empty).unwrap();
+        assert!(!observed_empty[1].absent);
+        assert_eq!(observed_empty[1].bytes, 0);
+        assert_eq!(observed_empty[1].sha256, observed_absent[1].sha256);
+        assert_ne!(observed_empty[1], observed_absent[1]);
+        assert_ne!(empty.digest().unwrap(), absent.digest().unwrap());
+        // A required resolver that is missing is refused even when hosts is
+        // optional.
+        std::fs::remove_file(&resolver).unwrap();
+        assert!(capture_network_inputs(&policy).is_err());
     }
 
     fn state_authority() -> (tempfile::TempDir, ryeos_state::PinnedStateAuthority) {

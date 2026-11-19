@@ -29,9 +29,10 @@ use provider_spec::{PlanValue, ProviderSpec, RouteName, RouteTarget};
 use ryeos_effect_contract::rfc3339;
 use ryeos_external_execution_contract::{
     LIFECYCLE_ADAPTER_EXECUTABLE_FD_ENV, LIFECYCLE_ADAPTER_PROTOCOL, LIFECYCLE_BOOTSTRAP_FD_ENV,
-    LIFECYCLE_HOSTS_FD_ENV, LIFECYCLE_HOSTS_SHA256_ENV, LIFECYCLE_NETWORK_POLICY_SHA256_ENV,
-    LIFECYCLE_PROVIDER_SPEC_FD_ENV, LIFECYCLE_PROVIDER_SPEC_SHA256_ENV, LIFECYCLE_REQUEST_FD_ENV,
-    LIFECYCLE_RESOLVER_FD_ENV, LIFECYCLE_RESOLVER_SHA256_ENV, LIFECYCLE_SETTINGS_FD_ENV,
+    LIFECYCLE_HOSTS_FD_ENV, LIFECYCLE_HOSTS_PRESENT_ENV, LIFECYCLE_HOSTS_SHA256_ENV,
+    LIFECYCLE_NETWORK_POLICY_SHA256_ENV, LIFECYCLE_PROVIDER_SPEC_FD_ENV,
+    LIFECYCLE_PROVIDER_SPEC_SHA256_ENV, LIFECYCLE_REQUEST_FD_ENV, LIFECYCLE_RESOLVER_FD_ENV,
+    LIFECYCLE_RESOLVER_PRESENT_ENV, LIFECYCLE_RESOLVER_SHA256_ENV, LIFECYCLE_SETTINGS_FD_ENV,
     LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV, LIFECYCLE_SIGNED_IMPORT_FD_ENV,
     LifecycleAdapterInspectionRequest, LifecycleAdapterInspectionResponse, LifecycleAdapterRequest,
     LifecycleAdapterResponse, LifecycleArtifactInspection, LifecycleArtifactRole,
@@ -1545,6 +1546,19 @@ fn network_context_from_captured_inputs_inner() -> Result<NetworkContext> {
         std::env::var(LIFECYCLE_HOSTS_SHA256_ENV).context("missing captured hosts digest")?;
     let network_policy_digest = std::env::var(LIFECYCLE_NETWORK_POLICY_SHA256_ENV)
         .context("missing captured network policy digest")?;
+    let resolver_present = ryeos_external_execution_contract::parse_lifecycle_input_presence(
+        &std::env::var(LIFECYCLE_RESOLVER_PRESENT_ENV)
+            .context("missing captured resolver presence")?,
+    )?;
+    let hosts_present = ryeos_external_execution_contract::parse_lifecycle_input_presence(
+        &std::env::var(LIFECYCLE_HOSTS_PRESENT_ENV).context("missing captured hosts presence")?,
+    )?;
+    // An absent input is delivered as empty bytes with the digest of empty
+    // bytes; it carries nothing else.
+    ensure!(
+        (resolver_present || resolver.is_empty()) && (hosts_present || hosts.is_empty()),
+        "absent captured network input carries bytes"
+    );
     ensure!(
         lillux::valid_hash(&resolver_digest)
             && lillux::valid_hash(&hosts_digest)
