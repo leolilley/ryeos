@@ -929,7 +929,9 @@ fn the_tab_band_carries_no_layout_readout_and_sets_its_words_level_with_the_chip
     assert!(top_bar.visible, "the chips scene shows the tab band");
     let texts = drawn_texts(&rt);
     assert!(
-        !texts.iter().any(|(text, _)| text.contains('|') || text.contains('│')),
+        !texts
+            .iter()
+            .any(|(text, _)| text.contains('|') || text.contains('│')),
         "no layout readout in the band: {texts:?}"
     );
     let current = top_bar

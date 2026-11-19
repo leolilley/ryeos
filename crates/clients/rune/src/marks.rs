@@ -162,15 +162,11 @@ pub(crate) fn key_chip(keys: &str) -> El {
 /// One key hint: the key chip, then its word at `word_ink` of `ink`.
 pub(crate) fn key_hint(keys: &str, word: &str, word_ink: f32) -> El {
     let t = Tokens::get();
-    row()
-        .gap(6.0)
-        .center_y()
-        .child(key_chip(keys))
-        .child(
-            text(theme::drawable(word, theme::Face::Ui).into_owned())
-                .font(theme::TYPE_MICRO)
-                .color(t.ink_at(word_ink)),
-        )
+    row().gap(6.0).center_y().child(key_chip(keys)).child(
+        text(theme::drawable(word, theme::Face::Ui).into_owned())
+            .font(theme::TYPE_MICRO)
+            .color(t.ink_at(word_ink)),
+    )
 }
 
 #[cfg(test)]

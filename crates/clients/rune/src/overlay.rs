@@ -153,9 +153,7 @@ fn surfaces_section(surfaces: &[RyeOsSurfaceChoiceVm], tight: bool) -> El {
             (1.0, t.ink_at(0.10), t.ink_at(0.78), t.ink_at(0.60))
         };
         let mark = match surface.chip.mark {
-            ryeos_client_base::ui::view_model::RyeOsChipMarkVm::Grid => {
-                marks::grid_mark(mark_ink)
-            }
+            ryeos_client_base::ui::view_model::RyeOsChipMarkVm::Grid => marks::grid_mark(mark_ink),
             ryeos_client_base::ui::view_model::RyeOsChipMarkVm::Key => {
                 match surface.chip.fingerprint.as_deref() {
                     Some(fingerprint) => marks::key_mark(fingerprint, 20.0, mark_ink),
