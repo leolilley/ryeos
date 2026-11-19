@@ -128,6 +128,23 @@ mod tests {
     }
 
     #[test]
+    fn query_pairs_sort_by_key_then_value_and_keep_repeats() {
+        assert_eq!(
+            canonical_path_and_query("/objects/get?hashes=def&hashes=abc&hashes=ghi"),
+            "/objects/get?hashes=abc&hashes=def&hashes=ghi"
+        );
+        assert_eq!(
+            canonical_path_and_query("/search?tag=b&limit=5&tag=a"),
+            "/search?limit=5&tag=a&tag=b"
+        );
+        assert_eq!(
+            canonical_path_and_query("/path?flag&other=val"),
+            "/path?flag&other=val"
+        );
+        assert_eq!(canonical_path_and_query("/execute"), "/execute");
+    }
+
+    #[test]
     fn empty_query_is_dropped() {
         assert_eq!(canonical_path_and_query("/x?"), "/x");
         assert_eq!(canonical_path("/x", Some("")), "/x");

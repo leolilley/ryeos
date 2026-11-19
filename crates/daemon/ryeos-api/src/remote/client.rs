@@ -2026,8 +2026,8 @@ impl RemoteClient {
 
     async fn signed_get(&self, path: &str) -> Result<Value> {
         let url = format!("{}{}", self.base_url, path);
-        // Sign with the full path+query — canonicalize_path inside
-        // sign_request will sort query params to match server-side.
+        // Sign with the full path+query — sign_request sorts the query
+        // params through the shared builder to match server-side.
         let headers = self.sign_request("GET", path, &[])?;
 
         let mut request = self
@@ -5087,11 +5087,6 @@ mod tests {
     }
 
     #[test]
-    fn canonicalize_path_no_query() {
-        assert_eq!(canonicalize_path("/execute"), "/execute");
-    }
-
-    #[test]
     fn forwarded_request_is_cosigned_by_source_node() {
         let directory = tempfile::tempdir().unwrap();
         let operator =
@@ -5215,59 +5210,6 @@ mod tests {
         ] {
             assert!(extract_remote_wait_result(invalid).is_err());
         }
-    }
-
-    #[test]
-    fn canonicalize_path_sorted_query() {
-        assert_eq!(
-            canonicalize_path("/threads/abc/events/stream?after=42&limit=10"),
-            "/threads/abc/events/stream?after=42&limit=10"
-        );
-    }
-
-    #[test]
-    fn canonicalize_path_unsorted_query() {
-        assert_eq!(
-            canonicalize_path("/threads/abc?limit=10&after=42"),
-            "/threads/abc?after=42&limit=10"
-        );
-    }
-
-    #[test]
-    fn canonicalize_path_repeated_keys() {
-        // Repeated query keys must be preserved and sorted together.
-        // Key "tag" appears twice: tag=b sorts before tag=a only if
-        // the full pair (tag, b) < (tag, a), but since k is the same,
-        // the value is the tiebreaker.
-        assert_eq!(
-            canonicalize_path("/objects/get?hashes=abc&hashes=def"),
-            "/objects/get?hashes=abc&hashes=def"
-        );
-        assert_eq!(
-            canonicalize_path("/search?tag=b&limit=5&tag=a"),
-            "/search?limit=5&tag=a&tag=b"
-        );
-    }
-
-    #[test]
-    fn canonicalize_path_empty_value() {
-        assert_eq!(
-            canonicalize_path("/path?flag&other=val"),
-            "/path?flag&other=val"
-        );
-    }
-
-    #[test]
-    fn signed_get_canonicalization_matches_server_repeated_keys() {
-        // The canonicalization for signing must match the server's
-        // auth.rs canonicalization. This test verifies that repeated
-        // keys (like hashes=abc&hashes=def) are preserved in order
-        // but sorted as pairs, and the full canonical string is
-        // deterministic.
-        let path_with_repeats = "/objects/get?hashes=def&hashes=abc&hashes=ghi";
-        let canonical = canonicalize_path(path_with_repeats);
-        // Sorted by key, then value:
-        assert_eq!(canonical, "/objects/get?hashes=abc&hashes=def&hashes=ghi");
     }
 
     #[test]
