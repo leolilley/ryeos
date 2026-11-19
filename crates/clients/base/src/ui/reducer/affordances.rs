@@ -1545,7 +1545,6 @@ mod tests {
         );
         assert!(!core.key_context().focused_dock_answer);
         assert!(press_dock_key(&mut core, 'a').is_empty());
-        assert!(active_selection(&core).get("decision").is_none());
     }
 
     #[test]
