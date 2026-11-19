@@ -185,6 +185,10 @@ exact `InputAt` addresses; character-level events remain shared keymap paths.
 | [x] `SetTreeRowCollapsed` | shared | shared | shared keymap |
 | [x] `SetViewTreeItemCollapsed` | native | gap | Browser hierarchy button addresses exact visible mount and stable row identity; terminal uses focused tree-fold keys. |
 | [x] `ActivateFocused` | shared | shared | shared keymap |
+| [x] `ToggleOverlay` | shared | shared | Alt+O from any state through the shared keymap; Rune's scrim press also sends it. |
+| [x] `MoveOverlay` | shared | shared | Up and Down while the overlay is open; shared keymap |
+| [x] `ActivateOverlay` | shared | shared | Enter on the selected overlay row; shared keymap |
+| [x] `ActivateOverlayKey` | shared | shared | The key of a selected row's action (`a` acknowledge); shared keymap |
 | [x] `DismissDialog` | shared | shared | Esc and the scrim: the launcher's second stage closes before its sheet |
 | [x] `ChooseLauncherPlace` | shared | shared | T and S while the launcher shows where a view can land; shared keymap |
 | [x] `RenameActive` | shared | shared | Alt+R renames the active view set, Alt+Shift+R the active Surface; shared keymap |
