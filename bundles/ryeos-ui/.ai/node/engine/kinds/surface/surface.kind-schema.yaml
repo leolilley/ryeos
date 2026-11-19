@@ -1,6 +1,6 @@
-# ryeos:signed:2026-11-18T22:21:29Z:4a49686ae5f6dd08c9887d984b4aadeab96a8bf0dff3ceb6096e85c6f1230774:OlcqRwaGUvWSbsPx7+Llpq8KitgA5W2e4QNZhIl8MLpNmnbL+T4nMO4tRv9upiUlF1r3m/gOqIV7skHnlxDMDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-19T06:28:49Z:d756e8c4cc06c61bb11ade8319412bb1ea57fc03d726c50552485ba69cce3a59:8GTMa1nNYOW8nJP72B3ukOq0+KUB5CdF+em6ik+ttbRhLLAg3hBL2rUkvJ8bUrL1A6FykAKWg88pu6m06yR3BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/surface"
-version: "2.4.0"
+version: "2.5.0"
 # A project file may not take the ref of a surface an installed bundle
 # supplies. Resolution refuses the ref, naming both files, so a project can
 # add its own surfaces but never replace the node's.
@@ -145,7 +145,22 @@ composed_value_contract:
           mark:
             type: single
             prim: string
-            enum: [grid, key, initial]
+            enum: [grid, key, initial, picture]
+          # The signed picture the `picture` mark draws, by content hash. Only
+          # a node-authored Surface may name one; the daemon drops it from a
+          # project-authored Surface and records the attenuation.
+          art:
+            type: single
+            prim: mapping
+            contract:
+              root_type: mapping
+              required:
+                sha256: { type: single, prim: string }
+                media_type:
+                  type: single
+                  prim: string
+                  enum: [image/png, image/jpeg, image/webp]
+              optional: {}
     extends:
       type: union
       prims: [string, "null"]

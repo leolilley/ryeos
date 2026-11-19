@@ -16,7 +16,7 @@
 //!    session cookie is set, browser is redirected to `/ui`.
 //! 4. Session-authed routes validate the cookie against this store.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -688,6 +688,21 @@ pub struct BrowserSession {
     pub presentations: HashMap<String, PresentationMembership>,
     pub(crate) next_attachment_generation: u64,
     pub(crate) next_surface_ordinal: u64,
+    /// Picture hashes this session may be served beyond those its bindings
+    /// name: pictures a service run for this session handed it. Bounded by
+    /// [`MAX_ART_GRANTS_PER_SESSION`] and gone with the session.
+    pub art_grants: BTreeSet<String>,
+}
+
+/// Most picture hashes one session's grant set may hold.
+pub const MAX_ART_GRANTS_PER_SESSION: usize = 256;
+
+/// Why a picture grant was not recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtGrantRefusal {
+    UnknownSession,
+    MalformedHash,
+    SetFull,
 }
 
 /// Short-lived, idempotent activation token for a pending session.
@@ -792,6 +807,7 @@ impl BrowserSessionStore {
             presentations: HashMap::new(),
             next_surface_ordinal: 1,
             next_attachment_generation: 2,
+            art_grants: BTreeSet::new(),
         };
 
         let token_bytes: [u8; 32] = rand::random();
@@ -906,6 +922,31 @@ impl BrowserSessionStore {
             revoked.insert(session_id.to_owned(), until);
         }
         until.is_some()
+    }
+
+    /// Add one picture hash to a live session's grant set. The set is the
+    /// only way a session is served a picture its bindings do not name.
+    ///
+    /// Nothing in production calls this yet. A future caller must be a
+    /// service running for this session that itself returned the hash, and
+    /// must first check the hash is in the `ArtIndex`. It must never be wired
+    /// to a request field.
+    pub fn grant_art(&self, session_id: &str, sha256: &str) -> Result<(), ArtGrantRefusal> {
+        if !ryeos_client_base::art::is_art_hash(sha256) {
+            return Err(ArtGrantRefusal::MalformedHash);
+        }
+        let mut sessions = self.sessions.lock().unwrap();
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or(ArtGrantRefusal::UnknownSession)?;
+        if session.art_grants.contains(sha256) {
+            return Ok(());
+        }
+        if session.art_grants.len() >= MAX_ART_GRANTS_PER_SESSION {
+            return Err(ArtGrantRefusal::SetFull);
+        }
+        session.art_grants.insert(sha256.to_owned());
+        Ok(())
     }
 
     /// Whether an operator revoked this session and its lifetime has not yet
@@ -3808,6 +3849,7 @@ pub(crate) mod tests {
                 affordances: BTreeMap::new(),
                 surface_route: None,
                 attenuated: Vec::new(),
+                art: BTreeMap::new(),
                 project_source_ceiling_digest: String::new(),
             },
         })

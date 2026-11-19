@@ -69,6 +69,11 @@ pub struct ViewBinding {
     pub facet: Option<String>,
     #[serde(default)]
     pub projections: Value,
+    /// The signed picture this view draws behind its content. Only a
+    /// node-authored view may name one; the daemon drops it from a
+    /// project-authored view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture: Option<crate::art::ArtRef>,
     /// Row-activation binding for the `rows` and `table` widgets:
     /// `selection.activate: <affordance_id>`. Explicit — there is no
     /// implicit "first affordance" activation. A `timeline` view names the

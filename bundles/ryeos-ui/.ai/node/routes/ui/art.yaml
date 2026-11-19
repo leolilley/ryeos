@@ -1,0 +1,12 @@
+# ryeos:signed:2026-11-19T06:28:49Z:827c13a1da4efcc7d4835432e70c8505e1c93fc9507c774c84e8de9dff372e44:XhgF453Fm0NKhYtM+tiqP35NghEA6Dxs3GU2Mof9906JOPQOzL0sA8WES4YMSeHpsUDqOkMlksYORrkiGwrDDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: ui/art
+path: /ui/art/{sha256}
+methods:
+  - GET
+auth: browser_session
+limits:
+  body_bytes_max: 0
+  timeout_ms: 5000
+  concurrent_max: 64
+response:
+  mode: art

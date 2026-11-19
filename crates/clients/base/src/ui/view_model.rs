@@ -2959,7 +2959,9 @@ fn surface_chip_vm(
     let mark = match spec.map(|spec| spec.chip.mark).unwrap_or_default() {
         SurfaceChipMarkSpec::Grid => RyeOsChipMarkVm::Grid,
         SurfaceChipMarkSpec::Key => RyeOsChipMarkVm::Key,
-        SurfaceChipMarkSpec::Initial => RyeOsChipMarkVm::Initial,
+        // No client draws the picture mark yet; until one does it shows as
+        // the Surface's initial.
+        SurfaceChipMarkSpec::Initial | SurfaceChipMarkSpec::Picture => RyeOsChipMarkVm::Initial,
     };
     RyeOsSurfaceChipVm {
         mark,

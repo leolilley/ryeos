@@ -221,13 +221,19 @@ pub(super) fn rebuild_bundle_manifest_in_place(
         ryeos_engine::executor_resolution::EXECUTOR_MANIFEST_REF_DOMAIN
     );
     let existing_ref = fs::read_to_string(&refs_path).ok();
-    if !existing_ref
-        .as_deref()
-        .is_some_and(|existing| already_signed_manifest_ref(existing, &manifest_hash, signing_key))
-    {
+    if !existing_ref.as_deref().is_some_and(|existing| {
+        already_signed_manifest_ref(
+            existing,
+            ryeos_engine::executor_resolution::EXECUTOR_MANIFEST_REF_DOMAIN,
+            &manifest_hash,
+            signing_key,
+        )
+    }) {
         let signed_ref = sign_content(&ref_body, signing_key, "#", None);
         atomic_write_str(&refs_path, &signed_ref)?;
     }
+
+    rebuild_picture_manifest(bundle_root, &cas, signing_key)?;
 
     Ok(RebuildReport {
         manifest_hash,
@@ -241,15 +247,78 @@ fn atomic_write_str(path: &Path, content: &str) -> Result<()> {
         .with_context(|| format!("atomically write {}", path.display()))
 }
 
+/// Cover every picture blob under `.ai/pictures` with a signed picture
+/// manifest at `.ai/refs/bundles/pictures`.
+///
+/// The picture sources are checked first: every record carries its required
+/// fields and an accepted licence, every blob has exactly one record, hashes to
+/// it and matches its declared type, and the size caps hold. A failure here
+/// fails the publish. Each blob becomes a non-executable `pictures/<sha256>`
+/// item source; the blob itself stays under `.ai/pictures/blobs`. A bundle
+/// with no pictures root carries no picture manifest ref.
+fn rebuild_picture_manifest(
+    bundle_root: &Path,
+    cas: &CasStore,
+    signing_key: &SigningKey,
+) -> Result<()> {
+    let ai_root = bundle_root.join(ryeos_engine::AI_DIR);
+    let refs_path = ryeos_bundle::pictures::picture_manifest_ref_path(&ai_root);
+    let Some(pictures) = ryeos_bundle::pictures::check_picture_sources(bundle_root)
+        .context("picture sources failed the publish check")?
+    else {
+        // A stale ref must not outlive the pictures it covered.
+        match fs::remove_file(&refs_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("remove stale {}", refs_path.display()));
+            }
+        }
+        return Ok(());
+    };
+
+    let mut item_source_hashes: HashMap<String, String> = HashMap::new();
+    for sha256 in pictures.entries.keys() {
+        let item_ref = format!(
+            "{}{sha256}",
+            ryeos_bundle::pictures::PICTURE_ITEM_REF_PREFIX
+        );
+        let item_source = ItemSource {
+            item_ref: item_ref.clone(),
+            content_blob_hash: sha256.clone(),
+            integrity: format!("sha256:{sha256}"),
+            signature_info: None,
+            mode: Some(ryeos_engine::executor_resolution::PICTURE_ITEM_SOURCE_MODE),
+        };
+        let item_source_hash = cas.store_object(&item_source.to_value())?;
+        item_source_hashes.insert(item_ref, item_source_hash);
+    }
+    let source_manifest = SourceManifest { item_source_hashes };
+    let manifest_hash = cas.store_object(&source_manifest.to_value())?;
+
+    let domain = ryeos_engine::executor_resolution::PICTURE_MANIFEST_REF_DOMAIN;
+    let existing_ref = fs::read_to_string(&refs_path).ok();
+    if !existing_ref.as_deref().is_some_and(|existing| {
+        already_signed_manifest_ref(existing, domain, &manifest_hash, signing_key)
+    }) {
+        let ref_body = format!("{domain}\n{manifest_hash}\n");
+        let signed_ref = sign_content(&ref_body, signing_key, "#", None);
+        atomic_write_str(&refs_path, &signed_ref)?;
+    }
+    Ok(())
+}
+
 fn already_signed_manifest_ref(
     existing: &str,
+    domain: &str,
     expected_manifest_hash: &str,
     signing_key: &SigningKey,
 ) -> bool {
     let verifying_key = signing_key.verifying_key();
     let fingerprint = compute_fingerprint(&verifying_key);
-    ryeos_engine::executor_resolution::verify_signed_executor_manifest_ref(
+    ryeos_engine::executor_resolution::verify_signed_manifest_ref_in_domain(
         existing,
+        domain,
         |candidate| (candidate == fingerprint).then_some(verifying_key),
         ryeos_engine::resolution::TrustClass::TrustedBundle,
     )
@@ -507,5 +576,172 @@ mod tests {
         )
         .unwrap();
         assert_eq!(verified.manifest_hash, report.manifest_hash);
+    }
+    /// A real 16x10 lossy WebP.
+    const WEBP_16X10: [u8; 52] = [
+        0x52, 0x49, 0x46, 0x46, 0x2c, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38,
+        0x20, 0x20, 0x00, 0x00, 0x00, 0x70, 0x01, 0x00, 0x9d, 0x01, 0x2a, 0x10, 0x00, 0x0a, 0x00,
+        0x01, 0x40, 0x26, 0x25, 0x94, 0x02, 0x74, 0x01, 0xa0, 0x00, 0x00, 0xf1, 0x3a, 0xbf, 0xbe,
+        0xa7, 0x41, 0xf1, 0x5f, 0x00, 0x00, 0x00,
+    ];
+
+    fn picture_record(sha: &str, source_line: &str, licence: &str) -> String {
+        format!(
+            "title: Test\n{source_line}licence: \"{licence}\"\nrenditions:\n  - role: card\n    \
+             sha256: \"{sha}\"\n    media_type: image/webp\n    width: 16\n    height: 10\n    \
+             bytes: 52\n"
+        )
+    }
+
+    /// A bundle with one picture, its record signed by `key`. Returns the
+    /// bundle root and the blob hash.
+    fn picture_bundle(
+        tmp: &Path,
+        key: &SigningKey,
+        source_url: &str,
+        licence: &str,
+    ) -> (std::path::PathBuf, String) {
+        let bundle = tmp.join("bundle");
+        let pictures = bundle.join(".ai/pictures");
+        fs::create_dir_all(pictures.join("blobs")).unwrap();
+        fs::create_dir_all(pictures.join("ryeos")).unwrap();
+        let sha = lillux::sha256_hex(&WEBP_16X10);
+        fs::write(pictures.join(format!("blobs/{sha}.webp")), WEBP_16X10).unwrap();
+        let source_line = if source_url.is_empty() {
+            String::new()
+        } else {
+            format!("source_url: {source_url}\n")
+        };
+        let record = picture_record(&sha, &source_line, licence);
+        fs::write(
+            pictures.join("ryeos/test.yaml"),
+            sign_content(&record, key, "#", None),
+        )
+        .unwrap();
+        (bundle, sha)
+    }
+
+    fn trust_of(key: &SigningKey) -> ryeos_engine::trust::TrustStore {
+        ryeos_engine::trust::TrustStore::from_signers(vec![ryeos_engine::trust::TrustedSigner {
+            fingerprint: compute_fingerprint(&key.verifying_key()),
+            verifying_key: key.verifying_key(),
+            label: None,
+        }])
+    }
+
+    #[test]
+    fn pictures_are_covered_by_a_signed_non_executable_picture_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = test_signing_key();
+        let (bundle, sha) =
+            picture_bundle(tmp.path(), &key, "https://example.test/object/1", "cc0");
+
+        let report = rebuild_bundle_manifest(&bundle, &key).unwrap();
+        assert!(report.entries.is_empty(), "pictures are not executables");
+        assert!(bundle.join(".ai/refs/bundles/pictures").is_file());
+
+        let pictures =
+            ryeos_bundle::pictures::verify_bundle_pictures(&bundle, &trust_of(&key), true).unwrap();
+        assert_eq!(pictures.entries.len(), 1);
+        assert_eq!(pictures.entries[&sha].width, 16);
+
+        // The executor manifest ref is a different signing domain: it does not
+        // verify as a picture manifest.
+        let executor_ref = fs::read_to_string(bundle.join(".ai/refs/bundles/manifest")).unwrap();
+        fs::write(bundle.join(".ai/refs/bundles/pictures"), executor_ref).unwrap();
+        assert!(
+            ryeos_bundle::pictures::verify_bundle_pictures(&bundle, &trust_of(&key), false)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn picture_rebuild_is_idempotent_and_drops_a_stale_ref() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = test_signing_key();
+        let (bundle, _) = picture_bundle(tmp.path(), &key, "https://example.test/object/1", "cc0");
+        rebuild_bundle_manifest(&bundle, &key).unwrap();
+        let first = fs::read_to_string(bundle.join(".ai/refs/bundles/pictures")).unwrap();
+        rebuild_bundle_manifest(&bundle, &key).unwrap();
+        let second = fs::read_to_string(bundle.join(".ai/refs/bundles/pictures")).unwrap();
+        assert_eq!(first, second);
+
+        fs::remove_dir_all(bundle.join(".ai/pictures")).unwrap();
+        rebuild_bundle_manifest(&bundle, &key).unwrap();
+        assert!(!bundle.join(".ai/refs/bundles/pictures").exists());
+    }
+
+    #[test]
+    fn publish_refuses_a_picture_without_source_or_with_an_unaccepted_licence() {
+        let key = test_signing_key();
+        for (source_url, licence, needle) in [
+            ("", "cc0", "source_url"),
+            ("https://example.test/object/1", "cc-by", "licence"),
+            ("https://example.test/object/1", "", "licence"),
+            ("http://example.test/object/1", "cc0", "https"),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let (bundle, _) = picture_bundle(tmp.path(), &key, source_url, licence);
+            let error = rebuild_bundle_manifest(&bundle, &key)
+                .expect_err("an incomplete picture record must fail the publish");
+            let text = format!("{error:#}");
+            assert!(text.contains(needle), "{text}");
+            assert!(!bundle.join(".ai/refs/bundles/pictures").exists());
+        }
+    }
+
+    #[test]
+    fn publish_refuses_a_picture_whose_bytes_do_not_match_the_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = test_signing_key();
+        let (bundle, sha) =
+            picture_bundle(tmp.path(), &key, "https://example.test/object/1", "cc0");
+        let mut tampered = WEBP_16X10.to_vec();
+        tampered[30] ^= 1;
+        fs::write(
+            bundle.join(format!(".ai/pictures/blobs/{sha}.webp")),
+            tampered,
+        )
+        .unwrap();
+        let error = rebuild_bundle_manifest(&bundle, &key)
+            .expect_err("a blob that no longer hashes to its record must fail the publish");
+        assert!(format!("{error:#}").contains("hashes to"));
+    }
+
+    #[test]
+    fn installed_picture_tampering_and_foreign_signers_do_not_verify() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = test_signing_key();
+        let (bundle, sha) =
+            picture_bundle(tmp.path(), &key, "https://example.test/object/1", "cc0");
+        rebuild_bundle_manifest(&bundle, &key).unwrap();
+        let blob = bundle.join(format!(".ai/pictures/blobs/{sha}.webp"));
+
+        // Same length, one byte changed: only the deep check hashes it.
+        let mut tampered = WEBP_16X10.to_vec();
+        tampered[30] ^= 1;
+        fs::write(&blob, tampered).unwrap();
+        assert!(
+            ryeos_bundle::pictures::verify_bundle_pictures(&bundle, &trust_of(&key), true).is_err()
+        );
+        fs::write(&blob, WEBP_16X10).unwrap();
+
+        // A node that does not trust the signer verifies nothing.
+        let other = SigningKey::from_bytes(&[48; 32]);
+        assert!(
+            ryeos_bundle::pictures::verify_bundle_pictures(&bundle, &trust_of(&other), false)
+                .is_err()
+        );
+
+        // A record edited after signing fails its signature.
+        let record = bundle.join(".ai/pictures/ryeos/test.yaml");
+        let edited = fs::read_to_string(&record)
+            .unwrap()
+            .replace("title: Test", "title: Changed");
+        fs::write(&record, edited).unwrap();
+        assert!(
+            ryeos_bundle::pictures::verify_bundle_pictures(&bundle, &trust_of(&key), false)
+                .is_err()
+        );
     }
 }
