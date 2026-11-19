@@ -1715,12 +1715,9 @@ fn timeline_foot(
     // within a capped height instead.
     if !dock.is_empty() {
         if dock.len() > 1 {
-            cards = cards
-                .max_h(DOCK_STACK_MAX)
-                .shrink()
-                .scroll(ScrollSpec {
-                    stick_bottom: false,
-                });
+            cards = cards.max_h(DOCK_STACK_MAX).shrink().scroll(ScrollSpec {
+                stick_bottom: false,
+            });
         }
         foot = foot.child(cards);
     }

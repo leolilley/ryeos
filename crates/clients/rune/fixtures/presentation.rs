@@ -219,7 +219,10 @@ fn find_input(value: &Value) -> Option<ryeos_client_base::ui::view_model::RyeOsI
 }
 
 fn is_timeline_scene(scene: &str) -> bool {
-    matches!(scene, "timeline" | "timeline-draft" | "timeline-top" | "timeline-asks")
+    matches!(
+        scene,
+        "timeline" | "timeline-draft" | "timeline-top" | "timeline-asks"
+    )
 }
 
 /// The `states` scene: the first table answers with no rows, the second is
@@ -402,18 +405,7 @@ fn demo_timeline(scene: &str) -> Value {
             .filter(|item| {
                 matches!(
                     item["id"].as_str(),
-                    Some(
-                        "rc:e0"
-                            | "mk1"
-                            | "m1"
-                            | "t1"
-                            | "p1"
-                            | "a1"
-                            | "a2"
-                            | "a3"
-                            | "l1"
-                            | "k1"
-                    )
+                    Some("rc:e0" | "mk1" | "m1" | "t1" | "p1" | "a1" | "a2" | "a3" | "l1" | "k1")
                 )
             })
             .collect()
