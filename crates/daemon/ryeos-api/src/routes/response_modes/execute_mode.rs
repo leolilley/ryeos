@@ -945,7 +945,8 @@ pub(crate) fn map_project_source_error(
             DispatchError::ProjectSourceCheckoutFailed(detail)
         }
         project_source::ProjectSourceError::Other(detail) => DispatchError::ProjectSource(detail),
-        error @ project_source::ProjectSourceError::AiOnlyBaseNotMutable { .. } => {
+        error @ (project_source::ProjectSourceError::AiOnlyBaseNotMutable { .. }
+        | project_source::ProjectSourceError::SnapshotNotCurrentHead { .. }) => {
             DispatchError::ProjectSource(error.to_string())
         }
     }

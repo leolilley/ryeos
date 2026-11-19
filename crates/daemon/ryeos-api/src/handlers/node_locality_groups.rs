@@ -19,8 +19,16 @@
 //! for are listed as "installed here, not connected". They are never asked and
 //! make no claim.
 //!
-//! Operator machine declarations are not read yet (see the comparison's
-//! `declarations`): no signed user-space item kind exists to hold them.
+//! Member ids carry a prefix naming their identity: `site:<fp>` for this node
+//! and every pinned remote, `installed:<service name>` for an installed node
+//! that is not connected, and `pin:<name>` for a pin that failed verification.
+//!
+//! Machine declarations are the node-signed records under
+//! `.ai/node/machines/` ([`crate::machine_declaration`]). A record that does
+//! not verify, and every record that shares a node with another, is reported in
+//! the groups' `invalid_declarations` and left out of the comparison; it never
+//! fails the view. Declarations name site ids only, so an installed-not-
+//! connected node is never a member of a declared machine.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -31,9 +39,11 @@ use anyhow::Result;
 use ryeos_app::execution_policy::{ExecutionPolicy, ExecutionResponse};
 use ryeos_app::state::AppState;
 use ryeos_effect_contract::locality::{
-    LocalityError, MachineDeclaration, MemberKind, NodeAnswer, NodeInput, NodeLocalityFacts,
-    REASON_INBOUND_ONLY, REASON_INVALID_ANSWER, REASON_REMOTE_ERROR, REASON_REMOTE_INVALID,
-    REASON_SERVICE_NOT_INSTALLED, REASON_TIMEOUT, REASON_UNREACHABLE, compare_locality,
+    InvalidDeclaration, LocalityError, MachineDeclaration, MemberKind, NodeAnswer, NodeInput,
+    NodeLocalityFacts, REASON_INBOUND_ONLY, REASON_INVALID_ANSWER, REASON_REMOTE_ERROR,
+    REASON_REMOTE_INVALID, REASON_SERVICE_NOT_INSTALLED, REASON_SITE_MISMATCH, REASON_TIMEOUT,
+    REASON_UNREACHABLE, compare_locality, exclude_conflicting_declarations, installed_member_id,
+    pin_member_id, validate_member_id,
 };
 use ryeos_effect_contract::rfc3339::now_millis;
 use ryeos_executor::executor::ServiceAvailability;
@@ -45,6 +55,7 @@ use crate::handler_context::HandlerContext;
 use crate::handler_error::HandlerError;
 use crate::handlers::node_locality::local_facts;
 use crate::handlers::remote_push::OutboundPrincipal;
+use crate::machine_declaration::{self, DeclarationsReport};
 use crate::registry::ServiceDescriptor;
 use crate::remote::client::RemoteHttpError;
 use crate::remote::config::{self, RemoteConfig, RemotesLoadReport};
@@ -142,6 +153,11 @@ async fn ask_remote(
             .map_err(anyhow::Error::from)
             .and_then(|facts| facts.validate().map(|()| facts).map_err(Into::into))
         {
+            // The pin names a site; a node answering as another site is not
+            // the node that was pinned, whatever its facts say.
+            Ok(facts) if facts.site_id != remote.site_id => {
+                did_not_answer(REASON_SITE_MISMATCH, now_millis())
+            }
             Ok(facts) => NodeAnswer::Answered {
                 facts,
                 as_of: now_millis(),
@@ -178,7 +194,7 @@ fn plan_remote_asks(
     let rows = invalid
         .into_iter()
         .map(|entry| NodeInput {
-            id: format!("remote:{}", entry.name),
+            id: pin_member_id(&entry.name),
             name: entry.name,
             kind: MemberKind::Remote,
             answer: Some(did_not_answer(REASON_REMOTE_INVALID, as_of.to_owned())),
@@ -229,7 +245,7 @@ fn installed_not_connected(
             })
         })
         .map(|service| NodeInput {
-            id: service.name.clone(),
+            id: installed_member_id(&service.name),
             name: service.name,
             kind: MemberKind::InstalledNotConnected,
             answer: None,
@@ -240,10 +256,31 @@ fn installed_not_connected(
     rows
 }
 
-/// The operator's machine declarations. None are read yet: declarations need a
-/// signed user-space item, and the daemon has no such item kind.
-fn declarations() -> Vec<MachineDeclaration> {
-    Vec::new()
+/// The declarations the comparison may use, and a report for each record that
+/// cannot be. A record that failed verification is already in `invalid`; the
+/// records that name a node another also names are set aside here, all of them,
+/// because nothing may pick which is right.
+fn usable_declarations(
+    report: DeclarationsReport,
+) -> (Vec<MachineDeclaration>, Vec<InvalidDeclaration>) {
+    let (usable, conflicting) = exclude_conflicting_declarations(
+        report
+            .declarations
+            .into_iter()
+            .map(|loaded| loaded.declaration)
+            .collect(),
+    );
+    let mut invalid = report.invalid;
+    invalid.extend(conflicting);
+    invalid.sort_by(|a, b| a.label.cmp(&b.label));
+    (usable, invalid)
+}
+
+/// The operator's machine declarations from the node-signed records.
+fn declarations(app_root: &Path) -> Result<(Vec<MachineDeclaration>, Vec<InvalidDeclaration>)> {
+    Ok(usable_declarations(machine_declaration::load_declarations(
+        app_root,
+    )?))
 }
 
 pub async fn handle(_req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
@@ -265,7 +302,8 @@ pub async fn compare_groups(
 
     let this_facts = {
         let root = app_root.clone();
-        tokio::task::spawn_blocking(move || local_facts(&root)).await?
+        let site_id = own_site_id.clone();
+        tokio::task::spawn_blocking(move || local_facts(&root, &site_id)).await?
     };
     let mut nodes = vec![NodeInput {
         id: own_site_id.clone(),
@@ -315,8 +353,14 @@ pub async fn compare_groups(
     };
     nodes.extend(installed);
 
-    let groups = compare_locality(&now_millis(), &nodes, &declarations())
+    for node in &nodes {
+        validate_member_id(node.kind, &node.id)
+            .map_err(|error| HandlerError::Internal(error.to_string()))?;
+    }
+    let (declared, invalid_declarations) = declarations(&app_root)?;
+    let mut groups = compare_locality(&now_millis(), &nodes, &declared)
         .map_err(|error: LocalityError| HandlerError::Conflict(error.to_string()))?;
+    groups.invalid_declarations = invalid_declarations;
     Ok(groups)
 }
 
@@ -397,7 +441,7 @@ mod tests {
         // The first name in order keeps the site; this node is not asked.
         assert_eq!(asked, [("alpha", "site:b"), ("other", "site:c")]);
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].id, "remote:broken");
+        assert_eq!(rows[0].id, "pin:broken");
         assert_eq!(
             rows[0].answer,
             Some(did_not_answer(REASON_REMOTE_INVALID, AS_OF.to_owned()))
@@ -444,8 +488,48 @@ mod tests {
         assert_eq!(DESCRIPTOR.service_ref, "service:node/locality/groups");
     }
 
+    fn declared(label: &str, members: &[&str]) -> crate::machine_declaration::LoadedDeclaration {
+        crate::machine_declaration::LoadedDeclaration {
+            declaration: MachineDeclaration {
+                label: label.to_owned(),
+                members: members.iter().map(|id| (*id).to_owned()).collect(),
+            },
+            declared_at: AS_OF.to_owned(),
+            path: "/x".into(),
+        }
+    }
+
     #[test]
-    fn no_declarations_are_read_yet() {
-        assert!(declarations().is_empty());
+    fn conflicting_records_are_reported_per_record_and_the_view_still_compares() {
+        let report = DeclarationsReport {
+            declarations: vec![
+                declared("one", &["site:a", "site:b"]),
+                declared("two", &["site:b"]),
+                declared("fine", &["site:c"]),
+            ],
+            invalid: vec![InvalidDeclaration {
+                label: "edited".to_owned(),
+                code: "machine_declaration_tampered".to_owned(),
+                message: "edited after signing".to_owned(),
+            }],
+        };
+        let (usable, invalid) = usable_declarations(report);
+        assert_eq!(usable.len(), 1);
+        assert_eq!(usable[0].label, "fine");
+        let labels: Vec<_> = invalid.iter().map(|entry| entry.label.as_str()).collect();
+        assert_eq!(labels, ["edited", "one", "two"]);
+        // What is left compares: no whole-view refusal.
+        compare_locality(AS_OF, &[], &usable).unwrap();
+    }
+
+    #[test]
+    fn member_ids_follow_the_prefixed_scheme() {
+        assert_eq!(pin_member_id("broken"), "pin:broken");
+        assert_eq!(installed_member_id("ryeos-ab"), "installed:ryeos-ab");
+        assert!(validate_member_id(MemberKind::Remote, &pin_member_id("x")).is_ok());
+        assert!(
+            validate_member_id(MemberKind::InstalledNotConnected, &installed_member_id("x"))
+                .is_ok()
+        );
     }
 }
