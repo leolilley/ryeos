@@ -31,7 +31,7 @@ pub(super) static WEB_ASSETS: &[WebAssetEntry] = &[
         filename: "ryeos_rune.js",
         content_type: "application/javascript; charset=utf-8",
         cache_control: "no-cache",
-        sha256: "0f679693f73479a45b886bc787028cd84031b20d12629fc5ef3ef3f889425474",
+        sha256: "0e12d64a070c0950f020806205181e0ce613deca1c049bee70c674f086fa5758",
         encoding: None,
         imports: &[
             "/ui/assets/rune_bridge.js",
@@ -112,7 +112,7 @@ pub(super) static WEB_ASSETS: &[WebAssetEntry] = &[
         filename: "ryeos_rune_bg.wasm.gz",
         content_type: "application/wasm",
         cache_control: "no-cache",
-        sha256: "77bcd71f884f999eadeb581be9e9542301c2aa1d75b6f34f2769137bdfbd9c6c",
+        sha256: "2248ad7b65377bc1f159291ba68e54e2e9bab1406b1f44963ec010667a9d4b5a",
         encoding: Some("gzip"),
         imports: &[],
         bytes: include_bytes!("../../../clients/rune/pkg/ryeos_rune_bg.wasm.gz"),
