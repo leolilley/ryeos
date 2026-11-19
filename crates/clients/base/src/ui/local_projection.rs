@@ -187,7 +187,6 @@ fn acts_on_selection(record: &Candidate) -> bool {
                     | RyeOsUiIntent::InspectSummary { .. }
                     | RyeOsUiIntent::ReadFile { .. }
                     | RyeOsUiIntent::PinViewSelection { .. }
-                    | RyeOsUiIntent::SupplyRequiredSubject { .. }
                     | RyeOsUiIntent::OpenPinnedViewAlongside { .. }
                     | RyeOsUiIntent::FollowViewSetSelection { .. }
                     | RyeOsUiIntent::MoveTileToViewSet { .. }
