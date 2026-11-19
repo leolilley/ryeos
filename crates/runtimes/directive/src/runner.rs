@@ -931,6 +931,33 @@ fn retry_backoff(
     retry_classification(err, attempt, execution).map(|(delay, _)| delay)
 }
 
+/// A request the provider refused that the entry's `request_rejections` rows
+/// name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RequestRejection {
+    code: String,
+    status: u16,
+}
+
+/// Which declared rejection row, if any, a refused request matches. Only a
+/// response that carried a status can match: such a refusal means the
+/// provider did not act on the request, so this never touches the
+/// uncertain-outcome path.
+fn request_rejection(provider: &ProviderConfig, error: &anyhow::Error) -> Option<RequestRejection> {
+    let Some(crate::provider_adapter::ProviderStreamError::Status { code, body, .. }) =
+        error.downcast_ref::<crate::provider_adapter::ProviderStreamError>()
+    else {
+        return None;
+    };
+    let rows = provider.request_rejections.as_deref()?;
+    ryeos_directive_definition::classify_request_rejection(rows, *code, body).map(|row_code| {
+        RequestRejection {
+            code: row_code.to_string(),
+            status: *code,
+        }
+    })
+}
+
 fn retry_classification(
     err: &anyhow::Error,
     attempt: u32,
@@ -2148,8 +2175,16 @@ impl Runner {
                             // financial state; no post-settlement event append is
                             // allowed to become retry authority.
                             let mut prepared_retry = if let Err(error) = &call {
+                                // A refusal the entry names is final: it is
+                                // never retried, whatever the retry status
+                                // codes say.
                                 if let Some((delay, reason)) =
-                                    retry_classification(error, attempt, &self.execution)
+                                    retry_classification(error, attempt, &self.execution).filter(
+                                        |_| {
+                                            request_rejection(&self.provider_config, error)
+                                                .is_none()
+                                        },
+                                    )
                                 {
                                     let usage_required = retry_requires_attempt_usage(
                                         &reason,
@@ -2913,6 +2948,7 @@ impl Runner {
                             State::CheckingLimits
                         }
                         Err(e) => {
+                            let rejection = request_rejection(&self.provider_config, &e);
                             let error = if let Some(limit) = e.downcast_ref::<
                                 crate::provider_adapter::LocalOutputByteLimitError,
                             >() {
@@ -3163,10 +3199,39 @@ impl Runner {
                                     }
                                 }
                                 detail
+                            } else if let Some(rejection) = &rejection {
+                                format!("{}: {e:#}", rejection.code)
                             } else {
                                 format!("{e:#}")
                             };
-                            State::Errored { error }
+                            match rejection {
+                                // A named refusal reaches the directive's
+                                // `provider_error` hooks, with its code, before
+                                // the failure settles. The hooks observe; the
+                                // failure itself is the typed code.
+                                Some(rejection) => State::FiringHooks {
+                                    occurrence:
+                                        ryeos_runtime::callback::HookDispatchOccurrence::new(
+                                            "directive",
+                                            "provider_error",
+                                            self.definition_ref.clone(),
+                                            self.root_raw_content_digest.clone(),
+                                            self.effective_definition_digest.clone(),
+                                        )
+                                        .with_counter_coordinate("turn", turn),
+                                    context: json!({
+                                        "event": {
+                                            "name": "provider_error",
+                                            "code": rejection.code,
+                                            "status": rejection.status,
+                                            "turn": turn,
+                                            "retryable": false,
+                                        }
+                                    }),
+                                    resume_to: Box::new(State::Errored { error }),
+                                },
+                                None => State::Errored { error },
+                            }
                         }
                     }
                 }
@@ -4022,6 +4087,13 @@ impl Runner {
                                 },
                                 None => *resume_to,
                             }
+                        }
+                        // A `provider_error` hook only observes a failure that
+                        // is already typed; a hook that itself fails must not
+                        // replace that failure's code.
+                        Err(e) if event == "provider_error" => {
+                            tracing::warn!(error = %e, "provider_error hook failed; the typed failure stands");
+                            *resume_to
                         }
                         Err(e) => State::Errored {
                             error: format!("hook event `{event}` failed: {e}"),
@@ -6144,6 +6216,7 @@ mod tests {
             spend_authority: None,
             image_input: None,
             cache_marks: None,
+            request_rejections: None,
             profiles: vec![],
         };
 
@@ -6225,6 +6298,7 @@ mod tests {
             spend_authority: None,
             image_input: None,
             cache_marks: None,
+            request_rejections: None,
             profiles: vec![],
         };
 
@@ -6282,6 +6356,7 @@ mod tests {
             spend_authority: None,
             image_input: None,
             cache_marks: None,
+            request_rejections: None,
             profiles: vec![],
         };
 
@@ -6338,6 +6413,7 @@ mod tests {
             spend_authority: None,
             image_input: None,
             cache_marks: None,
+            request_rejections: None,
             profiles: vec![],
         };
         let outputs = Some(vec![OutputSpec {
@@ -6409,6 +6485,7 @@ mod tests {
             spend_authority: None,
             image_input: None,
             cache_marks: None,
+            request_rejections: None,
             profiles: vec![],
         };
         let mut budget = BudgetTracker::new(usd("1"));
@@ -6585,6 +6662,7 @@ mod tests {
             spend_authority: None,
             image_input: None,
             cache_marks: None,
+            request_rejections: None,
             profiles: vec![],
         };
 
@@ -6661,6 +6739,7 @@ mod tests {
             spend_authority: None,
             image_input: None,
             cache_marks: None,
+            request_rejections: None,
             profiles: vec![],
         };
 
@@ -6734,6 +6813,7 @@ mod tests {
             spend_authority: None,
             image_input: None,
             cache_marks: None,
+            request_rejections: None,
             profiles: vec![],
         };
 
@@ -6791,6 +6871,7 @@ mod tests {
             spend_authority: None,
             image_input: None,
             cache_marks: None,
+            request_rejections: None,
             profiles: vec![],
         };
 
@@ -6843,6 +6924,73 @@ mod tests {
         }
     }
 
+    fn provider_with_rejections(rows: &str) -> ProviderConfig {
+        serde_yaml::from_str(&format!(
+            "family: chat_completions\ntransport:\n  kind: remote_http\n  base_url: \"http://localhost\"\n{rows}"
+        ))
+        .expect("provider config")
+    }
+
+    fn status_err_with_body(code: u16, body: &str) -> anyhow::Error {
+        anyhow::Error::new(crate::provider_adapter::ProviderStreamError::Status {
+            code,
+            detail: format!("provider returned {code}: {body}"),
+            body: body.to_string(),
+        })
+    }
+
+    const REJECTION_ROWS: &str = "request_rejections:\n  - code: provider_context_length_exceeded\n    statuses: [400, 413]\n    body_contains_any: [\"context length\", \"too long\"]\n";
+
+    #[test]
+    fn a_refused_request_the_entry_names_gets_its_code() {
+        let provider = provider_with_rejections(REJECTION_ROWS);
+        assert_eq!(
+            request_rejection(
+                &provider,
+                &status_err_with_body(400, "maximum CONTEXT LENGTH exceeded")
+            ),
+            Some(RequestRejection {
+                code: "provider_context_length_exceeded".to_string(),
+                status: 400,
+            })
+        );
+    }
+
+    #[test]
+    fn a_refusal_the_entry_does_not_name_stays_generic() {
+        let provider = provider_with_rejections(REJECTION_ROWS);
+        assert_eq!(
+            request_rejection(&provider, &status_err_with_body(400, "malformed json")),
+            None
+        );
+        assert_eq!(
+            request_rejection(&provider, &status_err_with_body(500, "context length")),
+            None
+        );
+        // An entry with no rows names nothing.
+        let plain = provider_with_rejections("");
+        assert_eq!(
+            request_rejection(&plain, &status_err_with_body(400, "context length")),
+            None
+        );
+        // A failure with no status never matches.
+        let timeout = anyhow::Error::new(crate::provider_adapter::ProviderStreamError::Timeout {
+            detail: "context length".to_string(),
+        });
+        assert_eq!(request_rejection(&provider, &timeout), None);
+    }
+
+    #[test]
+    fn a_named_refusal_carries_its_code_as_the_failure_code() {
+        let error = format!(
+            "{}: provider returned 400",
+            "provider_context_length_exceeded"
+        );
+        let failure: ryeos_runtime::RuntimeFailure =
+            serde_json::from_value(runtime_failure_payload(&error, "T-child", 3, None)).unwrap();
+        assert_eq!(failure.code, "provider_context_length_exceeded");
+    }
+
     #[test]
     fn provider_length_finish_is_distinct_and_fail_closed() {
         assert_eq!(
@@ -6855,6 +7003,7 @@ mod tests {
         anyhow::Error::new(crate::provider_adapter::ProviderStreamError::Status {
             code,
             detail: format!("provider returned {code}"),
+            body: String::new(),
         })
     }
 
@@ -7721,6 +7870,7 @@ mod tests {
             spend_authority: None,
             image_input: None,
             cache_marks: None,
+            request_rejections: None,
             profiles: vec![],
         };
         Runner::new(RunnerConfig {

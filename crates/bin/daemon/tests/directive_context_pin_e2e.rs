@@ -400,3 +400,97 @@ async fn an_operator_follow_up_survives_a_long_chain() {
         assert_valid_start(&bodies[start], &label);
     }
 }
+
+/// The provider entry's rejection rows for the stub: a context-length refusal.
+const REJECTION_ROWS: &str = "request_rejections:\n  - code: provider_context_length_exceeded\n    statuses: [400, 413]\n    body_contains_any: [\"context length\", \"too long\"]\n";
+
+/// A `provider_error` hook that runs the marker tool, so the test can see the
+/// event fire.
+const PROVIDER_ERROR_HOOK: &str = "hooks:\n  - id: on-rejection\n    event: provider_error\n    result: observation\n    action:\n      primary: execute\n      item_id: \"tool:marker/marker\"\n      ref_bindings: {}\n      params: {}\n";
+
+/// The failure code recorded on a settled thread.
+async fn failure_code(rig: &Rig, thread_id: &str) -> String {
+    let record = rig
+        .h
+        .get_thread(thread_id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    fn find_code(value: &Value) -> Option<String> {
+        match value {
+            Value::Object(map) => map
+                .get("code")
+                .and_then(Value::as_str)
+                .filter(|code| code.starts_with("provider_") || *code == "directive_failed")
+                .map(str::to_owned)
+                .or_else(|| map.values().find_map(find_code)),
+            Value::Array(items) => items.iter().find_map(find_code),
+            _ => None,
+        }
+    }
+    find_code(&record).unwrap_or_else(|| format!("no failure code in {record}"))
+}
+
+/// E6. A refusal the provider entry names is a typed failure that is not
+/// retried and reaches the directive's `provider_error` hook; a refusal it does
+/// not name stays the generic failure.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_context_length_refusal_is_a_typed_failure() {
+    let script = "steps:\n  - fail: { status: 400, body: \"This model's maximum context length is 8192 tokens\" }\n  - text: unreachable\n";
+    let rig = start_rig(
+        script,
+        RigOptions {
+            header_extra: PROVIDER_ERROR_HOOK,
+            provider_top_extra: REJECTION_ROWS.to_string(),
+            // Even a status the node would retry is final when a row names it.
+            exec_yaml: Some(
+                execution_with_timeout(60)
+                    .replace("[429, 500, 502, 503]", "[400, 429, 500, 502, 503]"),
+            ),
+            marker_sleep_seconds: 0,
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    let id = launch_on(&rig).await.expect("launch");
+    let (status, _) = wait_terminal(&rig.h, &id, Duration::from_secs(120)).await;
+    assert_eq!(
+        status,
+        "failed",
+        "{}",
+        thread_detail(&rig.h, &id, 2000).await
+    );
+    assert_eq!(
+        failure_code(&rig, &id).await,
+        "provider_context_length_exceeded"
+    );
+    assert_eq!(
+        rig.stub.requests().await.len(),
+        1,
+        "a named refusal is not retried"
+    );
+    assert_eq!(rig.marker_count(), 1, "the provider_error hook ran once");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refusal_the_entry_does_not_name_stays_generic() {
+    let script = "steps:\n  - fail: { status: 400, body: \"malformed request body\" }\n";
+    let rig = start_rig(
+        script,
+        RigOptions {
+            header_extra: PROVIDER_ERROR_HOOK,
+            provider_top_extra: REJECTION_ROWS.to_string(),
+            marker_sleep_seconds: 0,
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    let id = launch_on(&rig).await.expect("launch");
+    let (status, _) = wait_terminal(&rig.h, &id, Duration::from_secs(120)).await;
+    assert_eq!(status, "failed");
+    assert_eq!(failure_code(&rig, &id).await, "directive_failed");
+    assert_eq!(rig.marker_count(), 0, "no hook for an unnamed refusal");
+}

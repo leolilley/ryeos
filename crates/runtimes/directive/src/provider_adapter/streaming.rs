@@ -219,6 +219,22 @@ fn tool_use_payload(
 /// Redact provider error bodies by default. Returns a safe preview
 /// (first 200 chars) plus a sha256 hash. Full body is logged only when
 /// `RYEOS_LOG_PROVIDER_BODIES=1` is set (development/debugging).
+/// Most bytes of a refused response's body kept on a status error.
+pub const STATUS_BODY_MAX_BYTES: usize = 4096;
+
+/// The start of `body`, cut at a character boundary within
+/// [`STATUS_BODY_MAX_BYTES`].
+fn bounded_status_body(body: &str) -> String {
+    if body.len() <= STATUS_BODY_MAX_BYTES {
+        return body.to_string();
+    }
+    let mut end = STATUS_BODY_MAX_BYTES;
+    while !body.is_char_boundary(end) {
+        end -= 1;
+    }
+    body[..end].to_string()
+}
+
 fn safe_error_body(body: &str) -> String {
     let truncated: String = body.chars().take(512).collect();
     if truncated.len() < body.len() {
@@ -251,7 +267,14 @@ fn safe_error_body(body: &str) -> String {
 #[derive(Debug, Clone)]
 pub enum ProviderStreamError {
     /// The provider returned a non-success HTTP status before streaming began.
-    Status { code: u16, detail: String },
+    /// `body` is the start of the response body (at most
+    /// [`STATUS_BODY_MAX_BYTES`] bytes), kept for matching the entry's declared
+    /// request rejections; `detail` is the formatted diagnostic.
+    Status {
+        code: u16,
+        detail: String,
+        body: String,
+    },
     /// The request timed out before a response arrived. The provider may still
     /// have accepted work, so this is not proof of zero usage.
     Timeout { detail: String },
@@ -2129,6 +2152,7 @@ async fn send_prepared_streaming_inner(
         return Err(anyhow::Error::new(ProviderStreamError::Status {
             code: status,
             detail,
+            body: bounded_status_body(&text),
         }));
     }
 
@@ -3541,6 +3565,15 @@ fn inject_system_prompt(body: &mut Value, system: &str, provider: &ProviderConfi
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_status_body_is_cut_at_a_character_boundary_within_the_bound() {
+        let body = "é".repeat(STATUS_BODY_MAX_BYTES);
+        let kept = bounded_status_body(&body);
+        assert!(kept.len() <= STATUS_BODY_MAX_BYTES);
+        assert!(body.starts_with(&kept));
+        assert_eq!(bounded_status_body("short"), "short");
+    }
+
     use super::*;
     use ryeos_tracing::test as trace_test;
     use std::result::Result;
@@ -4615,6 +4648,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             spend_authority: None,
             image_input: None,
             cache_marks: None,
+            request_rejections: None,
             profiles: vec![],
         };
         let msgs = vec![json!({"role": "user", "parts": [{"text": "hi"}]})];
@@ -4652,6 +4686,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             spend_authority: None,
             image_input: None,
             cache_marks: None,
+            request_rejections: None,
             profiles: vec![],
         };
         let body = super::build_request_body(
@@ -4699,6 +4734,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             spend_authority: None,
             image_input: None,
             cache_marks: None,
+            request_rejections: None,
             profiles: vec![],
         };
 
@@ -4791,6 +4827,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             spend_authority: None,
             image_input: None,
             cache_marks: None,
+            request_rejections: None,
             profiles: vec![],
         };
         let _ =
@@ -4820,6 +4857,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             spend_authority: None,
             image_input: None,
             cache_marks: None,
+            request_rejections: None,
             profiles: vec![],
         };
         let msgs = vec![json!({"role": "user", "parts": [{"text": "hi"}]})];
@@ -4870,6 +4908,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             spend_authority: None,
             image_input: None,
             cache_marks: None,
+            request_rejections: None,
             profiles: vec![],
         };
         let mut body = json!({});
@@ -4920,6 +4959,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             spend_authority: None,
             image_input: None,
             cache_marks: None,
+            request_rejections: None,
             profiles: vec![],
         };
         let mut body = json!({"contents": []});
