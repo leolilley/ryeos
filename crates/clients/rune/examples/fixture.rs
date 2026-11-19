@@ -5,7 +5,7 @@
 //!
 //! `RYEOS_FIXTURE_THEME` picks the colours (`night`, `paper` or `gruvbox`;
 //! night by default). `RYEOS_FIXTURE_SCENE` picks the presentation (`field`, `launcher`, `long`,
-//! `timeline`, `timeline-draft` and `timeline-top` for one conversation of every entry type with
+//! `timeline`, `timeline-draft`, `timeline-top` and `timeline-asks` (two pending asks) for one conversation of every entry type with
 //! its lane, dock and composer, `states` for an empty, a loading and an
 //! unavailable table, or the
 //! default shell); `RYEOS_FIXTURE_FONTS` adds colon-separated font files

@@ -1789,10 +1789,19 @@ fn bound_view_vm_keyed(
                 folded.collapsible.contains(&section).then_some(section)
             });
             let expand_fields = super::content::expand_fields(binding);
+            // Messages and prose never fold: they have no detail to open.
             let entry_expandable: Vec<bool> = folded
                 .sources
                 .iter()
-                .map(|source| source.is_some() && !expand_fields.is_empty())
+                .map(|source| {
+                    source.as_ref().is_some_and(|source| {
+                        !expand_fields.is_empty()
+                            && !matches!(
+                                super::timeline::item_role(&source.raw).as_str(),
+                                "message" | "prose"
+                            )
+                    })
+                })
                 .collect();
             let entry_expanded: Vec<bool> = folded
                 .sources

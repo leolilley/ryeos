@@ -217,6 +217,9 @@ pub struct RyeOsTimelineDockVm {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsTimelineDockActionVm {
     pub label: String,
+    /// The key cap the button shows: the label's initial.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
     /// The affordance's invocation; absent when it is not enabled for this ask.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent: Option<RyeOsUiIntent>,
@@ -376,16 +379,22 @@ fn entry_vm(entry: &Value) -> RyeOsTimelineEntryVm {
     let tool = slot(entry, "tool");
     let target = slot(entry, "target");
     match kind {
+        // The operator's words are drawn whole: the bubble wraps them.
         "message" => RyeOsTimelineEntryVm::Separator {
-            label: clip(first_line(body.or(headline).unwrap_or("message")), 80),
+            label: body.or(headline).unwrap_or("message").trim().to_string(),
         },
         "prose" => RyeOsTimelineEntryVm::Block {
             text: body.or(headline).unwrap_or_default().to_string(),
             tone,
         },
-        "thought" => RyeOsTimelineEntryVm::Block {
-            text: format!("✻ {}", body.or(headline).unwrap_or_default()),
+        // A thought is one quiet line; its text is the opened detail.
+        "thought" => RyeOsTimelineEntryVm::Line {
+            primary: headline.unwrap_or("Thought").to_string(),
+            meta: None,
             tone: RyeOsTone::Neutral,
+            intent: None,
+            secondary_intent: None,
+            state: None,
         },
         "activity" => {
             let summary = headline.or(tool).unwrap_or("activity");
@@ -400,7 +409,7 @@ fn entry_vm(entry: &Value) -> RyeOsTimelineEntryVm {
         }
         "link" => RyeOsTimelineEntryVm::Line {
             primary: format!("↘ {}", headline.unwrap_or("child")),
-            meta: target.map(str::to_string),
+            meta: target.map(|thread| format!("child thread {thread}")),
             tone,
             intent: target.map(|thread| RyeOsUiIntent::DrillThread {
                 thread_id: thread.to_string(),
@@ -408,16 +417,22 @@ fn entry_vm(entry: &Value) -> RyeOsTimelineEntryVm {
                 label: headline.map(str::to_string),
             }),
             secondary_intent: None,
-            state: state_words(entry),
+            // The cost or size badge follows the state word.
+            state: match (state_words(entry), badge) {
+                (Some(state), Some(badge)) => Some(format!("{state} · {badge}")),
+                (state, _) => state,
+            },
         },
+        // The reason leads; the state word and the headline follow it.
         "outcome" => {
             let label = state.or(headline).unwrap_or("outcome");
             let primary = match reason {
-                Some(reason) => format!("{label} — {}", clip(first_line(reason), SUMMARY_MAX)),
+                Some(reason) => clip(first_line(reason), SUMMARY_MAX),
                 None => label.to_string(),
             };
-            let intent = reason.map(|_| RyeOsUiIntent::InspectSummary {
-                title: primary.clone(),
+            // The inspector's title still names the state beside the reason.
+            let intent = reason.map(|reason| RyeOsUiIntent::InspectSummary {
+                title: format!("{label} — {}", clip(first_line(reason), SUMMARY_MAX)),
                 detail: entry.clone(),
             });
             RyeOsTimelineEntryVm::Line {
@@ -426,8 +441,7 @@ fn entry_vm(entry: &Value) -> RyeOsTimelineEntryVm {
                 tone,
                 intent,
                 secondary_intent: None,
-                // The outcome's own primary text is its state.
-                state: None,
+                state: reason.and_then(|_| state_words(entry)),
             }
         }
         "marker" => RyeOsTimelineEntryVm::Line {
@@ -593,12 +607,17 @@ fn dock_actions(
             if !eligibility.visible {
                 return None;
             }
+            let label = affordance
+                .get("label")
+                .and_then(Value::as_str)
+                .unwrap_or(id)
+                .to_string();
             Some(RyeOsTimelineDockActionVm {
-                label: affordance
-                    .get("label")
-                    .and_then(Value::as_str)
-                    .unwrap_or(id)
-                    .to_string(),
+                key: label
+                    .chars()
+                    .next()
+                    .map(|initial| initial.to_uppercase().to_string()),
+                label,
                 intent: eligibility
                     .enabled
                     .then(|| RyeOsUiIntent::InvokeAffordance {
@@ -1877,7 +1896,7 @@ mod tests {
         assert_eq!(
             built[0],
             RyeOsTimelineEntryVm::Separator {
-                label: "do the thing".into()
+                label: "do the thing\nplease".into()
             }
         );
         assert_eq!(
@@ -1887,9 +1906,11 @@ mod tests {
                 tone: RyeOsTone::Neutral
             }
         );
-        assert!(
-            matches!(&built[2], RyeOsTimelineEntryVm::Block { text, .. } if text.ends_with("hmm"))
-        );
+        assert!(matches!(
+            &built[2],
+            RyeOsTimelineEntryVm::Line { primary, meta: None, state: None, .. }
+                if primary == "Thought"
+        ));
         assert_eq!(
             built[3],
             RyeOsTimelineEntryVm::Pair {
@@ -1937,9 +1958,11 @@ mod tests {
                 meta,
                 tone,
                 intent,
+                state,
                 ..
             } => {
-                assert_eq!(primary, "failed — boom");
+                assert_eq!(primary, "boom");
+                assert_eq!(state.as_deref(), Some("failed"));
                 assert_eq!(meta.as_deref(), Some("boom_code"));
                 assert_eq!(*tone, RyeOsTone::Danger);
                 assert!(matches!(
@@ -1962,6 +1985,34 @@ mod tests {
     }
 
     #[test]
+    fn a_long_message_is_kept_whole_for_the_bubble_to_wrap() {
+        let body = ["Keep the tiling behaviour as it is."; 8].join(" ");
+        let built = layout(vec![entry("m", "message", json!({ "body": body }))], 0).entries;
+        assert_eq!(built[0], RyeOsTimelineEntryVm::Separator { label: body });
+    }
+
+    #[test]
+    fn a_settled_link_puts_its_badge_after_the_state_word() {
+        let link = with(
+            with(
+                entry(
+                    "l",
+                    "link",
+                    json!({"headline": "review", "target": "T-1", "badge": "$0.21"}),
+                ),
+                "state",
+                json!("done"),
+            ),
+            "exchange",
+            Value::Null,
+        );
+        assert!(matches!(
+            &layout(vec![link], 0).entries[0],
+            RyeOsTimelineEntryVm::Line { state: Some(state), .. } if state == "done · $0.21"
+        ));
+    }
+
+    #[test]
     fn a_link_steps_into_its_child_thread() {
         let link = entry(
             "l",
@@ -1972,7 +2023,7 @@ mod tests {
             layout(vec![link], 0).entries[0],
             RyeOsTimelineEntryVm::Line {
                 primary: "↘ study".into(),
-                meta: Some("T-child".into()),
+                meta: Some("child thread T-child".into()),
                 tone: RyeOsTone::Neutral,
                 intent: Some(RyeOsUiIntent::DrillThread {
                     thread_id: "T-child".into(),
@@ -2863,9 +2914,9 @@ mod tests {
             )],
             0,
         );
-        assert_eq!(link.entries[0].label(), "study, T-child");
+        assert_eq!(link.entries[0].label(), "study, child thread T-child");
         let thought = layout(vec![entry("t", "thought", json!({"body": "hmm"}))], 0);
-        assert_eq!(thought.entries[0].label(), "hmm");
+        assert_eq!(thought.entries[0].label(), "Thought");
     }
 
     #[test]

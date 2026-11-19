@@ -1520,7 +1520,13 @@ const TIMELINE_COLUMN: f32 = 720.0;
 /// Tile padding either side of the column, and above and below it.
 const TIMELINE_PAD_X: f32 = 24.0;
 const TIMELINE_PAD_TOP: f32 = 14.0;
-const TIMELINE_PAD_BOTTOM: f32 = 18.0;
+/// The feed's viewport never gets shorter than this.
+const TIMELINE_FEED_FLOOR: f32 = 160.0;
+/// The space above the status lane, outside the feed's viewport.
+const TIMELINE_LANE_SPACE: f32 = 16.0;
+/// The tallest the dock grows once it holds more than one card; the cards
+/// scroll inside it.
+const DOCK_STACK_MAX: f32 = 260.0;
 /// Between entries.
 const TIMELINE_GAP: f32 = 16.0;
 /// A selected line's fill reaches this far past the column on either side.
@@ -1528,8 +1534,8 @@ const SELECT_REACH: f32 = 10.0;
 
 const TIMELINE_PAD: ListPad = ListPad {
     x: TIMELINE_PAD_X - SELECT_REACH,
-    top: TIMELINE_PAD_TOP,
-    bottom: TIMELINE_PAD_BOTTOM,
+    top: 0.0,
+    bottom: 0.0,
     gap: TIMELINE_GAP,
     column: Some(TIMELINE_COLUMN + 2.0 * SELECT_REACH),
 };
@@ -1545,7 +1551,7 @@ fn timeline_view(
         let keys = (0..timeline.entries.len())
             .map(|index| timeline_entry_key(instance, &timeline, index))
             .collect();
-        return virtual_list(
+        return timeline_inset(virtual_list(
             format!("timeline:{instance:?}"),
             title,
             "list",
@@ -1560,13 +1566,13 @@ fn timeline_view(
                     .filter(|timeline| index < timeline.entries.len())
                     .map(|timeline| timeline_entry(instance, &timeline, index))
             },
-        );
+        ));
     }
+    // The insets sit outside the scrolled column, so they stay put as the feed
+    // scrolls and a clipped line is cut 14 below the header, not flush with it.
     let mut column = col()
         .w_full()
         .max_w(TIMELINE_COLUMN + 2.0 * SELECT_REACH)
-        .pt(TIMELINE_PAD.top)
-        .pb(TIMELINE_PAD.bottom)
         .gap(TIMELINE_GAP);
     if let Some(status) = status {
         column = column.child(status);
@@ -1575,16 +1581,30 @@ fn timeline_view(
         column = column.child(timeline_entry(instance, &timeline, index));
     }
     // A feed: it opens at the newest entry and follows new ones while there.
+    timeline_inset(
+        col()
+            .key(format!("timeline:{instance:?}"))
+            .w_full()
+            .shrink()
+            .min_h(0.0)
+            .px(TIMELINE_PAD.x)
+            .items_center()
+            .label(title.to_owned())
+            .scroll(ScrollSpec { stick_bottom: true })
+            .child(column),
+    )
+}
+
+/// The quiet band between a tile's header and the feed's viewport, and the
+/// least height the feed keeps however tall the foot grows.
+fn timeline_inset(feed: El) -> El {
     col()
-        .key(format!("timeline:{instance:?}"))
         .w_full()
+        .grow(1.0)
         .shrink()
-        .min_h(0.0)
-        .px(TIMELINE_PAD.x)
-        .items_center()
-        .label(title.to_owned())
-        .scroll(ScrollSpec { stick_bottom: true })
-        .child(column)
+        .min_h(TIMELINE_FEED_FLOOR)
+        .pt(TIMELINE_PAD_TOP)
+        .child(feed)
 }
 
 /// Height reserved for the status lane whether or not it has text, so the
@@ -1638,6 +1658,7 @@ fn timeline_foot(
         .min_w(0.0)
         .gap(DOCK_STACK_GAP)
         .child(lane_row);
+    let mut cards = col().w_full().min_w(0.0).gap(DOCK_STACK_GAP);
     for ask in dock {
         let (primary, meta) = match &ask.entry {
             RyeOsTimelineEntryVm::Line { primary, meta, .. } => (primary.clone(), meta.clone()),
@@ -1688,14 +1709,47 @@ fn timeline_foot(
         for (index, action) in ask.actions.iter().enumerate() {
             actions = actions.child(dock_action(action, Some(index) == filled));
         }
-        foot = foot.child(card.child(actions));
+        cards = cards.child(card.child(actions));
     }
+    // More than one pending ask would crowd the feed out: the cards scroll
+    // within a capped height instead.
+    if !dock.is_empty() {
+        if dock.len() > 1 {
+            cards = cards.max_h(DOCK_STACK_MAX).shrink().scroll(ScrollSpec {
+                stick_bottom: false,
+            });
+        }
+        foot = foot.child(cards);
+    }
+    // The space above the lane belongs to the foot, not to the scrolled feed,
+    // so it is there whatever entry is selected.
     col()
         .w_full()
         .min_w(0.0)
         .px(TIMELINE_PAD_X)
         .items_center()
+        .child(el().h(TIMELINE_LANE_SPACE))
         .child(foot)
+}
+
+/// The gap between a dock button's word and its key.
+const DOCK_KEY_GAP: f32 = 8.0;
+
+/// A key's cap: a small bordered chip holding the key's name.
+fn key_cap(key: &str) -> El {
+    let t = Tokens::get();
+    row()
+        .h(20.0)
+        .min_w(20.0)
+        .px(6.0)
+        .center()
+        .radius(5.0)
+        .border(1.0, t.ink_at(0.16))
+        .child(
+            text(key.to_owned())
+                .font(theme::TYPE_KEY)
+                .color(t.ink_at(0.60)),
+        )
 }
 
 /// One answering action beside a docked ask. One the ask's authority does not
@@ -1713,20 +1767,38 @@ fn dock_action(action: &RyeOsTimelineDockActionVm, filled: bool) -> El {
         Some(intent) => {
             let intent = intent.clone();
             let button = if filled {
-                button.fill(t.ink).hover(t.ink_strong()).child(
-                    text(action.label.clone())
-                        .font(theme::medium(theme::TYPE_CELL))
-                        .color(t.bg),
-                )
-            } else {
+                let mut button = button
+                    .gap(DOCK_KEY_GAP)
+                    .fill(t.ink)
+                    .hover(t.ink_strong())
+                    .child(
+                        text(action.label.clone())
+                            .font(theme::medium(theme::TYPE_CELL))
+                            .color(t.bg),
+                    );
+                // The key sits in the button as quiet text on the fill.
+                if let Some(key) = &action.key {
+                    button = button.child(
+                        text(key.clone())
+                            .font(theme::medium(theme::TYPE_NOTE))
+                            .color(t.bg.alpha(0.5)),
+                    );
+                }
                 button
+            } else {
+                let mut button = button
+                    .gap(DOCK_KEY_GAP)
                     .border(1.0, t.control_border_strong())
                     .hover(p.plane_selected)
                     .child(
                         text(action.label.clone())
                             .font(theme::TYPE_CELL)
                             .color(t.ink_body()),
-                    )
+                    );
+                if let Some(key) = &action.key {
+                    button = button.child(key_cap(key));
+                }
+                button
             };
             button
                 .label(action.label.clone())
@@ -1783,28 +1855,17 @@ fn timeline_entry(instance: &RyeOsViewInstanceKey, timeline: &Timeline<'_>, inde
     let expandable = timeline.expandable.get(index).copied().unwrap_or(false);
     let expanded = timeline.expanded.get(index).copied().unwrap_or(false);
     let content = match entry {
+        // Prose is plain text, never folded.
         RyeOsTimelineEntryVm::Block { text: body, .. } => {
             let body = theme::drawable(undecorated(body), theme::Face::Ui).into_owned();
-            if role == "thought" {
-                // A thought is a quiet line, at the headline step.
-                text(body)
-                    .selectable(true)
-                    .font(theme::TYPE_LINE)
-                    .color(t.ink_soft())
-                    .wrap()
-                    .grow(1.0)
-                    .min_w(0.0)
-            } else {
-                // Prose is plain text, never folded.
-                text(body)
-                    .selectable(true)
-                    .font(theme::TYPE_PROSE)
-                    .color(t.ink_body())
-                    .wrap()
-                    .max_w(TIMELINE_COLUMN)
-                    .grow(1.0)
-                    .min_w(0.0)
-            }
+            text(body)
+                .selectable(true)
+                .font(theme::TYPE_PROSE)
+                .color(t.ink_body())
+                .wrap()
+                .max_w(TIMELINE_COLUMN)
+                .grow(1.0)
+                .min_w(0.0)
         }
         RyeOsTimelineEntryVm::Line {
             primary,
@@ -1867,7 +1928,6 @@ fn timeline_entry(instance: &RyeOsViewInstanceKey, timeline: &Timeline<'_>, inde
     let mut head = row()
         .w_full()
         .min_w(0.0)
-        .ml(indent * TIMELINE_INDENT)
         .px(SELECT_REACH)
         .radius(theme::RADIUS_ROW)
         .child(button);
@@ -1883,10 +1943,13 @@ fn timeline_entry(instance: &RyeOsViewInstanceKey, timeline: &Timeline<'_>, inde
             CHEVRON_WIDTH,
         ));
     }
+    // The indent narrows the record from the left, so a nested entry's chevron
+    // still stands at the column's right edge.
     let mut record = col()
         .key(timeline_entry_key(instance, timeline, index))
         .w_full()
         .min_w(0.0)
+        .pl(indent * TIMELINE_INDENT)
         .child(head);
     if expanded && let Some(rows) = timeline.details.get(index) {
         record = record.child(details(rows));
@@ -2094,53 +2157,84 @@ fn pair_block(pairs: &[(&str, String, Option<rune::Color>)], style: Pairs) -> El
 }
 
 /// The admitted source's state when it is not simply live. A source that
-/// could not be read takes a `warn` dot and is never drawn as empty.
+/// could not be read says so in a sentence under a `warn` dot, with its reason
+/// beneath, and is never drawn as empty.
 fn source_status(status: &RyeOsSourceStatusVm) -> El {
-    let p = Palette::get();
     let t = Tokens::get();
     let stale = if status.stale {
         "Last observation (stale) · "
     } else {
         ""
     };
-    let message = text(format!("{stale}{}: {}", status.state, status.message))
-        .font(theme::TYPE_SMALL)
-        .color(t.ink_dim())
-        .wrap_anywhere()
-        .grow(1.0)
-        .min_w(0.0)
-        .role("status");
-    let mut line = row().w_full().gap(TONE_DOT_GAP).center_y().px(9.0).py(6.0);
     if is_unreadable(&status.state) {
-        line = line.child(
-            el().size(TONE_DOT, TONE_DOT)
-                .radius(TONE_DOT / 2.0)
-                .fill(t.warn),
-        );
+        let said = match status.state.as_str() {
+            "unresolved" => "Waiting for something to read from.",
+            "unavailable" => "Unavailable.",
+            _ => "Could not be read.",
+        };
+        return unavailable(said, &format!("{stale}{}", status.message));
     }
-    line = line.child(message);
-    if status.state != "failed" {
-        return line;
-    }
-    // A failed fetch offers its retry beside the error.
-    line.gap(8.0).child(
-        text("Retry")
-            .font(theme::ui(12.0))
-            .color(p.text)
-            .px(10.0)
-            .py(5.0)
-            .border(1.0, p.line_strong)
-            .fill(p.plane)
-            .hover(p.plane_selected)
-            .role("button")
-            .label("Retry the failed fetch")
-            .on_press(|app: &mut App| {
-                app.ui(RyeOsUiEvent::Activate {
-                    intent: RyeOsUiIntent::Refresh,
-                });
-            }),
+    row().w_full().px(STATE_PAD_X).py(6.0).child(
+        text(format!("{stale}{}", status.message))
+            .font(theme::TYPE_SMALL)
+            .color(t.ink_dim())
+            .wrap_anywhere()
+            .grow(1.0)
+            .min_w(0.0)
+            .role("status"),
     )
 }
+
+/// The left inset of a state's lines, and the room above them.
+const STATE_PAD_X: f32 = 10.0;
+const STATE_PAD_TOP: f32 = 10.0;
+
+/// A source that could not be read: a `warn` dot and a sentence, with the
+/// reason on a line beneath it, left-aligned under the header.
+fn unavailable(said: &str, reason: &str) -> El {
+    let t = Tokens::get();
+    let mut lines = col()
+        .w_full()
+        .min_w(0.0)
+        .px(STATE_PAD_X)
+        .pt(STATE_PAD_TOP)
+        .gap(2.0)
+        .role("status")
+        .label(said.to_owned())
+        .child(
+            row()
+                .gap(10.0)
+                .min_h(26.0)
+                .center_y()
+                .child(
+                    el().size(UNAVAILABLE_DOT, UNAVAILABLE_DOT)
+                        .radius(UNAVAILABLE_DOT / 2.0)
+                        .fill(t.warn),
+                )
+                .child(
+                    text(said.to_owned())
+                        .font(theme::TYPE_CELL)
+                        .color(t.ink_body())
+                        .wrap()
+                        .grow(1.0)
+                        .min_w(0.0),
+                ),
+        );
+    if !reason.is_empty() {
+        lines = lines.child(
+            text(reason.to_owned())
+                .font(theme::TYPE_MICRO)
+                .color(t.ink_dim())
+                .wrap_anywhere()
+                .min_w(0.0)
+                .pl(UNAVAILABLE_DOT + 10.0),
+        );
+    }
+    lines
+}
+
+/// The unavailable state's dot.
+const UNAVAILABLE_DOT: f32 = 7.0;
 
 /// A view waiting for a subject: what it needs, and the open selections that
 /// can supply it.
@@ -2215,24 +2309,75 @@ fn required_subject(
     block
 }
 
+/// A view with nothing to draw yet: still loading, unreadable, or empty. The
+/// message says which, in the words the core gave it.
 fn empty_state(title: &str, message: &str) -> El {
-    let p = Palette::get();
+    let t = Tokens::get();
+    if message.starts_with("loading") {
+        return loading_skeleton();
+    }
+    if let Some(reason) = ["failed: ", "unavailable: ", "unresolved: "]
+        .into_iter()
+        .find_map(|prefix| message.strip_prefix(prefix))
+    {
+        let said = if title.is_empty() {
+            "Could not be read.".to_owned()
+        } else {
+            format!("{title} could not be read.")
+        };
+        return unavailable(&said, reason);
+    }
+    col().w_full().px(STATE_PAD_X).pt(STATE_PAD_TOP).child(
+        text(message.to_owned())
+            .font(theme::TYPE_SMALL)
+            .color(t.ink_dim())
+            .wrap()
+            .min_w(0.0),
+    )
+}
+
+/// The widths of a loading page's bars, in a row's columns.
+const SKELETON_BARS: [f32; 6] = [90.0, 62.0, 120.0, 64.0, 83.0, 56.0];
+const SKELETON_ROWS: usize = 8;
+const SKELETON_ROW_HEIGHT: f32 = 28.0;
+const SKELETON_BAR_HEIGHT: f32 = 8.0;
+const SKELETON_FILL: f32 = 0.07;
+
+/// A page that is still being read: still bars where the rows will be, and a
+/// word under them. Nothing moves, so nothing seems to be happening that is
+/// not.
+fn loading_skeleton() -> El {
+    let t = Tokens::get();
+    let mut rows = col().w_full().gap(1.0);
+    for index in 0..SKELETON_ROWS {
+        let mut line = row()
+            .key(format!("skeleton:{index}"))
+            .w_full()
+            .h(SKELETON_ROW_HEIGHT)
+            .gap(12.0)
+            .center_y();
+        for width in SKELETON_BARS {
+            line = line.child(
+                el().size(width, SKELETON_BAR_HEIGHT)
+                    .radius(SKELETON_BAR_HEIGHT / 2.0)
+                    .fill(t.ink_at(SKELETON_FILL)),
+            );
+        }
+        rows = rows.child(line);
+    }
     col()
         .w_full()
-        .grow(1.0)
-        .min_h(160.0)
-        .center()
-        .gap(12.0)
-        .padding(24.0)
-        .child(text("◇").font(theme::ui(24.0)).color(p.yellow))
-        .child(text(title.to_owned()).font(theme::ui(13.0)).color(p.text))
+        .min_w(0.0)
+        .px(STATE_PAD_X)
+        .pt(STATE_PAD_TOP)
+        .gap(10.0)
+        .role("status")
+        .label("Reading")
+        .child(rows)
         .child(
-            text(message.to_owned())
-                .font(theme::ui(13.0))
-                .color(p.muted)
-                .wrap()
-                .min_w(0.0)
-                .max_w(360.0),
+            text("Reading…")
+                .font(theme::TYPE_MICRO)
+                .color(t.ink_at(0.40)),
         )
 }
 
@@ -2686,11 +2831,13 @@ mod tests {
             actions: vec![
                 RyeOsTimelineDockActionVm {
                     label: "Approve".to_owned(),
+                    key: Some("A".to_owned()),
                     intent: None,
                     disabled_reason: Some("not allowed here".to_owned()),
                 },
                 RyeOsTimelineDockActionVm {
                     label: "Decline".to_owned(),
+                    key: Some("D".to_owned()),
                     intent: Some(RyeOsUiIntent::Refresh),
                     disabled_reason: None,
                 },
@@ -2709,6 +2856,7 @@ mod tests {
             "~/.config/ryeos/presentation.yaml",
             "Approve",
             "Decline",
+            "D",
         ] {
             assert!(says(&rt, shown), "{shown:?} in {:?}", texts(&rt));
         }
@@ -2745,7 +2893,29 @@ mod tests {
         .unwrap();
         let rt = drawn(view);
         assert!(!says(&rt, "No rows in this page."));
-        assert!(says(&rt, "failed: denied"));
+        assert!(says(&rt, "Could not be read."));
+        assert!(says(&rt, "denied"));
+        assert!(!says(&rt, "failed: denied"));
+    }
+
+    #[test]
+    fn a_page_still_loading_draws_bars_and_an_unreadable_one_a_sentence() {
+        let placeholder = |message: &str| {
+            drawn(
+                serde_json::from_value(
+                    json!({"type": "placeholder", "title": "Surfaces", "message": message}),
+                )
+                .unwrap(),
+            )
+        };
+        let loading = placeholder("loading service:scheduler/list …");
+        assert!(says(&loading, "Reading…"), "{:?}", texts(&loading));
+        assert!(!says(&loading, "loading service:scheduler/list …"));
+        let failed = placeholder("failed: service_cap_denied");
+        assert!(says(&failed, "Surfaces could not be read."));
+        assert!(says(&failed, "service_cap_denied"));
+        let empty = placeholder("No activity yet");
+        assert!(says(&empty, "No activity yet"));
     }
 
     #[test]
