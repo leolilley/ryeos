@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-15T01:20:57Z:ccb6b83c05aa0f5fed65e3f0ac594210c41e3d22672927b6bccdeb5bd13d4eef:seKu5M+heKQDDUzCo/G9DwGmob6Ve4C9UnbM769G9RTDk+64aSLoEg+DIOPdRz3yFMCvmfE7FOclF0qn07BgDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-19T05:58:47Z:63faf0df2b18047c4ddddc96a2d54f7089bc8270d904c51a02dc88ef89f2eefd:stscxKKbYWSwXuI/GWCvgXh6NSpMmX+LweAjQm05bSg82EKnB5Cu23ZxMYeQdt36pek+ux8J1tRIkdZUSLoVCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: assistant-work
 title: Work
 version: "1.0.0"
@@ -12,11 +12,11 @@ sources:
     collection: work
 projections:
   columns:
-    - { label: status, field: phase.state_code, present: words }
-    - { label: work, field: item_ref, present: leaf }
-    - { label: project, field: project.name, fallback: node }
+    - { label: status, field: phase.state_code, present: words, role: status }
+    - { label: work, field: item_ref, present: leaf, role: ref }
+    - { label: project, field: project.name, fallback: node, role: text }
     - { label: attention, field: attention_count }
-    - { label: updated, field: observed_at, present: time_date }
+    - { label: updated, field: observed_at, present: time_date, role: time }
   expand:
     fields: [coordinate.chain_root_id, placement.thread_id, placement.origin_site_id, placement.current_site_id, placement_count, attention, item_ref, kind, phase.category, phase.state_code, project.name, project.path, owner_principal_id, observed_at]
   tone:

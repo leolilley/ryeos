@@ -1,6 +1,6 @@
-# ryeos:signed:2026-11-17T22:59:57Z:195fd4243c5cb8a056dd2f960db3efb0481426fafa57b991ee7dc5fe30362f9e:is0V5RhW/kc9VQ6PAKcYrZagFdG2AE44/DflK9M6Sk3Cycz90UDX+poj29qSLnTUPoAB+Yqs8f6meyWtDGdYCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-19T05:58:46Z:cd5ad9b675296843285343f23e570e72fbe27c590fda95c3757085e1b11b6bcf:cIDXPAAMEaSJreqaxDNO2qY6HRFPCDXfefY15WBmVPJjwXAv0fQvzc7SQ5J5WFU4j7wjbnWVQIiUbISlggetCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/ui
-version: "1.0.0"
+version: "1.1.0"
 description: Shared terminal presentation with explicit admitted terminal Surface seeds and no ambient project selection.
 shared_presentation:
   schema: 2
@@ -22,6 +22,7 @@ shared_presentation:
       - ryeos.execute.service.node/status
       - ryeos.execute.service.projects/list
       - ryeos.execute.service.ui/ryeos-ui/config/get
+      - ryeos.execute.service.ui/ryeos-ui/coverage/wording
       - ryeos.execute.service.ui/ryeos-ui/items/list
       - ryeos.execute.service.ui/ryeos-ui/work/attention
     affordances:

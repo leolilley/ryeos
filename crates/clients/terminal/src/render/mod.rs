@@ -336,15 +336,17 @@ fn draw_view(surface: &mut TextSurface, mut rect: Rect, view: &RyeOsViewVm, now_
     }
     if let RyeOsViewVm::Table {
         columns,
+        column_roles,
         rows,
         coverage,
         ..
     } = view
     {
-        widgets::table::draw_table_with_coverage(
+        widgets::table::draw_table_with_roles(
             surface,
             rect,
             columns,
+            column_roles,
             rows,
             coverage.as_ref(),
             now_ms,

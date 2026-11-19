@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-18T11:49:26Z:8281ed5649bb88569f57097484764cb82c25dc0bdf1cb312b2fb789508792ad2:dNKinoJl5CT2Kin0NZGDHxOk0BTfwTvReVtwdEKV9YVAmAcx+7jYTqLud8CwuZzb5qEwE42Xu3hR654F+9TyBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-19T05:58:47Z:4eacefcd972b13461a951f3c8e27a6d62457fdde313619c211ecd50ab134b1d4:b/DJkO8aSY7yZ46GFEslAmMojbz0O9+oZa1oIaH5vi2p067T5HaXjTWYOfsDe1VFGJrCyWHpImDEwU2Bm+ReCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: project-graphs
 title: Graphs
 version: "1.0.0"
@@ -21,6 +21,7 @@ projections:
       field: title
     - label: item
       field: canonical_ref
+      role: ref
     - label: space
       field: space
     - label: trust

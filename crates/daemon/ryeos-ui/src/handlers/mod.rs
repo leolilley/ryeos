@@ -5,6 +5,7 @@ use ryeos_api::registry::ServiceDescriptor;
 pub mod item_titles;
 pub mod signed_item_topology;
 pub mod ui_attention;
+pub mod ui_coverage_wording;
 pub mod ui_dimension;
 pub mod ui_field;
 pub mod ui_field_comparison;
@@ -52,6 +53,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_field_execution::OCCURRENCE_DESCRIPTOR,
     ui_field_project::DESCRIPTOR,
     ui_field_runs::DESCRIPTOR,
+    ui_coverage_wording::DESCRIPTOR,
     ui_dimension::DESCRIPTOR,
     ui_items::ITEMS_LIST_DESCRIPTOR,
     ui_items::ITEM_INSPECT_DESCRIPTOR,

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-19T22:29:41Z:90bac0b0fc78d10b87e55c8076ccd47d48a88e3ef3638bf8821b463844feb47b:RP05zxU47P5d8XS10gt223ZquImBp/Xg3K9T7ecBd66I+P6h0GGbnox3g3OVJk5J85knazCYihGYrGIUkta4DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-19T05:58:47Z:d1fcc040ad666fde14cc9950c1594aa9fc91f3d95b17825bd0acc32185707a20:UDwgp0AA6zt4NVpfW061y0CrfRSsfFq1UBEMa4ZMW6uYU9Gx6MRvHY67eJgsnIIRKlwDDAt9F13UNcvYluOFCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: threads-list
 title: Observed Threads
 version: "1.0.0"
@@ -20,22 +20,28 @@ projections:
   columns:
     - label: thread
       field: thread_id
+      role: id
     - label: kind
       field: kind
+      role: kind
       present: words
     # The table carries the readable leaf; the full canonical ref remains in
     # expanded detail.
     - label: item
       field: item_ref
+      role: ref
       present: leaf
     - label: project
       field: project.name
+      role: text
       fallback: node
     - label: status
       field: status
+      role: status
       present: words
     - label: created
       field: created_at
+      role: time
       present: time_date
   expand:
     fields: [thread_id, chain_root_id, project.name, project.path, item_ref, requested_by, created_at]

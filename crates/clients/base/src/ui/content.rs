@@ -748,10 +748,67 @@ pub fn project_tone(record: &Value, projection: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// What a table column holds. A client chooses font, dimming, alignment,
+/// truncation and default width from the role; the view only names the field.
+/// The set is closed because each role is a drawing choice, not a policy.
+///
+/// A graphical client draws every role. A terminal has no font or dimming, so
+/// it keeps only what a character grid can show: right alignment for `count`,
+/// truncation (middle for `id` and `ref`, from the left for `path`), the first
+/// eight characters of a `hash`, and the status mark and word for `status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ColumnRole {
+    /// Words in the body face; takes the room left over.
+    #[default]
+    Text,
+    /// A thread or chain id: monospace, truncated in the middle.
+    Id,
+    /// An item ref: monospace, truncated in the middle, keeps the leaf.
+    Ref,
+    /// A file path: monospace, dim, truncated from the left.
+    Path,
+    /// A kind word, soft ink.
+    Kind,
+    /// A status word led by a dot in the row's tone, in one cell. A view with
+    /// a status column draws no leading row dot.
+    Status,
+    /// A time, dim.
+    Time,
+    /// A number: right-aligned.
+    Count,
+    /// A digest: monospace, dim, first eight characters.
+    Hash,
+    /// A single quiet affordance.
+    Action,
+}
+
+impl ColumnRole {
+    /// The role an authored `role` word names; `None` for a word outside the
+    /// closed set (the view kind schema refuses those before they get here).
+    pub fn from_word(word: &str) -> Option<Self> {
+        Some(match word {
+            "text" => Self::Text,
+            "id" => Self::Id,
+            "ref" => Self::Ref,
+            "path" => Self::Path,
+            "kind" => Self::Kind,
+            "status" => Self::Status,
+            "time" => Self::Time,
+            "count" => Self::Count,
+            "hash" => Self::Hash,
+            "action" => Self::Action,
+            _ => return None,
+        })
+    }
+}
+
 /// One declared column of a `table` view: a header label and the record field
 /// it projects. `projections.columns` is the ordered list.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TableColumn {
+    /// What the column holds; absent means `text`.
+    pub role: ColumnRole,
     pub label: String,
     pub field: String,
     /// Optional per-column tone block — the same `{field, map, default,
@@ -864,7 +921,7 @@ fn present_time_date(value: &str) -> Option<String> {
 }
 
 /// The columns a `table` view declares — `projections.columns`, each
-/// `{label, field, tone?, present?, fallback?}` (label defaults to the field
+/// `{label, field, role?, tone?, present?, fallback?}` (label defaults to the field
 /// path). A column missing a field is skipped; absent `columns` → empty (the
 /// table renders headerless).
 pub fn table_columns(binding: &ViewBinding) -> Vec<TableColumn> {
@@ -878,6 +935,11 @@ pub fn table_columns(binding: &ViewBinding) -> Vec<TableColumn> {
                     let field = col.get("field").and_then(Value::as_str)?;
                     let label = col.get("label").and_then(Value::as_str).unwrap_or(field);
                     Some(TableColumn {
+                        role: col
+                            .get("role")
+                            .and_then(Value::as_str)
+                            .and_then(ColumnRole::from_word)
+                            .unwrap_or_default(),
                         label: label.to_string(),
                         field: field.to_string(),
                         tone: col.get("tone").cloned(),
@@ -3036,6 +3098,32 @@ mod tests {
                 .iter()
                 .all(|section| section.projection["identity"] == "name")
         );
+    }
+
+    #[test]
+    fn thread_detail_label_value_sections_lead_with_the_label() {
+        let path = ryeos_engine::test_support::workspace_root()
+            .join("bundles/ryeos-ui/.ai/views/ryeos/threads/detail.yaml");
+        let binding: ViewBinding =
+            serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let response = json!({
+            "execution_meta": [{"label": "executor", "value": "directive-runtime"}],
+            "usage": [{"label": "tokens in", "value": "184,220"}],
+        });
+        for (title, label, value) in [
+            ("Execution", "executor", "directive-runtime"),
+            ("Usage", "tokens in", "184,220"),
+        ] {
+            let section = binding
+                .sections
+                .iter()
+                .find(|section| section.title == title)
+                .expect("section is authored");
+            let rows = project_section(section, &response);
+            assert_eq!(rows.len(), 1, "{title}");
+            assert_eq!(rows[0].primary, label, "{title}: the name leads");
+            assert_eq!(rows[0].meta.as_deref(), Some(value), "{title}");
+        }
     }
 
     #[test]
