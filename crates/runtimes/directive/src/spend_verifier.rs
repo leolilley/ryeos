@@ -351,6 +351,7 @@ mod tests {
             body_extra: None,
             image_input: None,
             cache_marks: None,
+            request_rejections: None,
             profiles: vec![],
         }
     }

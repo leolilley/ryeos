@@ -442,7 +442,7 @@ async fn prepare_public_ordinary_fixture(recorded: bool) -> anyhow::Result<Ordin
     let roots =
         vec![ryeos_external_candidate_supervisor::test_support::TEST_CA_DER_BASE64.to_owned()];
     let transport = ExternalControllerTransportContract {
-        schema: 2,
+        schema: 3,
         https_origin: format!("https://localhost:{}", listener.local_addr()?.port()),
         route_contract: EXTERNAL_CHANNEL_ROUTE_CONTRACT.into(),
         tls_root_bundle_digest: external_tls_root_bundle_digest(&roots)?,
@@ -454,10 +454,12 @@ async fn prepare_public_ordinary_fixture(recorded: bool) -> anyhow::Result<Ordin
             resolver: ExternalNetworkInputSelection {
                 source: "/etc/resolv.conf".into(),
                 max_bytes: 65536,
+                required: true,
             },
             hosts: ExternalNetworkInputSelection {
                 source: "/etc/hosts".into(),
                 max_bytes: 65536,
+                required: true,
             },
         },
     };

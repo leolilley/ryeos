@@ -22,6 +22,7 @@ use ryeos_accounting::{
 mod cache_marks;
 mod effective;
 mod image_input;
+mod request_rejections;
 
 pub use cache_marks::{CACHE_MARKS_MAX, CacheMarkPosition, CacheMarksConfig};
 pub use effective::{
@@ -33,6 +34,10 @@ pub use effective::{
 pub use image_input::{
     ImageAcceptConfig, ImageCostConfig, ImageInputConfig, ToolResultImagePlacement,
     UnsupportedImagePolicy, render_note,
+};
+pub use request_rejections::{
+    REQUEST_REJECTION_CODE_PREFIX, RequestRejectionRow, classify_request_rejection,
+    validate_request_rejections,
 };
 
 pub const MODEL_BINDING: &str = "model";
@@ -144,6 +149,12 @@ pub struct ProviderConfig {
     /// request carries no mark.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_marks: Option<CacheMarksConfig>,
+    /// Which refused requests get a named failure code, by status and response
+    /// body phrase. A top-level field, not part of `schemas`, for the same
+    /// reason as `image_input`. Absent: every refusal is the generic provider
+    /// failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_rejections: Option<Vec<RequestRejectionRow>>,
     #[serde(default)]
     pub profiles: Vec<ProviderProfile>,
 }
@@ -177,6 +188,9 @@ pub struct ProviderProfile {
     /// Replaces the config's `cache_marks` whole.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_marks: Option<CacheMarksConfig>,
+    /// Replaces the config's `request_rejections` whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_rejections: Option<Vec<RequestRejectionRow>>,
 }
 
 /// Provider-domain transport selection. The remote and admitted-worker paths
@@ -1453,6 +1467,9 @@ impl ProviderConfig {
         if let Some(cache_marks) = &self.cache_marks {
             cache_marks.validate(context)?;
         }
+        if let Some(rows) = &self.request_rejections {
+            validate_request_rejections(rows, context)?;
+        }
         for profile in &self.profiles {
             // A profile can change the route (schemas, spend authority) under
             // an entry-level declaration, or add its own; the cross-field
@@ -1467,6 +1484,9 @@ impl ProviderConfig {
             }
             if let Some(cache_marks) = &profile.cache_marks {
                 cache_marks.validate(&format!("{context} profile {}", profile.name))?;
+            }
+            if let Some(rows) = &profile.request_rejections {
+                validate_request_rejections(rows, &format!("{context} profile {}", profile.name))?;
             }
         }
         if self.body_template.is_none() {
@@ -2008,6 +2028,9 @@ impl ProviderConfig {
         }
         if let Some(cache_marks) = &profile.cache_marks {
             resolved.cache_marks = Some(cache_marks.clone());
+        }
+        if let Some(rows) = &profile.request_rejections {
+            resolved.request_rejections = Some(rows.clone());
         }
         resolved.profiles.clear();
         resolved
@@ -3091,6 +3114,7 @@ mod reasoning_tests {
             body_extra: None,
             image_input: None,
             cache_marks: None,
+            request_rejections: None,
             profiles: Vec::new(),
         };
         ResolvedProviderSnapshot {
@@ -4122,5 +4146,88 @@ profiles:
         )
         .validate("")
         .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod request_rejections_config_tests {
+    use super::*;
+
+    const ROWS: &str = r#"
+request_rejections:
+  - code: provider_context_length_exceeded
+    statuses: [400, 413]
+    body_contains_any: ["context length"]
+"#;
+
+    const PROFILE_ROWS: &str = r#"
+    request_rejections:
+      - code: provider_profile_rejection
+        statuses: [400]
+        body_contains_any: ["profile phrase"]
+"#;
+
+    fn load(top: &str, profile: &str) -> ProviderConfig {
+        let yaml = format!(
+            r#"
+family: chat_completions
+transport: {{kind: remote_http, base_url: "https://example.invalid"}}
+schemas:
+  streaming:
+    mode: delta_merge
+  output_limit: {{path: max_tokens, semantics: provider_native_output_tokens}}
+body_template: {{model: "{{model}}", messages: "{{messages}}", stream: "{{stream}}"}}
+{top}
+profiles:
+  - name: special
+    match: ["special-*"]
+{profile}
+"#
+        );
+        serde_json::from_value(serde_yaml::from_str::<Value>(&yaml).expect("yaml"))
+            .expect("provider config")
+    }
+
+    #[test]
+    fn a_profile_replaces_the_rows_whole() {
+        let provider = load(ROWS, PROFILE_ROWS);
+        provider.validate("").unwrap();
+        let plain = provider.resolve_for_model("other").request_rejections;
+        assert_eq!(plain.expect("config rows")[0].statuses, vec![400, 413]);
+        let special = provider
+            .resolve_for_model("special-1")
+            .request_rejections
+            .expect("profile rows");
+        assert_eq!(special.len(), 1);
+        assert_eq!(special[0].code, "provider_profile_rejection");
+    }
+
+    #[test]
+    fn no_rows_is_the_default_and_serialises_nothing() {
+        let provider = load("", "    extra: {}");
+        assert!(provider.request_rejections.is_none());
+        provider.validate("").unwrap();
+        let value = serde_json::to_value(&provider).unwrap();
+        assert!(value.get("request_rejections").is_none());
+    }
+
+    #[test]
+    fn invalid_rows_fail_config_validation_in_the_entry_and_in_a_profile() {
+        let bad_top = ROWS.replace("provider_context_length_exceeded", "context_length");
+        assert!(load(&bad_top, "    extra: {}").validate("").is_err());
+        let bad_profile = PROFILE_ROWS.replace("provider_profile_rejection", "nope");
+        assert!(load(ROWS, &bad_profile).validate("").is_err());
+    }
+
+    #[test]
+    fn an_unknown_row_field_is_refused() {
+        let yaml = ROWS.replace("statuses:", "status:");
+        let parsed: Result<ProviderConfig, _> = serde_json::from_value(
+            serde_yaml::from_str::<Value>(&format!(
+                "family: chat_completions\ntransport: {{kind: remote_http, base_url: \"https://example.invalid\"}}\n{yaml}"
+            ))
+            .unwrap(),
+        );
+        assert!(parsed.is_err());
     }
 }

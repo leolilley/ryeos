@@ -756,16 +756,18 @@ mod tests {
             resolver: ExternalNetworkInputSelection {
                 source: "/etc/resolv.conf".into(),
                 max_bytes: 65_536,
+                required: true,
             },
             hosts: ExternalNetworkInputSelection {
                 source: "/etc/hosts".into(),
                 max_bytes: 65_536,
+                required: true,
             },
         };
         let bootstrap = ExternalSupervisorBootstrap {
             schema: ryeos_state::external_execution::transport::EXTERNAL_SUPERVISOR_HTTP_BOOTSTRAP_SCHEMA,
             controller: ExternalControllerTransportContract {
-                schema: 2,
+                schema: 3,
                 network_inputs,
                 https_origin: "https://controller.example:7443".into(),
                 route_contract: EXTERNAL_CHANNEL_ROUTE_CONTRACT.into(),

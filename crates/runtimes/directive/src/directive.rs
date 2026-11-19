@@ -38,6 +38,11 @@ pub struct ContinuationRuntimeConfig {
     /// Upper bound a directive's declared `carry_turns` is clamped to.
     #[serde(default = "default_carry_turns_cap")]
     pub carry_turns_cap: u32,
+    /// Estimated tokens a successor's starting conversation (pinned inputs plus
+    /// recent turns) should fit. Pinned inputs over this budget are carried
+    /// alone; pinned inputs over the continuation threshold are refused.
+    #[serde(default = "default_successor_start_tokens")]
+    pub successor_start_tokens: u64,
 }
 
 fn default_context_threshold_ratio() -> f64 {
@@ -49,6 +54,9 @@ fn default_carry_turns() -> u32 {
 fn default_carry_turns_cap() -> u32 {
     32
 }
+fn default_successor_start_tokens() -> u64 {
+    crate::resume::DEFAULT_SUCCESSOR_START_TOKENS
+}
 
 impl Default for ContinuationRuntimeConfig {
     fn default() -> Self {
@@ -57,6 +65,7 @@ impl Default for ContinuationRuntimeConfig {
             context_threshold_ratio: default_context_threshold_ratio(),
             carry_turns_default: default_carry_turns(),
             carry_turns_cap: default_carry_turns_cap(),
+            successor_start_tokens: default_successor_start_tokens(),
         }
     }
 }

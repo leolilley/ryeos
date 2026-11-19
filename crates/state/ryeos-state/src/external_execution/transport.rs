@@ -64,6 +64,10 @@ pub const MAX_EXTERNAL_NETWORK_CAPTURE_JSON_BYTES: usize =
 pub struct ExternalNetworkInputSelection {
     pub source: String,
     pub max_bytes: u64,
+    /// Whether the file must exist on the target. A required input that is
+    /// missing refuses the capture; an optional one is recorded as absent and
+    /// consumed as empty bytes.
+    pub required: bool,
 }
 
 impl ExternalNetworkInputSelection {
@@ -101,7 +105,7 @@ impl ExternalNetworkInputPolicy {
     pub fn digest(&self) -> Result<String> {
         self.validate()?;
         crate::objects::canonical_value_digest(&serde_json::json!({
-            "domain": "ryeos.external-network-input-policy.v1",
+            "domain": "ryeos.external-network-input-policy.v2",
             "policy": self,
         }))
     }
@@ -117,7 +121,18 @@ pub struct ExternalCapturedNetworkInputs {
     pub hosts_base64: String,
     pub resolver_digest: String,
     pub hosts_digest: String,
+    /// False when the resolver file did not exist on the target. An absent
+    /// input carries no bytes and the digest of empty bytes so the digest type
+    /// stays valid, but it is a different state from a present empty file.
+    pub resolver_present: bool,
+    /// As `resolver_present`, for the hosts file.
+    pub hosts_present: bool,
 }
+
+/// Current schema of [`ExternalCapturedNetworkInputs`].
+pub const EXTERNAL_CAPTURED_NETWORK_INPUTS_SCHEMA: u32 = 2;
+/// Current schema of [`ExternalControllerTransportContract`].
+pub const EXTERNAL_CONTROLLER_TRANSPORT_CONTRACT_SCHEMA: u32 = 3;
 
 impl std::fmt::Debug for ExternalCapturedNetworkInputs {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -127,29 +142,46 @@ impl std::fmt::Debug for ExternalCapturedNetworkInputs {
             .field("policy_digest", &self.policy_digest)
             .field("resolver_digest", &self.resolver_digest)
             .field("hosts_digest", &self.hosts_digest)
+            .field("resolver_present", &self.resolver_present)
+            .field("hosts_present", &self.hosts_present)
             .finish_non_exhaustive()
     }
 }
 
 impl ExternalCapturedNetworkInputs {
+    /// A capture in which both inputs were present (possibly empty).
     pub fn from_bytes(
         policy: &ExternalNetworkInputPolicy,
         resolver: &[u8],
         hosts: &[u8],
     ) -> Result<Self> {
+        Self::from_captures(policy, Some(resolver), Some(hosts))
+    }
+
+    /// A capture where `None` records an input absent on the target. Absence
+    /// is accepted only for an input whose policy selection is not required.
+    pub fn from_captures(
+        policy: &ExternalNetworkInputPolicy,
+        resolver: Option<&[u8]>,
+        hosts: Option<&[u8]>,
+    ) -> Result<Self> {
         policy.validate()?;
+        let (resolver_bytes, hosts_bytes) =
+            (resolver.unwrap_or_default(), hosts.unwrap_or_default());
         ensure!(
-            resolver.len() as u64 <= policy.resolver.max_bytes
-                && hosts.len() as u64 <= policy.hosts.max_bytes,
+            resolver_bytes.len() as u64 <= policy.resolver.max_bytes
+                && hosts_bytes.len() as u64 <= policy.hosts.max_bytes,
             "external captured network inputs exceed policy bounds"
         );
         let capture = Self {
-            schema: 1,
+            schema: EXTERNAL_CAPTURED_NETWORK_INPUTS_SCHEMA,
             policy_digest: policy.digest()?,
-            resolver_base64: STANDARD.encode(resolver),
-            hosts_base64: STANDARD.encode(hosts),
-            resolver_digest: lillux::sha256_hex(resolver),
-            hosts_digest: lillux::sha256_hex(hosts),
+            resolver_base64: STANDARD.encode(resolver_bytes),
+            hosts_base64: STANDARD.encode(hosts_bytes),
+            resolver_digest: lillux::sha256_hex(resolver_bytes),
+            hosts_digest: lillux::sha256_hex(hosts_bytes),
+            resolver_present: resolver.is_some(),
+            hosts_present: hosts.is_some(),
         };
         capture.validate_for(policy)?;
         Ok(capture)
@@ -165,13 +197,25 @@ impl ExternalCapturedNetworkInputs {
                 && self.hosts_bytes()?.len() as u64 <= policy.hosts.max_bytes,
             "external captured network inputs exceed policy bounds"
         );
+        ensure!(
+            self.resolver_present || !policy.resolver.required,
+            "required external network resolver input is absent"
+        );
+        ensure!(
+            self.hosts_present || !policy.hosts.required,
+            "required external network hosts input is absent"
+        );
         Ok(())
     }
 
-    fn decode(&self, encoded: &str, digest: &str) -> Result<Vec<u8>> {
+    fn decode(&self, encoded: &str, digest: &str, present: bool) -> Result<Vec<u8>> {
         ensure!(
-            self.schema == 1,
+            self.schema == EXTERNAL_CAPTURED_NETWORK_INPUTS_SCHEMA,
             "unsupported external network capture schema"
+        );
+        ensure!(
+            present || encoded.is_empty(),
+            "absent external network capture carries bytes"
         );
         hash(&self.policy_digest)?;
         hash(digest)?;
@@ -191,19 +235,25 @@ impl ExternalCapturedNetworkInputs {
         Ok(bytes)
     }
 
+    /// The resolver bytes; empty for an absent input.
     pub fn resolver_bytes(&self) -> Result<Vec<u8>> {
-        self.decode(&self.resolver_base64, &self.resolver_digest)
+        self.decode(
+            &self.resolver_base64,
+            &self.resolver_digest,
+            self.resolver_present,
+        )
     }
 
+    /// The hosts bytes; empty for an absent input.
     pub fn hosts_bytes(&self) -> Result<Vec<u8>> {
-        self.decode(&self.hosts_base64, &self.hosts_digest)
+        self.decode(&self.hosts_base64, &self.hosts_digest, self.hosts_present)
     }
 
     pub fn digest(&self) -> Result<String> {
         self.resolver_bytes()?;
         self.hosts_bytes()?;
         crate::objects::canonical_value_digest(&serde_json::json!({
-            "domain": "ryeos.external-captured-network-inputs.v1",
+            "domain": "ryeos.external-captured-network-inputs.v2",
             "capture": self,
         }))
     }
@@ -239,7 +289,7 @@ pub struct ExternalControllerTransportContract {
 impl ExternalControllerTransportContract {
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema == 2,
+            self.schema == EXTERNAL_CONTROLLER_TRANSPORT_CONTRACT_SCHEMA,
             "unsupported external controller transport schema"
         );
         self.network_inputs.validate()?;
@@ -1298,7 +1348,7 @@ mod tests {
 
     fn controller(roots: &[String]) -> ExternalControllerTransportContract {
         ExternalControllerTransportContract {
-            schema: 2,
+            schema: 3,
             network_inputs: network_policy(),
             https_origin: "https://controller.example:7443".into(),
             route_contract: EXTERNAL_CHANNEL_ROUTE_CONTRACT.into(),
@@ -1456,10 +1506,12 @@ mod tests {
             resolver: ExternalNetworkInputSelection {
                 source: "/etc/resolv.conf".into(),
                 max_bytes: 65536,
+                required: true,
             },
             hosts: ExternalNetworkInputSelection {
                 source: "/etc/hosts".into(),
                 max_bytes: 65536,
+                required: true,
             },
         }
     }
@@ -1903,7 +1955,7 @@ mod tests {
         changed_policy.hosts.max_bytes -= 1;
         assert!(capture.validate_for(&changed_policy).is_err());
         let mut changed = capture.clone();
-        changed.schema = 2;
+        changed.schema = 1;
         assert!(changed.digest().is_err());
         for encoded in [
             "eA".to_owned(),
@@ -1930,6 +1982,72 @@ mod tests {
                 .unwrap()
                 .digest()
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn absent_network_input_is_accepted_only_when_not_required() {
+        let mut policy = network_policy();
+        // Both required: an absent input of either kind is refused.
+        assert!(ExternalCapturedNetworkInputs::from_captures(&policy, None, Some(b"x")).is_err());
+        assert!(ExternalCapturedNetworkInputs::from_captures(&policy, Some(b"x"), None).is_err());
+        policy.hosts.required = false;
+        let capture = ExternalCapturedNetworkInputs::from_captures(
+            &policy,
+            Some(b"nameserver 1.1.1.1\n"),
+            None,
+        )
+        .unwrap();
+        capture.validate_for(&policy).unwrap();
+        assert!(capture.resolver_present);
+        assert!(!capture.hosts_present);
+        assert!(capture.hosts_bytes().unwrap().is_empty());
+        assert_eq!(capture.hosts_digest, lillux::sha256_hex(b""));
+        // The resolver is still required.
+        assert!(ExternalCapturedNetworkInputs::from_captures(&policy, None, None).is_err());
+        // The same capture under the policy that now requires hosts is refused.
+        let mut stricter = policy.clone();
+        stricter.hosts.required = true;
+        assert!(capture.validate_for(&stricter).is_err());
+        // An absent input carries no bytes.
+        let mut smuggled = capture.clone();
+        smuggled.hosts_base64 = STANDARD.encode(b"x");
+        smuggled.hosts_digest = lillux::sha256_hex(b"x");
+        assert!(smuggled.validate_for(&policy).is_err());
+    }
+
+    #[test]
+    fn empty_file_is_not_mistaken_for_absent() {
+        let mut policy = network_policy();
+        policy.hosts.required = false;
+        let empty =
+            ExternalCapturedNetworkInputs::from_captures(&policy, Some(b"r"), Some(b"")).unwrap();
+        let absent =
+            ExternalCapturedNetworkInputs::from_captures(&policy, Some(b"r"), None).unwrap();
+        assert_eq!(empty.hosts_base64, absent.hosts_base64);
+        assert_eq!(empty.hosts_digest, absent.hosts_digest);
+        assert!(empty.hosts_present && !absent.hosts_present);
+        assert_ne!(empty, absent);
+        assert_ne!(empty.digest().unwrap(), absent.digest().unwrap());
+        // Flipping the flag on a stored capture changes its identity.
+        let mut flipped = empty.clone();
+        flipped.hosts_present = false;
+        assert_ne!(flipped.digest().unwrap(), empty.digest().unwrap());
+        let mut value = serde_json::to_value(&empty).unwrap();
+        value.as_object_mut().unwrap().remove("hosts_present");
+        assert!(serde_json::from_value::<ExternalCapturedNetworkInputs>(value).is_err());
+    }
+
+    #[test]
+    fn required_is_mandatory_and_part_of_the_policy_digest() {
+        let mut value = serde_json::to_value(network_policy()).unwrap();
+        value["hosts"].as_object_mut().unwrap().remove("required");
+        assert!(serde_json::from_value::<ExternalNetworkInputPolicy>(value).is_err());
+        let mut optional = network_policy();
+        optional.hosts.required = false;
+        assert_ne!(
+            optional.digest().unwrap(),
+            network_policy().digest().unwrap()
         );
     }
 

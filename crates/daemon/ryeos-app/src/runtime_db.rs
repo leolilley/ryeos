@@ -2707,7 +2707,15 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // execution-history` on its next upgrade. A change to
 // `LAUNCH_METADATA_SCHEMA_VERSION` or `ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION`
 // is an epoch cut: they move together with this constant.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 140;
+// Epoch 141: every retained external execution binding generation embeds the
+// controller transport contract, which is now schema 3: each declared network
+// input carries `required`, so a binding written at epoch 140 (transport
+// schema 2) no longer decodes and the strict decode on open would refuse it.
+// An epoch-140 store is a predecessor and is reset without decoding; a node
+// that wrote such rows (a controller or origin holding retained bindings)
+// needs `ryeos node reset execution-history` on its next upgrade. A change to
+// `EXTERNAL_CONTROLLER_TRANSPORT_CONTRACT_SCHEMA` moves with this constant.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 141;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -8287,9 +8295,13 @@ struct IncompatibleRuntimeOperatorSchema {
 }
 
 impl IncompatibleRuntimeOperatorSchema {
+    fn is_predecessor_epoch(&self) -> bool {
+        self.stored < self.current
+    }
+
     #[cfg(test)]
     fn is_predecessor(&self) -> bool {
-        self.stored < self.current
+        self.is_predecessor_epoch()
     }
 }
 
@@ -8348,11 +8360,21 @@ fn runtime_operator_schema_epoch(conn: &Connection, path: &Path) -> Result<u32> 
 }
 
 fn incompatible_runtime_operator_schema(stored: u32) -> anyhow::Error {
-    IncompatibleRuntimeOperatorSchema {
+    let mismatch = IncompatibleRuntimeOperatorSchema {
         stored,
         current: RUNTIME_OPERATOR_SCHEMA_EPOCH,
+    };
+    let guidance = mismatch.is_predecessor_epoch().then(|| {
+        format!(
+            "{mismatch}; stop the daemon and run `{}` before restarting",
+            crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND
+        )
+    });
+    let error = anyhow::Error::new(mismatch);
+    match guidance {
+        Some(guidance) => error.context(guidance),
+        None => error,
     }
-    .into()
 }
 
 fn assert_current_runtime_schema(
