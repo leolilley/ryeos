@@ -6,8 +6,6 @@
 //! request, and a successor keeps the pinned prefix whatever the carried tail.
 //! They need populated bundles (`-f bundles=branch`).
 
-use ryeosd::test_support as common;
-
 #[path = "common/stub_rig.rs"]
 mod stub_rig;
 use stub_rig::*;

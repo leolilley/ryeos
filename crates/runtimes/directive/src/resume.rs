@@ -1715,6 +1715,14 @@ mod tests {
         json!({"turn": turn, "parts": text_parts(text), "finish": "stop"})
     }
 
+    /// A completed text-only turn that carries its provider record, as a
+    /// replayed turn does.
+    fn accounted_out(turn: u32, text: &str) -> Value {
+        let mut payload = out(turn, text);
+        payload["provider_accounting"] = json!({"replayed_from": "ab".repeat(32)});
+        payload
+    }
+
     /// A turn cut short by an interrupt.
     fn out_interrupted(turn: u32, text: &str) -> Value {
         json!({"turn": turn, "parts": text_parts(text), "finish": "interrupted"})
@@ -2693,12 +2701,12 @@ mod tests {
         }];
         events.push(ReplayedEventRecord {
             event_type: "cognition_out".to_string(),
-            payload: out(1, "a1"),
+            payload: accounted_out(1, "a1"),
         });
         events.extend(wrap_up_events().into_iter().skip(2));
         events.push(ReplayedEventRecord {
             event_type: "cognition_out".to_string(),
-            payload: out(2, "a2"),
+            payload: accounted_out(2, "a2"),
         });
         let callback = make_callback(events);
         let delivered = |carry, mode| {
@@ -3757,9 +3765,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_whole_conversation_that_does_not_start_with_a_user_message_is_refused() {
+        let mut payload = out(1, "orphan answer");
+        payload["provider_accounting"] = json!({"replayed_from": "ab".repeat(32)});
         let callback = make_callback(vec![ReplayedEventRecord {
             event_type: "cognition_out".to_string(),
-            payload: out(1, "orphan answer"),
+            payload,
         }]);
         let error = load_resume_state(
             &callback,
