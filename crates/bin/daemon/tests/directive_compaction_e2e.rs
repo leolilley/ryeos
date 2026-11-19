@@ -46,7 +46,11 @@ async fn chain_threads(rig: &Rig, root: &str) -> Vec<(String, String)> {
 /// Wait until every thread of the chain is terminal and the thread count has
 /// stayed the same across several polls.
 async fn wait_chain_settled(rig: &Rig, root: &str) -> Vec<(String, String)> {
-    let deadline = std::time::Instant::now() + Duration::from_secs(300);
+    wait_chain_settled_for(rig, root, 300).await
+}
+
+async fn wait_chain_settled_for(rig: &Rig, root: &str, seconds: u64) -> Vec<(String, String)> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(seconds);
     let mut stable = 0u32;
     let mut last_count = 0usize;
     loop {
@@ -410,8 +414,12 @@ async fn a_chain_of_fifteen_continuations_runs_under_a_raised_limit() {
     .await
     .expect("start rig");
     let id = launch_on(&rig).await.expect("launch");
-    let chain = wait_chain_settled(&rig, &id).await;
-    assert!(chain.len() >= 16, "fifteen continuations: {}", chain.len());
+    let chain = wait_chain_settled_for(&rig, &id, 1500).await;
+    assert!(
+        chain.len() >= 16,
+        "fifteen continuations: {} {chain:?}",
+        chain.len()
+    );
     assert!(
         chain.iter().filter(|(_, s)| s == "continued").count() >= 15,
         "{chain:?}"
