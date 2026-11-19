@@ -558,6 +558,7 @@ impl From<crate::contracts::ThreadTerminalStatus> for RuntimeResultStatus {
             crate::contracts::ThreadTerminalStatus::Cancelled => Self::Cancelled,
             crate::contracts::ThreadTerminalStatus::Continued => Self::Continued,
             crate::contracts::ThreadTerminalStatus::Killed => Self::Killed,
+            crate::contracts::ThreadTerminalStatus::TimedOut => Self::TimedOut,
         }
     }
 }

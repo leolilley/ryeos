@@ -1179,6 +1179,28 @@ impl PreparedItemPlan {
         Ok(())
     }
 
+    /// Bound this plan's process timeout by its caller's hard stop. Only ever
+    /// shortens: a timeout the tool already declares stays when it is the
+    /// shorter, and a tool with none gains the bound. Returns whether the
+    /// bound is now the effective limit, so a timeout kill can be recorded as
+    /// a cut at the deadline rather than the tool's own timeout.
+    pub fn bound_timeout_at_deadline(
+        &mut self,
+        end_at_ms: Option<i64>,
+        now_ms: i64,
+    ) -> Result<bool> {
+        let timeout =
+            crate::run_deadline::clamp_tool_timeout(self.timeout_secs, end_at_ms, now_ms)?;
+        let (secs, cut) = match timeout {
+            crate::run_deadline::ToolTimeout::Own(secs) => (secs, false),
+            crate::run_deadline::ToolTimeout::CutAtDeadline(secs) => (secs, true),
+        };
+        let spec = first_subprocess_spec_mut(&mut self.plan)?;
+        spec.timeout_secs = secs;
+        self.timeout_secs = secs;
+        Ok(cut)
+    }
+
     /// Add the per-realization descriptor delivery document after the
     /// realization set, root and delivery are bound. It names the files the
     /// trusted consumer receives as inherited descriptors instead of finding

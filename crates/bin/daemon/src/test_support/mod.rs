@@ -815,6 +815,14 @@ impl DaemonHarness {
         std::fs::read_to_string(&self.stderr_log_path).unwrap_or_default()
     }
 
+    /// The last `lines` lines of the daemon's stderr log, for timeout panics
+    /// that must show the shutdown path without flooding the CI log.
+    pub fn stderr_tail(&self, lines: usize) -> String {
+        let log = self.stderr_so_far();
+        let all: Vec<&str> = log.lines().collect();
+        all[all.len().saturating_sub(lines)..].join("\n")
+    }
+
     /// Retain the disposable node and its exact bundle/user inputs for diagnosis
     /// if an accepted operation fails or observation times out. The daemon is
     /// still killed on drop; this grants no permission to relaunch that work.
@@ -1653,10 +1661,15 @@ impl DaemonHarness {
         drop(stream);
         peer.request_termination()
             .context("request orderly daemon stop")?;
-        let status = tokio::time::timeout(Duration::from_secs(120), self.child.wait())
-            .await
-            .context("daemon did not stop within 120s of its orderly stop request")?
-            .context("observe daemon exit after orderly stop request")?;
+        let waited = tokio::time::timeout(Duration::from_secs(120), self.child.wait()).await;
+        let status = match waited {
+            Ok(status) => status.context("observe daemon exit after orderly stop request")?,
+            Err(_) => anyhow::bail!(
+                "daemon did not stop within 120s of its orderly stop request; stderr log {}\n--- stderr tail (last 200 lines) ---\n{}",
+                self.stderr_log_path.display(),
+                self.stderr_tail(200)
+            ),
+        };
         anyhow::ensure!(
             status.success(),
             "daemon orderly stop exited with {status}; stderr log {}\n--- stderr tail ---\n{}",
