@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-18T06:12:01Z:0a13112ce3d3a745641898c75db60ed0e620d2d920418e876f22e2d166736fc4:c2FvqCQ5hR1ZAjTNoChQdLYNdjMEV0lQxoBFl4Rdi0O60tWVcXIWy+mc0GZiYrcYVf3p8/Nv8KSZspFnik3tBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-18T11:24:51Z:79cf91b6e2fb18661101e29e47e23c6e337224bb2fb189591121741bd1af9eb8:RU2M4/qTo9nsFQCbPviokNksBUljAALhtojtiT1EQiVeQ+qt5XwVzwYkfEaMN28hEBUrZteEfses1gf+U7Y7Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/standard
@@ -315,6 +315,49 @@ is not read back: it stands in the conversation as `[image not used:
 image_oversize]` and the run goes on. Images the next request carries are held
 in memory and are never evicted while that request is built.
 
+## Cache marks
+
+Some routes cache a prompt prefix only where the request marks it. `cache_marks`
+sits at the top level of the provider entry, applies to Chat Completions entries
+only, and a profile's value replaces the entry's whole. An entry without it sends
+no mark.
+
+```yaml
+cache_marks:
+  mark: {cache_control: {type: ephemeral}}        # keys merged into a content part
+  text_part_template: {type: text, text: "{text}"} # how a string content becomes a part
+  max_marks: 4                                      # 1 to 4, the route's limit
+  positions: [system, newest, previous_tail]        # priority order
+```
+
+The marks are written after the request's messages are final, so they land only
+on bytes the request really sends. `system` is the system message, `newest` the
+last message, and `previous_tail` the message just before the last assistant
+message. When the last request ended on that message (the usual case: a tool
+result or a user input), it is the message the previous request marked as its
+newest, so the cache entry written last turn is read at an exact breakpoint. A
+user message that follows the tool results (a wrap-up input or an operator
+steer) takes the newest mark instead, and the previous tail then marks the
+message before the assistant, not the previous newest. A position with no
+message (no earlier assistant turn yet) costs no mark, and positions past
+`max_marks` are dropped. The mark goes on the last content part of the message
+and never on an assistant message. With `cache_marks` declared, every system,
+user and tool message with text renders as a part array on every turn, marked or
+not, so a mark moving to a newer message leaves the older message's bytes equal
+apart from the mark key. A selected message with empty content, or content that
+does not end in an object part, takes no mark.
+
+Validation (of the entry and of every profile resolved from it) refuses `cache_marks` on a route that renames the system or assistant
+role, extracts the system message, uses another content key or tool role, or does not wrap
+tool results directly. A tariff on a marked route must cover `cache_read_tokens`
+and `cache_write_tokens`, because input and output are no longer the complete
+billable set.
+
+Marks do not change what the run costs where no tariff exists: cached tokens are
+recorded, and priced only where a tariff covers their dimension. A change to the
+tool list, the system prompt or any earlier message starts a new cache entry, so
+the next request pays one full miss.
+
 ## Provider cache usage
 
 A signed streaming usage schema may map cache-read, cache-miss, and cache-write
@@ -322,6 +365,16 @@ token paths. When it declares `cache_partition_of_input: true`, both read and
 miss paths are required and RyeOS validates that their checked sum equals the
 reported input-token total. Cache miss is a distinct accounting dimension; it
 is never relabelled as cache write.
+
+A usage schema also reads cache counts that sit inside the input count. It
+declares `cache_read_tokens_path` and `cache_write_tokens_path` and sets
+`cache_included_in_input: true`; a report whose read plus write exceeds the
+input count is then an anomaly, so the turn's token counts are invalid rather
+than silently over-counted. It cannot be combined with `cache_partition_of_input`, and a tariff covering `input_tokens` together with a
+cache dimension is refused because it would bill the cached part twice. The
+counts are recorded on the turn as `provider_accounting.cache_read_tokens`,
+`cache_write_tokens` and `cache_miss_tokens`; a path the schema does not declare
+is recorded as `null`, never guessed from a field name.
 
 Pricing may declare paired cache-read/cache-miss rates for operational budgets,
 while the signed spend tariff covers the exact billable dimensions used for

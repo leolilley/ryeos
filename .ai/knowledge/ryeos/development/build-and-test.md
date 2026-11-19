@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-18T01:04:08Z:0ed685d990d0efd68ed062193c9cf8358716a5028a529811eae7259f7d67f9bc:Lz3WrYFyKD7RVkpZetYatgQztjs+TIRd53LaIWkS550ZzZHUXcun+0s9zJGIwLzIYoMWU6lEB+rbhPHqEN7nAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-18T23:37:00Z:24a2d0657a8c1ad1915f065d9ddc93046d9fe5d9100854d7ecc631fe78a9402f:NM9Ndz5ziU0cRXAkwq9kXt+nDnt0CiTxm5mdRG+k4mItuc8543eTjfHdLr3PmuJGjHOMNIoIkb7DDhCcrFWPAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "build-and-test"
@@ -239,6 +239,15 @@ HEADs, so it requires the operator decision shown above rather than an install
 flag or automatic fallback. It preserves project worktrees, installed bundles,
 vault values, trust, and node/signing identity. No reinstall is needed after
 the cutover when the new binaries and bundles were already installed.
+
+A node whose runtime store is of an earlier operator epoch refuses to start
+and names the reset: with the daemon stopped, run
+`ryeos node reset execution-history --include-project-heads --confirm
+--confirm-project-heads`, then `ryeos node allow-restart` and `ryeos start`.
+Epoch 140 is such a cut: any node whose store is at epoch 139 needs this
+reset on its next upgrade. The reset never decodes a predecessor
+store's rows. A change to a stored launch contract version without an epoch
+bump leaves a node that neither opens nor resets, which a unit test pins.
 
 Important: bundle-owned binaries (`ryeos-core-tools`, parsers, composers,
 runtimes, `ryeos-tui`, etc.) belong inside signed bundle bin trees under

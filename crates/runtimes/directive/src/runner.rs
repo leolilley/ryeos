@@ -2721,6 +2721,9 @@ impl Runner {
                                 "input_tokens": resp.usage.as_ref().and_then(|usage| usage.input_tokens),
                                 "output_tokens": resp.usage.as_ref().and_then(|usage| usage.output_tokens),
                                 "reasoning_tokens": resp.usage.as_ref().and_then(|usage| usage.reasoning_tokens),
+                                "cache_read_tokens": resp.usage.as_ref().and_then(|usage| usage.cache_read_tokens),
+                                "cache_write_tokens": resp.usage.as_ref().and_then(|usage| usage.cache_write_tokens),
+                                "cache_miss_tokens": resp.usage.as_ref().and_then(|usage| usage.cache_miss_tokens),
                                 "reported_cost_usd": resp.usage.as_ref().and_then(|usage| usage.reported_cost_usd),
                                 "cost_details": resp.usage.as_ref().and_then(|usage| usage.cost_details.as_ref()),
                                 "is_byok": resp.usage.as_ref().and_then(|usage| usage.is_byok),
@@ -6138,6 +6141,7 @@ mod tests {
             body_extra: None,
             spend_authority: None,
             image_input: None,
+            cache_marks: None,
             profiles: vec![],
         };
 
@@ -6218,6 +6222,7 @@ mod tests {
             body_extra: None,
             spend_authority: None,
             image_input: None,
+            cache_marks: None,
             profiles: vec![],
         };
 
@@ -6274,6 +6279,7 @@ mod tests {
             body_extra: None,
             spend_authority: None,
             image_input: None,
+            cache_marks: None,
             profiles: vec![],
         };
 
@@ -6329,6 +6335,7 @@ mod tests {
             body_extra: None,
             spend_authority: None,
             image_input: None,
+            cache_marks: None,
             profiles: vec![],
         };
         let outputs = Some(vec![OutputSpec {
@@ -6399,6 +6406,7 @@ mod tests {
             body_extra: None,
             spend_authority: None,
             image_input: None,
+            cache_marks: None,
             profiles: vec![],
         };
         let mut budget = BudgetTracker::new(usd("1"));
@@ -6574,6 +6582,7 @@ mod tests {
             body_extra: None,
             spend_authority: None,
             image_input: None,
+            cache_marks: None,
             profiles: vec![],
         };
 
@@ -6649,6 +6658,7 @@ mod tests {
             body_extra: None,
             spend_authority: None,
             image_input: None,
+            cache_marks: None,
             profiles: vec![],
         };
 
@@ -6721,6 +6731,7 @@ mod tests {
             body_extra: None,
             spend_authority: None,
             image_input: None,
+            cache_marks: None,
             profiles: vec![],
         };
 
@@ -6777,6 +6788,7 @@ mod tests {
             body_extra: None,
             spend_authority: None,
             image_input: None,
+            cache_marks: None,
             profiles: vec![],
         };
 
@@ -7706,6 +7718,7 @@ mod tests {
             body_extra: None,
             spend_authority: None,
             image_input: None,
+            cache_marks: None,
             profiles: vec![],
         };
         Runner::new(RunnerConfig {

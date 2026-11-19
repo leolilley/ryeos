@@ -2699,7 +2699,15 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // completed predecessor placement a worker continuation was admitted from,
 // with a unique partial index so a predecessor is continued at most once; an
 // epoch-138 store lacks the column and refuses.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 139;
+// Epoch 140: stored `launch_metadata` is launch-metadata schema 38 (it carries
+// the run deadline share) sealing admitted launch capsule schema 39; an
+// epoch-139 store holds rows of earlier schemas, which the strict launch
+// decode refuses, so it is a predecessor and is reset without decoding. Any
+// node that wrote such rows at epoch 139 needs `ryeos node reset
+// execution-history` on its next upgrade. A change to
+// `LAUNCH_METADATA_SCHEMA_VERSION` or `ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION`
+// is an epoch cut: they move together with this constant.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 140;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
