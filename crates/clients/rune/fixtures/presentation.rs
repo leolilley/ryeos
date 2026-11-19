@@ -201,12 +201,11 @@ fn conversation() -> Result<Value, String> {
 /// The draft the `timeline-draft` scene types.
 const DRAFT: &str = "Retry the fetch with a longer timeout, and read the retry settings first.";
 
-/// Whether choosing a launcher row stages a view for its place.
-fn stages_a_view(intent: &ryeos_client_base::ui::event::RyeOsUiIntent) -> bool {
-    matches!(
-        intent,
-        ryeos_client_base::ui::event::RyeOsUiIntent::StageLauncherView { .. }
-    )
+/// Whether a launcher row lists a view, not a command or a place.
+fn is_a_view(row: &ryeos_client_base::ui::view_model::RyeOsRowVm) -> bool {
+    row.launch
+        .as_ref()
+        .is_some_and(|launch| !launch.place && launch.group != "Commands")
 }
 
 /// The first input anywhere in a serialised view model.
@@ -675,7 +674,7 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
                 };
                 let staging = rows
                     .iter()
-                    .find(|row| row.intent.as_ref().is_some_and(stages_a_view))
+                    .find(|row| row.intent.is_some() && is_a_view(row))
                     .ok_or("the launcher lists no view that can be staged")?;
                 let effects = core.dispatch(RyeOsEvent::Ui {
                     event: RyeOsUiEvent::ChooseViewItem {
