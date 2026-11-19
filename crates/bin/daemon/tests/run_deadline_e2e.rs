@@ -759,3 +759,66 @@ async fn a_restart_after_the_deadline_settles_without_spawning() {
         "no model call after the restart"
     );
 }
+
+/// A successor born inside the wrap-up window is told once, with the time left
+/// now, when its carried start no longer holds the notice. With a zero carry a
+/// successor keeps only pinned inputs, so the notice recorded by an earlier
+/// thread of the chain is gone from its conversation; no request ever holds
+/// two notices.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_successor_in_the_wrap_up_window_is_told_once() {
+    let script = "steps:\n  - repeat: 300\n    delay_ms: 1000\n    tool_calls:\n      - { id: \"call_{n}\", name: bulk_bulk, arguments: {} }\n";
+    let rig = start_rig(
+        script,
+        RigOptions {
+            context_window: 2000,
+            header_extra: "limits:\n  wrap_up_seconds: 20\n  deadline:\n    reserve_seconds: 5\ncontinuation:\n  carry_turns: 0\n",
+            limits: None,
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    let id = launch_on_with(&rig, json!({"run_timeout": 60}))
+        .await
+        .expect("launch");
+    // The root settles as `continued` early; wait for the whole chain.
+    let give_up = Instant::now() + Duration::from_secs(150);
+    let mut stable = 0u32;
+    let mut last = 0usize;
+    while stable < 6 && Instant::now() < give_up {
+        let chain = thread_ids_of_chain(&rig.h, &id).await;
+        let settled = !chain.is_empty()
+            && chain
+                .iter()
+                .all(|(_, status)| TERMINAL.contains(&status.as_str()));
+        stable = if settled && chain.len() == last {
+            stable + 1
+        } else {
+            0
+        };
+        last = chain.len();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let dump = failure_dump(&rig, &id).await;
+    let notices = wrap_up_inputs(&rig, &id).await;
+    let threads = thread_ids_of_chain(&rig.h, &id).await;
+    assert!(
+        threads.len() >= 2,
+        "the small window should have forced a successor: {threads:?}{dump}"
+    );
+    assert!(
+        notices.len() >= 2,
+        "a successor that lost the notice is told again: {} notices{dump}",
+        notices.len()
+    );
+    for request in rig.stub.requests().await {
+        assert!(
+            request_text(&request.body)
+                .matches("Deadline notice")
+                .count()
+                <= 1,
+            "a request holds two notices"
+        );
+    }
+}

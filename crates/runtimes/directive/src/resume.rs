@@ -218,7 +218,20 @@ pub async fn load_resume_state(
     let frame = latest_frame(&events)?;
     let predecessor = fold_messages(&events[..own_start])?;
     let own = fold_messages(&events[own_start..])?;
+    let predecessor_notices: Vec<ProviderMessage> = predecessor
+        .iter()
+        .filter(|folded| is_wrap_up_notice(folded))
+        .map(|folded| folded.message.clone())
+        .collect();
+    let own_has_notice = own.iter().any(is_wrap_up_notice);
     let mut messages = carry_into_successor(predecessor, &carry, images)?;
+    // The notice counts as delivered only if the conversation the model is
+    // given still holds it: a successor whose carried start trimmed it away is
+    // told again, with the time left now.
+    let wrap_up_delivered = own_has_notice
+        || predecessor_notices
+            .iter()
+            .any(|notice| messages.contains(notice));
     messages.extend(own.into_iter().map(|folded| folded.message));
     // The whole rebuilt conversation, predecessors' carry and own part, must
     // be one a provider accepts. A failed check is a typed refusal, not a
@@ -238,7 +251,7 @@ pub async fn load_resume_state(
         provider_retry_testimony_digests,
         trailing_length_turns,
         frame,
-        deadline_wrap_up_delivered: recover_wrap_up_delivered(&events)?,
+        deadline_wrap_up_delivered: wrap_up_delivered,
         images: recover_image_run(&events)?,
     })
 }
@@ -262,21 +275,9 @@ fn recover_image_run(events: &[ReplayedEventRecord]) -> Result<ImageRunState> {
     Ok(run)
 }
 
-/// Whether any input on the path is the run-deadline wrap-up notice.
-fn recover_wrap_up_delivered(events: &[ReplayedEventRecord]) -> Result<bool> {
-    let mut assembler = ryeos_runtime::CognitionInAssembler::default();
-    for event in events
-        .iter()
-        .filter(|event| event.event_type == "cognition_in")
-    {
-        if let ryeos_runtime::CognitionInAssembly::Complete(input) =
-            assembler.push(&event.payload)?
-            && input.kind.as_deref() == Some(ryeos_runtime::cognition::KIND_DEADLINE_WRAP_UP)
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+/// Whether a folded message is the run-deadline wrap-up notice.
+fn is_wrap_up_notice(folded: &FoldedMessage) -> bool {
+    folded.kind.as_deref() == Some(ryeos_runtime::cognition::KIND_DEADLINE_WRAP_UP)
 }
 
 /// Count the final turns, newest first, that ended at the output limit,
@@ -1238,6 +1239,9 @@ fn latest_frame(events: &[ReplayedEventRecord]) -> Result<Option<CognitionFrameP
 struct FoldedMessage {
     message: ProviderMessage,
     pinned: bool,
+    /// The kind of the harness input that produced this message, when it is an
+    /// input's own user message.
+    kind: Option<String>,
 }
 
 fn fold_messages(events: &[ReplayedEventRecord]) -> Result<Vec<FoldedMessage>> {
@@ -1246,6 +1250,7 @@ fn fold_messages(events: &[ReplayedEventRecord]) -> Result<Vec<FoldedMessage>> {
     let unpinned = |message: ProviderMessage| FoldedMessage {
         message,
         pinned: false,
+        kind: None,
     };
 
     for event in events {
@@ -1266,9 +1271,13 @@ fn fold_messages(events: &[ReplayedEventRecord]) -> Result<Vec<FoldedMessage>> {
                     messages.extend(
                         crate::launch_records::input_messages(&input)
                             .into_iter()
-                            .map(|message| FoldedMessage {
+                            .enumerate()
+                            .map(|(index, message)| FoldedMessage {
                                 message,
                                 pinned: input.pinned,
+                                // The input's own message comes first; its
+                                // acknowledgement follows and has no kind.
+                                kind: if index == 0 { input.kind.clone() } else { None },
                             }),
                     );
                 }
@@ -2637,30 +2646,73 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_recorded_wrap_up_input_is_found_on_replay_and_nothing_else_is() {
+    /// The events of an operator input then a wrap-up notice (turn markers
+    /// carry no message), folded.
+    fn wrap_up_events() -> Vec<ReplayedEventRecord> {
         let record = |payload: Value| ReplayedEventRecord {
             event_type: "cognition_in".to_string(),
             payload,
         };
-        let operator = vec![
+        let mut events = vec![
             record(json!({"turn": 1})),
             record(input("Deadline notice: about 5 seconds remain")),
         ];
-        assert!(!recover_wrap_up_delivered(&operator).unwrap());
-
-        let mut with_notice = operator.clone();
-        with_notice.extend(
+        events.extend(
             ryeos_runtime::encode_cognition_in_payloads(
                 &ryeos_runtime::CognitionInput::text("harness", "wrap up")
-                    .with_kind(ryeos_runtime::cognition::KIND_DEADLINE_WRAP_UP)
-                    .pinned(),
+                    .with_kind(ryeos_runtime::cognition::KIND_DEADLINE_WRAP_UP),
             )
             .unwrap()
             .into_iter()
             .map(record),
         );
-        assert!(recover_wrap_up_delivered(&with_notice).unwrap());
+        events
+    }
+
+    #[test]
+    fn the_fold_marks_only_the_wrap_up_notice_with_its_kind() {
+        let folded = fold_messages(&wrap_up_events()).unwrap();
+        let notices: Vec<bool> = folded.iter().map(is_wrap_up_notice).collect();
+        assert_eq!(notices, [false, true]);
+        // The notice is deliberately not pinned.
+        assert!(folded.iter().all(|f| !f.pinned));
+    }
+
+    #[tokio::test]
+    async fn a_successor_is_told_again_when_its_carried_start_dropped_the_notice() {
+        // T1 recorded the task, a turn, the notice and a later turn. A
+        // successor with a zero carry keeps pinned inputs only, so the notice
+        // is gone and it is not delivered; a successor carrying everything
+        // still holds it; a same-thread resume keeps its own events whole.
+        let mut events = vec![ReplayedEventRecord {
+            event_type: "cognition_in".to_string(),
+            payload: serde_json::to_value(
+                ryeos_runtime::CognitionInput::text("launch", "task").pinned(),
+            )
+            .unwrap(),
+        }];
+        events.push(ReplayedEventRecord {
+            event_type: "cognition_out".to_string(),
+            payload: out(1, "a1"),
+        });
+        events.extend(wrap_up_events().into_iter().skip(2));
+        events.push(ReplayedEventRecord {
+            event_type: "cognition_out".to_string(),
+            payload: out(2, "a2"),
+        });
+        let callback = make_callback(events);
+        let delivered = |carry, mode| {
+            let callback = &callback;
+            async move {
+                load_resume_state(callback, "T1", CarryPolicy::turns(carry), mode, None)
+                    .await
+                    .unwrap()
+                    .deadline_wrap_up_delivered
+            }
+        };
+        assert!(!delivered(0, ResumeMode::Continuation).await);
+        assert!(delivered(8, ResumeMode::Continuation).await);
+        assert!(delivered(0, ResumeMode::NativeSameThread).await);
     }
 
     #[test]
@@ -3328,7 +3380,11 @@ mod tests {
     }
 
     fn folded(message: ProviderMessage, pinned: bool) -> FoldedMessage {
-        FoldedMessage { message, pinned }
+        FoldedMessage {
+            message,
+            pinned,
+            kind: None,
+        }
     }
 
     #[test]
