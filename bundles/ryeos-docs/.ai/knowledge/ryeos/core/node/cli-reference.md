@@ -638,9 +638,12 @@ provider settings. `--launch-shape` is required: a JSON object stating the
 shape every occurrence under the binding is created with, for example
 `{"controller_transport": "https", "sandbox_network_policy": {"kind":
 "allow_list", "hosts": ["controller.example"]}, "network_inputs": {"resolver":
-{"source": "/etc/resolv.conf", "max_bytes": 65536}, "hosts": {"source":
-"/etc/hosts", "max_bytes": 65536}}}` (an https shape declares the resolver and
-hosts sources its launches capture; a relay shape declares none) or `{"controller_transport":
+{"source": "/etc/resolv.conf", "max_bytes": 65536, "required": true}, "hosts":
+{"source": "/etc/hosts", "max_bytes": 65536, "required": true}}}` (an https shape
+declares the resolver and hosts sources its launches capture, each with
+`required`: a required source that is missing refuses the launch, an optional
+one that is missing is recorded as absent and the resolver gets no bytes from
+it; a relay shape declares none) or `{"controller_transport":
 "relay", "sandbox_network_policy": {"kind": "deny_all"}}`. There is no default
 shape; a composition without the file is refused naming the input. The
 provider sandbox is created under that network policy, and a launch whose
