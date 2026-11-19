@@ -174,6 +174,23 @@ fn rolled_back_result(entries: &[SyncIncludeEntry]) -> Value {
     })
 }
 
+fn refused(code: &'static str, message: impl std::fmt::Display) -> anyhow::Error {
+    anyhow!("{message}").context(ApplyRecoveryRefusal::new(code))
+}
+
+fn surface_identity_mismatch(message: impl std::fmt::Display) -> anyhow::Error {
+    refused("surface_identity_mismatch", message)
+}
+
+/// The refusal code carried by a job-intrinsic recovery failure, if any.
+fn recovery_refusal_code(error: &anyhow::Error) -> Option<&'static str> {
+    // `downcast_ref` looks through every `.context()` layer, which `chain()`
+    // does not: a context value is not an element of the source chain.
+    error
+        .downcast_ref::<ApplyRecoveryRefusal>()
+        .map(|refusal| refusal.code)
+}
+
 fn recovery_result(outcome: &str, entries: &[SyncIncludeEntry]) -> Value {
     match outcome {
         "committed" => committed_result(entries),
@@ -941,6 +958,7 @@ pub(crate) fn snapshot_history_contains(cas: &CasStore, head: &str, wanted: &str
 type PinnedDirectory = lillux::PinnedDirectory;
 
 const APPLY_TRANSACTION_DIRECTORY: &str = "project-apply-transactions";
+const QUARANTINED_PHASE: &str = "quarantined";
 const APPLY_TRANSACTION_ENTRY_LIMIT: usize = 1_000_000;
 const APPLY_TRANSACTION_DEPTH_LIMIT: usize = 128;
 
@@ -1392,9 +1410,14 @@ fn read_apply_journal_from_transaction(
         .open_pinned_regular(OsStr::new("journal.json"), false)?
         .context("project apply transaction has no authenticated journal")?;
     let bytes = file.read_bounded(APPLY_JOURNAL_MAX_BYTES)?;
+    decode_apply_journal(&bytes, key)
+        .map_err(|error| error.context(ApplyRecoveryRefusal::new("journal_unreadable")))
+}
+
+fn decode_apply_journal(bytes: &[u8], key: &[u8; 32]) -> Result<ApplyJournal> {
     // Check the contract before the struct shape: a v1 journal lacks fields v2
     // requires, and the operator must see why, not a missing-field error.
-    let raw: Value = serde_json::from_slice(&bytes)?;
+    let raw: Value = serde_json::from_slice(bytes)?;
     if raw.get("kind").and_then(Value::as_str) != Some(APPLY_JOURNAL_KIND) {
         anyhow::bail!("unsupported project apply journal contract");
     }
@@ -1407,7 +1430,7 @@ fn read_apply_journal_from_transaction(
             "unsupported project apply journal schema {other:?}; this node reads only schema {APPLY_JOURNAL_SCHEMA}"
         ),
     }
-    let journal: ApplyJournal = serde_json::from_slice(&bytes)?;
+    let journal: ApplyJournal = serde_json::from_slice(bytes)?;
     if lillux::canonical_json(&serde_json::to_value(&journal)?)?.as_bytes() != bytes {
         anyhow::bail!("project apply journal is not canonical JSON");
     }
@@ -1904,17 +1927,19 @@ fn verify_journal_target_identities(
 ) -> Result<()> {
     validate_journal_surfaces(surfaces)?;
     if expected_targets.len() != surfaces.len() {
-        anyhow::bail!("project snapshot has the wrong managed-surface identity count");
+        return Err(surface_identity_mismatch(
+            "project snapshot has the wrong managed-surface identity count",
+        ));
     }
     for frozen in surfaces {
         let expected = expected_targets
             .get(&frozen.relative)
             .context("target surface identity was not derived from the project snapshot")?;
         if &frozen.target_content != expected {
-            anyhow::bail!(
+            return Err(surface_identity_mismatch(format!(
                 "authenticated target for managed surface '{}' differs from the exact project snapshot",
                 frozen.relative
-            );
+            )));
         }
     }
     Ok(())
@@ -1945,10 +1970,10 @@ fn verify_live_journal_surfaces(
     target: bool,
 ) -> Result<()> {
     if !live_journal_surfaces_match(project, surfaces, target)? {
-        anyhow::bail!(
+        return Err(surface_identity_mismatch(format!(
             "live managed surfaces do not match the authenticated {} content",
             if target { "target" } else { "prior" }
-        );
+        )));
     }
     Ok(())
 }
@@ -1959,17 +1984,19 @@ fn verify_live_target_identities(
     entries: &[SyncIncludeEntry],
 ) -> Result<()> {
     if expected_targets.len() != entries.len() {
-        anyhow::bail!("project snapshot has the wrong managed-surface identity count");
+        return Err(surface_identity_mismatch(
+            "project snapshot has the wrong managed-surface identity count",
+        ));
     }
     for surface in entries {
         let expected = expected_targets
             .get(surface.root.as_str())
             .context("target surface identity was not derived from the project snapshot")?;
         if &observe_surface_content(project, surface)? != expected {
-            anyhow::bail!(
+            return Err(surface_identity_mismatch(format!(
                 "live managed surface '{}' differs from the exact deployed project snapshot",
                 surface.root.as_str()
-            );
+            )));
         }
     }
     Ok(())
@@ -2094,7 +2121,8 @@ fn ensure_no_active_apply_job_for_project(state: &AppState, project_hash: &str) 
         };
         let next = (last.created_at.clone(), last.job_id.clone());
         for job in jobs {
-            let operation = validate_job_operation(&job)?;
+            let operation = validate_job_operation(&job)
+                .with_context(|| format!("active project apply job {} is invalid", job.job_id))?;
             if operation.project_hash == project_hash {
                 anyhow::bail!(
                     "project apply {} requires recovery before another apply may begin",
@@ -2123,9 +2151,12 @@ fn decide_apply_recovery(
     if visible == previous {
         return Ok(ApplyRecoveryDecision::Rollback);
     }
-    anyhow::bail!(
-        "project apply recovery found unrelated deployed ref {visible:?}; expected {previous:?} or {target}"
-    )
+    Err(refused(
+        "deployed_ref_unrelated",
+        format!(
+            "project apply recovery found unrelated deployed ref {visible:?}; expected {previous:?} or {target}"
+        ),
+    ))
 }
 
 async fn recover_apply_job(
@@ -2133,13 +2164,23 @@ async fn recover_apply_job(
     job: &SyncJobRecord,
     try_pending_acquisition: bool,
 ) -> Result<bool> {
-    let operation = validate_job_operation(job)?;
+    let operation = validate_job_operation(job)
+        .map_err(|error| error.context(ApplyRecoveryRefusal::new("invalid_operation")))?;
     let project_path = PathBuf::from(&operation.project_path);
-    let project = PinnedDirectory::open(&project_path)?
-        .context("project apply recovery cannot open its project root")?;
-    project.ensure_path_binding()?;
+    let project = PinnedDirectory::open(&project_path)?.ok_or_else(|| {
+        refused(
+            "project_unavailable",
+            "project apply recovery cannot open its project root",
+        )
+    })?;
+    project
+        .ensure_path_binding()
+        .map_err(|error| error.context(ApplyRecoveryRefusal::new("project_unavailable")))?;
     if project.identity()? != operation.project_identity {
-        anyhow::bail!("project apply recovery project root identity changed");
+        return Err(refused(
+            "project_unavailable",
+            "project apply recovery project root identity changed",
+        ));
     }
     let apply_lock = project_apply_lock(&operation.project_hash);
     let _apply_guard = apply_lock.lock_owned().await;
@@ -2149,7 +2190,8 @@ async fn recover_apply_job(
         .state_store
         .with_state_db(|db| db.get_sync_job(&operation.job_id))?
         .context("project apply recovery job disappeared while acquiring its locks")?;
-    let current_operation = validate_job_operation(&job)?;
+    let current_operation = validate_job_operation(&job)
+        .map_err(|error| error.context(ApplyRecoveryRefusal::new("invalid_operation")))?;
     if current_operation != operation {
         anyhow::bail!("project apply operation changed while acquiring recovery locks");
     }
@@ -2166,7 +2208,10 @@ async fn recover_apply_job(
             let key = authority.require_recovery()?.workspace_journal_auth_key()?;
             let journal = read_apply_journal_from_transaction(transaction, &key)?;
             if journal.operation != operation {
-                anyhow::bail!("project apply journal is bound to another operation");
+                return Err(refused(
+                    "journal_operation_mismatch",
+                    "project apply journal is bound to another operation",
+                ));
             }
             Some(journal)
         }
@@ -2293,12 +2338,18 @@ async fn recover_apply_job(
             &operation.target_snapshot_hash,
         )?;
         if settled_resolution.is_some_and(|settled| settled != decision) {
-            anyhow::bail!("settled project apply outcome conflicts with the deployed project ref");
+            return Err(refused(
+                "settled_outcome_conflict",
+                "settled project apply outcome conflicts with the deployed project ref",
+            ));
         }
         match decision {
             ApplyRecoveryDecision::Commit => {
                 if journal.is_none() && settled_resolution.is_none() {
-                    anyhow::bail!("committed project apply has no authenticated journal");
+                    return Err(refused(
+                        "journal_missing",
+                        "committed project apply has no authenticated journal",
+                    ));
                 }
                 verify_live_target_identities(&project, &expected_targets, &recovery_entries)?;
                 if journal.is_some() && settled_resolution.is_none() {
@@ -2349,7 +2400,10 @@ async fn recover_apply_job(
     if settled_resolution.is_some_and(|settled| {
         (settled == ApplyRecoveryDecision::Commit) != (outcome.0 == SyncJobState::Completed)
     }) {
-        anyhow::bail!("project apply recovery outcome conflicts with its settled job state");
+        return Err(refused(
+            "settled_outcome_conflict",
+            "project apply recovery outcome conflicts with its settled job state",
+        ));
     }
     // Preserve the authenticated transaction journal until job settlement is
     // durable. On settlement failure the moved owner is dropped back into the
@@ -2499,11 +2553,131 @@ impl Drop for ProjectScheduleSessionCustody {
     }
 }
 
+/// Take one unrecoverable apply job out of the active set. The job record is
+/// all this reads: the operation may be undecodable. The project's
+/// transaction directory and journal stay exactly as they are for
+/// inspection. The write is terminal, so the startup scan cannot see the job
+/// again; a failed write is a broken database and stops startup.
+fn quarantine_apply_job(
+    state: &AppState,
+    job: &SyncJobRecord,
+    code: &'static str,
+    error: &anyhow::Error,
+) -> Result<()> {
+    let detail = format!("{error:#}");
+    let update = SyncJobUpdate {
+        state: SyncJobState::Failed,
+        phase: QUARANTINED_PHASE.to_owned(),
+        roots: None,
+        heads: Some(Default::default()),
+        uploaded_hashes: job.uploaded_hashes.clone(),
+        fetched_hashes: job.fetched_hashes.clone(),
+        last_error: Some(format!("{code}: {detail}")),
+        result: Some(serde_json::json!({"outcome": "quarantined", "code": code})),
+    };
+    state
+        .state_store
+        .with_state_db(|db| db.update_sync_job(&job.job_id, &update))
+        .with_context(|| format!("quarantine project apply job {}", job.job_id))?;
+    // Recovery custody for this job is over: drop any retained session or
+    // acquisition marker so the retry loop cannot resurrect it.
+    let owners = project_deploy::recovery_owners(state)?;
+    while owners.take(&job.job_id).is_some() {}
+    tracing::warn!(
+        job_id = %job.job_id,
+        code,
+        detail = %detail,
+        "quarantined an unrecoverable project apply; its transaction directory is kept for inspection"
+    );
+    Ok(())
+}
+
+/// Mirror the quarantined apply jobs into the report `ryeos node doctor`
+/// reads offline, and return how many are listed. An entry stays listed while
+/// its transaction directory still exists, or while its operation is
+/// undecodable (so no directory can be named). The job rows stay the
+/// authority.
+pub fn refresh_apply_quarantine_report(state: &AppState) -> Result<usize> {
+    let mut entries = Vec::new();
+    let mut before: Option<(String, String)> = None;
+    loop {
+        let jobs = state.state_store.with_state_db(|db| {
+            db.list_sync_jobs_by_operation_type_before(
+                APPLY_OPERATION_TYPE,
+                before
+                    .as_ref()
+                    .map(|(created_at, job_id)| (created_at.as_str(), job_id.as_str())),
+                500,
+            )
+        })?;
+        let Some(last) = jobs.last() else {
+            break;
+        };
+        let next = (last.created_at.clone(), last.job_id.clone());
+        for job in jobs {
+            if job.state != SyncJobState::Failed || job.phase != QUARANTINED_PHASE {
+                continue;
+            }
+            let code = job
+                .result
+                .as_ref()
+                .and_then(|result| result.get("code"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_owned();
+            let decoded = validate_job_operation(&job).ok();
+            let (project_path, transaction_id, transaction_path) = match decoded {
+                Some(operation) => {
+                    let path = Path::new(&operation.project_path)
+                        .join(ryeos_engine::AI_DIR)
+                        .join("state")
+                        .join(APPLY_TRANSACTION_DIRECTORY)
+                        .join(&operation.transaction_id);
+                    if std::fs::symlink_metadata(&path).is_err() {
+                        continue;
+                    }
+                    (
+                        Some(operation.project_path.clone()),
+                        Some(operation.transaction_id.clone()),
+                        Some(path.to_string_lossy().into_owned()),
+                    )
+                }
+                None => (None, None, None),
+            };
+            entries.push(
+                ryeos_app::sync_apply_quarantine_report::SyncApplyQuarantineEntry {
+                    job_id: job.job_id.clone(),
+                    code,
+                    detail: job.last_error.clone().unwrap_or_default(),
+                    quarantined_at: job
+                        .finished_at
+                        .clone()
+                        .unwrap_or_else(|| job.updated_at.clone()),
+                    project_path,
+                    transaction_id,
+                    transaction_path,
+                },
+            );
+        }
+        before = Some(next);
+    }
+    entries.sort_by(|a, b| a.job_id.cmp(&b.job_id));
+    let listed = entries.len();
+    ryeos_app::sync_apply_quarantine_report::write_report(
+        &state.config.runtime_root().state(),
+        entries,
+    )?;
+    Ok(listed)
+}
+
 /// Recover every interrupted project materialization before scheduler or
 /// thread dispatch becomes observable. The deployed ref selects commit versus
 /// rollback; the pinned project identity, authenticated journal, and exact
 /// snapshot-derived surface identities independently prove that the selected
-/// resolution is safe. Any third ref value stops startup without guessing.
+/// resolution is safe. A job whose own record, journal, project or identities
+/// make it unrecoverable is quarantined (terminal, transaction kept) so one bad
+/// job cannot block startup; any other failure, and any third ref value that
+/// is not job-intrinsic, still stops startup without guessing.
 pub async fn recover_durable_project_snapshot_applies(state: &AppState) -> Result<usize> {
     let mut recovered = 0usize;
     loop {
@@ -2514,8 +2688,16 @@ pub async fn recover_durable_project_snapshot_applies(state: &AppState) -> Resul
             return Ok(recovered);
         }
         for job in jobs {
-            if recover_apply_job(state, &job, false).await? {
-                recovered += 1;
+            match recover_apply_job(state, &job, false).await {
+                Ok(true) => recovered += 1,
+                Ok(false) => {}
+                // Only a failure intrinsic to this one job quarantines it;
+                // anything else (database, CAS, locks, schedule sessions)
+                // still stops startup.
+                Err(error) => match recovery_refusal_code(&error) {
+                    Some(code) => quarantine_apply_job(state, &job, code, &error)?,
+                    None => return Err(error),
+                },
             }
         }
     }
@@ -4284,6 +4466,332 @@ schedules:
             })
             .unwrap();
         assert_eq!(by_operation.len(), 1);
+        drop(state);
+        store_owner.close().unwrap();
+    }
+    #[test]
+    fn job_intrinsic_failures_carry_a_typed_refusal_and_others_do_not() {
+        let target = "b".repeat(64);
+        let error = decide_apply_recovery(Some(&"c".repeat(64)), None, &target).unwrap_err();
+        assert_eq!(
+            recovery_refusal_code(&error),
+            Some("deployed_ref_unrelated")
+        );
+        assert_eq!(
+            recovery_refusal_code(&surface_identity_mismatch("x").context("outer")),
+            Some("surface_identity_mismatch"),
+            "the code is found through added context"
+        );
+        assert_eq!(
+            recovery_refusal_code(&anyhow!("database is locked")),
+            None,
+            "an infrastructure error is untyped"
+        );
+        let project = TempDir::new().unwrap();
+        let project_path = project.path().canonicalize().unwrap();
+        let directory = PinnedDirectory::open(&project_path).unwrap().unwrap();
+        let expected = HashMap::new();
+        let error = verify_live_target_identities(
+            &directory,
+            &expected,
+            &[SyncIncludeEntry::directory(".ai/views")],
+        )
+        .unwrap_err();
+        assert_eq!(
+            recovery_refusal_code(&error),
+            Some("surface_identity_mismatch")
+        );
+    }
+
+    fn store_empty_snapshot(state: &AppState) -> String {
+        let authority = state
+            .state_store
+            .with_state_db(|db| db.pinned_authority())
+            .unwrap();
+        let cas = authority.cas_store().unwrap();
+        let tree = ProjectTree {
+            files: std::collections::BTreeMap::new(),
+        };
+        let snapshot = ProjectSnapshot {
+            project_tree_hash: cas.store_object(&tree.to_value()).unwrap(),
+            effective_policy_hash: "0".repeat(64),
+            parent_hashes: Vec::new(),
+            message: None,
+            created_at: lillux::time::iso8601_now(),
+            source: "test".to_owned(),
+        };
+        cas.store_object(&snapshot.to_value()).unwrap()
+    }
+
+    fn insert_planned_job(state: &AppState, operation: &Value, job_id: &str, roots: Vec<String>) {
+        let job = ryeos_state::NewSyncJob {
+            job_id: job_id.to_owned(),
+            operation_type: APPLY_OPERATION_TYPE.to_owned(),
+            operation: operation.clone(),
+            peer: None,
+            roots,
+            heads: Vec::new(),
+            max_attempts: 3,
+        };
+        state
+            .state_store
+            .with_state_db(|db| {
+                db.create_sync_job_with_initial_progress(
+                    &job,
+                    SyncJobState::Planned,
+                    "planned",
+                    None,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    fn with_recovery_registry(state: &mut AppState) {
+        Arc::get_mut(&mut state.extensions)
+            .expect("test state extension owner is unique")
+            .insert(Arc::new(
+                project_deploy::ProjectScheduleRecoveryOwners::default(),
+            ));
+    }
+
+    fn job_row(state: &AppState, job_id: &str) -> SyncJobRecord {
+        state
+            .state_store
+            .with_state_db(|db| db.get_sync_job(job_id))
+            .unwrap()
+            .expect("job exists")
+    }
+
+    /// A crash-cut apply whose journal is rewritten as the retired schema 1:
+    /// the job is active and its transaction holds an unreadable journal.
+    fn insert_schema_1_journal_job(
+        state: &AppState,
+        project: &Path,
+        transaction_id: &str,
+    ) -> (ApplyOperation, PathBuf) {
+        let mut operation = test_operation(project, transaction_id);
+        operation.target_snapshot_hash = "d".repeat(64);
+        let directory = PinnedDirectory::open(project).unwrap().unwrap();
+        let workspace = StagingDirectory::create(&directory, transaction_id).unwrap();
+        let authority = state
+            .state_store
+            .with_state_db(|db| db.pinned_authority())
+            .unwrap();
+        let key = authority
+            .require_recovery()
+            .unwrap()
+            .workspace_journal_auth_key()
+            .unwrap();
+        write_apply_journal(
+            &workspace,
+            &key,
+            ApplyJournal {
+                kind: APPLY_JOURNAL_KIND.to_owned(),
+                schema: APPLY_JOURNAL_SCHEMA,
+                operation: operation.clone(),
+                surfaces: test_entries()
+                    .iter()
+                    .map(|surface| JournalSurface {
+                        relative: surface.root.clone(),
+                        shape: surface.shape.into(),
+                        prior_content: None,
+                        target_content: None,
+                    })
+                    .collect(),
+                schedule_before_images: Vec::new(),
+                auth_tag: String::new(),
+            },
+        )
+        .unwrap();
+        let transaction = workspace.transaction.path().to_path_buf();
+        let journal_path = transaction.join("journal.json");
+        let mut value: Value =
+            serde_json::from_slice(&std::fs::read(&journal_path).unwrap()).unwrap();
+        value["schema"] = Value::from(1);
+        for surface in value["surfaces"].as_array_mut().unwrap() {
+            surface.as_object_mut().unwrap().remove("shape");
+        }
+        std::fs::write(&journal_path, lillux::canonical_json(&value).unwrap()).unwrap();
+        insert_planned_job(
+            state,
+            &serde_json::to_value(&operation).unwrap(),
+            &operation.job_id,
+            vec![operation.target_snapshot_hash.clone()],
+        );
+        (operation, transaction)
+    }
+
+    #[tokio::test]
+    async fn a_schema_1_journal_job_is_quarantined_and_a_healthy_job_still_recovers() {
+        let (_state_root, store_owner, mut state) = crate::test_support::build_test_state();
+        with_recovery_registry(&mut state);
+        let bad_project = TempDir::new().unwrap();
+        let good_project = TempDir::new().unwrap();
+        let (bad, transaction) = insert_schema_1_journal_job(
+            &state,
+            &bad_project.path().canonicalize().unwrap(),
+            "00000000-0000-4000-8000-000000000001",
+        );
+        let journal_before = std::fs::read(transaction.join("journal.json")).unwrap();
+
+        // A healthy interrupted apply that never published a journal: it
+        // rolls back with nothing to restore.
+        let snapshot = store_empty_snapshot(&state);
+        let mut good = test_operation(
+            &good_project.path().canonicalize().unwrap(),
+            "00000000-0000-4000-8000-000000000002",
+        );
+        good.target_snapshot_hash = snapshot.clone();
+        insert_planned_job(
+            &state,
+            &serde_json::to_value(&good).unwrap(),
+            &good.job_id,
+            vec![snapshot],
+        );
+
+        let recovered = recover_durable_project_snapshot_applies(&state)
+            .await
+            .expect("one bad job must not block the pass");
+        assert_eq!(
+            recovered, 1,
+            "the healthy job was recovered in the same pass"
+        );
+
+        let bad_row = job_row(&state, &bad.job_id);
+        assert_eq!(bad_row.state, SyncJobState::Failed);
+        assert_eq!(bad_row.phase, "quarantined");
+        assert_eq!(
+            bad_row.result,
+            Some(serde_json::json!({"outcome": "quarantined", "code": "journal_unreadable"}))
+        );
+        assert!(
+            bad_row
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("journal_unreadable: ")
+                    && error.contains("no schema 1 reader")),
+            "{:?}",
+            bad_row.last_error
+        );
+        let good_row = job_row(&state, &good.job_id);
+        assert_eq!(good_row.state, SyncJobState::Failed);
+        assert_eq!(good_row.phase, "recovered_rolled_back");
+
+        // The quarantined job left the active set, so the pass terminated,
+        // and its transaction is exactly as the crash left it.
+        let active = state
+            .state_store
+            .with_state_db(|db| {
+                db.list_active_sync_jobs_by_operation_type(APPLY_OPERATION_TYPE, 64)
+            })
+            .unwrap();
+        assert!(active.is_empty(), "{active:?}");
+        assert_eq!(
+            std::fs::read(transaction.join("journal.json")).unwrap(),
+            journal_before
+        );
+        let registry = project_deploy::recovery_owners(&state).unwrap();
+        assert!(registry.job_ids().is_empty(), "no recovery owner is left");
+
+        // The advisory report lists it while the directory exists and drops
+        // it once the directory is gone.
+        assert_eq!(refresh_apply_quarantine_report(&state).unwrap(), 1);
+        let state_dir = state.config.runtime_root().state();
+        let report = ryeos_app::sync_apply_quarantine_report::read_report(&state_dir)
+            .unwrap()
+            .expect("report written");
+        assert_eq!(report.jobs.len(), 1);
+        assert_eq!(report.jobs[0].job_id, bad.job_id);
+        assert_eq!(report.jobs[0].code, "journal_unreadable");
+        assert_eq!(
+            report.jobs[0].transaction_path.as_deref(),
+            transaction.to_str()
+        );
+        assert_eq!(
+            report.jobs[0].project_path.as_deref(),
+            Some(bad.project_path.as_str())
+        );
+        std::fs::remove_dir_all(&transaction).unwrap();
+        assert_eq!(refresh_apply_quarantine_report(&state).unwrap(), 0);
+        assert!(
+            ryeos_app::sync_apply_quarantine_report::read_report(&state_dir)
+                .unwrap()
+                .is_none()
+        );
+        drop(state);
+        store_owner.close().unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_undecodable_operation_is_quarantined_and_named_without_a_path() {
+        let (_state_root, store_owner, mut state) = crate::test_support::build_test_state();
+        with_recovery_registry(&mut state);
+        let job_id = "project-snapshot-apply:00000000-0000-4000-8000-0000000000ff";
+        insert_planned_job(
+            &state,
+            &serde_json::json!({"operation_type": APPLY_OPERATION_TYPE, "bogus": true}),
+            job_id,
+            Vec::new(),
+        );
+        let error = ensure_no_active_apply_job_for_project(&state, &"e".repeat(64))
+            .expect_err("an active bad job refuses an apply-time scan");
+        assert!(format!("{error:#}").contains(job_id), "{error:#}");
+
+        assert_eq!(
+            recover_durable_project_snapshot_applies(&state)
+                .await
+                .unwrap(),
+            0
+        );
+        let row = job_row(&state, job_id);
+        assert_eq!(row.state, SyncJobState::Failed);
+        assert_eq!(row.phase, "quarantined");
+        assert_eq!(
+            row.result,
+            Some(serde_json::json!({"outcome": "quarantined", "code": "invalid_operation"}))
+        );
+        ensure_no_active_apply_job_for_project(&state, &"e".repeat(64))
+            .expect("the quarantined job no longer blocks an apply-time scan");
+        assert_eq!(refresh_apply_quarantine_report(&state).unwrap(), 1);
+        let report = ryeos_app::sync_apply_quarantine_report::read_report(
+            &state.config.runtime_root().state(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(report.jobs[0].transaction_path, None);
+        assert_eq!(report.jobs[0].project_path, None);
+        drop(state);
+        store_owner.close().unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_infrastructure_failure_is_not_quarantined_and_still_fails_the_pass() {
+        let (_state_root, store_owner, mut state) = crate::test_support::build_test_state();
+        with_recovery_registry(&mut state);
+        let project = TempDir::new().unwrap();
+        // The target snapshot is absent from the CAS: a storage failure, not
+        // a property of the job record.
+        let mut operation = test_operation(
+            &project.path().canonicalize().unwrap(),
+            "00000000-0000-4000-8000-000000000003",
+        );
+        operation.target_snapshot_hash = "f".repeat(64);
+        insert_planned_job(
+            &state,
+            &serde_json::to_value(&operation).unwrap(),
+            &operation.job_id,
+            vec![operation.target_snapshot_hash.clone()],
+        );
+        let error = recover_durable_project_snapshot_applies(&state)
+            .await
+            .expect_err("an untyped failure still stops startup");
+        assert_eq!(recovery_refusal_code(&error), None, "{error:#}");
+        assert_eq!(
+            job_row(&state, &operation.job_id).state,
+            SyncJobState::Planned,
+            "the job was not touched"
+        );
         drop(state);
         store_owner.close().unwrap();
     }

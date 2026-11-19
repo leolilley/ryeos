@@ -509,6 +509,160 @@ mod crash {
         Ok(())
     }
 
+    /// Every regular file under `root`, relative path to bytes, for a
+    /// byte-identity comparison of a kept transaction directory.
+    fn directory_bytes(
+        root: &Path,
+    ) -> Result<std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>> {
+        fn walk(
+            base: &Path,
+            dir: &Path,
+            out: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
+        ) -> Result<()> {
+            for entry in std::fs::read_dir(dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                let kind = entry.file_type()?;
+                let relative = path.strip_prefix(base)?.to_path_buf();
+                if kind.is_dir() {
+                    out.insert(relative, Vec::new());
+                    walk(base, &path, out)?;
+                } else {
+                    out.insert(relative, std::fs::read(&path)?);
+                }
+            }
+            Ok(())
+        }
+        let mut out = std::collections::BTreeMap::new();
+        walk(root, root, &mut out)?;
+        Ok(out)
+    }
+
+    /// `ryeos node doctor --json` check named `name`.
+    fn doctor_check(h: &DaemonHarness, name: &str) -> Result<Value> {
+        let output = std::process::Command::new(common::ryeos_binary())
+            .args(["node", "doctor", "--no-bundles", "--json", "--app-root"])
+            .arg(&h.state_path)
+            .env("RYEOS_APP_ROOT", &h.state_path)
+            .env("RYEOSD_BIN", common::ryeosd_binary())
+            .env("HOME", h.user_space.path())
+            .env("NO_COLOR", "1")
+            .output()?;
+        let doctor: Value = serde_json::from_slice(&output.stdout).with_context(|| {
+            format!(
+                "doctor stdout is not JSON; stderr:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+        })?;
+        doctor["checks"]
+            .as_array()
+            .context("doctor without checks")?
+            .iter()
+            .find(|check| check["name"] == name)
+            .cloned()
+            .with_context(|| format!("doctor without a {name} check"))
+    }
+
+    /// A crashed apply whose journal can no longer be read must not block
+    /// start: the daemon quarantines the job, keeps its transaction
+    /// directory byte-for-byte, reports it to `node doctor`, and a new apply
+    /// on the same project still succeeds without touching that directory.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unreadable_journal_is_quarantined_and_does_not_block_start() -> Result<()> {
+        let boundary = "journal_published";
+        let (mut h, _fixture) = DaemonHarness::start_fast_core_scheduling().await?;
+        let project = ProjectFixture::new()?;
+        let a = deploy_a(&h, &project).await?;
+        h.stop_gracefully().await?;
+        h.respawn_with(|command| {
+            command.env(
+                ryeos_app::env_contract::PROJECT_APPLY_TEST_CUT_ENV,
+                boundary,
+            );
+        })
+        .await?;
+        let b = project.push(&h, Generation::B, Some(&a)).await?;
+        let request = spawn_apply(
+            &h,
+            project_apply::apply_request(&project.live_path, &b, Some(&a)),
+        )?;
+        wait_for_cut(&mut h, boundary).await?;
+        h.kill_daemon().await?;
+        let _ = request.await?;
+
+        // Poison the crashed apply: rewrite its journal as the retired
+        // schema-1 shape no reader exists for.
+        let transactions = project
+            .live_root
+            .join(".ai/state/project-apply-transactions");
+        let mut dirs = std::fs::read_dir(&transactions)?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        assert_eq!(dirs.len(), 1, "exactly the crashed transaction: {dirs:?}");
+        let transaction = dirs.remove(0);
+        let journal_path = transaction.join("journal.json");
+        let mut journal: Value = serde_json::from_slice(&std::fs::read(&journal_path)?)?;
+        journal["schema"] = json!(1);
+        for surface in journal["surfaces"].as_array_mut().context("surfaces")? {
+            surface.as_object_mut().context("surface")?.remove("shape");
+        }
+        std::fs::write(&journal_path, serde_json::to_vec(&journal)?)?;
+        let kept = directory_bytes(&transaction)?;
+
+        // The daemon boots instead of refusing to start.
+        h.respawn_with(|_| {}).await?;
+        assert!(
+            h.stderr_so_far().contains("quarantined"),
+            "startup did not log the quarantine:\n{}",
+            h.stderr_tail(40)
+        );
+        assert_eq!(directory_bytes(&transaction)?, kept);
+
+        let state_dir = ryeos_engine::roots::RuntimeRoot::new(h.state_path.clone()).state();
+        let report = ryeos_app::sync_apply_quarantine_report::read_report(&state_dir)?
+            .context("startup wrote no sync apply quarantine report")?;
+        assert_eq!(report.jobs.len(), 1, "{report:?}");
+        let entry = &report.jobs[0];
+        assert_eq!(entry.code, "journal_unreadable");
+        assert_eq!(
+            entry.transaction_path.as_deref(),
+            transaction.to_str(),
+            "{entry:?}"
+        );
+
+        let (status, body) = h
+            .post_execute(
+                "service:sync/jobs/list",
+                ".",
+                json!({"state": "failed", "limit": 50}),
+            )
+            .await?;
+        anyhow::ensure!(status.is_success(), "sync/jobs/list refused: {body}");
+        let jobs = service_result(&body)["jobs"]
+            .as_array()
+            .with_context(|| format!("no jobs array: {body}"))?;
+        let job = jobs
+            .iter()
+            .find(|job| job["job_id"] == entry.job_id.as_str())
+            .with_context(|| format!("quarantined job missing from {body}"))?;
+        assert_eq!(job["phase"], "quarantined", "{job}");
+        assert_eq!(job["result"]["outcome"], "quarantined", "{job}");
+
+        let check = doctor_check(&h, "sync_apply_quarantine")?;
+        assert_eq!(check["status"], "warning", "{check}");
+        let detail = serde_json::to_string(&check["detail"])?;
+        assert!(detail.contains(transaction.to_str().unwrap()), "{detail}");
+        assert!(detail.contains("never restored"), "{detail}");
+
+        // Nothing blocks the project: a new apply succeeds and leaves the
+        // quarantined directory untouched.
+        let report = apply_ok(&h, &project, &b, Some(&a)).await?;
+        assert_eq!(report["schedules"]["updated"], 1, "{report}");
+        assert_generation(&h, &project, Generation::B, &b).await?;
+        assert_eq!(directory_bytes(&transaction)?, kept);
+        Ok(())
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn crash_after_journal_publication_restores_the_previous_generation() -> Result<()> {
         crash_at("journal_published", Recovered::Restored).await
