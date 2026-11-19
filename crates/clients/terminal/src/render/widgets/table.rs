@@ -700,7 +700,7 @@ mod tests {
     fn a_status_column_carries_the_mark_and_the_row_draws_none_before_it() {
         let roles = [ColumnRole::Id, ColumnRole::Text, ColumnRole::Status];
         let row = trow(RyeOsTone::Danger, &["T-ab", "ops", "failed"]);
-        let (s, col_w) = draw_roled(60, &roles, &[row.clone()]);
+        let (s, col_w) = draw_roled(60, &roles, std::slice::from_ref(&row));
         let body = row_text(&s, 60, 1);
         // Nothing before the first cell, then the mark and the word.
         assert_eq!(s.get(0, 1).rune, ' ');
