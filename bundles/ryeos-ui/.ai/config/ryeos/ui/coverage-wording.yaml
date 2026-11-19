@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-19T05:58:46Z:f644c16bc9095d35951f4883ccd040c6969d46ec6c1d042be42b20a9480d0830:h8Z1TzBmL1Xlb+nEJLZzqOsXBHXCBOeB3P6J/6mhZDfWRs0Y8yH/092ajDFFX0Ik5EoWeiNoL82Yswf8R69iBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-19T20:02:52Z:4dbab443e1057aa2e6c10813b8a10a99d8431aa40408a5cac3641182a84d79d1:W/YD7/Dp2b0SMLs4MVYlE6W6sCboE37/K2aYFg1vDgk2d8cCwuhHMi6nk3PaiB/p+FhBW91KLzNVOzJ4v7b9CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/ui
 version: "1.0.0"
 description: The sentence and tone a table's coverage line shows for each state and reason a service reports.
@@ -8,6 +8,9 @@ description: The sentence and tone a table's coverage line shows for each state 
 #   1. A state this config does not list reads as `fallback`.
 #   2. Otherwise a reason listed under `reasons` gives its own sentence.
 #   3. Otherwise the state's own sentence under `states` is used.
+# `reasons` also holds the sentences a view says in place of rows. A view names
+# one under `body.empty`, and `empty` when it names none. They are plain
+# sentences like the rest and need no service to report them.
 # Tone is one of none, good, warn, danger, accent. A sentence is plain, in
 # normal case, and says what the page shows or does not show.
 fallback:
@@ -79,8 +82,8 @@ reasons:
     label: Usage covers the chains you may see, not the whole node.
     tone: warn
   projection_locator_not_exhaustive:
-    label: This list may not include everything.
-    tone: warn
+    label: The page does not prove exhaustive membership.
+    tone: none
   authorized_subject_subset_not_totals:
     label: Counts cover what you may see, not the node's totals.
     tone: warn
@@ -90,3 +93,9 @@ reasons:
   kind_not_registered:
     label: This kind of item is not known to this node.
     tone: warn
+  empty:
+    label: Nothing observed yet.
+    tone: none
+  empty_project:
+    label: Nothing observed in this project yet.
+    tone: none

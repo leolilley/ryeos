@@ -70,6 +70,13 @@ fn press(rt: &mut Runtime<App>, prefix: &str) {
     rt.frame(FRAME);
 }
 
+/// Empty the find line the launcher scenes open with.
+fn clear_query(rt: &mut Runtime<App>) {
+    for _ in 0..8 {
+        bare_key(rt, Key::Backspace);
+    }
+}
+
 fn type_text(rt: &mut Runtime<App>, text: &str) {
     for ch in text.chars() {
         rt.key(KeyEvent {
@@ -91,7 +98,8 @@ fn an_opened_launcher_takes_typing_without_a_click() {
         .input
         .as_ref()
         .expect("the launcher's query");
-    assert_eq!(query.text, "new");
+    // The scene's own query is already in the find line.
+    assert_eq!(query.text, "treenew");
     assert_ne!(
         serde_json::to_value(&before.dialogs[0].view).unwrap(),
         serde_json::to_value(&after.dialogs[0].view).unwrap(),
@@ -335,6 +343,7 @@ fn the_launcher_sheet_has_a_find_line_group_labels_and_a_footer_but_no_title_bar
 #[test]
 fn enter_chooses_a_view_then_a_place_and_escape_closes_the_second_stage_first() {
     let mut rt = shell("launcher", (1280.0, 800.0));
+    clear_query(&mut rt);
     assert!(launcher_places(&model(&rt)).is_empty());
     // Down to the first view that can be chosen: commands and views that
     // need a selection do not stage anything.
@@ -401,7 +410,8 @@ fn the_launcher_stage_scene_draws_where_the_chosen_view_lands() {
 
 #[test]
 fn the_launcher_lists_no_selection_command_beside_its_views() {
-    let rt = shell("launcher", (1280.0, 800.0));
+    let mut rt = shell("launcher", (1280.0, 800.0));
+    clear_query(&mut rt);
     let RyeOsViewVm::Rows { rows, .. } = &model(&rt).dialogs[0].view else {
         panic!("the launcher is a rows view");
     };
@@ -1166,4 +1176,41 @@ fn a_narrow_overlay_wraps_its_cards_inside_the_sheet() {
             x + w
         );
     }
+}
+
+#[test]
+fn the_project_scenes_mount_the_project_surface_with_threads_in_view() {
+    for scene in ["project", "project-review", "project-launcher"] {
+        let rt = shell(scene, (1440.0, 900.0));
+        let vm = model(&rt);
+        let text = serde_json::to_string(&*vm).unwrap();
+        assert!(
+            text.contains("Project"),
+            "{scene}: the project Surface is active"
+        );
+        assert!(text.contains("T-7f3a"), "{scene}: thread rows are present");
+        assert!(
+            text.contains("T-0a55"),
+            "{scene}: the last of eight threads is present"
+        );
+        // The Review tab's history tile is narrow: it drops the id column
+        // (kind, item and status stay), so its rows are told by their item.
+        let row = if scene == "project-review" {
+            "worker:claude-code"
+        } else {
+            "T-7f3a"
+        };
+        let drawn = drawn_texts(&rt);
+        assert!(
+            drawn.iter().any(|(text, _)| text.contains(row)),
+            "{scene}: the thread rows are drawn"
+        );
+    }
+    let rt = shell("project-review", (1440.0, 900.0));
+    assert!(
+        drawn_texts(&rt)
+            .iter()
+            .any(|(text, _)| text.contains("Write a file outside the workspace")),
+        "the Review tab draws the pending ask"
+    );
 }

@@ -7574,6 +7574,32 @@ mod tests {
     }
 
     #[test]
+    fn a_passed_lifetime_deadline_only_refuses_the_next_contact() {
+        // Pins current behaviour. The deadline check is a refusal evaluated
+        // when a contact is admitted; it names which deadline passed and
+        // carries the `budget_exhausted` code. Nothing in it retires an idle
+        // worker, so an idle session past its deadline is still refused only
+        // on its next turn.
+        let lifetime = validate_hosted_contact_deadlines(Some(1_000), None, 1_000)
+            .unwrap_err()
+            .to_string();
+        assert!(lifetime.starts_with("budget_exhausted:"), "{lifetime}");
+        assert!(lifetime.contains("absolute lifetime"), "{lifetime}");
+        let aggregate = validate_hosted_contact_deadlines(None, Some(1_000), 1_000)
+            .unwrap_err()
+            .to_string();
+        assert!(aggregate.starts_with("budget_exhausted:"), "{aggregate}");
+        assert!(aggregate.contains("aggregate execution"), "{aggregate}");
+        // The session lifetime is checked first when both have passed.
+        let both = validate_hosted_contact_deadlines(Some(1_000), Some(1_000), 5_000)
+            .unwrap_err()
+            .to_string();
+        assert!(both.contains("absolute lifetime"), "{both}");
+        // Just before the deadline the contact is still admitted.
+        assert!(validate_hosted_contact_deadlines(Some(1_000), Some(1_000), 999).is_ok());
+    }
+
+    #[test]
     fn bounded_contact_deadline_is_creation_anchored_and_checked_for_overflow() {
         let config = bounded_admission_config();
         assert_eq!(

@@ -3415,7 +3415,7 @@ fn projected_row_signatures(
                 .enumerate()
                 .map(|(offset, raw)| {
                     let index = start + offset;
-                    let record = super::content::project_table_record(binding, raw, &columns);
+                    let record = super::content::project_table_record(binding, raw, &columns, 0);
                     let signature = serde_json::json!({
                         "cells": record.cells,
                         "cell_tones": record.cell_tones,
