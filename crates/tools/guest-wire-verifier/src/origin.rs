@@ -193,6 +193,25 @@ pub struct ObservedAttempt {
     pub terminal_observation_sha256: String,
 }
 
+/// A termination that never settled retains its phase with a null
+/// observation. That is a refusal naming the missing proof, not a decode
+/// error on the record shape.
+fn refuse_unobserved_termination(value: &serde_json::Value) -> Result<()> {
+    if value
+        .get("observation")
+        .is_none_or(serde_json::Value::is_null)
+    {
+        let phase = value
+            .get("phase")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        bail!(
+            "provider termination was never observed terminal (retained phase {phase:?}, observation null)"
+        );
+    }
+    Ok(())
+}
+
 fn check_terminal(
     value: &serde_json::Value,
     attempt: &RestoredVerifierAttemptIntent,
@@ -202,6 +221,7 @@ fn check_terminal(
         serde_json::to_vec(value)?.len() <= 4096,
         "provider terminal record exceeds bound"
     );
+    refuse_unobserved_termination(value)?;
     let retained: TerminalRecord = serde_json::from_value(value.clone())?;
     let TerminalPhase::Terminal = retained.phase;
     retained.observation.validate_for(&retained.intent)?;
@@ -497,6 +517,14 @@ mod tests {
 
     fn parse(value: &serde_json::Value) -> Result<VerifierConfig> {
         VerifierConfig::parse(&serde_json::to_vec(value)?)
+    }
+
+    #[test]
+    fn an_unobserved_termination_is_refused_by_name_not_as_a_decode_error() {
+        let record = serde_json::json!({"phase": "quarantined", "observation": null});
+        let error = format!("{:#}", refuse_unobserved_termination(&record).unwrap_err());
+        assert!(error.contains("never observed terminal"), "{error}");
+        assert!(error.contains("quarantined"), "{error}");
     }
 
     #[test]

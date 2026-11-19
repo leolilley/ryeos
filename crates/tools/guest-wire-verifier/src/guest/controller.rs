@@ -603,6 +603,7 @@ mod tests {
     fn an_unreadable_provider_network_file_is_refused_naming_its_source() {
         let mut sources = declared();
         sources.hosts.source = "/nonexistent-provider-network-file".into();
+        sources.hosts.required = true;
         let error = format!("{:#}", read_provider_network_inputs(&sources).unwrap_err());
         assert!(
             error.contains("/nonexistent-provider-network-file")
@@ -620,6 +621,7 @@ mod tests {
         sources.resolver.source = resolver.to_str().unwrap().into();
         sources.hosts.source = root.path().join("hosts").to_str().unwrap().into();
         // Required and missing: refused, naming the source.
+        sources.hosts.required = true;
         let error = format!("{:#}", read_provider_network_inputs(&sources).unwrap_err());
         assert!(error.contains("cannot be read"), "{error}");
         // Optional and missing: absent, with the digest of empty bytes.
