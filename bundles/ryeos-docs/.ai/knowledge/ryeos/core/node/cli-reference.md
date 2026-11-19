@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-17T01:35:34Z:82cd443223607c8d11a98dd2df0eaf9a3570c782a7b010fbef2cc8abf4b66e38:hxWgtWhaBCx5eyrabXrBBuYAaPAHUhGBuH1lLGb6iZgLilG95JceIAltgOFvSO1D8U3+00H3u9zCg8vg/s1AAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-19T04:23:34Z:e8051bbe9b3a4f188a37e6a9dd5ac8c99d3b1e9e8a0bf542d5f08485f01d13ef:tbzckAx+K4pc873aMMtoHsSL87sPY6rTMFtcLkeS9rEZStSoApwiLKwTuMfJ+mIGAUj8wSy8b++4k4cYlZEqCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -638,9 +638,12 @@ provider settings. `--launch-shape` is required: a JSON object stating the
 shape every occurrence under the binding is created with, for example
 `{"controller_transport": "https", "sandbox_network_policy": {"kind":
 "allow_list", "hosts": ["controller.example"]}, "network_inputs": {"resolver":
-{"source": "/etc/resolv.conf", "max_bytes": 65536}, "hosts": {"source":
-"/etc/hosts", "max_bytes": 65536}}}` (an https shape declares the resolver and
-hosts sources its launches capture; a relay shape declares none) or `{"controller_transport":
+{"source": "/etc/resolv.conf", "max_bytes": 65536, "required": true}, "hosts":
+{"source": "/etc/hosts", "max_bytes": 65536, "required": true}}}` (an https shape
+declares the resolver and hosts sources its launches capture, each with
+`required`: a required source that is missing refuses the launch, an optional
+one that is missing is recorded as absent and the resolver gets no bytes from
+it; a relay shape declares none) or `{"controller_transport":
 "relay", "sandbox_network_policy": {"kind": "deny_all"}}`. There is no default
 shape; a composition without the file is refused naming the input. The
 provider sandbox is created under that network policy, and a launch whose

@@ -136,18 +136,20 @@ fn bootstrap() -> ExternalSupervisorBootstrap {
     ExternalSupervisorBootstrap {
         schema: ryeos_state::external_execution::transport::EXTERNAL_SUPERVISOR_HTTP_BOOTSTRAP_SCHEMA,
         controller: ExternalControllerTransportContract {
-            schema: 2,
+            schema: 3,
             network_inputs:
                 ryeos_state::external_execution::transport::ExternalNetworkInputPolicy {
                     resolver:
                         ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
                             source: "/etc/resolv.conf".into(),
                             max_bytes: 64 * 1024,
+                            required: true,
                         },
                     hosts:
                         ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
                             source: "/etc/hosts".into(),
                             max_bytes: 64 * 1024,
+                            required: true,
                         },
                 },
             https_origin: "https://controller.invalid".into(),

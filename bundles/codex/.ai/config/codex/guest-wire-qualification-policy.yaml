@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-16T21:12:47Z:6762196d87b15494486ebcf3ddf45a5ab6fe277c26c0fb824e220c6731517514:Y2T5L4DvnJPS3SRjZvRoWbvr76Xx09G6WT/C4ipNhWv9Ja6XWzpUcLIvIXqbeG+4C2IKnE44JffDdT5onlR+Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-19T02:22:53Z:9b81fe6171c3b1cec6b1c5354b9da65889e54f8304de6afbb9e251fbe4e01da4:Zz/7C6PKEXcRx/jBeoh/HDgfR7uJWW+FSuo+7fQ5BC1LDMi1vDvIemK63j1dW0Cfum/b4NANeksDdN54S3S2BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
 version: 1.0.0
 description: Restored-guest qualification of the guest owner wire; the claim binds the subject's owner executable digest and manifest hash, proved under an ephemeral key in a restored guest. The measured owner, supervisor and launcher executables performed the exchange under an ephemeral controller key and test configuration; operation under the real controller key, connection and credentials is proved by a live session, not by this claim.
@@ -36,9 +36,11 @@ product_qualification_policy:
           resolver:
             source: /etc/resolv.conf
             max_bytes: 65536
+            required: true
           hosts:
             source: /etc/hosts
             max_bytes: 65536
+            required: false
       remote_probe_input:
         schema: ryeos.guest_wire_probe_input.v1
         guest_inputs_schema: 5

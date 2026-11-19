@@ -476,8 +476,8 @@ pub(crate) mod tests {
                 "tls_roots_der_base64": ["fixture"],
             }),
             network_inputs: serde_json::from_value(serde_json::json!({
-                "resolver": {"source": "/etc/resolv.conf", "max_bytes": 4096},
-                "hosts": {"source": "/etc/hosts", "max_bytes": 4096},
+                "resolver": {"source": "/etc/resolv.conf", "max_bytes": 4096, "required": true},
+                "hosts": {"source": "/etc/hosts", "max_bytes": 4096, "required": true},
             }))
             .unwrap(),
         }

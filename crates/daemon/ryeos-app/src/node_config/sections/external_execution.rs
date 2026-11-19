@@ -861,10 +861,12 @@ impl RetainedExternalExecutionBinding {
             resolver: ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
                 source: "/etc/resolv.conf".into(),
                 max_bytes: 64 * 1024,
+                required: true,
             },
             hosts: ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
                 source: "/etc/hosts".into(),
                 max_bytes: 64 * 1024,
+                required: true,
             },
         };
         let document = BindingDocument {
@@ -912,7 +914,7 @@ impl RetainedExternalExecutionBinding {
             provider_network_inputs: provider_network_inputs.clone(),
             controller_transport: ExternalControllerTransportSelection::HttpJson(
                 ExternalControllerTransportContract {
-                    schema: 2,
+                    schema: 3,
                     https_origin: "https://controller.example:7443".into(),
                     route_contract:
                         ryeos_state::external_execution::transport::EXTERNAL_CHANNEL_ROUTE_CONTRACT
