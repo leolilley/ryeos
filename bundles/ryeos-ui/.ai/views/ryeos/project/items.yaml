@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-19T22:29:40Z:4c3cfc55ce7777355969490767e9b8e47d110891e33341e218c08b5fb016e6f6:7N/UohbW8NXsWGvSV+Q1EOneJSZrBapCz+1XNQw1k2GITYI2vzNnFizBPTbfnYwQWOTpPBE4Yz93ubTcxIsPDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-19T05:58:47Z:10a985714cb2dc5e4bb842b3832cb01f82cee9221f315cc8c4fdb052e823818a:LFvTmk599jqLfIYcNYXDYH4VgXJkO6eWRGwMRtNDklDPiq+X7S84jeGuEUtArN17dGoF+JAfpjsf/9+Z0gzmCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: project-items
 title: Items
 version: "1.0.0"
@@ -18,8 +18,10 @@ projections:
   columns:
     - label: item
       field: canonical_ref
+      role: ref
     - label: kind
       field: item_kind
+      role: kind
     - label: space
       field: space
     - label: trust

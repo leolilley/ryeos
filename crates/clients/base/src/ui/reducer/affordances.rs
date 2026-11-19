@@ -1444,6 +1444,109 @@ mod tests {
         ));
     }
 
+    fn dock_key_core() -> (RyeOsCore, crate::ids::RyeOsViewInstanceKey) {
+        let answer = |id: &str, label: &str, decision: &str| {
+            serde_json::json!({
+                "id": id, "label": label,
+                "visible_when": {"all": [
+                    {"field": "type", "equals": "ask"},
+                    {"field": "state", "equals": "pending"}
+                ]},
+                "invoke": {
+                    "plane": "ui", "facet": "selection", "value": {"decision": decision}
+                }
+            })
+        };
+        let mut core = authored_affordance_core(&[(
+            "view:test/timeline",
+            serde_json::json!({
+                "widget": "timeline",
+                "sources": { "default": {
+                    "ref": "service:test/timeline", "collection": "items"
+                } },
+                "selection": { "activate": "older" },
+                "affordances": [
+                    {"id": "older", "invoke": {
+                        "plane": "ui", "facet": "timeline.window", "value": {"limit": 400}
+                    }},
+                    answer("accept", "Approve", "accepted"),
+                    answer("decline", "Decline", "declined")
+                ]
+            }),
+        )]);
+        let timeline = mount_affordance_view(&mut core, "view:test/timeline");
+        let ask = |id: &str| {
+            serde_json::json!({
+                "item": "entry", "id": id, "type": "ask", "state": "pending",
+                "tone": null, "thread": "T-1", "parent": null, "exchange": null,
+                "counts_as": null,
+                "slots": {
+                    "headline": "approval requested", "approval_id": id,
+                    "request_digest": "dg", "accept_allowed": "true"
+                },
+                "seq": [1, 1], "ts": ["t", "t"]
+            })
+        };
+        let source_key =
+            crate::ui::source_key::RyeOsSourceInstanceKey::named(timeline.clone(), "default")
+                .encode();
+        core.data.sources.insert(
+            source_key,
+            serde_json::json!({"chain_root_id": "R-1", "items": [ask("ap-1"), ask("ap-2")]}),
+        );
+        (core, timeline)
+    }
+
+    fn press_dock_key(core: &mut RyeOsCore, ch: char) -> Vec<RyeOsEffect> {
+        let event = crate::ui::RyeOsKeyEvent {
+            key: crate::ui::RyeOsKey::Char(ch),
+            modifiers: crate::ui::RyeOsKeyModifiers::default(),
+        };
+        let command = crate::ui::ryeos_key_command(event, core.key_context());
+        core.apply_key_command(command)
+    }
+
+    #[test]
+    fn dock_keys_answer_the_first_pending_ask_only() {
+        let (mut core, timeline) = dock_key_core();
+        let Some(crate::ui::view_model::RyeOsViewVm::Timeline { dock, .. }) =
+            crate::ui::view_model::view_vm_for_instance(&core, &timeline)
+        else {
+            panic!("expected a timeline");
+        };
+        assert_eq!(dock.len(), 2);
+        let keys = |ask: &crate::ui::timeline::RyeOsTimelineDockVm| {
+            ask.actions
+                .iter()
+                .map(|action| action.key.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(keys(&dock[0]), [Some("A".to_owned()), Some("D".to_owned())]);
+        assert_eq!(keys(&dock[1]), [None, None]);
+        assert!(core.key_context().focused_dock_answer);
+
+        press_dock_key(&mut core, 'd');
+        assert_eq!(active_selection(&core)["decision"], "declined");
+        press_dock_key(&mut core, 'a');
+        assert_eq!(active_selection(&core)["decision"], "accepted");
+        // Any other key names no button.
+        press_dock_key(&mut core, 'q');
+        assert_eq!(active_selection(&core)["decision"], "accepted");
+    }
+
+    #[test]
+    fn dock_keys_do_nothing_without_a_pending_ask() {
+        let (mut core, timeline) = dock_key_core();
+        let source_key =
+            crate::ui::source_key::RyeOsSourceInstanceKey::named(timeline, "default").encode();
+        core.data.sources.insert(
+            source_key,
+            serde_json::json!({"chain_root_id": "R-1", "items": []}),
+        );
+        assert!(!core.key_context().focused_dock_answer);
+        assert!(press_dock_key(&mut core, 'a').is_empty());
+    }
+
     #[test]
     fn delayed_affordance_from_inactive_view_set_is_rejected() {
         let mut core = authored_affordance_core(&[(

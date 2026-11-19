@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-19T22:29:40Z:91c1782536778b0f7d87a6f8d6df6a1564f778c91b9920edec6dacc750e2b1d0:AM3GDR/5iKnE6HOLiJbJoIJCMZG1S+BKpAG8Gm6uaMuzTkS8EuvtaYbSmqybjJuqnuCxwU6PYebGB4aUpmNYBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-19T10:10:12Z:4c0e27c4739ef2d3037ad4cf4558e6dfbe8d861525af4caf06c5da31194e17b5:fwrX5RSuXpcSgpW3MV54yptW6fuBxX4ba0IdhqExA37VEfvlCvW4vgNg/5+wT3dj8gi12sYvoD5F2Sq8fgREAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: node-threads-history
 title: Observed Operator Threads
 version: "1.0.0"
@@ -8,6 +8,10 @@ description: >-
   active/status/kind/source filter instead of a separate active-only view.
 
 widget: table
+# The tile's right note: how the page is bounded and ordered, said plainly.
+body:
+  supplement:
+    frame_detail: "200 at most · sorted by watch"
 sources:
   default:
     ref: service:ui/ryeos-ui/threads/list
@@ -20,22 +24,28 @@ projections:
   columns:
     - label: thread
       field: thread_id
+      role: id
     - label: kind
       field: kind
+      role: kind
       present: words
     # The table carries the readable leaf; the full canonical ref remains in
     # expanded detail.
     - label: item
       field: item_ref
+      role: ref
       present: leaf
     - label: project
       field: project.name
+      role: text
       fallback: node
     - label: status
       field: status
+      role: status
       present: words
     - label: created
       field: created_at
+      role: time
       present: time_date
   expand:
     fields: [thread_id, chain_root_id, project.name, project.path, item_ref, requested_by, created_at]

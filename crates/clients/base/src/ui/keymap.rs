@@ -57,6 +57,11 @@ pub fn shortcut_entries() -> Vec<super::view_model::RyeOsShortcutEntryVm> {
         entry("Feed", "v", "Inspect the raw events behind the entry"),
         entry("Feed", "f", "Fold or unfold the cluster under the point"),
         entry("Feed", "r", "Retry a failed fetch in the focused view"),
+        entry(
+            "Feed",
+            "a / d",
+            "Answer the first pending ask with the key shown on its button",
+        ),
         entry("Views", "Alt+←", "Return from a drill-in view"),
         entry(
             "Input",
@@ -128,6 +133,12 @@ pub struct RyeOsKeyContext {
     /// The attention overlay is open and takes the keys.
     pub overlay_open: bool,
     pub dialog_open: bool,
+    /// The launcher is showing where a chosen view can land, and takes the
+    /// place keys.
+    pub launcher_places_open: bool,
+    /// A rename was requested and no client has taken it: the core edits the
+    /// name, so these keys are its.
+    pub rename_open: bool,
     pub input_visible: bool,
     /// The focused view instance owns an input buffer.
     pub input_focused: bool,
@@ -168,6 +179,9 @@ pub struct RyeOsKeyContext {
     pub focused_timeline_foldable: bool,
     /// The focused view's source fetch failed, so it can be retried.
     pub focused_source_failed: bool,
+    /// The focused timeline's first pending ask has an answer a key cap
+    /// names.
+    pub focused_dock_answer: bool,
     /// Capabilities of the focused semantic field, if the focused instance is
     /// one. The keymap consumes capabilities rather than widget names or
     /// project roles, so every renderer gets the same actions.
@@ -247,6 +261,7 @@ pub fn key_hints(retained_lens_frames: bool) -> Vec<super::view_model::RyeOsKeyH
         ("alt+t/b", "bars"),
         ("ctrl+←/→", "tab"),
         ("ctrl+↑/↓", "move"),
+        ("alt+r", "rename"),
     ];
     back.iter()
         .chain(always)
@@ -303,8 +318,33 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
             _ => RyeOsKeyCommand::Ignore,
         };
     }
+    if context.rename_open {
+        return match event.key {
+            RyeOsKey::Escape if event.modifiers.none() => {
+                ui(RyeOsUiEvent::ResolveRename { title: None })
+            }
+            RyeOsKey::Enter if event.modifiers.none() => ui(RyeOsUiEvent::CommitRename),
+            RyeOsKey::Backspace if event.modifiers.none() => ui(RyeOsUiEvent::RenameBackspace),
+            RyeOsKey::Char('c') if event.modifiers.ctrl_only() => RyeOsKeyCommand::Quit,
+            RyeOsKey::Char(ch) if event.modifiers.none_or_shift() => {
+                ui(RyeOsUiEvent::RenameInsert { ch })
+            }
+            _ => RyeOsKeyCommand::Ignore,
+        };
+    }
     if context.dialog_open && event.key == RyeOsKey::Escape && event.modifiers.none() {
         return RyeOsKeyCommand::CloseFocusedDialog;
+    }
+    // With the launcher's places showing, their keys choose one instead of
+    // typing into the find line.
+    if context.launcher_places_open
+        && event.modifiers.none_or_shift()
+        && let RyeOsKey::Char(ch) = event.key
+        && matches!(ch.to_ascii_lowercase(), 't' | 's')
+    {
+        return ui(RyeOsUiEvent::ChooseLauncherPlace {
+            key: ch.to_ascii_lowercase(),
+        });
     }
     // Shell navigation remains available while a focused field edits its
     // query; that field owns ordinary characters, not the launcher chord.
@@ -342,6 +382,12 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
 
     match event.key {
         RyeOsKey::Char('n') if event.modifiers.alt_only() => intent(RyeOsUiIntent::NewViewSet),
+        // Alt+R renames the view set in front; with Shift, the Surface.
+        RyeOsKey::Char(c) if event.modifiers.alt_only() && c.eq_ignore_ascii_case(&'r') => {
+            ui(RyeOsUiEvent::RenameActive {
+                surface: event.modifiers.shift || c.is_uppercase(),
+            })
+        }
         // Ctrl+K is the reliable view-overlay binding: a control char that
         // terminals and tmux pass straight through. Alt+K is kept for
         // environments that deliver it, but Alt/ESC combos are eaten by
@@ -410,6 +456,15 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
                 && event.modifiers.none() =>
         {
             intent(RyeOsUiIntent::Refresh)
+        }
+        // The key caps on a docked ask's buttons answer it; never while typing.
+        RyeOsKey::Char(c)
+            if context.focused_dock_answer
+                && !context.input_focused
+                && event.modifiers.none_or_shift()
+                && c.is_alphanumeric() =>
+        {
+            ui(RyeOsUiEvent::AnswerDockAsk { ch: c })
         }
         RyeOsKey::ArrowUp if event.modifiers.ctrl_only() => {
             move_focused_tile(RyeOsStackMoveDirection::Up)
@@ -722,6 +777,10 @@ impl super::model::RyeOsCore {
                 let Some(instance_key) = self.focused_view_instance_key() else {
                     return Vec::new();
                 };
+                // The second stage of the launcher closes before the sheet.
+                if self.leave_launcher_stage(&instance_key) {
+                    return Vec::new();
+                }
                 self.close_dialog(&instance_key)
             }
             RyeOsKeyCommand::Ui { event } => self.dispatch(RyeOsEvent::Ui { event }),
@@ -1220,6 +1279,48 @@ mod tests {
     }
 
     #[test]
+    fn dock_keys_answer_only_when_a_pending_ask_is_docked_and_nothing_is_typed() {
+        let docked = RyeOsKeyContext {
+            focused_dock_answer: true,
+            ..Default::default()
+        };
+        for ch in ['a', 'd', 'A', 'D'] {
+            let event = RyeOsKeyEvent {
+                key: RyeOsKey::Char(ch),
+                modifiers: RyeOsKeyModifiers::default(),
+            };
+            assert_eq!(
+                ryeos_key_command(event, docked),
+                ui(RyeOsUiEvent::AnswerDockAsk { ch })
+            );
+            assert_eq!(
+                ryeos_key_command(event, RyeOsKeyContext::default()),
+                RyeOsKeyCommand::Ignore
+            );
+            let typing = RyeOsKeyContext {
+                input_focused: true,
+                ..docked
+            };
+            assert_eq!(
+                ryeos_key_command(event, typing),
+                ui(RyeOsUiEvent::InsertInputChar { ch })
+            );
+        }
+        // Ctrl+D keeps paging the rows.
+        let page = RyeOsKeyEvent {
+            key: RyeOsKey::Char('d'),
+            modifiers: RyeOsKeyModifiers {
+                ctrl: true,
+                ..Default::default()
+            },
+        };
+        assert_eq!(
+            ryeos_key_command(page, docked),
+            RyeOsKeyCommand::MoveFocusedRowPage { direction: 1 }
+        );
+    }
+
+    #[test]
     fn every_overlay_hint_maps_to_a_command_while_the_overlay_is_open() {
         let open = RyeOsKeyContext {
             overlay_open: true,
@@ -1295,7 +1396,14 @@ mod tests {
         };
         assert_eq!(
             keys(false),
-            ["ctrl+k", "alt+o", "alt+t/b", "ctrl+←/→", "ctrl+↑/↓"]
+            [
+                "ctrl+k",
+                "alt+o",
+                "alt+t/b",
+                "ctrl+←/→",
+                "ctrl+↑/↓",
+                "alt+r"
+            ]
         );
         assert_eq!(&keys(true)[..2], ["⌫", "alt+←"]);
     }
@@ -1566,5 +1674,58 @@ mod tests {
             ryeos_key_command(key(RyeOsKey::ArrowDown), context(true, false)),
             RyeOsKeyCommand::CloseFocusedDialog
         ));
+    }
+
+    #[test]
+    fn place_keys_choose_only_while_the_launcher_shows_its_places() {
+        let places = RyeOsKeyContext {
+            dialog_open: true,
+            input_focused: true,
+            input_is_live_filter: true,
+            launcher_places_open: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            ryeos_key_command(key(RyeOsKey::Char('t')), places),
+            RyeOsKeyCommand::Ui {
+                event: RyeOsUiEvent::ChooseLauncherPlace { key: 't' }
+            }
+        );
+        assert_eq!(
+            ryeos_key_command(key(RyeOsKey::Char('S')), places),
+            RyeOsKeyCommand::Ui {
+                event: RyeOsUiEvent::ChooseLauncherPlace { key: 's' }
+            }
+        );
+        let typing = RyeOsKeyContext {
+            launcher_places_open: false,
+            ..places
+        };
+        assert!(!matches!(
+            ryeos_key_command(key(RyeOsKey::Char('t')), typing),
+            RyeOsKeyCommand::Ui {
+                event: RyeOsUiEvent::ChooseLauncherPlace { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn alt_r_renames_the_view_set_and_alt_shift_r_the_surface() {
+        let alt = |ch: char, shift: bool| RyeOsKeyEvent {
+            key: RyeOsKey::Char(ch),
+            modifiers: RyeOsKeyModifiers {
+                alt: true,
+                shift,
+                ..Default::default()
+            },
+        };
+        for (event, surface) in [(alt('r', false), false), (alt('R', true), true)] {
+            assert_eq!(
+                ryeos_key_command(event, RyeOsKeyContext::default()),
+                RyeOsKeyCommand::Ui {
+                    event: RyeOsUiEvent::RenameActive { surface }
+                }
+            );
+        }
     }
 }

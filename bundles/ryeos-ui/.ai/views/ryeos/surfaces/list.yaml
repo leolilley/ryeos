@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-19T22:29:41Z:9027c17945c3b70d4616a234acaa89430ee73b4cdab6b61f5899c303ee21d89e:PrLPWwoU4J0cceV0EevRd0z4ANbzQ9LXoIU4UO024372XHNHULJCHN7xtK0ZXJGckBu31pEEKNad8TLZEQgzCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-19T05:58:47Z:25dfeaa0ccdd64625f5aa7a9ee5c97823ef46a1761cca598d955fb170aa40488:jkkYpK/mZKqb4cwRiwV1CN66UeMvZZgICkEfCUtcNrXcOo8T/ND0/N4he/t9j1v7Dpqit3VlLnkaiDZwKj0WAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: surfaces-list
 title: Surfaces
 version: "1.0.0"
@@ -22,6 +22,7 @@ projections:
       field: label
     - label: Reference
       field: canonical_ref
+      role: ref
     - label: Space
       field: space
     - label: Trust

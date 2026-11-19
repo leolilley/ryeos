@@ -44,6 +44,16 @@ pub struct RyeOsViewModel {
     /// The attention overlay: what needs the user and what is running.
     #[serde(default)]
     pub overlay: RyeOsOverlayVm,
+    /// A rename a command asked for and no client has taken yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rename: Option<RyeOsRenameVm>,
+}
+
+/// A requested rename: what it names and the name it starts from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RyeOsRenameVm {
+    pub target: super::event::RyeOsRenameTarget,
+    pub title: String,
 }
 
 /// The attention overlay lists: rows that need the user and rows that are
@@ -199,8 +209,6 @@ pub struct RyeOsPresentationChromeVm {
 pub struct RyeOsTopBarVm {
     pub visible: bool,
     pub tabs: Vec<RyeOsViewSetTabVm>,
-    pub focused_title: String,
-    pub layout_symbol: String,
     /// Whether the add-tab affordance is offered; the active Surface's
     /// `style.add_tab`, true unless it declares false.
     pub add_tab: bool,
@@ -352,6 +360,11 @@ pub struct RyeOsInputVm {
     /// replacing the widget, and Enter activates the focused row.
     #[serde(default)]
     pub live_filter: bool,
+    /// The conversation's usage totals ("184K in · 21K out · $1.62 · 7
+    /// turns"), drawn as quiet text in the strip. Present only on an input
+    /// whose view is a timeline over a response that carries a summary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -478,13 +491,29 @@ fn view_supplement(
     )
 }
 
+/// A table's coverage line: the codes the service reported and the sentence
+/// the signed wording gives them. Clients draw `label` in `tone` and never
+/// draw the codes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RyeOsTableCoverageVm {
     pub state: String,
     pub reason: String,
+    /// The sentence for this `(state, reason)`, from the signed wording. With
+    /// no wording loaded it is the fixed "not known" sentence below.
+    pub label: String,
+    pub tone: RyeOsTone,
 }
 
-fn table_source_coverage(binding: &ViewBinding, response: &Value) -> Option<RyeOsTableCoverageVm> {
+/// Shown when no signed wording has been read, so a coverage line is never
+/// blank and never a raw code. The signed wording's own fallback replaces it
+/// whenever the wording is loaded.
+pub const COVERAGE_UNKNOWN_LABEL: &str = "This page's coverage is not known.";
+
+fn table_source_coverage(
+    binding: &ViewBinding,
+    response: &Value,
+    wording: Option<&super::dto::RyeOsCoverageWordingDto>,
+) -> Option<RyeOsTableCoverageVm> {
     let path = binding.primary_source()?.1.coverage.as_deref()?;
     let report = super::content::field_path(response, path);
     let state = report
@@ -508,9 +537,18 @@ fn table_source_coverage(binding: &ViewBinding, response: &Value) -> Option<RyeO
                     .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
         })
         .unwrap_or("coverage_not_reported");
+    let (label, tone) = match wording {
+        Some(wording) => {
+            let entry = wording.resolve(state, reason);
+            (entry.label.clone(), tone_from_name(Some(&entry.tone)))
+        }
+        None => (COVERAGE_UNKNOWN_LABEL.to_owned(), RyeOsTone::Neutral),
+    };
     Some(RyeOsTableCoverageVm {
         state: state.into(),
         reason: reason.into(),
+        label,
+        tone,
     })
 }
 
@@ -545,7 +583,9 @@ fn source_status(core: &RyeOsCore, key: &str) -> Option<RyeOsSourceStatusVm> {
     if let Some(error) = core.data.source_errors.get(key) {
         return Some(RyeOsSourceStatusVm {
             state: "failed".into(),
-            message: format!("{}: {}", error.code, error.message),
+            // The service's own sentence; its code is for logs, not for the
+            // person reading the tile.
+            message: error.message.clone(),
             stale: cached,
         });
     }
@@ -626,6 +666,9 @@ pub enum RyeOsViewVm {
         /// Pending asks docked below the lane, directly above the composer.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         dock: Vec<RyeOsTimelineDockVm>,
+        /// The thread the timeline follows, for the tile's right note.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
         /// Stable semantic identity per visible entry. Source-backed entries
         /// use their source event key; presentation-only entries use a digest
         /// of their semantic content.
@@ -698,6 +741,10 @@ pub enum RyeOsViewVm {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_status: Option<RyeOsSourceStatusVm>,
         columns: Vec<String>,
+        /// What each column holds, parallel to `columns`; clients choose font,
+        /// dimming, alignment and width from it.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        column_roles: Vec<super::content::ColumnRole>,
         /// Total selectable rows in the source collection. `rows` may be a
         /// render window around the cursor for large lists.
         #[serde(default)]
@@ -821,7 +868,19 @@ pub struct RyeOsSectionVm {
     pub rows: Vec<RyeOsRowVm>,
 }
 
+/// What only a launcher record carries: the library group it is listed under,
+/// and why it cannot be chosen here when it cannot.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RyeOsLaunchRowVm {
+    pub group: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// A choice of where the staged view lands, not a view of its own.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub place: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct RyeOsRowVm {
     pub id: String,
     /// Exact cursor coordinate in the current complete projection. Render
@@ -843,6 +902,9 @@ pub struct RyeOsRowVm {
     pub expanded: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub detail: Vec<RyeOsRowDetailVm>,
+    /// Set on a launcher record only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<RyeOsLaunchRowVm>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changed_at_ms: Option<u64>,
     /// The change's tone when it crossed a tone boundary (or the row just
@@ -900,6 +962,7 @@ pub fn build_view_model(core: &RyeOsCore) -> RyeOsViewModel {
         transport: transport_vm(core),
         effect_failures: effect_failures_vm(core),
         overlay: overlay_vm(core),
+        rename: core.rename_request.clone(),
     }
 }
 
@@ -1052,17 +1115,8 @@ fn top_bar_vm(core: &RyeOsCore) -> RyeOsTopBarVm {
                 }),
             })
             .collect(),
-        focused_title: focused_tile_title(core),
-        layout_symbol: layout_symbol(core),
         add_tab: active_surface_style(core).add_tab,
     }
-}
-
-fn focused_tile_title(core: &RyeOsCore) -> String {
-    core.active_view_set()
-        .and_then(|set| set.tiles.get(&set.focused_tile))
-        .map(|tile| tile_title(core, tile))
-        .unwrap_or_default()
 }
 
 /// Human labels are authored content, not item identifiers. Use the same
@@ -1085,16 +1139,6 @@ fn view_title<'a>(
 
 fn tile_title(core: &RyeOsCore, tile: &crate::view_set::TileState) -> String {
     view_title(core, &tile.instance_key, &tile.view.view_ref).to_owned()
-}
-
-fn layout_symbol(core: &RyeOsCore) -> String {
-    let Some(view_set) = core.active_view_set() else {
-        return String::new();
-    };
-    let total = view_set.tile_ids().len();
-    let master = view_set.tiling.master.count.min(total);
-    let slave = total.saturating_sub(master);
-    format!("M{master}│S{slave}")
 }
 
 fn presentation_metrics_vm(
@@ -1554,6 +1598,7 @@ fn bound_view_vm_keyed(
                             } else {
                                 Vec::new()
                             },
+                            launch: None,
                             changed_at_ms: None,
                             changed_tone: None,
                         });
@@ -1624,6 +1669,7 @@ fn bound_view_vm_keyed(
             entries: Vec::new(),
             lane: None,
             dock: Vec::new(),
+            thread_id: None,
             entry_ids: Vec::new(),
             entry_roles: Vec::new(),
             entry_cursors: Vec::new(),
@@ -1716,6 +1762,7 @@ fn bound_view_vm_keyed(
                         expandable: !expand_fields.is_empty(),
                         expanded,
                         detail,
+                        launch: None,
                         changed_at_ms: changed_rows
                             .and_then(|rows| rows.get(&key))
                             .map(|flash| flash.at_ms),
@@ -1810,10 +1857,19 @@ fn bound_view_vm_keyed(
                 folded.collapsible.contains(&section).then_some(section)
             });
             let expand_fields = super::content::expand_fields(binding);
+            // Messages and prose never fold: they have no detail to open.
             let entry_expandable: Vec<bool> = folded
                 .sources
                 .iter()
-                .map(|source| source.is_some() && !expand_fields.is_empty())
+                .map(|source| {
+                    source.as_ref().is_some_and(|source| {
+                        !expand_fields.is_empty()
+                            && !matches!(
+                                super::timeline::item_role(&source.raw).as_str(),
+                                "message" | "prose"
+                            )
+                    })
+                })
                 .collect();
             let entry_expanded: Vec<bool> = folded
                 .sources
@@ -1878,6 +1934,11 @@ fn bound_view_vm_keyed(
                     instance_key,
                     view_ref,
                 ),
+                thread_id: response
+                    .get("chain_root_id")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_string),
                 entry_ids,
                 entry_roles,
                 entry_cursors,
@@ -1899,6 +1960,7 @@ fn bound_view_vm_keyed(
             let columns = super::content::table_columns(binding);
             let expand_fields = super::content::expand_fields(binding);
             let column_labels = columns.iter().map(|col| col.label.clone()).collect();
+            let column_roles = columns.iter().map(|col| col.role).collect();
             let records = super::content::source_collection(binding, response);
             let empty_tree_folds = std::collections::BTreeSet::new();
             let visible_rows = super::content::table_hierarchy_rows(
@@ -1991,8 +2053,13 @@ fn bound_view_vm_keyed(
                 title,
                 source_status: observation_status,
                 columns: column_labels,
+                column_roles,
                 total_rows,
-                coverage: table_source_coverage(binding, response),
+                coverage: table_source_coverage(
+                    binding,
+                    response,
+                    core.data.coverage_wording.as_ref(),
+                ),
                 provenance: Some(view_ref.to_string()),
                 affordance_hints: affordance_hints(binding),
                 rows,
@@ -2024,6 +2091,7 @@ fn bound_view_vm_keyed(
                     } else {
                         Vec::new()
                     },
+                    launch: None,
                     changed_at_ms: None,
                     changed_tone: None,
                 })
@@ -2426,6 +2494,7 @@ fn status_notice_rows(
             expandable: false,
             expanded: false,
             detail: Vec::new(),
+            launch: None,
             changed_at_ms: None,
             changed_tone: None,
         })
@@ -2559,7 +2628,25 @@ fn input_vm(
         completion,
         live_filter,
         text,
+        usage: timeline_usage(core, &key.view_instance_key, view_ref),
     })
+}
+
+/// The usage line of the timeline an input belongs to: its source response's
+/// summary, when the view is a timeline that has one.
+fn timeline_usage(
+    core: &RyeOsCore,
+    instance: &RyeOsViewInstanceKey,
+    view_ref: &str,
+) -> Option<String> {
+    let binding = core.binding_for_instance(instance, view_ref)?;
+    if binding.widget != "timeline" {
+        return None;
+    }
+    let channel = binding.primary_source()?.0;
+    let source_key =
+        super::source_key::RyeOsSourceInstanceKey::named(instance.clone(), channel).encode();
+    super::timeline::usage_text(core.data.sources.get(&source_key)?)
 }
 
 /// Derive the target strip when the author gives no `target_label`.
@@ -2593,7 +2680,7 @@ fn derived_target_label(
     // (e.g. graph) is not a conversation. No keybinding copy here; an author
     // overrides the whole strip via `target_label`.
     match (&route.invoke, &route.thread) {
-        (None, _) => "no target — surface declares no route".to_string(),
+        (None, _) => "no target".to_string(),
         (Some(_), Some(thread))
             if input.target.is_some()
                 && core.thread_supports_operator_followup(thread) != Some(false) =>
@@ -3522,6 +3609,26 @@ pub(crate) fn available_command_items_with_focus(
                         .is_some_and(|producer| core.producer_matches_membership(producer)),
             });
         }
+        if surface.active
+            && let Some(RyeOsUiIntent::RenameSurface {
+                surface_instance_id,
+                binding,
+                ..
+            }) = surface.rename_intent
+        {
+            items.push(RyeOsCommandChoice {
+                label: "Rename surface".into(),
+                hint: "change the name of this Surface".into(),
+                intent: RyeOsUiIntent::BeginRename {
+                    target: super::event::RyeOsRenameTarget::Surface {
+                        surface_instance_id,
+                        binding,
+                    },
+                },
+                secondary_intent: None,
+                enabled: true,
+            });
+        }
         if let Some(close_intent) = surface.close_intent {
             items.push(RyeOsCommandChoice {
                 label: format!("Close surface {:02} {}", surface.ordinal, surface.title),
@@ -3588,6 +3695,17 @@ pub(crate) fn available_command_items_with_focus(
         enabled: core
             .active_surface_view_sets()
             .is_some_and(|sets| sets.len() < crate::surface::view_sets::MAX_VIEW_SETS),
+    });
+    items.push(RyeOsCommandChoice {
+        label: "Rename view set".into(),
+        hint: "change the name of this arrangement".into(),
+        intent: RyeOsUiIntent::BeginRename {
+            target: super::event::RyeOsRenameTarget::ViewSet {
+                view_set_id: view_set.id,
+            },
+        },
+        secondary_intent: None,
+        enabled: core.composition_write_available(),
     });
     if let Some(instance) = focused {
         items.extend(
@@ -3724,6 +3842,15 @@ fn mounted_dialogs(core: &RyeOsCore) -> Vec<RyeOsDialogVm> {
             Some(RyeOsDialogVm {
                 instance_key: key.clone(),
                 title: mount.title().to_owned(),
+                description: core
+                    .binding_for_instance(key, mount.view().view_ref())
+                    .and_then(|binding| binding.description.clone()),
+                launcher: core
+                    .binding_for_instance(key, mount.view().view_ref())
+                    .is_some_and(|binding| {
+                        binding.local_projection
+                            == Some(super::local_projection::ViewLocalProjection::Launcher)
+                    }),
                 view: view_vm_for_instance(core, key)?,
                 input: instance_input_vm(core, key, mount.view().view_ref()),
             })
@@ -4248,42 +4375,122 @@ mod tests {
     use crate::ui::{RyeOsEffect, RyeOsEffectKind, RyeOsEvent, RyeOsUiEvent};
     use serde_json::json;
 
-    #[test]
-    fn authored_table_coverage_never_infers_completeness_from_rows() {
-        let binding: ViewBinding = serde_json::from_value(json!({
+    fn coverage_binding() -> ViewBinding {
+        serde_json::from_value(json!({
             "widget": "table",
             "sources": {"default": {
                 "ref": "service:test/list", "collection": "threads", "coverage": "coverage"
             }}
         }))
-        .unwrap();
+        .unwrap()
+    }
+
+    fn coverage_response(state: &str, reason: &str) -> Value {
+        json!({"threads": [], "coverage": {"state": state, "reason": reason}})
+    }
+
+    fn wording() -> crate::ui::dto::RyeOsCoverageWordingDto {
+        crate::ui::dto::RyeOsCoverageWordingDto::from_response(&json!({
+            "schema_version": "ryeos.ui.coverage_wording.v1",
+            "fallback": {"label": "Coverage is not known.", "tone": "none"},
+            "states": {
+                "observed": {"label": "Observed.", "tone": "none"},
+                "partial": {"label": "Part is shown.", "tone": "warn"},
+                "failed": {"label": "Could not be read.", "tone": "danger"},
+                "unavailable": {"label": "Not available.", "tone": "warn"},
+            },
+            "reasons": {
+                "projection_locator_not_exhaustive": {"label": "May be missing some.", "tone": "accent"},
+            },
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn authored_table_coverage_never_infers_completeness_from_rows() {
+        let binding = coverage_binding();
         let observed = table_source_coverage(
             &binding,
             &json!({"threads":[{"thread_id":"T-one"}], "coverage":{
                 "state":"observed", "reason":"projection_locator_not_exhaustive"
             }}),
+            None,
         )
         .unwrap();
         assert_eq!(observed.state, "observed");
         assert_eq!(observed.reason, "projection_locator_not_exhaustive");
-        let missing = table_source_coverage(&binding, &json!({"threads":[]})).unwrap();
+        let missing = table_source_coverage(&binding, &json!({"threads":[]}), None).unwrap();
         assert_eq!(missing.state, "unavailable");
         assert_eq!(missing.reason, "coverage_not_reported");
         for state in ["partial", "failed", "unavailable"] {
-            let report = table_source_coverage(&binding, &json!({
-                "threads": [], "coverage": {"state": state, "reason": "bounded_live_enumeration"}
-            })).unwrap();
+            let response = coverage_response(state, "bounded_live_enumeration");
+            let report = table_source_coverage(&binding, &response, None).unwrap();
             assert_eq!(report.state, state);
         }
-        let unavailable = table_source_coverage(
-            &binding,
-            &json!({
-                "threads": [], "coverage": {"state": "unavailable", "reason": "kind_not_registered"}
-            }),
-        )
-        .unwrap();
+        let response = coverage_response("unavailable", "kind_not_registered");
+        let unavailable = table_source_coverage(&binding, &response, None).unwrap();
         assert_eq!(unavailable.state, "unavailable");
         assert_eq!(unavailable.reason, "kind_not_registered");
+    }
+
+    #[test]
+    fn a_known_state_and_reason_take_the_reasons_sentence_and_tone() {
+        let words = wording();
+        let response = coverage_response("observed", "projection_locator_not_exhaustive");
+        let coverage = table_source_coverage(&coverage_binding(), &response, Some(&words));
+        let coverage = coverage.unwrap();
+        assert_eq!(coverage.label, "May be missing some.");
+        assert_eq!(coverage.tone, RyeOsTone::Accent);
+    }
+
+    #[test]
+    fn an_unknown_reason_takes_the_states_sentence_and_never_the_code() {
+        let words = wording();
+        let response = coverage_response("partial", "something_new");
+        let coverage = table_source_coverage(&coverage_binding(), &response, Some(&words));
+        let coverage = coverage.unwrap();
+        assert_eq!(coverage.label, "Part is shown.");
+        assert_eq!(coverage.tone, RyeOsTone::Warn);
+        assert!(!coverage.label.contains("something_new"));
+    }
+
+    #[test]
+    fn a_state_the_wording_does_not_list_takes_the_fallback_sentence() {
+        let words = wording();
+        // `complete` is a valid state with no entry in this wording; a reason
+        // the wording does know does not rescue an unknown state.
+        let response = coverage_response("complete", "projection_locator_not_exhaustive");
+        let coverage = table_source_coverage(&coverage_binding(), &response, Some(&words));
+        let coverage = coverage.unwrap();
+        assert_eq!(coverage.label, "Coverage is not known.");
+        assert_eq!(coverage.tone, RyeOsTone::Neutral);
+    }
+
+    #[test]
+    fn missing_wording_fails_closed_with_the_unknown_sentence() {
+        let response = coverage_response("complete", "ready");
+        let coverage = table_source_coverage(&coverage_binding(), &response, None).unwrap();
+        assert_eq!(coverage.label, COVERAGE_UNKNOWN_LABEL);
+        assert_eq!(coverage.label, "This page's coverage is not known.");
+        assert_eq!(coverage.tone, RyeOsTone::Neutral);
+    }
+
+    #[test]
+    fn the_wording_response_refuses_a_stale_contract_bad_tone_and_empty_sentence() {
+        let good = json!({
+            "schema_version": "ryeos.ui.coverage_wording.v1",
+            "fallback": {"label": "x", "tone": "none"}, "states": {}, "reasons": {},
+        });
+        assert!(crate::ui::dto::RyeOsCoverageWordingDto::from_response(&good).is_ok());
+        let mut stale = good.clone();
+        stale["schema_version"] = json!("ryeos.ui.coverage_wording.v0");
+        assert!(crate::ui::dto::RyeOsCoverageWordingDto::from_response(&stale).is_err());
+        let mut tone = good.clone();
+        tone["fallback"]["tone"] = json!("loud");
+        assert!(crate::ui::dto::RyeOsCoverageWordingDto::from_response(&tone).is_err());
+        let mut empty = good.clone();
+        empty["fallback"]["label"] = json!(" ");
+        assert!(crate::ui::dto::RyeOsCoverageWordingDto::from_response(&empty).is_err());
     }
 
     fn tile_default_source_key(core: &RyeOsCore, tile_id: TileId) -> String {
@@ -4408,6 +4615,130 @@ mod tests {
         (core, tile)
     }
 
+    fn table_with_roles() -> (RyeOsCore, TileId) {
+        let (mut core, tile) = source_status_fixture(json!({
+            "widget": "table",
+            "sources": {"default": {
+                "ref": "service:test/list", "collection": "rows", "coverage": "coverage"
+            }},
+            "projections": {"columns": [
+                {"label": "id", "field": "id", "role": "id"},
+                {"label": "path", "field": "path", "role": "path"},
+                {"label": "state", "field": "state", "role": "status"},
+                {"label": "n", "field": "n", "role": "count"},
+                {"label": "digest", "field": "digest", "role": "hash"},
+                {"label": "plain", "field": "plain"},
+                {"label": "odd", "field": "odd", "role": "sparkle"}
+            ]}
+        }));
+        let key = tile_default_source_key(&core, tile);
+        core.data.sources.insert(
+            key,
+            json!({
+                "rows": [{"id": "T-1", "path": "a/b", "state": "running", "n": 3,
+                          "digest": "abcdef0123456789", "plain": "x", "odd": "y"}],
+                "coverage": {"state": "observed", "reason": "projection_locator_not_exhaustive"}
+            }),
+        );
+        (core, tile)
+    }
+
+    #[test]
+    fn a_table_view_model_carries_each_columns_role() {
+        use crate::ui::content::ColumnRole;
+        let (core, tile) = table_with_roles();
+        let RyeOsViewVm::Table {
+            columns,
+            column_roles,
+            ..
+        } = bound_view_vm(&core, tile, "view:test/source-status")
+        else {
+            panic!("table")
+        };
+        assert_eq!(columns.len(), column_roles.len());
+        // A column with no role, or a word outside the closed set, is text.
+        assert_eq!(
+            column_roles,
+            [
+                ColumnRole::Id,
+                ColumnRole::Path,
+                ColumnRole::Status,
+                ColumnRole::Count,
+                ColumnRole::Hash,
+                ColumnRole::Text,
+                ColumnRole::Text,
+            ]
+        );
+    }
+
+    #[test]
+    fn every_authored_role_word_names_one_role() {
+        use crate::ui::content::ColumnRole;
+        let words = [
+            ("text", ColumnRole::Text),
+            ("id", ColumnRole::Id),
+            ("ref", ColumnRole::Ref),
+            ("path", ColumnRole::Path),
+            ("kind", ColumnRole::Kind),
+            ("status", ColumnRole::Status),
+            ("time", ColumnRole::Time),
+            ("count", ColumnRole::Count),
+            ("hash", ColumnRole::Hash),
+            ("action", ColumnRole::Action),
+        ];
+        for (word, role) in words {
+            assert_eq!(ColumnRole::from_word(word), Some(role), "{word}");
+            let wire = serde_json::to_value(role).unwrap();
+            assert_eq!(wire, json!(word), "{word} is the wire name");
+        }
+        assert_eq!(ColumnRole::from_word("sparkle"), None);
+    }
+
+    #[test]
+    fn a_table_resolves_its_coverage_line_from_the_loaded_wording() {
+        let (mut core, tile) = table_with_roles();
+        let line = |core: &RyeOsCore| {
+            let RyeOsViewVm::Table { coverage, .. } =
+                bound_view_vm(core, tile, "view:test/source-status")
+            else {
+                panic!("table")
+            };
+            coverage.expect("the source declares coverage")
+        };
+        // Nothing loaded: the fixed unknown sentence, never the codes.
+        let before = line(&core);
+        assert_eq!(before.label, COVERAGE_UNKNOWN_LABEL);
+        assert_eq!(before.reason, "projection_locator_not_exhaustive");
+        core.data.coverage_wording = Some(wording());
+        let after = line(&core);
+        assert_eq!(after.label, "May be missing some.");
+        assert_eq!(after.tone, RyeOsTone::Accent);
+    }
+
+    #[test]
+    fn shipped_tables_name_the_roles_their_fields_obviously_are() {
+        use crate::ui::content::{ColumnRole, ViewBinding, table_columns};
+        let history: ViewBinding = serde_yaml::from_str(include_str!(
+            "../../../../../bundles/ryeos-ui/.ai/views/ryeos/threads/history.yaml"
+        ))
+        .unwrap();
+        let roles = table_columns(&history)
+            .iter()
+            .map(|column| (column.label.clone(), column.role))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            roles,
+            [
+                ("thread".to_owned(), ColumnRole::Id),
+                ("kind".to_owned(), ColumnRole::Kind),
+                ("item".to_owned(), ColumnRole::Ref),
+                ("project".to_owned(), ColumnRole::Text),
+                ("status".to_owned(), ColumnRole::Status),
+                ("created".to_owned(), ColumnRole::Time),
+            ]
+        );
+    }
+
     #[test]
     fn sections_report_independent_failure_and_unresolved_instead_of_empty_success() {
         let (mut core, tile) = source_status_fixture(json!({
@@ -4443,7 +4774,7 @@ mod tests {
         assert!(sections[0].source_status.is_none());
         let denied = sections[1].source_status.as_ref().unwrap();
         assert_eq!(denied.state, "failed");
-        assert!(denied.message.contains("service_cap_denied"));
+        assert_eq!(denied.message, "Access denied");
         assert!(!denied.stale);
         assert!(sections[1].rows.is_empty());
         assert_eq!(
@@ -4936,6 +5267,14 @@ mod tests {
         assert_eq!(heading.title, "A task");
         let supplement = view_supplement(&core, &instance, "view:test/detail").unwrap();
         assert_eq!(supplement.excerpt[0].value, "<script>not markup</script>");
+    }
+
+    /// The focused tile's title in the active view set.
+    fn focused_tile_title(core: &RyeOsCore) -> String {
+        core.active_view_set()
+            .and_then(|set| set.tiles.get(&set.focused_tile))
+            .map(|tile| tile_title(core, tile))
+            .unwrap_or_default()
     }
 
     #[test]
@@ -5741,9 +6080,10 @@ mod tests {
         ]});
         let usage = project_section(section("Usage"), &with_usage);
         assert_eq!(usage.len(), 2);
-        assert_eq!(usage[0].primary, "1200");
-        assert_eq!(usage[0].meta.as_deref(), Some("input tokens"));
-        assert_eq!(usage[1].primary, "0.5000");
+        assert_eq!(usage[0].primary, "input tokens");
+        assert_eq!(usage[0].meta.as_deref(), Some("1200"));
+        assert_eq!(usage[1].primary, "spend (USD)");
+        assert_eq!(usage[1].meta.as_deref(), Some("0.5000"));
 
         // Re-fetches on the selection facet; each section pulls the selected
         // thread via @facet, so an unset selection SUPPRESSES the fetch (D8)
@@ -6149,6 +6489,10 @@ mod tests {
     /// A single focused timeline tile over a timeline-service response, with
     /// the point on the newest entry.
     fn feed_core(items: serde_json::Value) -> RyeOsCore {
+        feed_core_with(items, json!({}))
+    }
+
+    fn feed_core_with(items: serde_json::Value, projections: serde_json::Value) -> RyeOsCore {
         let session = session_with_surface(json!({
             "name": "t",
             "tiles": ["view:ryeos/chain/timeline"],
@@ -6157,7 +6501,8 @@ mod tests {
                     "widget": "timeline",
                     "sources": { "default": {
                         "ref": "service:ui/ryeos-ui/timeline/thread", "collection": "items"
-                    } }
+                    } },
+                    "projections": projections
                 }
             }
         }));
@@ -6217,6 +6562,46 @@ mod tests {
         };
         let command = crate::ui::ryeos_key_command(event, core.key_context());
         core.apply_key_command(command)
+    }
+
+    #[test]
+    fn messages_and_prose_are_never_expandable() {
+        let entry = |id: &str, kind: &str, state: &str| {
+            json!({
+                "item": "entry", "id": id, "type": kind, "state": state,
+                "tone": null, "thread": "T-1", "parent": null, "exchange": null,
+                "counts_as": null, "slots": {"headline": id, "body": id},
+                "seq": [1, 1], "ts": ["t", "t"]
+            })
+        };
+        let core = feed_core_with(
+            json!([
+                entry("said", "message", "done"),
+                entry("wrote", "prose", "done"),
+                activity("read", [3, 3]),
+            ]),
+            json!({"expand": {"fields": ["state"]}}),
+        );
+        let instance = core.focused_view_instance_key().unwrap();
+        let RyeOsViewVm::Timeline {
+            entry_roles,
+            entry_expandable,
+            ..
+        } = view_vm_for_instance(&core, &instance).unwrap()
+        else {
+            panic!("expected a timeline");
+        };
+        let expandable = |role: &str| {
+            entry_roles
+                .iter()
+                .zip(&entry_expandable)
+                .filter(|(entry_role, _)| entry_role.as_str() == role)
+                .map(|(_, expandable)| *expandable)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(expandable("message"), [false]);
+        assert_eq!(expandable("prose"), [false]);
+        assert_eq!(expandable("activity"), [true]);
     }
 
     #[test]

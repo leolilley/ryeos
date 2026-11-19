@@ -7,6 +7,13 @@ use super::super::event::RyeOsUiIntent;
 pub struct RyeOsDialogVm {
     pub instance_key: crate::ids::RyeOsViewInstanceKey,
     pub title: String,
+    /// The mounted View's own `description`, which a dialog may show as its
+    /// note.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The View is the launcher's own list, drawn as the launcher sheet.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub launcher: bool,
     pub view: super::RyeOsViewVm,
     pub input: Option<super::RyeOsInputVm>,
 }

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-18T11:49:26Z:0530c3137944a7ae67651f71b803e735f839314adbb197465c0f3f04f7301c09:nV1jGChYBFAXaZnm/omwMGGZy6EZHNJUvNL89G6eZJ0Dszfe2kGC0lylQSPdgyBqjjKvxXGd5fBvERvdsRnNDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-19T05:58:47Z:0d687f406b87185081eb075563268bdb2b5121b360969a02da1f24864f816dac:Nm91qvEaFt/BdhqjSzuuycqmcPQtQGZ2tlYwUAk4dmDpDeqXXf2w4EBmhVtv6jIox5zbZk2WiLhWWuzsbBfyAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: project-directives
 title: Directives
 version: "1.0.0"
@@ -21,6 +21,7 @@ projections:
       field: title
     - label: item
       field: canonical_ref
+      role: ref
     - label: space
       field: space
     - label: trust

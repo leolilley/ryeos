@@ -471,6 +471,11 @@ pub struct RyeOsDataState {
     /// the `attention` role.
     #[serde(default)]
     pub attention: Option<super::dto::RyeOsAttentionDto>,
+    /// The signed words for table coverage lines, from the surface source with
+    /// the `coverage_wording` role. Absent until read; a coverage line then
+    /// reads as unknown rather than showing codes.
+    #[serde(default)]
+    pub coverage_wording: Option<super::dto::RyeOsCoverageWordingDto>,
     pub projects: Option<RyeOsProjectsDto>,
     pub threads: Option<RyeOsThreadsDto>,
     pub files: Option<RyeOsFilesDto>,
@@ -723,6 +728,11 @@ pub struct RyeOsCore {
     pub(crate) input_buffers: BTreeMap<String, RyeOsInputState>,
     pub focused_input: Option<RyeOsViewInstanceKey>,
     pub(crate) dialog_return_focus: Option<RyeOsViewInstanceKey>,
+    /// The launcher's second stage: the dialog showing it and the view whose
+    /// place is being chosen. Local to the open launcher; never persisted.
+    pub(crate) launcher_stage: Option<(RyeOsViewInstanceKey, String)>,
+    /// A rename a command asked for, until a client takes it.
+    pub(crate) rename_request: Option<super::view_model::RyeOsRenameVm>,
     pub field_query_editing: Option<RyeOsViewInstanceKey>,
     pub runtime: RyeOsRuntimeState,
     pub pending_effects: BTreeMap<u64, RyeOsEffectKind>,
@@ -2615,6 +2625,10 @@ impl RyeOsCore {
         if self.field_query_editing.as_ref() == Some(instance_key) {
             self.field_query_editing = None;
         }
+        self.launcher_stage = self
+            .launcher_stage
+            .take()
+            .filter(|(instance, _)| instance != instance_key);
         self.bump_generation();
         Vec::new()
     }
@@ -2850,6 +2864,8 @@ impl RyeOsCore {
                         .any(|dialog| dialog.is_open() && dialog.view().instance_key() == &key)
                 })
             }),
+            launcher_places_open: self.launcher_places_open(),
+            rename_open: self.rename_request.is_some(),
             input_visible: focused.is_some() || self.default_input_instance().is_some(),
             input_focused: focused.is_some(),
             input_has_text: !text.is_empty(),
@@ -2883,6 +2899,7 @@ impl RyeOsCore {
             focused_timeline_entry: timeline_keys.entry,
             focused_timeline_foldable: timeline_keys.foldable,
             focused_source_failed: timeline_keys.source_failed,
+            focused_dock_answer: timeline_keys.dock_answer,
             field: super::keymap::focused_field_key_context(self),
         }
     }

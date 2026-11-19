@@ -126,7 +126,7 @@ pub fn shell(
         .h_full()
         .min_w(0.0)
         .min_h(0.0)
-        .child(body(vm, local));
+        .child(body(vm, local, edges));
     // A switcher at the side takes its room on that side; along the top it
     // takes its own band, and hidden it takes nothing.
     let mut main = row().w_full().grow(1.0).min_h(0.0);
@@ -144,7 +144,7 @@ pub fn shell(
     // move it on screen; first here, keyboard focus starts at the open
     // Surfaces.
     if edges.status_top {
-        page = page.child(status_bar(vm, edges));
+        page = page.child(status_bar(vm, edges, local.narrow()));
     }
     page = match edges.switcher {
         RyeOsEdgeVm::Left | RyeOsEdgeVm::Right => page.child(system_bar(vm, local, edges)),
@@ -155,7 +155,7 @@ pub fn shell(
         .child(view_set_strip(&chrome.top_bar, local, edges))
         .child(main);
     if !edges.status_top {
-        page = page.child(status_bar(vm, edges));
+        page = page.child(status_bar(vm, edges, local.narrow()));
     }
     if let Some(dot) = hidden_health_dot(vm) {
         page = page.child(dot);
@@ -309,6 +309,7 @@ fn system_bar(vm: &RyeOsViewModel, local: &Local, edges: Edges) -> El {
         .child(
             switcher.child(
                 col()
+                    .key("switcher:add")
                     .size(theme::SWITCHER_CHIP, 30.0)
                     .center()
                     .radius(theme::RADIUS_ROW)
@@ -326,8 +327,7 @@ fn system_bar(vm: &RyeOsViewModel, local: &Local, edges: Edges) -> El {
 }
 
 /// One open Surface as a chip in the switcher. The current one has the strong
-/// edge and carries its rename and close beneath it; any other selects on
-/// press.
+/// edge; any other selects on press. Pressing the current one twice renames it.
 fn surface_entry(surface: &RyeOsSurfaceChoiceVm, local: &Local) -> El {
     let t = Tokens::get();
     let key = format!("surface:{:?}", surface.surface_instance_id);
@@ -344,18 +344,19 @@ fn surface_entry(surface: &RyeOsSurfaceChoiceVm, local: &Local) -> El {
             .center_y()
             .child(rename_form(local, key, "Surface name", ("Save", "Cancel")));
     }
-    let (edge, edge_ink, ink) = if surface.active {
-        (1.5, t.ink_at(0.95), t.ink)
+    let (edge, edge_ink) = if surface.active {
+        (1.5, t.ink_at(0.95))
     } else {
-        (1.0, t.ink_at(0.14), t.ink_at(0.55))
+        (1.0, t.ink_at(0.14))
     };
     let select = surface.select_intent.clone();
     let mut chip = col()
         .size(theme::SWITCHER_CHIP, theme::SWITCHER_CHIP)
         .center()
         .radius(theme::RADIUS_ROW)
+        .fill(t.bg)
         .border(edge, edge_ink)
-        .child(chip_mark(surface, ink));
+        .child(chip_mark(surface));
     let dot = crate::marks::WorkDot::of(
         surface.needs_you.is_some_and(|count| count > 0),
         surface.running.is_some_and(|count| count > 0),
@@ -363,16 +364,9 @@ fn surface_entry(surface: &RyeOsSurfaceChoiceVm, local: &Local) -> El {
     if let Some(dot) = dot {
         chip = chip.child(crate::marks::chip_dot(dot, format!("{}:{key}", dot.word())));
     }
-    if surface.chip.authored_in_project {
-        chip = chip.child(crate::marks::project_chip_mark(
-            ink,
-            format!("project:{key}"),
-        ));
-    }
     let mut entry = col()
         .key(key)
         .items_center()
-        .gap(2.0)
         .role("tab")
         .label(surface.title.clone())
         .focus_selected(surface.active)
@@ -380,22 +374,9 @@ fn surface_entry(surface: &RyeOsSurfaceChoiceVm, local: &Local) -> El {
     if surface.active {
         if let Some(intent) = surface.rename_intent.clone() {
             let title = surface.title.clone();
-            entry = entry.child(surface_action(
-                &crate::icons::PENCIL,
-                format!("Rename {}", surface.title),
-                move |app| app.begin_rename(RenameTarget::Surface(intent.clone()), &title),
-            ));
-        }
-        if let Some(intent) = surface.close_intent.clone() {
-            entry = entry.child(surface_action(
-                &crate::icons::CLOSE,
-                format!("Close {}; running work is unaffected", surface.title),
-                move |app| {
-                    app.ui(RyeOsUiEvent::Activate {
-                        intent: intent.clone(),
-                    })
-                },
-            ));
+            entry = entry.on_double_press(move |app: &mut App| {
+                app.begin_rename(RenameTarget::Surface(intent.clone()), &title)
+            });
         }
     } else {
         entry = entry.hover(t.select_fill()).on_press(move |app: &mut App| {
@@ -407,15 +388,16 @@ fn surface_entry(surface: &RyeOsSurfaceChoiceVm, local: &Local) -> El {
     entry
 }
 
-/// The Surfaces switcher along the top: its own 40 high band, one pill per
-/// open Surface with its number and name, and the plus after the last.
+/// The Surfaces switcher along the top: one 40 high band holding an island of
+/// 30, a pill per open Surface with its number and name, and the plus after
+/// the last.
 fn switcher_band(vm: &RyeOsViewModel, local: &Local) -> El {
     let t = Tokens::get();
     let mut tags = row()
         .h_full()
         .min_w(0.0)
         .shrink()
-        .gap(8.0)
+        .gap(2.0)
         .center_y()
         .role("tablist")
         .label("Open Surfaces")
@@ -425,33 +407,44 @@ fn switcher_band(vm: &RyeOsViewModel, local: &Local) -> El {
     }
     row()
         .w_full()
-        .h(40.0)
-        .px(theme::SWITCHER_INSET + 8.0)
+        .h(theme::SWITCHER_BAND_HEIGHT)
+        .px(theme::SWITCHER_INSET)
         .pt(theme::SWITCHER_INSET)
-        .gap(8.0)
-        .center_y()
         .role("navigation")
         .label("Surfaces")
-        .child(tags)
         .child(
-            col()
-                .size(28.0, 24.0)
-                .center()
-                .radius(theme::RADIUS_ROW)
-                .role("button")
-                .label("Open a Surface")
-                .hover(t.select_fill())
-                .child(crate::icons::glyph(
-                    &crate::icons::PLUS,
-                    14.0,
-                    t.ink_at(0.40),
-                ))
-                .on_press(|app: &mut App| app.ui(RyeOsUiEvent::OpenLauncher)),
+            row()
+                .h(theme::ISLAND_HEIGHT)
+                .min_w(0.0)
+                .shrink()
+                .px(3.0)
+                .gap(2.0)
+                .center_y()
+                .radius(theme::radius_pill(theme::ISLAND_HEIGHT))
+                .fill(t.bg_at(theme::BAR_FILL))
+                .border(1.0, t.ink_at(theme::BAR_BORDER))
+                .child(tags)
+                .child(
+                    col()
+                        .key("switcher:add")
+                        .h(TAG_HEIGHT)
+                        .px(9.0)
+                        .center()
+                        .radius(theme::radius_pill(TAG_HEIGHT))
+                        .role("button")
+                        .label("Open a Surface")
+                        .hover(t.select_fill())
+                        .child(text("+").font(theme::ui(13.0)).color(t.ink_at(0.40)))
+                        .on_press(|app: &mut App| app.ui(RyeOsUiEvent::OpenLauncher)),
+                ),
         )
 }
 
-/// One open Surface as a pill in the top switcher: number, name, the project
-/// mark and its work dot. The current one has the strong edge.
+/// A tag in the top switcher.
+const TAG_HEIGHT: f32 = 24.0;
+
+/// One open Surface as a tag in the top switcher: number, name and its work
+/// dot. The current one is filled; pressing it twice renames it.
 fn surface_tag(surface: &RyeOsSurfaceChoiceVm, local: &Local) -> El {
     let t = Tokens::get();
     let key = format!("surface:{:?}", surface.surface_instance_id);
@@ -468,32 +461,31 @@ fn surface_tag(surface: &RyeOsSurfaceChoiceVm, local: &Local) -> El {
             ("Save", "Cancel"),
         ));
     }
-    let (edge, edge_ink, ink) = if surface.active {
-        (1.5, t.ink_at(0.95), t.ink)
+    let (number, name) = if surface.active {
+        (t.ink_at(0.55), t.ink)
     } else {
-        (1.0, t.ink_at(0.14), t.ink_at(0.70))
+        (t.ink_at(0.30), t.ink_at(0.62))
     };
-    let mut name = surface.title.clone();
-    if surface.chip.authored_in_project {
-        name.push('·');
-    }
     let mut tag = row()
         .key(key.clone())
-        .h(24.0)
+        .h(TAG_HEIGHT)
         .px(10.0)
         .gap(6.0)
         .center_y()
-        .radius(theme::radius_pill(24.0))
-        .border(edge, edge_ink)
+        .radius(theme::radius_pill(TAG_HEIGHT))
         .role("tab")
         .label(surface.title.clone())
         .focus_selected(surface.active)
         .child(
             text(format!("{}", surface.ordinal))
                 .font(theme::ui(10.5))
-                .color(t.ink_at(0.35)),
+                .color(number),
         )
-        .child(text(name).font(theme::medium(theme::TYPE_CELL)).color(ink));
+        .child(
+            text(surface.title.clone())
+                .font(theme::medium(theme::TYPE_CELL))
+                .color(name),
+        );
     let dot = crate::marks::WorkDot::of(
         surface.needs_you.is_some_and(|count| count > 0),
         surface.running.is_some_and(|count| count > 0),
@@ -502,24 +494,12 @@ fn surface_tag(surface: &RyeOsSurfaceChoiceVm, local: &Local) -> El {
         tag = tag.child(crate::marks::tab_dot(dot, format!("{}:{key}", dot.word())));
     }
     if surface.active {
+        tag = tag.fill(t.ink_at(0.14));
         if let Some(intent) = surface.rename_intent.clone() {
             let title = surface.title.clone();
-            tag = tag.child(surface_action(
-                &crate::icons::PENCIL,
-                format!("Rename {}", surface.title),
-                move |app| app.begin_rename(RenameTarget::Surface(intent.clone()), &title),
-            ));
-        }
-        if let Some(intent) = surface.close_intent.clone() {
-            tag = tag.child(surface_action(
-                &crate::icons::CLOSE,
-                format!("Close {}; running work is unaffected", surface.title),
-                move |app| {
-                    app.ui(RyeOsUiEvent::Activate {
-                        intent: intent.clone(),
-                    })
-                },
-            ));
+            tag = tag.on_double_press(move |app: &mut App| {
+                app.begin_rename(RenameTarget::Surface(intent.clone()), &title)
+            });
         }
         tag
     } else {
@@ -533,35 +513,23 @@ fn surface_tag(surface: &RyeOsSurfaceChoiceVm, local: &Local) -> El {
 }
 
 /// What a Surface's chip shows: Home's grid, a node's key figure, or the
-/// title's first letter.
-fn chip_mark(surface: &RyeOsSurfaceChoiceVm, ink: rune::Color) -> El {
+/// title's first letter. The current Surface's mark is lit.
+fn chip_mark(surface: &RyeOsSurfaceChoiceVm) -> El {
+    let t = Tokens::get();
+    let (figure, initial) = if surface.active {
+        (t.ink_at(0.95), t.ink_at(0.95))
+    } else {
+        (t.ink_at(0.60), t.ink_at(0.55))
+    };
     match surface.chip.mark {
-        RyeOsChipMarkVm::Grid => crate::marks::grid_mark(ink),
+        RyeOsChipMarkVm::Grid => crate::marks::grid_mark(figure),
         // A node whose key is not known yet shows its initial.
         RyeOsChipMarkVm::Key => match surface.chip.fingerprint.as_deref() {
-            Some(fingerprint) => crate::marks::key_mark(fingerprint, 14.0, ink),
-            None => crate::marks::initial_mark(&surface.title, ink),
+            Some(fingerprint) => crate::marks::key_mark(fingerprint, 14.0, figure),
+            None => crate::marks::initial_mark(&surface.title, initial),
         },
-        RyeOsChipMarkVm::Initial => crate::marks::initial_mark(&surface.title, ink),
+        RyeOsChipMarkVm::Initial => crate::marks::initial_mark(&surface.title, initial),
     }
-}
-
-/// A small action under the current Surface's chip.
-fn surface_action(
-    icon: &'static rune::Icon,
-    label: String,
-    act: impl Fn(&mut App) + 'static,
-) -> El {
-    let t = Tokens::get();
-    col()
-        .size(22.0, 22.0)
-        .center()
-        .radius(6.0)
-        .role("button")
-        .label(label)
-        .hover(t.select_fill())
-        .child(crate::icons::glyph(icon, 11.0, t.ink_dim()))
-        .on_press(act)
 }
 
 /// The transport freshness as its wire name, uppercased.
@@ -573,20 +541,22 @@ fn freshness_label(freshness: RyeOsTransportFreshness) -> String {
 }
 
 /// The tabs band: bare words centred as a group, the current one set heavier
-/// with a line under it, and a plus after the last.
+/// with a line under it, and a plus after the last. Pressing the current tab
+/// twice renames it.
 fn view_set_strip(top_bar: &RyeOsTopBarVm, local: &Local, edges: Edges) -> El {
     let t = Tokens::get();
     if !top_bar.visible {
         return el().h(0.0);
     }
+    // The group scrolls when it overflows, fading where tabs run out of view.
     let mut tabs = row()
         .h_full()
         .min_w(0.0)
         .shrink()
         .gap(8.0)
         .center_y()
-        .scroll_x();
-    // look: the plus does not stay fixed at the right while the tabs scroll.
+        .scroll_x()
+        .scroll_edge_fade(TABS_FADE);
     for tab in &top_bar.tabs {
         let view_set_id = tab.view_set_id;
         let renaming = tab.active
@@ -613,80 +583,58 @@ fn view_set_strip(top_bar: &RyeOsTopBarVm, local: &Local, edges: Edges) -> El {
                 ("✓", "×"),
             ))
         } else {
+            // The line under the word is the word's width; a work dot sits
+            // after it, outside the line.
+            let mut tab_row = row()
+                .h_full()
+                .px(10.0)
+                .gap(6.0)
+                .center_y()
+                .role("tab")
+                .label(tab.title.clone())
+                .focus_selected(tab.active)
+                .child(
+                    row()
+                        .pt(7.0)
+                        .pb(6.0)
+                        .border_sides([0.0, 0.0, 1.0, 0.0], mark)
+                        .child(text(tab.title.clone()).font(word).color(ink)),
+                );
             let dot = crate::marks::WorkDot::of(
                 tab.needs_you.unwrap_or(false),
                 tab.running.unwrap_or(false),
             );
-            let mut word_row = row()
-                .gap(6.0)
-                .center_y()
-                .child(text(tab.title.clone()).font(word).color(ink));
             if let Some(dot) = dot {
-                word_row = word_row.child(crate::marks::tab_dot(
+                tab_row = tab_row.child(crate::marks::tab_dot(
                     dot,
                     format!("{}:view-set:{view_set_id}", dot.word()),
                 ));
             }
-            slot.child(
-                row()
-                    .h_full()
-                    .px(10.0)
-                    .center_y()
-                    .role("tab")
-                    .label(tab.title.clone())
-                    .focus_selected(tab.active)
-                    .child(
-                        row()
-                            .pb(6.0)
-                            .border_sides([0.0, 0.0, 1.0, 0.0], mark)
-                            .child(word_row),
-                    )
-                    .on_press(move |app: &mut App| {
-                        app.ui(RyeOsUiEvent::Activate {
-                            intent: RyeOsUiIntent::SelectViewSet { view_set_id },
-                        });
-                    }),
-            )
+            if tab.active {
+                let title = tab.title.clone();
+                tab_row = tab_row.on_double_press(move |app: &mut App| {
+                    app.begin_rename(RenameTarget::ViewSet(view_set_id), &title)
+                });
+            }
+            slot.child(tab_row.on_press(move |app: &mut App| {
+                app.ui(RyeOsUiEvent::Activate {
+                    intent: RyeOsUiIntent::SelectViewSet { view_set_id },
+                });
+            }))
         };
-        if tab.active {
-            let title = tab.title.clone();
-            slot = slot.child(
-                row()
-                    .center_y()
-                    .role("group")
-                    .label(format!("{} view-set actions", tab.title))
-                    .child(strip_action(
-                        &crate::icons::PENCIL,
-                        format!("Rename {}", tab.title),
-                        move |app| {
-                            app.begin_rename(RenameTarget::ViewSet(view_set_id), &title);
-                        },
-                    ))
-                    .child(strip_action(
-                        &crate::icons::DUPLICATE,
-                        format!("Duplicate {}", tab.title),
-                        move |app| {
-                            app.ui(RyeOsUiEvent::Activate {
-                                intent: RyeOsUiIntent::DuplicateViewSet { view_set_id },
-                            });
-                        },
-                    ))
-                    .child(strip_action(
-                        &crate::icons::CLOSE,
-                        format!("Close {}", tab.title),
-                        move |app| {
-                            app.ui(RyeOsUiEvent::Activate {
-                                intent: RyeOsUiIntent::CloseViewSet { view_set_id },
-                            });
-                        },
-                    )),
-            );
-        }
         tabs = tabs.child(slot);
     }
+    // Under a top switcher the band is the tabs' 44 alone; otherwise it is 50
+    // with the words dropped 6 so they sit level with the switcher's chips.
+    let (height, top) = if edges.switcher == RyeOsEdgeVm::Top {
+        (theme::TABS_HEIGHT - theme::TABS_TOP, 0.0)
+    } else {
+        (theme::TABS_HEIGHT, theme::TABS_TOP)
+    };
     row()
         .w_full()
-        .h(theme::TABS_HEIGHT)
+        .h(height)
+        .pt(top)
         // The switcher's room plus the band's own 18, so tabs clear the switcher.
         .pl(edges.side_room().0 + 18.0)
         .pr(edges.side_room().1 + 18.0)
@@ -695,7 +643,7 @@ fn view_set_strip(top_bar: &RyeOsTopBarVm, local: &Local, edges: Edges) -> El {
         .role("navigation")
         .label("View sets")
         // Equal spacers either side keep the group centred; when it overflows they
-        // collapse and the group scrolls between the switcher and the readout.
+        // collapse and the group scrolls between the switcher and the far edge.
         .child(el().grow(1.0))
         .child(tabs)
         .child(if top_bar.add_tab {
@@ -721,41 +669,10 @@ fn view_set_strip(top_bar: &RyeOsTopBarVm, local: &Local, edges: Edges) -> El {
             el().w(0.0)
         })
         .child(el().grow(1.0))
-        // The focus readout takes its own slot in the flow, so the tabs are
-        // bounded between the left padding and it.
-        .child(
-            row()
-                .center_y()
-                .gap(14.0)
-                .label("Focused view and layout")
-                .child(
-                    text(top_bar.focused_title.clone())
-                        .font(theme::TYPE_MICRO)
-                        .color(t.ink_faint())
-                        .truncate()
-                        .max_w(220.0),
-                )
-                .child(
-                    text(top_bar.layout_symbol.clone())
-                        .font(theme::TYPE_MICRO)
-                        .color(t.ink_faint())
-                        .label("Layout"),
-                ),
-        )
 }
 
-/// One of the active view set's 25-point action buttons.
-fn strip_action(icon: &'static rune::Icon, label: String, act: impl Fn(&mut App) + 'static) -> El {
-    let p = Palette::get();
-    col()
-        .size(25.0, 25.0)
-        .center()
-        .role("button")
-        .label(label)
-        .hover(p.plane_selected)
-        .child(crate::icons::glyph(icon, 12.0, p.faint))
-        .on_press(act)
-}
+/// How far the tab group fades at an edge where tabs run out of view.
+const TABS_FADE: f32 = 24.0;
 
 /// The inline name field with save and cancel; Escape cancels.
 /// An inline rename; when it closes, focus returns to the `trigger` slot's first control.
@@ -811,14 +728,22 @@ fn rename_form(local: &Local, trigger: String, label: &str, (save, cancel): (&st
         )
 }
 
-fn body(vm: &RyeOsViewModel, local: &Local) -> El {
+/// The body: the tiles, 16 from the frame's edges (a side switcher's room
+/// comes on top, on its side). Under the tabs band the tiles start 2 below it;
+/// above the status bar they stop 12 above it.
+fn body(vm: &RyeOsViewModel, local: &Local, edges: Edges) -> El {
+    let chrome = &vm.presentation.chrome;
+    let top = if chrome.top_bar.visible { 2.0 } else { 14.0 };
+    let bottom = if edges.status_bottom { 12.0 } else { 14.0 };
+    let side = |on_side: bool| if on_side { 18.0 } else { 16.0 };
     row()
         .w_full()
         .grow(1.0)
         .min_h(0.0)
-        .pt(14.0)
-        .pb(14.0)
-        .px(18.0)
+        .pt(top)
+        .pb(bottom)
+        .pl(side(edges.switcher == RyeOsEdgeVm::Left))
+        .pr(side(edges.switcher == RyeOsEdgeVm::Right))
         .child(view_set(vm, local))
 }
 
@@ -861,8 +786,15 @@ fn center(view_set: Option<&RyeOsViewSetVm>, local: &Local) -> El {
                 guard: &set.layout_guard,
                 min: set.split_min_ratio,
                 max: set.split_max_ratio,
+                sole: local.narrow() || tile_count(root) == 1,
             };
-            layout(root, local, &splits, &mut Vec::new())
+            layout(
+                root,
+                local,
+                &splits,
+                &mut Vec::new(),
+                local.width() - SIDE_RESERVE,
+            )
         }
         None => el(),
     };
@@ -879,6 +811,22 @@ struct Splits<'a> {
     guard: &'a str,
     min: f32,
     max: f32,
+    /// Whether the set shows one tile only: it has no other tile to be
+    /// focused against.
+    sole: bool,
+}
+
+/// The room a window gives the tiles' row before the tiles: both sides'
+/// margins, and so an estimate of a tile's width. Tables use the estimate to
+/// decide which columns fit.
+const SIDE_RESERVE: f32 = 32.0;
+
+/// How many tiles the layout holds.
+fn tile_count(node: &RyeOsLayoutNodeVm) -> usize {
+    match node {
+        RyeOsLayoutNodeVm::Split { first, second, .. } => tile_count(first) + tile_count(second),
+        RyeOsLayoutNodeVm::Tile { .. } => 1,
+    }
 }
 
 /// One split's stable key: its branch path from the root.
@@ -1003,6 +951,7 @@ fn layout(
     local: &Local,
     splits: &Splits<'_>,
     path: &mut Vec<SplitBranch>,
+    width: f32,
 ) -> El {
     match node {
         RyeOsLayoutNodeVm::Split { first, second, .. } if local.narrow() => {
@@ -1014,7 +963,13 @@ fn layout(
             } else {
                 SplitBranch::Second
             });
-            let shown = layout(if into_first { first } else { second }, local, splits, path);
+            let shown = layout(
+                if into_first { first } else { second },
+                local,
+                splits,
+                path,
+                width,
+            );
             path.pop();
             shown
         }
@@ -1029,21 +984,32 @@ fn layout(
                 Some((preview_key, preview)) if *preview_key == key => *preview,
                 _ => ratio.clamp(splits.min, splits.max),
             };
+            let horizontal = *axis == RyeOsSplitAxisVm::Horizontal;
+            // Side by side, the panes share the width less the divider.
+            let (first_width, second_width) = if horizontal {
+                let shared = (width - DIVIDER).max(0.0);
+                (shared * ratio, shared * (1.0 - ratio))
+            } else {
+                (width, width)
+            };
             path.push(SplitBranch::First);
-            let first = col()
-                .grow(ratio)
-                .min_w(0.0)
-                .min_h(0.0)
-                .child(layout(first, local, splits, path));
+            let first = col().grow(ratio).min_w(0.0).min_h(0.0).child(layout(
+                first,
+                local,
+                splits,
+                path,
+                first_width,
+            ));
             path.pop();
             path.push(SplitBranch::Second);
-            let second = col()
-                .grow(1.0 - ratio)
-                .min_w(0.0)
-                .min_h(0.0)
-                .child(layout(second, local, splits, path));
+            let second = col().grow(1.0 - ratio).min_w(0.0).min_h(0.0).child(layout(
+                second,
+                local,
+                splits,
+                path,
+                second_width,
+            ));
             path.pop();
-            let horizontal = *axis == RyeOsSplitAxisVm::Horizontal;
             let handle = divider(*axis, &key, ratio, path, splits);
             let extent_key = key.clone();
             let container = if horizontal { row() } else { col() };
@@ -1099,6 +1065,8 @@ fn layout(
                         .filter(|detail| !detail.is_empty()),
                     attachment: attachment_label.as_deref(),
                     focused: *focused,
+                    sole: splits.sole,
+                    width,
                     transparent: *background_transparent,
                     chrome_hidden: *chrome_hidden,
                     tile: Some(views::TileChrome {
@@ -1147,8 +1115,6 @@ pub(crate) fn menu_intents<'a>(
     }
 }
 
-/// The floating status bar: two islands, the launcher and key hints at the
-/// left, the core's status segments and the node's health at the right.
 /// The health dot's colour: a feed that is not current tints it warn
 /// whatever the health says.
 fn health_color(vm: &RyeOsViewModel) -> rune::Color {
@@ -1191,14 +1157,15 @@ fn hidden_health_dot(vm: &RyeOsViewModel) -> Option<El> {
     )
 }
 
-fn status_bar(vm: &RyeOsViewModel, edges: Edges) -> El {
+/// The floating status bar: two islands, the key hints at the left, the
+/// core's status segments and the node's health at the right.
+fn status_bar(vm: &RyeOsViewModel, edges: Edges, narrow: bool) -> El {
     let t = Tokens::get();
     let model = &vm.presentation.chrome.status_bar;
     if !edges.status_top && !edges.status_bottom {
         // Hidden: the health dot drawn by `hidden_health_dot` stands in.
         return el().h(0.0);
     }
-    let working = model.energy > 0.05;
     let island = || {
         row()
             .h(theme::ISLAND_HEIGHT)
@@ -1211,49 +1178,31 @@ fn status_bar(vm: &RyeOsViewModel, edges: Edges) -> El {
     };
     let dot = |color: rune::Color| el().size(6.0, 6.0).radius(3.0).fill(color);
     let rule = || el().w(1.0).h(12.0).fill(t.ink_at(0.14));
-    // The pressable row takes the island's full height; the 20 high chip is
-    // drawn inside it, centred.
-    let chip = row()
-        .h(20.0)
-        .min_w(20.0)
-        .px(6.0)
-        .center()
-        .radius(5.0)
-        .border(
-            1.0,
-            if working {
-                t.accent.alpha(0.6)
-            } else {
-                t.ink_at(0.16)
-            },
-        )
-        .hover(t.select_fill())
-        .child(crate::icons::glyph(
-            &crate::icons::PLUS,
-            11.0,
-            t.ink_at(0.60),
-        ));
-    let launcher = row()
-        .key("shell:launch")
-        .role("button")
-        .label("Open the launcher")
-        .h(theme::ISLAND_HEIGHT)
-        .center_y()
-        .child(chip)
-        .on_press(|app: &mut App| app.ui(RyeOsUiEvent::OpenLauncher));
     // The hints run in priority order; the row is bounded by the island, so
-    // the last ones are the ones a narrow window loses.
+    // the last ones are the ones a narrow window loses, and it keeps four.
+    let shown = if narrow {
+        NARROW_HINTS
+    } else {
+        model.key_hints.len()
+    };
     let mut hints = row().min_w(0.0).shrink().gap(14.0).center_y().scroll_x();
-    for hint in &model.key_hints {
-        hints = hints.child(crate::marks::key_hint(&hint.keys, &hint.word));
+    for hint in model.key_hints.iter().take(shown) {
+        hints = hints.child(crate::marks::key_hint(
+            &hint.keys,
+            &hint.word,
+            crate::marks::HINT_WORD_STATUS,
+        ));
     }
-    let keys = island()
-        .min_w(0.0)
-        .gap(6.0)
-        .role("group")
-        .label("Keys")
-        .child(launcher)
-        .child(hints);
+    let keys = if model.key_hints.is_empty() {
+        el()
+    } else {
+        island()
+            .key("shell:keys")
+            .min_w(0.0)
+            .role("group")
+            .label("Keys")
+            .child(hints)
+    };
     let mut status = island();
     // Attention tints only a dot.
     if let Some(color) = model.attention.and_then(|tone| t.tone(tone)) {
@@ -1267,14 +1216,14 @@ fn status_bar(vm: &RyeOsViewModel, edges: Edges) -> El {
         if let Some(label) = segment.label.as_deref().filter(|label| !label.is_empty()) {
             part = part.child(
                 text(label.to_owned())
-                    .font(theme::TYPE_MICRO)
-                    .color(t.ink_dim()),
+                    .font(theme::TYPE_SMALL)
+                    .color(t.ink_at(0.45)),
             );
         }
         part = part.child(
             text(segment.value.clone())
-                .font(theme::TYPE_MICRO)
-                .color(t.ink_body()),
+                .font(theme::medium(theme::TYPE_SMALL))
+                .color(t.ink_at(0.90)),
         );
         status = status.child(part);
         status = status.child(rule());
@@ -1296,8 +1245,8 @@ fn status_bar(vm: &RyeOsViewModel, edges: Edges) -> El {
             .child(dot(health))
             .child(
                 text(vm.chrome.health_label.clone())
-                    .font(theme::TYPE_MICRO)
-                    .color(t.ink_body()),
+                    .font(theme::medium(theme::TYPE_SMALL))
+                    .color(t.ink_at(0.90)),
             ),
     );
     let bar = row()
@@ -1316,6 +1265,9 @@ fn status_bar(vm: &RyeOsViewModel, edges: Edges) -> El {
         .child(el().grow(1.0))
         .child(status)
 }
+
+/// How many key hints a narrow window keeps.
+const NARROW_HINTS: usize = 4;
 
 fn notices(
     notices: &[RyeOsNoticeVm],
@@ -1454,6 +1406,9 @@ fn document_offer(offer: &DocumentOffer, link: Option<&str>) -> El {
 }
 
 fn dialog_layer(dialog: &RyeOsDialogVm, local: &Local) -> El {
+    if dialog.launcher {
+        return crate::launcher::layer(dialog, local);
+    }
     let p = Palette::get();
     let t = Tokens::get();
     let close = dialog.instance_key.clone();
@@ -1537,29 +1492,26 @@ fn dialog_layer(dialog: &RyeOsDialogVm, local: &Local) -> El {
         .child(panel)
 }
 
-/// The input composer: route strip, the text field bound to the core's
-/// buffer, and the submit control. A live filter is the compact form above
-/// its view: Up and Down move the selection, Enter activates it.
-pub fn composer(input: &RyeOsInputVm, local: &Local) -> El {
+/// The text field bound to an input's buffer. With `place_keys` the keys that
+/// choose where a launcher view lands reach the core instead of the field.
+pub(crate) fn input_field(
+    input: &RyeOsInputVm,
+    local: &Local,
+    field_font: rune::tok::TextStyle,
+    place_keys: bool,
+) -> El {
     let key = crate::input_key(&input.address);
     let edit_key = key.clone();
     let change_address = input.address.clone();
     let key_address = input.address.clone();
-    let button_address = input.address.clone();
     let live = input.live_filter;
     let submit_enabled = input.submit_enabled;
     let focused = input.focused;
     let t = Tokens::get();
-    let field_font = if live {
-        theme::TYPE_SMALL
-    } else {
-        theme::TYPE_PROSE
-    };
-    let mut field = text_input(&local.edits.edit(&key), field_font)
+    text_input(&local.edits.edit(&key), field_font)
         .key(format!("composer:{key}"))
         .placeholder(input.placeholder.clone(), t.ink_faint())
         .color(t.ink_body())
-        .w_full()
         .on_edit(move |app: &mut App| app.edit_mut(&edit_key))
         .on_input_change(move |app: &mut App, _tx| {
             let Some((text, cursor)) = app.edit_state(&crate::input_key(&change_address)) else {
@@ -1581,6 +1533,10 @@ pub fn composer(input: &RyeOsInputVm, local: &Local) -> El {
                 return app.core_key(event);
             }
             let mods = &event.mods;
+            // With the launcher's places showing, T and S choose one.
+            if place_keys && !(mods.ctrl || mods.alt || mods.logo) && is_place_key(event) {
+                return app.core_key(event);
+            }
             let bare = !(mods.shift || mods.alt || mods.ctrl || mods.logo);
             let action = match &event.key {
                 Key::Up if live && bare => RyeOsInputAction::NavigateSelection { delta: -1 },
@@ -1613,34 +1569,49 @@ pub fn composer(input: &RyeOsInputVm, local: &Local) -> El {
                 action,
             });
             true
-        });
-    field = if live {
-        field.h(FILTER_HEIGHT).px(12.0)
-    } else {
-        field.min_h(COMPOSER_INPUT_HEIGHT)
-    };
-    if live {
-        // The filter line: a bordered line with its key hint at the right.
-        return col()
-            .w_full()
-            .px(theme::PAD_TILE)
-            .py(10.0)
-            .gap(6.0)
-            .border_sides([0.0, 0.0, 1.0, 0.0], t.rule())
-            .child(
-                col()
-                    .w_full()
-                    .radius(theme::RADIUS_ROW)
-                    .border(1.0, t.control_border())
-                    .child(field),
-            )
-            .child(
-                text(input.hint.clone())
-                    .font(theme::TYPE_MICRO)
-                    .color(t.ink_faint())
-                    .w_full(),
-            );
+        })
+}
+
+/// T or S: the keys that choose where a launcher view lands.
+fn is_place_key(event: &KeyEvent) -> bool {
+    match &event.key {
+        Key::Text(typed) => typed.eq_ignore_ascii_case("t") || typed.eq_ignore_ascii_case("s"),
+        _ => false,
     }
+}
+
+/// The input composer: route strip, the text field bound to the core's
+/// buffer, and the submit control. A live filter is the compact form above
+/// its view: Up and Down move the selection, Enter activates it.
+pub fn composer(input: &RyeOsInputVm, local: &Local) -> El {
+    let key = crate::input_key(&input.address);
+    let button_address = input.address.clone();
+    let live = input.live_filter;
+    let submit_enabled = input.submit_enabled;
+    let t = Tokens::get();
+    let field_font = if live {
+        theme::TYPE_SMALL
+    } else {
+        theme::TYPE_PROSE
+    };
+    let field = input_field(input, local, field_font, false);
+    if live {
+        // The filter line: a bordered box, the field centred in it and the
+        // key that reaches it as a cap at the right.
+        return col().w_full().px(12.0).pt(8.0).pb(6.0).child(
+            row()
+                .w_full()
+                .h(FILTER_HEIGHT)
+                .px(12.0)
+                .gap(8.0)
+                .center_y()
+                .radius(theme::RADIUS_BUTTON)
+                .border(1.0, t.control_border())
+                .child(field.grow(1.0).min_w(0.0))
+                .child(crate::marks::key_chip("/")),
+        );
+    }
+    let field = field.w_full();
     // The composer: the input, then a strip of the route, the hint and send.
     let chip = |label: String, border: rune::Color| {
         row()
@@ -1692,15 +1663,32 @@ pub fn composer(input: &RyeOsInputVm, local: &Local) -> El {
     } else {
         send.opacity(0.5)
     };
-    let strip = row()
+    // The send button and the DRAFT chip keep their size. The hint gives way
+    // first and is dropped in a narrow window; then the route chip's label
+    // is cut.
+    let mut strip = row()
         .w_full()
         .center_y()
         .gap(8.0)
-        .child(chip(input.route_label.clone(), t.control_border()))
-        .child(pending)
-        .child(el().grow(1.0))
-        .child(chip(input.hint.clone(), t.control_border()))
-        .child(send);
+        .child(chip(input.route_label.clone(), t.control_border()).shrink());
+    if !input.text.is_empty() {
+        strip = strip.child(pending);
+    }
+    strip = strip.child(el().grow(1.0));
+    if !local.narrow() {
+        strip = strip.child(chip(input.hint.clone(), t.control_border()).shrink());
+    }
+    // The conversation's usage is quiet text, not a chip.
+    if let Some(usage) = &input.usage {
+        strip = strip.child(
+            text(usage.clone())
+                .font(theme::TYPE_MICRO)
+                .color(t.ink_dim())
+                .truncate()
+                .min_w(0.0),
+        );
+    }
+    strip = strip.child(send);
     let boxed = col()
         .w_full()
         .max_w(COMPOSER_COLUMN)
@@ -1726,7 +1714,6 @@ const COMPOSER_COLUMN: f32 = 720.0;
 const COMPOSER_PAD: f32 = 14.0;
 const COMPOSER_GAP: f32 = 16.0;
 const COMPOSER_FILL: f32 = 0.55;
-const COMPOSER_INPUT_HEIGHT: f32 = 24.0;
 /// A chip in the strip, and the send button's diameter.
 const CHIP_HEIGHT: f32 = 24.0;
 const SEND_SIZE: f32 = 30.0;

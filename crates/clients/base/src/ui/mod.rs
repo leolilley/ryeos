@@ -66,8 +66,8 @@ pub use effect::{
     RyeOsUiError,
 };
 pub use event::{
-    RyeOsEvent, RyeOsFilterField, RyeOsTransportChannel, RyeOsTransportFreshness, RyeOsUiEvent,
-    RyeOsUiIntent,
+    RyeOsEvent, RyeOsFilterField, RyeOsRenameTarget, RyeOsTransportChannel,
+    RyeOsTransportFreshness, RyeOsUiEvent, RyeOsUiIntent,
 };
 pub use field::{RyeOsFieldVm, project_field};
 pub use keymap::{
