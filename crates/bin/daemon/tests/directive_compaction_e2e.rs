@@ -414,10 +414,20 @@ async fn a_chain_of_fifteen_continuations_runs_under_a_raised_limit() {
     .await
     .expect("start rig");
     let id = launch_on(&rig).await.expect("launch");
+    let mut rig = rig;
     let chain = wait_chain_settled_for(&rig, &id, 900).await;
+    let stderr = rig.h.drain_stderr_nonblocking().await;
+    let stderr_tail: String = stderr
+        .chars()
+        .rev()
+        .take(6000)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
     assert!(
         chain.len() >= 16,
-        "fifteen continuations: {} {chain:?} list={:?} requests={} root={}",
+        "fifteen continuations: {} {chain:?} stderr={stderr_tail} list={:?} requests={} root={}",
         chain.len(),
         rig.h.list_threads(200).await.map(|t| t.len()),
         rig.stub.requests().await.len(),
