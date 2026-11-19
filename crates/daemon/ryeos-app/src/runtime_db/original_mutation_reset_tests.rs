@@ -433,3 +433,21 @@ fn original_mutation_open_never_creates_an_absent_store() {
     });
     assert!(!missing.exists());
 }
+
+#[test]
+fn a_predecessor_operator_epoch_refusal_names_the_reset_command() {
+    let predecessor =
+        super::incompatible_runtime_operator_schema(super::RUNTIME_OPERATOR_SCHEMA_EPOCH - 1);
+    assert!(
+        format!("{predecessor:#}")
+            .contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND),
+        "{predecessor:#}"
+    );
+    let newer =
+        super::incompatible_runtime_operator_schema(super::RUNTIME_OPERATOR_SCHEMA_EPOCH + 1);
+    assert!(
+        !format!("{newer:#}")
+            .contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND),
+        "{newer:#}"
+    );
+}

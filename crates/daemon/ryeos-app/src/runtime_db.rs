@@ -8295,9 +8295,13 @@ struct IncompatibleRuntimeOperatorSchema {
 }
 
 impl IncompatibleRuntimeOperatorSchema {
+    fn is_predecessor_epoch(&self) -> bool {
+        self.stored < self.current
+    }
+
     #[cfg(test)]
     fn is_predecessor(&self) -> bool {
-        self.stored < self.current
+        self.is_predecessor_epoch()
     }
 }
 
@@ -8356,11 +8360,21 @@ fn runtime_operator_schema_epoch(conn: &Connection, path: &Path) -> Result<u32> 
 }
 
 fn incompatible_runtime_operator_schema(stored: u32) -> anyhow::Error {
-    IncompatibleRuntimeOperatorSchema {
+    let mismatch = IncompatibleRuntimeOperatorSchema {
         stored,
         current: RUNTIME_OPERATOR_SCHEMA_EPOCH,
+    };
+    let guidance = mismatch.is_predecessor_epoch().then(|| {
+        format!(
+            "{mismatch}; stop the daemon and run `{}` before restarting",
+            crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND
+        )
+    });
+    let error = anyhow::Error::new(mismatch);
+    match guidance {
+        Some(guidance) => error.context(guidance),
+        None => error,
     }
-    .into()
 }
 
 fn assert_current_runtime_schema(
