@@ -203,6 +203,60 @@ fn predecessor_reset_never_decodes_embedded_authority_rows() {
     });
 }
 
+/// A predecessor-epoch store holding a launch-metadata row of the previous
+/// schema is reset without decoding that row: the epoch, not the row, is what
+/// marks it stale.
+#[test]
+fn predecessor_reset_clears_a_stale_launch_metadata_schema_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(NAME);
+    seed(&path, |connection| {
+        connection.execute(
+            "INSERT INTO runtime_action_intent(
+                 operation_id, chain_root_id, first_caller_thread_id, mode, request_hash,
+                 child_thread_id, launch_metadata, created_at_ms
+             ) VALUES ('op-stale', 'T-chain', 'T-parent', 'detached', 'request', 'T-child', ?1, 1)",
+            params![format!(
+                "{{\"schema_version\":{}}}",
+                LAUNCH_METADATA_SCHEMA_VERSION - 1
+            )],
+        )?;
+        connection.pragma_update(None, "application_id", predecessor_application_id())?;
+        Ok(())
+    });
+
+    with_reset_host(dir.path(), |host, root, namespace| {
+        let mut reset = open_original_mutation(host, root, namespace, &path);
+        assert!(reset.requires_explicit_history_reset());
+        reset.fixture_apply_explicit_history_reset(&path).unwrap();
+        assert!(!reset.requires_explicit_history_reset());
+        assert_eq!(
+            reset.operator_schema_epoch().unwrap(),
+            RUNTIME_OPERATOR_SCHEMA_EPOCH
+        );
+        retire(host, reset);
+    });
+}
+
+/// A stored launch row pins its own schema and the admitted launch capsule
+/// schema it seals, and a store at the current epoch is strictly decoded on
+/// every open and by the reset's own inspection. A contract that moves without
+/// an epoch bump therefore leaves a node that neither opens nor resets. Move
+/// the epoch with either version, add its "Epoch N" line, then update this
+/// triple.
+#[test]
+fn stored_launch_contract_versions_and_runtime_epoch_move_together() {
+    assert_eq!(
+        (
+            LAUNCH_METADATA_SCHEMA_VERSION,
+            ryeos_state::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
+            RUNTIME_OPERATOR_SCHEMA_EPOCH,
+        ),
+        (38, 39, 140),
+        "a change to a stored launch contract version needs a runtime operator epoch bump"
+    );
+}
+
 #[test]
 fn original_mutation_refuses_newer_project_authority_without_mutation() {
     let dir = tempfile::tempdir().unwrap();
