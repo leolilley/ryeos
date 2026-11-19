@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-18T05:07:46Z:bd92947401cc0a08a20510731bcfadd6bf76b3dbc71e53d6110d28a49f16722e:XY5PcF84NJa8jg0zQJD7tfN5I/liQmptfHxgFh/a5yHC5V37IrJ53O3sQ5vS386YZZGAPBOyfZsqnPPjugqnAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-19T06:50:21Z:f72582eabd39346b7f23fa190ec523342e3f46b5b3e82be7c5c605769b83bdd7:xnP+MjgCJv9fk+JXwE1Q1Du9CrAPxf1EQ1yxiS8ffKhdrVTYqctNgGLnf1VpGDKKM9ckWy40ngBw8+CR811zAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: source-local-bundle-development
@@ -2027,6 +2027,21 @@ ryeos --project <project-path> external-content bind \
   tool:ryeos/development/<tool> pinned_project \
   <project_snapshot_hash>
 ```
+
+A pinned-project bind (and the bindings listing and rebind that share it) is
+accepted only for the snapshot that is the calling principal's current head for
+the canonical project path: create the snapshot with `ryeos snapshot create`
+for that path, then bind that exact `project_snapshot_hash`. Binding any other
+snapshot with the path, including a historical one, is refused with
+`SnapshotNotCurrentHead`, which names the path, the snapshot and the current
+head; there is no fallback to a projectless resolution. The path is judged as
+launch judges it: it must exist on the daemon host, and symlinked, relative and
+dot-segment spellings of one project resolve to the same head (a lookalike
+directory has no head and is refused). The logical project is what a
+project-scoped signer is matched on, so a Tool signed by a key scoped to that
+project is admitted only against the bytes its head currently names. The head is
+read before the snapshot is materialized; that window is harmless because
+snapshot content is immutable by hash.
 
 The same sequence runs independently on every placement target. Portable
 content may move through RyeOS object-closure transfer, but each node creates
