@@ -6,6 +6,19 @@
 //! a device or a uid. Two nodes compare digests and learn only whether they
 //! match.
 //!
+//! What the three relations mean:
+//!
+//! - `boot` is the kernel's per-boot id. It names one run of one kernel, so it
+//!   is not a machine id: the same machine reports a new digest after a reboot.
+//! - `storage` is one filesystem instance: the device number of the superblock
+//!   that holds the app root. Equal means the same live filesystem. Different
+//!   does not mean different disks (two overlay mounts over one disk, or two
+//!   btrfs subvolumes, differ), so "not shared" never implies separate hardware.
+//! - `account` is the effective uid within one boot.
+//!
+//! The response also names the node (`site_id`) and when it measured (`as_of`),
+//! so a reader can tell whose facts they are and how old.
+//!
 //! The service is gated by `ryeos.execute.service.node/locality`, so a remote
 //! node answers only a caller its own operator granted that capability to.
 //!
@@ -52,7 +65,15 @@ fn digest(domain: &str, parts: &[&str]) -> String {
 }
 
 /// The facts a node serves, from what its host measured. Pure.
-pub fn facts_from_observation(observed: &LocalityObservation) -> NodeLocalityFacts {
+pub fn facts_from_observation(
+    observed: &LocalityObservation,
+    site_id: &str,
+    as_of: &str,
+) -> NodeLocalityFacts {
+    NodeLocalityFacts::new(site_id, as_of, relations_from_observation(observed))
+}
+
+fn relations_from_observation(observed: &LocalityObservation) -> BTreeMap<String, RelationFact> {
     let boot: Result<(&str, String), &'static str> = if observed.kernel_kind == "gvisor" {
         // Under gVisor the kernel is emulated: its boot id is the sandbox's
         // own and says nothing about the machine beneath.
@@ -107,17 +128,22 @@ pub fn facts_from_observation(observed: &LocalityObservation) -> NodeLocalityFac
             }
         }
     }
-    NodeLocalityFacts::new(relations)
+    relations
 }
 
 /// This node's facts, observed now.
-pub fn local_facts(app_root: &std::path::Path) -> NodeLocalityFacts {
-    facts_from_observation(&LocalityObservation::observe(app_root))
+pub fn local_facts(app_root: &std::path::Path, site_id: &str) -> NodeLocalityFacts {
+    facts_from_observation(
+        &LocalityObservation::observe(app_root),
+        site_id,
+        &ryeos_effect_contract::rfc3339::now_millis(),
+    )
 }
 
 pub async fn handle(_req: Request, state: Arc<AppState>) -> Result<Value> {
     let app_root = state.config.app_root.clone();
-    let facts = tokio::task::spawn_blocking(move || local_facts(&app_root)).await?;
+    let site_id = state.threads.site_id().to_string();
+    let facts = tokio::task::spawn_blocking(move || local_facts(&app_root, &site_id)).await?;
     Ok(serde_json::to_value(facts)?)
 }
 
@@ -142,6 +168,14 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 mod tests {
     use super::*;
     use ryeos_effect_contract::locality::{LOCALITY_FACTS_SCHEMA, RelationFact};
+
+    const SITE_ID: &str = "site:test-node";
+    const AS_OF: &str = "2026-11-19T00:00:00.000Z";
+
+    /// The facts as the tests read them: one fixed node and time.
+    fn facts_from_observation(observed: &LocalityObservation) -> NodeLocalityFacts {
+        super::facts_from_observation(observed, SITE_ID, AS_OF)
+    }
 
     const BOOT_ID: &str = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
     const OTHER_BOOT_ID: &str = "ffffffff-4b5a-6978-8796-a5b4c3d2e1f0";
@@ -328,8 +362,10 @@ mod tests {
             let object = value.as_object().unwrap();
             assert_eq!(
                 object.keys().map(String::as_str).collect::<Vec<_>>(),
-                ["relations", "schema"]
+                ["as_of", "relations", "schema", "site_id"]
             );
+            assert_eq!(object["site_id"], SITE_ID);
+            assert_eq!(object["as_of"], AS_OF);
             for (relation, fact) in object["relations"].as_object().unwrap() {
                 let keys: Vec<_> = fact
                     .as_object()
@@ -351,7 +387,7 @@ mod tests {
     #[test]
     fn a_real_observation_never_carries_the_app_root_or_its_mount_point() {
         let root = tempfile::tempdir().unwrap();
-        let text = serde_json::to_string(&local_facts(root.path())).unwrap();
+        let text = serde_json::to_string(&local_facts(root.path(), SITE_ID)).unwrap();
         let path = root.path().display().to_string();
         assert!(!text.contains(&path), "{text}");
         let storage = lillux::process_control::RootStorageFacts::observe(root.path());

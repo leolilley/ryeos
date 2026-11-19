@@ -25,6 +25,27 @@
 //!   contradiction. It is shown, never hidden.
 //! - Reasons and grades are stable keys, never sentences. Relation names are
 //!   open strings: an unknown one is carried and compared, not refused.
+//! - Served wire types tolerate fields they do not know. A newer node may add
+//!   fields, grades or relations; an older reader decodes what it recognises
+//!   and reads the rest as `unknown` with the reason `unrecognised`, for that
+//!   relation only. Strictness belongs to signed stored records.
+//!
+//! What the relations mean, and do not mean:
+//!
+//! - `boot` is the kernel's per-boot id. It names one run of one kernel, so it
+//!   is not a machine id: the same machine reports a new value after a reboot,
+//!   and nothing here recognises a machine across boots.
+//! - `storage` is one filesystem instance: the kernel's device number for the
+//!   superblock that holds the node's app root. Equal means the same live
+//!   filesystem. Different does NOT mean different disks: two overlay mounts
+//!   over one disk, or two btrfs subvolumes, report different values. "Not
+//!   shared" therefore says nothing about the hardware beneath.
+//! - `account` is the effective uid within one boot.
+//!
+//! Member ids carry a prefix naming their kind of identity: `site:<fingerprint>`
+//! for this node and every pinned remote, `installed:<service name>` for an
+//! installed-not-connected node, and `pin:<name>` for a pin that failed
+//! verification. A machine declaration names `site:` ids only.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -32,13 +53,20 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 /// Schema of one node's own locality facts.
-pub const LOCALITY_FACTS_SCHEMA: &str = "ryeos.node.locality/v1";
+///
+/// `v2` added the node's own `site_id` and the time it measured (`as_of`).
+/// Further optional fields are additions and do not change the schema string.
+pub const LOCALITY_FACTS_SCHEMA: &str = "ryeos.node.locality/v2";
 /// Schema of the compared groups.
-pub const LOCALITY_GROUPS_SCHEMA: &str = "ryeos.node.locality.groups/v1";
+///
+/// `v2` moved member ids to the prefixed scheme and added
+/// `invalid_declarations`.
+pub const LOCALITY_GROUPS_SCHEMA: &str = "ryeos.node.locality.groups/v2";
 
-/// One kernel instance: shared fate.
+/// One run of one kernel: shared fate for that boot. Not a machine id.
 pub const RELATION_BOOT: &str = "boot";
-/// One backing filesystem: shared loss.
+/// One filesystem instance (one kernel superblock). Different values do not
+/// mean different disks.
 pub const RELATION_STORAGE: &str = "storage";
 /// One account: shared exposure.
 pub const RELATION_ACCOUNT: &str = "account";
@@ -70,6 +98,22 @@ pub const REASON_REMOTE_INVALID: &str = "remote_invalid";
 pub const REASON_REMOTE_ERROR: &str = "remote_error";
 /// The remote answered with something that is not valid locality facts.
 pub const REASON_INVALID_ANSWER: &str = "invalid_answer";
+/// The remote answered as a different node than the one pinned.
+pub const REASON_SITE_MISMATCH: &str = "site_mismatch";
+/// A reader met a grade, or a malformed fact, it does not recognise.
+pub const REASON_UNRECOGNISED: &str = "unrecognised";
+
+/// Stable code for a declaration excluded because another names the same node.
+pub const CODE_DECLARATION_CONFLICT: &str = "machine_declaration_conflict";
+
+/// Prefix of a site id: this node and every pinned remote.
+pub const SITE_ID_PREFIX: &str = "site:";
+/// Prefix of the id of an installed-not-connected node.
+pub const INSTALLED_ID_PREFIX: &str = "installed:";
+/// Prefix of the id of a remote pin that failed verification.
+pub const PIN_ID_PREFIX: &str = "pin:";
+/// Most members one declaration may name.
+pub const MAX_DECLARATION_MEMBERS: usize = 64;
 
 /// The grade of one relation fact, with the meaning of the same names in
 /// `lillux::process_control::ProofSource`.
@@ -78,7 +122,9 @@ pub const REASON_INVALID_ANSWER: &str = "invalid_answer";
 pub enum LocalityGrade {
     /// Observed by the node on its own host.
     Measured,
-    /// Not observed, or observed in a way that proves nothing.
+    /// Not observed, or observed in a way that proves nothing. A grade this
+    /// reader does not recognise decodes as this.
+    #[serde(other)]
     Unknown,
 }
 
@@ -94,14 +140,49 @@ impl LocalityGrade {
 
 /// What one node says about one relation: a digest it measured, or that it
 /// could not tell and why.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "grade", rename_all = "snake_case", deny_unknown_fields)]
+///
+/// Decoding never fails for this type. A grade this reader does not know, or a
+/// fact missing what its grade needs, reads as `Unknown` with the reason
+/// [`REASON_UNRECOGNISED`], so one new relation cannot make a node's whole
+/// answer unreadable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "grade", rename_all = "snake_case")]
 pub enum RelationFact {
     Measured { digest: String },
     Unknown { reason: String },
 }
 
+impl<'de> Deserialize<'de> for RelationFact {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Ok(Self::from_wire(&value))
+    }
+}
+
 impl RelationFact {
+    /// Read one served fact, tolerating anything this reader does not know.
+    fn from_wire(value: &serde_json::Value) -> Self {
+        let unrecognised = || Self::Unknown {
+            reason: REASON_UNRECOGNISED.to_owned(),
+        };
+        let text = |key: &str| value.get(key).and_then(serde_json::Value::as_str);
+        match text("grade") {
+            Some("measured") => match text("digest") {
+                Some(digest) if is_digest(digest) => Self::Measured {
+                    digest: digest.to_owned(),
+                },
+                _ => unrecognised(),
+            },
+            Some("unknown") => match text("reason") {
+                Some(reason) if require_key("reason", reason).is_ok() => Self::Unknown {
+                    reason: reason.to_owned(),
+                },
+                _ => unrecognised(),
+            },
+            _ => unrecognised(),
+        }
+    }
+
     pub fn grade(&self) -> LocalityGrade {
         match self {
             Self::Measured { .. } => LocalityGrade::Measured,
@@ -133,17 +214,42 @@ impl RelationFact {
 
 /// One node's own locality facts, as `service:node/locality` returns them.
 /// Digests only: never a boot id, path, mount, device or uid.
+///
+/// Unknown fields are ignored on decode, so a newer node's extra field does not
+/// make an older reader drop the node.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct NodeLocalityFacts {
     pub schema: String,
+    /// The node's own site id (`site:<fingerprint>`).
+    pub site_id: String,
+    /// When the node measured these facts, RFC 3339 millisecond `Z`.
+    pub as_of: String,
+    #[serde(deserialize_with = "lenient_relations")]
     pub relations: BTreeMap<String, RelationFact>,
 }
 
+/// Decode the relation map, dropping a relation whose name is not a stable
+/// key rather than refusing the node.
+fn lenient_relations<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<BTreeMap<String, RelationFact>, D::Error> {
+    let raw = BTreeMap::<String, RelationFact>::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .filter(|(relation, _)| require_key("relation", relation).is_ok())
+        .collect())
+}
+
 impl NodeLocalityFacts {
-    pub fn new(relations: BTreeMap<String, RelationFact>) -> Self {
+    pub fn new(
+        site_id: impl Into<String>,
+        as_of: impl Into<String>,
+        relations: BTreeMap<String, RelationFact>,
+    ) -> Self {
         Self {
             schema: LOCALITY_FACTS_SCHEMA.to_owned(),
+            site_id: site_id.into(),
+            as_of: as_of.into(),
             relations,
         }
     }
@@ -154,6 +260,16 @@ impl NodeLocalityFacts {
                 "locality facts schema `{}` is not `{LOCALITY_FACTS_SCHEMA}`",
                 self.schema
             )));
+        }
+        if !is_site_id(&self.site_id) {
+            return Err(LocalityError::Invalid(
+                "locality facts site_id is not a site id".to_owned(),
+            ));
+        }
+        if crate::rfc3339::parse_unix_millis(&self.as_of).is_err() {
+            return Err(LocalityError::Invalid(
+                "locality facts as_of is not an RFC 3339 time".to_owned(),
+            ));
         }
         for (relation, fact) in &self.relations {
             require_key("relation", relation)?;
@@ -195,9 +311,10 @@ pub enum MemberKind {
     InstalledNotConnected,
 }
 
-/// One node as the comparison receives it. `id` is the stable id (the site
-/// id; for an installed-not-connected node, its service association name).
-/// `name` is what the operator calls it.
+/// One node as the comparison receives it. `id` is the stable id in the
+/// prefixed scheme (see [`validate_member_id`]): `site:<fp>`, `installed:<name>`
+/// or `pin:<name>`. The comparison treats it as opaque. `name` is what the
+/// operator calls it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeInput {
@@ -213,9 +330,135 @@ pub struct NodeInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MachineDeclaration {
+    /// A lowercase key (`[a-z0-9_.-]`, at most 64, not starting with `.`).
     pub label: String,
-    /// Stable node ids (site ids).
+    /// Site ids (`site:<fingerprint>`) only. An installed-not-connected node
+    /// has no site id here and cannot be named.
     pub members: Vec<String>,
+}
+
+impl MachineDeclaration {
+    /// Whether the declaration is well formed: a label that is a stable key,
+    /// one to [`MAX_DECLARATION_MEMBERS`] distinct site ids.
+    pub fn validate(&self) -> Result<(), LocalityError> {
+        validate_machine_label(&self.label)?;
+        if self.members.is_empty() || self.members.len() > MAX_DECLARATION_MEMBERS {
+            return Err(LocalityError::Invalid(format!(
+                "a machine names 1 to {MAX_DECLARATION_MEMBERS} nodes, not {}",
+                self.members.len()
+            )));
+        }
+        let mut seen = BTreeSet::new();
+        for id in &self.members {
+            if !is_site_id(id) {
+                return Err(LocalityError::Invalid(format!(
+                    "member `{id}` is not a site id (`{SITE_ID_PREFIX}<fingerprint>`)"
+                )));
+            }
+            if !seen.insert(id.as_str()) {
+                return Err(LocalityError::Invalid(format!(
+                    "member `{id}` is named twice"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A declaration the node could not use, reported beside the groups instead
+/// of failing the view. `label` is the record's file stem.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InvalidDeclaration {
+    pub label: String,
+    /// Stable code, such as `machine_declaration_tampered`.
+    pub code: String,
+    pub message: String,
+}
+
+/// Set aside every declaration that shares a node with another. A node is on
+/// one machine and nothing here picks which declaration is right, so all the
+/// records involved are reported and none is used.
+pub fn exclude_conflicting_declarations(
+    declarations: Vec<MachineDeclaration>,
+) -> (Vec<MachineDeclaration>, Vec<InvalidDeclaration>) {
+    let mut by_member: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for declaration in &declarations {
+        for member in &declaration.members {
+            by_member
+                .entry(member.as_str())
+                .or_default()
+                .insert(declaration.label.as_str());
+        }
+    }
+    let mut conflicts: BTreeMap<String, String> = BTreeMap::new();
+    for (member, labels) in &by_member {
+        if labels.len() > 1 {
+            let named = labels.iter().copied().collect::<Vec<_>>().join(", ");
+            for label in labels {
+                conflicts.entry((*label).to_owned()).or_insert_with(|| {
+                    format!("node `{member}` is named by two machine declarations: {named}")
+                });
+            }
+        }
+    }
+    let mut usable = Vec::new();
+    let mut invalid = Vec::new();
+    for declaration in declarations {
+        match conflicts.get(&declaration.label) {
+            Some(message) => invalid.push(InvalidDeclaration {
+                label: declaration.label,
+                code: CODE_DECLARATION_CONFLICT.to_owned(),
+                message: message.clone(),
+            }),
+            None => usable.push(declaration),
+        }
+    }
+    (usable, invalid)
+}
+
+/// A machine label is a file stem and a group key, so it is a stable key that
+/// cannot hide as a dotfile.
+pub fn validate_machine_label(label: &str) -> Result<(), LocalityError> {
+    require_key("machine label", label)?;
+    if label.starts_with('.') {
+        return Err(LocalityError::Invalid(format!(
+            "machine label `{label}` must not start with `.`"
+        )));
+    }
+    Ok(())
+}
+
+/// The id of an installed-not-connected node, from its service name.
+pub fn installed_member_id(service_name: &str) -> String {
+    format!("{INSTALLED_ID_PREFIX}{service_name}")
+}
+
+/// The id of a remote pin that failed verification, from the pin's name.
+pub fn pin_member_id(name: &str) -> String {
+    format!("{PIN_ID_PREFIX}{name}")
+}
+
+fn is_site_id(id: &str) -> bool {
+    id.len() > SITE_ID_PREFIX.len() && id.len() <= 255 && id.starts_with(SITE_ID_PREFIX)
+}
+
+/// Whether `id` is in the scheme for a member of `kind`: `site:` for this node,
+/// `site:` or `pin:` for a remote, `installed:` for an installed-not-connected
+/// node. Each prefix must be followed by something.
+pub fn validate_member_id(kind: MemberKind, id: &str) -> Result<(), LocalityError> {
+    let has = |prefix: &str| id.len() > prefix.len() && id.starts_with(prefix);
+    let valid = match kind {
+        MemberKind::This => has(SITE_ID_PREFIX),
+        MemberKind::Remote => has(SITE_ID_PREFIX) || has(PIN_ID_PREFIX),
+        MemberKind::InstalledNotConnected => has(INSTALLED_ID_PREFIX),
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(LocalityError::Invalid(format!(
+            "member id `{id}` is not in the id scheme for a {kind:?} node"
+        )))
+    }
 }
 
 /// The named state of a group.
@@ -233,13 +476,15 @@ pub enum GroupState {
     Observed,
     /// One node, and nothing else shares its boot.
     Alone,
-    /// Nothing can be told about this node's host.
+    /// Nothing can be told about this node's host. A state this reader does
+    /// not recognise decodes as this.
+    #[serde(other)]
     CannotTell,
 }
 
 /// What a member's row says about the fan-out. Carries no facts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "state", rename_all = "snake_case")]
 pub enum MemberAnswer {
     Answered { as_of: String },
     DidNotAnswer { reason: String, as_of: String },
@@ -249,7 +494,6 @@ pub enum MemberAnswer {
 
 /// A member's grade for one relation. The digest is not repeated here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct MemberFact {
     pub grade: LocalityGrade,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -262,7 +506,6 @@ pub struct MemberFact {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct MemberRow {
     pub id: String,
     pub name: String,
@@ -280,7 +523,6 @@ pub struct MemberRow {
 /// that report the same digest. An `unknown` row names members that answered
 /// but could not tell, with the reason key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RelationRow {
     pub relation: String,
     pub grade: LocalityGrade,
@@ -290,7 +532,6 @@ pub struct RelationRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct LocalityGroup {
     /// Stable key: `machine:<label>` for a declared group, `node:<least id>`
     /// otherwise.
@@ -315,11 +556,14 @@ pub struct LocalityGroup {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct LocalityGroups {
     pub schema: String,
     pub as_of: String,
     pub groups: Vec<LocalityGroup>,
+    /// Declaration records that could not be used, reported one by one. Empty
+    /// from [`compare_locality`]; the caller that loaded the records fills it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub invalid_declarations: Vec<InvalidDeclaration>,
 }
 
 /// Why the comparison refused its input.
@@ -760,6 +1004,7 @@ pub fn compare_locality(
         schema: LOCALITY_GROUPS_SCHEMA.to_owned(),
         as_of: as_of.to_owned(),
         groups,
+        invalid_declarations: Vec::new(),
     })
 }
 
@@ -787,6 +1032,8 @@ mod tests {
 
     fn facts(relations: &[(&str, RelationFact)]) -> NodeLocalityFacts {
         NodeLocalityFacts::new(
+            "site:test",
+            AS_OF,
             relations
                 .iter()
                 .map(|(name, fact)| ((*name).to_owned(), fact.clone()))
@@ -1316,27 +1563,19 @@ mod tests {
     }
 
     #[test]
-    fn contract_types_reject_unknown_fields_and_round_trip() {
+    fn contract_types_round_trip() {
         let node_facts = facts(&[
             ("boot", measured("boot-1")),
             ("storage", unknown("not_measurable")),
         ]);
         let value = serde_json::to_value(&node_facts).unwrap();
         assert_eq!(value["schema"], LOCALITY_FACTS_SCHEMA);
+        assert_eq!(value["site_id"], "site:test");
+        assert_eq!(value["as_of"], AS_OF);
         assert_eq!(value["relations"]["boot"]["grade"], "measured");
         assert_eq!(value["relations"]["storage"]["reason"], "not_measurable");
-        let back: NodeLocalityFacts = serde_json::from_value(value.clone()).unwrap();
+        let back: NodeLocalityFacts = serde_json::from_value(value).unwrap();
         assert_eq!(back, node_facts);
-
-        let mut extra = value;
-        extra["boot_id"] = serde_json::json!("00000000-0000-0000-0000-000000000000");
-        assert!(serde_json::from_value::<NodeLocalityFacts>(extra).is_err());
-        assert!(
-            serde_json::from_value::<RelationFact>(serde_json::json!({
-                "grade": "measured", "digest": digest("x"), "path": "/x"
-            }))
-            .is_err()
-        );
 
         let groups = compare_locality(
             AS_OF,
@@ -1351,8 +1590,175 @@ mod tests {
             value["groups"][0]["members"][0]["answer"]["state"],
             "answered"
         );
+        assert!(value.get("invalid_declarations").is_none());
         let back: LocalityGroups = serde_json::from_value(value).unwrap();
         assert_eq!(back, groups);
+    }
+
+    #[test]
+    fn a_newer_node_with_extra_fields_and_grades_still_decodes() {
+        let value = serde_json::json!({
+            "schema": LOCALITY_FACTS_SCHEMA,
+            "site_id": "site:newer",
+            "as_of": AS_OF,
+            "added_later": {"anything": 1},
+            "relations": {
+                "boot": {"grade": "measured", "digest": digest("b"), "scope": "pid"},
+                "storage": {"grade": "attested", "digest": digest("s")},
+                "rack": {"grade": "measured"},
+                "account": "not an object",
+                "Bad Name": {"grade": "unknown", "reason": "x"},
+                "cpu": {"grade": "unknown", "reason": "Not a key"},
+            },
+        });
+        let decoded: NodeLocalityFacts = serde_json::from_value(value).unwrap();
+        decoded.validate().unwrap();
+        assert_eq!(decoded.relations["boot"], measured("b"));
+        let unrecognised = unknown(REASON_UNRECOGNISED);
+        for relation in ["storage", "rack", "account", "cpu"] {
+            assert_eq!(decoded.relations[relation], unrecognised, "{relation}");
+        }
+        assert!(!decoded.relations.contains_key("Bad Name"));
+
+        // Groups and their parts tolerate additions too, including a grade and
+        // a state this reader does not know.
+        let fact: MemberFact =
+            serde_json::from_value(serde_json::json!({"grade": "attested", "new": 1})).unwrap();
+        assert_eq!(fact.grade, LocalityGrade::Unknown);
+        let state: GroupState = serde_json::from_value(serde_json::json!("fused")).unwrap();
+        assert_eq!(state, GroupState::CannotTell);
+        let mut groups = serde_json::to_value(
+            compare_locality(
+                AS_OF,
+                &[answered("a", &[("boot", measured("boot-1"))])],
+                &[],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        groups["added_later"] = serde_json::json!(true);
+        groups["groups"][0]["added_later"] = serde_json::json!(true);
+        groups["groups"][0]["members"][0]["added_later"] = serde_json::json!(true);
+        serde_json::from_value::<LocalityGroups>(groups).unwrap();
+    }
+
+    #[test]
+    fn facts_need_a_site_id_and_a_time() {
+        let mut bad = facts(&[("boot", measured("b"))]);
+        bad.site_id = "not-a-site".to_owned();
+        assert!(bad.validate().is_err());
+        let mut bad = facts(&[("boot", measured("b"))]);
+        bad.as_of = "yesterday".to_owned();
+        assert!(bad.validate().is_err());
+        let mut bad = facts(&[("boot", measured("b"))]);
+        bad.schema = "ryeos.node.locality/v1".to_owned();
+        assert!(bad.validate().is_err());
+    }
+
+    /// The served wire contracts. A change to any of these strings or key sets
+    /// is a contract change: bump the schema string and update this test with
+    /// it, deliberately.
+    #[test]
+    fn wire_schemas_and_id_scheme_are_pinned() {
+        assert_eq!(LOCALITY_FACTS_SCHEMA, "ryeos.node.locality/v2");
+        assert_eq!(LOCALITY_GROUPS_SCHEMA, "ryeos.node.locality.groups/v2");
+        assert_eq!(SITE_ID_PREFIX, "site:");
+        assert_eq!(INSTALLED_ID_PREFIX, "installed:");
+        assert_eq!(PIN_ID_PREFIX, "pin:");
+        assert_eq!(installed_member_id("ryeos-ab"), "installed:ryeos-ab");
+        assert_eq!(pin_member_id("hosted"), "pin:hosted");
+
+        let facts_value = serde_json::to_value(facts(&[("boot", measured("b"))])).unwrap();
+        let mut keys: Vec<&str> = facts_value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["as_of", "relations", "schema", "site_id"]);
+
+        let groups = compare_locality(
+            AS_OF,
+            &[answered("a", &[("boot", measured("boot-1"))])],
+            &[],
+        )
+        .unwrap();
+        let value = serde_json::to_value(&groups).unwrap();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["as_of", "groups", "schema"]);
+        let mut group_keys: Vec<&str> = value["groups"][0]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        group_keys.sort_unstable();
+        assert_eq!(
+            group_keys,
+            ["key", "members", "relations", "state", "this_computer"]
+        );
+    }
+
+    #[test]
+    fn member_ids_are_prefixed_by_the_kind_of_identity() {
+        let ok = |kind, id| validate_member_id(kind, id).is_ok();
+        assert!(ok(MemberKind::This, "site:abc"));
+        assert!(ok(MemberKind::Remote, "site:abc"));
+        assert!(ok(MemberKind::Remote, "pin:broken"));
+        assert!(ok(MemberKind::InstalledNotConnected, "installed:ryeos-ab"));
+        assert!(!ok(MemberKind::This, "pin:x"));
+        assert!(!ok(MemberKind::Remote, "installed:x"));
+        assert!(!ok(MemberKind::Remote, "remote:broken"));
+        assert!(!ok(MemberKind::Remote, "site:"));
+        assert!(!ok(MemberKind::InstalledNotConnected, "ryeos-ab"));
+        assert!(!ok(MemberKind::InstalledNotConnected, "site:abc"));
+    }
+
+    #[test]
+    fn a_declaration_names_distinct_site_ids_under_a_stable_label() {
+        let good = declaration("workstation", &["site:a", "site:b"]);
+        good.validate().unwrap();
+        for bad in [
+            declaration("Work", &["site:a"]),
+            declaration(".hidden", &["site:a"]),
+            declaration("", &["site:a"]),
+            declaration("w", &[]),
+            declaration("w", &["installed:ryeos-ab"]),
+            declaration("w", &["pin:x"]),
+            declaration("w", &["site:a", "site:a"]),
+            declaration("w", &["a"]),
+        ] {
+            assert!(bad.validate().is_err(), "{bad:?}");
+        }
+        let many: Vec<String> = (0..=MAX_DECLARATION_MEMBERS)
+            .map(|n| format!("site:{n}"))
+            .collect();
+        let many: Vec<&str> = many.iter().map(String::as_str).collect();
+        assert!(declaration("w", &many).validate().is_err());
+    }
+
+    #[test]
+    fn declarations_sharing_a_node_are_all_set_aside_with_a_reason() {
+        let (usable, invalid) = exclude_conflicting_declarations(vec![
+            declaration("one", &["site:a", "site:b"]),
+            declaration("two", &["site:b", "site:c"]),
+            declaration("three", &["site:d"]),
+        ]);
+        assert_eq!(usable, [declaration("three", &["site:d"])]);
+        let labels: Vec<_> = invalid.iter().map(|entry| entry.label.as_str()).collect();
+        assert_eq!(labels, ["one", "two"]);
+        assert!(invalid.iter().all(
+            |entry| entry.code == CODE_DECLARATION_CONFLICT && entry.message.contains("site:b")
+        ));
+        // What is left compares without refusal.
+        compare_locality(AS_OF, &[], &usable).unwrap();
     }
 
     #[test]

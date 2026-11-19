@@ -1,0 +1,7 @@
+# ryeos:signed:2026-11-19T05:15:46Z:240d659bed8105c36424700592f36d906c20ce36e8352aba4b0c266117a6b57e:FlK1qI4IsDOUzNZYObcG1Wp3jc9TSByrCwMIBIzPnqgKmmuB4SNzLq3jQ5MtxYtw19TgNyNCT2AVzJxmbN1aDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: node.machine.remove
+required_caps: ["ryeos.execute.service.node/machine/remove"]
+schema:
+  label: string
+description: "Remove a machine declaration record, whether or not it still verifies. Only the configured local operator may remove one."
