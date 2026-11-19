@@ -768,7 +768,8 @@ async fn a_restart_after_the_deadline_settles_without_spawning() {
     );
 }
 
-/// A successor born inside the wrap-up window is told once, with the time left
+/// A successor born inside the wrap-up window (here open for most of a long
+/// run, so several successors are born in it) is told once, with the time left
 /// now, when its carried start no longer holds the notice. With a zero carry a
 /// successor keeps only pinned inputs, so the notice recorded by an earlier
 /// thread of the chain is gone from its conversation; no request ever holds
@@ -786,18 +787,18 @@ async fn a_successor_in_the_wrap_up_window_is_told_once() {
         &script,
         RigOptions {
             context_window: 2000,
-            header_extra: "limits:\n  wrap_up_seconds: 20\n  deadline:\n    reserve_seconds: 5\ncontinuation:\n  carry_turns: 0\n",
+            header_extra: "limits:\n  wrap_up_seconds: 80\n  deadline:\n    reserve_seconds: 5\ncontinuation:\n  carry_turns: 0\n",
             limits: None,
             ..RigOptions::default()
         },
     )
     .await
     .expect("start rig");
-    let id = launch_on_with(&rig, json!({"run_timeout": 60}))
+    let id = launch_on_with(&rig, json!({"run_timeout": 120}))
         .await
         .expect("launch");
     // The root settles as `continued` early; wait for the whole chain.
-    let give_up = Instant::now() + Duration::from_secs(150);
+    let give_up = Instant::now() + Duration::from_secs(220);
     let mut stable = 0u32;
     let mut last = 0usize;
     while stable < 6 && Instant::now() < give_up {
