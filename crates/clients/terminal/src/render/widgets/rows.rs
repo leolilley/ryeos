@@ -81,9 +81,18 @@ pub fn draw_rows(
         };
         let primary_width = width.saturating_sub(3 + meta_width + usize::from(meta_width > 0));
         let mut primary = row.primary.clone();
-        if let Some(secondary) = &row.secondary {
+        // A launcher record that cannot be chosen says why in place of its
+        // description, and sits dim.
+        let reason = row
+            .launch
+            .as_ref()
+            .and_then(|launch| launch.reason.as_deref());
+        if let Some(second) = reason.or(row.secondary.as_deref()) {
             primary.push_str("  ");
-            primary.push_str(secondary);
+            primary.push_str(second);
+        }
+        if reason.is_some() && !row.selected {
+            style = style_muted();
         }
         surface.draw_text(
             rect.x as usize + 2,
@@ -155,6 +164,7 @@ mod tests {
             expandable: false,
             expanded: false,
             detail: Vec::new(),
+            launch: None,
             changed_at_ms: None,
             changed_tone: None,
         };

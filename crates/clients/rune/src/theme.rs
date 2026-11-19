@@ -221,6 +221,8 @@ impl Tokens {
 
 // ---- Type ----
 
+/// The launcher's find line.
+pub const TYPE_FIND: TextStyle = TextStyle::new(19.0, 400.0);
 /// Prose, message, composer placeholder.
 pub const TYPE_PROSE: TextStyle = TextStyle::new(15.0, 400.0);
 /// Tile title, dock title.
@@ -369,8 +371,12 @@ pub fn drawable(text: &str, face: Face) -> std::borrow::Cow<'_, str> {
 
 // ---- The shell look (part 5) ----
 
-/// The tabs band's height.
+/// The tabs band's height, and how far the words drop from its top: they sit
+/// level with the switcher's chips.
 pub const TABS_HEIGHT: f32 = 50.0;
+pub const TABS_TOP: f32 = 6.0;
+/// The Surfaces switcher along the top: its band, 10 above its 30 high island.
+pub const SWITCHER_BAND_HEIGHT: f32 = 40.0;
 /// The floating status bar's row: its 30 high islands and the 10 beneath.
 pub const STATUS_BAR_HEIGHT: f32 = 40.0;
 /// An island of the status bar.

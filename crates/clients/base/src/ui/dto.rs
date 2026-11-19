@@ -258,6 +258,75 @@ impl RyeOsAttentionDto {
     }
 }
 
+/// The one coverage-wording response contract this client reads.
+pub const COVERAGE_WORDING_CONTRACT: &str = "ryeos.ui.coverage_wording.v1";
+
+/// The tones a wording entry may name. `none` draws as the neutral ink.
+const WORDING_TONES: [&str; 5] = ["none", "good", "warn", "danger", "accent"];
+
+/// One sentence and the tone it is drawn in.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RyeOsWordingEntry {
+    pub label: String,
+    pub tone: String,
+}
+
+/// The signed words for a table's coverage line, as the daemon serves them.
+/// The client holds no wording of its own: with no words loaded, every
+/// coverage line reads as unknown.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RyeOsCoverageWordingDto {
+    /// Used when the state is not one of `states`.
+    pub fallback: RyeOsWordingEntry,
+    /// The default sentence for each state.
+    pub states: std::collections::BTreeMap<String, RyeOsWordingEntry>,
+    /// The sentence for a reason, whichever state reports it.
+    pub reasons: std::collections::BTreeMap<String, RyeOsWordingEntry>,
+}
+
+impl RyeOsCoverageWordingDto {
+    /// Read a response of the contract this client speaks. Any other version,
+    /// an empty sentence or a tone outside the closed list is refused.
+    pub fn from_response(value: &serde_json::Value) -> Result<Self, String> {
+        let found = value
+            .get("schema_version")
+            .and_then(serde_json::Value::as_str);
+        if found != Some(COVERAGE_WORDING_CONTRACT) {
+            return Err(format!(
+                "coverage wording is {}; this client reads {COVERAGE_WORDING_CONTRACT}",
+                found.unwrap_or("unversioned")
+            ));
+        }
+        let wording: Self =
+            serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
+        let entries = std::iter::once(&wording.fallback)
+            .chain(wording.states.values())
+            .chain(wording.reasons.values());
+        for entry in entries {
+            if entry.label.trim().is_empty() {
+                return Err("coverage wording has an empty sentence".into());
+            }
+            if !WORDING_TONES.contains(&entry.tone.as_str()) {
+                return Err(format!(
+                    "coverage wording has an unknown tone {}",
+                    entry.tone
+                ));
+            }
+        }
+        Ok(wording)
+    }
+
+    /// The sentence for a reported `(state, reason)`: the reason's own when it
+    /// has one and the state is known, else the state's default, else the
+    /// fallback. A code is never returned as text.
+    pub fn resolve(&self, state: &str, reason: &str) -> &RyeOsWordingEntry {
+        match self.states.get(state) {
+            Some(default) => self.reasons.get(reason).unwrap_or(default),
+            None => &self.fallback,
+        }
+    }
+}
+
 /// One attention or running item, as far as the shell reads it.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct RyeOsAttentionItemDto {

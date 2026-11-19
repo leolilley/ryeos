@@ -9,6 +9,7 @@
 mod boot;
 mod field;
 mod icons;
+mod launcher;
 mod marks;
 mod overlay;
 #[cfg(test)]
@@ -418,7 +419,7 @@ impl App {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn fixture(core: Result<ryeos_client_base::ui::RyeOsCore, String>, dress: Dress) -> App {
-        App {
+        let mut app = App {
             boot: Boot::default(),
             phase: match core {
                 Ok(core) => Phase::Fixture(Box::new(core)),
@@ -427,7 +428,11 @@ impl App {
             local: Local::default(),
             model: Default::default(),
             dress,
-        }
+        };
+        // A scene that typed into the core before the app existed shows the
+        // text in its fields from the first frame.
+        app.sync_edits();
+        app
     }
 
     /// Apply `f` to the view a mounted instance shows in the current model.
@@ -509,7 +514,31 @@ impl App {
             self.local.edits.sync(&vm);
             self.local.sync_field_queries(&vm);
             self.local.drop_stale(&vm);
+            if let Some(request) = vm.rename.clone() {
+                self.take_rename_request(request);
+            }
         }
+    }
+
+    /// A command asked for a rename: open the field on the name it names, and
+    /// tell the core the request is taken.
+    fn take_rename_request(&mut self, request: ryeos_client_base::ui::view_model::RyeOsRenameVm) {
+        use ryeos_client_base::ui::{RyeOsRenameTarget, RyeOsUiIntent};
+        let target = match request.target {
+            RyeOsRenameTarget::ViewSet { view_set_id } => RenameTarget::ViewSet(view_set_id),
+            RyeOsRenameTarget::Surface {
+                surface_instance_id,
+                binding,
+            } => RenameTarget::Surface(RyeOsUiIntent::RenameSurface {
+                surface_instance_id,
+                binding,
+                title: request.title.clone(),
+            }),
+        };
+        self.begin_rename(target, &request.title);
+        self.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::ResolveRename { title: None },
+        });
     }
 
     /// Tell the core when a field took keyboard focus, as the browser

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-19T22:29:40Z:100c263168955aa77d5889f426c35ef9f8e3630aef041b83a5cace6962809e83:Plb41nAi2sOeyFxMQqjLX4sl+N8I3NXm+OBjTRJu5LfYGVdsuk6w4P535pSgRl/m0hwJCRK+sKMUskm1F2PKCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-19T05:58:46Z:3fa87cf8339647c5a00162a4a6afd5d776ae828cdbecd9a0ae27c0f1fbd1b304:zroEMZAjUOBB3Icn/4LR/HXyo8NsuAuqMZtbqnR42VgEIfuE+DpHNRYuppn2wRW1oMgGFUVcb/hXfjMI4TpHBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: items-space
 title: Item Space
 version: "1.0.0"
@@ -16,8 +16,10 @@ projections:
   columns:
     - label: item
       field: canonical_ref
+      role: ref
     - label: kind
       field: item_kind
+      role: kind
     - label: space
       field: space
     - label: trust

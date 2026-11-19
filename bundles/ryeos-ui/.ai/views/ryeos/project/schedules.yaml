@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-19T22:29:40Z:4a18ef986859c69151047986caf884f28e7c43f46ec2e25a4584ed552ade899d:NtJrqNm0JoweX6kct9DBaHpdxkn1ujuesjzFPUFXPF4uvWjN8kNn6WF7mn+IsM//l58yUT/FJgWZtMAG5OXyDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-19T05:58:47Z:408790d1214485801576d3fe7cc05cb494da1b4cee9cf22bf7a99f0f5ee63512:t8gFKMszxshnQMnUzsJPYq1RZF1TS+o+hDEcsgfoEIai767MR/LcQkke6cx24nTJGDlhmuW72aINFWOmgsxVAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: project-schedules
 title: My schedules
 version: "1.0.0"
@@ -16,6 +16,7 @@ projections:
       field: schedule_id
     - label: item
       field: item_ref
+      role: ref
     - label: expression
       field: expression
     - label: enabled

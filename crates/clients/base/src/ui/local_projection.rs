@@ -4,8 +4,12 @@
 //! records must be regenerated against the exact mounted binding before their
 //! canonical Rust intent can be activated.
 
-use super::view_model::{RyeOsRowVm, RyeOsTone, RyeOsViewVm};
-use super::{content::ViewBinding, event::RyeOsUiIntent, model::RyeOsCore};
+use super::view_model::{RyeOsLaunchRowVm, RyeOsRowVm, RyeOsTone, RyeOsViewVm};
+use super::{
+    content::ViewBinding,
+    event::{RyeOsRenameTarget, RyeOsUiIntent},
+    model::RyeOsCore,
+};
 use crate::ids::RyeOsViewInstanceKey;
 use serde::{Deserialize, Serialize};
 
@@ -17,6 +21,9 @@ pub enum ViewLocalProjection {
     SessionDetails,
 }
 
+/// The group every record that is not a view is listed under.
+const COMMAND_GROUP: &str = "Commands";
+
 #[derive(Serialize)]
 struct Candidate {
     id: String,
@@ -24,6 +31,17 @@ struct Candidate {
     hint: String,
     enabled: bool,
     intent: Option<RyeOsUiIntent>,
+    launch: Option<CandidateLaunch>,
+}
+
+/// How a launcher record is listed: its group, the note at its right, why it
+/// is unavailable, and whether it is a choice of place.
+#[derive(Serialize)]
+struct CandidateLaunch {
+    group: String,
+    meta: Option<String>,
+    reason: Option<String>,
+    place: bool,
 }
 
 fn candidate(
@@ -31,6 +49,37 @@ fn candidate(
     hint: String,
     enabled: bool,
     intent: Option<RyeOsUiIntent>,
+) -> Option<Candidate> {
+    candidate_listed(label, hint, enabled, intent, None)
+}
+
+/// A record of the launcher that is a command, not a view.
+fn command_candidate(
+    label: String,
+    hint: String,
+    enabled: bool,
+    intent: Option<RyeOsUiIntent>,
+) -> Option<Candidate> {
+    candidate_listed(
+        label,
+        hint,
+        enabled,
+        intent,
+        Some(CandidateLaunch {
+            group: COMMAND_GROUP.to_owned(),
+            meta: None,
+            reason: None,
+            place: false,
+        }),
+    )
+}
+
+fn candidate_listed(
+    label: String,
+    hint: String,
+    enabled: bool,
+    intent: Option<RyeOsUiIntent>,
+    launch: Option<CandidateLaunch>,
 ) -> Option<Candidate> {
     let id = super::seat_digest::seat_payload_digest(&serde_json::json!({
         "domain":"ryeos.ui.local-projection.record.v1", "label":label,"hint":hint,"intent":intent,
@@ -42,7 +91,40 @@ fn candidate(
         hint,
         enabled,
         intent,
+        launch,
     })
+}
+
+/// Why a view cannot open here, from the facets it needs and has not got.
+/// Each facet path names its subject: a selection facet reads "a selected
+/// thread", any other reads as its root.
+fn place_launch(group: &str, key: &str) -> CandidateLaunch {
+    CandidateLaunch {
+        group: group.to_owned(),
+        meta: Some(key.to_owned()),
+        reason: None,
+        place: true,
+    }
+}
+
+fn needs_reason(missing: &[String]) -> String {
+    let mut subjects: Vec<String> = Vec::new();
+    for spec in missing {
+        let mut parts = spec.split('.');
+        let root = parts.next().unwrap_or_default();
+        let subject = match root {
+            "selection" => {
+                let noun = parts.next().unwrap_or("item");
+                let noun = noun.strip_suffix("_id").unwrap_or(noun);
+                format!("a selected {}", noun.replace('_', " "))
+            }
+            other => other.replace('_', " "),
+        };
+        if !subjects.contains(&subject) {
+            subjects.push(subject);
+        }
+    }
+    format!("needs {}", subjects.join(" and "))
 }
 
 fn global_or_exact_command(
@@ -58,8 +140,14 @@ fn global_or_exact_command(
         | RyeOsUiIntent::SelectSurface { .. }
         | RyeOsUiIntent::CloseSurface { .. }
         | RyeOsUiIntent::RenameSurface { .. }
+        | RyeOsUiIntent::BeginRename {
+            target: RyeOsRenameTarget::Surface { .. },
+        }
         | RyeOsUiIntent::ReleaseBindingAttachment { .. } => true,
-        RyeOsUiIntent::NewViewSet
+        RyeOsUiIntent::BeginRename {
+            target: RyeOsRenameTarget::ViewSet { .. },
+        }
+        | RyeOsUiIntent::NewViewSet
         | RyeOsUiIntent::DuplicateViewSet { .. }
         | RyeOsUiIntent::CloseViewSet { .. } => has_destination,
         RyeOsUiIntent::InvokeAffordance { .. }
@@ -80,6 +168,34 @@ fn global_or_exact_command(
         // substitutes for an exactly captured operation.
         _ => false,
     }
+}
+
+/// Whether a listed command acts on the focused tile's selection or the tile
+/// itself, rather than on the shell, the Surface or its view sets.
+fn acts_on_selection(record: &Candidate) -> bool {
+    let is_command = record
+        .launch
+        .as_ref()
+        .is_some_and(|launch| launch.group == COMMAND_GROUP);
+    is_command
+        && matches!(
+            record.intent,
+            Some(
+                RyeOsUiIntent::InvokeAffordance { .. }
+                    | RyeOsUiIntent::InspectItem { .. }
+                    | RyeOsUiIntent::InspectThread { .. }
+                    | RyeOsUiIntent::InspectSummary { .. }
+                    | RyeOsUiIntent::ReadFile { .. }
+                    | RyeOsUiIntent::PinViewSelection { .. }
+                    | RyeOsUiIntent::OpenPinnedViewAlongside { .. }
+                    | RyeOsUiIntent::FollowViewSetSelection { .. }
+                    | RyeOsUiIntent::MoveTileToViewSet { .. }
+                    | RyeOsUiIntent::MoveTileToSurfaceViewSet { .. }
+                    | RyeOsUiIntent::PromoteTileToMaster { .. }
+                    | RyeOsUiIntent::MoveTileBeside { .. }
+                    | RyeOsUiIntent::MoveTileToGroup { .. }
+            )
+        )
 }
 
 /// A local projection cannot be its own contextual row source: asking for its
@@ -143,6 +259,7 @@ fn candidates(
         )
     }) && origin_visible;
     let mut records = Vec::new();
+    let mut places: Vec<Candidate> = Vec::new();
     if destination.is_some() && !destination_active {
         records.push(candidate(
             "Captured tab is not active".into(),
@@ -188,8 +305,15 @@ fn candidates(
                         },
                     ))
                 });
+                let staged = core
+                    .launcher_stage
+                    .as_ref()
+                    .filter(|(stage_instance, _)| stage_instance == instance)
+                    .map(|(_, view_ref)| view_ref.clone());
                 let mut listed = std::collections::BTreeSet::new();
                 for group in core.library_groups() {
+                    let mut available = Vec::new();
+                    let mut unavailable = Vec::new();
                     for view_ref in group.refs {
                         if !listed.insert(view_ref.clone()) {
                             continue;
@@ -206,64 +330,99 @@ fn candidates(
                             .clone()
                             .or_else(|| view.name.clone())
                             .unwrap_or_else(|| view_ref.clone());
+                        let hint = view
+                            .description
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|description| !description.is_empty())
+                            .map_or_else(|| group.title.clone(), str::to_owned);
                         let missing = super::view_model::unsatisfied_facets(core, view);
-                        records.push(candidate(
-                            label.clone(),
-                            if missing.is_empty() {
-                                format!("{} · Open admitted View in the captured tab", group.title)
-                            } else {
-                                format!(
-                                    "{} · Requires selection: {}",
-                                    group.title,
-                                    missing.join(", ")
-                                )
-                            },
-                            missing.is_empty(),
-                            Some(RyeOsUiIntent::OpenView {
-                                view: crate::view_set::ViewSpec::bound(view_ref.clone()),
-                            }),
-                        )?);
                         let descriptor = core.binding_attachment(attachment_id)?;
-                        records.push(candidate(
-                            format!("{label} · New tab"),
-                            format!(
-                                "{} · Fresh composition; select any required subject anew",
-                                group.title
-                            ),
-                            core.composition_write_available(),
-                            Some(RyeOsUiIntent::OpenViewInNewTab {
-                                surface_instance_id: destination.surface_instance_id.clone(),
-                                view_set_id: destination.view_set_id,
-                                binding: super::binding::UiBindingAttachmentCoordinate {
-                                    binding_attachment_id: descriptor.binding_attachment_id.clone(),
-                                    binding_generation: descriptor.binding_generation,
-                                    binding_digest: descriptor.binding_digest.clone(),
-                                },
-                                view_ref: view_ref.clone(),
-                            }),
-                        )?);
-                        if let Some((dialog_id, dialog_binding)) = &composed_opener {
-                            records.push(candidate(
-                                format!("{label} · New Surface"),
-                                "Fresh subject selection in a separately admitted Surface".into(),
-                                core.composition_write_available(),
-                                Some(RyeOsUiIntent::OpenCompositionInNewSurface {
+                        let coordinate = super::binding::UiBindingAttachmentCoordinate {
+                            binding_attachment_id: descriptor.binding_attachment_id.clone(),
+                            binding_generation: descriptor.binding_generation,
+                            binding_digest: descriptor.binding_digest.clone(),
+                        };
+                        let write = core.composition_write_available();
+                        let open_here = RyeOsUiIntent::OpenView {
+                            view: crate::view_set::ViewSpec::bound(view_ref.clone()),
+                        };
+                        let new_tab = RyeOsUiIntent::OpenViewInNewTab {
+                            surface_instance_id: destination.surface_instance_id.clone(),
+                            view_set_id: destination.view_set_id,
+                            binding: coordinate.clone(),
+                            view_ref: view_ref.clone(),
+                        };
+                        let new_surface =
+                            composed_opener.as_ref().map(|(dialog_id, dialog_binding)| {
+                                RyeOsUiIntent::OpenCompositionInNewSurface {
                                     surface_instance_id: destination.surface_instance_id.clone(),
                                     view_set_id: destination.view_set_id,
-                                    binding: super::binding::UiBindingAttachmentCoordinate {
-                                        binding_attachment_id: descriptor
-                                            .binding_attachment_id
-                                            .clone(),
-                                        binding_generation: descriptor.binding_generation,
-                                        binding_digest: descriptor.binding_digest.clone(),
-                                    },
-                                    view_ref: Some(view_ref),
+                                    binding: coordinate.clone(),
+                                    view_ref: Some(view_ref.clone()),
                                     dialog_id: dialog_id.clone(),
                                     dialog_binding: dialog_binding.clone(),
-                                }),
+                                }
+                            });
+                        let usable = missing.is_empty();
+                        if usable && staged.as_ref() == Some(&view_ref) {
+                            places.push(candidate_listed(
+                                "In this tile, as a tab".into(),
+                                String::new(),
+                                true,
+                                Some(open_here.clone()),
+                                Some(place_launch(&group.title, "↵")),
                             )?);
+                            if write {
+                                places.push(candidate_listed(
+                                    "New tab".into(),
+                                    String::new(),
+                                    true,
+                                    Some(new_tab),
+                                    Some(place_launch(&group.title, "T")),
+                                )?);
+                                if let Some(new_surface) = new_surface {
+                                    places.push(candidate_listed(
+                                        "New Surface".into(),
+                                        String::new(),
+                                        true,
+                                        Some(new_surface),
+                                        Some(place_launch(&group.title, "S")),
+                                    )?);
+                                }
+                            }
+                        }
+                        // With one place to go, choosing the view opens it.
+                        let intent = if !usable {
+                            None
+                        } else if write {
+                            Some(RyeOsUiIntent::StageLauncherView {
+                                instance_key: instance.clone(),
+                                view_ref: view_ref.clone(),
+                            })
+                        } else {
+                            Some(open_here)
+                        };
+                        let record = candidate_listed(
+                            label,
+                            hint,
+                            usable,
+                            intent,
+                            Some(CandidateLaunch {
+                                group: group.title.clone(),
+                                meta: Some(view.widget.clone()).filter(|kind| !kind.is_empty()),
+                                reason: (!usable).then(|| needs_reason(&missing)),
+                                place: false,
+                            }),
+                        )?;
+                        if usable {
+                            available.push(record);
+                        } else {
+                            unavailable.push(record);
                         }
                     }
+                    records.extend(available);
+                    records.extend(unavailable);
                 }
                 if let Some((dialog_id, dialog_binding)) = composed_opener {
                     let descriptor = core.binding_attachment(attachment_id)?;
@@ -287,7 +446,7 @@ fn candidates(
                                 })
                             });
                         if can_open_document {
-                            records.push(candidate(
+                            records.push(command_candidate(
                                     "Current Surface · New presentation".into(),
                                     "Prepare all tabs with fresh subjects, then open an explicit independent link".into(),
                                     core.composition_write_available(),
@@ -295,7 +454,7 @@ fn candidates(
                                 )?);
                         }
                     }
-                    records.push(candidate(
+                    records.push(command_candidate(
                         "Current tab · New Surface".into(),
                         "Reuse this layout without live pins, drafts or execution state".into(),
                         core.composition_write_available(),
@@ -328,7 +487,7 @@ fn candidates(
                     destination_active,
                     has_surface_origin && destination_active,
                 ) {
-                    records.push(candidate(
+                    records.push(command_candidate(
                         command.label,
                         command.hint,
                         command.enabled,
@@ -341,7 +500,7 @@ fn candidates(
                 {
                     continue;
                 }
-                records.push(candidate(
+                records.push(command_candidate(
                     dialog.title().to_owned(),
                     "Open admitted presentation dialog".into(),
                     true,
@@ -362,7 +521,7 @@ fn candidates(
         "origin_binding":origin.and_then(|origin| core.binding_attachment_for_instance(origin)),
         "origin_route":origin.map(|origin| core.route_for_instance(origin)),
         "origin_selection":origin.and_then(|origin| core.facet_value_for_instance(origin,"selection")),
-        "insertion_binding":insertion_binding,"layout":core.layout_guard(),"records":records,
+        "insertion_binding":insertion_binding,"layout":core.layout_guard(),"records":records,"places":places,
     })).ok()?;
     if let Some(input) = binding.input.as_ref().filter(|input| input.local_filter) {
         let key = core.input_key_for(instance.clone(), mount.view_ref(), input)?;
@@ -371,14 +530,26 @@ fn candidates(
             .get(&key.storage_key())
             .map(|buffer| buffer.text.trim().to_lowercase())
             .unwrap_or_default();
+        // The view finder lists views and the commands that stand alone.
+        // A command that acts on the focused tile's selected row (inspect,
+        // compare, move the tile) is found by typing for it, and is not
+        // listed beside the views while the find line is empty.
+        if query.is_empty() && projection == ViewLocalProjection::Launcher {
+            records.retain(|record| !acts_on_selection(record));
+        }
         if !query.is_empty() {
             records.retain(|record| {
-                format!("{} {}", record.label, record.hint)
+                let group = record
+                    .launch
+                    .as_ref()
+                    .map_or("", |launch| launch.group.as_str());
+                format!("{} {} {}", record.label, record.hint, group)
                     .to_lowercase()
                     .contains(&query)
             });
         }
     }
+    records.extend(places);
     Some((records, guard))
 }
 
@@ -434,32 +605,67 @@ pub(crate) fn project(
         .enumerate()
         .map(|(index, record)| {
             let enabled = record.enabled;
-            RyeOsRowVm {
-                id: record.id.clone(),
-                cursor: index,
-                glyph: (!enabled).then(|| "×".to_string()),
-                primary: record.label,
-                secondary: Some(if enabled {
-                    record.hint
-                } else {
-                    format!("Unavailable — {}", record.hint)
-                }),
-                meta: None,
-                kind: (!enabled).then(|| "unavailable".to_string()),
-                intent: record.intent.filter(|_| enabled).map(|_| {
-                    RyeOsUiIntent::ActivateLocalProjection {
-                        instance_key: instance.clone(),
-                        record_id: record.id,
-                        projection_guard: guard.clone(),
-                    }
-                }),
-                tone: RyeOsTone::Neutral,
-                selected: selected == Some(index),
-                expandable: false,
-                expanded: false,
-                detail: Vec::new(),
-                changed_at_ms: None,
-                changed_tone: None,
+            let selected = selected == Some(index);
+            match record.launch {
+                // A launcher record: its own title and description, the group
+                // it is listed under, and, when it cannot be chosen, the
+                // reason in place of any prefix.
+                Some(launch) => RyeOsRowVm {
+                    id: record.id.clone(),
+                    cursor: index,
+                    glyph: None,
+                    primary: record.label,
+                    secondary: Some(record.hint).filter(|hint| !hint.is_empty()),
+                    meta: launch.meta,
+                    kind: (!enabled).then(|| "unavailable".to_string()),
+                    intent: record.intent.filter(|_| enabled).map(|_| {
+                        RyeOsUiIntent::ActivateLocalProjection {
+                            instance_key: instance.clone(),
+                            record_id: record.id,
+                            projection_guard: guard.clone(),
+                        }
+                    }),
+                    tone: RyeOsTone::Neutral,
+                    selected,
+                    expandable: false,
+                    expanded: false,
+                    detail: Vec::new(),
+                    launch: Some(RyeOsLaunchRowVm {
+                        group: launch.group,
+                        reason: launch.reason,
+                        place: launch.place,
+                    }),
+                    changed_at_ms: None,
+                    changed_tone: None,
+                },
+                None => RyeOsRowVm {
+                    id: record.id.clone(),
+                    cursor: index,
+                    glyph: (!enabled).then(|| "×".to_string()),
+                    primary: record.label,
+                    secondary: Some(if enabled {
+                        record.hint
+                    } else {
+                        format!("Unavailable — {}", record.hint)
+                    }),
+                    meta: None,
+                    kind: (!enabled).then(|| "unavailable".to_string()),
+                    intent: record.intent.filter(|_| enabled).map(|_| {
+                        RyeOsUiIntent::ActivateLocalProjection {
+                            instance_key: instance.clone(),
+                            record_id: record.id,
+                            projection_guard: guard.clone(),
+                        }
+                    }),
+                    tone: RyeOsTone::Neutral,
+                    selected,
+                    expandable: false,
+                    expanded: false,
+                    detail: Vec::new(),
+                    launch: None,
+                    changed_at_ms: None,
+                    changed_tone: None,
+                },
             }
         })
         .collect();
@@ -471,6 +677,113 @@ pub(crate) fn project(
         provenance: core.mounted_view_ref(instance).map(str::to_owned),
         affordance_hints: Vec::new(),
         rows,
+    }
+}
+
+impl RyeOsCore {
+    /// The row and intent of the first record of the launcher's current
+    /// projection that `matches`.
+    fn launcher_find(
+        &self,
+        instance: &RyeOsViewInstanceKey,
+        matches: impl Fn(&Candidate) -> bool,
+    ) -> Option<(usize, Option<RyeOsUiIntent>)> {
+        let view_ref = self.mounted_view_ref(instance)?;
+        let binding = self.binding_for_instance(instance, view_ref)?;
+        let (records, _) = candidates(self, instance, binding)?;
+        records
+            .into_iter()
+            .enumerate()
+            .find(|(_, record)| matches(record))
+            .map(|(row, record)| (row, record.intent))
+    }
+
+    fn set_launcher_cursor(&mut self, instance: &RyeOsViewInstanceKey, row: usize) {
+        if let Some(crate::view_set::ViewLocalState::GenericList { cursor, .. }) =
+            self.mounted_local_state_mut(instance)
+        {
+            *cursor = row;
+        }
+    }
+
+    /// Reveal where `view_ref` can land and put the point on the first place.
+    pub(crate) fn stage_launcher_view(
+        &mut self,
+        instance: RyeOsViewInstanceKey,
+        view_ref: String,
+    ) -> Vec<super::RyeOsEffect> {
+        let open = self.presentation.as_ref().is_some_and(|presentation| {
+            presentation
+                .dialogs()
+                .values()
+                .any(|dialog| dialog.is_open() && dialog.view().instance_key() == &instance)
+        });
+        if !open {
+            return Vec::new();
+        }
+        self.launcher_stage = Some((instance.clone(), view_ref));
+        let first = self.launcher_find(&instance, |record| {
+            record.launch.as_ref().is_some_and(|launch| launch.place)
+        });
+        match first {
+            Some((row, _)) => self.set_launcher_cursor(&instance, row),
+            None => self.launcher_stage = None,
+        }
+        self.bump_generation();
+        Vec::new()
+    }
+
+    /// Whether the focused launcher is showing where a chosen view can land.
+    pub fn launcher_places_open(&self) -> bool {
+        self.launcher_stage.as_ref().is_some_and(|(instance, _)| {
+            self.focused_view_instance_key().as_ref() == Some(instance)
+        })
+    }
+
+    /// Take the staged place whose key is `key`, if the node admits it.
+    pub(crate) fn choose_launcher_place(&mut self, key: char) -> Vec<super::RyeOsEffect> {
+        let Some((instance, _)) = self.launcher_stage.clone() else {
+            return Vec::new();
+        };
+        let wanted = key.to_string().to_lowercase();
+        let chosen = self.launcher_find(&instance, |record| {
+            record.enabled
+                && record.launch.as_ref().is_some_and(|launch| {
+                    launch.place
+                        && launch
+                            .meta
+                            .as_ref()
+                            .is_some_and(|meta| meta.to_lowercase() == wanted)
+                })
+        });
+        let Some((_, Some(intent))) = chosen else {
+            return Vec::new();
+        };
+        self.launcher_stage = None;
+        self.dispatch_intent(intent)
+    }
+
+    /// Close the second stage of the launcher dialog `instance`, putting the
+    /// point back on the view it was opened from. False when none was open.
+    pub(crate) fn leave_launcher_stage(&mut self, instance: &RyeOsViewInstanceKey) -> bool {
+        let Some((_, view_ref)) = self
+            .launcher_stage
+            .take_if(|(stage_instance, _)| stage_instance == instance)
+        else {
+            return false;
+        };
+        let row = self.launcher_find(instance, |record| {
+            matches!(
+                &record.intent,
+                Some(RyeOsUiIntent::StageLauncherView { view_ref: staged, .. })
+                    if *staged == view_ref
+            )
+        });
+        if let Some((row, _)) = row {
+            self.set_launcher_cursor(instance, row);
+        }
+        self.bump_generation();
+        true
     }
 }
 
@@ -545,6 +858,7 @@ fn session_details(
                 value,
                 tone: None,
             }],
+            launch: None,
             changed_at_ms: None,
             changed_tone: None,
         })
@@ -858,10 +1172,23 @@ mod tests {
             .binding_for_instance(&key, "view:ryeos/launcher")
             .unwrap();
         let (records, guard) = candidates(&core, &key, binding).unwrap();
+        let chosen = records
+            .iter()
+            .find(|row| matches!(&row.intent, Some(RyeOsUiIntent::StageLauncherView { .. })))
+            .expect("admitted library View is chosen before its place");
+        let Some(intent) = activate(&core, &key, &chosen.id, &guard) else {
+            panic!("the chosen View activates");
+        };
+        core.dispatch_intent(intent);
+        assert!(core.launcher_places_open());
+        let binding = core
+            .binding_for_instance(&key, "view:ryeos/launcher")
+            .unwrap();
+        let (records, guard) = candidates(&core, &key, binding).unwrap();
         let row = records
             .iter()
             .find(|row| matches!(&row.intent, Some(RyeOsUiIntent::OpenViewInNewTab { .. })))
-            .expect("admitted library View offers a new-tab action");
+            .expect("the staged View offers a new-tab place");
         let Some(RyeOsUiIntent::OpenViewInNewTab {
             surface_instance_id,
             view_set_id,
@@ -923,7 +1250,12 @@ mod tests {
         let (records, guard) = candidates(&core, &key, binding).unwrap();
         let views = records
             .iter()
-            .filter(|record| matches!(record.intent, Some(RyeOsUiIntent::OpenView { .. })))
+            .filter(|record| {
+                record
+                    .launch
+                    .as_ref()
+                    .is_some_and(|launch| launch.group == "Workbench")
+            })
             .collect::<Vec<_>>();
         assert_eq!(
             views
@@ -932,13 +1264,16 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["Beta", "Home", "Needs selection"]
         );
-        assert!(
-            views
-                .iter()
-                .all(|record| record.hint.starts_with("Workbench · "))
-        );
+        // With no description of its own, a view's second line is its group.
+        assert!(views.iter().all(|record| record.hint == "Workbench"));
         assert!(!views[2].enabled);
-        assert!(views[2].hint.contains("selection.thread_id"));
+        assert_eq!(
+            views[2]
+                .launch
+                .as_ref()
+                .and_then(|launch| launch.reason.as_deref()),
+            Some("needs a selected thread")
+        );
         assert!(activate(&core, &key, &views[2].id, &guard).is_none());
     }
 
@@ -1107,7 +1442,12 @@ mod tests {
         let (records, guard) = candidates(&core, &key, binding).unwrap();
         let record = records
             .iter()
-            .find(|record| matches!(record.intent, Some(RyeOsUiIntent::OpenView { .. })))
+            .find(|record| {
+                matches!(
+                    record.intent,
+                    Some(RyeOsUiIntent::OpenView { .. } | RyeOsUiIntent::StageLauncherView { .. })
+                )
+            })
             .unwrap();
         let id = record.id.clone();
         assert!(activate(&core, &key, &id, &guard).is_some());
@@ -1137,11 +1477,10 @@ mod tests {
                 .iter()
                 .any(|record| record.label == "Captured tab is not active" && !record.enabled)
         );
-        assert!(
-            !records
-                .iter()
-                .any(|record| matches!(record.intent, Some(RyeOsUiIntent::OpenView { .. })))
-        );
+        assert!(!records.iter().any(|record| matches!(
+            record.intent,
+            Some(RyeOsUiIntent::OpenView { .. } | RyeOsUiIntent::StageLauncherView { .. })
+        )));
         let RyeOsViewVm::Rows { .. } = project(&core, &key, binding) else {
             panic!("shared launcher should remain an ordinary visible View");
         };
@@ -1165,13 +1504,17 @@ mod tests {
             .find(|row| row.primary == "Close view set")
             .expect("single-set launcher retains the unavailable close action");
         assert_eq!(close.kind.as_deref(), Some("unavailable"));
-        assert_eq!(close.glyph.as_deref(), Some("×"));
+        assert!(close.glyph.is_none());
+        assert_eq!(
+            close.launch.as_ref().map(|launch| launch.group.as_str()),
+            Some(COMMAND_GROUP)
+        );
         assert!(
-            close
+            !close
                 .secondary
                 .as_deref()
                 .unwrap()
-                .starts_with("Unavailable — ")
+                .starts_with("Unavailable")
         );
         assert!(close.intent.is_none());
         assert!(rows.iter().any(|row| row.intent.is_some()));
@@ -1227,6 +1570,270 @@ mod tests {
                 super::super::event::RyeOsInputAction::NavigateSelection { delta: 1 }
             )
             .is_empty()
+        );
+    }
+
+    fn library_core(
+        library: serde_json::Value,
+        views: serde_json::Value,
+    ) -> (RyeOsCore, RyeOsViewInstanceKey) {
+        let mut session = test_support::session_with_surface(serde_json::json!({
+            "name":"library", "tiles":["view:test/home"], "library":library, "views":views
+        }));
+        let root_id = session.root_attachment_id.clone();
+        let root = session
+            .binding_attachments
+            .iter_mut()
+            .find(|attachment| attachment.binding_attachment_id == root_id)
+            .unwrap();
+        root.presentation.views.insert(
+            "view:ryeos/launcher".into(),
+            serde_json::json!({
+                "widget":"rows","title":"Launch","local_projection":"launcher",
+                "input":{"id":"query","local_filter":true}
+            }),
+        );
+        let mut core = test_support::core(session);
+        core.open_dialog("launcher");
+        let key = core.presentation.as_ref().unwrap().dialogs()["launcher"]
+            .view()
+            .instance_key()
+            .clone();
+        (core, key)
+    }
+
+    fn three_views() -> (RyeOsCore, RyeOsViewInstanceKey) {
+        library_core(
+            serde_json::json!([{"group":"Workbench","views":[
+                "view:test/needs","view:test/beta","view:test/home"
+            ]}]),
+            serde_json::json!({
+                "view:test/home":{"widget":"text","title":"Home","body":"Home"},
+                "view:test/beta":{
+                    "widget":"text","title":"Beta","description":"Every beta thing","body":"Beta"
+                },
+                "view:test/needs":{
+                    "widget":"text","title":"Needs","description":"Reads a thread",
+                    "body":"@facet:selection.thread_id"
+                }
+            }),
+        )
+    }
+
+    fn launcher_rows(core: &RyeOsCore, key: &RyeOsViewInstanceKey) -> Vec<RyeOsRowVm> {
+        let binding = core
+            .binding_for_instance(key, "view:ryeos/launcher")
+            .unwrap();
+        let RyeOsViewVm::Rows { rows, .. } = project(core, key, binding) else {
+            panic!("the launcher is a rows View");
+        };
+        rows
+    }
+
+    fn view_rows(rows: &[RyeOsRowVm]) -> Vec<&RyeOsRowVm> {
+        rows.iter()
+            .filter(|row| {
+                row.launch
+                    .as_ref()
+                    .is_some_and(|launch| launch.group == "Workbench")
+            })
+            .collect()
+    }
+
+    fn set_query(core: &mut RyeOsCore, key: &RyeOsViewInstanceKey, text: &str) {
+        let binding = core
+            .binding_for_instance(key, "view:ryeos/launcher")
+            .unwrap();
+        let input = binding.input.as_ref().unwrap();
+        let buffer = core
+            .input_key_for(key.clone(), "view:ryeos/launcher", input)
+            .unwrap();
+        let address = core.input_address_for(buffer).unwrap();
+        core.dispatch_addressed_input(
+            address,
+            super::super::event::RyeOsInputAction::SetText {
+                text: text.into(),
+                cursor: 0,
+            },
+        );
+    }
+
+    fn choose_view(core: &mut RyeOsCore, key: &RyeOsViewInstanceKey, title: &str) {
+        let intent = launcher_rows(core, key)
+            .into_iter()
+            .find(|row| row.primary == title)
+            .and_then(|row| row.intent)
+            .expect("the view can be chosen");
+        core.dispatch_intent(intent);
+    }
+
+    #[test]
+    fn the_launcher_lists_one_row_per_view_with_its_own_description() {
+        let (core, key) = three_views();
+        let rows = launcher_rows(&core, &key);
+        let views = view_rows(&rows);
+        assert_eq!(
+            views
+                .iter()
+                .map(|row| row.primary.as_str())
+                .collect::<Vec<_>>(),
+            ["Beta", "Home", "Needs"]
+        );
+        assert_eq!(views[0].secondary.as_deref(), Some("Every beta thing"));
+        assert_eq!(views[0].meta.as_deref(), Some("text"));
+        // No description of its own: the second line is the group.
+        assert_eq!(views[1].secondary.as_deref(), Some("Workbench"));
+        assert!(rows.iter().all(|row| {
+            !row.primary.contains("New tab") && !row.primary.contains("New Surface")
+        }));
+    }
+
+    #[test]
+    fn an_unavailable_view_is_listed_after_the_available_ones_with_its_reason() {
+        let (core, key) = three_views();
+        let rows = launcher_rows(&core, &key);
+        let views = view_rows(&rows);
+        // Authored first, listed last.
+        let needs = views.last().unwrap();
+        assert_eq!(needs.primary, "Needs");
+        assert_eq!(needs.kind.as_deref(), Some("unavailable"));
+        assert_eq!(needs.secondary.as_deref(), Some("Reads a thread"));
+        assert_eq!(
+            needs
+                .launch
+                .as_ref()
+                .and_then(|launch| launch.reason.as_deref()),
+            Some("needs a selected thread")
+        );
+        assert!(needs.intent.is_none());
+        assert!(needs.glyph.is_none());
+        assert!(views[..2].iter().all(|row| row.intent.is_some()));
+    }
+
+    #[test]
+    fn the_launcher_filters_by_title_description_and_group() {
+        let (mut core, key) = three_views();
+        let titles = |core: &RyeOsCore| {
+            let rows = launcher_rows(core, &key);
+            view_rows(&rows)
+                .iter()
+                .map(|row| row.primary.clone())
+                .collect::<Vec<_>>()
+        };
+        set_query(&mut core, &key, "beta");
+        assert_eq!(titles(&core), ["Beta"]);
+        set_query(&mut core, &key, "reads a thread");
+        assert_eq!(titles(&core), ["Needs"]);
+        set_query(&mut core, &key, "workbench");
+        assert_eq!(titles(&core), ["Beta", "Home", "Needs"]);
+    }
+
+    #[test]
+    fn choosing_a_view_reveals_only_the_places_the_node_admits() {
+        let (mut core, key) = three_views();
+        assert!(
+            launcher_rows(&core, &key)
+                .iter()
+                .all(|row| row.launch.as_ref().is_none_or(|launch| !launch.place))
+        );
+        choose_view(&mut core, &key, "Beta");
+        assert!(core.launcher_places_open());
+        let rows = launcher_rows(&core, &key);
+        let places = rows
+            .iter()
+            .filter(|row| row.launch.as_ref().is_some_and(|launch| launch.place))
+            .collect::<Vec<_>>();
+        // No composed opener here: this tile and a new tab, not a new Surface.
+        assert_eq!(
+            places
+                .iter()
+                .map(|row| (row.primary.as_str(), row.meta.as_deref()))
+                .collect::<Vec<_>>(),
+            [
+                ("In this tile, as a tab", Some("↵")),
+                ("New tab", Some("T"))
+            ]
+        );
+        assert!(places[0].selected, "the point is on the first place");
+        assert!(places.iter().all(|row| row.intent.is_some()));
+    }
+
+    #[test]
+    fn with_no_composition_write_a_view_opens_at_once_and_has_no_places() {
+        let (mut core, key) = three_views();
+        core.presentation_operations.replay_blocked = true;
+        let binding = core
+            .binding_for_instance(&key, "view:ryeos/launcher")
+            .unwrap();
+        let (records, _) = candidates(&core, &key, binding).unwrap();
+        let beta = records
+            .iter()
+            .find(|record| record.label == "Beta")
+            .unwrap();
+        assert!(matches!(beta.intent, Some(RyeOsUiIntent::OpenView { .. })));
+        choose_view(&mut core, &key, "Beta");
+        assert!(!core.launcher_places_open());
+    }
+
+    #[test]
+    fn a_place_key_chooses_where_the_staged_view_lands() {
+        let (mut core, key) = three_views();
+        choose_view(&mut core, &key, "Beta");
+        // A key that is not a place does nothing.
+        core.choose_launcher_place('x');
+        assert!(core.launcher_places_open());
+        core.choose_launcher_place('t');
+        assert!(!core.launcher_places_open());
+    }
+
+    #[test]
+    fn escape_closes_the_second_stage_before_the_sheet() {
+        let (mut core, key) = three_views();
+        choose_view(&mut core, &key, "Beta");
+        assert!(core.launcher_places_open());
+        core.apply_key_command(super::super::keymap::RyeOsKeyCommand::CloseFocusedDialog);
+        assert!(!core.launcher_places_open());
+        assert!(core.presentation.as_ref().unwrap().dialogs()["launcher"].is_open());
+        let rows = launcher_rows(&core, &key);
+        let selected = rows.iter().find(|row| row.selected).unwrap();
+        assert_eq!(selected.primary, "Beta", "the point returns to the view");
+        core.apply_key_command(super::super::keymap::RyeOsKeyCommand::CloseFocusedDialog);
+        assert!(!core.presentation.as_ref().unwrap().dialogs()["launcher"].is_open());
+    }
+
+    #[test]
+    fn rename_commands_are_listed_as_commands_and_hand_off_to_the_client() {
+        let (mut core, key) = three_views();
+        let rows = launcher_rows(&core, &key);
+        for label in ["Rename surface", "Rename view set"] {
+            let row = rows
+                .iter()
+                .find(|row| row.primary == label)
+                .unwrap_or_else(|| panic!("{label} is in the launcher"));
+            assert_eq!(
+                row.launch.as_ref().map(|launch| launch.group.as_str()),
+                Some(COMMAND_GROUP)
+            );
+        }
+        let view_set_id = core.active_view_set().unwrap().id;
+        core.dispatch_intent(RyeOsUiIntent::BeginRename {
+            target: RyeOsRenameTarget::ViewSet { view_set_id },
+        });
+        let request = crate::ui::view_model::build_view_model(&core)
+            .rename
+            .expect("a rename was requested");
+        assert_eq!(request.target, RyeOsRenameTarget::ViewSet { view_set_id });
+        assert!(
+            !core.presentation.as_ref().unwrap().dialogs()["launcher"].is_open(),
+            "the launcher leaves the editor clear"
+        );
+        core.dispatch(super::super::RyeOsEvent::Ui {
+            event: super::super::RyeOsUiEvent::ResolveRename { title: None },
+        });
+        assert!(
+            crate::ui::view_model::build_view_model(&core)
+                .rename
+                .is_none()
         );
     }
 }

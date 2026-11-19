@@ -81,6 +81,10 @@ producers of the same intents, not a second command vocabulary.
 | [x] `InvokeAffordance` | shared | shared | content-declared affordance |
 | [x] `ActivateLocalProjection` | shared | shared | guarded Rust-projected local row activation |
 | [x] `OpenView` | shared | shared | compiled view activation |
+| [x] `OpenAttentionItem` | shared | shared | Overlay row action (Enter): opens the item's chain. Rune draws the selected row's actions as buttons; the terminal draws them on the row; the shared overlay keymap sends the key. |
+| [x] `AcknowledgeAttentionItem` | shared | shared | Overlay row action (`a`) on items that admit acknowledgement. Same overlay drawing and shared key in both clients. |
+| [x] `StageLauncherView` | shared | shared | Launcher row chosen with more than one place to go; the places show under the list and Esc closes them first. |
+| [x] `BeginRename` | shared | shared | Launcher rename commands hand the name to the client that edits text: Rune opens its inline field, the terminal edits it on its last line. |
 | [x] `OpenViewInNewTab` | shared | shared | Launcher row captures exact insertion tab/binding; existing retained InsertTab publishes only after ACK, with fresh required subjects. |
 | [x] `OpenCompositionInNewSurface` | shared | shared | Exact source tab/binding is recaptured portably; ordinary shared catalogue dialog invokes its signed composed-opening affordance. Admission remains ACK-gated. |
 | [x] `OpenSurfaceInNewPresentation` | shared | gap | Captures the exact selected Surface and each portable tab origin under ordinary signed admission. Only completed ACK reveals a prepared independent-document link; native document hosting remains unsupported. |
@@ -181,8 +185,20 @@ exact `InputAt` addresses; character-level events remain shared keymap paths.
 | [x] `SetTreeRowCollapsed` | shared | shared | shared keymap |
 | [x] `SetViewTreeItemCollapsed` | native | gap | Browser hierarchy button addresses exact visible mount and stable row identity; terminal uses focused tree-fold keys. |
 | [x] `ActivateFocused` | shared | shared | shared keymap |
+| [x] `ToggleOverlay` | shared | shared | Alt+O from any state through the shared keymap; Rune's scrim press also sends it. |
+| [x] `MoveOverlay` | shared | shared | Up and Down while the overlay is open; shared keymap |
+| [x] `ActivateOverlay` | shared | shared | Enter on the selected overlay row; shared keymap |
+| [x] `ActivateOverlayKey` | shared | shared | The key of a selected row's action (`a` acknowledge); shared keymap |
+| [x] `DismissDialog` | shared | shared | Esc and the scrim: the launcher's second stage closes before its sheet |
+| [x] `ChooseLauncherPlace` | shared | shared | T and S while the launcher shows where a view can land; shared keymap |
+| [x] `RenameActive` | shared | shared | Alt+R renames the active view set, Alt+Shift+R the active Surface; shared keymap |
+| [x] `ResolveRename` | shared | shared | ends a requested rename: Rune hands it to its inline field, the terminal commits or abandons it |
+| [x] `RenameInsert` | shared | shared | core-edited rename name, terminal; Rune takes the request before any key reaches it |
+| [x] `RenameBackspace` | shared | shared | core-edited rename name, terminal; Rune takes the request before any key reaches it |
+| [x] `CommitRename` | shared | shared | Enter in the core-edited rename name, terminal |
 | [x] `TimelineEntry` | shared | shared | shared keymap |
 | [x] `ToggleTimelineFold` | shared | shared | shared keymap |
+| [x] `AnswerDockAsk` | shared | shared | shared keymap |
 | [x] `PopLens` | shared | shared | drill return |
 <!-- parity:RyeOsUiEvent:end -->
 

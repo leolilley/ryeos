@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-16T23:12:59Z:3a3d08ad29b466541e69cbcfc189cc1ed029e56d3ba0b8a01c2a7c06e387cd03:lRRA8fAYGQRqpegoEmQeDeTWQoUN54BIgLq/MfanK23tzKCS/W8+qzQMPA9wDMfFEm3rP0X99oVatPVGJJNVDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-19T16:51:25Z:a85c1e9b9f9b35a1e35d9429f6ede070fc66f21f6c55d02c41148b3bde1ab96a:G+HViNHJhi5PU30PBFSmi8tgiJnNlKz7oE/aGZtDB6KTO24aUBLPLOq2XF5tAp1ZxpZQuGpui6wpI+D3fiNyDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, security, subprocess, node-policy]
@@ -827,6 +827,24 @@ signalled. The quarantine is recorded on the thread's runtime row
 under `runtime`, `ryeos node doctor` lists it as a `process_quarantine`
 finding, and it clears with the identity once a later recovery pass proves the
 group gone.
+
+A project snapshot apply that was interrupted is resumed or rolled back by
+startup recovery from its journal. Settled apply results record the
+`sync_include` table the apply used, so recovery never reads the current table
+for a past apply. When recovery can never resolve one apply (an unreadable or
+mismatched journal, a settled result without the recorded table, a project that
+is gone, or a surface identity that no longer matches), it quarantines that
+apply instead of failing startup: the job is marked failed with phase
+`quarantined`, and its transaction directory under
+`.ai/state/<transaction directory>/<transaction id>` and its journal are left
+exactly as they were. Infrastructure failures are not quarantined and still stop
+startup. The daemon mirrors quarantined applies into `sync-apply-quarantine.json`
+in its state directory, and `ryeos node doctor` lists each as a
+`sync_apply_quarantine` finding naming the full transaction directory, which may
+hold originals that were never restored. A quarantined apply does not block new
+applies, but a new apply does not restore what the quarantined one moved aside;
+there is no clearing command, so an operator inspects the directory and
+restores or discards it by hand.
 
 A graceful stop sends SIGTERM to the exact target only, never to its process
 group or scope. The retained launcher stays alive to publish the real exit, and

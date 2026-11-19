@@ -1,10 +1,14 @@
-# ryeos:signed:2026-10-19T22:29:41Z:90bac0b0fc78d10b87e55c8076ccd47d48a88e3ef3638bf8821b463844feb47b:RP05zxU47P5d8XS10gt223ZquImBp/Xg3K9T7ecBd66I+P6h0GGbnox3g3OVJk5J85knazCYihGYrGIUkta4DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-19T10:10:12Z:be1724a7de2e024d6c727108ae73dc901f5037df432b9b4f6338939bbadb67c1:sM3ZbDuF+17+vsOHux4Nyri+ukrUpBRdwQTKHdluzG5UtJWXdhEWSI9J3n89oALvwU8bQFm3AI59P6LikCQxBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: threads-list
 title: Observed Threads
 version: "1.0.0"
 description: Bounded observed thread candidates; an empty page does not prove no retained work exists
 
 widget: table
+# The tile's right note: how the page is bounded and ordered, said plainly.
+body:
+  supplement:
+    frame_detail: "200 at most · sorted by watch"
 # Operator watch dashboard: the UI-ryeos-ui (operator-scoped) thread list, ordered
 # active-first then newest (sort: watch), applied before the limit so the most
 # relevant rows always show.
@@ -20,22 +24,28 @@ projections:
   columns:
     - label: thread
       field: thread_id
+      role: id
     - label: kind
       field: kind
+      role: kind
       present: words
     # The table carries the readable leaf; the full canonical ref remains in
     # expanded detail.
     - label: item
       field: item_ref
+      role: ref
       present: leaf
     - label: project
       field: project.name
+      role: text
       fallback: node
     - label: status
       field: status
+      role: status
       present: words
     - label: created
       field: created_at
+      role: time
       present: time_date
   expand:
     fields: [thread_id, chain_root_id, project.name, project.path, item_ref, requested_by, created_at]

@@ -217,6 +217,9 @@ pub struct RyeOsTimelineDockVm {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsTimelineDockActionVm {
     pub label: String,
+    /// The key cap the button shows: the label's initial.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
     /// The affordance's invocation; absent when it is not enabled for this ask.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent: Option<RyeOsUiIntent>,
@@ -376,16 +379,22 @@ fn entry_vm(entry: &Value) -> RyeOsTimelineEntryVm {
     let tool = slot(entry, "tool");
     let target = slot(entry, "target");
     match kind {
+        // The operator's words are drawn whole: the bubble wraps them.
         "message" => RyeOsTimelineEntryVm::Separator {
-            label: clip(first_line(body.or(headline).unwrap_or("message")), 80),
+            label: body.or(headline).unwrap_or("message").trim().to_string(),
         },
         "prose" => RyeOsTimelineEntryVm::Block {
             text: body.or(headline).unwrap_or_default().to_string(),
             tone,
         },
-        "thought" => RyeOsTimelineEntryVm::Block {
-            text: format!("✻ {}", body.or(headline).unwrap_or_default()),
+        // A thought is one quiet line; its text is the opened detail.
+        "thought" => RyeOsTimelineEntryVm::Line {
+            primary: headline.unwrap_or("Thought").to_string(),
+            meta: None,
             tone: RyeOsTone::Neutral,
+            intent: None,
+            secondary_intent: None,
+            state: None,
         },
         "activity" => {
             let summary = headline.or(tool).unwrap_or("activity");
@@ -400,7 +409,7 @@ fn entry_vm(entry: &Value) -> RyeOsTimelineEntryVm {
         }
         "link" => RyeOsTimelineEntryVm::Line {
             primary: format!("↘ {}", headline.unwrap_or("child")),
-            meta: target.map(str::to_string),
+            meta: target.map(|thread| format!("child thread {thread}")),
             tone,
             intent: target.map(|thread| RyeOsUiIntent::DrillThread {
                 thread_id: thread.to_string(),
@@ -408,16 +417,22 @@ fn entry_vm(entry: &Value) -> RyeOsTimelineEntryVm {
                 label: headline.map(str::to_string),
             }),
             secondary_intent: None,
-            state: state_words(entry),
+            // The cost or size badge follows the state word.
+            state: match (state_words(entry), badge) {
+                (Some(state), Some(badge)) => Some(format!("{state} · {badge}")),
+                (state, _) => state,
+            },
         },
+        // The reason leads; the state word and the headline follow it.
         "outcome" => {
             let label = state.or(headline).unwrap_or("outcome");
             let primary = match reason {
-                Some(reason) => format!("{label} — {}", clip(first_line(reason), SUMMARY_MAX)),
+                Some(reason) => clip(first_line(reason), SUMMARY_MAX),
                 None => label.to_string(),
             };
-            let intent = reason.map(|_| RyeOsUiIntent::InspectSummary {
-                title: primary.clone(),
+            // The inspector's title still names the state beside the reason.
+            let intent = reason.map(|reason| RyeOsUiIntent::InspectSummary {
+                title: format!("{label} — {}", clip(first_line(reason), SUMMARY_MAX)),
                 detail: entry.clone(),
             });
             RyeOsTimelineEntryVm::Line {
@@ -426,8 +441,7 @@ fn entry_vm(entry: &Value) -> RyeOsTimelineEntryVm {
                 tone,
                 intent,
                 secondary_intent: None,
-                // The outcome's own primary text is its state.
-                state: None,
+                state: reason.and_then(|_| state_words(entry)),
             }
         }
         "marker" => RyeOsTimelineEntryVm::Line {
@@ -481,44 +495,36 @@ fn retry_intent(entry: &Value, chain_root_id: &str) -> Option<RyeOsUiIntent> {
     })
 }
 
-/// Map a thread/chain status to a tone. Matches the typed [`ThreadStatus`]
-/// variants so a new status is a compile error here, not a silently-neutral
-/// string.
-fn status_tone(status: &str) -> RyeOsTone {
-    use super::dto::ThreadStatus;
-    match ThreadStatus::from_wire(status) {
-        ThreadStatus::Running | ThreadStatus::Created => RyeOsTone::Accent,
-        ThreadStatus::Failed | ThreadStatus::Killed | ThreadStatus::TimedOut => RyeOsTone::Danger,
-        ThreadStatus::Cancelled => RyeOsTone::Warn,
-        ThreadStatus::Completed | ThreadStatus::Continued => RyeOsTone::Good,
-        ThreadStatus::Unknown => RyeOsTone::Neutral,
+/// A token count in the short form a usage line reads: whole below a
+/// thousand, thousands as `K`, millions with one decimal as `M`.
+fn short_count(count: i64) -> String {
+    if count < 1_000 {
+        count.to_string()
+    } else if count < 1_000_000 {
+        format!("{}K", count / 1_000)
+    } else {
+        format!("{:.1}M", count as f64 / 1_000_000.0)
     }
 }
 
-/// The chain header line from a response's `summary` (chain status and
-/// chain-wide usage totals). `None` when the response carries no summary, so
-/// the header only appears where it means something.
-fn summary_entry(response: &Value) -> Option<RyeOsTimelineEntryVm> {
+/// The chain's usage totals from a response's `summary`, as the quiet line the
+/// composer carries ("184K in · 21K out · $1.62 · 7 turns"). `None` when the
+/// response carries no summary, so the line only appears where it means
+/// something.
+pub(crate) fn usage_text(response: &Value) -> Option<String> {
     let summary = response.get("summary")?;
-    let status = summary.get("status").and_then(Value::as_str).unwrap_or("");
     let count = |field: &str| summary.get(field).and_then(Value::as_i64).unwrap_or(0);
     let cost = summary
         .get("spend_usd")
         .and_then(Value::as_f64)
         .unwrap_or(0.0);
-    Some(RyeOsTimelineEntryVm::Line {
-        primary: format!(
-            "{status} · ↑{} ↓{} · ${cost:.4} · {} turns",
-            count("input_tokens"),
-            count("output_tokens"),
-            count("turns"),
-        ),
-        meta: None,
-        tone: status_tone(status),
-        intent: None,
-        secondary_intent: None,
-        state: None,
-    })
+    let turns = count("turns");
+    Some(format!(
+        "{} in · {} out · ${cost:.2} · {turns} {}",
+        short_count(count("input_tokens")),
+        short_count(count("output_tokens")),
+        if turns == 1 { "turn" } else { "turns" },
+    ))
 }
 
 /// The "N older" line that opens a windowed timeline. Activating it runs
@@ -593,12 +599,17 @@ fn dock_actions(
             if !eligibility.visible {
                 return None;
             }
+            let label = affordance
+                .get("label")
+                .and_then(Value::as_str)
+                .unwrap_or(id)
+                .to_string();
             Some(RyeOsTimelineDockActionVm {
-                label: affordance
-                    .get("label")
-                    .and_then(Value::as_str)
-                    .unwrap_or(id)
-                    .to_string(),
+                key: label
+                    .chars()
+                    .next()
+                    .map(|initial| initial.to_uppercase().to_string()),
+                label,
                 intent: eligibility
                     .enabled
                     .then(|| RyeOsUiIntent::InvokeAffordance {
@@ -628,7 +639,7 @@ pub(crate) fn pending_asks(
         .get("chain_root_id")
         .and_then(Value::as_str)
         .unwrap_or("");
-    entries
+    let mut asks: Vec<RyeOsTimelineDockVm> = entries
         .into_iter()
         .filter(|entry| is_docked(entry))
         .map(|entry| {
@@ -658,7 +669,14 @@ pub(crate) fn pending_asks(
                 actions,
             }
         })
-        .collect()
+        .collect();
+    // Keys answer the first ask only, so only its buttons show key caps.
+    for ask in asks.iter_mut().skip(1) {
+        for action in &mut ask.actions {
+            action.key = None;
+        }
+    }
+    asks
 }
 
 /// Events the definition has no rule for: how many, and the noun the
@@ -1018,7 +1036,6 @@ pub(crate) fn timeline_layout_for(
 ) -> TimelineLayout {
     let older = response.get("older").and_then(Value::as_u64).unwrap_or(0);
     let mut lead = Vec::new();
-    lead.extend(summary_entry(response));
     if older > 0 {
         lead.push(older_entry(
             older,
@@ -1374,6 +1391,8 @@ pub(crate) struct TimelineKeyState {
     pub entry: bool,
     pub foldable: bool,
     pub source_failed: bool,
+    /// The dock's first ask offers at least one enabled action with a key.
+    pub dock_answer: bool,
 }
 
 /// The timeline entry under the point in the focused view.
@@ -1513,17 +1532,48 @@ impl RyeOsCore {
             RyeOsViewVm::Timeline {
                 selected,
                 fold_section,
+                dock,
                 ..
             } => TimelineKeyState {
                 entry: selected.is_some(),
                 foldable: fold_section.is_some(),
                 source_failed,
+                dock_answer: dock.first().is_some_and(|ask| {
+                    ask.actions
+                        .iter()
+                        .any(|action| action.key.is_some() && action.intent.is_some())
+                }),
             },
             _ => TimelineKeyState {
                 source_failed,
                 ..TimelineKeyState::default()
             },
         }
+    }
+
+    /// Answer the focused timeline's first pending ask with the action whose
+    /// key cap is `ch`. Only the first ask's actions carry key caps, so a
+    /// key never answers a card further down the dock.
+    pub(crate) fn answer_dock_ask(&mut self, ch: char) -> Vec<RyeOsEffect> {
+        let Some(instance) = self.focused_view_instance_key() else {
+            return Vec::new();
+        };
+        let Some(super::view_model::RyeOsViewVm::Timeline { dock, .. }) =
+            super::view_model::view_vm_for_instance(self, &instance)
+        else {
+            return Vec::new();
+        };
+        let intent = dock.first().and_then(|ask| {
+            ask.actions.iter().find_map(|action| {
+                let key = action.key.as_deref()?;
+                let mut chars = key.chars();
+                let first = chars.next()?;
+                (chars.next().is_none() && first.to_uppercase().eq(ch.to_uppercase()))
+                    .then(|| action.intent.clone())
+                    .flatten()
+            })
+        });
+        intent.map_or_else(Vec::new, |intent| self.dispatch_intent(intent))
     }
 
     /// Fold or unfold the cluster under the point in the focused timeline.
@@ -1687,7 +1737,15 @@ pub fn timeline_text(response: &Value) -> TimelineText {
             }
         };
     let mut lead = Vec::new();
-    if let Some(entry) = summary_entry(response) {
+    if let Some(usage) = usage_text(response) {
+        let entry = RyeOsTimelineEntryVm::Line {
+            primary: usage,
+            meta: None,
+            tone: RyeOsTone::Neutral,
+            intent: None,
+            secondary_intent: None,
+            state: None,
+        };
         lead.push(line("summary", &entry, 0, "summary".to_string(), false));
     }
     let older = response.get("older").and_then(Value::as_u64).unwrap_or(0);
@@ -1877,7 +1935,7 @@ mod tests {
         assert_eq!(
             built[0],
             RyeOsTimelineEntryVm::Separator {
-                label: "do the thing".into()
+                label: "do the thing\nplease".into()
             }
         );
         assert_eq!(
@@ -1887,9 +1945,11 @@ mod tests {
                 tone: RyeOsTone::Neutral
             }
         );
-        assert!(
-            matches!(&built[2], RyeOsTimelineEntryVm::Block { text, .. } if text.ends_with("hmm"))
-        );
+        assert!(matches!(
+            &built[2],
+            RyeOsTimelineEntryVm::Line { primary, meta: None, state: None, .. }
+                if primary == "Thought"
+        ));
         assert_eq!(
             built[3],
             RyeOsTimelineEntryVm::Pair {
@@ -1937,9 +1997,11 @@ mod tests {
                 meta,
                 tone,
                 intent,
+                state,
                 ..
             } => {
-                assert_eq!(primary, "failed — boom");
+                assert_eq!(primary, "boom");
+                assert_eq!(state.as_deref(), Some("failed"));
                 assert_eq!(meta.as_deref(), Some("boom_code"));
                 assert_eq!(*tone, RyeOsTone::Danger);
                 assert!(matches!(
@@ -1962,6 +2024,34 @@ mod tests {
     }
 
     #[test]
+    fn a_long_message_is_kept_whole_for_the_bubble_to_wrap() {
+        let body = ["Keep the tiling behaviour as it is."; 8].join(" ");
+        let built = layout(vec![entry("m", "message", json!({ "body": body }))], 0).entries;
+        assert_eq!(built[0], RyeOsTimelineEntryVm::Separator { label: body });
+    }
+
+    #[test]
+    fn a_settled_link_puts_its_badge_after_the_state_word() {
+        let link = with(
+            with(
+                entry(
+                    "l",
+                    "link",
+                    json!({"headline": "review", "target": "T-1", "badge": "$0.21"}),
+                ),
+                "state",
+                json!("done"),
+            ),
+            "exchange",
+            Value::Null,
+        );
+        assert!(matches!(
+            &layout(vec![link], 0).entries[0],
+            RyeOsTimelineEntryVm::Line { state: Some(state), .. } if state == "done · $0.21"
+        ));
+    }
+
+    #[test]
     fn a_link_steps_into_its_child_thread() {
         let link = entry(
             "l",
@@ -1972,7 +2062,7 @@ mod tests {
             layout(vec![link], 0).entries[0],
             RyeOsTimelineEntryVm::Line {
                 primary: "↘ study".into(),
-                meta: Some("T-child".into()),
+                meta: Some("child thread T-child".into()),
                 tone: RyeOsTone::Neutral,
                 intent: Some(RyeOsUiIntent::DrillThread {
                     thread_id: "T-child".into(),
@@ -2282,38 +2372,37 @@ mod tests {
     }
 
     #[test]
-    fn the_summary_opens_the_timeline_as_a_header_line() {
+    fn the_summary_is_a_usage_line_and_not_a_feed_entry() {
         let binding = window_binding(None);
         let response = json!({
             "older": 0,
             "summary": {
-                "status": "running", "input_tokens": 1200, "output_tokens": 340,
-                "spend_usd": 0.0421, "turns": 3
+                "status": "running", "input_tokens": 184220, "output_tokens": 21840,
+                "spend_usd": 1.62, "turns": 7
             },
             "items": [entry("p", "prose", json!({"body": "x"}))]
         });
+        assert_eq!(
+            usage_text(&response).as_deref(),
+            Some("184K in · 21K out · $1.62 · 7 turns")
+        );
         let built = timeline_layout_for(&binding, &response, &instance(), "view:t");
-        assert_eq!(built.entries.len(), 2);
-        match &built.entries[0] {
-            RyeOsTimelineEntryVm::Line { primary, tone, .. } => {
-                assert!(primary.contains("running"), "{primary}");
-                assert!(
-                    primary.contains("1200") && primary.contains("340"),
-                    "{primary}"
-                );
-                assert!(primary.contains("$0.0421"), "{primary}");
-                assert!(primary.contains("3 turns"), "{primary}");
-                assert_eq!(*tone, RyeOsTone::Accent);
-            }
-            other => panic!("expected a header Line, got {other:?}"),
-        }
-        assert!(built.sources[0].is_none());
+        assert_eq!(built.entries.len(), 1, "the feed holds no header line");
+        assert!(built.sources[0].is_some());
 
-        // The header precedes the "N older" line; no summary, no header.
+        let small = json!({"summary": {"input_tokens": 900, "output_tokens": 2500000,
+            "spend_usd": 0.004, "turns": 1}});
+        assert_eq!(
+            usage_text(&small).as_deref(),
+            Some("900 in · 2.5M out · $0.00 · 1 turn")
+        );
+        assert_eq!(usage_text(&json!({"items": []})), None);
+
+        // The "N older" line still opens the window.
         let older = json!({ "older": 5, "summary": response["summary"], "items": [] });
         let built = timeline_layout_for(&binding, &older, &instance(), "view:t");
         assert!(matches!(
-            &built.entries[1],
+            &built.entries[0],
             RyeOsTimelineEntryVm::Line { primary, .. } if primary == "5 older"
         ));
         let bare = json!({ "items": [] });
@@ -2665,19 +2754,6 @@ mod tests {
     }
 
     #[test]
-    fn status_tone_maps_by_typed_status_variant() {
-        assert_eq!(status_tone("running"), RyeOsTone::Accent);
-        assert_eq!(status_tone("created"), RyeOsTone::Accent);
-        assert_eq!(status_tone("completed"), RyeOsTone::Good);
-        assert_eq!(status_tone("continued"), RyeOsTone::Good);
-        assert_eq!(status_tone("failed"), RyeOsTone::Danger);
-        assert_eq!(status_tone("killed"), RyeOsTone::Danger);
-        assert_eq!(status_tone("timed_out"), RyeOsTone::Danger);
-        assert_eq!(status_tone("cancelled"), RyeOsTone::Warn);
-        assert_eq!(status_tone("some_future_status"), RyeOsTone::Neutral);
-    }
-
-    #[test]
     fn only_an_entry_with_a_retry_input_offers_retry_within_the_response_chain() {
         let failed = |slots: Value| {
             with(
@@ -2863,9 +2939,9 @@ mod tests {
             )],
             0,
         );
-        assert_eq!(link.entries[0].label(), "study, T-child");
+        assert_eq!(link.entries[0].label(), "study, child thread T-child");
         let thought = layout(vec![entry("t", "thought", json!({"body": "hmm"}))], 0);
-        assert_eq!(thought.entries[0].label(), "hmm");
+        assert_eq!(thought.entries[0].label(), "Thought");
     }
 
     #[test]

@@ -29,7 +29,7 @@
       "filename": "ryeos_rune.js",
       "mime": "application/javascript; charset=utf-8",
       "cache": "no-cache",
-      "sha256": "3e8a187b7826ace6e81c49a92255360d4fd2b1b7b6a88bc758091eb6eeef27a4",
+      "sha256": "0f679693f73479a45b886bc787028cd84031b20d12629fc5ef3ef3f889425474",
       "imports": [
         "/ui/assets/rune_bridge.js",
         "/ui/assets/rune_health.js",
@@ -96,7 +96,7 @@
       "filename": "ryeos_rune_bg.wasm.gz",
       "mime": "application/wasm",
       "cache": "no-cache",
-      "sha256": "20ce3d201873c2d2ffbb04ce07b7979341b6668453bb893ed9c85d6e9b8306cc",
+      "sha256": "f1c8dbb0f0e03cf7236c8edbf80b38f701b926d2b47a8e6b008d5d8bffdd69ac",
       "imports": [],
       "encoding": "gzip"
     },

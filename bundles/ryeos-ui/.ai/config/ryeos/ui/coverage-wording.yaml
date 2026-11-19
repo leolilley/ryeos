@@ -1,0 +1,92 @@
+# ryeos:signed:2026-11-19T05:58:46Z:f644c16bc9095d35951f4883ccd040c6969d46ec6c1d042be42b20a9480d0830:h8Z1TzBmL1Xlb+nEJLZzqOsXBHXCBOeB3P6J/6mhZDfWRs0Y8yH/092ajDFFX0Ik5EoWeiNoL82Yswf8R69iBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/ui
+version: "1.0.0"
+description: The sentence and tone a table's coverage line shows for each state and reason a service reports.
+# A service reports coverage as codes: a state and a reason. A client reads
+# this config through the coverage wording service and draws the sentence, in
+# the tone, instead of the codes. Resolution:
+#   1. A state this config does not list reads as `fallback`.
+#   2. Otherwise a reason listed under `reasons` gives its own sentence.
+#   3. Otherwise the state's own sentence under `states` is used.
+# Tone is one of none, good, warn, danger, accent. A sentence is plain, in
+# normal case, and says what the page shows or does not show.
+fallback:
+  label: This page's coverage is not known.
+  tone: none
+states:
+  complete:
+    label: Everything this source holds is shown.
+    tone: good
+  observed:
+    label: What was observed is shown. It may not be everything.
+    tone: none
+  partial:
+    label: Part of what exists is shown.
+    tone: warn
+  failed:
+    label: This source could not be read.
+    tone: danger
+  unavailable:
+    label: This source is not available.
+    tone: warn
+reasons:
+  coverage_not_reported:
+    label: This source did not say what it covers.
+    tone: warn
+  not_required:
+    label: Not needed for this view.
+    tone: none
+  ready:
+    label: Ready.
+    tone: good
+  unchanged:
+    label: Nothing has changed since the last read.
+    tone: none
+  thread_running:
+    label: The thread is still running, so this is not final.
+    tone: warn
+  thread_not_selected:
+    label: Select a thread to see this.
+    tone: none
+  conflict:
+    label: Two records disagree. Neither is shown as settled.
+    tone: danger
+  stale_ledger_head:
+    label: This was read from an older record than the current one.
+    tone: warn
+  policy_unconfigured:
+    label: This node has no policy set for this yet.
+    tone: warn
+  inline_value_limit:
+    label: A value was too large to show in full.
+    tone: warn
+  candidate_retained:
+    label: A candidate from this thread is held.
+    tone: none
+  audit_record_retained:
+    label: The audit record for this thread is held.
+    tone: good
+  signed_scoped_usage_not_available:
+    label: No signed usage is available for this scope.
+    tone: warn
+  signed_facet_map_not_proven:
+    label: This view's selections have not been proved.
+    tone: warn
+  settled_usage_projection_not_signed_testimony:
+    label: Usage shown is settled but is not signed testimony.
+    tone: warn
+  settled_usage_projection_for_authorized_observed_chains_not_node_totals:
+    label: Usage covers the chains you may see, not the whole node.
+    tone: warn
+  projection_locator_not_exhaustive:
+    label: This list may not include everything.
+    tone: warn
+  authorized_subject_subset_not_totals:
+    label: Counts cover what you may see, not the node's totals.
+    tone: warn
+  authorized_projection_subset_not_exhaustive:
+    label: This shows what you may see, not everything.
+    tone: warn
+  kind_not_registered:
+    label: This kind of item is not known to this node.
+    tone: warn

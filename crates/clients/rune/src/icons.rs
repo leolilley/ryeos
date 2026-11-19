@@ -47,21 +47,6 @@ solid_icon!(
     "ryeos-more",
     r#"<circle cx="8" cy="3.5" r="1.25"/><circle cx="8" cy="8" r="1.25"/><circle cx="8" cy="12.5" r="1.25"/>"#
 );
-line_icon!(
-    PENCIL,
-    "ryeos-pencil",
-    r#"<path d="M10.5 3 L13 5.5 L6 12.5 L3 13 L3.5 10 Z"/><path d="M9 4.5 L11.5 7"/>"#
-);
-line_icon!(
-    DUPLICATE,
-    "ryeos-duplicate",
-    r#"<rect x="5.5" y="5.5" width="7.5" height="7.5" rx="1"/><path d="M3 10.5 V4 a1 1 0 0 1 1 -1 H10.5"/>"#
-);
-line_icon!(
-    CLOSE,
-    "ryeos-close",
-    r#"<path d="M4 4 L12 12 M12 4 L4 12"/>"#
-);
 line_icon!(PLUS, "ryeos-plus", r#"<path d="M8 3 V13 M3 8 H13"/>"#);
 solid_icon!(
     PREVIOUS,

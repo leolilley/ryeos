@@ -237,6 +237,12 @@ impl RenderNetworkPolicy {
     /// the echoed rules must equal the requested rules byte for byte as
     /// canonical JSON, in the requested order. Any difference leaves the
     /// Sandbox unbound or unobserved, never trusted.
+    ///
+    /// The allow-list comparison is order-exact over canonical JSON. If the
+    /// provider reorders or normalises the hosts it echoes (case, trailing
+    /// dot, wildcard form), termination never settles and stays
+    /// TerminationPending rather than being trusted. This fail-closed
+    /// behaviour is deliberate.
     fn matches(&self, expected: &provider_spec::EgressPolicy) -> bool {
         let expected_type = match expected.policy_type {
             provider_spec::NetworkPolicyType::DenyAll => RenderNetworkPolicyType::DenyAll,
