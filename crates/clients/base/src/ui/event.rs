@@ -13,6 +13,20 @@ pub enum RyeOsFilterField {
     ServicesQuery,
 }
 
+/// What a rename names. The client that edits text starts from this and ends
+/// with the matching rename intent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RyeOsRenameTarget {
+    Surface {
+        surface_instance_id: crate::ids::SurfaceInstanceId,
+        binding: super::binding::UiBindingAttachmentCoordinate,
+    },
+    ViewSet {
+        view_set_id: crate::ids::ViewSetId,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RyeOsUiIntent {
@@ -73,6 +87,17 @@ pub enum RyeOsUiIntent {
     },
     OpenView {
         view: ViewSpec,
+    },
+    /// Choose one launcher view and reveal where it can land. The choice is
+    /// local to the open launcher; nothing is opened.
+    StageLauncherView {
+        instance_key: RyeOsViewInstanceKey,
+        view_ref: String,
+    },
+    /// Ask the client to start renaming a Surface or view set. The client
+    /// edits the name and answers with a resolve event.
+    BeginRename {
+        target: RyeOsRenameTarget,
     },
     /// Open one admitted View as a fresh tab at the captured insertion owner.
     /// Subject-dependent Views stay unresolved; this never copies ambient work.
@@ -487,6 +512,27 @@ pub enum RyeOsUiEvent {
         collapsed: bool,
     },
     ActivateFocused,
+    /// Choose where the staged launcher view lands by the key its choice shows.
+    ChooseLauncherPlace {
+        key: char,
+    },
+    /// Start renaming the active view set, or with `surface` the active
+    /// Surface.
+    RenameActive {
+        surface: bool,
+    },
+    /// End a requested rename: `Some` commits that name, `None` abandons it.
+    ResolveRename {
+        title: Option<String>,
+    },
+    /// Type one character into a requested rename that the core is editing.
+    RenameInsert {
+        ch: char,
+    },
+    /// Delete the last character of a requested rename the core is editing.
+    RenameBackspace,
+    /// Commit a requested rename with the name as edited so far.
+    CommitRename,
     /// Act on the timeline entry under the point in the focused feed: copy it
     /// or look at the raw events behind it.
     TimelineEntry {

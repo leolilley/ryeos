@@ -3,7 +3,7 @@
 
 use ryeos_client_base::layout::Rect;
 use ryeos_client_base::text_surface::{Border, Style, TextSurface};
-use ryeos_client_base::ui::view_model::RyeOsDialogVm;
+use ryeos_client_base::ui::view_model::{RyeOsDialogVm, RyeOsRowVm, RyeOsViewVm};
 
 use super::primitives::fill_rect;
 use super::text::truncate;
@@ -65,5 +65,60 @@ pub fn draw_dialog(surface: &mut TextSurface, dialog: &RyeOsDialogVm, now_ms: u6
         );
         content.h = content.h.saturating_sub(input_h);
     }
-    super::draw_view(surface, content, &dialog.view, now_ms);
+    // The places a chosen launcher view can land are one line under its list.
+    let (view, places) = split_places(&dialog.view);
+    if !places.is_empty() && content.h > 1 {
+        let line_y = content.y + content.h - 1;
+        let mut line = String::new();
+        let mut selected_span = None;
+        for place in &places {
+            if !line.is_empty() {
+                line.push_str("  ");
+            }
+            let start = line.chars().count();
+            line.push_str(&format!(
+                "{} {}",
+                place.meta.as_deref().unwrap_or_default(),
+                place.primary
+            ));
+            if place.selected {
+                selected_span = Some((start, line.chars().count()));
+            }
+        }
+        let line = truncate(&line, content.w as usize);
+        surface.draw_text(
+            content.x as usize,
+            line_y as usize,
+            &line,
+            Style::new().fg(FG).bg(PANEL),
+        );
+        if let Some((start, end)) = selected_span {
+            let shown: String = line.chars().skip(start).take(end - start).collect();
+            surface.draw_text(
+                content.x as usize + start,
+                line_y as usize,
+                &shown,
+                Style::new().fg(PANEL).bg(ACCENT),
+            );
+        }
+        content.h -= 1;
+    }
+    super::draw_view(surface, content, &view, now_ms);
+}
+
+/// A launcher's list without its places, and the places apart.
+fn split_places(view: &RyeOsViewVm) -> (RyeOsViewVm, Vec<RyeOsRowVm>) {
+    let RyeOsViewVm::Rows { rows, .. } = view else {
+        return (view.clone(), Vec::new());
+    };
+    let is_place = |row: &RyeOsRowVm| row.launch.as_ref().is_some_and(|launch| launch.place);
+    if !rows.iter().any(is_place) {
+        return (view.clone(), Vec::new());
+    }
+    let places = rows.iter().filter(|row| is_place(row)).cloned().collect();
+    let mut list = view.clone();
+    if let RyeOsViewVm::Rows { rows, .. } = &mut list {
+        rows.retain(|row| !is_place(row));
+    }
+    (list, places)
 }

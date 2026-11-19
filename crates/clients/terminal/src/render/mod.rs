@@ -121,6 +121,25 @@ fn build_surface(vm: &RyeOsViewModel, width: usize, height: usize) -> TextSurfac
         dialog::draw_dialog(&mut surface, active_dialog, vm.now_ms);
     }
 
+    // A requested rename is edited on the last line, over whatever is there.
+    if let Some(rename) = &vm.rename {
+        let style = theme::style_selected();
+        let y = height - 1;
+        primitives::fill_line(&mut surface, 0, y, width, style);
+        let field = format!("rename \u{203a} {}", rename.title);
+        let field = truncate(&field, width.saturating_sub(1));
+        surface.draw_text(0, y, &field, style);
+        let cursor_x = display_width(&field);
+        if cursor_x < width {
+            surface.draw_char(cursor_x, y, ' ', Style::new().fg(BG).bg(FG));
+        }
+        let hint = "enter save \u{b7} esc cancel";
+        let hint_x = width.saturating_sub(display_width(hint) + 1);
+        if hint_x > cursor_x + 1 {
+            surface.draw_text(hint_x, y, hint, style);
+        }
+    }
+
     surface
 }
 

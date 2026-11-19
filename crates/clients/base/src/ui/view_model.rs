@@ -44,6 +44,16 @@ pub struct RyeOsViewModel {
     /// The attention overlay: what needs the user and what is running.
     #[serde(default)]
     pub overlay: RyeOsOverlayVm,
+    /// A rename a command asked for and no client has taken yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rename: Option<RyeOsRenameVm>,
+}
+
+/// A requested rename: what it names and the name it starts from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RyeOsRenameVm {
+    pub target: super::event::RyeOsRenameTarget,
+    pub title: String,
 }
 
 /// The attention overlay lists: rows that need the user and rows that are
@@ -819,7 +829,19 @@ pub struct RyeOsSectionVm {
     pub rows: Vec<RyeOsRowVm>,
 }
 
+/// What only a launcher record carries: the library group it is listed under,
+/// and why it cannot be chosen here when it cannot.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RyeOsLaunchRowVm {
+    pub group: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// A choice of where the staged view lands, not a view of its own.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub place: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct RyeOsRowVm {
     pub id: String,
     /// Exact cursor coordinate in the current complete projection. Render
@@ -841,6 +863,9 @@ pub struct RyeOsRowVm {
     pub expanded: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub detail: Vec<RyeOsRowDetailVm>,
+    /// Set on a launcher record only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<RyeOsLaunchRowVm>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changed_at_ms: Option<u64>,
     /// The change's tone when it crossed a tone boundary (or the row just
@@ -898,6 +923,7 @@ pub fn build_view_model(core: &RyeOsCore) -> RyeOsViewModel {
         transport: transport_vm(core),
         effect_failures: effect_failures_vm(core),
         overlay: overlay_vm(core),
+        rename: core.rename_request.clone(),
     }
 }
 
@@ -1533,6 +1559,7 @@ fn bound_view_vm_keyed(
                             } else {
                                 Vec::new()
                             },
+                            launch: None,
                             changed_at_ms: None,
                             changed_tone: None,
                         });
@@ -1695,6 +1722,7 @@ fn bound_view_vm_keyed(
                         expandable: !expand_fields.is_empty(),
                         expanded,
                         detail,
+                        launch: None,
                         changed_at_ms: changed_rows
                             .and_then(|rows| rows.get(&key))
                             .map(|flash| flash.at_ms),
@@ -2012,6 +2040,7 @@ fn bound_view_vm_keyed(
                     } else {
                         Vec::new()
                     },
+                    launch: None,
                     changed_at_ms: None,
                     changed_tone: None,
                 })
@@ -2414,6 +2443,7 @@ fn status_notice_rows(
             expandable: false,
             expanded: false,
             detail: Vec::new(),
+            launch: None,
             changed_at_ms: None,
             changed_tone: None,
         })
@@ -3510,6 +3540,26 @@ pub(crate) fn available_command_items_with_focus(
                         .is_some_and(|producer| core.producer_matches_membership(producer)),
             });
         }
+        if surface.active
+            && let Some(RyeOsUiIntent::RenameSurface {
+                surface_instance_id,
+                binding,
+                ..
+            }) = surface.rename_intent
+        {
+            items.push(RyeOsCommandChoice {
+                label: "Rename surface".into(),
+                hint: "change the name of this Surface".into(),
+                intent: RyeOsUiIntent::BeginRename {
+                    target: super::event::RyeOsRenameTarget::Surface {
+                        surface_instance_id,
+                        binding,
+                    },
+                },
+                secondary_intent: None,
+                enabled: true,
+            });
+        }
         if let Some(close_intent) = surface.close_intent {
             items.push(RyeOsCommandChoice {
                 label: format!("Close surface {:02} {}", surface.ordinal, surface.title),
@@ -3576,6 +3626,17 @@ pub(crate) fn available_command_items_with_focus(
         enabled: core
             .active_surface_view_sets()
             .is_some_and(|sets| sets.len() < crate::surface::view_sets::MAX_VIEW_SETS),
+    });
+    items.push(RyeOsCommandChoice {
+        label: "Rename view set".into(),
+        hint: "change the name of this arrangement".into(),
+        intent: RyeOsUiIntent::BeginRename {
+            target: super::event::RyeOsRenameTarget::ViewSet {
+                view_set_id: view_set.id,
+            },
+        },
+        secondary_intent: None,
+        enabled: core.composition_write_available(),
     });
     if let Some(instance) = focused {
         items.extend(
@@ -3712,6 +3773,15 @@ fn mounted_dialogs(core: &RyeOsCore) -> Vec<RyeOsDialogVm> {
             Some(RyeOsDialogVm {
                 instance_key: key.clone(),
                 title: mount.title().to_owned(),
+                description: core
+                    .binding_for_instance(key, mount.view().view_ref())
+                    .and_then(|binding| binding.description.clone()),
+                launcher: core
+                    .binding_for_instance(key, mount.view().view_ref())
+                    .is_some_and(|binding| {
+                        binding.local_projection
+                            == Some(super::local_projection::ViewLocalProjection::Launcher)
+                    }),
                 view: view_vm_for_instance(core, key)?,
                 input: instance_input_vm(core, key, mount.view().view_ref()),
             })
