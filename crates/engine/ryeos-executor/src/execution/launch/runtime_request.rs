@@ -1358,6 +1358,29 @@ mod tests {
     }
 
     #[test]
+    fn a_respawn_restarts_the_per_spawn_clock_and_only_the_run_end_clamps_it() {
+        // Pins current behaviour. A resume or continuation spawn passes the
+        // same `duration_seconds` again and the timeout is measured from its
+        // own spawn instant, so without a run end each spawn gets the full
+        // duration and the total wall clock across spawns is unbounded.
+        let first_spawn = effective_runtime_timeout_at(60, None, 0).unwrap();
+        let resumed_spawn = effective_runtime_timeout_at(60, None, 50_000).unwrap();
+        assert_eq!(first_spawn, std::time::Duration::from_secs(60));
+        assert_eq!(resumed_spawn, std::time::Duration::from_secs(60));
+        // With an absolute run end the later spawn is clamped to what is
+        // left of it, which is the only cross-spawn bound.
+        let run_end = Some(70_000);
+        assert_eq!(
+            effective_runtime_timeout_at(60, run_end, 0).unwrap(),
+            std::time::Duration::from_secs(60)
+        );
+        assert_eq!(
+            effective_runtime_timeout_at(60, run_end, 50_000).unwrap(),
+            std::time::Duration::from_secs(20)
+        );
+    }
+
+    #[test]
     fn a_far_end_is_bounded_by_the_segment_cap() {
         assert_eq!(
             effective_runtime_timeout_at(30, Some(i64::MAX), 0).unwrap(),
