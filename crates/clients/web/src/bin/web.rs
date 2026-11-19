@@ -370,6 +370,22 @@ fn open_browser(url: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn old_canonicalize_path_matches_recorded_vectors() {
+        let vectors: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../presentation-contract/tests/vectors/request_signing.json"
+        ))
+        .unwrap();
+        for v in vectors["vectors"].as_array().unwrap() {
+            assert_eq!(
+                canonicalize_path(v["path_and_query"].as_str().unwrap()),
+                v["canonical_path"].as_str().unwrap(),
+                "{}",
+                v["name"]
+            );
+        }
+    }
+
     use super::*;
 
     #[test]

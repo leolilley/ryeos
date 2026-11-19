@@ -1,0 +1,103 @@
+{
+  "signing_key_seed_byte": 7,
+  "vectors": [
+    {
+      "name": "post_no_query",
+      "method": "post",
+      "path_and_query": "/execute",
+      "body": "{\"item_ref\":\"tool:example/run\"}",
+      "timestamp": 1700000000,
+      "nonce": "00112233445566778899aabbccddeeff",
+      "audience": "fp:audience-node",
+      "canonical_path": "/execute",
+      "body_digest": "e8f604fff568378790dc36adc6f885de1330b8143b02f6129e679628ebf24eb2",
+      "string_to_sign": "ryeos-request-v1\nPOST\n/execute\ne8f604fff568378790dc36adc6f885de1330b8143b02f6129e679628ebf24eb2\n1700000000\n00112233445566778899aabbccddeeff\nfp:audience-node",
+      "content_hash": "015f651e8df850ec37e617189e4391c0e35a80978d9df96a69cf541a3225fd6a",
+      "signature": "wjT0Qxi43V/qKyqWNWmov/TfZY0m9+MaoGb8YtOLVXneegN5xoOF9lLt5jIaEYxD9bY5EmJj72TMAFnTEPEsCQ=="
+    },
+    {
+      "name": "get_empty_body",
+      "method": "GET",
+      "path_and_query": "/threads/abc",
+      "body": "",
+      "timestamp": 1700000001,
+      "nonce": "nonce-a",
+      "audience": "fp:audience-node",
+      "canonical_path": "/threads/abc",
+      "body_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "string_to_sign": "ryeos-request-v1\nGET\n/threads/abc\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n1700000001\nnonce-a\nfp:audience-node",
+      "content_hash": "2bebc074bb8f165f5817b2af0c207a74aad3404c71996f2125fb11ffe79a92b0",
+      "signature": "cZIB9n88nPxoq6cjK14QZtU2+SgDH+a1lqHKVqUBlfAcOClQpjdzlXAxLVyfwLrIJ6JVuyDHYNRP/l1iX4ZKDw=="
+    },
+    {
+      "name": "sorted_query",
+      "method": "GET",
+      "path_and_query": "/threads/abc/events/stream?after=42&limit=10",
+      "body": "",
+      "timestamp": 1700000002,
+      "nonce": "nonce-b",
+      "audience": "fp:audience-node",
+      "canonical_path": "/threads/abc/events/stream?after=42&limit=10",
+      "body_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "string_to_sign": "ryeos-request-v1\nGET\n/threads/abc/events/stream?after=42&limit=10\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n1700000002\nnonce-b\nfp:audience-node",
+      "content_hash": "072e39970537911dc1abdbba026d2b754dfb35a777dfd3b76180e20aa43c101a",
+      "signature": "0+p1/eSfVp9RTeVmNRR4vAH8yGa+lpGVjytxWBxrT03tHbKL1qWOfvwTxBxWcRsZh20ZQCf6+q8dkqsPFpDdBA=="
+    },
+    {
+      "name": "unsorted_query",
+      "method": "Get",
+      "path_and_query": "/threads/abc?limit=10&after=42",
+      "body": "",
+      "timestamp": 1700000003,
+      "nonce": "nonce-c",
+      "audience": "fp:audience-node",
+      "canonical_path": "/threads/abc?after=42&limit=10",
+      "body_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "string_to_sign": "ryeos-request-v1\nGET\n/threads/abc?after=42&limit=10\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n1700000003\nnonce-c\nfp:audience-node",
+      "content_hash": "e43b5f852a1b18a5a4f4ad580db349a94bfa20b8ce22a66fb1ec6afcf754fd64",
+      "signature": "ELg0igJFFf0jHsMHDzJogv0LLoHhmQlHa1PLnp5AID9PoAxT5R+5X7YosEmP9zsY8kYBLeIfLTRT5yvIX3pgBA=="
+    },
+    {
+      "name": "bare_key_query",
+      "method": "GET",
+      "path_and_query": "/public-key?pretty&a=1",
+      "body": "",
+      "timestamp": 1700000004,
+      "nonce": "nonce-d",
+      "audience": "fp:audience-node",
+      "canonical_path": "/public-key?a=1&pretty",
+      "body_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "string_to_sign": "ryeos-request-v1\nGET\n/public-key?a=1&pretty\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n1700000004\nnonce-d\nfp:audience-node",
+      "content_hash": "c0e9b0bb298e2c59077da1d24266c8b87c1f98b848bffbf9fe10a2c0d72359ac",
+      "signature": "ZWycw9RDaFWhLTks5UJAkhMYRbiznaSWQg1ChwAbI7Mpx+odOhSKS+l5E2YdHXPmo23+GoH0KXDqTLWKq/TLCw=="
+    },
+    {
+      "name": "empty_value_query",
+      "method": "GET",
+      "path_and_query": "/x?b=&a=1",
+      "body": "",
+      "timestamp": 1700000005,
+      "nonce": "nonce-e",
+      "audience": "fp:audience-node",
+      "canonical_path": "/x?a=1&b",
+      "body_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "string_to_sign": "ryeos-request-v1\nGET\n/x?a=1&b\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n1700000005\nnonce-e\nfp:audience-node",
+      "content_hash": "269d42d2949a9090aceb82555dc93aa5979def5f60de769944d4cf5cfa6f3584",
+      "signature": "UTHWtq59Zp3wIE9LqTnWTmanIdnLSvdheVZ+8IlSlx5TjiA9o+/+vcrEwmybhoBCWfJ72z398c0tcTIxo4DFCw=="
+    },
+    {
+      "name": "non_ascii_body",
+      "method": "POST",
+      "path_and_query": "/execute?z=1&y=2",
+      "body": "café ☃\n",
+      "timestamp": 1700000006,
+      "nonce": "bm9uY2U=",
+      "audience": "fp:other-node",
+      "canonical_path": "/execute?y=2&z=1",
+      "body_digest": "40793ac06ff20eb2e739a4a2e50e97ae6cfff98adf434a96207da5a78b23fe99",
+      "string_to_sign": "ryeos-request-v1\nPOST\n/execute?y=2&z=1\n40793ac06ff20eb2e739a4a2e50e97ae6cfff98adf434a96207da5a78b23fe99\n1700000006\nbm9uY2U=\nfp:other-node",
+      "content_hash": "e3f3562b837108935a913cb7dde4635a9f40d42cf5669f481e243b559dd4b6ec",
+      "signature": "MKYBOB4XEfnMC2Z7fatANVyo7txo+TXzlZBfZLHaoQhD1g5YlbDRPmBLe6dFNSwIr7Xki3R1Wh1tT/JTWKreDA=="
+    }
+  ]
+}

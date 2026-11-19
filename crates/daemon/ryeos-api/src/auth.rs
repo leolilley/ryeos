@@ -794,6 +794,40 @@ fn verify_delegated(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn old_verifier_matches_recorded_vectors() {
+        let vectors: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../clients/presentation-contract/tests/vectors/request_signing.json"
+        ))
+        .unwrap();
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        for v in vectors["vectors"].as_array().unwrap() {
+            let s = |k: &str| v[k].as_str().unwrap();
+            let uri: axum::http::Uri = s("path_and_query").parse().unwrap();
+            assert_eq!(canonical_path(&uri), s("canonical_path"), "{}", s("name"));
+            assert_eq!(
+                lillux::cas::sha256_hex(s("body").as_bytes()),
+                s("body_digest")
+            );
+            let hash = request_content_hash(
+                s("method"),
+                &canonical_path(&uri),
+                &lillux::cas::sha256_hex(s("body").as_bytes()),
+                &v["timestamp"].as_u64().unwrap().to_string(),
+                s("nonce"),
+                s("audience"),
+            );
+            assert_eq!(hash, s("content_hash"), "{}", s("name"));
+            let sig = lillux::crypto::Signer::sign(&key, hash.as_bytes());
+            assert_eq!(
+                base64::engine::general_purpose::STANDARD.encode(sig.to_bytes()),
+                s("signature"),
+                "{}",
+                s("name")
+            );
+        }
+    }
+
     use base64::Engine;
     use lillux::crypto::{EncodePrivateKey, SigningKey};
     use tempfile::TempDir;
