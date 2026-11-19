@@ -1,6 +1,6 @@
 [package]
 name = "modal-guest-launcher"
-version = "0.6.0-ple.1"
+version = "0.6.0-ple.2"
 edition = "2024"
 description = "Guest entrypoint that installs the staged runtime on a Modal sandbox and starts the occurrence owner"
 license.workspace = true

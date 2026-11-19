@@ -1,6 +1,6 @@
 [package]
 name = "ryeos-codex-external-configuration"
-version = "0.6.0-ple.1"
+version = "0.6.0-ple.2"
 edition = "2024"
 description = "Signed Codex provider configuration adapter for RyeOS external candidates"
 license.workspace = true
