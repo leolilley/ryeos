@@ -393,7 +393,7 @@ fn successor_starts(bodies: &[Value]) -> Vec<usize> {
 }
 
 /// A small window forces a successor about every ten bulk calls.
-const LONG_CHAIN: &str = "steps:\n  - repeat: 230\n    tool_calls:\n      - { id: \"call_{n}\", name: bulk_bulk, arguments: {} }\n  - repeat: 5\n    text: done\n";
+const LONG_CHAIN: &str = "steps:\n  - repeat: 130\n    tool_calls:\n      - { id: \"call_{n}\", name: bulk_bulk, arguments: {} }\n  - repeat: 5\n    text: done\n";
 
 /// E7. A chain of at least fifteen continuations, with the chain limit set
 /// above it in the signed config, completes; every successor starts well formed.
@@ -402,7 +402,7 @@ async fn a_chain_of_fifteen_continuations_runs_under_a_raised_limit() {
     let rig = start_rig(
         LONG_CHAIN,
         RigOptions {
-            context_window: 2000,
+            context_window: 1000,
             header_extra: CONTINUING,
             continuation_yaml: Some(
                 "category: \"ryeos-runtime\"\nchain_depth_limit: 40\n".to_string(),
@@ -414,11 +414,12 @@ async fn a_chain_of_fifteen_continuations_runs_under_a_raised_limit() {
     .await
     .expect("start rig");
     let id = launch_on(&rig).await.expect("launch");
-    let chain = wait_chain_settled_for(&rig, &id, 1500).await;
+    let chain = wait_chain_settled_for(&rig, &id, 900).await;
     assert!(
         chain.len() >= 16,
-        "fifteen continuations: {} {chain:?}",
-        chain.len()
+        "fifteen continuations: {} {chain:?} root={}",
+        chain.len(),
+        thread_text(&rig, &id).await
     );
     assert!(
         chain.iter().filter(|(_, s)| s == "continued").count() >= 15,
