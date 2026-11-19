@@ -69,6 +69,9 @@ pub struct SurfaceSpec {
     /// Chrome style (border treatment).
     #[serde(default)]
     pub style: SurfaceStyleSpec,
+    /// The Surface's switcher chip.
+    #[serde(default)]
+    pub chip: SurfaceChipSpec,
     #[serde(default)]
     pub input: Option<serde_json::Value>,
     /// Shell-wide observation sources. Like view sources, these are compiled
@@ -253,7 +256,7 @@ fn clamped_ratio<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<f3
 // ---------------------------------------------------------------------------
 
 /// Chrome style declared by the surface.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SurfaceStyleSpec {
     #[serde(default)]
@@ -261,6 +264,70 @@ pub struct SurfaceStyleSpec {
     /// Show the view set tab strip, independently of optional status.
     #[serde(default)]
     pub view_set_tabs: bool,
+    /// Edge the Surface switcher sits on, or hidden.
+    #[serde(default)]
+    pub switcher: SwitcherEdgeSpec,
+    /// Edge the status bar sits on, or hidden.
+    #[serde(default)]
+    pub status_bar: StatusBarEdgeSpec,
+    /// Whether the add-tab affordance is offered.
+    #[serde(default = "default_add_tab")]
+    pub add_tab: bool,
+}
+
+fn default_add_tab() -> bool {
+    true
+}
+
+impl Default for SurfaceStyleSpec {
+    fn default() -> Self {
+        Self {
+            border: BorderStyleSpec::default(),
+            view_set_tabs: false,
+            switcher: SwitcherEdgeSpec::default(),
+            status_bar: StatusBarEdgeSpec::default(),
+            add_tab: true,
+        }
+    }
+}
+
+/// Closed placement vocabulary for the Surface switcher.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwitcherEdgeSpec {
+    #[default]
+    Left,
+    Top,
+    Right,
+    Hidden,
+}
+
+/// Closed placement vocabulary for the status bar.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusBarEdgeSpec {
+    #[default]
+    Bottom,
+    Top,
+    Hidden,
+}
+
+/// The Surface's switcher chip: which mark the client draws for it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SurfaceChipSpec {
+    #[serde(default)]
+    pub mark: SurfaceChipMarkSpec,
+}
+
+/// Closed vocabulary of chip marks; each value is a client drawing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SurfaceChipMarkSpec {
+    Grid,
+    Key,
+    #[default]
+    Initial,
 }
 
 /// Closed border vocabulary. Renderers map names to local glyph/pixel
@@ -658,6 +725,7 @@ pub fn builtin_default() -> SurfaceSpec {
         view_sets: Vec::new(),
         dialogs: Vec::new(),
         style: SurfaceStyleSpec::default(),
+        chip: SurfaceChipSpec::default(),
         input: None,
         sources: BTreeMap::new(),
         views: None,

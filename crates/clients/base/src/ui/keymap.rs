@@ -125,6 +125,8 @@ pub struct RyeOsKeyEvent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct RyeOsKeyContext {
+    /// The attention overlay is open and takes the keys.
+    pub overlay_open: bool,
     pub dialog_open: bool,
     pub input_visible: bool,
     /// The focused view instance owns an input buffer.
@@ -228,7 +230,79 @@ pub enum RyeOsKeyCommand {
     Ignore,
 }
 
+/// The key hints for the focused context, in priority order, at most
+/// [`MAX_KEY_HINTS`]. `keys` is display text in the shell's one notation; the
+/// table sits beside the matcher and a test feeds every hint's keys through
+/// [`ryeos_key_command`], so a hint cannot drift from the binding it names.
+/// With retained lens frames the two back hints lead.
+pub fn key_hints(retained_lens_frames: bool) -> Vec<super::view_model::RyeOsKeyHintVm> {
+    let back: &[(&str, &str)] = if retained_lens_frames {
+        &[("⌫", "back"), ("alt+←", "back")]
+    } else {
+        &[]
+    };
+    let always: &[(&str, &str)] = &[
+        ("ctrl+k", "open"),
+        ("alt+o", "overlay"),
+        ("alt+t/b", "bars"),
+        ("ctrl+←/→", "tab"),
+        ("ctrl+↑/↓", "move"),
+    ];
+    back.iter()
+        .chain(always)
+        .take(MAX_KEY_HINTS)
+        .map(|(keys, word)| super::view_model::RyeOsKeyHintVm {
+            keys: (*keys).to_string(),
+            word: (*word).to_string(),
+        })
+        .collect()
+}
+
+/// The key hints for the overlay sheet footer: move, open, acknowledge, close.
+pub fn overlay_key_hints() -> Vec<super::view_model::RyeOsKeyHintVm> {
+    [
+        ("↑/↓", "move"),
+        ("enter", "open"),
+        ("a", "acknowledge"),
+        ("esc", "close"),
+    ]
+    .into_iter()
+    .map(|(keys, word)| super::view_model::RyeOsKeyHintVm {
+        keys: keys.to_string(),
+        word: word.to_string(),
+    })
+    .collect()
+}
+
+/// The most hints the status bar carries.
+pub const MAX_KEY_HINTS: usize = 7;
+
 pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeOsKeyCommand {
+    // The overlay key works over any Surface, in any state, whatever edges the
+    // Surface hides.
+    if let RyeOsKey::Char(ch) = event.key
+        && ch.eq_ignore_ascii_case(&'o')
+        && event.modifiers.alt_only()
+    {
+        return ui(RyeOsUiEvent::ToggleOverlay);
+    }
+    if context.overlay_open {
+        return match event.key {
+            RyeOsKey::Escape if event.modifiers.none() => ui(RyeOsUiEvent::ToggleOverlay),
+            RyeOsKey::ArrowUp if event.modifiers.none() => {
+                ui(RyeOsUiEvent::MoveOverlay { delta: -1 })
+            }
+            RyeOsKey::ArrowDown if event.modifiers.none() => {
+                ui(RyeOsUiEvent::MoveOverlay { delta: 1 })
+            }
+            RyeOsKey::Enter if event.modifiers.none() => ui(RyeOsUiEvent::ActivateOverlay),
+            RyeOsKey::Char('c') if event.modifiers.ctrl_only() => RyeOsKeyCommand::Quit,
+            RyeOsKey::Char(ch) if event.modifiers.none_or_shift() => {
+                ui(RyeOsUiEvent::ActivateOverlayKey { ch })
+            }
+            _ => RyeOsKeyCommand::Ignore,
+        };
+    }
     if context.dialog_open && event.key == RyeOsKey::Escape && event.modifiers.none() {
         return RyeOsKeyCommand::CloseFocusedDialog;
     }
@@ -1088,6 +1162,142 @@ mod tests {
             input_visible,
             ..Default::default()
         }
+    }
+
+    /// Parse a hint's display keys (`ctrl+k`, `alt+t/b`, `ctrl+←/→`, `⌫`) into
+    /// the events it names; `/` separates alternatives for the last key.
+    fn events_of_hint(keys: &str) -> Vec<RyeOsKeyEvent> {
+        let (mods, last) = match keys.rsplit_once('+') {
+            Some((mods, last)) => (mods, last),
+            None => ("", keys),
+        };
+        let mut modifiers = RyeOsKeyModifiers::default();
+        for modifier in mods.split('+').filter(|part| !part.is_empty()) {
+            match modifier {
+                "ctrl" => modifiers.ctrl = true,
+                "alt" => modifiers.alt = true,
+                other => panic!("unknown modifier {other:?} in hint {keys:?}"),
+            }
+        }
+        last.split('/')
+            .map(|name| {
+                let key = match name {
+                    "←" => RyeOsKey::ArrowLeft,
+                    "→" => RyeOsKey::ArrowRight,
+                    "↑" => RyeOsKey::ArrowUp,
+                    "↓" => RyeOsKey::ArrowDown,
+                    "⌫" => RyeOsKey::Backspace,
+                    "enter" => RyeOsKey::Enter,
+                    "esc" => RyeOsKey::Escape,
+                    single if single.chars().count() == 1 => {
+                        RyeOsKey::Char(single.chars().next().unwrap())
+                    }
+                    other => panic!("unknown key {other:?} in hint {keys:?}"),
+                };
+                RyeOsKeyEvent { key, modifiers }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_key_hint_maps_to_a_command_in_a_context_where_it_appears() {
+        for retained in [false, true] {
+            let hints = key_hints(retained);
+            assert!(hints.len() <= MAX_KEY_HINTS);
+            assert!(!hints.is_empty());
+            for hint in hints {
+                for event in events_of_hint(&hint.keys) {
+                    assert_ne!(
+                        ryeos_key_command(event, RyeOsKeyContext::default()),
+                        RyeOsKeyCommand::Ignore,
+                        "hint {:?} ({}) names a key the matcher ignores",
+                        hint.keys,
+                        hint.word
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_overlay_hint_maps_to_a_command_while_the_overlay_is_open() {
+        let open = RyeOsKeyContext {
+            overlay_open: true,
+            ..Default::default()
+        };
+        let hints = overlay_key_hints();
+        assert!(hints.len() <= MAX_KEY_HINTS);
+        assert_eq!(hints.len(), 4);
+        for hint in hints {
+            for event in events_of_hint(&hint.keys) {
+                assert_ne!(
+                    ryeos_key_command(event, open),
+                    RyeOsKeyCommand::Ignore,
+                    "overlay hint {:?} ({}) names a key the matcher ignores",
+                    hint.keys,
+                    hint.word
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_overlay_key_toggles_in_any_context_and_takes_the_keys_while_open() {
+        let alt_o = RyeOsKeyEvent {
+            key: RyeOsKey::Char('o'),
+            modifiers: RyeOsKeyModifiers {
+                alt: true,
+                ..Default::default()
+            },
+        };
+        let toggle = RyeOsKeyCommand::Ui {
+            event: RyeOsUiEvent::ToggleOverlay,
+        };
+        for context in [
+            RyeOsKeyContext::default(),
+            RyeOsKeyContext {
+                dialog_open: true,
+                ..Default::default()
+            },
+            RyeOsKeyContext {
+                overlay_open: true,
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(ryeos_key_command(alt_o, context), toggle);
+        }
+        let open = RyeOsKeyContext {
+            overlay_open: true,
+            ..Default::default()
+        };
+        assert_eq!(ryeos_key_command(key(RyeOsKey::Escape), open), toggle);
+        assert_eq!(
+            ryeos_key_command(key(RyeOsKey::ArrowDown), open),
+            RyeOsKeyCommand::Ui {
+                event: RyeOsUiEvent::MoveOverlay { delta: 1 }
+            }
+        );
+        assert_eq!(
+            ryeos_key_command(key(RyeOsKey::Enter), open),
+            RyeOsKeyCommand::Ui {
+                event: RyeOsUiEvent::ActivateOverlay
+            }
+        );
+    }
+
+    #[test]
+    fn back_hints_appear_only_with_retained_lens_frames() {
+        let keys = |retained| -> Vec<String> {
+            key_hints(retained)
+                .into_iter()
+                .map(|hint| hint.keys)
+                .collect()
+        };
+        assert_eq!(
+            keys(false),
+            ["ctrl+k", "alt+o", "alt+t/b", "ctrl+←/→", "ctrl+↑/↓"]
+        );
+        assert_eq!(&keys(true)[..2], ["⌫", "alt+←"]);
     }
 
     #[test]

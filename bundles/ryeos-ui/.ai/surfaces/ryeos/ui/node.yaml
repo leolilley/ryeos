@@ -1,8 +1,11 @@
-# ryeos:signed:2026-11-18T06:38:05Z:2154942576b706348687aa450aaf7458ce079674477668d6428729316c1c0558:80WaI3E4o0OitNXFG0B1+sVRQsxbbll29n7F45t0TVUzNW4rg2kufJff/0ilkLPcSJmoxqjWLOYbqVGx3TwMBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T22:21:29Z:862c435bd950cf8856122ec57f60a7177eb712850c4c0d6286265f4fdf141b2f:GrGG/x7qJT5JBL6v3HdRgepvM4Rw4JH+CUWL84ezSLu/MN70jh4Ac49vVZ7vY3ky9D37AlUgqx49UlakWroaAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-node
 title: Node
 version: "1.0.0"
 description: Admitted node inspection with explicit execution subjects, registered project navigation and bounded maintenance observations
+
+chip:
+  mark: key
 
 capabilities:
   sources:
