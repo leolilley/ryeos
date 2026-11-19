@@ -13,6 +13,20 @@ name: Remote node build
 #
 # The job summary prints the artifact name and the exact download and install
 # commands; the same steps are in .ai/knowledge/ryeos/development/build-and-test.md.
+#
+# Inputs beyond the bundle set:
+#   base=runner (default)  build on the ubuntu-latest runner itself; binaries
+#                          link against the runner's glibc (2.39).
+#   base=bookworm          run the populate (and so every Rust build) inside the
+#                          rust:1.95-slim-bookworm image Dockerfile.release pins,
+#                          so the binaries need glibc 2.36 or older, then prove
+#                          they start in debian:bookworm-slim with no dev
+#                          libraries. sccache is not used inside the container.
+#   extra_bins             space-separated cargo package names (for example
+#                          ryeos-chat-stub) built with `cargo build --release -p`
+#                          in the same environment and added to the artifact's
+#                          target/release and manifest. A package that does not
+#                          produce a binary of its own name fails the job.
 on:
   workflow_dispatch:
     inputs:
@@ -34,6 +48,19 @@ on:
           - core-workflow
           - core-knowledge
           - release-authority
+      base:
+        description: "Build environment: runner (ubuntu-latest glibc) or bookworm (pinned Debian 12 container, glibc 2.36 floor)"
+        required: false
+        default: runner
+        type: choice
+        options:
+          - runner
+          - bookworm
+      extra_bins:
+        description: "Space-separated cargo packages to build and ship beside the node binaries (e.g. ryeos-chat-stub)"
+        required: false
+        default: ""
+        type: string
       label:
         description: "Optional short label shown in the run name"
         required: false
@@ -80,6 +107,7 @@ jobs:
       # The same call the installer makes for --populate --all: its default
       # development publisher key and owner label, the release profile.
       - name: Populate and sign the bundle set
+        if: ${{ inputs.base != 'bookworm' }}
         env:
           BUNDLE_SET: ${{ inputs.bundle_set }}
           CARGO_TARGET_DIR: ${{ runner.temp }}/ryeos-node-target
@@ -89,10 +117,84 @@ jobs:
             --owner "RyeOS Development" \
             --bundle-set "$BUNDLE_SET" --all
 
+      # base=bookworm: the same populate call, run as root inside the pinned
+      # Debian 12 Rust image with the checkout and target directory mounted.
+      # The files it leaves behind are handed back to the runner user.
+      - name: Populate and sign the bundle set (bookworm container)
+        if: ${{ inputs.base == 'bookworm' }}
+        env:
+          BUNDLE_SET: ${{ inputs.bundle_set }}
+          EXTRA_BINS: ${{ inputs.extra_bins }}
+          CARGO_TARGET_DIR: ${{ runner.temp }}/ryeos-node-target
+        run: |
+          set -euo pipefail
+          if [[ ! "$EXTRA_BINS" =~ ^[A-Za-z0-9_\ -]*$ ]]; then
+            echo "extra_bins must be cargo package names separated by spaces" >&2
+            exit 1
+          fi
+          mkdir -p "$CARGO_TARGET_DIR"
+          script="$RUNNER_TEMP/bookworm-build.sh"
+          cat > "$script" <<'INNER'
+          set -euo pipefail
+          trap 'chown -R "$HOST_UID:$HOST_GID" /work "$CARGO_TARGET_DIR" || true' EXIT
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl gzip openssl pkg-config libssl-dev tar xz-utils \
+            libcap-dev binutils python3 python3-yaml python3-cryptography \
+            libxkbcommon-dev git jq zstd
+          git config --global --add safe.directory '*'
+          ldd --version | head -1
+          ./scripts/populate-bundles.sh \
+            --key .dev-keys/PUBLISHER_DEV.pem \
+            --owner "RyeOS Development" \
+            --bundle-set "$BUNDLE_SET" --all
+          for pkg in $EXTRA_BINS; do
+            cargo build --release -p "$pkg"
+            test -x "$CARGO_TARGET_DIR/release/$pkg" || {
+              echo "package $pkg did not produce a binary named $pkg" >&2
+              exit 1
+            }
+          done
+          INNER
+          docker run --rm \
+            -v "$PWD:/work" -w /work \
+            -v "$CARGO_TARGET_DIR:$CARGO_TARGET_DIR" \
+            -v "${TMPDIR:-/tmp}:${TMPDIR:-/tmp}" \
+            -v "$script:/bookworm-build.sh:ro" \
+            -e BUNDLE_SET -e EXTRA_BINS -e CARGO_TARGET_DIR \
+            -e TMPDIR="${TMPDIR:-/tmp}" \
+            -e CARGO_TERM_COLOR -e RUST_BACKTRACE -e CARGO_INCREMENTAL \
+            -e RYEOS_VCS_REF="$(git rev-parse --short=12 HEAD)" \
+            -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+            rust:1.95-slim-bookworm@sha256:d7482085ff5b415f84dba5647ae71606650bdef00db7aeb69f4b3d170c3e4082 \
+            bash /bookworm-build.sh
+
+      - name: Build extra binaries (runner)
+        if: ${{ inputs.base != 'bookworm' && inputs.extra_bins != '' }}
+        env:
+          EXTRA_BINS: ${{ inputs.extra_bins }}
+          CARGO_TARGET_DIR: ${{ runner.temp }}/ryeos-node-target
+        run: |
+          set -euo pipefail
+          if [[ ! "$EXTRA_BINS" =~ ^[A-Za-z0-9_\ -]*$ ]]; then
+            echo "extra_bins must be cargo package names separated by spaces" >&2
+            exit 1
+          fi
+          for pkg in $EXTRA_BINS; do
+            cargo build --release -p "$pkg"
+            test -x "$CARGO_TARGET_DIR/release/$pkg" || {
+              echo "package $pkg did not produce a binary named $pkg" >&2
+              exit 1
+            }
+          done
+
       - name: Pack the install artifact
         id: pack
         env:
           BUNDLE_SET: ${{ inputs.bundle_set }}
+          BASE: ${{ inputs.base }}
+          EXTRA_BINS: ${{ inputs.extra_bins }}
           CARGO_TARGET_DIR: ${{ runner.temp }}/ryeos-node-target
         run: |
           set -euo pipefail
@@ -119,6 +221,12 @@ jobs:
             fi
           done
 
+          # Extra packages requested through extra_bins: each must exist.
+          for b in $EXTRA_BINS; do
+            [[ -f "$CARGO_TARGET_DIR/release/$b" ]] || { echo "missing extra binary: $b" >&2; exit 1; }
+            install -m755 "$CARGO_TARGET_DIR/release/$b" "$stage/target/release/$b"
+          done
+
           # The populated bundle state of the checkout (everything the
           # installer reads from bundles/ that is not tracked source).
           ./scripts/ci/pack-bundle-state.sh "$stage/bundle-state.tar.zst"
@@ -130,6 +238,12 @@ jobs:
             '{commit:$sha, bundle_set:$set, ref:$ref, run_id:$run, built_utc:$built,
               binaries:($sums | split("\n") | map(select(length>0) | split("  ") | {(.[1]): .[0]}) | add)}' \
             > "$stage/manifest.json"
+          if [[ "$BASE" != runner || -n "$EXTRA_BINS" ]]; then
+            jq --arg base "$BASE" --arg extra "$EXTRA_BINS" \
+              '. + {base:$base, extra_bins:($extra | split(" ") | map(select(length>0)))}' \
+              "$stage/manifest.json" > "$stage/manifest.new"
+            mv "$stage/manifest.new" "$stage/manifest.json"
+          fi
           cat "$stage/manifest.json"
 
           tar -C "$stage" --zstd -cf "$RUNNER_TEMP/node-out/$name.tar.zst" \
@@ -138,7 +252,46 @@ jobs:
           {
             echo "name=$name"
             echo "file=$RUNNER_TEMP/node-out/$name.tar.zst"
+            echo "stage=$stage"
           } >> "$GITHUB_OUTPUT"
+
+      # base=bookworm: prove the packed binaries start on a bare Debian 12
+      # image (no dev libraries) and that none needs a glibc newer than 2.36.
+      - name: Verify the binaries start on bookworm
+        if: ${{ inputs.base == 'bookworm' }}
+        env:
+          STAGE: ${{ steps.pack.outputs.stage }}
+          EXTRA_BINS: ${{ inputs.extra_bins }}
+        run: |
+          set -euo pipefail
+          sha12="$(git rev-parse --short=12 HEAD)"
+          for f in "$STAGE"/target/release/*; do
+            floor="$(objdump -T "$f" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -V | tail -1 || true)"
+            echo "$(basename "$f") needs glibc <= ${floor:-none}"
+            if [[ -n "$floor" && "$(printf '%s\n2.36\n' "$floor" | sort -V | tail -1)" != 2.36 ]]; then
+              echo "$f needs glibc $floor, newer than bookworm's 2.36" >&2
+              exit 1
+            fi
+          done
+          cat > "$RUNNER_TEMP/bookworm-verify.sh" <<'INNER'
+          set -euo pipefail
+          ldd --version | head -1
+          ryeos --version
+          rev="$(ryeosd build-info --revision)"
+          echo "ryeosd revision: $rev"
+          test "$rev" = "$SHA12"
+          for b in $EXTRA_BINS; do
+            "$b" --help > /dev/null
+            echo "$b --help ok"
+          done
+          INNER
+          docker run --rm \
+            -v "$STAGE/target/release:/node-bin:ro" \
+            -v "$RUNNER_TEMP/bookworm-verify.sh:/verify.sh:ro" \
+            -e PATH=/node-bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            -e SHA12="$sha12" -e EXTRA_BINS \
+            debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc \
+            bash /verify.sh
 
       - name: Upload the install artifact
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
@@ -172,4 +325,24 @@ jobs:
             echo "git worktree add --detach \"\$d/src\" $GITHUB_SHA && cd \"\$d/src\" && ./scripts/ci/unpack-bundle-state.sh \"\$d/bundle-state.tar.zst\""
             echo "./scripts/pkg/install-local-direct.sh --bundle-set $BUNDLE_SET --cargo-target-dir \"\$d/target\" --trust-source-publishers"
             echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Print the build environment and extra binaries
+        if: ${{ inputs.base == 'bookworm' || inputs.extra_bins != '' }}
+        env:
+          NAME: ${{ steps.pack.outputs.name }}
+          BASE: ${{ inputs.base }}
+          EXTRA_BINS: ${{ inputs.extra_bins }}
+        run: |
+          {
+            echo
+            if [[ "$BASE" == bookworm ]]; then
+              echo "Built in rust:1.95-slim-bookworm: every binary needs glibc 2.36 or older and was started in debian:bookworm-slim (ryeos --version, ryeosd build-info --revision matches the commit)."
+            else
+              echo "Built on the runner (ubuntu-latest): the binaries link against the runner's glibc, not bookworm's."
+            fi
+            if [[ -n "$EXTRA_BINS" ]]; then
+              echo
+              echo "Extra binaries in \`target/release/\` of the same archive: \`$EXTRA_BINS\`. After the unpack above, run \`\$d/target/release/<name>\`, for example \`\$d/target/release/ryeos-chat-stub script.yaml\`."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
