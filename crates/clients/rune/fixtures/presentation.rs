@@ -60,7 +60,7 @@ fn response(view_ref: &str, scene: &str) -> Option<Value> {
         return long_response(view_ref);
     }
     if is_timeline_scene(scene) {
-        return (view_ref == CONVERSATION_REF).then(|| demo_timeline(scene == "timeline-top"));
+        return (view_ref == CONVERSATION_REF).then(|| demo_timeline(scene));
     }
     if scene == "states" {
         return states_response(view_ref);
@@ -219,7 +219,7 @@ fn find_input(value: &Value) -> Option<ryeos_client_base::ui::view_model::RyeOsI
 }
 
 fn is_timeline_scene(scene: &str) -> bool {
-    matches!(scene, "timeline" | "timeline-draft" | "timeline-top")
+    matches!(scene, "timeline" | "timeline-draft" | "timeline-top" | "timeline-asks")
 }
 
 /// The `states` scene: the first table answers with no rows, the second is
@@ -242,9 +242,10 @@ fn with_tone(mut entry: Value, tone: &str) -> Value {
 /// A conversation that draws every entry type and group: an earlier exchange
 /// folded into a recap, then an operator message, a thought, prose,
 /// activities in each state, a link, long entries, an answered ask, an
-/// outcome, two pending asks, and a closing cluster. The lane waits on the
-/// first pending ask.
-fn demo_timeline(top: bool) -> Value {
+/// outcome, one pending ask, and a closing cluster. The lane waits on the
+/// pending ask. The `timeline-asks` scene adds a second one, which the dock
+/// stacks; the `timeline-top` scene keeps the start of the conversation.
+fn demo_timeline(scene: &str) -> Value {
     let entry = |id: &str, kind: &str, slots: Value| fixture_entry(id, kind, "x1", slots);
     let done = |id: &str, headline: &str, detail: &str, badge: Option<&str>| {
         let mut slots = json!({ "headline": headline, "detail": detail });
@@ -387,9 +388,15 @@ fn demo_timeline(top: bool) -> Value {
             ]
         }),
     ];
-    // The top scene keeps the start of the conversation and the asks, so the
+    // One pending ask, as most conversations have; the second joins it in the
+    // `timeline-asks` scene only.
+    let items: Vec<Value> = items
+        .into_iter()
+        .filter(|item| scene == "timeline-asks" || item["id"].as_str() != Some("k2"))
+        .collect();
+    // The top scene keeps the start of the conversation and the ask, so the
     // whole of it fits one frame.
-    let items: Vec<Value> = if top {
+    let items: Vec<Value> = if scene == "timeline-top" {
         items
             .into_iter()
             .filter(|item| {
@@ -404,10 +411,8 @@ fn demo_timeline(top: bool) -> Value {
                             | "a1"
                             | "a2"
                             | "a3"
-                            | "a4"
                             | "l1"
                             | "k1"
-                            | "k2"
                     )
                 )
             })
@@ -616,7 +621,7 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
     match scene {
         "" | "field" | "long" | "states" | "chips" | "switcher-right" | "switcher-top" | "bare"
         | "overlay" => {}
-        "timeline" | "timeline-draft" | "timeline-top" => {
+        "timeline" | "timeline-draft" | "timeline-top" | "timeline-asks" => {
             // The newest group is opened, so an opened group is drawn too.
             if scene != "timeline-top" {
                 core.dispatch(RyeOsEvent::Ui {

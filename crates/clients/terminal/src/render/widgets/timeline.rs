@@ -288,7 +288,9 @@ fn push_timeline_lines(
                 ));
             }
             RyeOsTimelineEntryVm::Separator { label } => {
-                let label = format!(" {label} ");
+                // The label carries the whole message; a rule holds one line.
+                let flat = label.split_whitespace().collect::<Vec<_>>().join(" ");
+                let label = format!(" {} ", truncate(&flat, entry_width.saturating_sub(4)));
                 let rule_len = entry_width.saturating_sub(display_width(&label));
                 let left = rule_len / 2;
                 let right = rule_len.saturating_sub(left);
