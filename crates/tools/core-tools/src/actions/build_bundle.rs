@@ -214,6 +214,11 @@ pub(super) fn rebuild_bundle_manifest_in_place(
     let manifest_value = source_manifest.to_value();
     let manifest_hash = cas.store_object(&manifest_value)?;
 
+    // The picture manifest is written before the executor manifest ref: the
+    // test harness treats the executor ref's mtime as the publish time, and a
+    // picture ref or object written after it would read as a stale bundle.
+    rebuild_picture_manifest(bundle_root, &cas, signing_key)?;
+
     // Signed, domain-separated ref to the exact manifest object.
     let refs_path = refs_dir.join("manifest");
     let ref_body = format!(
@@ -232,8 +237,6 @@ pub(super) fn rebuild_bundle_manifest_in_place(
         let signed_ref = sign_content(&ref_body, signing_key, "#", None);
         atomic_write_str(&refs_path, &signed_ref)?;
     }
-
-    rebuild_picture_manifest(bundle_root, &cas, signing_key)?;
 
     Ok(RebuildReport {
         manifest_hash,
