@@ -2139,7 +2139,8 @@ mod tests {
             (8, 7, 2, 3),
             "a change to a stored network-input version needs a journal epoch bump"
         );
-        let policy = &bootstrap().controller.http().unwrap().network_inputs;
+        let bootstrap = bootstrap();
+        let policy = &bootstrap.controller.http().unwrap().network_inputs;
         assert_eq!(
             policy.digest().unwrap(),
             crate::objects::canonical_value_digest(&serde_json::json!({
