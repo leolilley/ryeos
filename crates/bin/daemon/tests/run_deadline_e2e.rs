@@ -704,6 +704,14 @@ async fn a_restart_mid_run_keeps_the_deadline_and_the_single_wrap_up() {
             "settled as an elapsed deadline: {detail}{dump}"
         );
         assert_eq!(result["deadline_at_ms"], before[0], "{result}");
+        // The settlement was recorded at or after the end it names.
+        let stopped_at_ms = result["stopped_at_ms"]
+            .as_i64()
+            .unwrap_or_else(|| panic!("no stopped_at_ms: {result}"));
+        assert!(
+            stopped_at_ms >= result["deadline_at_ms"].as_i64().expect("deadline_at_ms"),
+            "stopped before the recorded end: {result}"
+        );
     }
     assert_eq!(
         wrap_up_inputs(&rig, &id).await.len(),

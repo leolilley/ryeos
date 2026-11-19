@@ -8330,6 +8330,7 @@ async fn run_claimed_thread_row_inner(
             envelope: &envelope,
             timeout_secs: duration,
             aggregate_deadline_at_ms: run_end_at_ms,
+            successor_end_at_ms,
             callback: &callback_owned,
             thread_id: &thread_id_owned,
             launch_owner: &launch_owner_owned,
@@ -8379,43 +8380,7 @@ async fn run_claimed_thread_row_inner(
         // borrower settlement while it still holds the request lifelines.
         // Neither an arbitrary error nor a JoinError supplies that proof here.
         Ok(Ok(spawned)) => spawned,
-        Ok(Err(error)) => {
-            // A successor whose end passed between its launch admission and
-            // the spawn (the spawn waits for a blocking worker, which load
-            // lengthens) is a deadline stop like one found elapsed at
-            // admission, not a failed launch.
-            let now_ms = lillux::time::timestamp_millis();
-            let elapsed_end_at_ms = successor_end_at_ms.filter(|end| {
-                now_ms >= *end
-                    && error
-                        .downcast_ref::<DispatchError>()
-                        .is_some_and(|refusal| refusal.code() == "budget_exhausted")
-            });
-            if let Some(end_at_ms) = elapsed_end_at_ms {
-                crate::dispatch::finalize_method_thread_with_params(
-                    state,
-                    launch_owner,
-                    ryeos_app::run_deadline::elapsed_finalize_params(
-                        &thread_id,
-                        ryeos_app::run_deadline::REASON_ELAPSED_BEFORE_LAUNCH,
-                        end_at_ms,
-                        now_ms,
-                    ),
-                )?;
-                return Err(BuildAndLaunchError::from(
-                    DispatchError::LaunchPreparationFailed {
-                        code: "deadline_elapsed".to_owned(),
-                        message: "the run deadline passed before this thread could launch; it \
-                                  settled as a deadline stop"
-                            .to_owned(),
-                        classification: "policy".to_owned(),
-                        binding: None,
-                        details: Box::new(BTreeMap::new()),
-                    },
-                ));
-            }
-            return Err(error.into());
-        }
+        Ok(Err(error)) => return Err(error.into()),
         Err(error) => {
             lifecycle_owner.revoke_tokens_after_unsettled_wait();
             return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
