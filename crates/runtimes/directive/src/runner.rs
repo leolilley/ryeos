@@ -4103,6 +4103,14 @@ impl Runner {
                     if let Some(cost) = hook_cost
                         && let Err(error) = self.budget.accumulate(cost)
                     {
+                        // A `provider_error` hook only observes a failure that
+                        // is already typed; its own cost violation must not
+                        // replace that failure's code.
+                        if event == "provider_error" {
+                            tracing::warn!(%error, "provider_error hook cost violates accounting bounds; the typed failure stands");
+                            state = *resume_to;
+                            continue;
+                        }
                         state = State::Errored {
                             error: format!(
                                 "hook event `{event}` cost violates accounting bounds: {error}"

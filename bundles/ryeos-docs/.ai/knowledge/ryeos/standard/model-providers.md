@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-19T05:28:29Z:b8072da5d1c1315c34121453e4f2f405361d61c22712bb276621fe3fa4aa4a50:gexxhZLPr1nmaaTliplDXYvQnmKOTQz89t05dgAJAv975skd38WxTWpOv/d5KvlxsyLmzi7ngciuEisXhaTNBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-19T10:13:35Z:8bcc39ff59b9f7f7d3da169cee24fcb96b01b8169f18c91c721c506c346713be:AVHunrneQbJVdXTbPOTzYRo4/4sem6X+8c0yLJNz/w4i9jlaMupddsPZPPgh0pNwgTC6o/M+K7OCQ7P8whiXBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/standard
@@ -382,7 +382,9 @@ rules. Only a response that carried a status can match, so an uncertain outcome
 (a timeout, a cut stream) is never reclassified.
 
 `code` is an opaque token chosen by the entry: lowercase letters, digits and
-underscores, at most 64 bytes, and it must start with `provider_`. The runtime
+underscores, at most 64 bytes, and it must start with `provider_`; a code the
+runtime reports itself (for example `provider_outcome_uncertain`) is reserved and
+refused. The runtime
 gives no code a meaning. A parent graph that follows the directive reads it as
 `state._outcome.failure_code`, and the directive's own `provider_error` hooks
 (observation only) receive it as `event.code` beside `event.status` and

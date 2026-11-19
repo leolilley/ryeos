@@ -236,19 +236,17 @@ pub async fn load_resume_state(
     // The whole rebuilt conversation, predecessors' carry and own part, must
     // be one a provider accepts. A failed check is a typed refusal, not a
     // request that would be sent and rejected.
-    check_well_formed(
-        &messages,
-        // Calls left unanswered at the end are expected when a tool batch is
-        // pending, and when the batch was cut short on purpose (a settled
-        // `directive_return` or a failed lifecycle call abandons the calls
-        // after it); neither sends a request with them.
-        !recovered_tools.pending.is_empty()
-            || matches!(
-                disposition,
-                ResumeDisposition::FinalizeDirectiveReturn { .. }
-                    | ResumeDisposition::CheckContinuation
-            ),
-    )?;
+    // Calls unanswered at the very end are tolerated only when the record
+    // accounts for them: a pending tool batch (still to run), or calls a
+    // settled `directive_return` abandoned. Any other unanswered call is a
+    // record defect and is refused.
+    let tolerated_open: Vec<String> = recovered_tools
+        .pending
+        .iter()
+        .map(|occurrence| occurrence.call.id.clone().unwrap_or_default())
+        .chain(recovered_tools.abandoned_call_ids.iter().cloned())
+        .collect();
+    check_well_formed(&messages, &tolerated_open)?;
 
     Ok(ResumeState {
         messages,
@@ -391,6 +389,9 @@ fn recover_result_guard(
 #[derive(Debug)]
 struct RecoveredToolState {
     pending: Vec<ToolOccurrence>,
+    /// Call ids of calls a settled lifecycle call abandoned: they were never
+    /// started and never get a result, by design.
+    abandoned_call_ids: Vec<String>,
     pending_source_thread_id: Option<String>,
     started: Vec<StartedToolOccurrence>,
     current_batch: Option<RecoveredToolBatch>,
@@ -440,6 +441,7 @@ fn recover_tool_state(
     let mut started = Vec::new();
     let mut current_batch: Option<RecoveredToolBatch> = None;
     let mut terminal_lifecycle_settlement = None;
+    let mut abandoned_call_ids: Vec<String> = Vec::new();
     for (event_index, (event, source_thread_id)) in events.iter().zip(source_thread_ids).enumerate()
     {
         if terminal_lifecycle_settlement.is_some()
@@ -472,6 +474,11 @@ fn recover_tool_state(
                     );
                 }
                 current_batch = None;
+                abandoned_call_ids.extend(
+                    open.iter()
+                        .filter(|entry| !entry.settled && entry.abandoned)
+                        .map(|entry| entry.occurrence.call.id.clone().unwrap_or_default()),
+                );
                 let cognition = replayed_cognition_out(event)?;
                 let tool_calls = cognition.message().calls();
                 if tool_calls.is_empty() {
@@ -641,6 +648,11 @@ fn recover_tool_state(
         }
     }
 
+    abandoned_call_ids.extend(
+        open.iter()
+            .filter(|entry| !entry.settled && entry.abandoned)
+            .map(|entry| entry.occurrence.call.id.clone().unwrap_or_default()),
+    );
     let pending_source_thread_id = open
         .iter()
         .find(|entry| !entry.settled && !entry.abandoned)
@@ -651,6 +663,7 @@ fn recover_tool_state(
             .filter(|entry| !entry.settled && !entry.abandoned)
             .map(|entry| entry.occurrence.clone())
             .collect(),
+        abandoned_call_ids,
         pending_source_thread_id,
         started,
         current_batch,
@@ -1460,19 +1473,20 @@ fn carry_into_successor(
     {
         messages.remove(0);
     }
-    check_well_formed(&messages, false)?;
+    check_well_formed(&messages, &[])?;
     Ok(messages)
 }
 
 /// Checks that a conversation begins with a user message and that every tool
-/// call is answered by a result and every result has its call. With
-/// `allow_open_tail`, calls still unanswered at the very end are accepted:
-/// that is a tool batch a same-thread recovery has yet to settle. The end of
+/// call is answered by a result and every result has its call. Calls still
+/// unanswered at the very end are accepted only when their ids are in
+/// `tolerated_open`: a tool batch a same-thread recovery has yet to settle, or
+/// calls a settled lifecycle call abandoned. The end of
 /// the conversation is otherwise unchecked, because a rebuild legitimately
 /// ends on an assistant message (a retained answer or a settled return).
 fn check_well_formed(
     messages: &[ProviderMessage],
-    allow_open_tail: bool,
+    tolerated_open: &[String],
 ) -> Result<(), ResumeFoldError> {
     if let Some(first) = messages.first()
         && first.role() != "user"
@@ -1500,14 +1514,15 @@ fn check_well_formed(
             }
             continue;
         }
-        if let Some(call_id) = open.first() {
+        if let Some(call_id) = open.iter().find(|id| !tolerated_open.contains(id)) {
             return Err(ResumeFoldError::UnansweredToolCall {
                 call_id: call_id.clone(),
             });
         }
+        open.clear();
         open.extend(message.tool_calls().map(|call| call.call_id.clone()));
     }
-    if !allow_open_tail && let Some(call_id) = open.first() {
+    if let Some(call_id) = open.iter().find(|id| !tolerated_open.contains(id)) {
         return Err(ResumeFoldError::UnansweredToolCall {
             call_id: call_id.clone(),
         });
@@ -2080,6 +2095,89 @@ mod tests {
             recover_resume_disposition(&events, &recovered).unwrap(),
             ResumeDisposition::CheckContinuation
         );
+    }
+
+    /// The launch input, then a batch whose `directive_return` failed
+    /// validation: the sibling call after it is abandoned and never answered.
+    fn failed_return_events() -> Vec<ReplayedEventRecord> {
+        let (mut batch, _) = lifecycle_batch_events(0, false);
+        batch[0].payload["provider_accounting"] = json!({"replayed_from": "ab".repeat(32)});
+        let mut events = vec![ReplayedEventRecord {
+            event_type: "cognition_in".to_string(),
+            payload: input("task"),
+        }];
+        events.extend(batch);
+        events
+    }
+
+    #[tokio::test]
+    async fn a_same_thread_rebuild_tolerates_the_calls_a_failed_return_abandoned() {
+        let callback = make_callback(failed_return_events());
+        let state = load_resume_state(
+            &callback,
+            "T-lifecycle",
+            CarryPolicy::turns(8),
+            ResumeMode::NativeSameThread,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.disposition, ResumeDisposition::CheckContinuation);
+        assert!(state.pending_tools.is_empty());
+        let roles: Vec<&str> = state.messages.iter().map(|m| m.role()).collect();
+        assert_eq!(roles, ["user", "assistant", "tool"]);
+    }
+
+    #[tokio::test]
+    async fn a_successor_cannot_start_from_a_tail_with_abandoned_calls() {
+        // The predecessor's last assistant turn proposed a call that a failed
+        // `directive_return` abandoned, so the call has no result anywhere. A
+        // successor carries that turn (it is the most recent), and a provider
+        // would refuse the start: the rebuild fails with the typed code rather
+        // than sending it.
+        let callback = make_callback(failed_return_events());
+        let error = load_resume_state(
+            &callback,
+            "T-lifecycle",
+            CarryPolicy::turns(8),
+            ResumeMode::Continuation,
+            None,
+        )
+        .await
+        .unwrap_err();
+        let typed = error
+            .downcast_ref::<ResumeFoldError>()
+            .expect("a typed refusal");
+        assert_eq!(typed.code(), "resume_unanswered_tool_call");
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_turn_still_resumes_in_place() {
+        // An interrupted turn is sealed with its text and reasoning only, no
+        // tool calls, so a conversation that ends on it is well formed.
+        let mut interrupted = out_interrupted(1, "partial");
+        interrupted["provider_accounting"] = json!({"replayed_from": "ab".repeat(32)});
+        let callback = make_callback(vec![
+            ReplayedEventRecord {
+                event_type: "cognition_in".to_string(),
+                payload: input("task"),
+            },
+            ReplayedEventRecord {
+                event_type: "cognition_out".to_string(),
+                payload: interrupted,
+            },
+        ]);
+        let state = load_resume_state(
+            &callback,
+            "T-int",
+            CarryPolicy::turns(8),
+            ResumeMode::NativeSameThread,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.disposition, ResumeDisposition::ContinueProvider);
+        assert_eq!(state.messages.len(), 2);
     }
 
     #[test]
@@ -3638,7 +3736,7 @@ mod tests {
             ProviderMessage::user("and then"),
         ];
         assert_eq!(
-            check_well_formed(&unanswered, false),
+            check_well_formed(&unanswered, &[]),
             Err(ResumeFoldError::UnansweredToolCall {
                 call_id: "c1".to_string()
             })
@@ -3648,14 +3746,14 @@ mod tests {
             ProviderMessage::tool_result("c9", "result"),
         ];
         assert_eq!(
-            check_well_formed(&orphan, false),
+            check_well_formed(&orphan, &[]),
             Err(ResumeFoldError::OrphanToolResult {
                 call_id: "c9".to_string()
             })
         );
         let assistant_first = vec![ProviderMessage::assistant_text("hi")];
         assert_eq!(
-            check_well_formed(&assistant_first, false),
+            check_well_formed(&assistant_first, &[]),
             Err(ResumeFoldError::DoesNotStartWithUser {
                 role: "assistant".to_string()
             })
@@ -3709,18 +3807,18 @@ mod tests {
             ProviderMessage::assistant(None, vec![call], None),
         ];
         assert_eq!(
-            check_well_formed(&open_tail, false),
+            check_well_formed(&open_tail, &[]),
             Err(ResumeFoldError::UnansweredToolCall {
                 call_id: "c1".to_string()
             })
         );
-        assert_eq!(check_well_formed(&open_tail, true), Ok(()));
+        assert_eq!(check_well_formed(&open_tail, &["c1".to_string()]), Ok(()));
         // An assistant message may end a rebuilt conversation.
         let answered = vec![
             ProviderMessage::user("go"),
             ProviderMessage::assistant_text("done"),
         ];
-        assert_eq!(check_well_formed(&answered, false), Ok(()));
+        assert_eq!(check_well_formed(&answered, &[]), Ok(()));
     }
 
     /// A pinned launch input of `chars` characters (four per estimated token)

@@ -14,9 +14,28 @@ use serde::{Deserialize, Serialize};
 pub const REQUEST_REJECTIONS_MAX_ROWS: usize = 16;
 /// Most body phrases one row can declare.
 pub const REQUEST_REJECTION_MAX_PHRASES: usize = 16;
-/// Required prefix of a rejection code, so a provider-declared code can never
-/// collide with a code the runtime itself reports.
+/// Required prefix of a rejection code: it marks the code as one the provider
+/// entry declared.
 pub const REQUEST_REJECTION_CODE_PREFIX: &str = "provider_";
+/// Failure codes the runtime itself reports under the same prefix. An entry
+/// cannot declare one: a named refusal must never be mistaken for, or hide, a
+/// failure the runtime classified (for example an uncertain outcome).
+pub const REQUEST_REJECTION_RESERVED_CODES: [&str; 14] = [
+    "provider_accounting_invalid",
+    "provider_accounting_policy_invalid",
+    "provider_attempt_outcome_unknown",
+    "provider_attempt_released_before_issue",
+    "provider_attempt_settlement_unprovable",
+    "provider_duplicate_call_id",
+    "provider_outcome_uncertain",
+    "provider_output_limit_reached",
+    "provider_protocol_error",
+    "provider_reported_error",
+    "provider_request_body_limit_exceeded",
+    "provider_retry_requires_durable_attempt_authority",
+    "provider_spend_bound_unverified",
+    "provider_stream_interrupted",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -74,6 +93,12 @@ pub fn validate_request_rejections(rows: &[RequestRejectionRow], context: &str) 
         if !valid_code(&row.code) {
             bail!(
                 "provider config{context}: request_rejections code {:?} must be lowercase letters, digits and underscores, at most 64 bytes, and start with {REQUEST_REJECTION_CODE_PREFIX}",
+                row.code
+            );
+        }
+        if REQUEST_REJECTION_RESERVED_CODES.contains(&row.code.as_str()) {
+            bail!(
+                "provider config{context}: request_rejections code {:?} is reserved for a failure the runtime reports itself",
                 row.code
             );
         }
@@ -175,6 +200,8 @@ mod tests {
             row("provider_x", &[400], &[]),
             row("provider_x", &[400], &[""]),
             row("provider_x", &[400], &["a\nb"]),
+            row("provider_outcome_uncertain", &[400], &["x"]),
+            row("provider_stream_interrupted", &[400], &["x"]),
         ] {
             assert!(
                 validate_request_rejections(std::slice::from_ref(&bad), "").is_err(),

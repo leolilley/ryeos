@@ -216,9 +216,6 @@ fn tool_use_payload(
     payload
 }
 
-/// Redact provider error bodies by default. Returns a safe preview
-/// (first 200 chars) plus a sha256 hash. Full body is logged only when
-/// `RYEOS_LOG_PROVIDER_BODIES=1` is set (development/debugging).
 /// Most bytes of a refused response's body kept on a status error.
 pub const STATUS_BODY_MAX_BYTES: usize = 4096;
 
@@ -235,6 +232,9 @@ fn bounded_status_body(body: &str) -> String {
     body[..end].to_string()
 }
 
+/// Redact provider error bodies by default. Returns a safe preview
+/// (first 200 chars) plus a sha256 hash. Full body is logged only when
+/// `RYEOS_LOG_PROVIDER_BODIES=1` is set (development/debugging).
 fn safe_error_body(body: &str) -> String {
     let truncated: String = body.chars().take(512).collect();
     if truncated.len() < body.len() {
@@ -3565,6 +3565,8 @@ fn inject_system_prompt(body: &mut Value, system: &str, provider: &ProviderConfi
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn a_status_body_is_cut_at_a_character_boundary_within_the_bound() {
         let body = "é".repeat(STATUS_BODY_MAX_BYTES);
@@ -3573,8 +3575,6 @@ mod tests {
         assert!(body.starts_with(&kept));
         assert_eq!(bounded_status_body("short"), "short");
     }
-
-    use super::*;
     use ryeos_tracing::test as trace_test;
     use std::result::Result;
 
