@@ -2,7 +2,10 @@
 //! existing process group. Every spawn starts a new group, so a group's leader
 //! is its spawner's own direct child. This test fails when any workspace
 //! source calls `setpgid` with a non-zero group argument or `process_group`
-//! with a non-zero argument.
+//! with a non-zero argument. `setpgid(x, x)` is not a join: it makes `x` its
+//! own group's leader, the same new group the child's own `setpgid(0, 0)`
+//! makes, so a spawner may repeat the call on its child to close the window
+//! before the child runs.
 
 use std::path::{Path, PathBuf};
 
@@ -113,7 +116,11 @@ fn offending_calls(source: &str) -> Vec<String> {
                 .as_ref()
                 .and_then(|args| args.get(index))
                 .is_some_and(|arg| is_literal_zero(arg));
-            if !zero {
+            let own_group = is_setpgid
+                && args
+                    .as_ref()
+                    .is_some_and(|args| args.len() == 2 && args[0] == args[1]);
+            if !zero && !own_group {
                 found.push(format!("{name}{args:?}"));
             }
         }
@@ -154,13 +161,16 @@ fn guard_flags_joins_and_accepts_new_groups() {
         assert!(offending_calls(&format!("cmd.process_group({zero});")).is_empty());
         assert!(offending_calls(&format!("CommandExt::process_group(&mut c, {zero})")).is_empty());
     }
+    // A leader making itself its own group is a new group, not a join.
+    assert!(offending_calls("libc::setpgid(pid, pid)").is_empty());
+    assert!(offending_calls("unsafe { libc::setpgid(child, child) };").is_empty());
     assert!(offending_calls("// libc::setpgid(0, leader)").is_empty());
     assert!(offending_calls("fn setpgid(a: i32, b: i32) {}").is_empty());
     assert!(offending_calls("let g = process_group(pid);").is_empty());
     assert!(offending_calls("quiesce_exact_process_group(&identity, t)").is_empty());
     for join in [
         "libc::setpgid(0, leader)",
-        "libc::setpgid(pid, pid)",
+        "libc::setpgid(pid, other)",
         "setpgid(0, leader)",
         "libc::setpgid(0, 1)",
         "cmd.process_group(pgid)",
