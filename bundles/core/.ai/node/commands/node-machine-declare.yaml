@@ -1,0 +1,16 @@
+# ryeos:signed:2026-11-19T05:15:46Z:70db1a5a880bb8ce8904d1ea48bc0be4fc05dcc4a32648765b751e1f1d1c3567:xCeWl1SLN2tty0YBmk5fwcGrdcfPPtnSdfGzj2uFyFooq6506qgJxhSQvo1C/THnkpmsyM1V27/ZJePUGrQJAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- node
+- machine
+- declare
+description: Declare that some nodes are one machine, by label and site id
+forms:
+- slots:
+  - field: label
+help:
+  usage: "ryeos node machine declare <label> --members <site-id> [--members <site-id>]..."
+  examples:
+  - "ryeos node machine declare workstation --members site:laptop --members site:build-box"
+dispatch:
+  kind: execute_ref
+  execute: service:node/machine/declare
