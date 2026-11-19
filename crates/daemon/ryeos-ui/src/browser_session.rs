@@ -925,8 +925,12 @@ impl BrowserSessionStore {
     }
 
     /// Add one picture hash to a live session's grant set. The set is the
-    /// only way a session is served a picture its bindings do not name, so a
-    /// caller grants only hashes a service run for that session returned.
+    /// only way a session is served a picture its bindings do not name.
+    ///
+    /// Nothing in production calls this yet. A future caller must be a
+    /// service running for this session that itself returned the hash, and
+    /// must first check the hash is in the `ArtIndex`. It must never be wired
+    /// to a request field.
     pub fn grant_art(&self, session_id: &str, sha256: &str) -> Result<(), ArtGrantRefusal> {
         if !ryeos_client_base::art::is_art_hash(sha256) {
             return Err(ArtGrantRefusal::MalformedHash);

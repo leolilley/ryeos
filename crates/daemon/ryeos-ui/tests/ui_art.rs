@@ -85,14 +85,21 @@ fn blob_path(state: &AppState, picture: &Picture) -> std::path::PathBuf {
 /// Install pictures into the fixture bundle the way a published bundle
 /// carries them: blobs, signed records, and a signed picture manifest.
 fn install(state: &AppState, pictures: &[Picture]) {
+    install_at(&ai_dir(state), pictures);
+}
+
+fn install_at(ai: &std::path::Path, pictures: &[Picture]) {
     let key = dev_key();
-    let ai = ai_dir(state);
     std::fs::create_dir_all(ai.join("pictures/blobs")).unwrap();
     let cas = lillux::cas::CasStore::new(ai.join("objects"));
     let mut item_source_hashes = HashMap::new();
     for (index, picture) in pictures.iter().enumerate() {
         let sha = picture.sha256();
-        std::fs::write(blob_path(state, picture), &picture.bytes).unwrap();
+        std::fs::write(
+            ai.join(format!("pictures/blobs/{sha}.{}", picture.extension)),
+            &picture.bytes,
+        )
+        .unwrap();
         let record = format!(
             "title: Test picture\nsource_url: https://example.test/object/{index}\nlicence: cc0\n\
              renditions:\n  - role: card\n    sha256: \"{sha}\"\n    media_type: {}\n    \
@@ -100,11 +107,12 @@ fn install(state: &AppState, pictures: &[Picture]) {
             picture.media_type,
             picture.bytes.len()
         );
-        test_support::write_fixture_bundle_item(
-            state,
-            &format!("pictures/ryeos/p{index}.yaml"),
-            &record,
-        );
+        std::fs::create_dir_all(ai.join("pictures/ryeos")).unwrap();
+        std::fs::write(
+            ai.join(format!("pictures/ryeos/p{index}.yaml")),
+            lillux::signature::sign_content(&record, &key, "#", None),
+        )
+        .unwrap();
         let item_ref = format!("pictures/{sha}");
         let item_source = ItemSource {
             item_ref: item_ref.clone(),
@@ -659,4 +667,35 @@ fn the_route_compiles_only_for_browser_session_get_with_the_hash_capture() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn a_corrupt_copy_in_one_bundle_falls_through_to_a_good_copy_in_another() {
+    let webp = Picture::webp();
+    let sha = webp.sha256();
+    let tmp = tempfile::tempdir().unwrap();
+    let (first, second) = (tmp.path().join("a"), tmp.path().join("b"));
+    for root in [&first, &second] {
+        std::fs::create_dir_all(root.join(".ai/pictures/blobs")).unwrap();
+        install_at(&root.join(".ai"), std::slice::from_ref(&webp));
+    }
+    let trust = ryeos_engine::test_support::live_trust_store();
+    let roots = [first.clone(), second.clone()];
+    let index = ryeos_ui::art::ArtIndex::build(&roots, &trust);
+    assert_eq!(index.candidates(&sha).len(), 2);
+
+    // Same length, one byte changed, in the earlier bundle.
+    let corrupt = first.join(format!(".ai/pictures/blobs/{sha}.webp"));
+    let mut bytes = WEBP_16X10.to_vec();
+    bytes[30] ^= 1;
+    std::fs::write(&corrupt, bytes).unwrap();
+    let body = ryeos_ui::art::read_art(&index, &sha, Some("image/webp")).unwrap();
+    assert_eq!(body.bytes, WEBP_16X10.to_vec());
+
+    // With no good copy anywhere the integrity failure is returned.
+    std::fs::write(second.join(format!(".ai/pictures/blobs/{sha}.webp")), [0u8; 52]).unwrap();
+    assert!(matches!(
+        ryeos_ui::art::read_art(&index, &sha, Some("image/webp")),
+        Err(ryeos_ui::art::ArtFailure::Integrity(_))
+    ));
 }

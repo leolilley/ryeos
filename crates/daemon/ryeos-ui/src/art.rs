@@ -53,7 +53,8 @@ const HASH_CAPTURE: &str = "sha256";
 /// only from bundles whose picture manifest and records verify.
 #[derive(Debug, Clone, Default)]
 pub struct ArtIndex {
-    entries: BTreeMap<String, PictureEntry>,
+    /// Every bundle's copy of each hash, in bundle order.
+    entries: BTreeMap<String, Vec<PictureEntry>>,
 }
 
 impl ArtIndex {
@@ -65,8 +66,9 @@ impl ArtIndex {
             match verify_bundle_pictures(root, trust_store, false) {
                 Ok(pictures) => {
                     for (sha256, entry) in pictures.entries {
-                        // Equal hashes are equal bytes; the first bundle keeps it.
-                        entries.entry(sha256).or_insert(entry);
+                        // Equal hashes are equal bytes; every bundle's copy is
+                        // kept so a corrupt one can fall through to a good one.
+                        entries.entry(sha256).or_insert_with(Vec::new).push(entry);
                     }
                 }
                 Err(error) => tracing::warn!(
@@ -79,8 +81,9 @@ impl ArtIndex {
         Self { entries }
     }
 
-    pub fn get(&self, sha256: &str) -> Option<&PictureEntry> {
-        self.entries.get(sha256)
+    /// Every installed copy of `sha256`, empty when none.
+    pub fn candidates(&self, sha256: &str) -> &[PictureEntry] {
+        self.entries.get(sha256).map(Vec::as_slice).unwrap_or(&[])
     }
 
     pub fn len(&self) -> usize {
@@ -195,10 +198,27 @@ pub fn read_art(
     sha256: &str,
     declared: Option<&str>,
 ) -> Result<ArtBody, ArtFailure> {
-    let entry = index.get(sha256).ok_or(ArtFailure::NotFound)?;
-    if declared.is_some_and(|declared| declared != entry.media_type.mime()) {
+    let mut candidates = index
+        .candidates(sha256)
+        .iter()
+        .filter(|entry| declared.is_none_or(|declared| declared == entry.media_type.mime()))
+        .peekable();
+    if candidates.peek().is_none() {
         return Err(ArtFailure::NotFound);
     }
+    // A copy that fails verification falls through to the next bundle's copy;
+    // the failure is returned only when no copy verifies.
+    let mut failure = ArtFailure::NotFound;
+    for entry in candidates {
+        match read_entry(entry, sha256) {
+            Ok(body) => return Ok(body),
+            Err(error) => failure = error,
+        }
+    }
+    Err(failure)
+}
+
+fn read_entry(entry: &PictureEntry, sha256: &str) -> Result<ArtBody, ArtFailure> {
     let bytes = lillux::read_regular_file_bounded_no_follow(&entry.blob_path, MAX_PICTURE_BYTES)
         .map_err(|error| ArtFailure::Integrity(format!("read picture blob: {error:#}")))?;
     if bytes.len() as u64 != entry.bytes {
@@ -337,11 +357,12 @@ impl CompiledArtMode {
         let engine = request.engine;
         let outcome = tokio::task::spawn_blocking(move || -> Result<ArtOutcome, ArtFailure> {
             let index = cache.index_for(&engine);
-            let entry = index.get(&key).ok_or(ArtFailure::NotFound)?;
-            if declared
-                .as_deref()
-                .is_some_and(|declared| declared != entry.media_type.mime())
-            {
+            let usable = index.candidates(&key).iter().any(|entry| {
+                declared
+                    .as_deref()
+                    .is_none_or(|declared| declared == entry.media_type.mime())
+            });
+            if !usable {
                 return Err(ArtFailure::NotFound);
             }
             if revalidating {
