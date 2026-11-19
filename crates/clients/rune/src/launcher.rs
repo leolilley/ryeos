@@ -96,12 +96,7 @@ pub(crate) fn layer(dialog: &RyeOsDialogVm, local: &Local) -> El {
 /// The find line: the query at 19, and at the right how many views match.
 fn find_line(dialog: &RyeOsDialogVm, local: &Local, places: bool, listed: usize) -> El {
     let t = Tokens::get();
-    let mut line = row()
-        .w_full()
-        .h(FIND_HEIGHT)
-        .px(24.0)
-        .gap(2.0)
-        .center_y();
+    let mut line = row().w_full().h(FIND_HEIGHT).px(24.0).gap(2.0).center_y();
     match &dialog.input {
         Some(input) => {
             line = line.child(
@@ -159,15 +154,11 @@ fn list(dialog: &RyeOsDialogVm, rows: &[RyeOsRowVm]) -> El {
                 ),
             )
             .child(
-                col()
-                    .w_full()
-                    .px(10.0)
-                    .gap(2.0)
-                    .children(
-                        items
-                            .into_iter()
-                            .map(|item| view_row(&dialog.instance_key, item)),
-                    ),
+                col().w_full().px(10.0).gap(2.0).children(
+                    items
+                        .into_iter()
+                        .map(|item| view_row(&dialog.instance_key, item)),
+                ),
             );
     }
     body
@@ -275,7 +266,9 @@ fn places_block(dialog: &RyeOsDialogVm, places: &[&RyeOsRowVm]) -> El {
                         })
                         .color(t.ink_at(if chosen { 0.98 } else { 0.70 })),
                 )
-                .child(crate::marks::key_chip(place.meta.as_deref().unwrap_or_default()))
+                .child(crate::marks::key_chip(
+                    place.meta.as_deref().unwrap_or_default(),
+                ))
                 .on_press(move |app: &mut App| {
                     app.ui(RyeOsUiEvent::ChooseViewItem {
                         instance_key: instance.clone(),
@@ -301,11 +294,7 @@ fn places_block(dialog: &RyeOsDialogVm, places: &[&RyeOsRowVm]) -> El {
 /// closes the sheet.
 fn footer(note: Option<&str>, instance: &RyeOsViewInstanceKey) -> El {
     let t = Tokens::get();
-    let word = |what: &'static str| {
-        text(what)
-            .font(theme::TYPE_MICRO)
-            .color(t.ink_at(0.45))
-    };
+    let word = |what: &'static str| text(what).font(theme::TYPE_MICRO).color(t.ink_at(0.45));
     let close = instance.clone();
     let mut line = row()
         .w_full()

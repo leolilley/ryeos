@@ -325,16 +325,17 @@ fn candidates(
                             binding: coordinate.clone(),
                             view_ref: view_ref.clone(),
                         };
-                        let new_surface = composed_opener.as_ref().map(|(dialog_id, dialog_binding)| {
-                            RyeOsUiIntent::OpenCompositionInNewSurface {
-                                surface_instance_id: destination.surface_instance_id.clone(),
-                                view_set_id: destination.view_set_id,
-                                binding: coordinate.clone(),
-                                view_ref: Some(view_ref.clone()),
-                                dialog_id: dialog_id.clone(),
-                                dialog_binding: dialog_binding.clone(),
-                            }
-                        });
+                        let new_surface =
+                            composed_opener.as_ref().map(|(dialog_id, dialog_binding)| {
+                                RyeOsUiIntent::OpenCompositionInNewSurface {
+                                    surface_instance_id: destination.surface_instance_id.clone(),
+                                    view_set_id: destination.view_set_id,
+                                    binding: coordinate.clone(),
+                                    view_ref: Some(view_ref.clone()),
+                                    dialog_id: dialog_id.clone(),
+                                    dialog_binding: dialog_binding.clone(),
+                                }
+                            });
                         let usable = missing.is_empty();
                         if usable && staged.as_ref() == Some(&view_ref) {
                             places.push(candidate_listed(
@@ -1734,10 +1735,7 @@ mod tests {
             .iter()
             .find(|record| record.label == "Beta")
             .unwrap();
-        assert!(matches!(
-            beta.intent,
-            Some(RyeOsUiIntent::OpenView { .. })
-        ));
+        assert!(matches!(beta.intent, Some(RyeOsUiIntent::OpenView { .. })));
         choose_view(&mut core, &key, "Beta");
         assert!(!core.launcher_places_open());
     }

@@ -1337,7 +1337,14 @@ mod tests {
         };
         assert_eq!(
             keys(false),
-            ["ctrl+k", "alt+o", "alt+t/b", "ctrl+←/→", "ctrl+↑/↓", "alt+r"]
+            [
+                "ctrl+k",
+                "alt+o",
+                "alt+t/b",
+                "ctrl+←/→",
+                "ctrl+↑/↓",
+                "alt+r"
+            ]
         );
         assert_eq!(&keys(true)[..2], ["⌫", "alt+←"]);
     }

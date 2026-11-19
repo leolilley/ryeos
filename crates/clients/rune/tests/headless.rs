@@ -270,6 +270,95 @@ fn a_launcher_dialog_opens_moves_chooses_and_closes() {
     assert!(model(&rt).dialogs.is_empty(), "the launcher is closed");
 }
 
+/// The launcher sheet's own element: the dialog panel, not its close control.
+fn launcher_sheet(rt: &Runtime<App>) -> Option<[f32; 4]> {
+    rt.elements()
+        .into_iter()
+        .find(|element| {
+            element.key.as_deref().is_some_and(|key| {
+                key.starts_with("dialog:") && !key.ends_with(":close")
+            })
+        })
+        .map(|element| element.rect)
+}
+
+fn launcher_places(vm: &RyeOsViewModel) -> Vec<String> {
+    match &vm.dialogs[0].view {
+        RyeOsViewVm::Rows { rows, .. } => rows
+            .iter()
+            .filter(|row| row.launch.as_ref().is_some_and(|launch| launch.place))
+            .map(|row| row.primary.clone())
+            .collect(),
+        other => panic!("the launcher is not a rows view: {other:?}"),
+    }
+}
+
+#[test]
+fn the_launcher_sheet_has_a_find_line_group_labels_and_a_footer_but_no_title_bar() {
+    let rt = shell("launcher", (1280.0, 800.0));
+    let texts: Vec<String> = drawn_texts(&rt).into_iter().map(|(text, _)| text).collect();
+    assert!(
+        !texts.iter().any(|text| text == "LAUNCH"),
+        "the sheet draws no title bar, saw {texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.starts_with("Opening a view runs nothing")),
+        "the footer carries the view's own note, saw {texts:?}"
+    );
+    assert!(texts.iter().any(|text| text == "cancel"));
+    let vm = model(&rt);
+    let RyeOsViewVm::Rows { rows, .. } = &vm.dialogs[0].view else {
+        panic!("the launcher is a rows view");
+    };
+    let group = rows
+        .iter()
+        .find_map(|row| row.launch.as_ref().map(|launch| launch.group.clone()))
+        .expect("launcher rows carry their group");
+    assert!(
+        texts.contains(&group.to_uppercase()),
+        "the group {group:?} is a label, saw {texts:?}"
+    );
+    let [_, _, width, _] = launcher_sheet(&rt).expect("the launcher sheet");
+    assert!(
+        (width - 860.0).abs() < 1.0,
+        "the sheet is 860 wide, not {width}"
+    );
+    assert_eq!(
+        vm.dialogs[0].title, "Launch",
+        "the dialog keeps the title the smoke test finds"
+    );
+}
+
+#[test]
+fn enter_chooses_a_view_then_a_place_and_escape_closes_the_second_stage_first() {
+    let mut rt = shell("launcher", (1280.0, 800.0));
+    assert!(launcher_places(&model(&rt)).is_empty());
+    bare_key(&mut rt, Key::Enter);
+    let vm = model(&rt);
+    assert_eq!(vm.dialogs.len(), 1, "choosing a view keeps the sheet");
+    let places = launcher_places(&vm);
+    assert_eq!(
+        places.first().map(String::as_str),
+        Some("In this tile, as a tab"),
+        "the first place is the one Enter takes"
+    );
+    assert!(places.iter().any(|place| place == "New tab"));
+    assert!(
+        drawn_texts(&rt)
+            .iter()
+            .any(|(text, _)| text == "WHERE IT LANDS"),
+        "the places are drawn under their label"
+    );
+    bare_key(&mut rt, Key::Escape);
+    let vm = model(&rt);
+    assert_eq!(vm.dialogs.len(), 1, "Escape closes the second stage first");
+    assert!(launcher_places(&vm).is_empty());
+    bare_key(&mut rt, Key::Escape);
+    assert!(model(&rt).dialogs.is_empty(), "then the sheet");
+}
+
 #[test]
 fn the_launcher_opens_from_the_switcher_and_closes_from_its_control() {
     let mut rt = shell("", (1280.0, 800.0));

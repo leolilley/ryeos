@@ -945,4 +945,142 @@ max_seat_append_bytes:64*1024,
         });
         core
     }
+
+    fn launcher_row(
+        id: &str,
+        primary: &str,
+        secondary: &str,
+        meta: Option<&str>,
+        launch: ryeos_client_base::ui::view_model::RyeOsLaunchRowVm,
+    ) -> ryeos_client_base::ui::view_model::RyeOsRowVm {
+        ryeos_client_base::ui::view_model::RyeOsRowVm {
+            id: id.into(),
+            primary: primary.into(),
+            secondary: Some(secondary.into()).filter(|text: &String| !text.is_empty()),
+            meta: meta.map(Into::into),
+            launch: Some(launch),
+            ..Default::default()
+        }
+    }
+
+    fn launch(
+        group: &str,
+        reason: Option<&str>,
+        place: bool,
+    ) -> ryeos_client_base::ui::view_model::RyeOsLaunchRowVm {
+        ryeos_client_base::ui::view_model::RyeOsLaunchRowVm {
+            group: group.into(),
+            reason: reason.map(Into::into),
+            place,
+        }
+    }
+
+    fn launcher_vm(places: bool) -> RyeOsViewModel {
+        use ryeos_client_base::ui::view_model::RyeOsDialogVm;
+        let mut vm = build_view_model(&empty_center_core());
+        let presentation =
+            ryeos_client_base::ids::PresentationId::try_new("11111111-1111-4111-8111-111111111111")
+                .unwrap();
+        let mut rows = vec![
+            launcher_row(
+                "files",
+                "Files",
+                "The project's file tree",
+                Some("rows"),
+                launch("Project", None, false),
+            ),
+            launcher_row(
+                "activity",
+                "Activity",
+                "The activity of one chain",
+                None,
+                launch("Project", Some("needs a selected thread"), false),
+            ),
+        ];
+        rows[0].selected = !places;
+        rows[1].kind = Some("unavailable".into());
+        if places {
+            let mut here = launcher_row(
+                "here",
+                "In this tile, as a tab",
+                "",
+                Some("\u{21b5}"),
+                launch("Project", None, true),
+            );
+            here.selected = true;
+            rows.push(here);
+            rows.push(launcher_row(
+                "tab",
+                "New tab",
+                "",
+                Some("T"),
+                launch("Project", None, true),
+            ));
+        }
+        vm.dialogs = vec![RyeOsDialogVm {
+            instance_key: ryeos_client_base::ids::RyeOsViewInstanceKey::shared_dialog(
+                &presentation,
+                "launch",
+            )
+            .unwrap(),
+            title: "Launch".into(),
+            description: None,
+            launcher: true,
+            view: RyeOsViewVm::Rows {
+                title: "Launch".into(),
+                source_status: None,
+                columns: Vec::new(),
+                total_rows: rows.len(),
+                provenance: None,
+                affordance_hints: Vec::new(),
+                rows,
+            },
+            input: None,
+        }];
+        vm
+    }
+
+    #[test]
+    fn the_launcher_lists_titles_descriptions_and_reasons() {
+        let text = surface_text(&build_surface(&launcher_vm(false), 100, 30));
+        assert!(
+            text.contains("Files  The project's file tree"),
+            "title then its own description: {text}"
+        );
+        assert!(
+            text.contains("Activity  needs a selected thread"),
+            "an unavailable view says why, not what it shows: {text}"
+        );
+        assert!(!text.contains("Unavailable"), "{text}");
+        assert!(!text.contains("New tab"), "no places before a choice: {text}");
+    }
+
+    #[test]
+    fn the_places_of_a_chosen_view_are_one_line_under_the_list() {
+        let text = surface_text(&build_surface(&launcher_vm(true), 100, 30));
+        let line = text
+            .lines()
+            .find(|line| line.contains("In this tile, as a tab"))
+            .expect("the places line");
+        assert!(line.contains("\u{21b5} In this tile, as a tab  T New tab"), "{line}");
+        assert!(
+            !text.lines().any(|other| other != line && other.contains("New tab")),
+            "the places are not also list rows: {text}"
+        );
+    }
+
+    #[test]
+    fn a_requested_rename_is_edited_on_the_last_line() {
+        let mut vm = build_view_model(&empty_center_core());
+        vm.rename = Some(ryeos_client_base::ui::view_model::RyeOsRenameVm {
+            target: ryeos_client_base::ui::RyeOsRenameTarget::ViewSet {
+                view_set_id: ryeos_client_base::ids::ViewSetId::new(1),
+            },
+            title: "Work".into(),
+        });
+        let text = surface_text(&build_surface(&vm, 60, 10));
+        let last = text.lines().nth(9).expect("the last line");
+        assert!(last.starts_with("rename \u{203a} Work"), "{last}");
+        assert!(last.contains("enter save"), "{last}");
+    }
 }

@@ -700,7 +700,10 @@ impl RyeOsCore {
             RyeOsUiEvent::RenameInsert { ch } => self.edit_rename(Some(ch)),
             RyeOsUiEvent::RenameBackspace => self.edit_rename(None),
             RyeOsUiEvent::CommitRename => {
-                let title = self.rename_request.as_ref().map(|request| request.title.clone());
+                let title = self
+                    .rename_request
+                    .as_ref()
+                    .map(|request| request.title.clone());
                 self.resolve_rename(title)
             }
             RyeOsUiEvent::TimelineEntry { action } => self.timeline_entry_action(action),
