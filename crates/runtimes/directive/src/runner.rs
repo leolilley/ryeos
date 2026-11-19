@@ -732,6 +732,9 @@ pub struct Runner {
     /// conversation with nothing yet to replace is looked at again once it has
     /// grown by the kept turns.
     compaction_retry_at_turn: u32,
+    /// Continuation predecessors of this thread, and the most a chain may have.
+    chain_depth: u32,
+    chain_depth_limit: u32,
 }
 
 /// The two states a `context_pressure` hook chooses between.
@@ -1578,7 +1581,14 @@ impl Runner {
             pressure_hook: None,
             summary_job: None,
             compaction_retry_at_turn: 0,
+            chain_depth: 0,
+            chain_depth_limit: u32::MAX,
         }
+    }
+
+    /// Set how many continuation predecessors a chain may have.
+    pub fn set_chain_depth_limit(&mut self, limit: u32) {
+        self.chain_depth_limit = limit;
     }
 
     /// Set the compaction policy the signed runtime config carries.
@@ -1628,6 +1638,7 @@ impl Runner {
         let last_turn_coordinate = resume.last_turn_coordinate;
         let compaction_memo = resume.compaction.clone();
         let start_with_overflow_compaction = resume.predecessor_rejected_turn.is_some();
+        let chain_depth = resume.chain_depth;
         if let Some(active_turn) = resume_active_provider_turn {
             let expected = last_turn_coordinate
                 .checked_add(1)
@@ -1713,6 +1724,7 @@ impl Runner {
         runner.wrap_up_delivered = wrap_up_delivered;
         runner.consecutive_length_turns = trailing_length_turns;
         runner.compaction_memo = compaction_memo;
+        runner.chain_depth = chain_depth;
         runner.start_with_overflow_compaction = start_with_overflow_compaction;
         runner.return_nudge_sent = recovered_return_nudge_seen(
             &runner.messages,
@@ -5018,6 +5030,15 @@ impl Runner {
                 }
 
                 State::Continued => {
+                    if self.chain_depth >= self.chain_depth_limit {
+                        state = State::Errored {
+                            error: format!(
+                                "continuation_chain_limit: this thread has {} continuation predecessors, the chain's limit of {}; the chain will not continue",
+                                self.chain_depth, self.chain_depth_limit
+                            ),
+                        };
+                        continue;
+                    }
                     // Cut off by a limit mid-task: hand off to a chain-fold
                     // successor. Continuation is autonomous by construction — no
                     // reason/gate/mode, only an optional free-form string for logs.
@@ -5081,7 +5102,12 @@ impl Runner {
 
                 State::Errored { error } => {
                     // A failed compaction summary call fails the run with its
-                    // own code.
+                    // own typed code. This is a deliberate choice, not the
+                    // carry-on-uncompacted behaviour a gentler design would
+                    // have: the failed call burned a turn coordinate, and
+                    // carrying on would need a failure-final record that every
+                    // recovery reader skips. The alternative is written up in
+                    // the design's pending decisions.
                     let error = if self.summary_job.take().is_some() {
                         format!("compaction_summary_failed: {error}")
                     } else {

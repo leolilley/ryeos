@@ -224,6 +224,61 @@ pub fn render_for_summary(replaced: &[FoldedMessage], budget_tokens: u64) -> Ren
     }
 }
 
+/// Read the tool results of `messages` (the kept turns, oldest first) under
+/// `rule`: every result but the newest `keep_recent` whose text is longer than
+/// `over_bytes` becomes its head, a marker naming what was left out, and its
+/// tail. A pure function of the messages and the rule, so a live run and a
+/// rebuild from the record read the same bytes.
+pub fn clip_tool_results(messages: &mut [ProviderMessage], rule: &ryeos_runtime::ClipRule) {
+    let tool_messages: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| message.role() == "tool")
+        .map(|(index, _)| index)
+        .collect();
+    let keep = usize::try_from(rule.keep_recent).unwrap_or(usize::MAX);
+    let clipped = tool_messages.len().saturating_sub(keep);
+    for &index in &tool_messages[..clipped] {
+        for part in &mut messages[index].parts {
+            let Part::ToolResult(result) = part else {
+                continue;
+            };
+            for inner in &mut result.parts {
+                if let Part::Text(text) = inner {
+                    text.text = clip_text(&text.text, rule);
+                }
+            }
+        }
+    }
+}
+
+fn clip_text(text: &str, rule: &ryeos_runtime::ClipRule) -> String {
+    let over = usize::try_from(rule.over_bytes).unwrap_or(usize::MAX);
+    if text.len() <= over {
+        return text.to_string();
+    }
+    let mut head = usize::try_from(rule.head_bytes)
+        .unwrap_or(0)
+        .min(text.len());
+    while !text.is_char_boundary(head) {
+        head -= 1;
+    }
+    let tail_len = usize::try_from(rule.tail_bytes)
+        .unwrap_or(0)
+        .min(text.len() - head);
+    let mut tail = text.len() - tail_len;
+    while !text.is_char_boundary(tail) {
+        tail += 1;
+    }
+    format!(
+        "{}\n[... {} of {} bytes of this result were clipped when the conversation was compacted ...]\n{}",
+        &text[..head],
+        tail - head,
+        text.len(),
+        &text[tail..]
+    )
+}
+
 /// The compaction record for `plan`, with the sizes before and after and the
 /// seed every recovery reader starts from.
 pub fn build_record(
@@ -239,7 +294,19 @@ pub fn build_record(
         .iter()
         .map(|folded| folded.message.clone())
         .collect();
-    let after = compacted_messages(&basis.folded, plan, &summary);
+    let clip = (policy.clip.tool_results == crate::directive::ClipMode::Clip).then(|| {
+        ryeos_runtime::ClipRule {
+            over_bytes: policy.clip.over_bytes,
+            head_bytes: policy.clip.head_bytes,
+            tail_bytes: policy.clip.tail_bytes,
+            keep_recent: policy.clip.keep_recent,
+        }
+    });
+    let mut after = compacted_messages(&basis.folded, plan, &summary);
+    if let Some(rule) = &clip {
+        let kept_from = after.len() - (basis.folded.len() - plan.cut);
+        clip_tool_results(&mut after[kept_from..], rule);
+    }
     let size_before = crate::estimate::estimate_tokens(&before, images);
     let size_after = crate::estimate::estimate_tokens(&after, images);
     let ineffective =
@@ -266,6 +333,7 @@ pub fn build_record(
         overflow_recoveries: previous
             .map_or(0, |record| record.overflow_recoveries)
             .saturating_add(u32::from(trigger == "overflow")),
+        clip,
     };
     record.validate()?;
     let bytes = serde_json::to_vec(&record)?.len();
@@ -379,6 +447,48 @@ mod tests {
         let all = render_for_summary(&folded, u64::MAX / 8);
         assert_eq!(all.omitted, 0);
         assert!(all.text.contains("input 1 "));
+    }
+
+    #[test]
+    fn older_large_tool_results_are_clipped_and_the_newest_are_not() {
+        let big = "x".repeat(1000);
+        let mut messages: Vec<ProviderMessage> = (0..4)
+            .map(|n| ProviderMessage::tool_result(format!("c{n}"), format!("{n}{big}")))
+            .collect();
+        let rule = ryeos_runtime::ClipRule {
+            over_bytes: 100,
+            head_bytes: 10,
+            tail_bytes: 10,
+            keep_recent: 2,
+        };
+        clip_tool_results(&mut messages, &rule);
+        let texts: Vec<String> = messages.iter().map(|m| m.text().unwrap()).collect();
+        assert!(texts[0].contains("bytes of this result were clipped"));
+        assert!(texts[1].contains("bytes of this result were clipped"));
+        assert!(texts[0].starts_with('0'));
+        assert_eq!(texts[2].len(), 1001);
+        assert_eq!(texts[3].len(), 1001);
+        // Deterministic.
+        let mut again: Vec<ProviderMessage> = (0..4)
+            .map(|n| ProviderMessage::tool_result(format!("c{n}"), format!("{n}{big}")))
+            .collect();
+        clip_tool_results(&mut again, &rule);
+        assert_eq!(again, messages);
+    }
+
+    #[test]
+    fn the_open_loop_of_a_compacted_conversation_starts_after_the_summary() {
+        let folded = conversation(8);
+        let plan = plan(&folded, 3).expect("a cut");
+        let rebuilt = compacted_messages(&folded, &plan, &fixed_note(&plan));
+        // The summary is a user message, so every kept assistant turn is inside
+        // the open loop and a replaced turn's provider artefact is out of scope.
+        let start = crate::provider_adapter::reasoning_replay::open_loop_start(&rebuilt);
+        assert!(
+            start >= 2,
+            "the open loop never reaches back past the summary"
+        );
+        assert!(rebuilt[start..].iter().any(|m| m.role() == "assistant"));
     }
 
     #[test]

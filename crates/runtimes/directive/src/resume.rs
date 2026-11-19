@@ -71,6 +71,8 @@ pub struct ResumeState {
     /// completing: its request was refused. A successor of such a thread
     /// starts by compacting.
     pub predecessor_rejected_turn: Option<u32>,
+    /// Continuation predecessors this thread has on its path.
+    pub chain_depth: u32,
 }
 
 /// What a run keeps in memory of the latest compaction on its path.
@@ -224,6 +226,11 @@ pub async fn load_resume_state(
     // its continuation predecessor, never a child), and replaying each turn
     // thread-scoped structurally excludes those children.
     let path = continuation_path(callback, previous_thread_id).await?;
+    let chain_depth = u32::try_from(match mode {
+        ResumeMode::NativeSameThread => path.len().saturating_sub(1),
+        ResumeMode::Continuation => path.len(),
+    })
+    .unwrap_or(u32::MAX);
 
     // A path that holds a compaction replays from the compaction's kept turns
     // on, not from its start: the compaction carries what came before.
@@ -402,6 +409,7 @@ pub async fn load_resume_state(
             .as_ref()
             .map(|anchor| CompactionMemo::of(&anchor.payload)),
         predecessor_rejected_turn,
+        chain_depth,
     })
 }
 
@@ -1838,6 +1846,18 @@ pub(crate) fn fold_messages_anchored(
                     kind: Some(ryeos_runtime::cognition::KIND_COMPACTION_SUMMARY.to_string()),
                     ..unpinned(record.summary_message())
                 });
+                // The kept turns read as the record says: older large tool
+                // results clipped, the events themselves untouched.
+                if let Some(rule) = &record.clip {
+                    let mut kept: Vec<ProviderMessage> = messages
+                        .iter()
+                        .map(|folded| folded.message.clone())
+                        .collect();
+                    crate::compaction::clip_tool_results(&mut kept, rule);
+                    for (folded, clipped) in messages.iter_mut().zip(kept) {
+                        folded.message = clipped;
+                    }
+                }
                 messages.splice(0..0, prefix);
             }
             "tool_call_result" => {
@@ -5014,6 +5034,7 @@ mod tests {
             ineffective: false,
             compactions: 1,
             overflow_recoveries: 0,
+            clip: None,
         }
     }
 

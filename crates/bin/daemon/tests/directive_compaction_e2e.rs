@@ -338,3 +338,313 @@ async fn over_the_window_without_continuation_is_a_typed_failure() {
     let text = thread_text(&rig, &id).await;
     assert!(text.contains("context_window_exhausted"), "{text}");
 }
+
+/// A request is a valid start: its first non-system message is a user message,
+/// every assistant tool call has its result, and no result is orphaned.
+fn assert_valid_start(body: &Value, label: &str) {
+    let messages = messages_of(body);
+    let first = messages
+        .iter()
+        .find(|m| role_of(m) != "system")
+        .unwrap_or_else(|| panic!("{label}: no conversation"));
+    assert_eq!(role_of(first), "user", "{label}");
+    let mut calls: Vec<String> = Vec::new();
+    let mut answered: Vec<String> = Vec::new();
+    for message in &messages {
+        if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
+            calls.extend(
+                tool_calls
+                    .iter()
+                    .filter_map(|c| c.get("id").and_then(Value::as_str).map(str::to_owned)),
+            );
+        }
+        if role_of(message) == "tool" {
+            let id = message
+                .get("tool_call_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            assert!(calls.contains(&id), "{label}: orphan tool result {id}");
+            answered.push(id);
+        }
+    }
+    for call in &calls {
+        assert!(answered.contains(call), "{label}: unanswered call {call}");
+    }
+}
+
+/// The indices of the requests that open a successor: a request with no more
+/// messages than the one before it.
+fn successor_starts(bodies: &[Value]) -> Vec<usize> {
+    let mut starts = Vec::new();
+    let mut previous = 0usize;
+    for (index, body) in bodies.iter().enumerate() {
+        let count = messages_of(body).len();
+        if index > 0 && count <= previous {
+            starts.push(index);
+        }
+        previous = count;
+    }
+    starts
+}
+
+/// A small window forces a successor about every ten bulk calls.
+const LONG_CHAIN: &str = "steps:\n  - repeat: 230\n    tool_calls:\n      - { id: \"call_{n}\", name: bulk_bulk, arguments: {} }\n  - repeat: 5\n    text: done\n";
+
+/// E7. A chain of at least fifteen continuations, with the chain limit set
+/// above it in the signed config, completes; every successor starts well formed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chain_of_fifteen_continuations_runs_under_a_raised_limit() {
+    let rig = start_rig(
+        LONG_CHAIN,
+        RigOptions {
+            context_window: 2000,
+            header_extra: CONTINUING,
+            continuation_yaml: Some(
+                "category: \"ryeos-runtime\"\nchain_depth_limit: 40\n".to_string(),
+            ),
+            limits: Some((2000, 2000)),
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    let id = launch_on(&rig).await.expect("launch");
+    let chain = wait_chain_settled(&rig, &id).await;
+    assert!(chain.len() >= 16, "fifteen continuations: {}", chain.len());
+    assert!(
+        chain.iter().filter(|(_, s)| s == "continued").count() >= 15,
+        "{chain:?}"
+    );
+    let bodies = request_bodies(&rig).await;
+    let starts = successor_starts(&bodies);
+    assert!(starts.len() >= 15, "{starts:?}");
+    for start in starts {
+        assert_valid_start(&bodies[start], &format!("successor request {start}"));
+    }
+}
+
+/// E15 (chain limit). At the signed limit the chain ends with the typed failure.
+#[tokio::test(flavor = "multi_thread")]
+async fn reaching_the_chain_limit_is_a_typed_failure() {
+    let rig = start_rig(
+        LONG_CHAIN,
+        RigOptions {
+            context_window: 2000,
+            header_extra: CONTINUING,
+            continuation_yaml: Some(
+                "category: \"ryeos-runtime\"\nchain_depth_limit: 3\n".to_string(),
+            ),
+            limits: Some((2000, 2000)),
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    let id = launch_on(&rig).await.expect("launch");
+    let chain = wait_chain_settled(&rig, &id).await;
+    assert_eq!(chain.len(), 4, "{chain:?}");
+    let failed = chain
+        .iter()
+        .find(|(_, status)| status == "failed")
+        .unwrap_or_else(|| panic!("a thread failed: {chain:?}"));
+    let text = thread_text(&rig, &failed.0).await;
+    assert!(text.contains("continuation_chain_limit"), "{text}");
+}
+
+/// Clipping. The older large tool results of the kept turns are read clipped
+/// after a compaction, the newest whole; the record carries the rule.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_compaction_clips_the_older_tool_results_of_the_kept_turns() {
+    let script = format!("steps:\n  - repeat: 14\n    {TURN}  - text: done\n");
+    let rig = start_rig(
+        &script,
+        RigOptions {
+            context_window: 2000,
+            continuation_yaml: Some(continuation_yaml(
+                "  trigger_ratio: 0.4\n  keep_turns: 3\n  min_turns_between: 2\n  summary:\n    mode: none\n  clip:\n    over_bytes: 100\n    head_bytes: 20\n    tail_bytes: 20\n    keep_recent: 1\n",
+            )),
+            limits: Some((300, 300)),
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    let id = launch_on(&rig).await.expect("launch");
+    wait_chain_settled(&rig, &id).await;
+    let records = chain_payloads(&rig.h, &id, "cognition_compaction").await;
+    assert!(!records.is_empty());
+    assert_eq!(records[0]["clip"]["keep_recent"], 1, "{}", records[0]);
+    let bodies = request_bodies(&rig).await;
+    let clipped = bodies.iter().find(|body| {
+        body.to_string()
+            .contains("bytes of this result were clipped when the conversation was compacted")
+    });
+    let clipped = clipped.expect("a request after the compaction reads a clipped result");
+    // The newest tool result is whole.
+    let last_tool = messages_of(clipped)
+        .into_iter()
+        .rev()
+        .find(|m| role_of(m) == "tool")
+        .expect("a tool result");
+    assert!(
+        !last_tool.to_string().contains("were clipped"),
+        "{last_tool}"
+    );
+}
+
+/// E3. A successor started right after a failed `directive_return` whose
+/// sibling call was answered with the refusal starts well formed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_successor_can_start_from_a_failed_return_tail() {
+    let script = "steps:\n  - tool_calls:\n      - { id: bad_return, name: directive_return, arguments: {} }\n      - { id: sibling, name: bulk_bulk, arguments: {} }\n  - repeat: 40\n    tool_calls:\n      - { id: \"call_{n}\", name: bulk_bulk, arguments: {} }\n  - repeat: 5\n    text: done\n";
+    let rig = start_rig(
+        script,
+        RigOptions {
+            context_window: 2000,
+            header_extra: "continuation:\n  carry_turns: 2\noutputs:\n  - name: answer\n    type: string\n",
+            limits: Some((300, 300)),
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    let id = launch_on(&rig).await.expect("launch");
+    let chain = wait_chain_settled(&rig, &id).await;
+    assert!(chain.len() >= 2, "{chain:?}");
+    let bodies = request_bodies(&rig).await;
+    assert!(
+        bodies[1]
+            .to_string()
+            .contains("tool_not_run_after_failed_return"),
+        "the sibling is answered in the next request"
+    );
+    for start in successor_starts(&bodies) {
+        assert_valid_start(&bodies[start], &format!("successor request {start}"));
+    }
+}
+
+/// E9. An image in a replaced turn is not in the request after the compaction.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_image_in_a_replaced_turn_leaves_the_conversation() {
+    let mut script = String::from(
+        "steps:\n  - tool_calls:\n      - { id: shot_call, name: shot_shot, arguments: {} }\n",
+    );
+    script.push_str(&format!("  - repeat: 12\n    {TURN}  - text: done\n"));
+    let rig = start_rig(
+        &script,
+        RigOptions {
+            context_window: 3000,
+            image_tools: true,
+            provider_top_extra: "image_input:\n  accepts:\n    media_types: [image/png]\n    max_bytes_per_image: 4096\n    max_images_per_request: 4\n    text_part_template: {type: text, text: \"{text}\"}\n    image_part_template: {type: image_url, image_url: {url: \"{data_url}\"}}\n    tool_result_note: \"[{count} image(s) follow in the next message]\"\n    deferred_label: \"Image {index} from tool result {call_id}:\"\n    omitted_note: \"[earlier image omitted: {media_type} {width}x{height}]\"\n    cost: {pixels_per_token: 750, max_tokens: 1600, unknown_dimensions_tokens: 1600}\n".to_string(),
+            continuation_yaml: Some(continuation_yaml(
+                "  trigger_ratio: 0.6\n  keep_turns: 2\n  min_turns_between: 2\n  summary:\n    mode: none\n",
+            )),
+            limits: Some((300, 300)),
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    let id = launch_on(&rig).await.expect("launch");
+    wait_chain_settled(&rig, &id).await;
+    let records = chain_payloads(&rig.h, &id, "cognition_compaction").await;
+    assert!(!records.is_empty());
+    let bodies = request_bodies(&rig).await;
+    assert!(
+        bodies
+            .iter()
+            .any(|b| b.to_string().contains("data:image/png"))
+    );
+    let compacted = bodies
+        .iter()
+        .position(|b| {
+            b.to_string()
+                .contains("were removed to keep it within the context window")
+        })
+        .expect("a request after the compaction");
+    assert!(
+        !bodies[compacted].to_string().contains("data:image/png"),
+        "the replaced turn's image is not sent again"
+    );
+}
+
+/// A hook tool that answers with a control action.
+fn plant_control_tool(rig: &Rig, name: &str, action: &str) {
+    plant_python_tool(
+        rig.project.path(),
+        name,
+        &format!("print(json.dumps({{'action': '{action}'}}))"),
+        &rig.publisher,
+    )
+    .expect("plant control tool");
+}
+
+fn control_hook(tool: &str) -> String {
+    format!(
+        "hooks:\n  - id: pressure-choice\n    event: context_pressure\n    result: control\n    action:\n      primary: execute\n      item_id: \"tool:{tool}/{tool}\"\n      ref_bindings: {{}}\n      params: {{}}\n"
+    )
+}
+
+/// E13. A `context_pressure` hook that answers `skip_compaction` prevents the
+/// compaction: no record and no summary request.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hook_can_veto_a_compaction() {
+    let script = format!("steps:\n  - repeat: 8\n    {TURN}  - text: done\n");
+    let hook: &'static str = Box::leak(control_hook("veto").into_boxed_str());
+    let rig = start_rig(
+        &script,
+        RigOptions {
+            context_window: 2000,
+            header_extra: hook,
+            continuation_yaml: Some(continuation_yaml(
+                "  trigger_ratio: 0.4\n  keep_turns: 2\n  min_turns_between: 2\n",
+            )),
+            limits: Some((300, 300)),
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    plant_control_tool(&rig, "veto", "skip_compaction");
+    let id = launch_on(&rig).await.expect("launch");
+    wait_chain_settled(&rig, &id).await;
+    assert!(
+        chain_payloads(&rig.h, &id, "cognition_compaction")
+            .await
+            .is_empty()
+    );
+    assert!(
+        request_bodies(&rig)
+            .await
+            .iter()
+            .all(|b| !offers_no_tools(b))
+    );
+}
+
+/// E14. With the policy set to observe, a hook answering `compact` is the
+/// only trigger.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hook_can_trigger_a_compaction_when_the_policy_only_observes() {
+    let script = format!("steps:\n  - repeat: 14\n    {TURN}  - text: done\n");
+    let hook: &'static str = Box::leak(control_hook("pressing").into_boxed_str());
+    let rig = start_rig(
+        &script,
+        RigOptions {
+            context_window: 2000,
+            header_extra: hook,
+            continuation_yaml: Some(continuation_yaml(
+                "  trigger_ratio: 0.4\n  keep_turns: 2\n  min_turns_between: 100\n  on_pressure: observe\n  summary:\n    mode: none\n",
+            )),
+            limits: Some((300, 300)),
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    plant_control_tool(&rig, "pressing", "compact");
+    let id = launch_on(&rig).await.expect("launch");
+    wait_chain_settled(&rig, &id).await;
+    let records = chain_payloads(&rig.h, &id, "cognition_compaction").await;
+    assert_eq!(records.len(), 1, "{records:?}");
+}

@@ -46,6 +46,15 @@ pub struct ContinuationRuntimeConfig {
     /// When and how a conversation is compacted before it outgrows the window.
     #[serde(default)]
     pub compaction: CompactionConfig,
+    /// Most continuation predecessors a chain may have; reaching it fails the
+    /// run with `continuation_chain_limit` instead of continuing. The daemon
+    /// keeps a higher backstop of its own.
+    #[serde(default = "default_chain_depth_limit")]
+    pub chain_depth_limit: u32,
+}
+
+fn default_chain_depth_limit() -> u32 {
+    12
 }
 
 /// What a compaction's summary is, as a mechanical switch.
@@ -144,6 +153,58 @@ pub struct CompactionConfig {
     pub max_overflow_recoveries_per_chain: u32,
     #[serde(default)]
     pub summary: SummaryConfig,
+    #[serde(default)]
+    pub clip: ClipConfig,
+}
+
+/// Whether a compaction clips the older tool results of the turns it keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClipMode {
+    Clip,
+    Keep,
+}
+
+/// Clipping of the kept turns' older tool results (see `ClipRule`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClipConfig {
+    #[serde(default = "default_clip_mode")]
+    pub tool_results: ClipMode,
+    #[serde(default = "default_clip_over_bytes")]
+    pub over_bytes: u64,
+    #[serde(default = "default_clip_part_bytes")]
+    pub head_bytes: u64,
+    #[serde(default = "default_clip_part_bytes")]
+    pub tail_bytes: u64,
+    /// Newest tool results left whole.
+    #[serde(default = "default_clip_keep_recent")]
+    pub keep_recent: u32,
+}
+
+impl Default for ClipConfig {
+    fn default() -> Self {
+        Self {
+            tool_results: default_clip_mode(),
+            over_bytes: default_clip_over_bytes(),
+            head_bytes: default_clip_part_bytes(),
+            tail_bytes: default_clip_part_bytes(),
+            keep_recent: default_clip_keep_recent(),
+        }
+    }
+}
+
+fn default_clip_mode() -> ClipMode {
+    ClipMode::Clip
+}
+fn default_clip_over_bytes() -> u64 {
+    8 * 1024
+}
+fn default_clip_part_bytes() -> u64 {
+    2 * 1024
+}
+fn default_clip_keep_recent() -> u32 {
+    4
 }
 
 impl Default for CompactionConfig {
@@ -158,6 +219,7 @@ impl Default for CompactionConfig {
             overflow_codes: default_compaction_overflow_codes(),
             max_overflow_recoveries_per_chain: default_compaction_max_overflow_recoveries(),
             summary: SummaryConfig::default(),
+            clip: ClipConfig::default(),
         }
     }
 }
@@ -206,6 +268,7 @@ impl Default for ContinuationRuntimeConfig {
             carry_turns_cap: default_carry_turns_cap(),
             successor_start_tokens: default_successor_start_tokens(),
             compaction: CompactionConfig::default(),
+            chain_depth_limit: default_chain_depth_limit(),
         }
     }
 }

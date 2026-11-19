@@ -506,6 +506,10 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
     )?;
     drop(launch_inventory);
     let launch_key = format!("launch:{}", envelope.thread_id);
+    let chain_depth_limit = bootstrap_output
+        .config
+        .continuation_runtime
+        .chain_depth_limit;
     let compaction_policy = bootstrap_output
         .config
         .continuation_runtime
@@ -758,6 +762,7 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
         })
     };
     runner_inst.set_compaction(compaction_policy);
+    runner_inst.set_chain_depth_limit(chain_depth_limit);
     runner_inst.run().await
 }
 

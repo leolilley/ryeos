@@ -552,6 +552,19 @@ pub struct WindowSeed {
     pub image_stored: Vec<String>,
 }
 
+/// How the tool results of the kept turns are read after a compaction: all but
+/// the newest `keep_recent` results that are longer than `over_bytes` are read
+/// as their first `head_bytes`, a marker naming how much was left out, and
+/// their last `tail_bytes`. The events are not edited; the fold applies the rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClipRule {
+    pub over_bytes: u64,
+    pub head_bytes: u64,
+    pub tail_bytes: u64,
+    pub keep_recent: u32,
+}
+
 /// A conversation compaction: the older part of the conversation replaced by
 /// a summary, the newest turns kept whole. Self-contained as a fold base: the
 /// pinned inputs and the summary are in it, and the window seed says where the
@@ -588,6 +601,9 @@ pub struct CompactionPayload {
     /// Compactions and overflow recoveries up to and including this one.
     pub compactions: u32,
     pub overflow_recoveries: u32,
+    /// How the kept turns' tool results are clipped, when they are.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip: Option<ClipRule>,
 }
 
 impl CompactionPayload {
