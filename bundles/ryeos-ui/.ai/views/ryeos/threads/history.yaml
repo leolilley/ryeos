@@ -25,22 +25,28 @@ projections:
   columns:
     - label: thread
       field: thread_id
+      role: id
     - label: kind
       field: kind
+      role: kind
       present: words
     # The table carries the readable leaf; the full canonical ref remains in
     # expanded detail.
     - label: item
       field: item_ref
+      role: ref
       present: leaf
     - label: project
       field: project.name
+      role: text
       fallback: node
     - label: status
       field: status
+      role: status
       present: words
     - label: created
       field: created_at
+      role: time
       present: time_date
   expand:
     fields: [thread_id, chain_root_id, project.name, project.path, item_ref, requested_by, created_at]

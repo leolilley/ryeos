@@ -1,6 +1,6 @@
 # ryeos:signed:2026-11-17T22:59:57Z:5c3a2fae3a6babd43d9bed5378d50653289a3e8dbc1170bf8b6142422e1b6856:b3RVPlbuaJkWNbAkJ9CcrQcOH7SWrBMqHMmSrmucthn67JOzFL/7dSNu1HLUwClNOdfoNC1RINbMH3NxN2haCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/ui
-version: "1.0.0"
+version: "1.1.0"
 description: Shared RyeOS browser presentation; Surface contents retain their own independent admission.
 shared_presentation:
   schema: 2
@@ -22,6 +22,7 @@ shared_presentation:
       - ryeos.execute.service.node/status
       - ryeos.execute.service.projects/list
       - ryeos.execute.service.ui/ryeos-ui/config/get
+      - ryeos.execute.service.ui/ryeos-ui/coverage/wording
       - ryeos.execute.service.ui/ryeos-ui/items/list
       - ryeos.execute.service.ui/ryeos-ui/work/attention
     affordances:

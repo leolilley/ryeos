@@ -1,7 +1,7 @@
 # ryeos:signed:2026-11-18T23:23:10Z:1e6330e56f2a6b550f6380a155fe91602134f882c492de831a3ae732c2ecdf5c:UKi0iRPXz7VZC9Qwvdzd+H4KBF3t8gdA898s00jYwryD9knI9NkpcLEcC6QWVhQ7utbkdFSNUv02NeNjGaMIAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-lens
 title: Lens
-version: "1.0.0"
+version: "1.1.0"
 description: Single-lens composition over the shared presentation model
 
 capabilities:
@@ -25,6 +25,10 @@ sources:
     role: attention
     params: { limit: 25 }
     refresh: { on_hint: [thread, activity] }
+  # The words for every table's coverage line; the clients hold none of them.
+  coverage_wording:
+    ref: service:ui/ryeos-ui/coverage/wording
+    role: coverage_wording
   file_read:
     ref: service:ui/ryeos-ui/files/read
     role: file_read

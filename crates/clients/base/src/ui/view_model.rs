@@ -478,13 +478,29 @@ fn view_supplement(
     )
 }
 
+/// A table's coverage line: the codes the service reported and the sentence
+/// the signed wording gives them. Clients draw `label` in `tone` and never
+/// draw the codes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RyeOsTableCoverageVm {
     pub state: String,
     pub reason: String,
+    /// The sentence for this `(state, reason)`, from the signed wording. With
+    /// no wording loaded it is the fixed "not known" sentence below.
+    pub label: String,
+    pub tone: RyeOsTone,
 }
 
-fn table_source_coverage(binding: &ViewBinding, response: &Value) -> Option<RyeOsTableCoverageVm> {
+/// Shown when no signed wording has been read, so a coverage line is never
+/// blank and never a raw code. The signed wording's own fallback replaces it
+/// whenever the wording is loaded.
+pub const COVERAGE_UNKNOWN_LABEL: &str = "This page's coverage is not known.";
+
+fn table_source_coverage(
+    binding: &ViewBinding,
+    response: &Value,
+    wording: Option<&super::dto::RyeOsCoverageWordingDto>,
+) -> Option<RyeOsTableCoverageVm> {
     let path = binding.primary_source()?.1.coverage.as_deref()?;
     let report = super::content::field_path(response, path);
     let state = report
@@ -508,9 +524,18 @@ fn table_source_coverage(binding: &ViewBinding, response: &Value) -> Option<RyeO
                     .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
         })
         .unwrap_or("coverage_not_reported");
+    let (label, tone) = match wording {
+        Some(wording) => {
+            let entry = wording.resolve(state, reason);
+            (entry.label.clone(), tone_from_name(Some(&entry.tone)))
+        }
+        None => (COVERAGE_UNKNOWN_LABEL.to_owned(), RyeOsTone::Neutral),
+    };
     Some(RyeOsTableCoverageVm {
         state: state.into(),
         reason: reason.into(),
+        label,
+        tone,
     })
 }
 
@@ -600,6 +625,10 @@ pub enum RyeOsViewVm {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_status: Option<RyeOsSourceStatusVm>,
         columns: Vec<String>,
+        /// What each column holds, parallel to `columns`; clients choose font,
+        /// dimming, alignment and width from it.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        column_roles: Vec<super::content::ColumnRole>,
         /// Total selectable rows in the source collection. `rows` may be a
         /// render window around the cursor for large lists.
         #[serde(default)]
@@ -1899,6 +1928,7 @@ fn bound_view_vm_keyed(
             let columns = super::content::table_columns(binding);
             let expand_fields = super::content::expand_fields(binding);
             let column_labels = columns.iter().map(|col| col.label.clone()).collect();
+            let column_roles = columns.iter().map(|col| col.role).collect();
             let records = super::content::source_collection(binding, response);
             let empty_tree_folds = std::collections::BTreeSet::new();
             let visible_rows = super::content::table_hierarchy_rows(
@@ -1991,8 +2021,13 @@ fn bound_view_vm_keyed(
                 title,
                 source_status: observation_status,
                 columns: column_labels,
+                column_roles,
                 total_rows,
-                coverage: table_source_coverage(binding, response),
+                coverage: table_source_coverage(
+                    binding,
+                    response,
+                    core.data.coverage_wording.as_ref(),
+                ),
                 provenance: Some(view_ref.to_string()),
                 affordance_hints: affordance_hints(binding),
                 rows,
@@ -4248,42 +4283,122 @@ mod tests {
     use crate::ui::{RyeOsEffect, RyeOsEffectKind, RyeOsEvent, RyeOsUiEvent};
     use serde_json::json;
 
-    #[test]
-    fn authored_table_coverage_never_infers_completeness_from_rows() {
-        let binding: ViewBinding = serde_json::from_value(json!({
+    fn coverage_binding() -> ViewBinding {
+        serde_json::from_value(json!({
             "widget": "table",
             "sources": {"default": {
                 "ref": "service:test/list", "collection": "threads", "coverage": "coverage"
             }}
         }))
-        .unwrap();
+        .unwrap()
+    }
+
+    fn coverage_response(state: &str, reason: &str) -> Value {
+        json!({"threads": [], "coverage": {"state": state, "reason": reason}})
+    }
+
+    fn wording() -> crate::ui::dto::RyeOsCoverageWordingDto {
+        crate::ui::dto::RyeOsCoverageWordingDto::from_response(&json!({
+            "schema_version": "ryeos.ui.coverage_wording.v1",
+            "fallback": {"label": "Coverage is not known.", "tone": "none"},
+            "states": {
+                "observed": {"label": "Observed.", "tone": "none"},
+                "partial": {"label": "Part is shown.", "tone": "warn"},
+                "failed": {"label": "Could not be read.", "tone": "danger"},
+                "unavailable": {"label": "Not available.", "tone": "warn"},
+            },
+            "reasons": {
+                "projection_locator_not_exhaustive": {"label": "May be missing some.", "tone": "accent"},
+            },
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn authored_table_coverage_never_infers_completeness_from_rows() {
+        let binding = coverage_binding();
         let observed = table_source_coverage(
             &binding,
             &json!({"threads":[{"thread_id":"T-one"}], "coverage":{
                 "state":"observed", "reason":"projection_locator_not_exhaustive"
             }}),
+            None,
         )
         .unwrap();
         assert_eq!(observed.state, "observed");
         assert_eq!(observed.reason, "projection_locator_not_exhaustive");
-        let missing = table_source_coverage(&binding, &json!({"threads":[]})).unwrap();
+        let missing = table_source_coverage(&binding, &json!({"threads":[]}), None).unwrap();
         assert_eq!(missing.state, "unavailable");
         assert_eq!(missing.reason, "coverage_not_reported");
         for state in ["partial", "failed", "unavailable"] {
-            let report = table_source_coverage(&binding, &json!({
-                "threads": [], "coverage": {"state": state, "reason": "bounded_live_enumeration"}
-            })).unwrap();
+            let response = coverage_response(state, "bounded_live_enumeration");
+            let report = table_source_coverage(&binding, &response, None).unwrap();
             assert_eq!(report.state, state);
         }
-        let unavailable = table_source_coverage(
-            &binding,
-            &json!({
-                "threads": [], "coverage": {"state": "unavailable", "reason": "kind_not_registered"}
-            }),
-        )
-        .unwrap();
+        let response = coverage_response("unavailable", "kind_not_registered");
+        let unavailable = table_source_coverage(&binding, &response, None).unwrap();
         assert_eq!(unavailable.state, "unavailable");
         assert_eq!(unavailable.reason, "kind_not_registered");
+    }
+
+    #[test]
+    fn a_known_state_and_reason_take_the_reasons_sentence_and_tone() {
+        let words = wording();
+        let response = coverage_response("observed", "projection_locator_not_exhaustive");
+        let coverage = table_source_coverage(&coverage_binding(), &response, Some(&words));
+        let coverage = coverage.unwrap();
+        assert_eq!(coverage.label, "May be missing some.");
+        assert_eq!(coverage.tone, RyeOsTone::Accent);
+    }
+
+    #[test]
+    fn an_unknown_reason_takes_the_states_sentence_and_never_the_code() {
+        let words = wording();
+        let response = coverage_response("partial", "something_new");
+        let coverage = table_source_coverage(&coverage_binding(), &response, Some(&words));
+        let coverage = coverage.unwrap();
+        assert_eq!(coverage.label, "Part is shown.");
+        assert_eq!(coverage.tone, RyeOsTone::Warn);
+        assert!(!coverage.label.contains("something_new"));
+    }
+
+    #[test]
+    fn a_state_the_wording_does_not_list_takes_the_fallback_sentence() {
+        let words = wording();
+        // `complete` is a valid state with no entry in this wording; a reason
+        // the wording does know does not rescue an unknown state.
+        let response = coverage_response("complete", "projection_locator_not_exhaustive");
+        let coverage = table_source_coverage(&coverage_binding(), &response, Some(&words));
+        let coverage = coverage.unwrap();
+        assert_eq!(coverage.label, "Coverage is not known.");
+        assert_eq!(coverage.tone, RyeOsTone::Neutral);
+    }
+
+    #[test]
+    fn missing_wording_fails_closed_with_the_unknown_sentence() {
+        let response = coverage_response("complete", "ready");
+        let coverage = table_source_coverage(&coverage_binding(), &response, None).unwrap();
+        assert_eq!(coverage.label, COVERAGE_UNKNOWN_LABEL);
+        assert_eq!(coverage.label, "This page's coverage is not known.");
+        assert_eq!(coverage.tone, RyeOsTone::Neutral);
+    }
+
+    #[test]
+    fn the_wording_response_refuses_a_stale_contract_bad_tone_and_empty_sentence() {
+        let good = json!({
+            "schema_version": "ryeos.ui.coverage_wording.v1",
+            "fallback": {"label": "x", "tone": "none"}, "states": {}, "reasons": {},
+        });
+        assert!(crate::ui::dto::RyeOsCoverageWordingDto::from_response(&good).is_ok());
+        let mut stale = good.clone();
+        stale["schema_version"] = json!("ryeos.ui.coverage_wording.v0");
+        assert!(crate::ui::dto::RyeOsCoverageWordingDto::from_response(&stale).is_err());
+        let mut tone = good.clone();
+        tone["fallback"]["tone"] = json!("loud");
+        assert!(crate::ui::dto::RyeOsCoverageWordingDto::from_response(&tone).is_err());
+        let mut empty = good.clone();
+        empty["fallback"]["label"] = json!(" ");
+        assert!(crate::ui::dto::RyeOsCoverageWordingDto::from_response(&empty).is_err());
     }
 
     fn tile_default_source_key(core: &RyeOsCore, tile_id: TileId) -> String {
@@ -4406,6 +4521,130 @@ mod tests {
         );
         let tile = core.active_view_set().unwrap().focused_tile;
         (core, tile)
+    }
+
+    fn table_with_roles() -> (RyeOsCore, TileId) {
+        let (mut core, tile) = source_status_fixture(json!({
+            "widget": "table",
+            "sources": {"default": {
+                "ref": "service:test/list", "collection": "rows", "coverage": "coverage"
+            }},
+            "projections": {"columns": [
+                {"label": "id", "field": "id", "role": "id"},
+                {"label": "path", "field": "path", "role": "path"},
+                {"label": "state", "field": "state", "role": "status"},
+                {"label": "n", "field": "n", "role": "count"},
+                {"label": "digest", "field": "digest", "role": "hash"},
+                {"label": "plain", "field": "plain"},
+                {"label": "odd", "field": "odd", "role": "sparkle"}
+            ]}
+        }));
+        let key = tile_default_source_key(&core, tile);
+        core.data.sources.insert(
+            key,
+            json!({
+                "rows": [{"id": "T-1", "path": "a/b", "state": "running", "n": 3,
+                          "digest": "abcdef0123456789", "plain": "x", "odd": "y"}],
+                "coverage": {"state": "observed", "reason": "projection_locator_not_exhaustive"}
+            }),
+        );
+        (core, tile)
+    }
+
+    #[test]
+    fn a_table_view_model_carries_each_columns_role() {
+        use crate::ui::content::ColumnRole;
+        let (core, tile) = table_with_roles();
+        let RyeOsViewVm::Table {
+            columns,
+            column_roles,
+            ..
+        } = bound_view_vm(&core, tile, "view:test/source-status")
+        else {
+            panic!("table")
+        };
+        assert_eq!(columns.len(), column_roles.len());
+        // A column with no role, or a word outside the closed set, is text.
+        assert_eq!(
+            column_roles,
+            [
+                ColumnRole::Id,
+                ColumnRole::Path,
+                ColumnRole::Status,
+                ColumnRole::Count,
+                ColumnRole::Hash,
+                ColumnRole::Text,
+                ColumnRole::Text,
+            ]
+        );
+    }
+
+    #[test]
+    fn every_authored_role_word_names_one_role() {
+        use crate::ui::content::ColumnRole;
+        let words = [
+            ("text", ColumnRole::Text),
+            ("id", ColumnRole::Id),
+            ("ref", ColumnRole::Ref),
+            ("path", ColumnRole::Path),
+            ("kind", ColumnRole::Kind),
+            ("status", ColumnRole::Status),
+            ("time", ColumnRole::Time),
+            ("count", ColumnRole::Count),
+            ("hash", ColumnRole::Hash),
+            ("action", ColumnRole::Action),
+        ];
+        for (word, role) in words {
+            assert_eq!(ColumnRole::from_word(word), Some(role), "{word}");
+            let wire = serde_json::to_value(role).unwrap();
+            assert_eq!(wire, json!(word), "{word} is the wire name");
+        }
+        assert_eq!(ColumnRole::from_word("sparkle"), None);
+    }
+
+    #[test]
+    fn a_table_resolves_its_coverage_line_from_the_loaded_wording() {
+        let (mut core, tile) = table_with_roles();
+        let line = |core: &RyeOsCore| {
+            let RyeOsViewVm::Table { coverage, .. } =
+                bound_view_vm(core, tile, "view:test/source-status")
+            else {
+                panic!("table")
+            };
+            coverage.expect("the source declares coverage")
+        };
+        // Nothing loaded: the fixed unknown sentence, never the codes.
+        let before = line(&core);
+        assert_eq!(before.label, COVERAGE_UNKNOWN_LABEL);
+        assert_eq!(before.reason, "projection_locator_not_exhaustive");
+        core.data.coverage_wording = Some(wording());
+        let after = line(&core);
+        assert_eq!(after.label, "May be missing some.");
+        assert_eq!(after.tone, RyeOsTone::Accent);
+    }
+
+    #[test]
+    fn shipped_tables_name_the_roles_their_fields_obviously_are() {
+        use crate::ui::content::{ColumnRole, ViewBinding, table_columns};
+        let history: ViewBinding = serde_yaml::from_str(include_str!(
+            "../../../../../bundles/ryeos-ui/.ai/views/ryeos/threads/history.yaml"
+        ))
+        .unwrap();
+        let roles = table_columns(&history)
+            .iter()
+            .map(|column| (column.label.clone(), column.role))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            roles,
+            [
+                ("thread".to_owned(), ColumnRole::Id),
+                ("kind".to_owned(), ColumnRole::Kind),
+                ("item".to_owned(), ColumnRole::Ref),
+                ("project".to_owned(), ColumnRole::Text),
+                ("status".to_owned(), ColumnRole::Status),
+                ("created".to_owned(), ColumnRole::Time),
+            ]
+        );
     }
 
     #[test]

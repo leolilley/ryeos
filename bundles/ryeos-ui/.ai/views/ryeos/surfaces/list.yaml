@@ -22,6 +22,7 @@ projections:
       field: label
     - label: Reference
       field: canonical_ref
+      role: ref
     - label: Space
       field: space
     - label: Trust

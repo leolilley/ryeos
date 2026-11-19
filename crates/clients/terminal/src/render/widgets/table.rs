@@ -1,10 +1,18 @@
 //! The table widget: aligned cells under column headers, a leading tone
 //! glyph, full-width selection. The typed list surface for non-chat lenses —
 //! richer than the rows widget's primary/secondary/meta. Equal column widths
-//! for now (weighted/right-aligned columns are a later refinement).
+//! for now (weighted columns are a later refinement).
+//!
+//! A column's role (`ColumnRole`) is honoured only where a character grid can
+//! show it: `count` is right-aligned, `id` and `ref` are cut in the middle,
+//! `path` is cut from the left, `hash` is its first eight characters, and
+//! `status` is a tone mark and the word in one cell, with no mark before the
+//! first cell. Font, dimming and default width have no meaning here and are
+//! ignored.
 
 use ryeos_client_base::layout::Rect;
 use ryeos_client_base::text_surface::TextSurface;
+use ryeos_client_base::ui::content::ColumnRole;
 use ryeos_client_base::ui::view_model::{RyeOsTableCoverageVm, RyeOsTableRowVm, RyeOsTone};
 
 use super::super::primitives::fill_line;
@@ -36,10 +44,23 @@ pub fn draw_table(
     draw_table_with_coverage(surface, rect, columns, rows, None, now_ms);
 }
 
+#[cfg(test)]
 pub fn draw_table_with_coverage(
     surface: &mut TextSurface,
     rect: Rect,
     columns: &[String],
+    rows: &[RyeOsTableRowVm],
+    coverage: Option<&RyeOsTableCoverageVm>,
+    now_ms: u64,
+) {
+    draw_table_with_roles(surface, rect, columns, &[], rows, coverage, now_ms);
+}
+
+pub fn draw_table_with_roles(
+    surface: &mut TextSurface,
+    rect: Rect,
+    columns: &[String],
+    roles: &[ColumnRole],
     rows: &[RyeOsTableRowVm],
     coverage: Option<&RyeOsTableCoverageVm>,
     now_ms: u64,
@@ -56,9 +77,12 @@ pub fn draw_table_with_coverage(
     if let Some(coverage) = coverage
         && height >= FOOT_MIN_HEIGHT
     {
-        let line = format!("{} / {}", coverage.state, coverage.reason);
+        let style = match coverage.tone {
+            RyeOsTone::Neutral => style_muted(),
+            tone => tone_style(tone),
+        };
         bottom -= 1;
-        surface.draw_text(left, bottom, &truncate(&line, width), style_muted());
+        surface.draw_text(left, bottom, &truncate(&coverage.label, width), style);
         bottom -= 1;
         surface.draw_text(left, bottom, &"─".repeat(width), style_muted());
     }
@@ -78,6 +102,7 @@ pub fn draw_table_with_coverage(
         ncols,
         col_w,
         cell_w,
+        roles,
     };
 
     if !columns.is_empty() && y < bottom {
@@ -168,17 +193,18 @@ pub fn draw_table_with_coverage(
 /// Horizontal geometry shared by every row of one table draw: the row
 /// band plus the derived column grid.
 #[derive(Clone, Copy)]
-struct RowLayout {
+struct RowLayout<'a> {
     left: usize,
     width: usize,
     ncols: usize,
     col_w: usize,
     cell_w: usize,
+    roles: &'a [ColumnRole],
 }
 
 fn draw_row(
     surface: &mut TextSurface,
-    layout: RowLayout,
+    layout: RowLayout<'_>,
     y: usize,
     row: &RyeOsTableRowVm,
     now_ms: u64,
@@ -189,7 +215,9 @@ fn draw_row(
         ncols,
         col_w,
         cell_w,
+        roles,
     } = layout;
+    let has_status = roles.contains(&ColumnRole::Status);
     let mut style = if row.selected {
         style_selected()
     } else {
@@ -211,12 +239,17 @@ fn draw_row(
     } else {
         tone_style(row.tone)
     };
+    // A table with a status column carries the tone in that cell instead.
     let glyph = if row.expandable {
-        if row.expanded { "▾" } else { "▸" }
+        Some(if row.expanded { "▾" } else { "▸" })
+    } else if has_status {
+        None
     } else {
-        tone_glyph(row.tone)
+        Some(tone_glyph(row.tone))
     };
-    surface.draw_text(left, y, glyph, glyph_style);
+    if let Some(glyph) = glyph {
+        surface.draw_text(left, y, glyph, glyph_style);
+    }
 
     for (i, cell) in row.cells.iter().enumerate().take(ncols) {
         // Cells take the body ink; a status word takes its tone's colour,
@@ -235,6 +268,26 @@ fn draw_row(
             style
         };
         let cell_x = left + GUTTER + i * col_w;
+        let role = roles.get(i).copied().unwrap_or_default();
+        if role == ColumnRole::Status {
+            // The mark in the row's tone, then the word, in one cell.
+            let tone = row
+                .cell_tones
+                .get(i)
+                .copied()
+                .flatten()
+                .unwrap_or(row.tone);
+            let mark_style = if row.selected {
+                style
+            } else {
+                tone_style(tone)
+            };
+            surface.draw_text(cell_x, y, tone_glyph(tone), mark_style);
+            if cell_w > 2 {
+                surface.draw_text(cell_x + 2, y, &truncate(cell, cell_w - 2), cell_style);
+            }
+            continue;
+        }
         if i == 0
             && let Some(tree) = &row.hierarchy
         {
@@ -251,8 +304,58 @@ fn draw_row(
             }
             continue;
         }
-        surface.draw_text(cell_x, y, &truncate(cell, cell_w), cell_style);
+        let shown = role_text(role, cell, cell_w);
+        let x = if role == ColumnRole::Count {
+            cell_x + cell_w.saturating_sub(display_width(&shown))
+        } else {
+            cell_x
+        };
+        surface.draw_text(x, y, &shown, cell_style);
     }
+}
+
+/// What a cell shows for its role within `width` columns: a hash is its first
+/// eight characters, an id or ref is cut in the middle, a path from the left.
+fn role_text(role: ColumnRole, cell: &str, width: usize) -> String {
+    match role {
+        ColumnRole::Hash => truncate(&cell.chars().take(8).collect::<String>(), width),
+        ColumnRole::Id | ColumnRole::Ref => cut_middle(cell, width),
+        ColumnRole::Path => cut_left(cell, width),
+        _ => truncate(cell, width),
+    }
+}
+
+/// `value` cut to `width` columns by an ellipsis in the middle.
+fn cut_middle(value: &str, width: usize) -> String {
+    if display_width(value) <= width {
+        return value.to_string();
+    }
+    if width < 3 {
+        return truncate(value, width);
+    }
+    let chars: Vec<char> = value.chars().collect();
+    let keep = width - 1;
+    let head = keep.div_ceil(2).min(chars.len());
+    let tail = (keep - head).min(chars.len() - head);
+    let mut text: String = chars[..head].iter().collect();
+    text.push('…');
+    text.extend(chars[chars.len() - tail..].iter());
+    text
+}
+
+/// `value` cut to `width` columns by an ellipsis at the start.
+fn cut_left(value: &str, width: usize) -> String {
+    if display_width(value) <= width {
+        return value.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let chars: Vec<char> = value.chars().collect();
+    let tail = (width - 1).min(chars.len());
+    let mut text = String::from("…");
+    text.extend(chars[chars.len() - tail..].iter());
+    text
 }
 
 fn hierarchy_prefix(tree: &ryeos_client_base::ui::view_model::RyeOsTableHierarchyVm) -> String {
@@ -334,13 +437,16 @@ mod tests {
             Some(&RyeOsTableCoverageVm {
                 state: "observed".into(),
                 reason: "projection_locator_not_exhaustive".into(),
+                label: "This list may not include everything.".into(),
+                tone: RyeOsTone::Warn,
             }),
             0,
         );
         // The row sits under the header; the sentence is the last line, over a rule.
         assert!(row_text(&s, 72, 1).contains("T-ab"));
         assert!(row_text(&s, 72, 3).starts_with('─'));
-        assert!(row_text(&s, 72, 4).contains("observed / projection_locator_not_exhaustive"));
+        assert!(row_text(&s, 72, 4).contains("This list may not include everything."));
+        assert!(!row_text(&s, 72, 4).contains("projection_locator"));
     }
 
     #[test]
@@ -551,5 +657,62 @@ mod tests {
         draw_table(&mut s, rect, &columns(), &[], 0);
         // The "no rows" notice sits on the line below the header.
         assert!(row_text(&s, 40, 1).contains("no rows in this page"));
+    }
+
+    fn draw_roled(
+        width: usize,
+        roles: &[ColumnRole],
+        rows: &[RyeOsTableRowVm],
+    ) -> (TextSurface, usize) {
+        let (mut s, rect) = surface(width, 4);
+        draw_table_with_roles(&mut s, rect, &columns(), roles, rows, None, 0);
+        let col_w = (width - GUTTER) / 3;
+        (s, col_w)
+    }
+
+    #[test]
+    fn a_count_column_is_right_aligned_within_its_cell() {
+        let roles = [ColumnRole::Text, ColumnRole::Text, ColumnRole::Count];
+        let (s, col_w) = draw_roled(60, &roles, &[trow(RyeOsTone::Neutral, &["a", "b", "42"])]);
+        let body = row_text(&s, 60, 1);
+        let cell_x = GUTTER + 2 * col_w;
+        let cell_w = col_w - 1;
+        // The last figure sits at the cell's right edge.
+        assert_eq!(from_col(&body, cell_x + cell_w - 2)[..2].to_string(), "42");
+        assert_eq!(from_col(&body, cell_x).chars().next(), Some(' '));
+    }
+
+    #[test]
+    fn a_hash_column_shows_eight_characters() {
+        let roles = [ColumnRole::Hash, ColumnRole::Text, ColumnRole::Text];
+        let hash = "0123456789abcdef0123";
+        let (s, _) = draw_roled(60, &roles, &[trow(RyeOsTone::Neutral, &[hash, "b", "c"])]);
+        let body = row_text(&s, 60, 1);
+        assert!(from_col(&body, GUTTER).starts_with("01234567"));
+        assert!(!body.contains("012345678"));
+    }
+
+    #[test]
+    fn an_id_is_cut_in_the_middle_and_a_path_from_the_left() {
+        assert_eq!(cut_middle("T-0123456789abcdef", 10), "T-012…cdef");
+        assert_eq!(cut_middle("short", 10), "short");
+        assert_eq!(cut_left("/home/leo/projects/x", 8), "…jects/x");
+        assert_eq!(cut_left("/a", 8), "/a");
+        assert_eq!(role_text(ColumnRole::Text, "abcdefghij", 5), "abcd…");
+    }
+
+    #[test]
+    fn a_status_column_carries_the_mark_and_the_row_draws_none_before_it() {
+        let roles = [ColumnRole::Id, ColumnRole::Text, ColumnRole::Status];
+        let row = trow(RyeOsTone::Danger, &["T-ab", "ops", "failed"]);
+        let (s, col_w) = draw_roled(60, &roles, &[row.clone()]);
+        let body = row_text(&s, 60, 1);
+        // Nothing before the first cell, then the mark and the word.
+        assert_eq!(s.get(0, 1).rune, ' ');
+        let status = from_col(&body, GUTTER + 2 * col_w);
+        assert!(status.starts_with("✗ failed"), "{status:?}");
+        // A table with no status column keeps the mark before the first cell.
+        let (plain, _) = draw_roled(60, &[], &[row]);
+        assert_eq!(plain.get(0, 1).rune, '✗');
     }
 }

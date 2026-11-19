@@ -430,6 +430,7 @@ mod tests {
             title: "threads".into(),
             source_status: None,
             columns: vec!["thread".into()],
+            column_roles: Vec::new(),
             total_rows: 1,
             coverage: None,
             provenance: None,

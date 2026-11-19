@@ -471,6 +471,11 @@ pub struct RyeOsDataState {
     /// the `attention` role.
     #[serde(default)]
     pub attention: Option<super::dto::RyeOsAttentionDto>,
+    /// The signed words for table coverage lines, from the surface source with
+    /// the `coverage_wording` role. Absent until read; a coverage line then
+    /// reads as unknown rather than showing codes.
+    #[serde(default)]
+    pub coverage_wording: Option<super::dto::RyeOsCoverageWordingDto>,
     pub projects: Option<RyeOsProjectsDto>,
     pub threads: Option<RyeOsThreadsDto>,
     pub files: Option<RyeOsFilesDto>,

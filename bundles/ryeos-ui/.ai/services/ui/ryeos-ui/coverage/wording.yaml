@@ -1,0 +1,11 @@
+kind: service
+name: ryeos-ui/coverage/wording
+version: "1.0.0"
+description: >-
+  The signed sentence and tone for each coverage state and reason a table can
+  report, read as a Surface source so every client words coverage the same way.
+endpoint: ui.ryeos.coverage.wording
+ui_read_only: true
+state_access: read_only_existing
+record_thread: false
+availability: daemon_only

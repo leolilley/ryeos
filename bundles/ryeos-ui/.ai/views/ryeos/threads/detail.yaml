@@ -65,17 +65,19 @@ sections:
     source_channel: detail
     collection: execution_meta
     projection:
-      primary: value
-      meta: label
+      primary: label
+      meta: value
 
+  # Rows are `{label, value}`: the name leads (primary) and the figure follows
+  # (meta), as in every other section.
   # Chain-wide settled usage from the projection (its coverage row is in
   # Evidence coverage); not signed testimony.
   - title: Usage
     source_channel: detail
     collection: usage
     projection:
-      primary: value
-      meta: label
+      primary: label
+      meta: value
 
   # Null outcome fields are explained by the signed snapshot coverage below;
   # a terminal status alone is not an outcome or a successful result.

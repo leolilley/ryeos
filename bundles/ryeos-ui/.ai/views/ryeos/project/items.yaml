@@ -18,8 +18,10 @@ projections:
   columns:
     - label: item
       field: canonical_ref
+      role: ref
     - label: kind
       field: item_kind
+      role: kind
     - label: space
       field: space
     - label: trust

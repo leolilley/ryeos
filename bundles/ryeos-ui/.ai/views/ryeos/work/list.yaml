@@ -12,11 +12,11 @@ sources:
     collection: work
 projections:
   columns:
-    - { label: status, field: phase.state_code, present: words }
-    - { label: work, field: item_ref, present: leaf }
-    - { label: project, field: project.name, fallback: node }
+    - { label: status, field: phase.state_code, present: words, role: status }
+    - { label: work, field: item_ref, present: leaf, role: ref }
+    - { label: project, field: project.name, fallback: node, role: text }
     - { label: attention, field: attention_count }
-    - { label: updated, field: observed_at, present: time_date }
+    - { label: updated, field: observed_at, present: time_date, role: time }
   expand:
     fields: [coordinate.chain_root_id, placement.thread_id, placement.origin_site_id, placement.current_site_id, placement_count, attention, item_ref, kind, phase.category, phase.state_code, project.name, project.path, owner_principal_id, observed_at]
   tone:

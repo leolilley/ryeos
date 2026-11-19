@@ -16,3 +16,4 @@ projections:
       field: name
     - label: path
       field: path
+      role: path

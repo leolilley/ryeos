@@ -5,6 +5,7 @@
 
 use rune::{Align, Color, El, Key, KeyEvent, ScrollSpec, Side, col, el, row, text};
 use ryeos_client_base::ids::RyeOsViewInstanceKey;
+use ryeos_client_base::ui::content::ColumnRole;
 use ryeos_client_base::ui::timeline::RyeOsTimelineEntryVm;
 
 use ryeos_client_base::ui::view_model::{
@@ -568,6 +569,7 @@ pub fn body(view: &RyeOsViewVm, instance: &RyeOsViewInstanceKey, local: &crate::
             title,
             source_status,
             columns,
+            column_roles,
             total_rows,
             rows,
             ..
@@ -576,6 +578,7 @@ pub fn body(view: &RyeOsViewVm, instance: &RyeOsViewInstanceKey, local: &crate::
             title,
             source_status.as_ref(),
             columns,
+            column_roles,
             *total_rows,
             rows,
         ),
@@ -1145,12 +1148,13 @@ fn table_view(
     title: &str,
     status: Option<&RyeOsSourceStatusVm>,
     columns: &[String],
+    roles: &[ColumnRole],
     total_rows: usize,
     rows: &[RyeOsTableRowVm],
 ) -> El {
     let t = Tokens::get();
     if rows.len() > VIRTUAL_ROWS_FROM {
-        let head = col().w_full().children(table_head(status, columns));
+        let head = col().w_full().children(table_head(status, columns, roles));
         let keys = rows
             .iter()
             .map(|item| format!("item:{instance:?}:{}", item.id))
@@ -1166,9 +1170,11 @@ fn table_view(
             false,
             TABLE_PAD,
             |view, instance, index| match view {
-                RyeOsViewVm::Table { rows, .. } => {
-                    rows.get(index).map(|item| table_record(instance, item))
-                }
+                RyeOsViewVm::Table {
+                    rows, column_roles, ..
+                } => rows
+                    .get(index)
+                    .map(|item| table_record(instance, item, column_roles)),
                 _ => None,
             },
         );
@@ -1187,7 +1193,7 @@ fn table_view(
         .scroll(ScrollSpec {
             stick_bottom: false,
         })
-        .children(table_head(status, columns));
+        .children(table_head(status, columns, roles));
     // A source that could not be read is never drawn as an empty page.
     if total_rows == 0 && !unreadable(status) {
         body = body.child(
@@ -1200,7 +1206,7 @@ fn table_view(
         );
     }
     for item in rows {
-        body = body.child(table_record(instance, item));
+        body = body.child(table_record(instance, item, roles));
     }
     body
 }
@@ -1220,9 +1226,9 @@ pub fn table_foot(view: &RyeOsViewVm) -> Option<El> {
             .w_full()
             .border_sides([1.0, 0.0, 0.0, 0.0], t.rule())
             .child(
-                text(format!("{} / {}", coverage.state, coverage.reason).to_uppercase())
+                text(coverage.label.clone())
                     .font(theme::TYPE_NOTE)
-                    .color(t.ink_faint())
+                    .color(t.tone(coverage.tone).unwrap_or_else(|| t.ink_faint()))
                     .wrap_anywhere()
                     .px(theme::PAD_TILE)
                     .py(11.0)
@@ -1232,7 +1238,11 @@ pub fn table_foot(view: &RyeOsViewVm) -> Option<El> {
 }
 
 /// What a table shows above its rows: source status and the column headings.
-fn table_head(status: Option<&RyeOsSourceStatusVm>, columns: &[String]) -> Vec<El> {
+fn table_head(
+    status: Option<&RyeOsSourceStatusVm>,
+    columns: &[String],
+    roles: &[ColumnRole],
+) -> Vec<El> {
     let t = Tokens::get();
     let mut head = Vec::new();
     if let Some(status) = status {
@@ -1245,16 +1255,20 @@ fn table_head(status: Option<&RyeOsSourceStatusVm>, columns: &[String]) -> Vec<E
         .gap(TABLE_CELL_GAP)
         .center_y()
         .role("row");
-    for column in columns {
-        columns_row = columns_row.child(
-            text(column.to_uppercase())
-                .font(theme::TYPE_LABEL)
-                .color(t.ink_dim())
-                .truncate()
-                .grow(1.0)
-                .min_w(0.0)
-                .role("columnheader"),
-        );
+    for (index, column) in columns.iter().enumerate() {
+        let role = role_at(roles, index);
+        let label = text(column.to_uppercase())
+            .font(theme::TYPE_LABEL)
+            .color(t.ink_dim())
+            .truncate()
+            .min_w(0.0);
+        // A right-aligned column's heading sits over its figures.
+        let cell = if role == ColumnRole::Count {
+            row().justify_end().child(label)
+        } else {
+            row().child(label)
+        };
+        columns_row = columns_row.child(sized(cell, role).min_w(0.0).role("columnheader"));
     }
     columns_row = columns_row.child(
         col()
@@ -1267,7 +1281,77 @@ fn table_head(status: Option<&RyeOsSourceStatusVm>, columns: &[String]) -> Vec<E
     head
 }
 
-fn table_record(instance: &RyeOsViewInstanceKey, item: &RyeOsTableRowVm) -> El {
+/// The role of column `index`; a column with no role entry is text.
+fn role_at(roles: &[ColumnRole], index: usize) -> ColumnRole {
+    roles.get(index).copied().unwrap_or_default()
+}
+
+/// The width a role asks for in pixels; `None` takes the room left over.
+fn role_width(role: ColumnRole) -> Option<f32> {
+    match role {
+        ColumnRole::Id | ColumnRole::Status => Some(100.0),
+        ColumnRole::Kind | ColumnRole::Time | ColumnRole::Hash => Some(84.0),
+        ColumnRole::Count => Some(56.0),
+        ColumnRole::Action => Some(TABLE_ACTION_WIDTH),
+        ColumnRole::Text | ColumnRole::Ref | ColumnRole::Path => None,
+    }
+}
+
+/// Give a cell its role's width, or let it grow.
+fn sized(cell: El, role: ColumnRole) -> El {
+    match role_width(role) {
+        Some(width) => cell.w(width),
+        None => cell.grow(1.0),
+    }
+}
+
+/// Roles drawn in the monospace face.
+fn role_is_mono(role: ColumnRole) -> bool {
+    matches!(
+        role,
+        ColumnRole::Id | ColumnRole::Ref | ColumnRole::Path | ColumnRole::Hash
+    )
+}
+
+/// The characters of an id that fit its column: longer ids keep their head
+/// and tail around an ellipsis.
+const ID_CHARS: usize = 13;
+
+/// The characters of a hash that are shown.
+const HASH_CHARS: usize = 8;
+
+/// `text` cut to at most `max` characters by replacing the middle with an
+/// ellipsis, so both ends of an id stay readable.
+fn middle_ellipsis(text: &str, max: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max || max < 3 {
+        return text.to_owned();
+    }
+    let keep = max - 1;
+    let head = keep.div_ceil(2);
+    let tail = keep - head;
+    let mut shortened: String = chars[..head].iter().collect();
+    shortened.push('…');
+    shortened.extend(chars[chars.len() - tail..].iter());
+    shortened
+}
+
+/// What a cell shows for its role: a hash is its first eight characters and
+/// an id is cut in the middle. The graphical toolkit truncates `ref` and
+/// `path` cells at the end, since it offers no middle or left cut.
+fn role_text(role: ColumnRole, cell: &str) -> String {
+    match role {
+        ColumnRole::Hash => cell.chars().take(HASH_CHARS).collect(),
+        ColumnRole::Id => middle_ellipsis(cell, ID_CHARS),
+        _ => cell.to_owned(),
+    }
+}
+
+fn table_record(
+    instance: &RyeOsViewInstanceKey,
+    item: &RyeOsTableRowVm,
+    roles: &[ColumnRole],
+) -> El {
     let p = Palette::get();
     let t = Tokens::get();
     let mut line = row()
@@ -1286,9 +1370,10 @@ fn table_record(instance: &RyeOsViewInstanceKey, item: &RyeOsTableRowVm) -> El {
         line = line.fill(t.select_fill()).radius(theme::RADIUS_ROW);
     }
     // Only a status dot takes the tone; the row's text keeps its colour. A
-    // table that declares no per-cell tones puts the row's tone before its
-    // first cell.
-    let row_tone = if item.cell_tones.is_empty() {
+    // table with a status column draws the dot in that cell. One with none
+    // and no per-cell tones puts the row's tone before its first cell.
+    let has_status = roles.contains(&ColumnRole::Status);
+    let row_tone = if item.cell_tones.is_empty() && !has_status {
         t.tone(item.tone)
     } else {
         None
@@ -1298,15 +1383,25 @@ fn table_record(instance: &RyeOsViewInstanceKey, item: &RyeOsTableRowVm) -> El {
         let item_id = item.id.clone();
         let cell_tone = item.cell_tones.get(index).copied().flatten();
         let name = index == 0 && item.selected;
-        let mut slot = row().grow(1.0).min_w(0.0).h_full().center_y().role("cell");
+        let role = role_at(roles, index);
+        let mut slot = sized(row(), role).min_w(0.0).h_full().center_y().role("cell");
         if index == 0
             && let Some(hierarchy) = &item.hierarchy
         {
             slot = slot.child(tree_prefix(instance, &item.id, cell, hierarchy));
         }
         let mut words = row().grow(1.0).min_w(0.0).gap(TONE_DOT_GAP).center_y();
-        // A status cell: the dot, or room for one, then the word.
-        if let Some(tone) = cell_tone {
+        if role == ColumnRole::Count {
+            words = words.justify_end();
+        }
+        // A status cell: the dot, or room for one, then the word. In a
+        // status column the dot takes the cell's tone, else the row's.
+        let dot_tone = if role == ColumnRole::Status {
+            Some(cell_tone.unwrap_or(item.tone))
+        } else {
+            cell_tone
+        };
+        if let Some(tone) = dot_tone {
             words = words.child(match tone_dot(t.tone(tone), TONE_DOT) {
                 Some(dot) => dot,
                 None => el().size(TONE_DOT, TONE_DOT),
@@ -1316,12 +1411,23 @@ fn table_record(instance: &RyeOsViewInstanceKey, item: &RyeOsTableRowVm) -> El {
         {
             words = words.child(dot);
         }
+        let ink = match role {
+            ColumnRole::Path | ColumnRole::Time | ColumnRole::Hash => t.ink_dim(),
+            ColumnRole::Kind => t.ink_soft(),
+            _ if name => t.ink_strong(),
+            _ => t.ink_body(),
+        };
+        let face = if role_is_mono(role) {
+            theme::mono(theme::TYPE_SMALL)
+        } else {
+            theme::TYPE_SMALL
+        };
         slot = slot.child(
             words
                 .child(
-                    text(cell.clone())
-                        .font(theme::TYPE_SMALL)
-                        .color(if name { t.ink_strong() } else { t.ink_body() })
+                    text(role_text(role, cell))
+                        .font(face)
+                        .color(ink)
                         .truncate()
                         .grow(1.0)
                         .min_w(0.0),
@@ -2601,22 +2707,83 @@ mod tests {
     #[test]
     fn the_coverage_line_is_shown_whether_or_not_there_are_rows() {
         let drawn = drawn_with_foot;
-        let coverage = json!({"state": "partial", "reason": "page_limit"});
+        let coverage = json!({
+            "state": "partial", "reason": "page_limit",
+            "label": "Part of what exists is shown.", "tone": "warn"
+        });
         let empty = drawn(table(Vec::new(), 0, coverage.clone()));
-        assert!(says(&empty, "PARTIAL / PAGE_LIMIT"));
+        assert!(says(&empty, "Part of what exists is shown."));
         assert!(says(&empty, "No rows in this page."));
         let populated = drawn(table(
             vec![table_row("t1", ["Alpha", "beta"], json!({}))],
             1,
             coverage,
         ));
-        assert!(says(&populated, "PARTIAL / PAGE_LIMIT"));
+        // The sentence is drawn as written, never upper-cased and never as
+        // the codes.
+        assert!(says(&populated, "Part of what exists is shown."));
+        assert!(!texts(&populated).iter().any(|text| text.contains("PAGE_LIMIT")));
+        assert!(!texts(&populated).iter().any(|text| text.contains("page_limit")));
         let unreported = drawn(table(
             vec![table_row("t1", ["Alpha", "beta"], json!({}))],
             1,
             Value::Null,
         ));
         assert!(!texts(&unreported).iter().any(|text| text.contains(" / ")));
+    }
+
+    fn roled_table(roles: Value) -> RyeOsViewVm {
+        serde_json::from_value(json!({
+            "type": "table", "title": "Threads", "columns": ["name", "kind"],
+            "column_roles": roles, "total_rows": 1,
+            "rows": [table_row("t1", ["T-0123456789abcdef", "0123456789abcdef"], json!({}))]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn an_id_is_cut_in_the_middle_and_a_hash_keeps_eight_characters() {
+        let rt = drawn(roled_table(json!(["id", "hash"])));
+        assert!(says(&rt, "T-0123…abcdef"));
+        assert!(says(&rt, "01234567"));
+        // With no roles the cells are drawn whole.
+        let plain = drawn(roled_table(json!([])));
+        assert!(says(&plain, "T-0123456789abcdef"));
+        assert!(says(&plain, "0123456789abcdef"));
+    }
+
+    #[test]
+    fn each_role_asks_for_its_width_and_the_flexible_roles_grow() {
+        use ryeos_client_base::ui::content::ColumnRole as R;
+        for (role, width) in [
+            (R::Id, 100.0),
+            (R::Status, 100.0),
+            (R::Kind, 84.0),
+            (R::Time, 84.0),
+            (R::Hash, 84.0),
+            (R::Count, 56.0),
+            (R::Action, 50.0),
+        ] {
+            assert_eq!(super::role_width(role), Some(width), "{role:?}");
+        }
+        for role in [R::Text, R::Ref, R::Path] {
+            assert_eq!(super::role_width(role), None, "{role:?}");
+        }
+        for role in [R::Id, R::Ref, R::Path, R::Hash] {
+            assert!(super::role_is_mono(role), "{role:?}");
+        }
+        for role in [R::Text, R::Kind, R::Status, R::Time, R::Count, R::Action] {
+            assert!(!super::role_is_mono(role), "{role:?}");
+        }
+    }
+
+    #[test]
+    fn middle_ellipsis_keeps_both_ends_and_leaves_short_text_alone() {
+        assert_eq!(super::middle_ellipsis("short", 13), "short");
+        let cut = super::middle_ellipsis("T-0123456789abcdef", 13);
+        assert_eq!(cut.chars().count(), 13);
+        assert!(cut.starts_with("T-0123"));
+        assert!(cut.ends_with("abcdef"));
     }
 
     // ---- The look ----

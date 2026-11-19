@@ -16,6 +16,7 @@ projections:
       field: schedule_id
     - label: item
       field: item_ref
+      role: ref
     - label: expression
       field: expression
     - label: enabled

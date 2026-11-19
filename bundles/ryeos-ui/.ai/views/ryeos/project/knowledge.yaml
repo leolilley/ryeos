@@ -21,6 +21,7 @@ projections:
       field: title
     - label: item
       field: canonical_ref
+      role: ref
     - label: namespace
       field: namespace
     - label: space

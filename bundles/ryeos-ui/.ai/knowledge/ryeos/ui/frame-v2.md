@@ -5,12 +5,12 @@ name: "frame-v2"
 title: "RyeOS UI Frame Contract v2"
 description: "The closed widget-primitive set and view-binding schema renderers implement; content composes against this, never against client source"
 entry_type: reference
-version: "2.1.0"
+version: "2.2.0"
 ```
 
 # RyeOS UI Frame Contract v2
 
-Frame contract version `2.1.0`, implemented with UI binding contract
+Frame contract version `2.2.0`, implemented with UI binding contract
 `ryeos.ui.binding.v14` and timeline contract `ryeos.timeline.v1` (the
 `timeline-v1` document). A renderer and the daemon cut over together: the
 frame, the binding contract and the timeline contract each have exactly one
@@ -310,6 +310,54 @@ The shell fills each Surface chip's counts from `by_project` by the Surface's
 project (a projectless Surface takes the totals), each tab's flags from its
 selected work's chain, and the overlay rows from the two item lists. Counts and
 flags are None when attention is unavailable or a chain list was cut short.
+
+## Table columns and roles
+
+`projections.columns` is the ordered list of a `table` view's columns. Each is
+`{label, field, role?, present?, fallback?, tone?}`. A column may name what it
+holds with `role`, a closed set of mechanical drawing choices (the view names
+the field; the client chooses font, dimming, alignment, truncation and default
+width):
+
+| role | draws | default width |
+|---|---|---|
+| `text` (default) | sans, body ink, takes the room left over | grows |
+| `id` | mono, truncates in the middle | 100 |
+| `ref` | mono, truncates in the middle and keeps the leaf | grows |
+| `path` | mono, dim, truncates from the left | grows |
+| `kind` | sans, soft ink | 84 |
+| `status` | a 6 px dot in the row's tone, then the word, in one cell | 100 |
+| `time` | sans, dim | 84 |
+| `count` | sans, right-aligned | 56 |
+| `hash` | mono, dim, first eight characters | 84 |
+| `action` | one quiet affordance | 50 |
+
+A view with a `status` column has the row's tone drawn as the dot in that
+cell, and no dot before the first cell; a view with none keeps the dot before
+the first cell. The view model carries `column_roles`, parallel to `columns`;
+an absent or unknown role is `text`. A terminal has no font or dimming, so it
+keeps right alignment for `count`, truncation, the first eight characters of a
+`hash`, and the status mark and word. The `view` kind schema refuses a word
+outside the set.
+
+## Coverage wording
+
+A table source may name a `coverage` field holding `{state, reason}` codes. A
+client never draws the codes. The Surface source with role `coverage_wording`
+(`service:ui/ryeos-ui/coverage/wording`, declared once on the shared `lens`
+Surface and admitted by both shared presentations) answers one response of
+contract `ryeos.ui.coverage_wording.v1`: `fallback`, `states` and `reasons`,
+each entry `{label, tone}` with tone one of `none`, `good`, `warn`, `danger`,
+`accent`. The words are the signed config `config:ryeos/ui/coverage-wording`;
+no client holds any of them. The view model carries the resolved `label` and
+`tone` beside the codes:
+
+1. a state the wording does not list reads as `fallback`;
+2. otherwise a reason the wording lists gives its sentence;
+3. otherwise the state's own sentence.
+
+With no wording loaded, or a response that is refused, every coverage line
+reads "This page's coverage is not known." A client never draws a code.
 
 ## Backdrop
 

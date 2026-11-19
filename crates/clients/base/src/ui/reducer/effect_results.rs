@@ -864,6 +864,13 @@ impl RyeOsCore {
                     self.rebuild_overlay_rows();
                 }
             }
+            // The wording is the node's, not a project's, so any admitted
+            // Surface may supply it. An unreadable response clears it, and
+            // every coverage line then reads as unknown.
+            Some("coverage_wording") => {
+                self.data.coverage_wording =
+                    crate::ui::dto::RyeOsCoverageWordingDto::from_response(data).ok();
+            }
             // File reads remain under their exact source-instance key in
             // `data.sources`. A global projection would let two mounted views
             // overwrite one another and erase the originating coordinate.
@@ -1577,6 +1584,69 @@ mod tests {
                 "{label}: the refusal is a failed source"
             );
         }
+    }
+
+    #[test]
+    fn the_coverage_wording_source_is_stored_and_a_bad_response_clears_it() {
+        let mut session = writable_session();
+        let crate::presentation::UiCompositionDefinition::Surface { surface } =
+            &mut session.binding_attachments[0].presentation.definition
+        else {
+            panic!("Surface fixture required")
+        };
+        surface.sources = serde_json::from_value(serde_json::json!({
+            "coverage_wording": {
+                "ref": "service:ui/ryeos-ui/coverage/wording",
+                "role": "coverage_wording"
+            }
+        }))
+        .unwrap();
+        let mut core = core(session);
+        let wording_fetch = |effects: &[RyeOsEffect]| {
+            effects
+                .iter()
+                .find(|effect| {
+                    matches!(
+                        &effect.kind,
+                        RyeOsEffectKind::FetchSource { request, .. }
+                            if matches!(
+                                &request.coordinate,
+                                crate::ui::binding::UiBindingCoordinate::Source { channel, .. }
+                                    if channel == "coverage_wording"
+                            )
+                    )
+                })
+                .map(|effect| effect.id)
+        };
+        let send = |core: &mut RyeOsCore, id: u64, data: serde_json::Value| {
+            core.dispatch(RyeOsEvent::EffectResult {
+                result: RyeOsEffectResult {
+                    id,
+                    ok: true,
+                    kind: RyeOsEffectResultKind::SourceData,
+                    data: Some(data),
+                    error: None,
+                },
+            });
+        };
+        let id = wording_fetch(&core.initial_effects()).expect("surface source fetch");
+        assert!(core.data.coverage_wording.is_none());
+        send(
+            &mut core,
+            id,
+            serde_json::json!({
+                "schema_version": "ryeos.ui.coverage_wording.v1",
+                "fallback": {"label": "Not known.", "tone": "none"},
+                "states": {"partial": {"label": "Part is shown.", "tone": "warn"}},
+                "reasons": {},
+            }),
+        );
+        let stored = core.data.coverage_wording.as_ref().expect("wording arrives");
+        assert_eq!(stored.resolve("partial", "x").label, "Part is shown.");
+
+        let id = wording_fetch(&core.initial_effects()).expect("surface source fetch");
+        send(&mut core, id, serde_json::json!({"fallback": {}}));
+        assert!(core.data.coverage_wording.is_none());
     }
 
     #[test]

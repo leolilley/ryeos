@@ -23,15 +23,18 @@ projections:
   columns:
     - label: execution
       field: item_ref
+      role: ref
       present: leaf
     - label: kind
       field: kind
+      role: kind
       present: words
     - label: relation
       field: tree.relation
       present: words
     - label: status
       field: status
+      role: status
       present: words
     - label: current
       field: current_node.node
@@ -47,6 +50,7 @@ projections:
           resumed: good
     - label: created
       field: created_at
+      role: time
       present: time_date
   expand:
     fields: [thread_id, chain_root_id, tree.parent_thread_id, tree.relation, tree.depth, project.name, project.path, item_ref, requested_by, created_at, updated_at, current_node.node, current_node.step, follow.role, follow.display_state, follow.phase, follow.follow_node, follow.child_thread_id, follow.child_chain_root_id, follow.child_terminal_status, follow.parent_successor_thread_id, follow.cohort.done, follow.cohort.expected]
