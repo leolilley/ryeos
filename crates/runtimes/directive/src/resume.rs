@@ -126,14 +126,25 @@ pub(crate) fn directive_tool_operation_id(
 /// call of the same batch failed, so the call was never run.
 pub(crate) const TOOL_NOT_RUN_AFTER_FAILED_RETURN: &str = "tool_not_run_after_failed_return";
 
-/// Whether a recorded tool result is the refusal a call after a failed
-/// `directive_return` is owed: an error result carrying exactly that code.
+/// The model-visible body of the refusal a call after a failed
+/// `directive_return` gets. Fixed text: the runtime writes it and recovery
+/// compares against it exactly, so no tool output can pass as the refusal.
+pub(crate) fn failed_return_refusal_body() -> Value {
+    serde_json::json!({
+        "error": {
+            "code": TOOL_NOT_RUN_AFTER_FAILED_RETURN,
+            "message": "not run: an earlier directive_return call in the same batch failed; call it again if still needed",
+        }
+    })
+}
+
+/// Whether a recorded tool result is exactly the refusal a call after a
+/// failed `directive_return` is owed: an error result whose whole body is the
+/// fixed envelope, with no extra field or other text.
 fn is_failed_return_refusal(result: &ToolResultPayload) -> bool {
     result.status == ToolResultStatus::Error
-        && serde_json::from_str::<Value>(&result.text()).is_ok_and(|body| {
-            body.pointer("/error/code").and_then(Value::as_str)
-                == Some(TOOL_NOT_RUN_AFTER_FAILED_RETURN)
-        })
+        && serde_json::from_str::<Value>(&result.text())
+            .is_ok_and(|body| body == failed_return_refusal_body())
 }
 
 /// Backstop on the continuation-path walk — far above any real conversation
@@ -208,7 +219,11 @@ pub async fn load_resume_state(
                 );
             }
             ResumeMode::Continuation => {
-                anyhow::bail!("resume: continuation predecessor contains an unresolved tool batch");
+                return Err(ResumeFoldError::UnsettledToolBatch {
+                    detail: "continuation predecessor contains an unresolved tool batch"
+                        .to_string(),
+                }
+                .into());
             }
             ResumeMode::NativeSameThread => {}
         }
@@ -225,7 +240,11 @@ pub async fn load_resume_state(
                 );
             }
             ResumeMode::Continuation => {
-                anyhow::bail!("resume: continuation predecessor contains an unresolved tool batch");
+                return Err(ResumeFoldError::UnsettledToolBatch {
+                    detail: "continuation predecessor contains an unresolved tool batch"
+                        .to_string(),
+                }
+                .into());
             }
             ResumeMode::NativeSameThread => {}
         }
@@ -506,9 +525,11 @@ fn recover_tool_state(
         if event.event_type == "cognition_in"
             && open.iter().any(|entry| !entry.settled && !entry.abandoned)
         {
-            anyhow::bail!(
-                "resume: cognition input appeared before every retained tool occurrence settled"
-            );
+            return Err(ResumeFoldError::UnsettledToolBatch {
+                detail: "cognition input appeared before every retained tool occurrence settled"
+                    .to_string(),
+            }
+            .into());
         }
         match event.event_type.as_str() {
             "cognition_out"
@@ -517,9 +538,7 @@ fn recover_tool_state(
                     || event.payload.get("tool_use_partial").is_some() => {}
             "cognition_out" => {
                 if open.iter().any(|entry| !entry.settled && !entry.abandoned) {
-                    anyhow::bail!(
-                        "resume: a new cognition_out appeared before every prior tool occurrence settled"
-                    );
+                    return Err(ResumeFoldError::UnsettledToolBatch { detail: "a new cognition_out appeared before every prior tool occurrence settled".to_string() }.into());
                 }
                 current_batch = None;
                 let cognition = replayed_cognition_out(event)?;
@@ -670,7 +689,11 @@ fn recover_tool_state(
                         "resume: tool_call_result for operation {operation_id} after a failed directive_return is not the {TOOL_NOT_RUN_AFTER_FAILED_RETURN} refusal"
                     );
                 }
-                if open[occurrence_index].occurrence.call.name == DIRECTIVE_RETURN_TOOL {
+                // An owed `directive_return` (a second return after a failed
+                // one) is an ordinary refusal, not a lifecycle settlement.
+                if open[occurrence_index].occurrence.call.name == DIRECTIVE_RETURN_TOOL
+                    && !open[occurrence_index].owed
+                {
                     if open[..occurrence_index].iter().any(|entry| !entry.settled) {
                         anyhow::bail!(
                             "resume: directive_return settled before an earlier serial occurrence"
@@ -1182,9 +1205,11 @@ fn recover_resume_disposition(
 
     if !tools.pending.is_empty() {
         if later_cognition_input {
-            anyhow::bail!(
-                "resume: cognition input appeared before the retained tool proposal settled"
-            );
+            return Err(ResumeFoldError::UnsettledToolBatch {
+                detail: "cognition input appeared before the retained tool proposal settled"
+                    .to_string(),
+            }
+            .into());
         }
         return Ok(ResumeDisposition::ContinueProvider);
     }
@@ -1457,6 +1482,13 @@ pub enum ResumeFoldError {
     OrphanToolResult { call_id: String },
     /// The pinned inputs alone are larger than the ceiling.
     PinnedInputsExceedWindow { ceiling: u64 },
+    /// The record moves on while calls of a tool batch have no result.
+    /// Records written before a failed `directive_return` answered the calls
+    /// after it (they were left with no start and no result) read this way
+    /// when the run went on, and a continuation predecessor with calls still
+    /// owed a result reads this way too. Such records are refused: there is no
+    /// reader for the old shape.
+    UnsettledToolBatch { detail: String },
 }
 
 impl ResumeFoldError {
@@ -1467,6 +1499,7 @@ impl ResumeFoldError {
             Self::UnansweredToolCall { .. } => "resume_unanswered_tool_call",
             Self::OrphanToolResult { .. } => "resume_orphan_tool_result",
             Self::PinnedInputsExceedWindow { .. } => "resume_pinned_exceeds_window",
+            Self::UnsettledToolBatch { .. } => "resume_unsettled_tool_batch",
         }
     }
 }
@@ -1491,6 +1524,7 @@ impl std::fmt::Display for ResumeFoldError {
                 f,
                 "{code}: pinned inputs alone exceed the {ceiling}-token ceiling of the model window"
             ),
+            Self::UnsettledToolBatch { detail } => write!(f, "{code}: {detail}"),
         }
     }
 }
@@ -2163,8 +2197,7 @@ mod tests {
 
     /// The refusal a call after a failed `directive_return` is owed.
     fn refusal_text() -> String {
-        json!({"error": {"code": TOOL_NOT_RUN_AFTER_FAILED_RETURN, "message": "not run"}})
-            .to_string()
+        failed_return_refusal_body().to_string()
     }
 
     /// The batch of `lifecycle_batch_events(0, false)` (a failed return, then
@@ -2255,6 +2288,155 @@ mod tests {
         });
         sources.push("T-lifecycle".to_string());
         assert!(recover_tool_state(&events, &sources).is_err());
+    }
+
+    #[test]
+    fn only_the_exact_fixed_envelope_is_the_refusal() {
+        let body = failed_return_refusal_body();
+        let mut with_extra = body.clone();
+        with_extra["error"]["detail"] = json!("smuggled tool output");
+        let mut other_message = body.clone();
+        other_message["error"]["message"] = json!("something else");
+        for text in [with_extra.to_string(), other_message.to_string()] {
+            let (events, sources) = failed_return_batch(true, Some(text));
+            assert!(recover_tool_state(&events, &sources).is_err());
+        }
+    }
+
+    /// A batch `[failing return, (tool:x,) return]` whose calls after the
+    /// failed first return were each refused; `answered` holds how many of
+    /// them have their start and refusal recorded.
+    fn double_return_events(
+        with_tool_between: bool,
+        answered: usize,
+    ) -> (Vec<ReplayedEventRecord>, Vec<String>) {
+        let source = "T-lifecycle".to_string();
+        let mut calls = vec![json!({"id":"call-r1", "name":DIRECTIVE_RETURN_TOOL, "arguments":{}})];
+        if with_tool_between {
+            calls.push(json!({"id":"call-x", "name":"tool:x", "arguments":{}}));
+        }
+        calls.push(
+            json!({"id":"call-r2", "name":DIRECTIVE_RETURN_TOOL, "arguments":{"answer":"done"}}),
+        );
+        let mut events = vec![
+            ReplayedEventRecord {
+                event_type: "cognition_in".to_string(),
+                payload: input("task"),
+            },
+            ReplayedEventRecord {
+                event_type: "cognition_out".to_string(),
+                payload: {
+                    let mut out = out_calls(1, json!(calls));
+                    out["provider_accounting"] = json!({"replayed_from": "ab".repeat(32)});
+                    out
+                },
+            },
+        ];
+        let first = directive_tool_operation_id(&source, 1, 0);
+        events.push(ReplayedEventRecord {
+            event_type: "tool_call_start".to_string(),
+            payload: json!({"operation_id":first,"call_id":"call-r1","tool":DIRECTIVE_RETURN_TOOL}),
+        });
+        events.push(ReplayedEventRecord {
+            event_type: "tool_call_result".to_string(),
+            payload: error_result(
+                &first,
+                "call-r1",
+                DIRECTIVE_RETURN_TOOL,
+                "{\"error\":\"invalid\"}",
+            ),
+        });
+        for (offset, call) in calls.iter().enumerate().skip(1).take(answered) {
+            let operation = directive_tool_operation_id(&source, 1, offset);
+            let id = call["id"].as_str().unwrap();
+            let tool = call["name"].as_str().unwrap();
+            events.push(ReplayedEventRecord {
+                event_type: "tool_call_start".to_string(),
+                payload: json!({"operation_id":operation,"call_id":id,"tool":tool}),
+            });
+            events.push(ReplayedEventRecord {
+                event_type: "tool_call_result".to_string(),
+                payload: error_result(&operation, id, tool, &refusal_text()),
+            });
+        }
+        let sources = vec![source; events.len()];
+        (events, sources)
+    }
+
+    #[test]
+    fn a_second_return_after_a_failed_one_is_an_ordinary_owed_refusal() {
+        for with_tool in [false, true] {
+            let total = if with_tool { 2 } else { 1 };
+            let (events, sources) = double_return_events(with_tool, total);
+            let recovered = recover_tool_state(&events, &sources).unwrap();
+            assert!(recovered.pending.is_empty() && recovered.owed.is_empty());
+            assert!(recovered.terminal_lifecycle_settlement.is_none());
+            assert_eq!(
+                recover_resume_disposition(&events, &recovered).unwrap(),
+                ResumeDisposition::CheckContinuation
+            );
+            // Cut before any refusal: every later call is owed one.
+            let (events, sources) = double_return_events(with_tool, 0);
+            let recovered = recover_tool_state(&events, &sources).unwrap();
+            assert_eq!(recovered.owed.len(), total);
+            assert_eq!(
+                recover_resume_disposition(&events, &recovered).unwrap(),
+                ResumeDisposition::SettleOwedSiblings
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_batch_with_two_returns_rebuilds_and_a_successor_starts_from_it() {
+        for with_tool in [false, true] {
+            let total = if with_tool { 2 } else { 1 };
+            let (events, _) = double_return_events(with_tool, total);
+            let callback = make_callback(events);
+            for mode in [ResumeMode::NativeSameThread, ResumeMode::Continuation] {
+                let state =
+                    load_resume_state(&callback, "T-lifecycle", CarryPolicy::turns(8), mode, None)
+                        .await
+                        .unwrap();
+                let tools = state.messages.iter().filter(|m| m.role() == "tool").count();
+                assert_eq!(tools, total + 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_untyped_unsettled_batch_refusals_carry_their_stable_code() {
+        // A continuation from a tail that still owes refusals.
+        let callback = make_callback(failed_return_events_before_refusal());
+        let error = load_resume_state(
+            &callback,
+            "T-lifecycle",
+            CarryPolicy::turns(8),
+            ResumeMode::Continuation,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<ResumeFoldError>()
+                .map(ResumeFoldError::code),
+            Some("resume_unsettled_tool_batch")
+        );
+        // A record written before the fix: the failed return's sibling has no
+        // start and no result and the run went on.
+        let mut events = failed_return_events_before_refusal();
+        events.push(ReplayedEventRecord {
+            event_type: "cognition_in".to_string(),
+            payload: input("later"),
+        });
+        let sources = vec!["T-lifecycle".to_string(); events.len()];
+        let error = recover_tool_state(&events, &sources).unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<ResumeFoldError>()
+                .map(ResumeFoldError::code),
+            Some("resume_unsettled_tool_batch")
+        );
     }
 
     #[test]
@@ -4000,6 +4182,12 @@ mod tests {
             (
                 ResumeFoldError::PinnedInputsExceedWindow { ceiling: 9 },
                 "resume_pinned_exceeds_window",
+            ),
+            (
+                ResumeFoldError::UnsettledToolBatch {
+                    detail: "d".to_string(),
+                },
+                "resume_unsettled_tool_batch",
             ),
         ];
         for (error, code) in errors {

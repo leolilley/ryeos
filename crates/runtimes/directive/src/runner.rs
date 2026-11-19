@@ -11,7 +11,7 @@ use crate::directive::{
 use crate::dispatcher::{DispatchKind, Dispatcher};
 use crate::harness::{Harness, HookAction};
 use crate::result_guard::ResultGuard;
-use crate::resume::{ResumeDisposition, ResumeState, TOOL_NOT_RUN_AFTER_FAILED_RETURN};
+use crate::resume::{ResumeDisposition, ResumeState};
 use crate::run_clock::{RunClock, RunPhase};
 use ryeos_accounting::{
     AttemptBudgetState, BillableDimension, ChargeReconciliationAuthority, HexDigest,
@@ -331,13 +331,8 @@ fn tool_call_limit_error() -> String {
 /// What the model sees for a call that sat after a failed `directive_return`
 /// in the same batch: the call did not run, and may be proposed again.
 fn tool_not_run_after_failed_return_error() -> String {
-    serde_json::to_string(&json!({
-        "error": {
-            "code": TOOL_NOT_RUN_AFTER_FAILED_RETURN,
-            "message": "not run: an earlier directive_return call in the same batch failed; call it again if still needed",
-        }
-    }))
-    .expect("fixed failed-return refusal envelope serializes")
+    serde_json::to_string(&crate::resume::failed_return_refusal_body())
+        .expect("fixed failed-return refusal envelope serializes")
 }
 
 /// Error observations are model-visible transcript data. Keep them useful but

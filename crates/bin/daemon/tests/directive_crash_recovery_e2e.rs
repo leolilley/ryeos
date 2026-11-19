@@ -976,6 +976,7 @@ fn tool_result_text(payload: &Value) -> String {
 /// crash cut between the return's result and the call's result.
 async fn run_failed_return(crash_between_results: bool) {
     const REFUSED_CALL: &str = "refused-marker-call";
+    const REFUSED_RETURN_CALL: &str = "refused-return-call";
     let mock = MockProvider::start(vec![
         MockResponse::ToolCall {
             id: "marker-call".to_string(),
@@ -992,6 +993,13 @@ async fn run_failed_return(crash_between_results: bool) {
                 id: REFUSED_CALL.to_string(),
                 name: TOOL_NAME.to_string(),
                 arguments: "{}".to_string(),
+            },
+            // A second return in the batch is refused like any other call
+            // after the failed one, not settled as a lifecycle return.
+            MockToolCallSpec {
+                id: REFUSED_RETURN_CALL.to_string(),
+                name: DIRECTIVE_RETURN_NAME.to_string(),
+                arguments: r#"{"answer":"too early"}"#.to_string(),
             },
         ]),
         MockResponse::ToolCall {
@@ -1086,16 +1094,16 @@ async fn run_failed_return(crash_between_results: bool) {
         .await
         .expect("stop daemon before evidence inspection");
 
-    // Starts and results: the marker, the failing return, the refused call,
-    // and the valid return, each exactly once.
+    // Starts and results: the marker, the failing return, the two refused
+    // calls, and the valid return, each exactly once.
     assert_eq!(
         event_count(&events, "tool_call_start"),
-        4,
+        5,
         "events={events:#?}"
     );
     assert_eq!(
         event_count(&events, "tool_call_result"),
-        4,
+        5,
         "events={events:#?}"
     );
     let for_call = |kind: &str, call_id: &str| {
@@ -1109,6 +1117,12 @@ async fn run_failed_return(crash_between_results: bool) {
             .collect::<Vec<_>>()
     };
     assert_eq!(for_call("tool_call_start", REFUSED_CALL).len(), 1);
+    let refused_return = for_call("tool_call_result", REFUSED_RETURN_CALL);
+    assert_eq!(refused_return.len(), 1, "events={events:#?}");
+    assert_eq!(
+        refused_return[0].get("status").and_then(Value::as_str),
+        Some("error")
+    );
     let refusal = for_call("tool_call_result", REFUSED_CALL);
     assert_eq!(refusal.len(), 1, "events={events:#?}");
     assert_eq!(
@@ -1151,7 +1165,11 @@ async fn run_failed_return(crash_between_results: bool) {
         .collect::<Vec<_>>();
     assert_eq!(
         tool_ids,
-        vec![Some("failing-return-call"), Some(REFUSED_CALL)],
+        vec![
+            Some("failing-return-call"),
+            Some(REFUSED_CALL),
+            Some(REFUSED_RETURN_CALL)
+        ],
         "appended={appended:#?}"
     );
 }
