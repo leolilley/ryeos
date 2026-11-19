@@ -718,6 +718,8 @@ pub fn project_record(record: &Value, projection: &Value) -> ProjectedRecord {
     let meta = projection
         .get("meta")
         .and_then(Value::as_str)
+        // A null field is no value: the row shows nothing rather than "null".
+        .filter(|path| !matches!(field_path(record, path), Some(Value::Null)))
         .and_then(|path| field_text(record, path));
     let tone = project_tone(record, projection);
     ProjectedRecord {

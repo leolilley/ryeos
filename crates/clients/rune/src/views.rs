@@ -191,7 +191,7 @@ fn frame_header(spec: &FrameSpec<'_>, local: &crate::Local) -> El {
         .px(theme::PAD_TILE)
         .center_y()
         .gap(10.0)
-        .child(identity.grow(1.0));
+        .child(identity);
     // The mark for a project-authored view: always drawn when present, at
     // the right of the title row, in ink (never a warning tone). The title
     // truncates before the mark does.
@@ -206,7 +206,7 @@ fn frame_header(spec: &FrameSpec<'_>, local: &crate::Local) -> El {
             .or(spec.detail)
             .map(str::to_owned)
             .unwrap_or_default();
-        return title_row.child(frame_detail(&aside));
+        return title_row.child(note_slot(Some(&aside)));
     };
     let tabs = (tile.tabs.len() > 1).then(|| view_tabs(tile.tabs, tile.grouped));
     if !tile.grouped
@@ -223,9 +223,9 @@ fn frame_header(spec: &FrameSpec<'_>, local: &crate::Local) -> El {
             RyeOsViewVm::Timeline { thread_id, .. } => thread_id.as_deref(),
             _ => None,
         });
-    if let Some(detail) = note {
-        title_row = title_row.child(frame_detail(detail));
-    }
+    // The note takes what room the title leaves and is cut first; the title
+    // is never cut for it.
+    title_row = title_row.child(note_slot(note));
     let mut tools = row().center_y().gap(8.0);
     if let Some(attachment) = spec.attachment {
         tools = tools.child(frame_detail(attachment).label("Selection attachment"));
@@ -324,6 +324,16 @@ fn authorship_chip(authorship: &ryeos_client_base::ui::content::ItemAuthorship) 
                 .color(t.ink_at(0.85))
                 .truncate(),
         )
+}
+
+/// The room right of a tile's title: the note, right-aligned, in whatever the
+/// title leaves.
+fn note_slot(note: Option<&str>) -> El {
+    let slot = row().grow(1.0).min_w(0.0).justify_end();
+    match note {
+        Some(note) => slot.child(frame_detail(note)),
+        None => slot,
+    }
 }
 
 /// A tile's right note: `type.small` at `ink.dim`.
@@ -799,13 +809,13 @@ fn virtual_list(
 }
 
 /// Above a section's title, and below it.
-const SECTION_TITLE_ABOVE: f32 = 14.0;
-const SECTION_TITLE_BELOW: f32 = 4.0;
+const SECTION_TITLE_ABOVE: f32 = 12.0;
+const SECTION_TITLE_BELOW: f32 = 9.0;
 /// A section's field row.
-const FIELD_ROW_HEIGHT: f32 = 25.0;
-const FIELD_ROW_GAP: f32 = 10.0;
+const FIELD_ROW_HEIGHT: f32 = 24.0;
+const FIELD_ROW_GAP: f32 = 8.0;
 /// The fixed width of a field's name.
-const FIELD_NAME_WIDTH: f32 = 120.0;
+const FIELD_NAME_WIDTH: f32 = 104.0;
 /// A field row sits this far in from the tile's padding, so its selection
 /// fill has a margin.
 const FIELD_INSET: f32 = 8.0;
@@ -931,7 +941,8 @@ fn record(instance: &RyeOsViewInstanceKey, item: &RyeOsRowVm, style: RowStyle) -
     if item.selected {
         line = match style {
             RowStyle::Rows => line.fill(p.plane_selected),
-            RowStyle::Section => line.fill(t.select_fill()).radius(theme::RADIUS_ROW),
+            // A field row marks the point by its brighter name, with no fill.
+            RowStyle::Section => line,
         };
     }
     line = match style {
@@ -982,12 +993,12 @@ fn record(instance: &RyeOsViewInstanceKey, item: &RyeOsRowVm, style: RowStyle) -
             if let Some(dot) = tone_dot(t.tone(item.tone), TONE_DOT) {
                 value = value.child(dot);
             }
-            // A value is read whole: it wraps rather than truncates.
+            // A value that does not fit is cut at the tile's edge.
             let words = |what: &String| {
                 text(what.clone())
                     .font(theme::TYPE_CELL)
                     .color(t.ink_body())
-                    .wrap_anywhere()
+                    .truncate()
                     .grow(1.0)
                     .min_w(0.0)
             };
@@ -1179,7 +1190,7 @@ const FOLD_MARK_WIDTH: f32 = 16.0;
 /// The table's padding: rows inset from the tile.
 const TABLE_PAD: ListPad = ListPad {
     x: TABLE_INSET,
-    top: 8.0,
+    top: 0.0,
     bottom: 8.0,
     gap: TABLE_ROW_GAP,
     column: None,
@@ -1385,24 +1396,32 @@ const TEXT_MOST: f32 = 160.0;
 /// A ref or path column's least width.
 const REF_LEAST: f32 = 150.0;
 
-/// The width a role asks for. Ids, kinds, statuses, times, counts and hashes
-/// are fixed so rows line up; refs and paths take the room left over, with
-/// text columns beside them held to a bounded share. With no ref or path
-/// column, text columns share the room equally.
-fn role_width(role: ColumnRole, has_ref: bool) -> ColumnWidth {
+/// The width a role asks for. Ids, kinds, statuses, counts and hashes are
+/// fixed so rows line up. A time column takes the room left over; refs and
+/// paths then hold a fixed width and text columns a short one, so slack
+/// gathers at the table's end rather than in the middle. With no time
+/// column, refs and paths take the room instead, with text columns beside
+/// them held to a bounded share (or sharing it equally with no ref or path).
+fn role_width(role: ColumnRole, has_ref: bool, has_time: bool) -> ColumnWidth {
     match role {
         ColumnRole::Id => ColumnWidth::Fixed(112.0),
         ColumnRole::Kind => ColumnWidth::Fixed(78.0),
         ColumnRole::Status => ColumnWidth::Fixed(104.0),
-        ColumnRole::Time => ColumnWidth::Fixed(100.0),
+        ColumnRole::Time => ColumnWidth::Grow {
+            min: 100.0,
+            weight: 1.0,
+            max: None,
+        },
         ColumnRole::Hash => ColumnWidth::Fixed(84.0),
         ColumnRole::Count => ColumnWidth::Fixed(56.0),
         ColumnRole::Action => ColumnWidth::Fixed(TABLE_ACTION_WIDTH),
+        ColumnRole::Ref | ColumnRole::Path if has_time => ColumnWidth::Fixed(REF_FIXED),
         ColumnRole::Ref | ColumnRole::Path => ColumnWidth::Grow {
             min: REF_LEAST,
             weight: 2.0,
             max: None,
         },
+        ColumnRole::Text if has_time => ColumnWidth::Fixed(TEXT_LEAST),
         ColumnRole::Text => ColumnWidth::Grow {
             min: TEXT_LEAST,
             weight: 1.0,
@@ -1411,34 +1430,46 @@ fn role_width(role: ColumnRole, has_ref: bool) -> ColumnWidth {
     }
 }
 
+/// A ref or path column's width beside a time column.
+const REF_FIXED: f32 = 150.0;
+
 /// When a tile is too narrow for every column, columns go in this order,
-/// lowest first. `None` never goes: an id says which row it is and a status
-/// says what happened to it.
+/// lowest first. A status says what happened to a row and never goes; an id
+/// goes after the text columns, since the item says what the row is.
 fn drop_rank(role: ColumnRole) -> Option<u8> {
     match role {
         ColumnRole::Hash => Some(0),
         ColumnRole::Time => Some(1),
         ColumnRole::Count => Some(2),
-        ColumnRole::Text => Some(3),
+        ColumnRole::Text | ColumnRole::Id => Some(3),
         ColumnRole::Kind => Some(4),
         ColumnRole::Path => Some(5),
         ColumnRole::Ref => Some(6),
-        ColumnRole::Id | ColumnRole::Status | ColumnRole::Action => None,
+        ColumnRole::Status | ColumnRole::Action => None,
     }
 }
 
 /// Each column's width, or `None` for one the tile has no room for. Columns
 /// leave by rank, the later of two equals first, until the rest fit the width
 /// (less the table's inset, the rows' padding and gaps, and the disclosure
-/// column).
+/// column). The widths are then settled for the columns that stay, so a
+/// table that lost its time column lets its refs take the room.
 fn table_plan(shape: TableShape<'_>, action: bool) -> Vec<Option<ColumnWidth>> {
-    let has_ref = shape
-        .roles
-        .iter()
-        .any(|role| matches!(role, ColumnRole::Ref | ColumnRole::Path));
-    let mut plan: Vec<Option<ColumnWidth>> = (0..shape.columns.len())
-        .map(|index| Some(role_width(role_at(shape.roles, index), has_ref)))
-        .collect();
+    let settle = |kept: &dyn Fn(usize) -> bool| -> Vec<Option<ColumnWidth>> {
+        let kept_roles = || {
+            (0..shape.columns.len())
+                .filter(|index| kept(*index))
+                .map(|index| role_at(shape.roles, index))
+        };
+        let has_ref = kept_roles().any(|role| matches!(role, ColumnRole::Ref | ColumnRole::Path));
+        let has_time = kept_roles().any(|role| role == ColumnRole::Time);
+        (0..shape.columns.len())
+            .map(|index| {
+                kept(index).then(|| role_width(role_at(shape.roles, index), has_ref, has_time))
+            })
+            .collect()
+    };
+    let mut plan = settle(&|_| true);
     let disclosure = if action {
         TABLE_ACTION_WIDTH + TABLE_CELL_GAP
     } else {
@@ -1459,6 +1490,8 @@ fn table_plan(shape: TableShape<'_>, action: bool) -> Vec<Option<ColumnWidth>> {
             Some((_, index)) => plan[index] = None,
             None => break,
         }
+        let kept: Vec<bool> = plan.iter().map(Option::is_some).collect();
+        plan = settle(&|index| kept[index]);
     }
     plan
 }
@@ -3107,23 +3140,36 @@ mod tests {
             (R::Id, 112.0),
             (R::Kind, 78.0),
             (R::Status, 104.0),
-            (R::Time, 100.0),
             (R::Hash, 84.0),
             (R::Count, 56.0),
             (R::Action, 24.0),
         ] {
-            assert_eq!(super::role_width(role, true), Fixed(width), "{role:?}");
+            assert_eq!(
+                super::role_width(role, true, true),
+                Fixed(width),
+                "{role:?}"
+            );
         }
+        // The time column takes the room left over.
+        assert!(matches!(
+            super::role_width(R::Time, true, true),
+            Grow { .. }
+        ));
+        // Beside a time column, refs, paths and text hold fixed widths.
+        for (role, width) in [(R::Ref, 150.0), (R::Path, 150.0), (R::Text, 80.0)] {
+            assert_eq!(super::role_width(role, true, true), Fixed(width));
+        }
+        // With no time column refs and paths take the room instead.
         for role in [R::Ref, R::Path] {
-            assert!(matches!(super::role_width(role, true), Grow { .. }));
+            assert!(matches!(super::role_width(role, true, false), Grow { .. }));
         }
         // Beside a ref column text is bounded; alone it takes its share.
         assert!(matches!(
-            super::role_width(R::Text, true),
+            super::role_width(R::Text, true, false),
             Grow { max: Some(_), .. }
         ));
         assert!(matches!(
-            super::role_width(R::Text, false),
+            super::role_width(R::Text, false, false),
             Grow { max: None, .. }
         ));
         for role in [R::Id, R::Ref, R::Path, R::Hash] {
@@ -3159,17 +3205,17 @@ mod tests {
     }
 
     #[test]
-    fn a_narrow_tile_drops_columns_by_rank_and_keeps_id_and_status() {
+    fn a_narrow_tile_drops_columns_by_rank_and_keeps_the_status() {
         // Room for every column.
         assert_eq!(shown(940.0), vec![true; 6]);
-        // The tile of a three-column page: time, project and kind go.
+        // Time, project and id go: kind, item and status stay.
         assert_eq!(
             shown(450.0),
-            vec![true, false, true, false, true, false],
-            "id, item and status stay"
+            vec![false, true, true, false, true, false],
+            "kind, item and status stay"
         );
-        // Narrower still: the item goes before the id or the status do.
-        assert_eq!(shown(190.0), vec![true, false, false, false, true, false]);
+        // Narrower still: the kind and the item go before the status does.
+        assert_eq!(shown(190.0), vec![false, false, false, false, true, false]);
         // A window with no width yet keeps every column.
         assert_eq!(shown(f32::MAX), vec![true; 6]);
     }
@@ -3191,7 +3237,7 @@ mod tests {
         let rt = runtime((900.0, 700.0), move || {
             super::body_in(&view, &instance, &local, 200.0)
         });
-        assert!(says(&rt, "T-1"));
+        assert!(!says(&rt, "T-1"));
         assert!(says(&rt, "running"));
         assert!(!says(&rt, "directive"));
         assert!(!says(&rt, "KIND"));

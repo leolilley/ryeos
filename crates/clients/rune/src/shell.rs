@@ -803,6 +803,7 @@ fn center(view_set: Option<&RyeOsViewSetVm>, local: &Local) -> El {
         .h_full()
         .min_w(0.0)
         .min_h(0.0)
+        .clip_rounded(0.0)
         .child(content)
 }
 
@@ -820,6 +821,30 @@ struct Splits<'a> {
 /// margins, and so an estimate of a tile's width. Tables use the estimate to
 /// decide which columns fit.
 const SIDE_RESERVE: f32 = 32.0;
+
+/// The least width a pane keeps beside another: a tile is read whole, and
+/// one the window has no room for is clipped rather than squeezed.
+const MIN_PANE: f32 = 400.0;
+
+/// The least width a layout node keeps: side by side, panes add up with the
+/// divider; stacked, the widest counts.
+fn pane_floor(node: &RyeOsLayoutNodeVm) -> f32 {
+    match node {
+        RyeOsLayoutNodeVm::Split {
+            axis,
+            first,
+            second,
+            ..
+        } => {
+            if *axis == RyeOsSplitAxisVm::Horizontal {
+                pane_floor(first) + DIVIDER + pane_floor(second)
+            } else {
+                pane_floor(first).max(pane_floor(second))
+            }
+        }
+        RyeOsLayoutNodeVm::Tile { .. } => MIN_PANE,
+    }
+}
 
 /// How many tiles the layout holds.
 fn tile_count(node: &RyeOsLayoutNodeVm) -> usize {
@@ -986,29 +1011,31 @@ fn layout(
             };
             let horizontal = *axis == RyeOsSplitAxisVm::Horizontal;
             // Side by side, the panes share the width less the divider.
+            let (floor_first, floor_second) = if horizontal {
+                (pane_floor(first), pane_floor(second))
+            } else {
+                (0.0, 0.0)
+            };
             let (first_width, second_width) = if horizontal {
                 let shared = (width - DIVIDER).max(0.0);
-                (shared * ratio, shared * (1.0 - ratio))
+                let first_width = (shared * ratio).min(shared - floor_second).max(floor_first);
+                (first_width, (shared - first_width).max(floor_second))
             } else {
                 (width, width)
             };
             path.push(SplitBranch::First);
-            let first = col().grow(ratio).min_w(0.0).min_h(0.0).child(layout(
-                first,
-                local,
-                splits,
-                path,
-                first_width,
-            ));
+            let first = col()
+                .grow(ratio)
+                .min_w(floor_first)
+                .min_h(0.0)
+                .child(layout(first, local, splits, path, first_width));
             path.pop();
             path.push(SplitBranch::Second);
-            let second = col().grow(1.0 - ratio).min_w(0.0).min_h(0.0).child(layout(
-                second,
-                local,
-                splits,
-                path,
-                second_width,
-            ));
+            let second = col()
+                .grow(1.0 - ratio)
+                .min_w(floor_second)
+                .min_h(0.0)
+                .child(layout(second, local, splits, path, second_width));
             path.pop();
             let handle = divider(*axis, &key, ratio, path, splits);
             let extent_key = key.clone();
@@ -1307,7 +1334,7 @@ fn notices(
                 .gap(12.0)
                 .fill(p.plane_raised)
                 .border(1.0, p.line_strong)
-                .border_sides([1.0, 1.0, 1.0, 3.0], p.notice_rule(notice.tone))
+                .border_sides([0.0, 0.0, 0.0, 3.0], p.notice_rule(notice.tone))
                 .shadow(9.0, 30.0, rune::Color::BLACK.alpha(0.45))
                 .child(
                     text(notice.message.clone())
@@ -1598,7 +1625,7 @@ pub fn composer(input: &RyeOsInputVm, local: &Local) -> El {
     if live {
         // The filter line: a bordered box, the field centred in it and the
         // key that reaches it as a cap at the right.
-        return col().w_full().px(12.0).pt(8.0).pb(6.0).child(
+        return col().w_full().px(12.0).pt(12.0).pb(8.0).child(
             row()
                 .w_full()
                 .h(FILTER_HEIGHT)

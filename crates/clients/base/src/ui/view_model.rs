@@ -3845,6 +3845,9 @@ fn mounted_dialogs(core: &RyeOsCore) -> Vec<RyeOsDialogVm> {
                 description: core
                     .binding_for_instance(key, mount.view().view_ref())
                     .and_then(|binding| binding.description.clone()),
+                note: view_supplement(core, key, mount.view().view_ref())
+                    .map(|supplement| supplement.frame_detail)
+                    .filter(|note| !note.is_empty()),
                 launcher: core
                     .binding_for_instance(key, mount.view().view_ref())
                     .is_some_and(|binding| {
