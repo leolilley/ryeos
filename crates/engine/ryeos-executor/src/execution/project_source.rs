@@ -503,6 +503,9 @@ pub fn prepare_pinned_project_external_consumer(
     principal_scopes: Vec<String>,
     checkout_id: &str,
 ) -> anyhow::Result<PreparedExternalProductConsumer> {
+    // The materialized checkout is a per-generation path; the project the
+    // operator named is the logical project signer scopes are matched on.
+    let logical_project_root = project_path.clone();
     let project_context = resolve_pinned_snapshot_context(
         state,
         project_snapshot_hash,
@@ -514,6 +517,7 @@ pub fn prepare_pinned_project_external_consumer(
         state,
         consumer_ref,
         Some(project_context),
+        Some(logical_project_root),
         principal_fingerprint,
         principal_scopes,
         state.threads.site_id().to_owned(),
@@ -532,6 +536,7 @@ pub fn prepare_installed_bundle_external_consumer(
     prepare_external_consumer_context(
         state,
         consumer_ref,
+        None,
         None,
         principal_fingerprint,
         principal_scopes,
@@ -571,10 +576,13 @@ pub fn prepare_external_product_consumer(
     } else {
         None
     };
+    // A composition names a snapshot, not a project path, so there is no
+    // logical project to state here.
     prepare_external_consumer_context(
         state,
         &request.consumer_ref,
         project,
+        None,
         context.fingerprint.clone(),
         context.scopes.clone(),
         context.execution_origin(state.threads.site_id()),
@@ -585,6 +593,7 @@ fn prepare_external_consumer_context(
     state: &AppState,
     consumer_ref: &str,
     project_context: Option<ResolvedProjectContext>,
+    logical_project_root: Option<PathBuf>,
     principal_fingerprint: String,
     principal_scopes: Vec<String>,
     origin_site_id: String,
@@ -613,7 +622,7 @@ fn prepare_external_consumer_context(
         .map(|context| context.effective_path.clone());
     let site_id = state.threads.site_id().to_owned();
     let plan_context = ryeos_engine::contracts::PlanContext {
-        logical_project_root: None,
+        logical_project_root,
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
             ryeos_engine::contracts::Principal {
                 fingerprint: principal_fingerprint,
@@ -664,7 +673,11 @@ fn prepare_external_consumer_context(
         .get(item_kind)
         .and_then(|schema| schema.execution.as_ref())
         .and_then(|execution| execution.source_closure.as_ref());
-    let roots = engine.resolution_roots(project_root);
+    let roots = engine
+        .resolution_roots(project_root.clone())
+        .with_logical_project_root(
+            plan_context.effective_logical_project_root(project_root.as_deref()),
+        );
     let project_authority = project_context
         .as_ref()
         .map(|context| {
