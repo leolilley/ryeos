@@ -993,18 +993,22 @@ fn layout(
                 (width, width)
             };
             path.push(SplitBranch::First);
-            let first = col()
-                .grow(ratio)
-                .min_w(0.0)
-                .min_h(0.0)
-                .child(layout(first, local, splits, path, first_width));
+            let first = col().grow(ratio).min_w(0.0).min_h(0.0).child(layout(
+                first,
+                local,
+                splits,
+                path,
+                first_width,
+            ));
             path.pop();
             path.push(SplitBranch::Second);
-            let second = col()
-                .grow(1.0 - ratio)
-                .min_w(0.0)
-                .min_h(0.0)
-                .child(layout(second, local, splits, path, second_width));
+            let second = col().grow(1.0 - ratio).min_w(0.0).min_h(0.0).child(layout(
+                second,
+                local,
+                splits,
+                path,
+                second_width,
+            ));
             path.pop();
             let handle = divider(*axis, &key, ratio, path, splits);
             let extent_key = key.clone();

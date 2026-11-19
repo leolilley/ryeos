@@ -158,13 +158,12 @@ pub fn frame(spec: FrameSpec<'_>, local: &crate::Local) -> El {
     if let Some(input) = filter {
         frame = frame.child(crate::shell::composer(input, local));
     }
-    frame = frame.child(
-        col()
-            .w_full()
-            .grow(1.0)
-            .min_h(0.0)
-            .child(body_in(spec.view, spec.instance, local, spec.width)),
-    );
+    frame = frame.child(col().w_full().grow(1.0).min_h(0.0).child(body_in(
+        spec.view,
+        spec.instance,
+        local,
+        spec.width,
+    )));
     // The status lane and the pending asks close the feed, directly above the
     // composer in the same tile.
     if let RyeOsViewVm::Timeline { lane, dock, .. } = spec.view {
@@ -1039,10 +1038,7 @@ fn record(instance: &RyeOsViewInstanceKey, item: &RyeOsRowVm, style: RowStyle) -
             col()
                 .w(34.0)
                 .center()
-                .border_sides(
-                    [0.0, 0.0, 0.0, if rows_style { 1.0 } else { 0.0 }],
-                    p.line,
-                )
+                .border_sides([0.0, 0.0, 0.0, if rows_style { 1.0 } else { 0.0 }], p.line)
                 .fill(if !rows_style {
                     Color::TRANSPARENT
                 } else if expanded {
@@ -1219,7 +1215,9 @@ fn table_view(
     let action = table_has_action(rows);
     let plan = table_plan(shape, action);
     if rows.len() > VIRTUAL_ROWS_FROM {
-        let head = col().w_full().children(table_head(status, shape, &plan, action));
+        let head = col()
+            .w_full()
+            .children(table_head(status, shape, &plan, action));
         let keys = rows
             .iter()
             .map(|item| format!("item:{instance:?}:{}", item.id))
