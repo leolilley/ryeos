@@ -962,6 +962,7 @@ impl CallbackClient {
             "chain_root_id",
             chain_root_id,
             event_types,
+            None,
             &mut RuntimeReplayBudget::default(),
         )
         .await
@@ -992,8 +993,29 @@ impl CallbackClient {
         event_types: Option<&[&str]>,
         budget: &mut RuntimeReplayBudget,
     ) -> Result<ReplayResponse> {
-        self.replay_paged("thread_id", thread_id, event_types, budget)
+        self.replay_paged("thread_id", thread_id, event_types, None, budget)
             .await
+    }
+
+    /// [`Self::replay_thread_with_budget`] starting after the given chain
+    /// sequence number: only events with a larger `chain_seq` come back. A
+    /// recovery that found its fold base in an earlier, filtered replay uses it
+    /// to read the thread from there on.
+    pub async fn replay_thread_after(
+        &self,
+        thread_id: &str,
+        event_types: Option<&[&str]>,
+        after_chain_seq: i64,
+        budget: &mut RuntimeReplayBudget,
+    ) -> Result<ReplayResponse> {
+        self.replay_paged(
+            "thread_id",
+            thread_id,
+            event_types,
+            Some(after_chain_seq),
+            budget,
+        )
+        .await
     }
 
     /// Page through `after_chain_seq` cursors for a single replay scope
@@ -1004,6 +1026,7 @@ impl CallbackClient {
         scope_key: &str,
         scope_value: &str,
         event_types: Option<&[&str]>,
+        start_after_chain_seq: Option<i64>,
         budget: &mut RuntimeReplayBudget,
     ) -> Result<ReplayResponse> {
         let client = self.inner.as_ref().ok_or_else(|| {
@@ -1014,7 +1037,7 @@ impl CallbackClient {
         })?;
 
         let mut all_events = Vec::new();
-        let mut after_chain_seq: Option<i64> = None;
+        let mut after_chain_seq: Option<i64> = start_after_chain_seq;
         loop {
             let mut params = serde_json::Map::new();
             params.insert(
@@ -2456,6 +2479,7 @@ mod tests {
         async fn replay_events(&self, params: Value) -> Result<Value, CallbackError> {
             use crate::callback::{ReplayResponse, ReplayedEventRecord};
             let ev = |t: &str| ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: t.to_string(),
                 payload: json!({}),
             };
@@ -2540,6 +2564,7 @@ mod tests {
 
     fn replay_event(event_type: &str, payload: Value) -> ReplayedEventRecord {
         ReplayedEventRecord {
+            chain_seq: 0,
             event_type: event_type.to_string(),
             payload,
         }

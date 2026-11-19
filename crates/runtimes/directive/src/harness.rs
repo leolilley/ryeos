@@ -382,6 +382,10 @@ pub enum HookAction {
     Suspend,
     Escalate,
     Continue,
+    /// Compact the conversation now. Valid only on `context_pressure`.
+    Compact,
+    /// Do not compact this time. Valid only on `context_pressure`.
+    SkipCompaction,
 }
 
 impl HookAction {
@@ -399,6 +403,8 @@ impl HookAction {
             "suspend" => Ok(HookAction::Suspend),
             "escalate" => Ok(HookAction::Escalate),
             "continue" => Ok(HookAction::Continue),
+            "compact" => Ok(HookAction::Compact),
+            "skip_compaction" => Ok(HookAction::SkipCompaction),
             other => Err(format!("unknown hook control action `{other}`")),
         }
     }

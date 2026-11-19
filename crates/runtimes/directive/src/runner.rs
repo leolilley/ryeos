@@ -5,13 +5,15 @@ use serde_json::{Value, json};
 use crate::budget::BudgetTracker;
 use crate::continuation::ContinuationCheck;
 use crate::directive::{
-    DIRECTIVE_RETURN_TOOL, ExecutionConfig, FinishReason, ProviderMessage, ProviderMessageExt,
-    StreamEvent, TIME_LEFT_TOOL, ToolSchema,
+    CompactionConfig, CompactionOnPressure, DIRECTIVE_RETURN_TOOL, ExecutionConfig, FinishReason,
+    ProviderMessage, ProviderMessageExt, StreamEvent, SummaryMode, TIME_LEFT_TOOL, ToolSchema,
 };
 use crate::dispatcher::{DispatchKind, Dispatcher};
 use crate::harness::{Harness, HookAction};
 use crate::result_guard::ResultGuard;
-use crate::resume::{ResumeDisposition, ResumeState, TOOL_NOT_RUN_AFTER_FAILED_RETURN};
+use crate::resume::{
+    CompactionMemo, ResumeDisposition, ResumeState, TOOL_NOT_RUN_AFTER_FAILED_RETURN,
+};
 use crate::run_clock::{RunClock, RunPhase};
 use ryeos_accounting::{
     AttemptBudgetState, BillableDimension, ChargeReconciliationAuthority, HexDigest,
@@ -602,7 +604,20 @@ pub enum State {
         context: Value,
         resume_to: Box<State>,
     },
+    /// Decides, after every settled turn, whether the conversation has
+    /// reached the compaction trigger.
     CheckingContinuation,
+    /// The context-window continuation boundary, after any compaction.
+    ContinuationBoundary,
+    /// Replaces the older part of the conversation by a summary. `trigger` is
+    /// `pressure` (live context reached the trigger) or `overflow` (the
+    /// provider refused the request as too long).
+    Compacting {
+        trigger: String,
+    },
+    /// The compaction's summary call settled: write the record and rebuild the
+    /// conversation from it.
+    FinishingCompaction,
 
     Finalizing {
         result: Value,
@@ -710,7 +725,57 @@ pub struct Runner {
     resume_disposition: ResumeDisposition,
     resume_active_provider_turn: Option<u32>,
     provider_retry_testimony_digests: std::collections::BTreeSet<String>,
+    /// The compaction policy, from the signed runtime config.
+    compaction: CompactionConfig,
+    /// The latest compaction on the path, as far as the run needs it.
+    compaction_memo: Option<CompactionMemo>,
+    /// A predecessor's request was refused: the run starts by compacting.
+    start_with_overflow_compaction: bool,
+    /// What a `context_pressure` hook's action chooses between.
+    pressure_hook: Option<PressureHook>,
+    /// The compaction's summary call in flight.
+    summary_job: Option<SummaryJob>,
 }
+
+/// The two states a `context_pressure` hook chooses between.
+struct PressureHook {
+    compact: State,
+    skip: State,
+}
+
+/// A compaction's summary call: its request and, once it settles, its text.
+struct SummaryJob {
+    trigger: String,
+    messages: Vec<ProviderMessage>,
+    omitted_from_input: u32,
+    result: Option<Vec<Part>>,
+}
+
+/// How the compaction policy answers a refusal.
+enum OverflowRecovery {
+    /// Continue into a successor that compacts first.
+    Allowed,
+    /// Not a refusal the policy answers (or already answered once).
+    NotApplicable,
+    /// The chain has spent its recoveries.
+    Exhausted,
+}
+
+enum CompactionOutcome {
+    Compacted,
+    NothingToReplace,
+}
+
+enum CompactionFailure {
+    /// The compaction could not be done; the run's state is unchanged.
+    Failed(String),
+    /// A record append or rebuild whose outcome is not known: a same-thread
+    /// recovery decides.
+    Unknown(String),
+}
+
+/// The name of the hook event that lets a directive act on context pressure.
+const CONTEXT_PRESSURE_EVENT: &str = "context_pressure";
 
 struct RunGuard {
     finalized: bool,
@@ -1510,7 +1575,17 @@ impl Runner {
             resume_disposition: ResumeDisposition::ContinueProvider,
             resume_active_provider_turn: None,
             provider_retry_testimony_digests: std::collections::BTreeSet::new(),
+            compaction: CompactionConfig::default(),
+            compaction_memo: None,
+            start_with_overflow_compaction: false,
+            pressure_hook: None,
+            summary_job: None,
         }
+    }
+
+    /// Set the compaction policy the signed runtime config carries.
+    pub fn set_compaction(&mut self, policy: CompactionConfig) {
+        self.compaction = policy;
     }
 
     pub fn from_resume(resume: ResumeState, mut config: RunnerConfig) -> anyhow::Result<Self> {
@@ -1553,6 +1628,8 @@ impl Runner {
         let wrap_up_delivered = resume.deadline_wrap_up_delivered;
         let trailing_length_turns = resume.trailing_length_turns;
         let last_turn_coordinate = resume.last_turn_coordinate;
+        let compaction_memo = resume.compaction.clone();
+        let start_with_overflow_compaction = resume.predecessor_rejected_turn.is_some();
         if let Some(active_turn) = resume_active_provider_turn {
             let expected = last_turn_coordinate
                 .checked_add(1)
@@ -1576,16 +1653,21 @@ impl Runner {
         {
             anyhow::bail!("resume: settled directive_return no longer validates: {error}");
         }
+        // A compaction's replay window opens after the run's earlier tool
+        // starts and spawns; they are counted in the record.
+        let starts_before_window = resume.tool_starts_before_window;
         let started_count = u32::try_from(started_tool_occurrences.len())
-            .map_err(|_| anyhow::anyhow!("resume tool-start count exceeds u32"))?;
+            .map_err(|_| anyhow::anyhow!("resume tool-start count exceeds u32"))?
+            .checked_add(starts_before_window)
+            .ok_or_else(|| anyhow::anyhow!("resume tool-start count exceeds u32"))?;
         let admitted_count = runner
             .harness
             .recover_admitted_tool_call_count(started_count);
-        let admitted_len = usize::try_from(admitted_count)
+        let admitted_len = usize::try_from(admitted_count.saturating_sub(starts_before_window))
             .expect("u32 admitted tool count always fits usize on supported targets");
         let mut admitted_operations = std::collections::BTreeSet::new();
         let mut spawn_counted_operations = std::collections::BTreeSet::new();
-        let mut derived_spawns = 0u32;
+        let mut derived_spawns = resume.spawns_before_window;
         for started in &started_tool_occurrences[..admitted_len] {
             admitted_operations.insert(started.operation_id.clone());
             let Ok(resolved) = runner.dispatcher.resolve(
@@ -1632,6 +1714,8 @@ impl Runner {
         runner.provider_retry_testimony_digests = provider_retry_testimony_digests;
         runner.wrap_up_delivered = wrap_up_delivered;
         runner.consecutive_length_turns = trailing_length_turns;
+        runner.compaction_memo = compaction_memo;
+        runner.start_with_overflow_compaction = start_with_overflow_compaction;
         runner.return_nudge_sent = recovered_return_nudge_seen(
             &runner.messages,
             &runner.return_nudge,
@@ -1655,6 +1739,259 @@ impl Runner {
     ///
     /// Drained ONLY at safe turn boundaries (never between an assistant tool-call
     /// message and its tool results), so the folded wire history is well-formed.
+    /// Estimated tokens of live context at which a compaction starts.
+    fn compaction_trigger_tokens(&self) -> u64 {
+        (self.context_window as f64 * self.compaction.trigger_ratio) as u64
+    }
+
+    /// Whether the compaction policy asks for a compaction at `live_context`:
+    /// the trigger is reached, enough turns have settled since the last one,
+    /// and a last one that failed to shrink the conversation has been outgrown
+    /// by the same share. All of it is read from the record's compaction.
+    fn compaction_due(&self, live_context: u64) -> bool {
+        if !self.compaction.enabled || live_context < self.compaction_trigger_tokens() {
+            return false;
+        }
+        let Some(memo) = &self.compaction_memo else {
+            return true;
+        };
+        let settled_since = self.harness.turns_used().saturating_sub(memo.settled_turns);
+        if settled_since < self.compaction.min_turns_between {
+            return false;
+        }
+        if memo.ineffective {
+            let outgrown = memo.size_after as f64 * (1.0 + self.compaction.min_reduction_ratio);
+            return live_context as f64 >= outgrown;
+        }
+        true
+    }
+
+    /// Whether the policy answers a refusal carrying `code` with a compaction
+    /// in a successor, from the record alone: the policy is on, the directive
+    /// allows continuation, the code is one the policy names, the chain has
+    /// recoveries left, and the request has not already been retried after one.
+    fn overflow_recovery(&self, code: &str) -> OverflowRecovery {
+        if !self.compaction.enabled
+            || !self.continuation_config.enabled()
+            || !self
+                .compaction
+                .overflow_codes
+                .iter()
+                .any(|named| named == code)
+        {
+            return OverflowRecovery::NotApplicable;
+        }
+        if let Some(memo) = &self.compaction_memo {
+            // A compaction for an overflow, with no turn completed since:
+            // this refusal is the retried request's. It stands.
+            if memo.trigger == "overflow"
+                && self.harness.turns_used().saturating_sub(1) <= memo.settled_turns
+            {
+                return OverflowRecovery::NotApplicable;
+            }
+            if memo.overflow_recoveries >= self.compaction.max_overflow_recoveries_per_chain {
+                return OverflowRecovery::Exhausted;
+            }
+        } else if self.compaction.max_overflow_recoveries_per_chain == 0 {
+            return OverflowRecovery::Exhausted;
+        }
+        OverflowRecovery::Allowed
+    }
+
+    fn pressure_occurrence(&self, turn: u32) -> ryeos_runtime::callback::HookDispatchOccurrence {
+        ryeos_runtime::callback::HookDispatchOccurrence::new(
+            "directive",
+            CONTEXT_PRESSURE_EVENT,
+            self.definition_ref.clone(),
+            self.root_raw_content_digest.clone(),
+            self.effective_definition_digest.clone(),
+        )
+        .with_counter_coordinate("turn", turn)
+    }
+
+    /// The `context_pressure` hook context: numbers only, no conversation.
+    fn pressure_context(
+        &self,
+        trigger: &str,
+        turn: u32,
+        live_context: u64,
+        rejection: Option<&RequestRejection>,
+    ) -> Value {
+        let mut event = json!({
+            "name": CONTEXT_PRESSURE_EVENT,
+            "trigger": trigger,
+            "turn": turn,
+            "live_context_tokens": live_context,
+            "trigger_tokens": self.compaction_trigger_tokens(),
+            "threshold_tokens": self.continuation.threshold(),
+            "window_tokens": self.context_window,
+            "compactions_so_far": self.compaction_memo.as_ref().map_or(0, |memo| memo.compactions),
+            "last_compaction_turn": self.compaction_memo.as_ref().map(|memo| memo.settled_turns),
+        });
+        if let Some(rejection) = rejection {
+            event["code"] = json!(rejection.code);
+            event["status"] = json!(rejection.status);
+        }
+        json!({ "event": event })
+    }
+
+    /// The execution settings of a compaction's summary call: the run's, with
+    /// the output cap at the policy's.
+    fn summary_call_execution(&self) -> ExecutionConfig {
+        let mut execution = self.execution.clone();
+        let cap = self.compaction.summary.max_output_tokens;
+        execution.max_provider_output_tokens_per_turn =
+            match execution.max_provider_output_tokens_per_turn {
+                0 => cap,
+                existing => existing.min(cap),
+            };
+        execution
+    }
+
+    /// Load the conversation as the record holds it and choose the cut. The
+    /// summary call's request is the replaced range, rendered and bounded.
+    /// `false` when there is nothing to replace.
+    async fn begin_summary_call(&mut self, trigger: &str) -> Result<bool, CompactionFailure> {
+        let basis = crate::resume::load_compaction_basis(&self.callback, &self.thread_id)
+            .await
+            .map_err(|error| CompactionFailure::Failed(format!("{error:#}")))?;
+        let Some(plan) = crate::compaction::plan(&basis.folded, self.compaction.keep_turns) else {
+            return Ok(false);
+        };
+        let summary = &self.compaction.summary;
+        let input_budget = ((self.context_window as f64 * summary.input_ratio) as u64)
+            .saturating_sub(summary.max_output_tokens);
+        let rendered =
+            crate::compaction::render_for_summary(&basis.folded[..plan.cut], input_budget);
+        self.summary_job = Some(SummaryJob {
+            trigger: trigger.to_string(),
+            messages: vec![
+                ProviderMessage::system(summary.instruction.clone()),
+                ProviderMessage::user(rendered.text),
+            ],
+            omitted_from_input: rendered.omitted,
+            result: None,
+        });
+        Ok(true)
+    }
+
+    /// Write the compaction record and make the conversation the fold over it.
+    /// `summary` is the settled summary call's text, or `None` for the policy's
+    /// fixed note. The conversation is replaced by rebuilding it from the
+    /// record, never patched in place, so memory and record cannot diverge.
+    async fn finish_compaction(
+        &mut self,
+        trigger: &str,
+        summary: Option<crate::compaction::Summary>,
+    ) -> Result<CompactionOutcome, CompactionFailure> {
+        let images = self
+            .provider_config
+            .image_input
+            .as_ref()
+            .and_then(|image_input| image_input.accepts.clone());
+        let basis = crate::resume::load_compaction_basis(&self.callback, &self.thread_id)
+            .await
+            .map_err(|error| CompactionFailure::Failed(format!("{error:#}")))?;
+        let Some(plan) = crate::compaction::plan(&basis.folded, self.compaction.keep_turns) else {
+            return Ok(CompactionOutcome::NothingToReplace);
+        };
+        let summary = summary.unwrap_or_else(|| crate::compaction::fixed_note(&plan));
+        let record = crate::compaction::build_record(
+            &basis,
+            &plan,
+            summary,
+            trigger,
+            &self.compaction,
+            images.as_ref(),
+        )
+        .map_err(|error| CompactionFailure::Failed(format!("{error:#}")))?;
+        let payload = ryeos_runtime::cognition::to_payload(&record)
+            .map_err(|error| CompactionFailure::Failed(format!("{error:#}")))?;
+        self.callback
+            .append_runtime_event(RuntimeEventType::CognitionCompaction, payload)
+            .await
+            .map_err(|error| {
+                CompactionFailure::Unknown(format!(
+                    "resume-critical compaction record append failed: {error:#}"
+                ))
+            })?;
+        let rebuilt = crate::resume::load_resume_state(
+            &self.callback,
+            &self.thread_id,
+            crate::resume::CarryPolicy {
+                carry_turns: u32::MAX,
+                start_tokens: u64::MAX,
+                ceiling_tokens: u64::MAX,
+            },
+            crate::resume::ResumeMode::NativeSameThread,
+            images.as_ref(),
+        )
+        .await
+        .map_err(|error| {
+            CompactionFailure::Unknown(format!(
+                "resume-critical compaction rebuild failed: {error:#}"
+            ))
+        })?;
+        let system = self
+            .messages
+            .first()
+            .filter(|message| message.role() == "system")
+            .cloned();
+        self.messages = system.into_iter().chain(rebuilt.messages).collect();
+        self.result_guard = rebuilt.result_guard;
+        self.wrap_up_delivered = rebuilt.deadline_wrap_up_delivered;
+        self.compaction_memo = Some(CompactionMemo::of(&record));
+        self.start_with_overflow_compaction = false;
+        tracing::info!(
+            trigger,
+            size_before = record.size_before,
+            size_after = record.size_after,
+            ineffective = record.ineffective,
+            "compacted the conversation"
+        );
+        Ok(CompactionOutcome::Compacted)
+    }
+
+    /// Where a run goes after a compaction attempt.
+    fn after_compaction(
+        &self,
+        trigger: &str,
+        outcome: Result<CompactionOutcome, CompactionFailure>,
+    ) -> State {
+        let overflow = trigger == "overflow";
+        let onward = if overflow {
+            State::CheckingLimits
+        } else {
+            State::ContinuationBoundary
+        };
+        let overflow_code = || {
+            self.compaction
+                .overflow_codes
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "provider_context_length_exceeded".to_string())
+        };
+        match outcome {
+            Ok(CompactionOutcome::Compacted) => onward,
+            Ok(CompactionOutcome::NothingToReplace) if overflow => State::Errored {
+                error: format!(
+                    "{}: the request was refused as too long and the conversation holds no turn older than the {} kept turns to replace",
+                    overflow_code(),
+                    self.compaction.keep_turns
+                ),
+            },
+            Ok(CompactionOutcome::NothingToReplace) => onward,
+            Err(CompactionFailure::Unknown(error)) => State::RecoveryRequired { error },
+            Err(CompactionFailure::Failed(error)) if overflow => State::Errored {
+                error: format!("{}: compaction failed: {error}", overflow_code()),
+            },
+            Err(CompactionFailure::Failed(error)) => {
+                tracing::warn!(%error, "compaction failed; the run carries on uncompacted");
+                onward
+            }
+        }
+    }
+
     /// The `time_left` tool's answer, read from the run clock now.
     fn time_left_report(&self) -> Value {
         crate::run_clock::time_left_report(
@@ -1811,6 +2148,30 @@ impl Runner {
                         daemon-owned attempt ledger; native recovery refuses a second contact"
                     .to_string(),
             }
+        } else if self.compaction.enabled
+            && self.resume_active_provider_turn.is_some()
+            && self.compaction_due(
+                self.continuation
+                    .estimate_live_context_tokens(&self.messages),
+            )
+        {
+            // A turn started and never completed while the conversation was at
+            // the compaction trigger: it was the compaction's summary call, as
+            // a regular turn would have compacted first. It is re-issued at
+            // its own coordinate, by the ledger's rules for an unknown outcome.
+            State::Compacting {
+                trigger: "pressure".to_string(),
+            }
+        } else if self.compaction.enabled
+            && self.start_with_overflow_compaction
+            && self.resume_pending_tools.is_empty()
+        {
+            // The predecessor's request was refused as too long: this thread's
+            // first act is the compaction, and its first request is the
+            // retried one.
+            State::Compacting {
+                trigger: "overflow".to_string(),
+            }
         } else if !self.resume_pending_tools.is_empty() {
             let pending = std::mem::take(&mut self.resume_pending_tools);
             if batch_is_lifecycle_bearing(&pending) {
@@ -1840,6 +2201,19 @@ impl Runner {
                 },
                 ResumeDisposition::FinalizeDirectiveReturn { outputs } => {
                     State::FinalizingDirectiveReturn { outputs }
+                }
+                ResumeDisposition::FinishCompaction {
+                    trigger,
+                    turn: _,
+                    summary,
+                } => {
+                    self.summary_job = Some(SummaryJob {
+                        trigger,
+                        messages: Vec::new(),
+                        omitted_from_input: 0,
+                        result: Some(summary),
+                    });
+                    State::FinishingCompaction
                 }
             }
         };
@@ -1902,17 +2276,27 @@ impl Runner {
 
                 State::CallingProvider => {
                     let turn_start = Instant::now();
-                    self.harness.record_turn();
+                    // A compaction's summary call takes a turn coordinate but is
+                    // not a model turn of the directive: it does not count
+                    // against the turn limit.
+                    if self.summary_job.is_none() {
+                        self.harness.record_turn();
+                    }
                     // Filter tools by effective_caps so the LLM only sees
                     // tools it can actually call (saves context, avoids the
                     // "model names a tool the dispatcher would reject" path).
-                    let visible_tools_owned = visible_provider_tools(
-                        &self.tools,
-                        self.harness.effective_caps(),
-                        self.directive_outputs.as_deref(),
-                        self.harness.tool_calls_available(),
-                        self.harness.run_clock().is_some(),
-                    );
+                    // The summary call offers none.
+                    let visible_tools_owned = if self.summary_job.is_some() {
+                        Vec::new()
+                    } else {
+                        visible_provider_tools(
+                            &self.tools,
+                            self.harness.effective_caps(),
+                            self.directive_outputs.as_deref(),
+                            self.harness.tool_calls_available(),
+                            self.harness.run_clock().is_some(),
+                        )
+                    };
                     if let Some(active_turn) = self.resume_active_provider_turn.take() {
                         turn = active_turn;
                     } else {
@@ -1986,6 +2370,16 @@ impl Runner {
                         if let Err(error) = self.load_request_images().await {
                             break Err(error);
                         }
+                        let summary_execution: Option<ExecutionConfig> = self
+                            .summary_job
+                            .as_ref()
+                            .map(|_| self.summary_call_execution());
+                        let request_execution =
+                            summary_execution.as_ref().unwrap_or(&self.execution);
+                        let request_messages: &[ProviderMessage] = match &self.summary_job {
+                            Some(job) => &job.messages,
+                            None => &self.messages,
+                        };
                         let call_input = crate::provider_adapter::StreamingCallInput {
                             client: &self.http_client,
                             provider: &self.provider_config,
@@ -1993,9 +2387,9 @@ impl Runner {
                             matched_profile: self.matched_profile.as_deref(),
                             config_hash: &self.config_hash,
                             images: &self.image_store,
-                            execution: &self.execution,
+                            execution: request_execution,
                             model: &self.model_name,
-                            messages: &self.messages,
+                            messages: request_messages,
                             tools: &visible_tools_owned,
                             callback: &self.callback,
                             turn,
@@ -2026,7 +2420,7 @@ impl Runner {
                                 authority,
                                 &self.provider_config,
                                 self.context_window,
-                                self.execution.max_provider_output_tokens_per_turn,
+                                request_execution.max_provider_output_tokens_per_turn,
                             ) {
                                 Ok(verified) => verified,
                                 Err(error) => {
@@ -2757,6 +3151,7 @@ impl Runner {
                                 resp.finish_reason.as_deref(),
                             ) == FinishReason::Length;
                             if ended_at_output_limit
+                                && self.summary_job.is_none()
                                 && self.consecutive_length_turns >= self.output_limit_allowance()
                             {
                                 state = State::Errored {
@@ -2804,7 +3199,8 @@ impl Runner {
                             // a `refuse` rule and holds none fails here, after its
                             // usage is settled and before it is recorded or any
                             // tool it proposed is dispatched.
-                            if let Some(missing) = self
+                            if self.summary_job.is_none()
+                                && let Some(missing) = self
                                 .provider_config
                                 .schemas
                                 .as_ref()
@@ -2822,9 +3218,15 @@ impl Runner {
                                 };
                                 continue;
                             }
-                            let finish = finish_label(crate::directive::normalize_finish_reason(
-                                resp.finish_reason.as_deref(),
-                            ));
+                            let summary_finish = self.summary_job.as_ref().map(|job| {
+                                ryeos_runtime::cognition::compaction_summary_finish(&job.trigger)
+                            });
+                            let finish = match summary_finish.as_deref() {
+                                Some(finish) => finish,
+                                None => finish_label(crate::directive::normalize_finish_reason(
+                                    resp.finish_reason.as_deref(),
+                                )),
+                            };
                             let provider_accounting = Some(json!({
                                 "attempt_id": format!("{}:{turn}:{}", self.thread_id, attempt + 1),
                                 "attempt_number": attempt + 1,
@@ -2879,6 +3281,14 @@ impl Runner {
                                         "resume-critical callback emit_turn_complete failed: {e}"
                                     ),
                                 };
+                                continue;
+                            }
+                            if let Some(job) = self.summary_job.as_mut() {
+                                // The summary is not a conversation turn: it
+                                // goes into the compaction record, not into the
+                                // conversation.
+                                job.result = Some(resp.message.parts.clone());
+                                state = State::FinishingCompaction;
                                 continue;
                             }
                             self.turn_malformed_calls = malformed_calls;
@@ -2944,6 +3354,27 @@ impl Runner {
                             events,
                             attempt: cut,
                         }) => {
+                            // A live interrupt that cuts a compaction's summary
+                            // call ends the compaction: the partial summary is
+                            // not a conversation turn.
+                            if self.summary_job.is_some() {
+                                let settled = self
+                                    .settle_available_attempt_accounting(
+                                        turn,
+                                        cut.usage.as_ref(),
+                                        turn_start.elapsed().as_millis() as u64,
+                                    )
+                                    .await;
+                                state = State::Errored {
+                                    error: match settled {
+                                        Ok(()) => "interrupted: the compaction summary call was interrupted".to_string(),
+                                        Err(error) => format!(
+                                            "interrupted: the compaction summary call was interrupted; its accounting settlement failed: {error:#}"
+                                        ),
+                                    },
+                                };
+                                continue;
+                            }
                             // Live interrupt (SIGUSR1) cut the in-flight cognition.
                             // Surface any provider warnings from the partial stream
                             // (the diagnostic State::Streaming pass is skipped on the
@@ -3277,32 +3708,75 @@ impl Runner {
                             } else {
                                 format!("{e:#}")
                             };
+                            // The compaction policy may answer a refusal that names
+                            // an overflow code: this thread settles `continued` and
+                            // its successor compacts first, then makes the request
+                            // again. A refusal of a compaction's own summary call is
+                            // never answered this way.
+                            let recovery = match &rejection {
+                                Some(rejection) if self.summary_job.is_none() => {
+                                    self.overflow_recovery(&rejection.code)
+                                }
+                                _ => OverflowRecovery::NotApplicable,
+                            };
                             match rejection {
                                 // A named refusal reaches the directive's
                                 // `provider_error` hooks, with its code, before
                                 // the failure settles. The hooks observe; the
                                 // failure itself is the typed code.
-                                Some(rejection) => State::FiringHooks {
-                                    occurrence:
-                                        ryeos_runtime::callback::HookDispatchOccurrence::new(
-                                            "directive",
-                                            "provider_error",
-                                            self.definition_ref.clone(),
-                                            self.root_raw_content_digest.clone(),
-                                            self.effective_definition_digest.clone(),
-                                        )
-                                        .with_counter_coordinate("turn", turn),
-                                    context: json!({
-                                        "event": {
-                                            "name": "provider_error",
-                                            "code": rejection.code,
-                                            "status": rejection.status,
-                                            "turn": turn,
-                                            "retryable": false,
+                                Some(rejection) => {
+                                    let after = match recovery {
+                                        OverflowRecovery::Allowed => {
+                                            let live_context = self
+                                                .continuation
+                                                .estimate_live_context_tokens(&self.messages);
+                                            self.pressure_hook = Some(PressureHook {
+                                                compact: State::Continued,
+                                                skip: State::Errored {
+                                                    error: error.clone(),
+                                                },
+                                            });
+                                            State::FiringHooks {
+                                                occurrence: self.pressure_occurrence(turn),
+                                                context: self.pressure_context(
+                                                    "overflow",
+                                                    turn,
+                                                    live_context,
+                                                    Some(&rejection),
+                                                ),
+                                                resume_to: Box::new(State::Continued),
+                                            }
                                         }
-                                    }),
-                                    resume_to: Box::new(State::Errored { error }),
-                                },
+                                        OverflowRecovery::Exhausted => State::Errored {
+                                            error: format!(
+                                                "compaction_recovery_exhausted: {} overflow recoveries are spent in this chain; the refusal was: {error}",
+                                                self.compaction.max_overflow_recoveries_per_chain
+                                            ),
+                                        },
+                                        OverflowRecovery::NotApplicable => State::Errored { error },
+                                    };
+                                    State::FiringHooks {
+                                        occurrence:
+                                            ryeos_runtime::callback::HookDispatchOccurrence::new(
+                                                "directive",
+                                                "provider_error",
+                                                self.definition_ref.clone(),
+                                                self.root_raw_content_digest.clone(),
+                                                self.effective_definition_digest.clone(),
+                                            )
+                                            .with_counter_coordinate("turn", turn),
+                                        context: json!({
+                                            "event": {
+                                                "name": "provider_error",
+                                                "code": rejection.code,
+                                                "status": rejection.status,
+                                                "turn": turn,
+                                                "retryable": false,
+                                            }
+                                        }),
+                                        resume_to: Box::new(after),
+                                    }
+                                }
                                 None => State::Errored { error },
                             }
                         }
@@ -4104,6 +4578,12 @@ impl Runner {
                     resume_to,
                 } => {
                     let event = occurrence.event().to_string();
+                    // What a `context_pressure` hook's action chooses between.
+                    let pressure_hook = if event == CONTEXT_PRESSURE_EVENT {
+                        self.pressure_hook.take()
+                    } else {
+                        None
+                    };
                     let callback = self.callback.clone();
                     let thread_id = self.thread_id.clone();
 
@@ -4161,8 +4641,9 @@ impl Runner {
                     {
                         // A `provider_error` hook only observes a failure that
                         // is already typed; its own cost violation must not
-                        // replace that failure's code.
-                        if event == "provider_error" {
+                        // replace that failure's code. A `context_pressure`
+                        // hook's cost violation leaves the policy's default.
+                        if event == "provider_error" || event == CONTEXT_PRESSURE_EVENT {
                             tracing::warn!(%error, "provider_error hook cost violates accounting bounds; the typed failure stands");
                             state = *resume_to;
                             continue;
@@ -4200,6 +4681,29 @@ impl Runner {
 
                             match hook_result.as_ref().map(HookAction::from_value) {
                                 Some(Ok(action)) => match action {
+                                    HookAction::Compact if event == CONTEXT_PRESSURE_EVENT => {
+                                        match pressure_hook {
+                                            Some(hook) => hook.compact,
+                                            None => *resume_to,
+                                        }
+                                    }
+                                    HookAction::SkipCompaction if event == CONTEXT_PRESSURE_EVENT => {
+                                        match pressure_hook {
+                                            Some(hook) => hook.skip,
+                                            None => *resume_to,
+                                        }
+                                    }
+                                    HookAction::Compact | HookAction::SkipCompaction => State::Errored {
+                                        error: format!(
+                                            "hook event `{event}` returned invalid control action: {action:?} is valid only on context_pressure"
+                                        ),
+                                    },
+                                    // Retrying would send the same request: refused here.
+                                    HookAction::Retry if event == CONTEXT_PRESSURE_EVENT => {
+                                        State::Errored {
+                                            error: "hook event `context_pressure` returned invalid control action: retry would send the same request".to_string(),
+                                        }
+                                    }
                                     HookAction::Retry => State::CallingProvider,
                                     HookAction::Abort | HookAction::Fail => State::Errored {
                                         error: format!("hook aborted: {}", event),
@@ -4223,8 +4727,8 @@ impl Runner {
                         // A `provider_error` hook only observes a failure that
                         // is already typed; a hook that itself fails must not
                         // replace that failure's code.
-                        Err(e) if event == "provider_error" => {
-                            tracing::warn!(error = %e, "provider_error hook failed; the typed failure stands");
+                        Err(e) if event == "provider_error" || event == CONTEXT_PRESSURE_EVENT => {
+                            tracing::warn!(error = %e, event = %event, "observing hook failed; the policy default stands");
                             *resume_to
                         }
                         Err(e) => State::Errored {
@@ -4234,6 +4738,83 @@ impl Runner {
                 }
 
                 State::CheckingContinuation => {
+                    let live_context = self
+                        .continuation
+                        .estimate_live_context_tokens(&self.messages);
+                    if self.compaction_due(live_context) {
+                        // The trigger is reached: the directive's hooks may
+                        // choose, and with no choice the policy decides.
+                        let compact = || State::Compacting {
+                            trigger: "pressure".to_string(),
+                        };
+                        let by_policy =
+                            if self.compaction.on_pressure == CompactionOnPressure::Compact {
+                                compact()
+                            } else {
+                                State::ContinuationBoundary
+                            };
+                        self.pressure_hook = Some(PressureHook {
+                            compact: compact(),
+                            skip: State::ContinuationBoundary,
+                        });
+                        State::FiringHooks {
+                            occurrence: self.pressure_occurrence(turn),
+                            context: self.pressure_context("pressure", turn, live_context, None),
+                            resume_to: Box::new(by_policy),
+                        }
+                    } else {
+                        State::ContinuationBoundary
+                    }
+                }
+
+                State::Compacting { trigger } => {
+                    let outcome = match self.compaction.summary.mode {
+                        SummaryMode::None => self.finish_compaction(&trigger, None).await,
+                        SummaryMode::Model => match self.begin_summary_call(&trigger).await {
+                            Ok(true) => {
+                                state = State::CallingProvider;
+                                continue;
+                            }
+                            Ok(false) => Ok(CompactionOutcome::NothingToReplace),
+                            Err(failure) => Err(failure),
+                        },
+                    };
+                    self.after_compaction(&trigger, outcome)
+                }
+
+                State::FinishingCompaction => {
+                    let Some(job) = self.summary_job.take() else {
+                        state = State::Errored {
+                            error: "compaction_failed: no compaction summary to finish".to_string(),
+                        };
+                        continue;
+                    };
+                    let parts = job.result.unwrap_or_default();
+                    let has_text = parts.iter().any(
+                        |part| matches!(part, Part::Text(text) if !text.text.trim().is_empty()),
+                    );
+                    if !has_text {
+                        state = State::Errored {
+                            error: "compaction_summary_failed: the summary call returned no text"
+                                .to_string(),
+                        };
+                        continue;
+                    }
+                    let outcome = self
+                        .finish_compaction(
+                            &job.trigger,
+                            Some(crate::compaction::Summary {
+                                parts,
+                                model_call: true,
+                                turn,
+                                omitted_from_input: job.omitted_from_input,
+                            }),
+                        )
+                        .await;
+                    self.after_compaction(&job.trigger, outcome)
+                }
+
+                State::ContinuationBoundary => {
                     let threshold = self.continuation.threshold();
                     // Measure the LIVE context window (post-trim messages), NOT
                     // cumulative chain spend — the threshold is a per-call
@@ -4269,12 +4850,15 @@ impl Runner {
                                 resume_to: Box::new(State::Continued),
                             }
                         } else {
-                            let result = self
-                                .messages
-                                .last()
-                                .and_then(|m| m.content_value())
-                                .unwrap_or(Value::Null);
-                            State::Finalizing { result }
+                            // Over the window with no way to continue: the run
+                            // ends with a typed failure, not with its last
+                            // message as if it were an answer. A directive that
+                            // wants the old stop writes it into a hook.
+                            State::Errored {
+                                error: format!(
+                                    "context_window_exhausted: live context of {live_context} estimated tokens reached the {threshold}-token continuation threshold and continuation is not enabled"
+                                ),
+                            }
                         }
                     } else {
                         // Loop back to the limits + provider call.
@@ -4453,6 +5037,13 @@ impl Runner {
                 }
 
                 State::Errored { error } => {
+                    // A failed compaction summary call fails the run with its
+                    // own code.
+                    let error = if self.summary_job.take().is_some() {
+                        format!("compaction_summary_failed: {error}")
+                    } else {
+                        error
+                    };
                     record_callback_warning(
                         &mut warnings,
                         "thread_failed(emit_error)",

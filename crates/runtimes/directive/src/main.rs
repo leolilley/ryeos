@@ -6,6 +6,7 @@ use serde_json::json;
 mod adapter;
 mod bootstrap;
 mod budget;
+mod compaction;
 mod continuation;
 mod directive;
 mod dispatcher;
@@ -505,6 +506,11 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
     )?;
     drop(launch_inventory);
     let launch_key = format!("launch:{}", envelope.thread_id);
+    let compaction_policy = bootstrap_output
+        .config
+        .continuation_runtime
+        .compaction
+        .clone();
 
     // What a recovery rebuilds. A thread that lost its process before it
     // wrote any launch record has nothing to rebuild and launches fresh.
@@ -740,6 +746,7 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
             reasoning,
         })
     };
+    runner_inst.set_compaction(compaction_policy);
     runner_inst.run().await
 }
 

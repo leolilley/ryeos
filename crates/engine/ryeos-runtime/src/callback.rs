@@ -14,6 +14,10 @@ pub use ryeos_engine::method_call::MethodCall;
 pub struct ReplayedEventRecord {
     pub event_type: String,
     pub payload: Value,
+    /// The event's position in its chain. Replay pages are ordered by it, so a
+    /// reader can start a later replay at an event it found in an earlier one.
+    #[serde(default)]
+    pub chain_seq: i64,
 }
 
 /// A page of replayed events. `next_cursor` is the `after_chain_seq` to pass on

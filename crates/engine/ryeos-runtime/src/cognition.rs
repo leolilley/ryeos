@@ -504,6 +504,120 @@ impl FrameRecord {
 }
 
 /// Serialise a typed payload to the JSON an event carries.
+/// The start of the `finish` of a turn that is a compaction's summary call;
+/// the compaction's trigger follows it (`compaction_summary_pressure`). Its
+/// text is the summary, not a conversation turn: a fold never turns it into a
+/// message.
+pub const FINISH_COMPACTION_SUMMARY: &str = "compaction_summary";
+
+/// The `finish` of the summary call of a compaction started by `trigger`.
+pub fn compaction_summary_finish(trigger: &str) -> String {
+    format!("{FINISH_COMPACTION_SUMMARY}_{trigger}")
+}
+
+/// The trigger a summary call's `finish` names, when it is one.
+pub fn compaction_summary_trigger(finish: &str) -> Option<&str> {
+    finish
+        .strip_prefix(FINISH_COMPACTION_SUMMARY)
+        .and_then(|rest| rest.strip_prefix('_'))
+}
+
+/// Kind of the harness input a compaction's summary becomes in a rebuilt
+/// conversation.
+pub const KIND_COMPACTION_SUMMARY: &str = "compaction_summary";
+
+/// Largest serialized compaction record. A record holds the pinned inputs, so
+/// pinned inputs that do not fit leave a compaction impossible.
+pub const MAX_COMPACTION_RECORD_BYTES: usize = 192 * 1024;
+
+/// What the replay window of a compaction does not show: the progress of the
+/// run just before the window opens (the first kept turn's marker). Every
+/// recovery reader starts from it instead of from an empty record.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowSeed {
+    /// The last turn coordinate before the window.
+    pub last_coordinate: u32,
+    /// Completed turns before the window.
+    pub completed: u32,
+    /// Tool starts that took tool-call budget before the window.
+    pub tool_starts: u32,
+    /// Child spawns counted before the window.
+    pub spawns: u32,
+    /// Tool images admitted before the window, and the distinct bytes they hold.
+    pub images: u64,
+    pub image_bytes: u64,
+    /// The image attachments the node already stores for the run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub image_stored: Vec<String>,
+}
+
+/// A conversation compaction: the older part of the conversation replaced by
+/// a summary, the newest turns kept whole. Self-contained as a fold base: the
+/// pinned inputs and the summary are in it, and the window seed says where the
+/// replay of the kept turns begins.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompactionPayload {
+    /// The turn coordinate the summary call took; 0 when no model was called.
+    pub turn: u32,
+    /// What started the compaction. An open token; the fold ignores it.
+    pub trigger: String,
+    /// The range of turns the summary replaces.
+    pub replaces_from_turn: u32,
+    pub replaces_to_turn: u32,
+    /// The first turn kept whole; its turn marker opens the replay window.
+    pub kept_from_turn: u32,
+    /// The summary, as the parts of one user message.
+    pub summary: Vec<Part>,
+    /// Whether a model wrote the summary or it is the policy's fixed note.
+    pub summary_model_call: bool,
+    /// Messages the summary call's bounded input left out.
+    #[serde(default)]
+    pub omitted_from_input: u32,
+    /// The pinned inputs in force, with their acknowledgements, in order.
+    pub pinned: Vec<CognitionInput>,
+    pub seed: WindowSeed,
+    /// Completed turns when the record was written; the cooldown counts from it.
+    pub settled_turns: u32,
+    pub size_before: u64,
+    pub size_after: u64,
+    /// The reduction fell short of the policy's floor.
+    #[serde(default)]
+    pub ineffective: bool,
+    /// Compactions and overflow recoveries up to and including this one.
+    pub compactions: u32,
+    pub overflow_recoveries: u32,
+}
+
+impl CompactionPayload {
+    /// The summary as the user message the rebuilt conversation holds.
+    pub fn summary_message(&self) -> Message {
+        Message::new(Role::User, self.summary.clone())
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        validate_token("cognition_compaction trigger", &self.trigger)?;
+        if self.kept_from_turn == 0 || self.replaces_to_turn >= self.kept_from_turn {
+            bail!("cognition_compaction kept range must follow the replaced range");
+        }
+        if self.replaces_from_turn > self.replaces_to_turn {
+            bail!("cognition_compaction replaced range is inverted");
+        }
+        if self.summary_model_call && self.turn == 0 {
+            bail!("a model-written compaction summary names its turn coordinate");
+        }
+        if self.summary.is_empty() {
+            bail!("cognition_compaction carries no summary");
+        }
+        self.summary_message().validate()?;
+        for input in &self.pinned {
+            input.validate()?;
+        }
+        Ok(())
+    }
+}
+
 pub fn to_payload<T: Serialize>(payload: &T) -> Result<Value> {
     Ok(serde_json::to_value(payload)?)
 }

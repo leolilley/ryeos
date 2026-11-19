@@ -43,6 +43,145 @@ pub struct ContinuationRuntimeConfig {
     /// alone; pinned inputs over the continuation threshold are refused.
     #[serde(default = "default_successor_start_tokens")]
     pub successor_start_tokens: u64,
+    /// When and how a conversation is compacted before it outgrows the window.
+    #[serde(default)]
+    pub compaction: CompactionConfig,
+}
+
+/// What a compaction's summary is, as a mechanical switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SummaryMode {
+    /// A bounded model call writes the summary.
+    Model,
+    /// The summary is a fixed note naming how much was removed.
+    None,
+}
+
+/// What a context-pressure crossing does when no hook says otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionOnPressure {
+    /// Compact at the trigger.
+    Compact,
+    /// Only a hook's `compact` action starts a compaction.
+    Observe,
+}
+
+/// The summary call of a compaction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SummaryConfig {
+    #[serde(default = "default_summary_mode")]
+    pub mode: SummaryMode,
+    /// The system text the summary call is given.
+    #[serde(default = "default_summary_instruction")]
+    pub instruction: String,
+    /// Output cap of the summary call, in tokens.
+    #[serde(default = "default_summary_max_output_tokens")]
+    pub max_output_tokens: u64,
+    /// The share of the model window the summary call's input may fill. The
+    /// oldest part beyond it is left out of the call and the rendering says so.
+    #[serde(default = "default_summary_input_ratio")]
+    pub input_ratio: f64,
+}
+
+impl Default for SummaryConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_summary_mode(),
+            instruction: default_summary_instruction(),
+            max_output_tokens: default_summary_max_output_tokens(),
+            input_ratio: default_summary_input_ratio(),
+        }
+    }
+}
+
+fn default_summary_mode() -> SummaryMode {
+    SummaryMode::Model
+}
+fn default_summary_instruction() -> String {
+    "Summarize the conversation below so work can continue from the summary alone. Keep the \
+     decisions made, facts found, files and identifiers named, work done and work still open. \
+     Answer with the summary only."
+        .to_string()
+}
+fn default_summary_max_output_tokens() -> u64 {
+    2_000
+}
+fn default_summary_input_ratio() -> f64 {
+    0.6
+}
+
+/// The compaction policy: signed data, with the defaults below. A node turns
+/// it on by setting `enabled`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompactionConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Share of the model window at which live context starts a compaction.
+    #[serde(default = "default_compaction_trigger_ratio")]
+    pub trigger_ratio: f64,
+    /// Newest assistant turns a compaction keeps whole.
+    #[serde(default = "default_compaction_keep_turns")]
+    pub keep_turns: u32,
+    /// Turns that must settle after a compaction before the next one.
+    #[serde(default = "default_compaction_min_turns_between")]
+    pub min_turns_between: u32,
+    /// A compaction that shrinks the conversation by less than this share is
+    /// recorded as ineffective.
+    #[serde(default = "default_compaction_min_reduction_ratio")]
+    pub min_reduction_ratio: f64,
+    #[serde(default = "default_compaction_on_pressure")]
+    pub on_pressure: CompactionOnPressure,
+    /// Rejection codes a compaction answers. The runtime does not know what
+    /// any code means; the provider entry's rejection rows name them.
+    #[serde(default = "default_compaction_overflow_codes")]
+    pub overflow_codes: Vec<String>,
+    /// Most overflow recoveries one chain may spend.
+    #[serde(default = "default_compaction_max_overflow_recoveries")]
+    pub max_overflow_recoveries_per_chain: u32,
+    #[serde(default)]
+    pub summary: SummaryConfig,
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            trigger_ratio: default_compaction_trigger_ratio(),
+            keep_turns: default_compaction_keep_turns(),
+            min_turns_between: default_compaction_min_turns_between(),
+            min_reduction_ratio: default_compaction_min_reduction_ratio(),
+            on_pressure: default_compaction_on_pressure(),
+            overflow_codes: default_compaction_overflow_codes(),
+            max_overflow_recoveries_per_chain: default_compaction_max_overflow_recoveries(),
+            summary: SummaryConfig::default(),
+        }
+    }
+}
+
+fn default_compaction_trigger_ratio() -> f64 {
+    0.70
+}
+fn default_compaction_keep_turns() -> u32 {
+    6
+}
+fn default_compaction_min_turns_between() -> u32 {
+    4
+}
+fn default_compaction_min_reduction_ratio() -> f64 {
+    0.25
+}
+fn default_compaction_on_pressure() -> CompactionOnPressure {
+    CompactionOnPressure::Compact
+}
+fn default_compaction_overflow_codes() -> Vec<String> {
+    vec!["provider_context_length_exceeded".to_string()]
+}
+fn default_compaction_max_overflow_recoveries() -> u32 {
+    2
 }
 
 fn default_context_threshold_ratio() -> f64 {
@@ -66,6 +205,7 @@ impl Default for ContinuationRuntimeConfig {
             carry_turns_default: default_carry_turns(),
             carry_turns_cap: default_carry_turns_cap(),
             successor_start_tokens: default_successor_start_tokens(),
+            compaction: CompactionConfig::default(),
         }
     }
 }
