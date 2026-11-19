@@ -2139,6 +2139,21 @@ mod tests {
             (8, 7, 2, 3),
             "a change to a stored network-input version needs a journal epoch bump"
         );
+        // The Ready frame has no version of its own: it rides under the channel
+        // binding schema, which is stored in the runtime store. Its
+        // `ObservedNetworkInput` stays additive, and an old reader must refuse
+        // the field an absent input adds.
+        assert_eq!(super::super::EXECUTION_CHANNEL_BINDING_SCHEMA, 5);
+        let mut observed = serde_json::to_value(super::super::ObservedNetworkInput {
+            source: "/etc/hosts".into(),
+            bytes: 0,
+            sha256: lillux::sha256_hex(b""),
+            absent: false,
+        })
+        .unwrap();
+        assert!(observed.get("absent").is_none());
+        observed["unknown_field"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<super::super::ObservedNetworkInput>(observed).is_err());
         let bootstrap = bootstrap();
         let policy = &bootstrap.controller.http().unwrap().network_inputs;
         assert_eq!(

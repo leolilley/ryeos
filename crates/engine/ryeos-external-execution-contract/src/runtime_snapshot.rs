@@ -131,12 +131,12 @@ impl LaunchNetworkInputs {
             resolver: LaunchNetworkInput {
                 source: sources.resolver_source.into(),
                 max_bytes: sources.resolver_max_bytes,
-                required: true,
+                required: sources.resolver_required,
             },
             hosts: LaunchNetworkInput {
                 source: sources.hosts_source.into(),
                 max_bytes: sources.hosts_max_bytes,
-                required: true,
+                required: sources.hosts_required,
             },
         }
     }

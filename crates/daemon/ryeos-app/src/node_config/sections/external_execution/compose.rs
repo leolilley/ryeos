@@ -425,12 +425,12 @@ pub(crate) fn operator_network_inputs() -> ExternalNetworkInputPolicy {
         resolver: ExternalNetworkInputSelection {
             source: sources.resolver_source.into(),
             max_bytes: sources.resolver_max_bytes,
-            required: true,
+            required: sources.resolver_required,
         },
         hosts: ExternalNetworkInputSelection {
             source: sources.hosts_source.into(),
             max_bytes: sources.hosts_max_bytes,
-            required: true,
+            required: sources.hosts_required,
         },
     }
 }
@@ -2315,6 +2315,9 @@ pub(crate) mod tests {
         assert_eq!(policy.resolver.max_bytes, sources.resolver_max_bytes);
         assert_eq!(policy.hosts.source, sources.hosts_source);
         assert_eq!(policy.hosts.max_bytes, sources.hosts_max_bytes);
+        assert_eq!(policy.resolver.required, sources.resolver_required);
+        assert_eq!(policy.hosts.required, sources.hosts_required);
+        assert!(policy.resolver.required && !policy.hosts.required);
         policy.validate().unwrap();
         let selected = select_transport(&ComposeTransportRequest::FileRelay {
             owner_workspace_id: "w".into(),

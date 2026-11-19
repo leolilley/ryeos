@@ -52,8 +52,13 @@ pub const GUEST_OCCURRENCES_ROOT: &str = "/ryeos/occurrences";
 pub struct OperatorNetworkInputSources {
     pub resolver_source: &'static str,
     pub resolver_max_bytes: u64,
+    /// A launch without a resolver cannot resolve names, so it is refused.
+    pub resolver_required: bool,
     pub hosts_source: &'static str,
     pub hosts_max_bytes: u64,
+    /// Some provider sandboxes carry no hosts file; names resolve through the
+    /// captured resolver alone, so a missing one is recorded as absent.
+    pub hosts_required: bool,
 }
 
 /// The network inputs an operator binding captures from the sandbox it runs in.
@@ -61,8 +66,10 @@ pub const fn operator_network_inputs() -> OperatorNetworkInputSources {
     OperatorNetworkInputSources {
         resolver_source: "/etc/resolv.conf",
         resolver_max_bytes: 64 * 1024,
+        resolver_required: true,
         hosts_source: "/etc/hosts",
         hosts_max_bytes: 64 * 1024,
+        hosts_required: false,
     }
 }
 
