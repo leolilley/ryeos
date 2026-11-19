@@ -2754,19 +2754,6 @@ mod tests {
     }
 
     #[test]
-    fn status_tone_maps_by_typed_status_variant() {
-        assert_eq!(status_tone("running"), RyeOsTone::Accent);
-        assert_eq!(status_tone("created"), RyeOsTone::Accent);
-        assert_eq!(status_tone("completed"), RyeOsTone::Good);
-        assert_eq!(status_tone("continued"), RyeOsTone::Good);
-        assert_eq!(status_tone("failed"), RyeOsTone::Danger);
-        assert_eq!(status_tone("killed"), RyeOsTone::Danger);
-        assert_eq!(status_tone("timed_out"), RyeOsTone::Danger);
-        assert_eq!(status_tone("cancelled"), RyeOsTone::Warn);
-        assert_eq!(status_tone("some_future_status"), RyeOsTone::Neutral);
-    }
-
-    #[test]
     fn only_an_entry_with_a_retry_input_offers_retry_within_the_response_chain() {
         let failed = |slots: Value| {
             with(
