@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-17T01:21:16Z:1e0d8d5ba31d8bc2b81e040fbd95ed6e6189489a94c00ea1d3757d127b431af3:euvQyngquN9nMLNB/l0fyTNVRiLpjaCnz/9ab1hA5cSaDFhJxCr5y6AH1W/qxTJcxxuWmPmsYDxYnTpHEe09DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-19T05:44:26Z:e8fa94a9fabd67731a012a59674ab70701ddc9b7449395be6746a5af98c76f8f:MJRUvnNvF2/gprjim40dXu/RK19jngJ4WSaeVWgJJvp3Ofv7+wiSVHlwSluh1aXTDfMnwvxscdjTN63fy3EfDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -427,6 +427,7 @@ policies:
       - ".svn/"
       - ".tmp/"
       - ".venv/"
+      - "/.ai/node/machines/"
       - "/.ai/node/remotes/"
       - "/.ai/state/"
       - "__pycache__/"

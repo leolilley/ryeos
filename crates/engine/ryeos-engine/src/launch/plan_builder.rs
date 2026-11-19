@@ -2560,6 +2560,92 @@ config:
         );
     }
 
+    // ── Test: a project-scoped signer owns a source scope only on the logical project ──
+
+    #[test]
+    fn source_scope_owner_scope_matches_the_logical_project_not_the_checkout() {
+        use crate::trust::{SignerRecord, SignerRole, SignerScope, SignerSpace, SignerStatus};
+
+        let checkout = tempdir();
+        let kinds_dir = tempdir();
+        let kinds = {
+            write_tool_schema(&kinds_dir);
+            KindRegistry::load_base(&[kinds_dir], &test_ts()).unwrap()
+        };
+        let parsers = crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors();
+
+        // A chain terminal that declares a source scope, signed by a key that
+        // is scoped to one registered project that is not the checkout path.
+        let logical = PathBuf::from("/work/registered-project");
+        let author = SigningKey::from_bytes(&[43u8; 32]);
+        let node_key = SigningKey::from_bytes(&[44u8; 32]).verifying_key();
+        let mut record = SignerRecord::new(
+            &author.verifying_key(),
+            "project-author",
+            SignerRole::ProjectAuthor,
+            SignerScope {
+                spaces: vec![SignerSpace::Project],
+                kinds: vec!["*".to_string()],
+                projects: vec![logical.to_string_lossy().into_owned()],
+            },
+            SignerStatus::Active,
+        );
+        record.event = "e".repeat(64);
+        let store = TrustStore::from_registry(node_key, vec![record]).unwrap();
+
+        let tool_dir = checkout.join(AI_DIR).join("tools/ryeos/test");
+        fs::create_dir_all(&tool_dir).unwrap();
+        let terminal = tool_dir.join("scoped.yaml");
+        fs::write(
+            &terminal,
+            lillux::signature::sign_content(
+                "executor_id: null\nsource_scope:\n  location: item_directory\n  load_roots: [item_directory]\n  materialization: read_only\n",
+                &author,
+                "#",
+                None,
+            ),
+        )
+        .unwrap();
+
+        let resolve = |roots: &ResolutionRoots| {
+            resolve_executor_source_policy(
+                "tool:ryeos/test/scoped",
+                &terminal,
+                "tool",
+                &kinds,
+                &parsers,
+                roots,
+                &store,
+                &store,
+                None,
+            )
+        };
+
+        // The materialized checkout is judged when no logical project is
+        // stated: the signer is out of scope and owns nothing.
+        let by_checkout = ResolutionRoots::from_flat(Some(checkout.join(AI_DIR)), vec![]);
+        let refusal = resolve(&by_checkout).unwrap_err().to_string();
+        assert!(
+            refusal.contains("source_scope owner is not signed by an admitted trusted principal"),
+            "{refusal}"
+        );
+
+        // A logical project the signer's scope does not list admits nothing:
+        // stating some other project is not a way in.
+        let by_other = by_checkout
+            .clone()
+            .with_logical_project_root(Some(PathBuf::from("/work/other-project")));
+        let refusal = resolve(&by_other).unwrap_err().to_string();
+        assert!(
+            refusal.contains("source_scope owner is not signed by an admitted trusted principal"),
+            "{refusal}"
+        );
+
+        // Stating the logical project the scope lists admits the signer.
+        let by_logical = by_checkout.with_logical_project_root(Some(logical));
+        assert!(resolve(&by_logical).unwrap().is_some());
+    }
+
     // ── Test: chain cycle detected ─────────────────────────────────────
 
     #[test]

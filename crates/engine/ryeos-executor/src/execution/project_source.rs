@@ -37,6 +37,18 @@ pub enum ProjectSourceError {
         "snapshot {snapshot_hash} is an ai_only project head and cannot back a mutable run; execute it read-only or push a full_project snapshot"
     )]
     AiOnlyBaseNotMutable { snapshot_hash: String },
+    /// A pinned-project consumer named a snapshot that is not the principal's
+    /// current head for the project path it states. The path is the logical
+    /// project signer scopes are matched on, so it is only stated when the
+    /// head ref for that path is the exact snapshot whose bytes are resolved.
+    #[error(
+        "snapshot {snapshot_hash} is not the current head of project '{project_path}' (current head: {head}); the project scope of a signer is matched on the project path only for that head"
+    )]
+    SnapshotNotCurrentHead {
+        project_path: String,
+        snapshot_hash: String,
+        head: String,
+    },
     /// Anything else that goes wrong while resolving the project
     /// source — internal state-store errors, manifest parsing failures,
     /// etc. Mapped to HTTP 500 by the API layer.
@@ -503,6 +515,16 @@ pub fn prepare_pinned_project_external_consumer(
     principal_scopes: Vec<String>,
     checkout_id: &str,
 ) -> anyhow::Result<PreparedExternalProductConsumer> {
+    // The materialized checkout is a per-generation path; the project the
+    // operator named is the logical project signer scopes are matched on, but
+    // only for the snapshot that is that project's current head for this
+    // principal, as for launches. Any other pairing is refused.
+    let logical_project_root = current_head_logical_project(
+        state,
+        &principal_fingerprint,
+        &project_path,
+        project_snapshot_hash,
+    )?;
     let project_context = resolve_pinned_snapshot_context(
         state,
         project_snapshot_hash,
@@ -514,6 +536,7 @@ pub fn prepare_pinned_project_external_consumer(
         state,
         consumer_ref,
         Some(project_context),
+        Some(logical_project_root),
         principal_fingerprint,
         principal_scopes,
         state.threads.site_id().to_owned(),
@@ -532,6 +555,7 @@ pub fn prepare_installed_bundle_external_consumer(
     prepare_external_consumer_context(
         state,
         consumer_ref,
+        None,
         None,
         principal_fingerprint,
         principal_scopes,
@@ -571,20 +595,64 @@ pub fn prepare_external_product_consumer(
     } else {
         None
     };
+    // A composition names a snapshot, not a project path, so there is no
+    // logical project to state here.
     prepare_external_consumer_context(
         state,
         &request.consumer_ref,
         project,
+        None,
         context.fingerprint.clone(),
         context.scopes.clone(),
         context.execution_origin(state.threads.site_id()),
     )
 }
 
+/// The logical project a pinned-project consumer may state: the canonical
+/// project path, only when `head` (the principal's head ref for it) is exactly
+/// `snapshot_hash`. A missing or different head refuses; there is no fallback
+/// to a projectless or checkout-judged resolution.
+fn bind_logical_project_root(
+    project_ref: &str,
+    snapshot_hash: &str,
+    head: Option<&str>,
+) -> Result<PathBuf, ProjectSourceError> {
+    match head {
+        Some(head) if head == snapshot_hash => Ok(PathBuf::from(project_ref)),
+        other => Err(ProjectSourceError::SnapshotNotCurrentHead {
+            project_path: project_ref.to_owned(),
+            snapshot_hash: snapshot_hash.to_owned(),
+            head: other.unwrap_or("none").to_owned(),
+        }),
+    }
+}
+
+fn current_head_logical_project(
+    state: &AppState,
+    principal_id: &str,
+    project_path: &Path,
+    snapshot_hash: &str,
+) -> Result<PathBuf, ProjectSourceError> {
+    let raw = project_path.to_str().ok_or_else(|| {
+        ProjectSourceError::Other(
+            "project_path is not valid UTF-8 and cannot be used as a project identity".into(),
+        )
+    })?;
+    // The same canonical ref and storage key the head was written under.
+    let project_ref = canonical_project_ref(raw)?;
+    let project_hash = lillux::cas::sha256_hex(project_ref.as_bytes());
+    let principal_key = ryeos_state::refs::principal_storage_key(principal_id)?;
+    let head = state
+        .state_store
+        .with_state_db(|db| db.read_project_head(principal_key, &project_hash))?;
+    bind_logical_project_root(&project_ref, snapshot_hash, head.as_deref())
+}
+
 fn prepare_external_consumer_context(
     state: &AppState,
     consumer_ref: &str,
     project_context: Option<ResolvedProjectContext>,
+    logical_project_root: Option<PathBuf>,
     principal_fingerprint: String,
     principal_scopes: Vec<String>,
     origin_site_id: String,
@@ -613,7 +681,7 @@ fn prepare_external_consumer_context(
         .map(|context| context.effective_path.clone());
     let site_id = state.threads.site_id().to_owned();
     let plan_context = ryeos_engine::contracts::PlanContext {
-        logical_project_root: None,
+        logical_project_root,
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
             ryeos_engine::contracts::Principal {
                 fingerprint: principal_fingerprint,
@@ -664,7 +732,11 @@ fn prepare_external_consumer_context(
         .get(item_kind)
         .and_then(|schema| schema.execution.as_ref())
         .and_then(|execution| execution.source_closure.as_ref());
-    let roots = engine.resolution_roots(project_root);
+    let roots = engine
+        .resolution_roots(project_root.clone())
+        .with_logical_project_root(
+            plan_context.effective_logical_project_root(project_root.as_deref()),
+        );
     let project_authority = project_context
         .as_ref()
         .map(|context| {
@@ -1345,5 +1417,54 @@ mod ai_only_base_tests {
         ] {
             refuse_ai_only_mutable_base(scope, realization, "abc").unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod pinned_consumer_head_binding_tests {
+    use super::*;
+
+    const PROJECT: &str = "/work/registered-project";
+
+    #[test]
+    fn the_current_head_states_the_canonical_project_as_the_logical_root() {
+        let snapshot = "a".repeat(64);
+        let root = bind_logical_project_root(PROJECT, &snapshot, Some(&snapshot)).unwrap();
+        assert_eq!(root, PathBuf::from(PROJECT));
+    }
+
+    #[test]
+    fn a_snapshot_that_is_not_the_head_of_the_stated_path_is_refused() {
+        let snapshot = "a".repeat(64);
+        let head = "b".repeat(64);
+        match bind_logical_project_root(PROJECT, &snapshot, Some(&head)) {
+            Err(ProjectSourceError::SnapshotNotCurrentHead {
+                project_path,
+                snapshot_hash,
+                head: stated_head,
+            }) => {
+                assert_eq!(project_path, PROJECT);
+                assert_eq!(snapshot_hash, snapshot);
+                assert_eq!(stated_head, head);
+            }
+            other => panic!("a mismatched head must be refused with a typed error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_path_with_no_head_is_refused_not_resolved_projectless() {
+        let snapshot = "a".repeat(64);
+        let error = bind_logical_project_root(PROJECT, &snapshot, None).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                ProjectSourceError::SnapshotNotCurrentHead { head, .. } if head == "none"
+            ),
+            "{error:?}"
+        );
+        assert!(
+            error.to_string().contains("is not the current head"),
+            "{error}"
+        );
     }
 }

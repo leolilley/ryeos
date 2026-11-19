@@ -1,0 +1,14 @@
+# ryeos:signed:2026-11-19T05:15:46Z:c58fd9014895f92717b6b71bd2be110ed498f9848b7f65520fa590e7fb24a840:M6uPhGILu9y3yP6y2+gEtbVWK98oJtAxwEid3REufL2Sjx2EESGpEli/VTUVSMzIyic9uAjekKkkVScVJldzDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- node
+- machine
+- remove
+description: Remove a machine declaration
+forms:
+- slots:
+  - field: label
+help:
+  usage: "ryeos node machine remove <label>"
+dispatch:
+  kind: execute_ref
+  execute: service:node/machine/remove
