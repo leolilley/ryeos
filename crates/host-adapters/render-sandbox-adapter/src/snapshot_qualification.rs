@@ -55,6 +55,16 @@ fn qualification_egress_hosts(
     }
 }
 
+/// The egress policy a qualification occurrence was created with, derived
+/// from its own launch shape. Create requests it and every later read of the
+/// Sandbox (termination, reconciliation) must echo exactly it.
+fn qualification_expected_egress(
+    spec: &ProviderSpec,
+    shape: &ryeos_external_execution_contract::runtime_snapshot::LaunchShape,
+) -> Result<crate::provider_spec::EgressPolicy> {
+    spec.egress_policy(&qualification_egress_hosts(shape))
+}
+
 fn selected_qualification_settings(
     bytes: &[u8],
     digest: &str,
@@ -558,6 +568,8 @@ pub(crate) fn terminate_restored_sandbox(
             target.file_path_query.as_deref(),
         )?;
     }
+    let expected_egress =
+        qualification_expected_egress(&spec, &request.qualification_intent.launch_shape)?;
     let network = crate::network_context_from_captured_inputs()?;
     let cancellation = lillux::network::NetworkCancellation::default();
     let _signal_cancellation = crate::SignalCancellation::install(cancellation.clone())?;
@@ -619,7 +631,7 @@ pub(crate) fn terminate_restored_sandbox(
             &sandbox,
             &request.intent.occurrence_id,
             &settings,
-            &crate::provider_spec::EgressPolicy::deny_all(),
+            &expected_egress,
         )?;
         Some(
             RuntimeSnapshotQualificationTerminationAdapterResponse::Terminal {
@@ -991,6 +1003,67 @@ pub(crate) fn parse_verifier_stdout(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn termination_expects_the_egress_the_occurrence_was_created_with() {
+        use ryeos_external_execution_contract::runtime_snapshot::{
+            LaunchSandboxNetworkPolicy, LaunchShape,
+        };
+        let spec = ProviderSpec::parse(
+            include_bytes!("../fixtures/provider-spec.json"),
+            &lillux::sha256_hex(include_bytes!("../fixtures/settings.schema.json")),
+        )
+        .unwrap();
+        let settings = Settings {
+            schema: 2,
+            owner_id: "owner-fixture".into(),
+            plan: RenderPlan::Standard,
+            region: "oregon".into(),
+            snapshot_id: "snp-fixture-001".into(),
+            tls_roots_der_base64: vec!["AA==".into()],
+        };
+        let terminated = |network_policy: serde_json::Value| {
+            let mut value: serde_json::Value =
+                serde_json::from_slice(include_bytes!("../fixtures/terminated-response.json"))
+                    .unwrap();
+            value["networkPolicy"] = network_policy;
+            serde_json::from_value::<crate::RenderSandbox>(value).unwrap()
+        };
+        let settle = |shape: &LaunchShape, echo: serde_json::Value| {
+            let expected = qualification_expected_egress(&spec, shape).unwrap();
+            crate::exact_terminal_timestamp(
+                &terminated(echo),
+                "sbx-fixture-001",
+                &settings,
+                &expected,
+            )
+            .is_some()
+        };
+        let mut allow = LaunchShape::relay_deny_all();
+        allow.sandbox_network_policy = LaunchSandboxNetworkPolicy::AllowList {
+            hosts: std::collections::BTreeSet::from(["controller.example.com".to_owned()]),
+        };
+        let deny = LaunchShape::relay_deny_all();
+        let allow_echo = serde_json::json!({
+            "type": "allow-list", "default": "allow-list",
+            "rules": [{"domain": "controller.example.com", "protocol": "https"}]
+        });
+        let deny_echo = serde_json::json!({"type": "deny-all", "default": "deny-all"});
+        // An allow-list occurrence settles on its own echo, not on deny-all.
+        assert!(settle(&allow, allow_echo.clone()));
+        assert!(!settle(&allow, deny_echo.clone()));
+        // A deny-all occurrence is unchanged.
+        assert!(settle(&deny, deny_echo));
+        assert!(!settle(&deny, allow_echo));
+        // A mismatching echo (other host) stays pending.
+        assert!(!settle(
+            &allow,
+            serde_json::json!({
+                "type": "allow-list", "default": "allow-list",
+                "rules": [{"domain": "other.example.com", "protocol": "https"}]
+            })
+        ));
+    }
 
     fn restored_stream_fixture() -> (
         RestoredOwnerChallenge,
