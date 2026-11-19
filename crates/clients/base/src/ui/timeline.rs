@@ -430,8 +430,9 @@ fn entry_vm(entry: &Value) -> RyeOsTimelineEntryVm {
                 Some(reason) => clip(first_line(reason), SUMMARY_MAX),
                 None => label.to_string(),
             };
-            let intent = reason.map(|_| RyeOsUiIntent::InspectSummary {
-                title: primary.clone(),
+            // The inspector's title still names the state beside the reason.
+            let intent = reason.map(|reason| RyeOsUiIntent::InspectSummary {
+                title: format!("{label} — {}", clip(first_line(reason), SUMMARY_MAX)),
                 detail: entry.clone(),
             });
             RyeOsTimelineEntryVm::Line {
@@ -1967,7 +1968,7 @@ mod tests {
                 assert!(matches!(
                     intent,
                     Some(RyeOsUiIntent::InspectSummary { title, detail })
-                        if title == "boom" && *detail == failed
+                        if title == "failed — boom" && *detail == failed
                 ));
             }
             other => panic!("expected a line, got {other:?}"),
@@ -2913,7 +2914,7 @@ mod tests {
             )],
             0,
         );
-        assert_eq!(link.entries[0].label(), "study, T-child");
+        assert_eq!(link.entries[0].label(), "study, child thread T-child");
         let thought = layout(vec![entry("t", "thought", json!({"body": "hmm"}))], 0);
         assert_eq!(thought.entries[0].label(), "hmm");
     }
