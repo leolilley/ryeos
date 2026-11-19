@@ -370,6 +370,35 @@ impl RyeOsCore {
                 };
                 self.dispatch_ui(RyeOsUiEvent::OpenDialog { dialog_id: id })
             }
+            RyeOsUiEvent::ToggleOverlay => {
+                let overlay = &mut self.ui.overlay;
+                overlay.open = !overlay.open;
+                overlay.selected = (overlay.open && overlay.row_count() > 0).then_some(0);
+                self.bump_generation();
+                Vec::new()
+            }
+            RyeOsUiEvent::MoveOverlay { delta } => {
+                let overlay = &mut self.ui.overlay;
+                let count = overlay.row_count();
+                if overlay.open && count > 0 {
+                    let next = match overlay.selected {
+                        Some(index) => index as i64 + i64::from(delta),
+                        None => 0,
+                    };
+                    overlay.selected = Some(next.clamp(0, count as i64 - 1) as usize);
+                    self.bump_generation();
+                }
+                Vec::new()
+            }
+            RyeOsUiEvent::ActivateOverlay => {
+                let intent = self.selected_overlay_action(|_| true);
+                self.activate_overlay_intent(intent)
+            }
+            RyeOsUiEvent::ActivateOverlayKey { ch } => {
+                let keys = ch.to_string();
+                let intent = self.selected_overlay_action(|action| action.keys == keys);
+                self.activate_overlay_intent(intent)
+            }
             RyeOsUiEvent::OpenDialog { dialog_id } => self.open_dialog(&dialog_id),
             RyeOsUiEvent::CloseDialog { instance_key } => self.close_dialog(&instance_key),
             RyeOsUiEvent::FocusInput => {
@@ -671,9 +700,125 @@ impl RyeOsCore {
         }
     }
 
+    /// The intent of the first action, matching `accept`, on the selected
+    /// overlay row; None when the overlay is closed or nothing is selected.
+    fn selected_overlay_action(
+        &self,
+        accept: impl Fn(&super::view_model::RyeOsOverlayActionVm) -> bool,
+    ) -> Option<RyeOsUiIntent> {
+        let overlay = &self.ui.overlay;
+        if !overlay.open {
+            return None;
+        }
+        overlay
+            .row(overlay.selected?)?
+            .actions
+            .iter()
+            .find(|action| accept(action))
+            .map(|action| action.intent.clone())
+    }
+
+    fn activate_overlay_intent(&mut self, intent: Option<RyeOsUiIntent>) -> Vec<RyeOsEffect> {
+        match intent {
+            Some(intent) => self.dispatch_intent(intent),
+            None => Vec::new(),
+        }
+    }
+
+    /// Whether `intent` is one the open overlay offers: a Surface card's
+    /// selection or an action on one of its rows. Dispatching it closes the
+    /// overlay, so a client never sends a second event for that.
+    fn overlay_offers_intent(&self, intent: &RyeOsUiIntent) -> bool {
+        let overlay = &self.ui.overlay;
+        overlay.open
+            && (matches!(intent, RyeOsUiIntent::SelectSurface { .. })
+                || overlay
+                    .needs_you
+                    .iter()
+                    .chain(&overlay.running)
+                    .flat_map(|row| &row.actions)
+                    .any(|action| &action.intent == intent))
+    }
+
+    /// Bring forward the open view set whose selected work is `chain_root_id`,
+    /// switching Surface first when it sits in another one. Work that is open
+    /// nowhere in this session is said so; opening it is the Review view's job.
+    fn open_attention_item(&mut self, chain_root_id: &str) -> Vec<RyeOsEffect> {
+        let Some(presentation) = self.presentation.as_ref() else {
+            return Vec::new();
+        };
+        let holder = presentation.view_sets().find_map(|(surface_id, set)| {
+            let work = self.selection_value_in_view_set(set.id, "selection.work")?;
+            (work["chain_root"] == chain_root_id).then(|| (surface_id.clone(), set.id))
+        });
+        let Some((surface_id, view_set_id)) = holder else {
+            self.notice(
+                "That work is not open in this session; open it from Work or Review.",
+                RyeOsTone::Warn,
+            );
+            return Vec::new();
+        };
+        let mut effects = Vec::new();
+        if self
+            .active_surface()
+            .is_none_or(|active| active.id() != &surface_id)
+        {
+            let Some(binding) = self
+                .presentation
+                .as_ref()
+                .and_then(|presentation| presentation.surfaces().get(&surface_id))
+                .map(|surface| surface.binding().clone())
+            else {
+                return Vec::new();
+            };
+            effects.extend(self.select_surface_instance(&surface_id, &binding));
+        }
+        effects.extend(self.dispatch_intent(RyeOsUiIntent::SelectViewSet { view_set_id }));
+        effects
+    }
+
+    /// Acknowledge an attention item by invoking the `acknowledge` affordance
+    /// of a mounted view that declares one; with none mounted there is no
+    /// bound way to do it, and that is said.
+    fn acknowledge_attention_item(&mut self, item_id: &str) -> Vec<RyeOsEffect> {
+        let holder = self.mounted_instances().find_map(|instance| {
+            let view_ref = self.mounted_view_ref(&instance)?.to_owned();
+            let binding = self.binding_for_instance(&instance, &view_ref)?;
+            binding
+                .affordances
+                .iter()
+                .any(|affordance| affordance["id"] == "acknowledge")
+                .then_some((instance, view_ref))
+        });
+        let Some((instance, view_ref)) = holder else {
+            self.notice(
+                "Open the Attention panel to acknowledge this.",
+                RyeOsTone::Warn,
+            );
+            return Vec::new();
+        };
+        self.invoke_affordance(
+            &instance,
+            &view_ref,
+            "acknowledge",
+            &serde_json::json!({ "id": item_id }),
+        )
+    }
+
     pub(crate) fn dispatch_intent(&mut self, intent: RyeOsUiIntent) -> Vec<RyeOsEffect> {
+        if self.overlay_offers_intent(&intent) {
+            self.ui.overlay.open = false;
+            self.ui.overlay.selected = None;
+            self.bump_generation();
+        }
         match intent {
             RyeOsUiIntent::Refresh => self.initial_effects(),
+            RyeOsUiIntent::OpenAttentionItem { chain_root_id } => {
+                self.open_attention_item(&chain_root_id)
+            }
+            RyeOsUiIntent::AcknowledgeAttentionItem { item_id } => {
+                self.acknowledge_attention_item(&item_id)
+            }
             RyeOsUiIntent::OpenNewPresentationDocument => self.open_new_presentation_document(),
             RyeOsUiIntent::OpenSurfaceInNewPresentation {
                 surface_instance_id,
@@ -1986,7 +2131,7 @@ mod tests {
                 .presentation
                 .chrome
                 .status_bar
-                .key_hint
+                .key_hint_text()
                 .contains("ctrl+k")
         );
     }

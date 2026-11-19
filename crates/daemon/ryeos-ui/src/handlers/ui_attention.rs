@@ -30,7 +30,7 @@ use ryeos_engine::config_loading::{ConfigLoadContext, ConfigSpec, ResolveMode};
 
 pub const CONFIG_REF: &str = "config:ryeos/ui/attention";
 const CONFIG_PATH: &str = "ryeos/ui/attention.yaml";
-const ITEM_SCHEMA: &str = "ryeos.ui.attention_item.v2";
+const ITEM_SCHEMA: &str = "ryeos.ui.attention_item.v3";
 const ACK_SCHEMA: &str = "ryeos.ui.attention_acknowledged.v1";
 /// Acknowledgement events read per page of one chain.
 const ACK_PAGE_EVENTS: usize = 500;
@@ -80,6 +80,19 @@ pub struct AttentionConfig {
     /// Thread status to presentation category; an unlisted status is
     /// `unknown`.
     pub phase_categories: BTreeMap<String, String>,
+    /// The words the running list carries. Its statuses are the ones
+    /// `phase_categories` maps to `running`.
+    pub running: RunningSource,
+}
+
+/// How the running list reads: the title and tone its items carry and the
+/// noun the bars show beside its count.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunningSource {
+    pub title: String,
+    pub tone: String,
+    pub count_label: String,
 }
 
 impl AttentionConfig {
@@ -114,7 +127,25 @@ impl AttentionConfig {
                 _ => {}
             }
         }
+        if config.running.title.is_empty()
+            || config.running.tone.is_empty()
+            || config.running.count_label.is_empty()
+        {
+            return Err("attention running block needs a title, tone and count_label".into());
+        }
+        if config.running_statuses().is_empty() {
+            return Err("no thread status maps to the running category".into());
+        }
         Ok(config)
+    }
+
+    /// The thread statuses `phase_categories` maps to `running`, in name order.
+    pub fn running_statuses(&self) -> Vec<String> {
+        self.phase_categories
+            .iter()
+            .filter(|(_, category)| category.as_str() == "running")
+            .map(|(status, _)| status.clone())
+            .collect()
     }
 
     pub fn phase_category(&self, status: &str) -> &str {
@@ -213,7 +244,105 @@ pub fn counts(config: &AttentionConfig, items: &[Value]) -> Value {
             })
         })
         .collect::<Vec<_>>();
-    json!({"total": items.len(), "by_kind": by_kind})
+    let (by_project, chains, chains_truncated) = breakdown(items.iter().map(|item| {
+        (
+            item["project_root"].as_str(),
+            item["subject"]["chain_root_id"].as_str(),
+        )
+    }));
+    json!({
+        "total": items.len(),
+        "by_kind": by_kind,
+        "by_project": by_project,
+        "chains": chains,
+        "chains_truncated": chains_truncated,
+    })
+}
+
+/// Chain ids returned per list; a longer list is flagged truncated so a client
+/// shows no flag rather than a wrong one.
+const MAX_CHAIN_IDS: usize = 500;
+
+/// Group entries by project and list the distinct chains: `(by_project,
+/// chains, chains_truncated)`. A projectless entry has a null `project_root`.
+fn breakdown<'a>(
+    entries: impl Iterator<Item = (Option<&'a str>, Option<&'a str>)>,
+) -> (Value, Value, bool) {
+    let mut by_project = BTreeMap::<Option<&str>, usize>::new();
+    let mut chains = BTreeSet::<&str>::new();
+    for (project_root, chain_root_id) in entries {
+        *by_project.entry(project_root).or_default() += 1;
+        if let Some(chain_root_id) = chain_root_id {
+            chains.insert(chain_root_id);
+        }
+    }
+    let truncated = chains.len() > MAX_CHAIN_IDS;
+    let by_project = by_project
+        .into_iter()
+        .map(|(project_root, count)| json!({"project_root": project_root, "count": count}))
+        .collect::<Vec<_>>();
+    let chains = chains.into_iter().take(MAX_CHAIN_IDS).collect::<Vec<_>>();
+    (json!(by_project), json!(chains), truncated)
+}
+
+/// The running list for `owner`: chain heads the owner launched or follows
+/// whose status the config maps to `running`, newest first. Scheduled and child
+/// runs are left out by the store query. Returns the block the response carries:
+/// the whole count and breakdowns, and `items` limited to `limit`.
+pub fn running(
+    state: &AppState,
+    config: &AttentionConfig,
+    owner: &str,
+    project_root: Option<&Path>,
+    limit: usize,
+) -> Result<Value> {
+    let entries = state.state_store.failed_run_attention(
+        owner,
+        project_root,
+        &config.running_statuses(),
+        MAX_CHAIN_IDS,
+    )?;
+    Ok(running_block(config, &entries, limit))
+}
+
+fn running_block(config: &AttentionConfig, entries: &[FailedRunAttention], limit: usize) -> Value {
+    let (by_project, chains, chains_truncated) = breakdown(entries.iter().map(|entry| {
+        (
+            entry.project_root.as_deref(),
+            Some(entry.chain_root_id.as_str()),
+        )
+    }));
+    let items = entries
+        .iter()
+        .take(limit)
+        .map(|entry| {
+            json!({
+                "id": format!("running:{}", entry.thread_id),
+                "title": entry.item_ref,
+                "tone": config.running.tone,
+                "item_ref": entry.item_ref,
+                "project_root": entry.project_root,
+                "subject": {"chain_root_id": entry.chain_root_id, "thread_id": entry.thread_id},
+                "state": entry.status,
+                "since_ms": millis_of(&entry.created_at),
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "count": entries.len(),
+        "label": config.running.count_label,
+        "tone": config.running.tone,
+        "by_project": by_project,
+        "chains": chains,
+        "chains_truncated": chains_truncated,
+        "items": items,
+    })
+}
+
+fn millis_of(iso8601: &str) -> i64 {
+    lillux::time::unix_secs_from_iso8601(iso8601).map_or(0, |secs| {
+        i64::try_from(secs.saturating_mul(1000)).unwrap_or(i64::MAX)
+    })
 }
 
 /// Every item the sources raise for `owner`, acknowledged or not, oldest first.
@@ -247,6 +376,7 @@ fn collect_raised(
     for source in &config.sources {
         match source.query {
             Query::ApprovalsPending => {
+                let from = items.len();
                 for entry in state
                     .state_store
                     .pending_dedicated_session_approval_attention(
@@ -257,8 +387,10 @@ fn collect_raised(
                 {
                     items.push(approval_item(source, &entry));
                 }
+                fill_placement_projects(state, &mut items[from..])?;
             }
             Query::CandidatesReady => {
+                let from = items.len();
                 for entry in state.state_store.dedicated_session_candidate_attention(
                     owner,
                     placements.as_ref(),
@@ -266,6 +398,7 @@ fn collect_raised(
                 )? {
                     items.push(candidate_item(source, &entry));
                 }
+                fill_placement_projects(state, &mut items[from..])?;
             }
             Query::RunsFailed => {
                 for entry in state.state_store.failed_run_attention(
@@ -286,6 +419,31 @@ fn collect_raised(
             .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
     });
     Ok(items)
+}
+
+/// Give each approval or candidate item the project its placement thread ran
+/// in, reading each distinct thread once. An item whose thread is unknown or
+/// ran outside a project keeps a null `project_root`.
+fn fill_placement_projects(state: &AppState, items: &mut [Value]) -> Result<()> {
+    let mut projects = BTreeMap::<String, Option<String>>::new();
+    for item in items.iter_mut() {
+        let Some(thread_id) = item["subject"]["thread_id"].as_str().map(str::to_owned) else {
+            continue;
+        };
+        let project_root = match projects.get(&thread_id) {
+            Some(known) => known.clone(),
+            None => {
+                let found = state
+                    .state_store
+                    .get_thread(&thread_id)?
+                    .and_then(|thread| thread.project_root);
+                projects.insert(thread_id, found.clone());
+                found
+            }
+        };
+        item["project_root"] = json!(project_root);
+    }
+    Ok(())
 }
 
 /// The latest `item_since_ms` each acknowledgeable item of `items` was
@@ -423,6 +581,7 @@ fn item(
     state: &str,
     since_ms: i64,
     expires_at_ms: Option<i64>,
+    project_root: Option<&str>,
     detail: Value,
     mut actions: Value,
 ) -> Value {
@@ -437,6 +596,7 @@ fn item(
         "state": state,
         "since_ms": since_ms,
         "expires_at_ms": expires_at_ms,
+        "project_root": project_root,
         "detail": detail,
         "actions": actions,
     })
@@ -457,6 +617,7 @@ fn approval_item(source: &Source, entry: &DedicatedSessionApprovalProjection) ->
         &approval.state,
         approval.created_at_ms,
         Some(approval.expires_at_ms),
+        None,
         json!({
             "summary": approval.operation_class,
             "approval_id": approval.approval_id,
@@ -478,6 +639,7 @@ fn candidate_item(source: &Source, entry: &DedicatedSessionCandidateAttention) -
         &entry.state,
         entry.updated_at_ms,
         None,
+        None,
         json!({
             "summary": entry.publication_result,
             "candidate_snapshot_hash": entry.candidate_snapshot_hash,
@@ -490,9 +652,7 @@ fn candidate_item(source: &Source, entry: &DedicatedSessionCandidateAttention) -
 }
 
 fn failed_run_item(source: &Source, entry: &FailedRunAttention) -> Value {
-    let since_ms = lillux::time::unix_secs_from_iso8601(&entry.updated_at).map_or(0, |secs| {
-        i64::try_from(secs.saturating_mul(1000)).unwrap_or(i64::MAX)
-    });
+    let since_ms = millis_of(&entry.updated_at);
     item(
         source,
         &entry.thread_id,
@@ -501,6 +661,7 @@ fn failed_run_item(source: &Source, entry: &FailedRunAttention) -> Value {
         &entry.status,
         since_ms,
         None,
+        entry.project_root.as_deref(),
         json!({
             "summary": entry.item_ref,
             "item_ref": entry.item_ref,
@@ -565,19 +726,23 @@ mod tests {
     #[test]
     fn malformed_config_is_refused() {
         let parse = |text: &str| AttentionConfig::from_value(serde_yaml::from_str(text).unwrap());
-        let ok = "sources:\n  - {kind: a, query: runs_failed, title: T, tone: warn, statuses: [failed]}\nphase_categories: {}\n";
+        let ok = "sources:\n  - {kind: a, query: runs_failed, title: T, tone: warn, statuses: [failed]}\nrunning: {title: R, tone: accent, count_label: running}\nphase_categories: {running: running}\n";
         assert!(parse(ok).is_ok());
         for bad in [
             // runs_failed without statuses
-            "sources:\n  - {kind: a, query: runs_failed, title: T, tone: warn}\nphase_categories: {}\n",
+            "sources:\n  - {kind: a, query: runs_failed, title: T, tone: warn}\nrunning: {title: R, tone: accent, count_label: running}\nphase_categories: {running: running}\n",
             // statuses on a query that takes none
-            "sources:\n  - {kind: a, query: approvals_pending, title: T, tone: warn, statuses: [x]}\nphase_categories: {}\n",
+            "sources:\n  - {kind: a, query: approvals_pending, title: T, tone: warn, statuses: [x]}\nrunning: {title: R, tone: accent, count_label: running}\nphase_categories: {running: running}\n",
             // duplicate kind
-            "sources:\n  - {kind: a, query: approvals_pending, title: T, tone: warn}\n  - {kind: a, query: candidates_ready, title: T, tone: warn}\nphase_categories: {}\n",
+            "sources:\n  - {kind: a, query: approvals_pending, title: T, tone: warn}\n  - {kind: a, query: candidates_ready, title: T, tone: warn}\nrunning: {title: R, tone: accent, count_label: running}\nphase_categories: {running: running}\n",
             // unknown query
-            "sources:\n  - {kind: a, query: asks_pending, title: T, tone: warn}\nphase_categories: {}\n",
+            "sources:\n  - {kind: a, query: asks_pending, title: T, tone: warn}\nrunning: {title: R, tone: accent, count_label: running}\nphase_categories: {running: running}\n",
+            // no running block
+            "sources:\n  - {kind: a, query: approvals_pending, title: T, tone: warn}\nphase_categories: {running: running}\n",
+            // no status maps to running
+            "sources:\n  - {kind: a, query: approvals_pending, title: T, tone: warn}\nrunning: {title: R, tone: accent, count_label: running}\nphase_categories: {failed: failed}\n",
             // unknown field
-            "sources:\n  - {kind: a, query: approvals_pending, title: T, tone: warn, extra: 1}\nphase_categories: {}\n",
+            "sources:\n  - {kind: a, query: approvals_pending, title: T, tone: warn, extra: 1}\nrunning: {title: R, tone: accent, count_label: running}\nphase_categories: {running: running}\n",
         ] {
             assert!(parse(bad).is_err(), "{bad}");
         }
@@ -830,6 +995,7 @@ mod tests {
                 status: "failed".into(),
                 item_ref: "directive:x".into(),
                 project_root: Some("/work".into()),
+                created_at: "2026-11-17T00:00:00Z".into(),
                 updated_at: "2026-11-17T01:00:00Z".into(),
             },
         );
@@ -846,7 +1012,8 @@ mod tests {
                 "tone": "danger", "count_label": "failed",
                 "acknowledgeable": acknowledgeable, "statuses": ["failed"],
             }],
-            "phase_categories": {},
+            "running": {"title": "Running", "tone": "accent", "count_label": "running"},
+            "phase_categories": {"running": "running"},
         }))
         .unwrap()
     }
@@ -987,5 +1154,185 @@ mod tests {
             ])
         );
         assert_eq!(super::counts(&config, &[])["by_kind"], json!([]));
+    }
+
+    #[test]
+    fn every_item_kind_carries_a_project_root() {
+        let config = shipped_config();
+        let approval = approval_item(&source(&config, "approval"), &approval("pending", true));
+        assert_eq!(approval["project_root"], Value::Null);
+        let candidate = candidate_item(
+            &source(&config, "candidate"),
+            &DedicatedSessionCandidateAttention {
+                chain_root_id: "T-chain".into(),
+                placement_thread_id: "T-place".into(),
+                state: "completed".into(),
+                candidate_snapshot_hash: "a".repeat(64),
+                candidate_validation_hash: None,
+                candidate_evaluation_hash: None,
+                publication_result: "retained_for_review".into(),
+                updated_at_ms: 5_000,
+            },
+        );
+        assert_eq!(candidate["project_root"], Value::Null);
+        let failed = failed_run_item(
+            &source(&config, "failed_run"),
+            &FailedRunAttention {
+                chain_root_id: "T-chain".into(),
+                thread_id: "T-head".into(),
+                status: "failed".into(),
+                item_ref: "directive:x".into(),
+                project_root: Some("/work".into()),
+                created_at: "2026-11-17T00:00:00Z".into(),
+                updated_at: "2026-11-17T01:00:00Z".into(),
+            },
+        );
+        assert_eq!(failed["project_root"], "/work");
+        for value in [&approval, &candidate, &failed] {
+            assert_eq!(value["schema_version"], "ryeos.ui.attention_item.v3");
+            assert!(value.get("project_root").is_some());
+        }
+    }
+
+    #[test]
+    fn placement_threads_give_approvals_and_candidates_their_project() {
+        let (_dir, _owner, state) = crate::test_support::build_test_state();
+        let mut placed = thread("T-place", "T-place", OWNER);
+        placed.project_root = Some(std::path::PathBuf::from("/p"));
+        placed.project_authority = ExecutionProjectAuthority::pinned(
+            "d".repeat(64),
+            Some(std::path::PathBuf::from("/p")),
+            "b".repeat(64),
+            PinnedProjectRealization::Cow {
+                terminal_publication: PinnedTerminalPublication::RetainResult,
+            },
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        state.state_store.create_thread_for_test(&placed).unwrap();
+        state
+            .state_store
+            .create_thread_for_test(&thread("T-bare", "T-bare", OWNER))
+            .unwrap();
+        let config = shipped_config();
+        let mut items = vec![
+            approval_item(&source(&config, "approval"), &approval("pending", true)),
+            approval_item(&source(&config, "approval"), &approval("pending", true)),
+            approval_item(&source(&config, "approval"), &approval("pending", true)),
+        ];
+        items[0]["subject"]["thread_id"] = json!("T-place");
+        items[1]["subject"]["thread_id"] = json!("T-place");
+        items[2]["subject"]["thread_id"] = json!("T-bare");
+        fill_placement_projects(&state, &mut items).unwrap();
+        assert_eq!(items[0]["project_root"], "/p");
+        assert_eq!(items[1]["project_root"], "/p");
+        assert_eq!(items[2]["project_root"], Value::Null);
+    }
+
+    #[test]
+    fn by_project_sums_to_the_total_and_chains_list_distinct_chains() {
+        let config = shipped_config();
+        let item = |kind: &str, project: Value, chain: &str| json!({"kind": kind, "project_root": project, "subject": {"chain_root_id": chain}});
+        let counts = counts(
+            &config,
+            &[
+                item("failed_run", json!("/a"), "c1"),
+                item("approval", json!("/a"), "c1"),
+                item("approval", json!("/b"), "c2"),
+                item("candidate", Value::Null, "c3"),
+            ],
+        );
+        assert_eq!(counts["total"], 4);
+        let by_project = counts["by_project"].as_array().unwrap();
+        assert_eq!(
+            by_project
+                .iter()
+                .map(|entry| entry["count"].as_u64().unwrap())
+                .sum::<u64>(),
+            4
+        );
+        assert_eq!(
+            counts["by_project"],
+            json!([
+                {"project_root": null, "count": 1},
+                {"project_root": "/a", "count": 2},
+                {"project_root": "/b", "count": 1},
+            ])
+        );
+        assert_eq!(counts["chains"], json!(["c1", "c2", "c3"]));
+        assert_eq!(counts["chains_truncated"], false);
+    }
+
+    #[test]
+    fn a_chain_list_past_the_cap_is_flagged_truncated() {
+        let ids = (0..=MAX_CHAIN_IDS)
+            .map(|index| format!("chain-{index:04}"))
+            .collect::<Vec<_>>();
+        let (by_project, chains, truncated) =
+            breakdown(ids.iter().map(|id| (Some("/p"), Some(id.as_str()))));
+        assert!(truncated);
+        assert_eq!(chains.as_array().unwrap().len(), MAX_CHAIN_IDS);
+        // The counts stay exact even when the id list is cut.
+        assert_eq!(by_project[0]["count"], MAX_CHAIN_IDS + 1);
+        let (_, _, exact) = breakdown(
+            ids.iter()
+                .take(MAX_CHAIN_IDS)
+                .map(|id| (None, Some(id.as_str()))),
+        );
+        assert!(!exact);
+    }
+
+    #[test]
+    fn the_running_block_counts_what_the_owner_launched_and_names_its_words() {
+        let (_dir, _owner, state) = crate::test_support::build_test_state();
+        let config = shipped_config();
+        for (id, owner) in [("T-run-a", OWNER), ("T-run-b", OWNER), ("T-run-c", OTHER)] {
+            state
+                .state_store
+                .create_thread_for_test(&thread(id, id, owner))
+                .unwrap();
+        }
+        state
+            .state_store
+            .create_thread_for_test(&thread("T-done", "T-done", OWNER))
+            .unwrap();
+        finish(&state, "T-done", "completed");
+        let block = running(&state, &config, OWNER, None, 1).unwrap();
+        assert_eq!(block["count"], 2);
+        assert_eq!(block["label"], "running");
+        assert_eq!(block["tone"], "accent");
+        assert_eq!(block["chains"], json!(["T-run-a", "T-run-b"]));
+        assert_eq!(block["chains_truncated"], false);
+        assert_eq!(
+            block["by_project"],
+            json!([{"project_root": null, "count": 2}])
+        );
+        // The page is limited; the count is not.
+        let items = block["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert!(items[0]["id"].as_str().unwrap().starts_with("running:"));
+        assert!(items[0]["since_ms"].as_i64().unwrap() > 0);
+        assert_eq!(items[0]["tone"], "accent");
+    }
+
+    #[test]
+    fn a_running_child_run_is_not_counted() {
+        let (_dir, _owner, state) = crate::test_support::build_test_state();
+        let config = shipped_config();
+        state
+            .state_store
+            .create_thread_for_test(&thread("T-parent", "T-parent", OWNER))
+            .unwrap();
+        state
+            .state_store
+            .create_thread_for_test(&thread("T-child", "T-child", OWNER))
+            .unwrap();
+        state
+            .state_store
+            .record_child_link("T-parent", "T-child", "graph_step")
+            .unwrap();
+        let block = running(&state, &config, OWNER, None, 10).unwrap();
+        assert_eq!(block["chains"], json!(["T-parent"]));
     }
 }

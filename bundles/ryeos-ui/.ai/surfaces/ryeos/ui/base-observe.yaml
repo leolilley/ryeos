@@ -1,10 +1,13 @@
-# ryeos:signed:2026-11-18T09:42:19Z:f3e8e7f9791105289b09b31aca9fd1a3c1ef6cf95d33161745aeed8650fb4fb0:HIg5AoFMkkgkM4N3E7M8pvDIMULxkNQp+azgqWakH3ediJBvwBgKrewEss9q1oInMaoSya+GzVZ0H4ItdGV3Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T22:21:29Z:888ef0a49e19fb52f79cd4d5a116a57c5bdbbf141b16ca49c7c421dda51a675d:F5eW+wX+rG2rqnZ3TA/MX0TiKhDJIrAHYSe29eu8lSaIbCcgXoyXVQhKZOqfDbgGiNf1neY+XPwQaim0HRgrDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-base-observe
 title: Home
 version: "2.1.0"
 description: Observation-only browser Home over the Assistant's view sets; it reads the node and changes nothing.
 
 extends: surface:ryeos/ui/assistant
+
+chip:
+  mark: grid
 
 capabilities:
   sources:

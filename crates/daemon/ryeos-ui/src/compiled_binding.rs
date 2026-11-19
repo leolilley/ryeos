@@ -387,6 +387,11 @@ impl SessionCompiledUiBinding {
         let mut sources = BTreeMap::new();
         let mut affordances = BTreeMap::new();
         let mut attenuated = Vec::new();
+        if surface_authority != Authority::Node
+            && let Some(surface_fields) = effective_surface.as_object()
+        {
+            attenuated.extend(clamp_surface_chrome(&mut surface_fields.clone()));
+        }
 
         // Shell-wide observations are authored by the surface itself. They
         // use the surface's canonical identity as their coordinate namespace,
@@ -596,6 +601,9 @@ impl SessionCompiledUiBinding {
                 .affordances
                 .get(&self.binding.surface.canonical_ref),
         );
+        if Authority::of(&self.binding.surface) != Authority::Node {
+            clamp_surface_chrome(surface_fields);
+        }
         mark_authorship(
             surface_fields,
             Some(&self.binding.surface),
@@ -639,6 +647,55 @@ impl SessionCompiledUiBinding {
         }
         Ok(surface)
     }
+}
+
+/// Bring a project-authored Surface's chrome back inside what a project may
+/// choose: no chip mark other than the initial, no hidden switcher or status
+/// bar, and the add-tab affordance kept. Layout (`top`, `right`) stays the
+/// project's. Returns one record per value it changed.
+fn clamp_surface_chrome(fields: &mut serde_json::Map<String, Value>) -> Vec<AttenuatedUiBinding> {
+    let mut records = Vec::new();
+    let mut record = |coordinate: &str, reason: &str| {
+        records.push(AttenuatedUiBinding {
+            coordinate: coordinate.to_string(),
+            reason: reason.to_string(),
+        });
+    };
+    if let Some(chip) = fields.get_mut("chip").and_then(Value::as_object_mut)
+        && chip
+            .get("mark")
+            .is_some_and(|mark| mark.as_str() != Some("initial"))
+    {
+        chip.insert("mark".to_string(), Value::from("initial"));
+        record(
+            "surface/chip",
+            "a project-authored surface draws the initial chip mark only",
+        );
+    }
+    if let Some(style) = fields.get_mut("style").and_then(Value::as_object_mut) {
+        if style.get("switcher").and_then(Value::as_str) == Some("hidden") {
+            style.insert("switcher".to_string(), Value::from("left"));
+            record(
+                "surface/style.switcher",
+                "a project-authored surface cannot hide the switcher",
+            );
+        }
+        if style.get("status_bar").and_then(Value::as_str) == Some("hidden") {
+            style.insert("status_bar".to_string(), Value::from("bottom"));
+            record(
+                "surface/style.status_bar",
+                "a project-authored surface cannot hide the status bar",
+            );
+        }
+        if style.get("add_tab").and_then(Value::as_bool) == Some(false) {
+            style.insert("add_tab".to_string(), Value::from(true));
+            record(
+                "surface/style.add_tab",
+                "a project-authored surface cannot remove the add-tab affordance",
+            );
+        }
+    }
+    records
 }
 
 fn sanitize_sources(
@@ -1780,6 +1837,91 @@ mod tests {
             CompiledUiAffordance::Execution { .. }
         ));
         assert!(compiled.binding.attenuated.is_empty());
+    }
+
+    fn chrome_surface() -> Value {
+        let mut surface = surface_with_listed_source_and_selection();
+        surface["chip"] = serde_json::json!({"mark": "key"});
+        surface["style"] = serde_json::json!({
+            "switcher": "hidden",
+            "status_bar": "hidden",
+            "add_tab": false
+        });
+        surface
+    }
+
+    fn compile_chrome(surface_trust: TrustClass, surface: &Value) -> SessionCompiledUiBinding {
+        compile_authored_by(
+            surface_trust,
+            TrustClass::TrustedBundle,
+            &["cap.read", "cap.write"],
+            &ceiling(&[FIELD_PROJECT]),
+            surface,
+            bundle_service_target,
+        )
+    }
+
+    #[test]
+    fn project_authored_surface_chrome_is_clamped_and_recorded() {
+        let authored = chrome_surface();
+        let compiled = compile_chrome(TrustClass::TrustedProject, &authored);
+        let presentation = compiled.sanitize_effective_surface(&authored).unwrap();
+        assert_eq!(presentation["chip"]["mark"], "initial");
+        assert_eq!(presentation["style"]["switcher"], "left");
+        assert_eq!(presentation["style"]["status_bar"], "bottom");
+        assert_eq!(presentation["style"]["add_tab"], true);
+        let coordinates: Vec<&str> = compiled
+            .binding
+            .attenuated
+            .iter()
+            .map(|entry| entry.coordinate.as_str())
+            .filter(|coordinate| coordinate.starts_with("surface/"))
+            .collect();
+        assert_eq!(
+            coordinates,
+            [
+                "surface/chip",
+                "surface/style.switcher",
+                "surface/style.status_bar",
+                "surface/style.add_tab"
+            ]
+        );
+    }
+
+    #[test]
+    fn project_authored_surface_may_still_choose_top_and_right() {
+        let mut authored = chrome_surface();
+        authored["chip"] = serde_json::json!({"mark": "initial"});
+        authored["style"] = serde_json::json!({"switcher": "right", "status_bar": "top"});
+        let compiled = compile_chrome(TrustClass::TrustedProject, &authored);
+        let presentation = compiled.sanitize_effective_surface(&authored).unwrap();
+        assert_eq!(presentation["style"]["switcher"], "right");
+        assert_eq!(presentation["style"]["status_bar"], "top");
+        assert!(
+            compiled
+                .binding
+                .attenuated
+                .iter()
+                .all(|entry| !entry.coordinate.starts_with("surface/"))
+        );
+    }
+
+    #[test]
+    fn bundle_authored_surface_keeps_its_chrome() {
+        let authored = chrome_surface();
+        let compiled = compile_chrome(TrustClass::TrustedBundle, &authored);
+        let presentation = compiled.sanitize_effective_surface(&authored).unwrap();
+        assert_eq!(presentation["chip"]["mark"], "key");
+        assert_eq!(presentation["style"]["switcher"], "hidden");
+        assert_eq!(presentation["style"]["status_bar"], "hidden");
+        assert_eq!(presentation["style"]["add_tab"], false);
+        assert!(
+            compiled
+                .binding
+                .attenuated
+                .iter()
+                .all(|entry| !entry.coordinate.starts_with("surface/"))
+        );
     }
 
     /// A project-authored view and surface carry an authorship marker in the

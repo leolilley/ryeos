@@ -1,6 +1,6 @@
-# ryeos:signed:2026-11-18T06:08:47Z:9a546fdc0fd15668e12a7a350847167b3c2cdb7b009535f568ee18bbd639ddd6:xvxfNa5e/uz+qVYP5dyNdLp0+Lf/PVaa6ljJr+sGOzflKQhxOwyCMeMV48lMdiIT5p65Ndf91UApld3WwoABCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T22:21:29Z:4a49686ae5f6dd08c9887d984b4aadeab96a8bf0dff3ceb6096e85c6f1230774:OlcqRwaGUvWSbsPx7+Llpq8KitgA5W2e4QNZhIl8MLpNmnbL+T4nMO4tRv9upiUlF1r3m/gOqIV7skHnlxDMDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/surface"
-version: "2.3.0"
+version: "2.4.0"
 # A project file may not take the ref of a surface an installed bundle
 # supplies. Resolution refuses the ref, naming both files, so a project can
 # add its own surfaces but never replace the node's.
@@ -51,6 +51,9 @@ composer_config:
       strategy: replace_root_last
       expect_value_type: sequence
     - name: style
+      strategy: dict_merge_root_last
+      expect_value_type: mapping
+    - name: chip
       strategy: dict_merge_root_last
       expect_value_type: mapping
     - name: input
@@ -114,6 +117,35 @@ composed_value_contract:
     style:
       type: single
       prim: mapping
+      contract:
+        root_type: mapping
+        required: {}
+        optional:
+          border:
+            type: single
+            prim: string
+            enum: [thick, thin, hidden, none]
+          view_set_tabs: { type: single, prim: boolean }
+          switcher:
+            type: single
+            prim: string
+            enum: [left, top, right, hidden]
+          status_bar:
+            type: single
+            prim: string
+            enum: [bottom, top, hidden]
+          add_tab: { type: single, prim: boolean }
+    chip:
+      type: single
+      prim: mapping
+      contract:
+        root_type: mapping
+        required: {}
+        optional:
+          mark:
+            type: single
+            prim: string
+            enum: [grid, key, initial]
     extends:
       type: union
       prims: [string, "null"]
