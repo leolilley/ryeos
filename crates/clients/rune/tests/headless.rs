@@ -1183,9 +1183,16 @@ fn the_project_scenes_mount_the_project_surface_with_threads_in_view() {
             text.contains("T-0a55"),
             "{scene}: the last of eight threads is present"
         );
+        // The Review tab's history tile is narrow: it drops the id column
+        // (kind, item and status stay), so its rows are told by their item.
+        let row = if scene == "project-review" {
+            "worker:claude-code"
+        } else {
+            "T-7f3a"
+        };
         let drawn = drawn_texts(&rt);
         assert!(
-            drawn.iter().any(|(text, _)| text.contains("T-7f3a")),
+            drawn.iter().any(|(text, _)| text.contains(row)),
             "{scene}: the thread rows are drawn"
         );
     }
