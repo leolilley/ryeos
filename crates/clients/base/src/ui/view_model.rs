@@ -199,8 +199,6 @@ pub struct RyeOsPresentationChromeVm {
 pub struct RyeOsTopBarVm {
     pub visible: bool,
     pub tabs: Vec<RyeOsViewSetTabVm>,
-    pub focused_title: String,
-    pub layout_symbol: String,
     /// Whether the add-tab affordance is offered; the active Surface's
     /// `style.add_tab`, true unless it declares false.
     pub add_tab: bool,
@@ -1081,17 +1079,8 @@ fn top_bar_vm(core: &RyeOsCore) -> RyeOsTopBarVm {
                 }),
             })
             .collect(),
-        focused_title: focused_tile_title(core),
-        layout_symbol: layout_symbol(core),
         add_tab: active_surface_style(core).add_tab,
     }
-}
-
-fn focused_tile_title(core: &RyeOsCore) -> String {
-    core.active_view_set()
-        .and_then(|set| set.tiles.get(&set.focused_tile))
-        .map(|tile| tile_title(core, tile))
-        .unwrap_or_default()
 }
 
 /// Human labels are authored content, not item identifiers. Use the same
@@ -1114,16 +1103,6 @@ fn view_title<'a>(
 
 fn tile_title(core: &RyeOsCore, tile: &crate::view_set::TileState) -> String {
     view_title(core, &tile.instance_key, &tile.view.view_ref).to_owned()
-}
-
-fn layout_symbol(core: &RyeOsCore) -> String {
-    let Some(view_set) = core.active_view_set() else {
-        return String::new();
-    };
-    let total = view_set.tile_ids().len();
-    let master = view_set.tiling.master.count.min(total);
-    let slave = total.saturating_sub(master);
-    format!("M{master}│S{slave}")
 }
 
 fn presentation_metrics_vm(
@@ -1839,10 +1818,19 @@ fn bound_view_vm_keyed(
                 folded.collapsible.contains(&section).then_some(section)
             });
             let expand_fields = super::content::expand_fields(binding);
+            // Messages and prose never fold: they have no detail to open.
             let entry_expandable: Vec<bool> = folded
                 .sources
                 .iter()
-                .map(|source| source.is_some() && !expand_fields.is_empty())
+                .map(|source| {
+                    source.as_ref().is_some_and(|source| {
+                        !expand_fields.is_empty()
+                            && !matches!(
+                                super::timeline::item_role(&source.raw).as_str(),
+                                "message" | "prose"
+                            )
+                    })
+                })
                 .collect();
             let entry_expanded: Vec<bool> = folded
                 .sources
@@ -5175,6 +5163,14 @@ mod tests {
         assert_eq!(heading.title, "A task");
         let supplement = view_supplement(&core, &instance, "view:test/detail").unwrap();
         assert_eq!(supplement.excerpt[0].value, "<script>not markup</script>");
+    }
+
+    /// The focused tile's title in the active view set.
+    fn focused_tile_title(core: &RyeOsCore) -> String {
+        core.active_view_set()
+            .and_then(|set| set.tiles.get(&set.focused_tile))
+            .map(|tile| tile_title(core, tile))
+            .unwrap_or_default()
     }
 
     #[test]

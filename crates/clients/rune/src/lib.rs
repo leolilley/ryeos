@@ -418,7 +418,7 @@ impl App {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn fixture(core: Result<ryeos_client_base::ui::RyeOsCore, String>, dress: Dress) -> App {
-        App {
+        let mut app = App {
             boot: Boot::default(),
             phase: match core {
                 Ok(core) => Phase::Fixture(Box::new(core)),
@@ -427,7 +427,11 @@ impl App {
             local: Local::default(),
             model: Default::default(),
             dress,
-        }
+        };
+        // A scene that typed into the core before the app existed shows the
+        // text in its fields from the first frame.
+        app.sync_edits();
+        app
     }
 
     /// Apply `f` to the view a mounted instance shows in the current model.
