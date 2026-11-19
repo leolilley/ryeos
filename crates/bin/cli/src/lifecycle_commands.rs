@@ -3072,6 +3072,7 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
     // recovery pass; the rows stay the authority.
     if initialized {
         checks.push(process_quarantine_check(&config.app_root));
+        checks.push(sync_apply_quarantine_check(&config.app_root));
         checks.push(stale_publication_check(&config.app_root));
     } else {
         checks.push(check(
@@ -3081,6 +3082,11 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
         ));
         checks.push(check(
             "process_quarantine",
+            NA,
+            serde_json::json!({ "note": "not initialized" }),
+        ));
+        checks.push(check(
+            "sync_apply_quarantine",
             NA,
             serde_json::json!({ "note": "not initialized" }),
         ));
@@ -3942,6 +3948,63 @@ fn process_quarantine_check(
             }),
         ),
     }
+}
+
+/// The text naming one quarantined apply and what the operator does with it.
+fn sync_apply_quarantine_line(
+    entry: &ryeos_app::sync_apply_quarantine_report::SyncApplyQuarantineEntry,
+) -> String {
+    match entry.transaction_path.as_deref() {
+        Some(path) => format!(
+            "{} ({}): transaction directory {path} may hold originals that the apply moved aside and never restored; inspect it, restore them by hand if needed, then delete it",
+            entry.job_id, entry.code
+        ),
+        None => format!(
+            "{} ({}): its operation is undecodable, so no transaction directory path is known",
+            entry.job_id, entry.code
+        ),
+    }
+}
+
+fn sync_apply_quarantine_check(
+    app_root: &std::path::Path,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{OK, WARN};
+    let state_dir = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).state();
+    match ryeos_app::sync_apply_quarantine_report::read_report(&state_dir) {
+        Ok(None) => check("sync_apply_quarantine", OK, serde_json::json!({})),
+        Ok(Some(report)) => check(
+            "sync_apply_quarantine",
+            WARN,
+            sync_apply_quarantine_details(&report),
+        ),
+        Err(error) => check(
+            "sync_apply_quarantine",
+            WARN,
+            serde_json::json!({
+                "error": format!("{error:#}"),
+                "path": ryeos_app::sync_apply_quarantine_report::report_path(&state_dir),
+            }),
+        ),
+    }
+}
+
+fn sync_apply_quarantine_details(
+    report: &ryeos_app::sync_apply_quarantine_report::SyncApplyQuarantineReport,
+) -> serde_json::Value {
+    let lines: Vec<String> = report.jobs.iter().map(sync_apply_quarantine_line).collect();
+    serde_json::json!({
+        "message": format!(
+            "{} project snapshot apply(s) quarantined at startup: recovery could not resolve them, so the node started without them",
+            report.jobs.len() as u64 + report.omitted
+        ),
+        "written_at": report.written_at,
+        "jobs": report.jobs,
+        "omitted": report.omitted,
+        "details": lines,
+        "note": "the apply's transaction directory is kept untouched under <project>/.ai/state/project-apply-transactions/<transaction id>; surfaces the apply moved aside were not restored",
+        "fix": "inspect each named transaction directory; restore the originals it holds by hand if the project needs them, then remove the directory to clear this warning on the next start. A job whose operation is undecodable has no directory to inspect",
+    })
 }
 
 fn stale_publication_check(
@@ -5681,6 +5744,53 @@ fn policy_carry_choices(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod sync_apply_quarantine_doctor {
+        use super::*;
+        use ryeos_app::sync_apply_quarantine_report::{SyncApplyQuarantineEntry, write_report};
+        use ryeos_core_tools::actions::doctor::{OK, WARN};
+
+        fn entry(job_id: &str, path: Option<&str>) -> SyncApplyQuarantineEntry {
+            SyncApplyQuarantineEntry {
+                job_id: job_id.to_owned(),
+                code: "journal_unreadable".to_owned(),
+                detail: "journal is schema 1".to_owned(),
+                quarantined_at: "2026-11-20T00:00:00Z".to_owned(),
+                project_path: path.map(|_| "/work/proj".to_owned()),
+                transaction_id: path.map(|_| "tx-1".to_owned()),
+                transaction_path: path.map(str::to_owned),
+            }
+        }
+
+        #[test]
+        fn ok_without_a_report_and_warns_naming_the_directory_and_the_unrestored_originals() {
+            let app = tempfile::TempDir::new().unwrap();
+            let state_dir = ryeos_engine::roots::RuntimeRoot::new(app.path().to_path_buf()).state();
+            std::fs::create_dir_all(&state_dir).unwrap();
+            assert_eq!(sync_apply_quarantine_check(app.path()).status, OK);
+
+            let transaction = "/work/proj/.ai/state/project-apply-transactions/tx-1";
+            write_report(
+                &state_dir,
+                vec![
+                    entry("project-snapshot-apply:tx-1", Some(transaction)),
+                    entry("project-snapshot-apply:bad", None),
+                ],
+            )
+            .unwrap();
+            let result = sync_apply_quarantine_check(app.path());
+            assert_eq!(result.status, WARN);
+            let json = serde_json::to_string(&result.detail).unwrap();
+            assert!(json.contains(transaction), "{json}");
+            assert!(json.contains("never restored"), "{json}");
+            assert!(json.contains("restore them by hand"), "{json}");
+            assert!(json.contains("journal_unreadable"), "{json}");
+            assert!(
+                json.contains("undecodable, so no transaction directory path is known"),
+                "{json}"
+            );
+        }
+    }
 
     mod host_access_doctor {
         use super::*;

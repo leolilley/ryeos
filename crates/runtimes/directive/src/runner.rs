@@ -328,6 +328,13 @@ fn tool_call_limit_error() -> String {
     })
 }
 
+/// What the model sees for a call that sat after a failed `directive_return`
+/// in the same batch: the call did not run, and may be proposed again.
+fn tool_not_run_after_failed_return_error() -> String {
+    serde_json::to_string(&crate::resume::failed_return_refusal_body())
+        .expect("fixed failed-return refusal envelope serializes")
+}
+
 /// Error observations are model-visible transcript data. Keep them useful but
 /// bounded independently of successful tool output, and never copy a daemon
 /// error message (which can contain filesystem, credential, or policy detail)
@@ -574,6 +581,16 @@ pub enum State {
         operation_id: String,
         raw_args: String,
         malformed: Option<ryeos_runtime::MalformedCall>,
+        /// The calls after this one in its batch. A successful return ends
+        /// the run and abandons them; a failed one answers each with a
+        /// refusal and never runs it.
+        siblings: Vec<ToolOccurrence>,
+    },
+    /// Answers every call after a failed `directive_return` with the
+    /// `tool_not_run_after_failed_return` refusal, in proposal order. A call
+    /// whose start is already recorded gets only its result.
+    SettlingOwedSiblings {
+        siblings: Vec<ToolOccurrence>,
     },
     FiringHooks {
         occurrence: ryeos_runtime::callback::HookDispatchOccurrence,
@@ -675,6 +692,9 @@ pub struct Runner {
     /// Connection pooling keeps TCP/TLS handshakes to a minimum.
     http_client: reqwest::Client,
     resume_pending_tools: Vec<ToolOccurrence>,
+    /// Calls after a recovered failed `directive_return` that still owe a
+    /// refusal result.
+    resume_owed_siblings: Vec<ToolOccurrence>,
     /// Malformed-argument facts of the turn just recorded, read when its
     /// tool calls become occurrences.
     turn_malformed_calls: Vec<ryeos_runtime::MalformedCall>,
@@ -1479,6 +1499,7 @@ impl Runner {
                 .build()
                 .expect("reqwest client builder"),
             resume_pending_tools: Vec::new(),
+            resume_owed_siblings: Vec::new(),
             turn_malformed_calls: Vec::new(),
             consecutive_length_turns: 0,
             resume_disposition: ResumeDisposition::ContinueProvider,
@@ -1519,6 +1540,7 @@ impl Runner {
         let image_run = resume.images;
         config.messages = resume.messages;
         let mut pending_tools = resume.pending_tools;
+        let owed_siblings = resume.owed_siblings;
         let started_tool_occurrences = resume.started_tool_occurrences;
         let resume_disposition = resume.disposition;
         let resume_active_provider_turn = resume.active_provider_turn;
@@ -1532,6 +1554,7 @@ impl Runner {
                 .ok_or_else(|| anyhow::anyhow!("resume provider-turn coordinate overflow"))?;
             if active_turn != expected
                 || !pending_tools.is_empty()
+                || !owed_siblings.is_empty()
                 || !matches!(resume_disposition, ResumeDisposition::ContinueProvider)
             {
                 anyhow::bail!(
@@ -1598,6 +1621,7 @@ impl Runner {
         }
         runner.initial_turn = last_turn_coordinate;
         runner.resume_pending_tools = pending_tools;
+        runner.resume_owed_siblings = owed_siblings;
         runner.resume_disposition = resume_disposition;
         runner.resume_active_provider_turn = resume_active_provider_turn;
         runner.provider_retry_testimony_digests = provider_retry_testimony_digests;
@@ -1806,6 +1830,9 @@ impl Runner {
                     resume_to: Box::new(State::CheckingContinuation),
                 },
                 ResumeDisposition::CheckContinuation => State::CheckingContinuation,
+                ResumeDisposition::SettleOwedSiblings => State::SettlingOwedSiblings {
+                    siblings: std::mem::take(&mut self.resume_owed_siblings),
+                },
                 ResumeDisposition::FinalizeDirectiveReturn { outputs } => {
                     State::FinalizingDirectiveReturn { outputs }
                 }
@@ -3531,6 +3558,7 @@ impl Runner {
                                 operation_id: occurrence.operation_id,
                                 raw_args: tc.arguments.to_string(),
                                 malformed: occurrence.malformed,
+                                siblings: pending[index + 1..].to_vec(),
                             }
                         } else if self.tool_refused_at_hard_stop(&tc.name) {
                             // Refused before it takes tool-call budget; the
@@ -3930,6 +3958,7 @@ impl Runner {
                     operation_id,
                     raw_args,
                     malformed,
+                    siblings,
                 } => {
                     // directive_return is a lifecycle signal, not a
                     // dispatchable tool. The LLM calls it using the
@@ -4011,7 +4040,10 @@ impl Runner {
 
                     // Validation or parse failure: fire tool_call_result,
                     // push error as tool message, and let the LLM retry.
-                    // (Non-fatal — the LLM can correct its outputs.)
+                    // (Non-fatal — the LLM can correct its outputs.) The calls
+                    // after it in the batch are not run; each is answered with
+                    // a refusal so the next request holds a result for every
+                    // call the assistant message names.
                     let failure_size = tool_result_content.len() as u64;
                     let failure_result = RenderedToolResult {
                         tool: DIRECTIVE_RETURN_TOOL.to_string(),
@@ -4034,12 +4066,31 @@ impl Runner {
                         };
                         continue;
                     }
+                    block_at_directive_recovery_test_cut(
+                        &self.callback,
+                        "failed_directive_return_recorded",
+                    )
+                    .await;
                     self.messages.push(ProviderMessage::tool_result_with_status(
                         call_id,
                         tool_result_content,
                         ToolResultStatus::Error,
                     ));
-                    State::CheckingContinuation
+                    State::SettlingOwedSiblings { siblings }
+                }
+
+                State::SettlingOwedSiblings { siblings } => {
+                    let mut recovery_required = None;
+                    for sibling in &siblings {
+                        if let Err(error) = self.refuse_sibling_of_failed_return(sibling).await {
+                            recovery_required = Some(error);
+                            break;
+                        }
+                    }
+                    match recovery_required {
+                        Some(error) => State::RecoveryRequired { error },
+                        None => State::CheckingContinuation,
+                    }
                 }
 
                 State::FiringHooks {
@@ -4732,6 +4783,39 @@ impl Runner {
             images: Vec::new(),
             dropped: Vec::new(),
         }
+    }
+
+    /// Record the start (unless the record already holds it) and a
+    /// `tool_not_run_after_failed_return` error result for one call that sat
+    /// after a failed `directive_return`. The call is never run and takes no
+    /// tool-call budget.
+    async fn refuse_sibling_of_failed_return(
+        &mut self,
+        occurrence: &ToolOccurrence,
+    ) -> Result<(), String> {
+        let tc = &occurrence.call;
+        if !occurrence.start_recorded {
+            self.callback
+                .emit_tool_dispatch(&ryeos_runtime::callback_client::ToolDispatchEvent {
+                    operation_id: &occurrence.operation_id,
+                    tool: &tc.name,
+                    call_id: tc.id.as_deref().unwrap_or_default(),
+                    item_ref: self.dispatcher.item_ref(&tc.name).as_deref(),
+                    turn: occurrence.turn,
+                    call_index: occurrence.call_index,
+                    effective_caps: self.harness.effective_caps(),
+                })
+                .await
+                .map_err(|e| format!("resume-critical callback emit_tool_dispatch failed: {e}"))?;
+        }
+        let rendered =
+            Self::rendered_error_envelope(&tc.name, tool_not_run_after_failed_return_error());
+        self.settle_tool_result(
+            occurrence.operation_id.clone(),
+            tc.id.clone().unwrap_or_default(),
+            rendered,
+        )
+        .await
     }
 
     /// Emit the result event and append the transcript message for one settled
