@@ -3380,7 +3380,15 @@ async fn hold_shutdown_owners<T>(
     loop {
         interval.tick().await;
         if rechecking {
-            match reverify(&retained_owners) {
+            // A panicking re-check keeps holding: unwinding would drop custody.
+            let verdict = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                reverify(&retained_owners)
+            }))
+            .unwrap_or_else(|_| {
+                tracing::error!("shutdown hold re-check panicked; the hold keeps custody");
+                HoldRecheck::StillHeld
+            });
+            match verdict {
                 HoldRecheck::Cleared => {
                     tracing::warn!(
                         shutdown_outcome = "cleanup_reproved",
@@ -7743,16 +7751,48 @@ async fn drain_running_threads(state: &AppState, latch: &DrainLatch) -> DrainOut
             }
         }
     };
-    let other_legs_clean = external_candidate_imports_drained
-        && persistent_session_pool_drained
-        && persistent_session_workers_drained
-        && attached_snapshot_clean
-        && attached_drained
-        && in_process_drained
-        && in_process_authoritative_clean;
-    let clean = other_legs_clean && launch_owners_drained;
+    drain_verdict(
+        DrainLegs {
+            external_candidate_imports_drained,
+            persistent_session_pool_drained,
+            persistent_session_workers_drained,
+            attached_snapshot_clean,
+            attached_drained,
+            in_process_drained,
+            in_process_authoritative_clean,
+            launch_owners_drained,
+        },
+        mode,
+        deferred,
+    )
+}
+
+/// The legs of a finished drain, each true when proved.
+#[derive(Clone, Copy)]
+struct DrainLegs {
+    external_candidate_imports_drained: bool,
+    persistent_session_pool_drained: bool,
+    persistent_session_workers_drained: bool,
+    attached_snapshot_clean: bool,
+    attached_drained: bool,
+    in_process_drained: bool,
+    in_process_authoritative_clean: bool,
+    launch_owners_drained: bool,
+}
+
+/// Selects the drain outcome from its legs. Only a Normal stop whose sole
+/// open leg is the launch-owner wait may recover later; any other false leg,
+/// or a Latched stop, is plain `Unproved`.
+fn drain_verdict(legs: DrainLegs, mode: DrainMode, deferred: DeferredRows) -> DrainOutcome {
+    let other_legs_clean = legs.external_candidate_imports_drained
+        && legs.persistent_session_pool_drained
+        && legs.persistent_session_workers_drained
+        && legs.attached_snapshot_clean
+        && legs.attached_drained
+        && legs.in_process_drained
+        && legs.in_process_authoritative_clean;
+    let clean = other_legs_clean && legs.launch_owners_drained;
     match (clean, mode) {
-        // Only a Normal stop can recover from the launch-owner leg alone.
         (false, DrainMode::Normal) if other_legs_clean => DrainOutcome::UnprovedLaunchOwnersOnly,
         (false, _) => DrainOutcome::Unproved,
         (true, DrainMode::Normal) => DrainOutcome::Clean,
@@ -9675,8 +9715,8 @@ mod shutdown_mapping_tests {
 #[cfg(test)]
 mod shutdown_custody_tests {
     use super::{
-        DrainOutcome, HoldRecheck, complete_shutdown_drain, launch_owner_wait_deadline,
-        map_shutdown_drain_join, registry_reading_empty,
+        DeferredRows, DrainLegs, DrainMode, DrainOutcome, HoldRecheck, complete_shutdown_drain,
+        drain_verdict, launch_owner_wait_deadline, map_shutdown_drain_join, registry_reading_empty,
     };
     use std::future::Future as _;
     use std::sync::Arc;
@@ -9887,11 +9927,84 @@ mod shutdown_custody_tests {
         assert_eq!(launch_owner_wait_deadline(base, late), late + budget);
     }
 
+    fn all_legs() -> DrainLegs {
+        DrainLegs {
+            external_candidate_imports_drained: true,
+            persistent_session_pool_drained: true,
+            persistent_session_workers_drained: true,
+            attached_snapshot_clean: true,
+            attached_drained: true,
+            in_process_drained: true,
+            in_process_authoritative_clean: true,
+            launch_owners_drained: true,
+        }
+    }
+
+    #[test]
+    fn drain_verdict_recovers_only_from_the_launch_owner_leg_alone() {
+        let verdict = |legs, mode| drain_verdict(legs, mode, DeferredRows::default());
+        assert!(matches!(
+            verdict(all_legs(), DrainMode::Normal),
+            DrainOutcome::Clean
+        ));
+        assert!(matches!(
+            verdict(all_legs(), DrainMode::Latched),
+            DrainOutcome::ProcessCleanRowsDeferred(_)
+        ));
+        let mut only_owners = all_legs();
+        only_owners.launch_owners_drained = false;
+        assert!(matches!(
+            verdict(only_owners, DrainMode::Normal),
+            DrainOutcome::UnprovedLaunchOwnersOnly
+        ));
+        assert!(matches!(
+            verdict(only_owners, DrainMode::Latched),
+            DrainOutcome::Unproved
+        ));
+        let others: [fn(&mut DrainLegs); 7] = [
+            |l| l.external_candidate_imports_drained = false,
+            |l| l.persistent_session_pool_drained = false,
+            |l| l.persistent_session_workers_drained = false,
+            |l| l.attached_snapshot_clean = false,
+            |l| l.attached_drained = false,
+            |l| l.in_process_drained = false,
+            |l| l.in_process_authoritative_clean = false,
+        ];
+        for break_leg in others {
+            for owners_drained in [true, false] {
+                for mode in [DrainMode::Normal, DrainMode::Latched] {
+                    let mut legs = all_legs();
+                    break_leg(&mut legs);
+                    legs.launch_owners_drained = owners_drained;
+                    assert!(
+                        matches!(verdict(legs, mode), DrainOutcome::Unproved),
+                        "another false leg is plain Unproved"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn panicking_recheck_keeps_custody() {
+        let (released, calls) = run_hold(
+            DrainOutcome::UnprovedLaunchOwnersOnly,
+            Duration::from_millis(900),
+            |_| panic!("injected re-check panic"),
+        )
+        .await;
+        assert!(!released);
+        assert!(calls >= 2, "the hold kept re-checking after the panic");
+    }
+
     #[test]
     fn launch_owner_budget_fits_below_the_smallest_force_stop_window() {
         let budget = ryeos_app::process::LAUNCH_OWNER_UNWIND_BUDGET;
         let grace = Duration::from_secs(ryeos_app::process::MAX_GRACEFUL_SHUTDOWN_GRACE_SECS);
-        // runit force-stops a service 10 s after the stop request.
+        // runit force-stops a service 10 s after the stop request. This only
+        // pins the owner wait itself: the import, pool and worker drains that
+        // run before the kill deadline can take about three graces on their
+        // own, and a stop that overruns the window ends as Unproved.
         assert!(grace + budget < Duration::from_secs(10));
         assert!(budget > Duration::ZERO);
     }
