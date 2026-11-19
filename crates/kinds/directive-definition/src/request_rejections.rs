@@ -177,7 +177,7 @@ mod tests {
             row("provider_x", &[400], &["a\nb"]),
         ] {
             assert!(
-                validate_request_rejections(&[bad.clone()], "").is_err(),
+                validate_request_rejections(std::slice::from_ref(&bad), "").is_err(),
                 "{bad:?}"
             );
         }
