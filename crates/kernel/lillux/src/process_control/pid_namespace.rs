@@ -273,7 +273,13 @@ fn observe_init(pid: u32, start: u64) -> Result<InitObservation, String> {
     // SAFETY: pidfd_open returned one new uniquely owned descriptor.
     let pidfd = unsafe { OwnedFd::from_raw_fd(raw) };
     match linux::read_process_stat(pid) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+        // A pid that exits between pidfd_open and this read surfaces as
+        // ENOENT (the /proc entry is gone) or ESRCH (the entry opened but
+        // the task was reaped before the read). Both mean it is gone.
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                || error.raw_os_error() == Some(libc::ESRCH) =>
+        {
             return Ok(InitObservation::Gone);
         }
         Err(error) => return Err(format!("observe recorded namespace init: {error}")),
