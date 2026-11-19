@@ -270,7 +270,7 @@ fn inspect_jpeg(bytes: &[u8]) -> Result<(u32, u32), ImageRefusal> {
         offset += 2;
         match marker {
             0x01 | 0xD0..=0xD7 => continue,
-            0xD8 | 0xD9 | 0xDA => {
+            0xD8..=0xDA => {
                 return Err(ImageRefusal::Malformed("jpeg has no frame header"));
             }
             _ => {}
