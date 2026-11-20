@@ -470,6 +470,183 @@ mod tests {
         );
     }
 
+    fn fake_hash(byte: char) -> String {
+        byte.to_string().repeat(64)
+    }
+
+    fn fake_inputs() -> Value {
+        serde_json::json!({
+            "resolver": {"source": "fake", "max_bytes": 1},
+            "hosts": {"source": "fake", "max_bytes": 1},
+        })
+    }
+
+    fn fake_settings() -> Value {
+        serde_json::json!({
+            "owner_id": "fake-owner",
+            "plan": "fake-plan",
+            "region": "fake-region",
+            "sandbox_group_id": "fake-group",
+            "schema": 2,
+            "tls_roots_der_base64": ["fake"],
+        })
+    }
+
+    /// Bodies with the key sets and value types of the pre-141 documents an
+    /// operator moved aside from a real node (a schema 18 placement, a schema
+    /// 1 production binding, schema 5 qualifications over https and relay),
+    /// every value replaced by an obvious constant.
+    fn real_shaped_bodies() -> Vec<(&'static str, &'static str, Value, bool)> {
+        let placement = serde_json::json!({
+            "kind": "node",
+            "schema": 18,
+            "protocol": "fake.protocol",
+            "workload": {
+                "kind": "qualification_structured_session",
+                "provider_declaration_id": "fake-provider",
+                "provider_configuration_destination": "fake-destination",
+                "requirement_digest": fake_hash('1'),
+                "worker_profile_hash": fake_hash('1'),
+                "runtime_manifest_hash": fake_hash('1'),
+                "runtime_member_sha256": fake_hash('1'),
+                "configuration_adapter_artifact_hash": fake_hash('1'),
+                "configuration_adapter_artifact_bytes": 1,
+                "connector_protocol": "fake.connector",
+                "connector_artifact_hash": fake_hash('1'),
+                "connector_artifact_bytes": 1,
+            },
+            "backend": "fake-backend",
+            "account": "fake-account",
+            "capacity_group": "fake-group",
+            "credential_generation": fake_hash('c'),
+            "settings_schema_digest": fake_hash('2'),
+            "settings_digest": fake_hash('2'),
+            "settings": fake_settings(),
+            "backend_artifact_hash": fake_hash('3'),
+            "backend_artifact_bytes": 1,
+            "supervisor_artifact_hash": fake_hash('3'),
+            "supervisor_artifact_bytes": 1,
+            "guest_runtime_manifest_hash": fake_hash('3'),
+            "runtime_qualification": null_value(),
+            "runtime_content_qualification": null_value(),
+            "launcher_artifact_hash": fake_hash('3'),
+            "launcher_artifact_bytes": 1,
+            "network_policy": "fake",
+            "storage_policy": "fake",
+            "cleanup_proof": "fake",
+            "provider_network_inputs": fake_inputs(),
+            "controller_transport": {"schema": 1, "route_contract": "fake"},
+            "controller_tls_root_certificates_der_base64": [],
+            "max_active": 1,
+            "timeout_seconds": 1,
+            "native_work_steps": 1,
+        });
+        let production = serde_json::json!({
+            "kind": "node",
+            "schema": 1,
+            "protocol": "fake.protocol",
+            "backend": "fake-backend",
+            "account": "fake-account",
+            "provider_group_id": "fake-group",
+            "credential_generation": fake_hash('c'),
+            "adapter_artifact_hash": fake_hash('4'),
+            "snapshot_spec_sha256": fake_hash('4'),
+            "settings_digest": fake_hash('4'),
+            "settings": fake_settings(),
+            "network_inputs": fake_inputs(),
+            "contact_timeout_seconds": 1,
+            "maximum_bootstrap_lifetime_seconds": 1,
+            "maximum_upload_bytes": 1,
+        });
+        let qualification = |launch_shape: Value| {
+            serde_json::json!({
+                "kind": "node",
+                "schema": 5,
+                "protocol": "fake.protocol",
+                "production_binding_id": "fake-producer",
+                "production_binding_digest": fake_hash('5'),
+                "provider_spec_digest": fake_hash('5'),
+                "settings_digest": fake_hash('5'),
+                "settings": fake_settings(),
+                "verifier_artifact_hash": fake_hash('5'),
+                "consumer_verifiers": {
+                    "guest_wire": {"scenario_source_digest": fake_hash('5'), "verifier_artifact_hash": fake_hash('5'), "archive_budget": {}},
+                    "remote_codex": {"scenario_source_digest": fake_hash('5'), "verifier_artifact_hash": fake_hash('5'), "archive_budget": {}},
+                },
+                "launch_shape": launch_shape,
+                "contact_timeout_seconds": 1,
+                "delivery_timeout_seconds": 1,
+                "maximum_lifetime_seconds": 1,
+            })
+        };
+        vec![
+            (
+                external_execution::SECTION_NAME,
+                "placement",
+                placement,
+                true,
+            ),
+            (
+                runtime_snapshot_production::SECTION_NAME,
+                "production",
+                production,
+                true,
+            ),
+            (
+                runtime_snapshot_qualification::SECTION_NAME,
+                "qualification-https",
+                qualification(serde_json::json!({
+                    "controller_transport": "fake",
+                    "sandbox_network_policy": {"kind": "fake", "hosts": []},
+                    "network_inputs": fake_inputs(),
+                })),
+                false,
+            ),
+            (
+                runtime_snapshot_qualification::SECTION_NAME,
+                "qualification-relay",
+                qualification(serde_json::json!({
+                    "controller_transport": "fake",
+                    "sandbox_network_policy": {"kind": "fake"},
+                    "network_inputs": null_value(),
+                })),
+                false,
+            ),
+        ]
+    }
+
+    fn null_value() -> Value {
+        Value::Null
+    }
+
+    #[test]
+    fn real_shaped_stale_documents_report_their_handles_through_the_signed_path() {
+        for (section, id, body, carries_credential) in real_shaped_bodies() {
+            let node = stopped_node();
+            let path = write_signed(&node, section, id, &body);
+            let report = retire_binding(request(&node, &format!("{section}/{id}"), false)).unwrap();
+            assert!(report.removed && !path.exists(), "{section}/{id}");
+            match (&report.handles, carries_credential) {
+                (
+                    RetiredHandles::Credential {
+                        backend,
+                        account,
+                        credential_generation,
+                    },
+                    true,
+                ) => {
+                    assert_eq!(
+                        (backend.as_str(), account.as_str()),
+                        ("fake-backend", "fake-account")
+                    );
+                    assert!(lillux::valid_hash(credential_generation), "{section}/{id}");
+                }
+                (RetiredHandles::NoneCarried { .. }, false) => {}
+                (other, _) => panic!("{section}/{id}: unexpected handles {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn a_binding_can_be_composed_again_after_it_is_retired() {
         let node = stopped_node();
