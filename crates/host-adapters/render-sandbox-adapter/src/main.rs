@@ -2773,7 +2773,7 @@ mod offline_fixture_tests {
         assert!(ryeos_remote_lease_core::lease_end_passed(&past));
         assert!(!ryeos_remote_lease_core::lease_end_passed(&future));
         assert!(!ryeos_remote_lease_core::lease_end_passed(
-            &LatestLeaseEnd::Unbounded
+            &LatestLeaseEnd::Unbounded {}
         ));
         // An invalid stated end is refused at request validation and never
         // reads as passed.

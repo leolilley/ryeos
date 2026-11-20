@@ -7182,7 +7182,7 @@ fn exercise_activation_fault(fault: &str) {
         ));
         let termination = TerminationIntent {
             termination_request_digest: "7".repeat(64),
-            latest_lease_end: LatestLeaseEnd::Unbounded,
+            latest_lease_end: LatestLeaseEnd::Unbounded {},
         };
         let terminate = LifecycleAdapterRequest::Terminate {
             common: common("terminate"),
@@ -7311,7 +7311,7 @@ fn exercise_activation_fault(fault: &str) {
 
     let termination = TerminationIntent {
         termination_request_digest: "7".repeat(64),
-        latest_lease_end: LatestLeaseEnd::Unbounded,
+        latest_lease_end: LatestLeaseEnd::Unbounded {},
     };
     let terminate = LifecycleAdapterRequest::Terminate {
         common: common("terminate"),

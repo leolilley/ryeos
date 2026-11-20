@@ -2813,7 +2813,7 @@ fn latest_lease_end_from(
     lifetime_seconds: u32,
 ) -> LatestLeaseEnd {
     if !lease_admitted {
-        return LatestLeaseEnd::Unbounded;
+        return LatestLeaseEnd::Unbounded {};
     }
     let end = i64::from(lifetime_seconds)
         .checked_mul(1_000)
@@ -2821,7 +2821,7 @@ fn latest_lease_end_from(
         .filter(|end| (1..=MAX_LATEST_LEASE_END_UNIX_MS).contains(end));
     match end {
         Some(unix_ms) => LatestLeaseEnd::Bounded { unix_ms },
-        None => LatestLeaseEnd::Unbounded,
+        None => LatestLeaseEnd::Unbounded {},
     }
 }
 
@@ -3292,7 +3292,7 @@ mod tests {
         // No retained admission: no attested lifetime bound.
         assert_eq!(
             latest_lease_end_from(false, 1_000_000, 600),
-            LatestLeaseEnd::Unbounded
+            LatestLeaseEnd::Unbounded {}
         );
         // A statement the contract would refuse is never sent.
         for (deadline, lifetime) in [
@@ -3303,7 +3303,7 @@ mod tests {
         ] {
             assert_eq!(
                 latest_lease_end_from(true, deadline, lifetime),
-                LatestLeaseEnd::Unbounded,
+                LatestLeaseEnd::Unbounded {},
                 "{deadline} {lifetime}"
             );
         }

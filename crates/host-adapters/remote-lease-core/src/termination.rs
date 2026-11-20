@@ -40,6 +40,9 @@ mod tests {
         assert!(lease_end_passed_at(&end, limit + 1));
         assert!(!lease_end_passed_at(&end, 1_000_000));
         assert!(!lease_end_passed_at(&end, 0));
-        assert!(!lease_end_passed_at(&LatestLeaseEnd::Unbounded, i64::MAX));
+        assert!(!lease_end_passed_at(
+            &LatestLeaseEnd::Unbounded {},
+            i64::MAX
+        ));
     }
 }

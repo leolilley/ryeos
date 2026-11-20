@@ -1158,7 +1158,7 @@ mod tests {
     }
 
     fn intent() -> TerminationIntent {
-        intent_ending(LatestLeaseEnd::Unbounded)
+        intent_ending(LatestLeaseEnd::Unbounded {})
     }
 
     fn intent_ending(latest_lease_end: LatestLeaseEnd) -> TerminationIntent {
@@ -1357,7 +1357,7 @@ mod tests {
 
     #[test]
     fn a_not_found_before_the_latest_lease_end_or_for_an_unbounded_lease_stays_pending() {
-        for end in [FAR_FUTURE_END, LatestLeaseEnd::Unbounded] {
+        for end in [FAR_FUTURE_END, LatestLeaseEnd::Unbounded {}] {
             assert!(matches!(
                 run_reconcile_termination(end, not_found()),
                 LifecycleAdapterResponse::TerminationPending { .. }
@@ -1389,7 +1389,7 @@ mod tests {
     #[test]
     fn an_observed_termination_reports_its_basis_whatever_the_lease_end() {
         let response = run_reconcile_termination(
-            LatestLeaseEnd::Unbounded,
+            LatestLeaseEnd::Unbounded {},
             envelope("get", 200, get_fields(true, "terminated", Some(1))),
         );
         assert_eq!(basis_of(&response), Some(TerminalBasis::ObservedTerminated));

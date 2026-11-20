@@ -2428,7 +2428,7 @@ mod tests {
             .unwrap();
             let termination = ryeos_external_execution_contract::TerminationIntent {
                 termination_request_digest: "d".repeat(64),
-                latest_lease_end: ryeos_external_execution_contract::LatestLeaseEnd::Unbounded,
+                latest_lease_end: ryeos_external_execution_contract::LatestLeaseEnd::Unbounded {},
             };
             let request = LifecycleAdapterRequest::ReconcileTermination {
                 common,

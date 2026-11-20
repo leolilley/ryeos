@@ -1337,8 +1337,12 @@ pub const MAX_LATEST_LEASE_END_UNIX_MS: i64 = 32_503_680_000_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LatestLeaseEnd {
-    Bounded { unix_ms: i64 },
-    Unbounded,
+    Bounded {
+        unix_ms: i64,
+    },
+    /// A struct variant so the internally tagged form refuses stray fields
+    /// like every other wire shape here.
+    Unbounded {},
 }
 
 impl LatestLeaseEnd {
@@ -2838,7 +2842,7 @@ mod tests {
                 "{bad}"
             );
         }
-        assert!(LatestLeaseEnd::Unbounded.validate().is_ok());
+        assert!(LatestLeaseEnd::Unbounded {}.validate().is_ok());
         // Strictly past end plus grace.
         assert!(!end.is_past_with_grace(1_000_000 + 600_000, 600_000));
         assert!(end.is_past_with_grace(1_000_000 + 600_001, 600_000));
@@ -2846,7 +2850,7 @@ mod tests {
         // An unreadable clock, an unbounded lease and an invalid end never decide.
         assert!(!end.is_past_with_grace(0, 0));
         assert!(!end.is_past_with_grace(-5, 0));
-        assert!(!LatestLeaseEnd::Unbounded.is_past_with_grace(i64::MAX, 0));
+        assert!(!LatestLeaseEnd::Unbounded {}.is_past_with_grace(i64::MAX, 0));
         assert!(!LatestLeaseEnd::Bounded { unix_ms: 0 }.is_past_with_grace(i64::MAX, 0));
         let request = |latest_lease_end| LifecycleAdapterRequest::Terminate {
             common: common(),
@@ -2899,7 +2903,7 @@ mod tests {
             basis,
         };
         let bounded = request(LatestLeaseEnd::Bounded { unix_ms: 5 });
-        let unbounded = request(LatestLeaseEnd::Unbounded);
+        let unbounded = request(LatestLeaseEnd::Unbounded {});
         assert!(
             response(TerminalBasis::PastLatestLeaseEndNotFound)
                 .validate_for(&bounded)
@@ -2927,7 +2931,7 @@ mod tests {
             },
             termination: TerminationIntent {
                 termination_request_digest: "f".repeat(64),
-                latest_lease_end: LatestLeaseEnd::Unbounded,
+                latest_lease_end: LatestLeaseEnd::Unbounded {},
             },
         };
         let wrong = LifecycleAdapterResponse::AllocationPending {
