@@ -4293,6 +4293,7 @@ impl PersistentSessionPool {
                         wire,
                         lifecycle,
                         Arc::clone(&self.streams.backlog),
+                        &self.inner.shutdown,
                     ),
                     Err(error) => Err(PooledReadyFailure {
                         cleanup_unproved: original_start.has_retained_custody()
@@ -4759,6 +4760,7 @@ impl ExclusivePersistentSessionReservation {
             &self.contract.wire,
             &self.contract.lifecycle,
             Arc::clone(&self.backlog),
+            &self.inner.shutdown,
             Some(registration.clone()),
         ) {
             Ok(process) => {
@@ -5401,6 +5403,7 @@ fn ready_pooled_process(
     wire: &PersistentSessionWireContract,
     lifecycle: &PersistentSessionLifecycleContract,
     backlog: Arc<BacklogBudget>,
+    shutdown: &AtomicBool,
 ) -> std::result::Result<SessionProcess, PooledReadyFailure> {
     if original_start.has_original_trusted_obligation() {
         // Keep the original refusal: no held/runtime/driver readiness join exists.
@@ -5456,7 +5459,7 @@ fn ready_pooled_process(
             original_start,
         });
     }
-    match ready_process(started, wire, lifecycle, backlog) {
+    match ready_process(started, wire, lifecycle, backlog, shutdown) {
         Ok(mut process) => {
             process.pooled_start = Some(original_start);
             Ok(process)
@@ -5493,8 +5496,9 @@ fn ready_process(
     wire: &PersistentSessionWireContract,
     lifecycle: &PersistentSessionLifecycleContract,
     backlog: Arc<BacklogBudget>,
+    shutdown: &AtomicBool,
 ) -> std::result::Result<SessionProcess, ReadyProcessFailure> {
-    ready_process_registered(started, wire, lifecycle, backlog, None)
+    ready_process_registered(started, wire, lifecycle, backlog, shutdown, None)
 }
 
 fn ready_process_registered(
@@ -5502,6 +5506,7 @@ fn ready_process_registered(
     wire: &PersistentSessionWireContract,
     lifecycle: &PersistentSessionLifecycleContract,
     backlog: Arc<BacklogBudget>,
+    shutdown: &AtomicBool,
     registration: Option<ExclusiveCustodyRegistration>,
 ) -> std::result::Result<SessionProcess, ReadyProcessFailure> {
     let StartedPersistentSession {
@@ -5617,6 +5622,15 @@ fn ready_process_registered(
     let frame = match loop {
         match reader.read_next(&mut socket, wire.max_frame_bytes) {
             Ok(Some(frame)) => break Ok(frame),
+            // A worker that has not sent readiness when the daemon stops is
+            // abandoned: the refusal below kills and reaps the exact process,
+            // so the admitted start settles inside the drain instead of
+            // outliving it for the rest of the readiness timeout.
+            Ok(None) if shutdown.load(Ordering::Acquire) => {
+                break Err(anyhow!(
+                    "persistent-session readiness abandoned for daemon shutdown"
+                ));
+            }
             Ok(None) if !deadline.has_elapsed() => {
                 sleep_until_io_retry(deadline);
                 continue;
@@ -7506,8 +7520,13 @@ mod tests {
         started.running = owner;
         let pool = PersistentSessionPool::new();
         let backlog = Arc::clone(&pool.streams.backlog);
-        let process = match ready_process(started, &test_wire(), &owned_start_lifecycle(), backlog)
-        {
+        let process = match ready_process(
+            started,
+            &test_wire(),
+            &owned_start_lifecycle(),
+            backlog,
+            &pool.inner.shutdown,
+        ) {
             Ok(process) => process,
             Err(failure) => panic!("returned actual owner lost readiness: {}", failure.error),
         };
@@ -7674,6 +7693,18 @@ mod tests {
     fn fake_framed_session_with_observation_sink(
         observation_sink: Option<PersistentSessionObservationSink>,
     ) -> Result<StartedPersistentSession> {
+        fake_session(observation_sink, false)
+    }
+
+    /// A worker that never sends its readiness frame.
+    fn fake_silent_session() -> Result<StartedPersistentSession> {
+        fake_session(None, true)
+    }
+
+    fn fake_session(
+        observation_sink: Option<PersistentSessionObservationSink>,
+        silent: bool,
+    ) -> Result<StartedPersistentSession> {
         use std::collections::HashMap;
 
         use ryeos_engine::contracts::{
@@ -7762,10 +7793,18 @@ while True:
     elif frame['kind'] == 'cancel':
         send('error', frame['request_id'], {'message':'fixture observed cancellation'})
 "#;
+        let script = if silent {
+            script.replace(
+                "send('ready', None, None)\n",
+                "import time\ntime.sleep(120)\n",
+            )
+        } else {
+            script.to_owned()
+        };
         let spec = PlanSubprocessSpec {
             cmd: host_executable("python3"),
             verified_command: None,
-            args: vec!["-S".into(), "-c".into(), script.into()],
+            args: vec!["-S".into(), "-c".into(), script],
             cwd: None,
             env: HashMap::new(),
             env_sources: HashMap::new(),
@@ -8091,6 +8130,7 @@ while True:
             &test_wire(),
             &owned_start_lifecycle(),
             Arc::clone(&pool.streams.backlog),
+            &pool.inner.shutdown,
         )
         .map_err(|failure| failure.error)
     }
@@ -8126,6 +8166,7 @@ while True:
             &test_wire(),
             &owned_start_lifecycle(),
             Arc::clone(&pool.streams.backlog),
+            &pool.inner.shutdown,
         ) {
             Ok(process) => {
                 let _ = process.retire();
@@ -9526,6 +9567,68 @@ while True:
                 .expect("shutdown must reject exclusive admission")
                 .to_string()
                 .contains("admission is closed for daemon shutdown")
+        );
+    }
+
+    #[test]
+    fn shutdown_abandons_an_exclusive_start_waiting_for_worker_readiness() {
+        let pool = PersistentSessionPool::new();
+        let mut lifecycle = test_lifecycle();
+        lifecycle.ready_timeout_ms = 60_000;
+        let wire = test_wire();
+        let session_id = "q".repeat(64);
+        let reservation = pool
+            .reserve_exclusive(&session_id, &lifecycle, &wire)
+            .unwrap();
+        let started = fake_silent_session().unwrap();
+        let bind = std::thread::spawn(move || reservation.bind(started).err());
+        // Let the start reach its readiness wait before the stop arrives.
+        std::thread::sleep(Duration::from_millis(500));
+
+        let begun = std::time::Instant::now();
+        let reaped = pool
+            .shutdown_and_reap_all(Duration::from_secs(10))
+            .expect("an admitted start waiting for readiness must settle inside the drain");
+        assert_eq!(reaped, 0);
+        assert!(
+            begun.elapsed() < Duration::from_secs(10),
+            "shutdown must not wait out the readiness timeout"
+        );
+        let error = bind
+            .join()
+            .unwrap()
+            .expect("the abandoned start must be refused");
+        assert!(
+            format!("{error:#}").contains("readiness abandoned for daemon shutdown"),
+            "{error:#}"
+        );
+        assert!(
+            error
+                .downcast_ref::<PersistentSessionCleanupUnproved>()
+                .is_none(),
+            "the exact process was killed and reaped, so no cleanup is unproved: {error:#}"
+        );
+        let state = pool.inner.state.lock().unwrap();
+        assert!(state.cleanup_unproved.is_none());
+        assert_eq!(state.exclusive_starts_in_flight, 0);
+        assert!(state.exclusive_reservations.is_empty());
+    }
+
+    #[test]
+    fn shutdown_still_refuses_to_settle_over_an_uncancellable_admitted_start() {
+        let pool = PersistentSessionPool::new();
+        let lifecycle = test_lifecycle();
+        let wire = test_wire();
+        let _reservation = pool
+            .reserve_exclusive(&"r".repeat(64), &lifecycle, &wire)
+            .unwrap();
+        let error = pool
+            .shutdown_and_reap_all(Duration::from_millis(300))
+            .expect_err("a start that never settles keeps shutdown unproved");
+        assert!(
+            error
+                .to_string()
+                .contains("timed out waiting for admitted starts")
         );
     }
 
