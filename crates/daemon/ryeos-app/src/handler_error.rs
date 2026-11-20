@@ -131,6 +131,23 @@ pub fn vault_name_handler_error(refusal: &crate::vault::VaultNameRefusal) -> Han
     }
 }
 
+/// The structured response for a selection that disagrees with the remote
+/// testimony: 409 because the request is well formed and conflicts with the
+/// testimony the node holds; only a different selection cures it.
+pub fn selected_qualification_handler_error(
+    refusal: &crate::operator_external_content::qualification_testimony::SelectedQualificationRefused,
+) -> HandlerError {
+    HandlerError::Structured {
+        code: refusal.code().to_owned(),
+        status: 409,
+        body: serde_json::json!({
+            "code": refusal.code(),
+            "error": refusal.to_string(),
+            "retryable": false,
+        }),
+    }
+}
+
 /// Operator-correctable refusals raised deep in app code keep their own
 /// type (and their full message for non-HTTP callers); this is the single
 /// place they become a structured response.
@@ -149,6 +166,11 @@ fn typed_operator_refusal(error: &(dyn std::error::Error + 'static)) -> Option<H
         error.downcast_ref::<ryeos_node_runtime::remote_delegation::DelegationError>()
     {
         return Some(delegation_handler_error(refusal));
+    }
+    if let Some(refused) = error
+        .downcast_ref::<crate::operator_external_content::qualification_testimony::SelectedQualificationRefused>()
+    {
+        return Some(selected_qualification_handler_error(refused));
     }
     if let Some(engine_error) = error.downcast_ref::<ryeos_engine::error::EngineError>() {
         return project_shadow_handler_error(engine_error);
@@ -247,5 +269,24 @@ mod project_shadow_tests {
             kind: "widget".to_owned(),
         });
         assert!(extract_handler_error(&error).is_none());
+    }
+
+    #[test]
+    fn selected_qualification_refusal_maps_to_409_non_retryable() {
+        let refusal = anyhow::Error::new(
+            crate::operator_external_content::qualification_testimony::SelectedQualificationRefused::new(
+                "remote product testimony differs from the selected qualification",
+            ),
+        )
+        .context("admit selection");
+        match extract_handler_error(&refusal) {
+            Some(HandlerError::Structured { code, status, body }) => {
+                assert_eq!(code, "selected_qualification_refused");
+                assert_eq!(status, 409);
+                assert_eq!(body["retryable"], false);
+            }
+            other => panic!("expected the typed refusal, got {other:?}"),
+        }
+        assert!(extract_handler_error(&anyhow::anyhow!("boom")).is_none());
     }
 }
