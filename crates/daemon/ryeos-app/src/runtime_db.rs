@@ -2715,7 +2715,20 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // that wrote such rows (a controller or origin holding retained bindings)
 // needs `ryeos node reset execution-history` on its next upgrade. A change to
 // `EXTERNAL_CONTROLLER_TRANSPORT_CONTRACT_SCHEMA` moves with this constant.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 141;
+// Epoch 142: the external placement binding document is schema 20 (http), 21
+// (relay qualification) or 22 (relay structured session), and a retained
+// generation embeds it, so a store holding retained bindings of schema 17-19
+// no longer validates on read. An epoch-141 store is a predecessor and is reset
+// without decoding; every node needs `ryeos node reset execution-history`
+// (`--schema-cut-from 141 --schema-cut-to 142`) on its next upgrade. An epoch
+// cut can also strand node-config items, which live outside the runtime
+// database and which the reset does not touch: installed external_execution,
+// runtime_snapshot_production and runtime_snapshot_qualification documents
+// signed under a retired schema are set aside as stale and reported by
+// `ryeos node doctor`; retire and compose them again after the reset. A change
+// to the binding schemas or to `RETIRED_BINDING_SCHEMAS` moves with this
+// constant.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 142;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK

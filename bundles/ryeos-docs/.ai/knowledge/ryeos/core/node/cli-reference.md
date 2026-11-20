@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-20T00:00:05Z:793a5a4822a43baf9f83ce12ef5b7131519e75c952514755c770a68c93f2b8d7:1pQ7KoGlNSWVEJf60N3hKICAe/6p0ktQyxkrOIVz3UJ134KseLKUVjXE4bfrROpHglYWy1QvwuS6oGj4mH6mBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-20T01:48:53Z:b17149a4de8169e0ccccf5792ccda52b12fe5d23d18bfa31edfe7e5ac537c3b6:52CreBoCos6iz9CHzCRAdH+uCZ+813hs25+1w4gEek4Qr8QsteOCrwnuhDsqHYszzD4lqmgvkQPMZ7hEsc0sDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -334,6 +334,18 @@ status lists them too. A launch that no current binding admits while retired
 bindings are installed is refused with `binding_retired_schema`, naming them.
 The fix is to retire the stale file (move it out of `.ai/node/<section>/` on the
 stopped node) and compose the binding again.
+
+Operator note for the runtime schema cut to epoch 142: every node must run
+`ryeos node reset execution-history --schema-cut-from 141 --schema-cut-to 142`
+on its next upgrade, because retained binding generations in the runtime
+database embed the binding document and earlier schemas no longer validate. The
+reset covers the runtime database only. Node-config items live outside it and
+the reset does not touch them: installed `external_execution` bindings,
+`runtime_snapshot_production` and `runtime_snapshot_qualification` documents
+signed under a retired schema stay on disk and are reported as stale by
+`ryeos node doctor` until you retire them and compose them again (secret
+handles are carried by the compose, so provision again only what compose
+reports missing).
 
 The `external_capacity` and `credential_profiles` rows ask the running daemon
 (`service:external-execution/status`, a 10 s deadline) what still holds
