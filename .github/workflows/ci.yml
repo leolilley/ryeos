@@ -1532,12 +1532,12 @@ jobs:
 
       - name: Session secret delivery (real isolation)
         run: |
-          "$RUNNER_TEMP/run-suite" session_secret_delivery_e2e 5 1
+          "$RUNNER_TEMP/run-suite" session_secret_delivery_e2e 6 0
 
       - name: Handoff crash recovery (real isolation)
         if: ${{ !cancelled() }}
         run: |
-          "$RUNNER_TEMP/run-suite" handoff_crash_recovery_e2e 0 0
+          "$RUNNER_TEMP/run-suite" handoff_crash_recovery_e2e 17 0
 
       - name: Show the node capability evidence
         if: ${{ always() }}

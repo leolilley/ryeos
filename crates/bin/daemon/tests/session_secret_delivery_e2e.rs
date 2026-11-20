@@ -1024,7 +1024,6 @@ async fn a_value_with_control_characters_is_refused_as_unbounded() -> Result<()>
 /// owner and the node restarts, the recovering session is refused with
 /// `session_secret_revoked` instead of replaying the earlier value.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "recovery of a live session is reached only after the reconciler marks it `recovering` and a later command re-attaches it; forcing that transition on this fixture is unproven, so where the revoked refusal surfaces (command response or daemon log) is untested"]
 async fn recovery_after_the_recipient_rule_is_withdrawn_is_refused_as_revoked() -> Result<()> {
     let reports = common::process_scopes::tempdir()?;
     let report_path = reports.path().join("report.json");

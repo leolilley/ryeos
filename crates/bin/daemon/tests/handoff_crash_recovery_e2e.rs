@@ -3647,6 +3647,24 @@ fn settled_or_host_unqualified(result: Result<()>) -> Result<()> {
     }
 }
 
+/// The terminate request that ends a session whose first command completed a
+/// turn: a completed termination must carry that command's exact completion
+/// fence, which the command response reports.
+fn completed_termination_request(
+    chain_root_id: &str,
+    command_response: &serde_json::Value,
+) -> serde_json::Value {
+    let fence = command_response
+        .get("completion_fence")
+        .or_else(|| command_response.pointer("/result/completion_fence"))
+        .cloned();
+    let mut request = serde_json::json!({"chain_root_id":chain_root_id,"reason":"completed"});
+    if let Some(fence) = fence {
+        request["completion"] = fence;
+    }
+    request
+}
+
 async fn launch_and_checkpoint_portable_worker(
     daemon: &mut DaemonHarness,
     project: &Path,
@@ -3705,14 +3723,14 @@ async fn launch_and_checkpoint_portable_worker(
         last_command = Some(response);
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    command_result.with_context(|| {
+    let first_command = command_result.with_context(|| {
         format!("portable worker never accepted its first command: {last_command:?}")
     })?;
     let (status, terminated) = daemon
         .post_execute(
             "service:worker-executions/terminate",
             ".",
-            serde_json::json!({"chain_root_id":chain_root_id,"reason":"completed"}),
+            completed_termination_request(&chain_root_id, &first_command),
         )
         .await?;
     anyhow::ensure!(
@@ -7117,17 +7135,14 @@ async fn portable_worker_fixture_launches_and_binds_a_real_hosted_session_on_qua
         last_command = Some(response);
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let _command = command_result.with_context(|| {
+    let first_command = command_result.with_context(|| {
         format!("portable worker never accepted its first command: {last_command:?}")
     })?;
     let (status, terminated) = daemon
         .post_execute(
             "service:worker-executions/terminate",
             ".",
-            serde_json::json!({
-                "chain_root_id":chain_root_id,
-                "reason":"completed",
-            }),
+            completed_termination_request(chain_root_id, &first_command),
         )
         .await?;
     anyhow::ensure!(
