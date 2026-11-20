@@ -1,0 +1,39 @@
+name: probe init profiles
+on:
+  push:
+    branches: [work/release-init-ci]
+    paths: [".github/workflows/probe-init-profiles.yml"]
+env:
+  CARGO_TERM_COLOR: always
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: sccache
+  CARGO_INCREMENTAL: "0"
+  GATE_BUILD_JOBS: 0
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - run: ./scripts/ci/prepare-runner.sh
+      - name: Refresh bundles
+        env:
+          GATE_BUNDLE_TARGET_DIR: ${{ runner.temp }}/ryeos-bundle-target
+        run: ./scripts/gate.sh --refresh-bundles --no-tests
+      - run: cargo build --locked -p ryeos-cli --bin ryeos
+      - name: Initialize every profile under every host class
+        run: |
+          mkdir -p "$TMPDIR/init-profiles-root"
+          ./tests/e2e/init-profiles/check.sh \
+            --ryeos "$PWD/target/debug/ryeos" \
+            --source "$PWD/bundles" \
+            --trust-file "$PWD/bundles/.ai/PUBLISHER_TRUST.toml" \
+            --verify-root "$TMPDIR/init-profiles-root"
