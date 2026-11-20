@@ -1517,10 +1517,14 @@ async fn planned_rollover_with_a_settling_follow_child_exits_75_and_the_run_resu
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    let status = tokio::time::timeout(Duration::from_secs(300), harness.child.wait())
-        .await
-        .expect("the service window ends within its bound")
-        .expect("wait for daemon exit");
+    let waited = tokio::time::timeout(Duration::from_secs(300), harness.child.wait()).await;
+    let Ok(waited) = waited else {
+        panic!(
+            "the service window did not end within its bound\n--- daemon stderr tail ---\n{}",
+            harness.stderr_tail(80)
+        );
+    };
+    let status = waited.expect("wait for daemon exit");
     let stderr = harness.stderr_so_far();
     assert_eq!(
         status.code(),

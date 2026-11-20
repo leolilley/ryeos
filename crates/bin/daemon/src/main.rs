@@ -7441,15 +7441,21 @@ impl AttachedSnapshotSource for AppState {
         // so a process that exits during a stop always lands in that window.
         #[cfg(feature = "crash-qualification-test-support")]
         if let Some(bound) = snapshot_hold::bound() {
-            let deadline = Instant::now() + bound;
-            while self.still_registered(thread_id)? {
-                if Instant::now() >= deadline {
-                    anyhow::bail!(
-                        "thread {thread_id} was not settled within {bound:?} of the held snapshot"
-                    );
+            // The wait runs on a runtime worker; block_in_place hands the
+            // worker's other tasks (the launch owner being waited for) to
+            // another thread so the hold cannot starve them.
+            tokio::task::block_in_place(|| {
+                let deadline = Instant::now() + bound;
+                while self.still_registered(thread_id)? {
+                    if Instant::now() >= deadline {
+                        anyhow::bail!(
+                            "thread {thread_id} was not settled within {bound:?} of the held snapshot"
+                        );
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
                 }
-                std::thread::sleep(Duration::from_millis(5));
-            }
+                Ok::<(), anyhow::Error>(())
+            })?;
         }
         Ok(self
             .state_store
