@@ -1084,7 +1084,7 @@ mod tests {
     };
     use super::*;
     use ryeos_node_runtime::config::{Config, ConfigSources};
-    use ryeos_node_runtime::state_lock::{StateLock, default_lock_path};
+    use ryeos_node_runtime::state_lock::default_lock_path;
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
