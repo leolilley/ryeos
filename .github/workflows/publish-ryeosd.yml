@@ -488,7 +488,11 @@ jobs:
           targets: ${{ steps.release-plan.outputs.targets }}
           # A rehearsal builds every image so each build-time check runs, but
           # exports none of them to a registry.
-          set: ${{ inputs.dry_run && 'standard.output=type=cacheonly,central-host.output=type=cacheonly,local-inference.output=type=cacheonly,hosted-workflow.output=type=cacheonly' || '' }}
+          set: |
+            ${{ inputs.dry_run && 'standard.output=type=cacheonly' || '' }}
+            ${{ inputs.dry_run && 'central-host.output=type=cacheonly' || '' }}
+            ${{ inputs.dry_run && 'local-inference.output=type=cacheonly' || '' }}
+            ${{ inputs.dry_run && 'hosted-workflow.output=type=cacheonly' || '' }}
           vars: |
             VERSION=${{ needs.qualify.outputs.version }}
             SOURCE_DATE_EPOCH=${{ needs.qualify.outputs.source_date_epoch }}
