@@ -3119,7 +3119,7 @@ mod tests {
             }
         };
         assert!(natural.success, "{}", natural.stderr);
-        natural_recovery.wait_empty(Duration::ZERO).unwrap();
+        natural_recovery.wait_empty(Duration::from_secs(5)).unwrap();
         provider
             .retire(&natural_recovery, Duration::from_secs(5))
             .unwrap();
