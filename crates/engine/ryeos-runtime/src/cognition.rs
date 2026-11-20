@@ -563,6 +563,16 @@ pub struct ClipRule {
     pub keep_recent: u32,
 }
 
+/// Deserialize an `Option` that must be present: a missing key is an error
+/// instead of `None`.
+fn required_option<'de, D, T>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
 /// A conversation compaction: the older part of the conversation replaced by
 /// a summary, the newest turns kept whole. Self-contained as a fold base: the
 /// pinned inputs and the summary are in it, and the window seed says where the
@@ -599,6 +609,7 @@ pub struct CompactionPayload {
     pub overflow_recoveries: u32,
     /// How the kept turns' tool results are clipped, when they are. Always
     /// present on the record; `null` means not clipped.
+    #[serde(deserialize_with = "required_option")]
     pub clip: Option<ClipRule>,
 }
 
