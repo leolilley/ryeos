@@ -351,6 +351,24 @@ impl IsolationPolicy {
 /// no-group-escape contract. Native provider selection, delegation paths, and
 /// scope configuration are deliberately absent: Lillux retains and opens those
 /// only from the protected host association at daemon boot.
+/// Largest `control_timeout_ms` a policy may sign. Shutdown waits for an
+/// admitted start that is inside a process-scope control operation, and two of
+/// them can run back to back (allocate, then prove an unlaunched scope empty),
+/// so the stop path needs 2 x control + 1 s, plus the rest of the drain, to fit
+/// the time the host leaves the daemon after it first sees the stop.
+///
+/// Measured on the Render controller (P20 restart drill): the stop request
+/// reached the daemon about 5 s after the POST, the replacement came about
+/// 31 s after the POST, so the daemon had about 25 s, and the drain outside the
+/// admitted-start wait took about 4.9 s. At 8000 ms the bound is 17 s, 22 s
+/// with the rest of the drain, leaving about 3 s of margin; a larger value
+/// would erode it (9000 ms leaves none). Render's shutdown delay itself is
+/// not readable from its API and the 30 s default assumed here is unconfirmed.
+/// This constant is the only guard: the host-class policy declares no stop
+/// budget a doctor check could compare against. Every shipped profile signs
+/// 5000 ms, which stays valid.
+pub const MAX_PROCESS_SCOPE_CONTROL_TIMEOUT_MS: u64 = 8_000;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum IsolationProcessScopePolicy {
