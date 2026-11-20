@@ -10331,6 +10331,16 @@ mod shutdown_custody_tests {
     }
 
     #[test]
+    fn snapshot_after_the_clear_does_not_list_the_settled_child() {
+        let mut source = ScriptedSource::new("T-gone");
+        source.ids.clear();
+        source.registered.borrow_mut().clear();
+        let (attached, clean, read_failed) =
+            super::normal_attached_snapshot(&source).expect("snapshot");
+        assert!(attached.is_empty() && clean && !read_failed);
+    }
+
+    #[test]
     fn null_identity_with_membership_still_held_stays_unclean() {
         let mut source = ScriptedSource::new("T-borrower");
         source.clear_between_list_and_read = true;
