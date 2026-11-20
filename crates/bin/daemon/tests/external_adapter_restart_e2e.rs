@@ -52,6 +52,7 @@ mod candidate_requirement;
 #[path = "../../../../tests/e2e/external-execution/support/independent_verifier_scenario.rs"]
 mod independent_verifier_scenario;
 
+#[cfg(all(unix, feature = "handoff-test-support"))]
 #[path = "../../../../tests/e2e/external-execution/support/independent_verifier_race.rs"]
 mod independent_verifier_race;
 
@@ -715,6 +716,7 @@ fn ordinary_linked_children(state: &Path, root: &str) -> Vec<String> {
 /// once the attempt has reached its terminal retired phase. This is an
 /// operational assertion for the real-daemon fixture, not a substitute for the
 /// verifier's independent semantic claims.
+#[cfg(all(unix, feature = "handoff-test-support"))]
 fn exact_scoped_producer_observation(state: &Path, root: &str) -> anyhow::Result<Value> {
     use anyhow::{Context as _, ensure};
 
@@ -827,6 +829,7 @@ fn exact_scoped_producer_observation(state: &Path, root: &str) -> anyhow::Result
     Ok(observation)
 }
 
+#[cfg(all(unix, feature = "handoff-test-support"))]
 fn install_signed_independent_verifier_fixture(
     state: &Path,
     keys: &common::fast_fixture::FastFixture,
@@ -880,6 +883,7 @@ fn install_signed_independent_verifier_fixture(
     common::fast_fixture::register_presigned_fixture_bundle(state, bundle_name, &bundle, keys)
 }
 
+#[cfg(all(unix, feature = "handoff-test-support"))]
 fn admit_independent_verifier_input_root(
     state: &Path,
     keys: &common::fast_fixture::FastFixture,
@@ -934,6 +938,7 @@ fn admit_independent_verifier_input_root(
     Ok(())
 }
 
+#[cfg(all(unix, feature = "handoff-test-support"))]
 async fn import_independent_verifier_tree(
     harness: &impl QualificationEndpoint,
     member: &str,
@@ -976,6 +981,7 @@ async fn import_independent_verifier_tree(
 
 /// The public service, not fixture-side hashing, produces the four identities
 /// that can subsequently be committed into the signed verifier scenario.
+#[cfg(all(unix, feature = "handoff-test-support"))]
 async fn import_independent_verifier_trees(
     harness: &impl QualificationEndpoint,
 ) -> anyhow::Result<[Value; 4]> {
@@ -1015,6 +1021,7 @@ fn require_independent_verifier_imports_match_scenario(
     Ok(())
 }
 
+#[cfg(all(unix, feature = "handoff-test-support"))]
 async fn bind_independent_verifier_tree(
     harness: &impl QualificationEndpoint,
     imported: &Value,
@@ -1043,6 +1050,7 @@ async fn bind_independent_verifier_tree(
     Ok(bound)
 }
 
+#[cfg(all(unix, feature = "handoff-test-support"))]
 fn stage_independent_verifier_inputs(
     configuration: &ryeos_codex_runtime_verifier::ExactScenario,
 ) -> anyhow::Result<(
@@ -1326,6 +1334,7 @@ fn author_independent_verifier_scenario(
     Ok(scenario)
 }
 
+#[cfg(all(unix, feature = "handoff-test-support"))]
 async fn author_independent_verifier_scenario_from_public_import(
     input_root: &Path,
     configuration: ryeos_codex_runtime_verifier::ExactScenario,
