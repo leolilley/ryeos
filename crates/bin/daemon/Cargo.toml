@@ -77,6 +77,7 @@ ryeos-effect-contract = { workspace = true }
 ryeos-app = { workspace = true }
 ryeos-executor = { workspace = true }
 ryeos-api = { workspace = true }
+ryeos-request-signing = { workspace = true }
 ryeos-ui = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }
