@@ -243,6 +243,13 @@ pub enum ResumeDecision {
     DeadlineReached { end_at_ms: i64 },
 }
 
+/// A dedicated session that already settled terminal has nothing left to
+/// resume: its worker lease is gone and its root can only fail in launch
+/// preparation, spending the one-shot resume budget on the way.
+fn dedicated_session_forbids_resume(session_state: Option<&str>) -> bool {
+    session_state == Some("terminal")
+}
+
 /// Pure mapping from `(launch_metadata, current_attempts)` to a
 /// reconciler action. Extracted so it can be unit-tested without
 /// touching the daemon state.
@@ -2399,10 +2406,13 @@ async fn reconcile_active_threads_inner(
                 )?;
             }
             ResumeDecision::Resume { .. }
-                if state
-                    .state_store
-                    .dedicated_session(&thread.thread_id)?
-                    .is_some_and(|session| session.state == "terminal") =>
+                if dedicated_session_forbids_resume(
+                    state
+                        .state_store
+                        .dedicated_session(&thread.thread_id)?
+                        .as_ref()
+                        .map(|session| session.state.as_str()),
+                ) =>
             {
                 // The root of a dedicated session whose session already
                 // settled terminal has nothing to resume: the resume would
@@ -4625,6 +4635,28 @@ fn converge_reserved_follow(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_a_terminal_dedicated_session_forbids_native_resume() {
+        use super::dedicated_session_forbids_resume as forbids;
+        assert!(forbids(Some("terminal")));
+        for live in [
+            "admitted",
+            "binding",
+            "idle",
+            "turn_running",
+            "awaiting_approval",
+            "recovering",
+            "outcome_unknown",
+            "draining",
+        ] {
+            assert!(!forbids(Some(live)), "{live} must stay resumable");
+        }
+        assert!(
+            !forbids(None),
+            "a thread with no dedicated session resumes as before"
+        );
+    }
+
     #[test]
     fn a_drained_running_thread_is_interrupted_by_restart_not_spawn() {
         use super::{NoProcessCause, no_process_cause};
