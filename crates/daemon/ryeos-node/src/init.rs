@@ -5302,28 +5302,41 @@ mod tests {
         );
         assert!(crate::native_capacity::inspect_capacity_account(&state).is_err());
 
-        // The documented command, through the real offline handler. A node
-        // that was initialised but never started has no runtime database for
-        // the history reset itself to retire, so that half refuses; the
-        // capacity step runs first, in the same handler, and has already
-        // re-recorded the files by then.
+        // A node that has run has a State store and a Runtime store; a freshly
+        // initialised one has neither, so establish them the way a first live
+        // boot does. The reset issues its own native host, hence the serial.
+        let config =
+            ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+                app_root: Some(state.clone()),
+                ..Default::default()
+            })
+            .unwrap();
+        ryeos_app::runtime_db::test_native::seed_node(&config, true);
+        let _serial = lillux_sqlite::test_host::serial();
         let epoch = ryeos_app::runtime_db::RuntimeDb::current_operator_schema_epoch();
-        let history = crate::offline_operation::handlers::reset_execution_history_for_test(
+        let report = crate::offline_operation::handlers::reset_execution_history_for_test(
             &state,
             &lock,
             epoch - 1,
             epoch,
         )
-        .expect_err("a never-started node has no runtime database to reset");
-        assert!(
-            format!("{history:#}").contains("Existing Runtime source main was absent"),
-            "{history:#}"
+        .expect("the documented cut");
+        assert_eq!(
+            report["native_capacity_cut"],
+            serde_json::json!({"anchor_rewritten": true, "account_rewritten": true})
         );
-        // The step re-recorded both files and a rerun finds nothing left.
-        assert!(crate::native_capacity::inspect_capacity_account(&state).is_ok());
-        let again = crate::native_capacity::retire_pre_cut_identity_records(&state, &lock)
-            .expect("the cut reruns");
-        assert!(again.is_empty(), "{again:?}");
+        // Idempotent: a rerun finds nothing left to re-record.
+        let again = crate::offline_operation::handlers::reset_execution_history_for_test(
+            &state,
+            &lock,
+            epoch - 1,
+            epoch,
+        )
+        .expect("the cut reruns");
+        assert_eq!(
+            again["native_capacity_cut"],
+            serde_json::json!({"anchor_rewritten": false, "account_rewritten": false})
+        );
 
         crate::native_capacity::startup_seams::open_and_debit(&state, &lock)
             .expect("the node starts, settles the dead incarnation and debits");
