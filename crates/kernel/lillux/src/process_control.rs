@@ -818,7 +818,7 @@ pub fn require_current_process_identity_fixed(
             let mut link = [0u8; 64];
             let size = unsafe {
                 libc::readlink(
-                    b"/proc/self/ns/pid\0".as_ptr().cast(),
+                    c"/proc/self/ns/pid".as_ptr(),
                     link.as_mut_ptr().cast(),
                     link.len(),
                 )
