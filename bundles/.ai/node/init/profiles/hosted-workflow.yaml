@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-20T01:53:45Z:460001700d9aeb47548eb02b01a46315c104c320012f12f11ae94bc9e34903c6:nbWODTwvWQnhNNgvlp7eXUJ/k5dxtZusNNesLe08jIGI/X26jAeIEw0C/4MVtR49IHcp78/o0KwpJ7YZK9AuBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-20T02:24:28Z:308c5ec00b646b066fdbfce2ec1d3afaa82ba53bb782e3893924023e43e56523:TmVNQ3tyJ/fpP9Sppmsa1/DY64tAOD7yTyOQKicH0Cz0JEhPW4FG7x/09ZaxIzcZFZI2Vd+0ZxEZXokvdeZfAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - codex
@@ -500,10 +500,10 @@ policies:
     max_facet_pages_per_thread: 8
     max_facet_pages_total: 64
   # What a UI seat may read through a bound source. A service with no entry is
-  # not readable by a seat; a service under ui/ryeos-ui/ scopes its own result
-  # and is outside this list. `keep` is an allowlist of result fields: filesystem
-  # paths and operator-only fields are left out, and so is any field a later
-  # release adds until an entry names it.
+  # not readable by a seat. A service under ui/ryeos-ui/ scopes its own result
+  # and is outside this list. Each keep list is an allowlist of result fields.
+  # Filesystem paths and operator-only fields are left out, and so is any field
+  # a later release adds until an entry names it.
   ui_seat_reads:
     schema: 1
     reads:
