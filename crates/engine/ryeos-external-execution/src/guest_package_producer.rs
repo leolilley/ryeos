@@ -19,7 +19,8 @@ use ryeos_external_execution_contract::{GuestMountContentAuthority, GuestMountKi
 
 use crate::guest_inputs::ExternalGuestInputAuthority;
 use crate::{
-    guest_content::recheck_staged_guest_content, guest_staging::stage_uploaded_guest_package,
+    guest_content::recheck_staged_guest_content,
+    guest_staging::{GUEST_PACKAGE_PREFIX, stage_uploaded_guest_package},
 };
 
 /// Private, locally preflighted package. Delivery must still stream the exact
@@ -115,7 +116,7 @@ pub fn prepare_private_guest_package(
         .try_clone()
         .context("retain the guest package parent")?;
     let (name, root) = parent
-        .create_unique_child("guest-package", 0o700)
+        .create_unique_child(GUEST_PACKAGE_PREFIX, 0o700)
         .context("create the private guest package directory")?;
     let result = (|| {
         root.require_owner_private_directory()?;

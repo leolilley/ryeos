@@ -1974,6 +1974,7 @@ async fn handle_execute(
         usage_subject: None,
         usage_subject_asserted_by: None,
         previous_thread_id: None,
+        initial_facets: Default::default(),
         root_admission: prepared_admission,
         root_dispatch_evidence: prepared_dispatch_evidence,
         parent_execution_context: Some(parent_execution_context_from_capability(cap)),

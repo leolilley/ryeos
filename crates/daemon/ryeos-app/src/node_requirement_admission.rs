@@ -49,6 +49,53 @@ impl NodeCapabilityReportReader {
     }
 }
 
+/// What the node's signed capability report says about the node, as plain
+/// data for a client to read. It is built only from a report that was read
+/// back, whose digest and this node's signature verified, and that still
+/// describes the running node.
+#[derive(Debug, Clone)]
+pub struct NodeReportFacts {
+    /// Who signed the report (`fp:` form) and the digest the signature covers.
+    pub signer: String,
+    pub digest: String,
+    /// When the node measured the facts, as the report records it. Nothing
+    /// re-measures on a running node, so this is also how old they are.
+    pub generated_at: String,
+    /// The host class the node was set up under, and its profile if recorded.
+    pub host_class: String,
+    pub profile: Option<String>,
+    /// `native` or `gvisor`.
+    pub kernel_kind: String,
+    pub floor_admitted: bool,
+    pub floor_unmet: BTreeMap<String, String>,
+    /// The proofs and refusals, as launch admission reads them.
+    pub capabilities: HostCapabilities,
+}
+
+/// Reads the node's signed report as [`NodeReportFacts`]; supplied by the
+/// daemon composition root beside [`NodeCapabilityReportReader`].
+pub struct NodeReportFactsReader {
+    read: Box<dyn Fn() -> Result<NodeReportFacts> + Send + Sync>,
+}
+
+impl NodeReportFactsReader {
+    pub fn new(read: impl Fn() -> Result<NodeReportFacts> + Send + Sync + 'static) -> Self {
+        Self {
+            read: Box::new(read),
+        }
+    }
+}
+
+/// The report facts for a client, or `None` when this node was composed with
+/// no reader. A failure is classified like a launch admission failure; see
+/// [`is_report_unreadable`].
+pub fn current_node_report_facts(
+    state: &crate::state::AppState,
+) -> Option<Result<NodeReportFacts>> {
+    let reader = state.extensions.get::<NodeReportFactsReader>()?;
+    Some((reader.read)().map_err(classify_report_failure))
+}
+
 /// Where admission finds the composition root's report reader: the daemon's
 /// application state, or the extension bag that state carries.
 pub trait NodeCapabilitySource {
