@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-19T05:58:46Z:f2f8f2824605ac651ef59b3b2a52318513485350c17cb0fcbb63c262f3af7b4b:zT46SdyfUO8YlezZZtnNQHsTR7W5Bz+q+9X7ogwIkQ8Kr8djMsvMykGL1pDWTC85/yyjtGzB78yDyvZ50QQXBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-20T01:32:56Z:5189008e88b25bb24706af23d2adf1ac01af371fe68cb5721e9efe60424b053c:fY0U+ajQ+yELLoOFT5/hT9v/uJ+qwIREWS75xKTm5Bl7orKFji9YnbEmsmtlWzbjO+JhUbuL6zCeVB99ihWoBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-lens
 title: Lens
 version: "1.1.0"
@@ -29,6 +29,12 @@ sources:
   coverage_wording:
     ref: service:ui/ryeos-ui/coverage/wording
     role: coverage_wording
+  # The principal's stored theme preference; a config/update success reaches
+  # the `service` hint, so a change applies without reopening the seat.
+  theme_preference:
+    ref: service:ui/ryeos-ui/config/get
+    role: theme_preference
+    refresh: { on_hint: [service] }
   file_read:
     ref: service:ui/ryeos-ui/files/read
     role: file_read
