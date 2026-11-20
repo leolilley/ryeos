@@ -1089,13 +1089,30 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
+    /// One reset-shaped node under the process-wide native test serial.
+    /// Every recovery here reads guarded SQLite evidence, and such a read is
+    /// refused (contended, without latching) while another test's host holds
+    /// projection leases the reading thread is not a scope of. The node
+    /// therefore owns the serial for its whole life, so no test can omit it.
     struct Node {
         _tmp: tempfile::TempDir,
         config: Config,
         identity: NodeIdentity,
+        /// Declared last so it outlives the directory teardown. `None` only
+        /// while a test installs its own host (see `without_serial`).
+        serial: Option<lillux_sqlite::test_host::TestHostSerial>,
     }
 
     impl Node {
+        /// Run `body` with the serial released, for a test that must acquire
+        /// a [`TestNativeHost`](lillux_sqlite::test_host::TestNativeHost) on
+        /// this thread, then take the serial back.
+        fn without_serial<T>(&mut self, body: impl FnOnce() -> T) -> T {
+            self.serial = None;
+            let out = body();
+            self.serial = Some(lillux_sqlite::test_host::serial());
+            out
+        }
         fn ledger(&self) -> PathBuf {
             self.config.app_root.join(".ai/node").join(LEDGER_DIRECTORY)
         }
@@ -1127,6 +1144,7 @@ mod tests {
     }
 
     fn node() -> Node {
+        let serial = lillux_sqlite::test_host::serial();
         let tmp = tempfile::TempDir::new().unwrap();
         let config = Config::load(&ConfigSources {
             app_root: Some(tmp.path().to_owned()),
@@ -1162,6 +1180,7 @@ mod tests {
             _tmp: tmp,
             config,
             identity,
+            serial: Some(serial),
         }
     }
 
@@ -1589,7 +1608,7 @@ mod tests {
         use super::super::creation_evidence::{
             CompletedReleaseFacts, ISSUED_RESERVATION_PIN_SLOT, ReleasedBinding, RetiredPinFact,
         };
-        let node = node();
+        let mut node = node();
         let operation = stale_claim(&node, OriginalInspectionMode::DryRun, false);
         let disposition = signed_disposition(&node, &operation);
         std::fs::write(
@@ -1598,7 +1617,8 @@ mod tests {
         )
         .unwrap();
         std::fs::remove_file(node.ledger().join(format!("reserved.{operation}"))).unwrap();
-        let released = lillux_sqlite::test_host::TestNativeHost::acquire().release();
+        let released =
+            node.without_serial(|| lillux_sqlite::test_host::TestNativeHost::acquire().release());
         let ledger = lillux::PinnedDirectory::open(&node.ledger())
             .unwrap()
             .unwrap();
