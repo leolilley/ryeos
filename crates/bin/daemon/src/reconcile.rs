@@ -2632,8 +2632,17 @@ pub async fn reconcile_dedicated_worker_startup(state: &AppState) -> Result<()> 
         );
     }
     reconcile_process_resource_owners(state)?;
-    quiesce_unattached_worker_scopes(state)?;
+    // The old workers are stopped (no durable change) and the remote
+    // execution of every predecessor session is driven to its observed
+    // provider terminal BEFORE any local settlement of a session: the runtime
+    // database refuses to complete or re-identify a session whose external
+    // allocation is unsettled. A provider that has not yet resolved leaves the
+    // allocation quarantined and charged; every local settlement below then
+    // skips that session, and the periodic pass settles it once the allocation
+    // does. Pending never fails startup nor holds readiness.
     quiesce_dedicated_workers(state)?;
+    terminate_predecessor_external_leases(state).await?;
+    quiesce_unattached_worker_scopes(state)?;
     ryeos_app::dedicated_session_service::reconcile_command_outboxes(state)
         .context("reconcile hosted command testimony before worker detachment")?;
     ryeos_app::dedicated_session_service::reconcile_observation_outboxes(state)
@@ -2683,7 +2692,6 @@ pub async fn reconcile_dedicated_worker_startup(state: &AppState) -> Result<()> 
         .state_store
         .resume_closed_worker_scope_retirements()
         .context("resume exactly journaled closed-worker scope retirement")?;
-    terminate_predecessor_external_leases(state).await?;
     Ok(())
 }
 
@@ -2711,15 +2719,14 @@ async fn terminate_predecessor_external_leases(state: &AppState) -> Result<()> {
         .await
         .context("predecessor lease termination owner stopped without a result")?
         .context("discover remote leases of previous daemon incarnations")?;
-    if report.discovered != 0 {
-        tracing::warn!(
-            discovered = report.discovered,
-            terminated = report.terminated.len(),
-            pending = report.pending.len(),
-            failures = report.failures.len(),
-            "terminated remote leases of previous daemon incarnations; none is reattached"
-        );
-    }
+    tracing::info!(
+        discovered = report.discovered,
+        terminated = report.terminated.len(),
+        pending = report.pending.len(),
+        failed = report.failures.len(),
+        "predecessor external leases and session allocations driven toward their observed \
+         provider terminal at startup; none is reattached"
+    );
     for placement in report.terminated.iter().chain(&report.pending) {
         tracing::warn!(
             placement = %placement,
@@ -3102,12 +3109,21 @@ fn quiesce_unattached_worker_scopes(state: &AppState) -> Result<()> {
             if state.state_store.worker_process(worker_id)?.is_some() {
                 continue;
             }
+            let allocation_unsettled =
+                ryeos_app::external_placement::session_has_unsettled_external_allocation(
+                    state,
+                    &session.placement_thread_id,
+                )?;
             let Some(reservation) = state.state_store.dedicated_worker_scope(
                 &session.placement_thread_id,
                 worker_id,
                 epoch,
             )?
             else {
+                if allocation_unsettled {
+                    warn_session_awaits_external_terminal(&session.placement_thread_id);
+                    continue;
+                }
                 settle_unattached_trusted_holding(
                     state,
                     &session.placement_thread_id,
@@ -3117,6 +3133,10 @@ fn quiesce_unattached_worker_scopes(state: &AppState) -> Result<()> {
                 continue;
             };
             if reservation.daemon_generation_id == ryeos_app::runtime_db::daemon_generation_id() {
+                continue;
+            }
+            if allocation_unsettled {
+                warn_session_awaits_external_terminal(&session.placement_thread_id);
                 continue;
             }
             if reservation
@@ -3136,6 +3156,10 @@ fn quiesce_unattached_worker_scopes(state: &AppState) -> Result<()> {
                     "unattached process scope and launcher belonged to an ended host lifetime",
                     true,
                 )?;
+                log_predecessor_session_settled(
+                    &session.placement_thread_id,
+                    "unattached process scope and launcher belonged to an ended host lifetime",
+                );
                 continue;
             }
             let Some(recovery) = reservation.recovery else {
@@ -3143,13 +3167,19 @@ fn quiesce_unattached_worker_scopes(state: &AppState) -> Result<()> {
                 // spawn is permitted before binding. Unlike a bound scope,
                 // this journal phase proves there is no wrapper/reap owner.
                 match reservation.allocation.discard_unlaunched() {
-                    Ok(()) => state.state_store.fail_dedicated_session_start(
-                        &session.placement_thread_id,
-                        worker_id,
-                        epoch,
-                        "discarded unbound process-scope allocation before worker contact",
-                        true,
-                    )?,
+                    Ok(()) => {
+                        state.state_store.fail_dedicated_session_start(
+                            &session.placement_thread_id,
+                            worker_id,
+                            epoch,
+                            "discarded unbound process-scope allocation before worker contact",
+                            true,
+                        )?;
+                        log_predecessor_session_settled(
+                            &session.placement_thread_id,
+                            "discarded unbound process-scope allocation before worker contact",
+                        );
+                    }
                     Err(error) => tracing::warn!(
                         placement_thread_id = %session.placement_thread_id,
                         worker_instance_id = worker_id, error,
@@ -3170,6 +3200,22 @@ fn quiesce_unattached_worker_scopes(state: &AppState) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn log_predecessor_session_settled(placement_thread_id: &str, reason: &str) {
+    tracing::info!(
+        placement_thread_id,
+        reason,
+        "predecessor session settled locally after its external allocation was settled"
+    );
+}
+
+fn warn_session_awaits_external_terminal(placement_thread_id: &str) {
+    tracing::warn!(
+        placement_thread_id,
+        "session's external allocation has no observed provider terminal yet; the session stays \
+         quarantined with its credential lock held until the periodic cleanup settles it"
+    );
 }
 
 /// The trusted-process-group form of the pre-contact holding. There is no
@@ -3201,13 +3247,20 @@ fn settle_unattached_trusted_holding(
         worker_id,
         epoch,
     )? {
-        Proof::Ended => state.state_store.fail_dedicated_session_start(
-            placement_thread_id,
-            worker_id,
-            epoch,
-            "unattached trusted process group and launcher belonged to an ended host lifetime",
-            true,
-        ),
+        Proof::Ended => {
+            state.state_store.fail_dedicated_session_start(
+                placement_thread_id,
+                worker_id,
+                epoch,
+                "unattached trusted process group and launcher belonged to an ended host lifetime",
+                true,
+            )?;
+            log_predecessor_session_settled(
+                placement_thread_id,
+                "unattached trusted process group and launcher belonged to an ended host lifetime",
+            );
+            Ok(())
+        }
         Proof::Absent | Proof::NotEnded => {
             tracing::warn!(
                 placement_thread_id,
@@ -3238,52 +3291,118 @@ fn reconcile_dedicated_workers(state: &AppState) -> Result<()> {
         if worker.daemon_generation_id == current_generation && !retained_unproved {
             continue;
         }
-        let initial_liveness = execution_group_liveness(&worker.process_identity);
-        let cleanup_state = match initial_liveness {
-            IdentityLiveness::DeadOrStale => "reaped",
-            IdentityLiveness::Alive => {
-                let killed = kill_by_action(
-                    &worker.process_identity,
-                    ryeos_app::process::ShutdownAction::Hard,
-                );
-                if killed.success
-                    && execution_group_liveness(&worker.process_identity)
-                        == IdentityLiveness::DeadOrStale
-                {
-                    "reaped"
-                } else {
-                    "unproved"
-                }
+        fence_retained_dedicated_worker(state, &worker, retained_unproved)?;
+    }
+    Ok(())
+}
+
+/// Fence one worker retained from a previous daemon generation. A worker whose
+/// session's external allocation is unsettled is left exactly as it is: the
+/// fence would re-identify the session, which the runtime database refuses
+/// until the provider terminal is observed. Returns whether it was fenced.
+fn fence_retained_dedicated_worker(
+    state: &AppState,
+    worker: &ryeos_app::runtime_db::WorkerProcessRecord,
+    retained_unproved: bool,
+) -> Result<bool> {
+    if ryeos_app::external_placement::session_has_unsettled_external_allocation(
+        state,
+        &worker.placement_thread_id,
+    )? {
+        warn_session_awaits_external_terminal(&worker.placement_thread_id);
+        return Ok(false);
+    }
+    let initial_liveness = execution_group_liveness(&worker.process_identity);
+    let cleanup_state = match initial_liveness {
+        IdentityLiveness::DeadOrStale => "reaped",
+        IdentityLiveness::Alive => {
+            let killed = kill_by_action(
+                &worker.process_identity,
+                ryeos_app::process::ShutdownAction::Hard,
+            );
+            if killed.success
+                && execution_group_liveness(&worker.process_identity)
+                    == IdentityLiveness::DeadOrStale
+            {
+                "reaped"
+            } else {
+                "unproved"
             }
-            IdentityLiveness::Unavailable => "unproved",
-        };
-        if retained_unproved {
-            if cleanup_state == "reaped" {
-                state.state_store.settle_worker_process(
-                    &worker.worker_instance_id,
-                    &worker.placement_thread_id,
-                    worker.boot_epoch,
-                    "reaped",
-                    "abandoned worker cleanup proved during startup",
-                )?;
-            }
-        } else {
-            state.state_store.fence_abandoned_worker_process(
+        }
+        IdentityLiveness::Unavailable => "unproved",
+    };
+    if retained_unproved {
+        if cleanup_state == "reaped" {
+            state.state_store.settle_worker_process(
                 &worker.worker_instance_id,
                 &worker.placement_thread_id,
                 worker.boot_epoch,
-                cleanup_state,
+                "reaped",
+                "abandoned worker cleanup proved during startup",
             )?;
         }
-        tracing::warn!(
-            worker_instance_id = %worker.worker_instance_id,
-            placement_thread_id = %worker.placement_thread_id,
-            dead_daemon_generation = %worker.daemon_generation_id,
+    } else {
+        state.state_store.fence_abandoned_worker_process(
+            &worker.worker_instance_id,
+            &worker.placement_thread_id,
+            worker.boot_epoch,
             cleanup_state,
-            "fenced a dedicated worker retained from a previous daemon generation"
-        );
+        )?;
     }
-    Ok(())
+    tracing::warn!(
+        worker_instance_id = %worker.worker_instance_id,
+        placement_thread_id = %worker.placement_thread_id,
+        dead_daemon_generation = %worker.daemon_generation_id,
+        cleanup_state,
+        "fenced a dedicated worker retained from a previous daemon generation"
+    );
+    log_predecessor_session_settled(
+        &worker.placement_thread_id,
+        "worker of a previous daemon generation fenced",
+    );
+    Ok(true)
+}
+
+/// The periodic half of the startup settlement. A session whose external
+/// allocation was still unsettled at startup was left quarantined; once the
+/// periodic cleanup observes the provider terminal, this settles what startup
+/// skipped, by the same generation-gated rules and in the same order. It acts
+/// only on rows of an earlier daemon generation, so it never touches a live
+/// session of this one. Returns whether any session was settled.
+pub fn settle_predecessor_sessions_after_external_settlement(state: &AppState) -> Result<bool> {
+    let current_generation = ryeos_app::runtime_db::daemon_generation_id();
+    let mut settled = false;
+    for worker in state.state_store.live_worker_processes()? {
+        if worker.daemon_generation_id == current_generation {
+            continue;
+        }
+        let retained_unproved = worker.state == ryeos_app::runtime_db::WorkerProcessState::Dead
+            && worker.cleanup_state == "unproved";
+        settled |= fence_retained_dedicated_worker(state, &worker, retained_unproved)?;
+    }
+    let before = state
+        .state_store
+        .dedicated_sessions_in_state("admitted")?
+        .len()
+        + state
+            .state_store
+            .dedicated_sessions_in_state("outcome_unknown")?
+            .len();
+    quiesce_unattached_worker_scopes(state)?;
+    let after = state
+        .state_store
+        .dedicated_sessions_in_state("admitted")?
+        .len()
+        + state
+            .state_store
+            .dedicated_sessions_in_state("outcome_unknown")?
+            .len();
+    settled |= after < before;
+    if settled {
+        ryeos_app::dedicated_session_service::reconcile_command_outboxes(state)
+            .context("reconcile hosted commands classified by a deferred worker detachment")?;
+    }
+    Ok(settled)
 }
 
 /// Stop every worker retained from a previous daemon generation without
