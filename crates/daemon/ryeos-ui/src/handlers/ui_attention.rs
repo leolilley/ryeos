@@ -1235,6 +1235,17 @@ mod tests {
         let (_dir, _owner, state) = crate::test_support::build_test_state();
         let mut placed = thread("T-place", "T-place", OWNER);
         placed.project_root = Some(std::path::PathBuf::from("/p"));
+        placed.project_authority = ExecutionProjectAuthority::pinned(
+            "d".repeat(64),
+            Some(std::path::PathBuf::from("/p")),
+            "b".repeat(64),
+            PinnedProjectRealization::Cow {
+                terminal_publication: PinnedTerminalPublication::RetainResult,
+            },
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
         state.state_store.create_thread_for_test(&placed).unwrap();
         let config = shipped_config();
         let mut approval = approval_item(&source(&config, "approval"), &approval("pending", true));
