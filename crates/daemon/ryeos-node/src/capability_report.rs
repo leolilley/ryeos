@@ -822,6 +822,36 @@ pub fn current_node_capability_view(
     app_root: &std::path::Path,
     policy_generation: &str,
 ) -> Result<lillux::process_control::HostCapabilities> {
+    Ok(current_report_and_view(app_root, policy_generation)?.1)
+}
+
+/// The report facts a client reads: the same verified, current report launch
+/// admission judges, with its signer, digest and measure time.
+pub fn current_node_report_facts(
+    app_root: &std::path::Path,
+    policy_generation: &str,
+) -> Result<ryeos_app::node_requirement_admission::NodeReportFacts> {
+    let (signed, capabilities) = current_report_and_view(app_root, policy_generation)?;
+    Ok(ryeos_app::node_requirement_admission::NodeReportFacts {
+        signer: signed.signer,
+        digest: signed.digest,
+        generated_at: signed.report.generated_at,
+        host_class: signed.report.composition.host_class,
+        profile: signed.report.composition.profile,
+        kernel_kind: signed.report.host.kernel_kind,
+        floor_admitted: signed.report.floor.admitted,
+        floor_unmet: signed.report.floor.unmet,
+        capabilities,
+    })
+}
+
+fn current_report_and_view(
+    app_root: &std::path::Path,
+    policy_generation: &str,
+) -> Result<(
+    SignedNodeCapabilityReport,
+    lillux::process_control::HostCapabilities,
+)> {
     use ryeos_app::node_requirement_admission::{NodeReportUnreadable, NodeRequirementRefused};
     let signed = SignedNodeCapabilityReport::read_verified(app_root)?.ok_or_else(|| {
         NodeRequirementRefused(
@@ -837,8 +867,8 @@ pub fn current_node_capability_view(
         )));
     }
     let mut view = lillux::process_control::HostCapabilities {
-        provided: signed.report.provided,
-        missing: signed.report.missing,
+        provided: signed.report.provided.clone(),
+        missing: signed.report.missing.clone(),
     };
     let credential_home = CREDENTIAL_PRIVATE_HOME;
     if view.provided.contains_key(credential_home) {
@@ -855,7 +885,7 @@ pub fn current_node_capability_view(
             );
         }
     }
-    Ok(view)
+    Ok((signed, view))
 }
 
 #[cfg(test)]
