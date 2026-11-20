@@ -35,8 +35,8 @@ use serde_json::Value;
 
 use super::qualification::{
     OriginHolding, ProductQualificationEvidence, ProductQualificationPolicySource,
-    ProductQualificationResult, ProductQualificationVerifier, bounded, exact_coordinate,
-    validate_claims,
+    ProductQualificationResult, ProductQualificationVerifier, QualificationRefused, bounded,
+    exact_coordinate, validate_claims,
 };
 use super::qualification_publication::QualificationCoordinate;
 use super::transfer::ProductWitnessSource;
@@ -861,10 +861,10 @@ impl RemoteQualificationAcceptancePolicy {
     /// verifies.
     pub fn require_lane(&self, lane: QualificationLane) -> anyhow::Result<()> {
         if self.allowed_lanes.binary_search(&lane).is_err() {
-            bail!(
+            return Err(QualificationRefused::policy_denied(format!(
                 "remote qualification acceptance policy does not allow the {} lane",
                 lane.name()
-            );
+            )));
         }
         Ok(())
     }
@@ -875,9 +875,9 @@ impl RemoteQualificationAcceptancePolicy {
     pub fn require_unchanged_since_acceptance(&self, recorded_digest: &str) -> anyhow::Result<()> {
         let current = self.digest()?;
         if current != recorded_digest {
-            bail!(
+            return Err(QualificationRefused::stale(format!(
                 "remote qualification acceptance policy changed since acceptance: recorded digest {recorded_digest}, current digest {current}; the testimony must be accepted again under the current policy"
-            );
+            )));
         }
         Ok(())
     }
@@ -915,7 +915,9 @@ pub fn admit(
         || policy.qualification_policy_ref != binding_policy_ref
         || binding_policy_ref != evidence.policy_source().canonical_ref
     {
-        bail!("remote qualification policy ref differs from the binding or the evidence");
+        return Err(QualificationRefused::policy_denied(
+            "remote qualification policy ref differs from the binding or the evidence",
+        ));
     }
 
     // 2. The attester and its origin site are named by policy and by the grant.
@@ -924,7 +926,9 @@ pub fn admit(
             && attester.origin_site_id == body.origin_site_id
     });
     if !named || issuer_grant_site != body.origin_site_id {
-        bail!("remote qualification attester is not trusted for this origin site");
+        return Err(QualificationRefused::policy_denied(
+            "remote qualification attester is not trusted for this origin site",
+        ));
     }
 
     // 3. required policy claims <= binding claims <= evidence claims
@@ -943,7 +947,9 @@ pub fn admit(
                 || origin_allowed.binary_search(claim).is_err()
         })
     {
-        bail!("remote qualification claims differ from the required and allowed claims");
+        return Err(QualificationRefused::policy_denied(
+            "remote qualification claims differ from the required and allowed claims",
+        ));
     }
 
     // 4. Verifier identity digests are pinned as policy data.
@@ -959,7 +965,9 @@ pub fn admit(
             .binary_search(&artifact_digest)
             .is_err()
     {
-        bail!("remote qualification carries a stale verifier identity");
+        return Err(QualificationRefused::stale(
+            "remote qualification carries a stale verifier identity",
+        ));
     }
 
     // 4b. The origin's own holdings are named by policy. This is an audit and
@@ -973,7 +981,9 @@ pub fn admit(
                 .is_ok()
         };
         if !accepted(&holdings.verifier) || holdings.worker.as_ref().is_some_and(|w| !accepted(w)) {
-            bail!("origin holding is not accepted by this site policy");
+            return Err(QualificationRefused::policy_denied(
+                "origin holding is not accepted by this site policy",
+            ));
         }
     }
 
@@ -995,7 +1005,9 @@ pub fn admit(
     if verified.testimony.is_expired_at(now)?
         || body.qualification_attestation.is_expired_at(now)?
     {
-        bail!("remote qualification testimony or its qualification is expired");
+        return Err(QualificationRefused::stale(
+            "remote qualification testimony or its qualification is expired",
+        ));
     }
 
     Ok(AcceptedClaims {
@@ -1015,17 +1027,17 @@ fn require_issue_time_within_policy(
     let issued = epoch_seconds(&format!("{what} issue time"), issued_at)?;
     let skew = i64::try_from(policy.max_clock_skew_seconds).unwrap_or(i64::MAX);
     if issued > now_seconds.saturating_add(skew) {
-        bail!(
+        return Err(QualificationRefused::stale(format!(
             "remote qualification {what} is issued in the future beyond the allowed clock skew of {} seconds",
             policy.max_clock_skew_seconds
-        );
+        )));
     }
     let age = now_seconds.saturating_sub(issued);
     if u64::try_from(age).is_ok_and(|age| age > policy.max_testimony_age_seconds) {
-        bail!(
+        return Err(QualificationRefused::stale(format!(
             "remote qualification {what} is older than the maximum testimony age of {} seconds",
             policy.max_testimony_age_seconds
-        );
+        )));
     }
     Ok(())
 }
@@ -1605,6 +1617,17 @@ pub(crate) mod tests {
                 .to_string()
                 .contains("does not allow the product lane")
         );
+        // Found through added context, as the policy-denial class.
+        let contextual = anyhow::Error::new(
+            QualificationRefused::find(&error)
+                .expect("typed refusal")
+                .clone(),
+        )
+        .context("admit");
+        assert_eq!(
+            QualificationRefused::find(&contextual).unwrap().code(),
+            "qualification_policy_denied"
+        );
         let mut unsorted = f.policy.clone();
         unsorted.allowed_lanes = vec![QualificationLane::Product, QualificationLane::Content];
         assert!(unsorted.validate().is_err());
@@ -1618,10 +1641,14 @@ pub(crate) mod tests {
             .unwrap();
         let mut edited = f.policy.clone();
         edited.max_testimony_age_seconds -= 1;
-        let error = edited
+        let typed = edited
             .require_unchanged_since_acceptance(&recorded)
-            .unwrap_err()
-            .to_string();
+            .unwrap_err();
+        assert_eq!(
+            QualificationRefused::find(&typed).unwrap().code(),
+            "qualification_stale"
+        );
+        let error = typed.to_string();
         assert!(error.contains(&recorded) && error.contains(&edited.digest().unwrap()));
     }
 
