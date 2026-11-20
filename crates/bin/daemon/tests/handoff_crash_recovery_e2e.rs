@@ -2946,7 +2946,7 @@ fn export_exact_chain_head(
 }
 
 fn create_source_abort_authority() -> Result<SourceAbortAuthority> {
-    let state_root = tempfile::tempdir()?;
+    let state_root = common::process_scopes::tempdir()?;
     let identity_path = state_root
         .path()
         .join(ryeos_engine::AI_DIR)
@@ -4120,7 +4120,7 @@ impl RealPortableHandoff {
 }
 
 async fn start_real_portable_handoff() -> Result<RealPortableHandoff> {
-    let project = tempfile::tempdir()?;
+    let project = common::process_scopes::tempdir()?;
     std::fs::create_dir_all(project.path().join(".ai"))?;
     std::fs::write(
         project.path().join("fixture.txt"),
@@ -7056,7 +7056,7 @@ async fn portable_worker_fixture_launches_and_binds_a_real_hosted_session() -> R
 
 async fn portable_worker_fixture_launches_and_binds_a_real_hosted_session_on_qualified_host()
 -> Result<()> {
-    let project = tempfile::tempdir()?;
+    let project = common::process_scopes::tempdir()?;
     std::fs::create_dir_all(project.path().join(".ai"))?;
     std::fs::write(
         project.path().join("fixture.txt"),
@@ -7230,7 +7230,7 @@ async fn settled_portable_command_lost_ack_replays_after_real_daemon_restart_on_
     const LAUNCH_ID: &str = "L-22222222222222222222222222222222";
     const COMMAND_KEY: &str = "portable-lost-ack-session-start";
 
-    let project = tempfile::tempdir()?;
+    let project = common::process_scopes::tempdir()?;
     std::fs::create_dir_all(project.path().join(".ai"))?;
     std::fs::write(project.path().join("fixture.txt"), b"lost-ack fixture\n")?;
     let (mut cut_gate, mut cut_child) = DedicatedCommandCutGate::pair(COMMAND_KEY)?;

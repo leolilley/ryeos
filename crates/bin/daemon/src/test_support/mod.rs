@@ -1303,6 +1303,9 @@ impl DaemonHarness {
             .kill_on_drop(true);
 
         tweak(&mut cmd);
+        if scoped {
+            process_scopes::reject_dropped_tweaks(&cmd)?;
+        }
 
         let startup_deadline = daemon_startup_deadline()?;
         let mut child = cmd.spawn()?;
@@ -1765,6 +1768,7 @@ impl DaemonHarness {
             .kill_on_drop(true);
 
         tweak(&mut cmd);
+        process_scopes::reject_dropped_tweaks(&cmd)?;
 
         let startup_deadline = daemon_startup_deadline()?;
         self.child = cmd.spawn()?;
@@ -1802,6 +1806,7 @@ impl DaemonHarness {
         boundary: ryeos_app::worker_handoff::test_support::HandoffCrashBoundary,
         tweak: impl FnOnce(&mut Command),
     ) -> anyhow::Result<HandoffCrashGate> {
+        process_scopes::refuse_unsupported_channel("a handoff crash gate")?;
         let bind = self.bind;
         let harness_id = next_harness_id();
         let stderr_log_path = daemon_stderr_log_path(self._state_dir_outer.path(), harness_id);
@@ -1860,6 +1865,7 @@ impl DaemonHarness {
         &mut self,
         boundary: ryeos_app::worker_handoff::test_support::HandoffCrashBoundary,
     ) -> anyhow::Result<ryeos_app::worker_handoff::test_support::HandoffPhaseCutEvidence> {
+        process_scopes::refuse_unsupported_channel("a handoff crash gate")?;
         let bind = self.bind;
         let harness_id = next_harness_id();
         let stderr_log_path = daemon_stderr_log_path(self._state_dir_outer.path(), harness_id);
@@ -1914,6 +1920,7 @@ impl DaemonHarness {
     /// For tests that need to kill orphaned subprocesses between daemon death
     /// and respawn, use [`kill_daemon`] + [`respawn_with`] instead.
     pub async fn restart_with<F: FnOnce(&mut Command)>(&mut self, tweak: F) -> anyhow::Result<()> {
+        process_scopes::refuse_unsupported_channel("a graceful restart")?;
         // 1. SIGKILL the current child.
         self.child
             .start_kill()

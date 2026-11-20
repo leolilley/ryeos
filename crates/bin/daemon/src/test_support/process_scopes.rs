@@ -128,6 +128,44 @@ fn installed_daemon() -> Result<PathBuf> {
     Ok(installed)
 }
 
+/// A harness path whose test channel (an inherited descriptor, extra
+/// arguments or extra environment) the protected host-runtime entry cannot
+/// carry: the controller hands the node only its app root and an empty
+/// environment. In the real mode such a start fails with the cause, so a test
+/// that needs the channel is never silently run without it.
+pub fn refuse_unsupported_channel(what: &str) -> Result<()> {
+    anyhow::ensure!(
+        !required(),
+        "{what} cannot run in the real process-scope mode: the protected host-runtime entry carries no inherited descriptor, argument or environment into the node"
+    );
+    Ok(())
+}
+
+/// In the real mode, fail when a test's launch tweak added anything the
+/// protected host-runtime entry would silently drop. `HOSTNAME` is the one
+/// accepted variable: the node does not read it.
+pub fn reject_dropped_tweaks(command: &tokio::process::Command) -> Result<()> {
+    if !required() {
+        return Ok(());
+    }
+    let std_command = command.as_std();
+    let extra_args: Vec<String> = std_command
+        .get_args()
+        .skip(3)
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    let extra_env: Vec<String> = std_command
+        .get_envs()
+        .filter(|(name, _)| *name != std::ffi::OsStr::new("HOSTNAME"))
+        .map(|(name, _)| name.to_string_lossy().into_owned())
+        .collect();
+    anyhow::ensure!(
+        extra_args.is_empty() && extra_env.is_empty(),
+        "the test added launch arguments {extra_args:?} or environment {extra_env:?} that the protected host-runtime entry cannot carry into the node"
+    );
+    Ok(())
+}
+
 /// A temporary directory the node can use. A directory the test creates is
 /// owned by the test process, which in the real mode is an administrator, and
 /// the node account could not enter it; here it belongs to the node account.
