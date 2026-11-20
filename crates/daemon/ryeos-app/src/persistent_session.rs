@@ -8403,25 +8403,35 @@ while True:
         let pool = PersistentSessionPool::new();
         let (_root, path, guard) = owned_start_scratch();
         let key = "d".repeat(64);
-        let error = pool
-            .execute_attributed_owned_start(
-                &key,
+        // The stop arrives after the worker has published readiness, while
+        // the start is held at reader admission.
+        let (entered, release) =
+            install_owned_start_pause(&pool, PooledStartPauseStage::ReaderAdmission);
+        let worker_pool = pool.clone();
+        let worker_key = key.clone();
+        let worker_guard = Arc::clone(&guard);
+        let worker = std::thread::spawn(move || {
+            worker_pool.execute_attributed_owned_start(
+                &worker_key,
                 &owned_start_lifecycle(),
                 &test_wire(),
                 None,
                 serde_json::json!({}),
                 |original| {
-                    original.retain_before_contact(vec![Box::new(Arc::clone(&guard))])?;
+                    original.retain_before_contact(vec![Box::new(Arc::clone(&worker_guard))])?;
                     let mut started = fake_framed_session()?;
                     started.retirement_observer =
                         Some(Arc::new(|| Err(anyhow!("shutdown uncertainty control"))));
-                    pool.inner.shutdown.store(true, Ordering::Release);
                     Ok(started)
                 },
                 || false,
                 |_| Ok(()),
             )
-            .unwrap_err();
+        });
+        entered.recv_timeout(Duration::from_secs(5)).unwrap();
+        pool.inner.shutdown.store(true, Ordering::Release);
+        release.send(()).unwrap();
+        let error = worker.join().unwrap().unwrap_err();
         assert!(format!("{error:#}").contains("shutdown uncertainty"));
         drop(guard);
         let state = pool.inner.state.lock().unwrap();
