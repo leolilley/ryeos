@@ -344,6 +344,9 @@ pub struct DispatchRequest<'a> {
     /// chain). Set by daemon-internal callers (the thread-input service);
     /// never populated from raw HTTP request bodies.
     pub previous_thread_id: Option<String>,
+    /// Thread facets committed with the new root thread as its first
+    /// events (same commit as the row). Empty for launches that carry none.
+    pub initial_facets: BTreeMap<String, String>,
     /// Exact verified terminal/root subject and captured history authority
     /// produced by synchronous public-route admission. Wrapper recursion
     /// carries this unchanged until it reaches the subject that will actually
@@ -3483,6 +3486,7 @@ async fn dispatch_via_method_executor(
         usage_subject: request.usage_subject.clone(),
         usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
         previous_thread_id: request.previous_thread_id.clone(),
+        initial_facets: request.initial_facets.clone(),
         root_admission: request.root_admission.clone(),
         root_dispatch_evidence: request.root_dispatch_evidence.clone(),
         parent_execution_context: request.parent_execution_context.clone(),
@@ -3899,6 +3903,7 @@ fn dispatch_daemon_owned_inner(
     let usage_subject = request.usage_subject.clone();
     let usage_subject_asserted_by = request.usage_subject_asserted_by.clone();
     let previous_thread_id = request.previous_thread_id.clone();
+    let initial_facets = request.initial_facets.clone();
     let root_admission = request.root_admission.clone();
     let root_dispatch_evidence = request.root_dispatch_evidence.clone();
     let parent_execution_context = request.parent_execution_context.clone();
@@ -3931,6 +3936,7 @@ fn dispatch_daemon_owned_inner(
             usage_subject,
             usage_subject_asserted_by,
             previous_thread_id,
+            initial_facets,
             root_admission,
             root_dispatch_evidence,
             parent_execution_context,
