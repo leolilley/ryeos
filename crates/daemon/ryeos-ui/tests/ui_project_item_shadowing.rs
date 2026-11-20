@@ -292,7 +292,7 @@ fn project_file_at_a_bundle_service_ref_never_wins_resolution() {
     );
 }
 
-/// The refusal is confined to the kinds that declare it. Every other shipped
+/// The refusal is confined to the kinds that declare it (picture, surface, view). Every other shipped
 /// kind declares nothing, and each one that takes items from both project and
 /// bundle space still resolves project-first with the bundle item recorded
 /// as shadowed, exactly as before.

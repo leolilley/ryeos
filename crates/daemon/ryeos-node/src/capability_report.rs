@@ -427,6 +427,60 @@ impl NodeCapabilityReport {
     }
 }
 
+/// Why a recorded report was refused as unverified. Each case has a stable
+/// code a reader of the record can branch on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReportReadFailure {
+    /// The file is longer than the reader's bound.
+    Oversized,
+    /// The file is in an older format than this build writes.
+    StaleFormat(String),
+    /// The recorded digest is not the digest of the recorded content.
+    DigestMismatch,
+    /// The report names or is signed by a key other than this node's.
+    WrongSigner,
+    /// The node's signature over the digest does not verify.
+    BadSignature,
+}
+
+impl ReportReadFailure {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Oversized => "oversized",
+            Self::StaleFormat(_) => "stale_format",
+            Self::DigestMismatch => "digest_mismatch",
+            Self::WrongSigner => "wrong_signer",
+            Self::BadSignature => "bad_signature",
+        }
+    }
+
+    /// The failure `error` carries, when it carries one.
+    pub fn find(error: &anyhow::Error) -> Option<&Self> {
+        error.downcast_ref::<Self>()
+    }
+}
+
+impl std::fmt::Display for ReportReadFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Oversized => f.write_str("node capability report exceeds its bounded size"),
+            Self::StaleFormat(reason) => {
+                write!(
+                    f,
+                    "stale report: {reason}; the next node start writes a current one"
+                )
+            }
+            Self::DigestMismatch => {
+                f.write_str("node capability report digest does not match its content")
+            }
+            Self::WrongSigner => f.write_str("node capability report was not signed by this node"),
+            Self::BadSignature => f.write_str("node capability report signature is invalid"),
+        }
+    }
+}
+
+impl std::error::Error for ReportReadFailure {}
+
 impl SignedNodeCapabilityReport {
     pub fn path(app_root: &Path) -> PathBuf {
         ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf())
@@ -445,22 +499,33 @@ impl SignedNodeCapabilityReport {
     /// Read the recorded report and verify its digest and signature against
     /// the node's public identity. Freshness is the caller's question.
     pub fn read_verified(app_root: &Path) -> Result<Option<Self>> {
+        Self::read_verified_from(&Self::path(app_root), app_root, MAX_REPORT_BYTES)
+    }
+
+    /// [`Self::read_verified`] over the report file at `path`, refusing a file
+    /// longer than `max_bytes`. A refusal that has a stable meaning carries a
+    /// [`ReportReadFailure`] that [`ReportReadFailure::find`] recovers.
+    pub fn read_verified_from(
+        path: &Path,
+        app_root: &Path,
+        max_bytes: u64,
+    ) -> Result<Option<Self>> {
         use std::io::Read as _;
-        let path = Self::path(app_root);
-        let file = match std::fs::File::open(&path) {
+        let file = match std::fs::File::open(path) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error).with_context(|| format!("open {}", path.display())),
         };
         let mut bytes = Vec::new();
-        file.take(MAX_REPORT_BYTES + 1).read_to_end(&mut bytes)?;
-        if bytes.len() as u64 > MAX_REPORT_BYTES {
-            bail!("node capability report exceeds its bounded size");
+        file.take(max_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > max_bytes {
+            return Err(ReportReadFailure::Oversized.into());
         }
         let value: serde_json::Value =
             serde_json::from_slice(&bytes).context("parse node capability report")?;
         if let Some(reason) = stale_format(&value) {
-            bail!("stale report: {reason}; the next node start writes a current one");
+            return Err(ReportReadFailure::StaleFormat(reason).into());
         }
         let signed: Self = serde_json::from_value(value).context("parse node capability report")?;
         signed.verify(app_root)?;
@@ -469,17 +534,21 @@ impl SignedNodeCapabilityReport {
 
     fn verify(&self, app_root: &Path) -> Result<()> {
         if self.report.schema != CAPABILITY_REPORT_SCHEMA {
-            bail!("stale report: node capability report schema is not {CAPABILITY_REPORT_SCHEMA}");
+            return Err(ReportReadFailure::StaleFormat(format!(
+                "node capability report schema is not {CAPABILITY_REPORT_SCHEMA}"
+            ))
+            .into());
         }
         if self.report.host.version != lillux::process_control::HOST_FACTS_VERSION {
-            bail!(
-                "stale report: host facts version {} is not {}",
+            return Err(ReportReadFailure::StaleFormat(format!(
+                "host facts version {} is not {}",
                 self.report.host.version,
                 lillux::process_control::HOST_FACTS_VERSION
-            );
+            ))
+            .into());
         }
         if self.report.digest()? != self.digest {
-            bail!("node capability report digest does not match its content");
+            return Err(ReportReadFailure::DigestMismatch.into());
         }
         let identity_path = app_root
             .join(ryeos_engine::AI_DIR)
@@ -491,7 +560,7 @@ impl SignedNodeCapabilityReport {
         let fingerprint = identity.verified_fingerprint()?;
         if fingerprint != self.report.node_fingerprint || self.signer != format!("fp:{fingerprint}")
         {
-            bail!("node capability report was not signed by this node");
+            return Err(ReportReadFailure::WrongSigner.into());
         }
         let key_bytes: [u8; 32] = base64::engine::general_purpose::STANDARD
             .decode(
@@ -508,7 +577,7 @@ impl SignedNodeCapabilityReport {
             &self.signature,
             &key,
         ) {
-            bail!("node capability report signature is invalid");
+            return Err(ReportReadFailure::BadSignature.into());
         }
         Ok(())
     }
@@ -1858,5 +1927,135 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.starts_with("stale report:"), "{error}");
+    }
+
+    /// A node's identity files under a fresh app root, and a fixture report
+    /// naming that node.
+    fn recorded_node() -> (
+        tempfile::TempDir,
+        ryeos_node_runtime::identity::NodeIdentity,
+        NodeCapabilityReport,
+    ) {
+        let app_root = tempfile::tempdir().unwrap();
+        let identity_dir = app_root.path().join(".ai/node/identity");
+        std::fs::create_dir_all(&identity_dir).unwrap();
+        let node = ryeos_node_runtime::identity::NodeIdentity::create(
+            &identity_dir.join("private_key.pem"),
+        )
+        .unwrap();
+        node.write_public_identity(&identity_dir.join("public-identity.json"))
+            .unwrap();
+        let mut fixture = report(view(&["time"], &[]), floor(&["time"]));
+        fixture.node_fingerprint = node.fingerprint().to_owned();
+        (app_root, node, fixture)
+    }
+
+    fn write_value(app_root: &Path, value: &serde_json::Value) {
+        let path = SignedNodeCapabilityReport::path(app_root);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, serde_json::to_vec(value).unwrap()).unwrap();
+    }
+
+    fn failure_code(app_root: &Path) -> &'static str {
+        let error = SignedNodeCapabilityReport::read_verified(app_root).unwrap_err();
+        ReportReadFailure::find(&error)
+            .unwrap_or_else(|| panic!("an untyped refusal: {error:#}"))
+            .code()
+    }
+
+    #[test]
+    fn a_recorded_report_reads_back_verified() {
+        let (app_root, node, fixture) = recorded_node();
+        let signed = fixture.sign(node.signing_key()).unwrap();
+        signed.write(app_root.path()).unwrap();
+        let read = SignedNodeCapabilityReport::read_verified(app_root.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(read, signed);
+    }
+
+    #[test]
+    fn an_absent_report_reads_as_none() {
+        let (app_root, _node, _fixture) = recorded_node();
+        assert!(
+            SignedNodeCapabilityReport::read_verified(app_root.path())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_tampered_digest_is_refused_with_its_code() {
+        let (app_root, node, fixture) = recorded_node();
+        let signed = fixture.sign(node.signing_key()).unwrap();
+        let mut value = serde_json::to_value(&signed).unwrap();
+        value["digest"] = serde_json::json!("sha256:00");
+        write_value(app_root.path(), &value);
+        assert_eq!(failure_code(app_root.path()), "digest_mismatch");
+
+        // Changing the content under an unchanged digest is the same refusal.
+        let mut value = serde_json::to_value(&signed).unwrap();
+        value["report"]["composition"]["host_class"] = serde_json::json!("local");
+        write_value(app_root.path(), &value);
+        assert_eq!(failure_code(app_root.path()), "digest_mismatch");
+    }
+
+    #[test]
+    fn a_report_signed_by_another_key_is_refused_as_a_bad_signature() {
+        let (app_root, node, fixture) = recorded_node();
+        let other =
+            ryeos_node_runtime::identity::NodeIdentity::create(&app_root.path().join("other.pem"))
+                .unwrap();
+        assert_ne!(other.fingerprint(), node.fingerprint());
+        fixture
+            .sign(other.signing_key())
+            .unwrap()
+            .write(app_root.path())
+            .unwrap();
+        assert_eq!(failure_code(app_root.path()), "bad_signature");
+    }
+
+    #[test]
+    fn a_report_naming_another_node_is_refused_as_a_wrong_signer() {
+        let (app_root, node, mut fixture) = recorded_node();
+        fixture.node_fingerprint = "f".repeat(64);
+        fixture
+            .sign(node.signing_key())
+            .unwrap()
+            .write(app_root.path())
+            .unwrap();
+        assert_eq!(failure_code(app_root.path()), "wrong_signer");
+    }
+
+    #[test]
+    fn an_older_format_is_refused_with_its_code() {
+        let (app_root, _node, _fixture) = recorded_node();
+        write_value(
+            app_root.path(),
+            &serde_json::json!({
+                "report": {"schema": "ryeos.node.capability-report/v6", "host": {"version": 5}}
+            }),
+        );
+        assert_eq!(failure_code(app_root.path()), "stale_format");
+    }
+
+    #[test]
+    fn a_report_over_the_bound_is_refused_whole() {
+        let (app_root, node, fixture) = recorded_node();
+        let signed = fixture.sign(node.signing_key()).unwrap();
+        let path = signed.write(app_root.path()).unwrap();
+        let size = std::fs::metadata(&path).unwrap().len();
+        let error =
+            SignedNodeCapabilityReport::read_verified_from(&path, app_root.path(), size - 1)
+                .unwrap_err();
+        assert_eq!(
+            ReportReadFailure::find(&error),
+            Some(&ReportReadFailure::Oversized)
+        );
+        assert!(
+            SignedNodeCapabilityReport::read_verified_from(&path, app_root.path(), size)
+                .unwrap()
+                .is_some()
+        );
     }
 }

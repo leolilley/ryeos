@@ -63,10 +63,18 @@
 # Every ryeos command here runs as the image's node account, ryeos
 # (uid 10000, gid 10000), never as root: lillux refuses root as the recorded
 # actor of `ryeos node allow-restart` and `ryeos node capacity reissue`, so a
-# node run as root could never have its inhibition cleared in place. tini
-# starts this script as root; the first thing it does is hand /data (a
-# platform volume, mounted root-owned) to the node account and re-execute
-# itself as that account with no capabilities and no_new_privs set. An
+# node run as root could never have its inhibition cleared in place. The
+# image's ENTRYPOINT is this script, so it starts as pid 1 and as root. The
+# first thing it does is hand /data (a platform volume, mounted root-owned) to
+# the node account and replace itself, in one setpriv exec that keeps pid 1,
+# with tini running as the node account with no capabilities and no_new_privs
+# set; tini then runs this script again as its child. tini, the daemon and
+# every command therefore share one uid, and tini forwards the platform's
+# stop signal to the daemon without any capability: a root or capability-
+# bearing init is neither needed nor present, and a hosted sandbox that
+# withholds CAP_KILL from the init cannot make the forward fail. Until that
+# exec this script is pid 1 with no signal handler of its own beyond a trap
+# for TERM and INT that exits at once (nothing is running to stop). An
 # operator shell that clears an inhibition must run as the same account:
 # `setpriv --reuid=10000 --regid=10000 --clear-groups --no-new-privs
 # ryeos node allow-restart --app-root /data/app`.
@@ -303,44 +311,36 @@ require_fresh_app_root() {
   done
 }
 
-# Re-execute this script as the node account before any ryeos command. As
-# root: own /data and the app root for the node account (the platform mounts
-# the volume root-owned on every boot, so this is per boot, not per image),
-# then drop every privilege: supplementary groups, every capability from the
-# bounding and inheritable sets, and the ability to regain privilege through
-# a setuid or file-capability executable. Already the node account: continue.
-# Any other non-root account is the platform's choice and is kept, but named.
-# The external host-runtime route keeps root only for its administrator
-# bootstrap; see the header.
-run_as_node_account() {
-  local uid
-  uid="$(id -u)"
-  if [[ "$uid" == "$NODE_UID" ]]; then
-    deliver_offline_operation_request /data/app
-    return 0
-  fi
-  if [[ "$uid" != 0 ]]; then
-    echo "[entrypoint] running as uid $uid (platform-selected), not the image's node account $NODE_UID" >&2
-    deliver_offline_operation_request /data/app
-    return 0
-  fi
-  if [[ -n "${RYEOS_HOST_RUNTIME_BINDING:-}" ]]; then
-    echo "[entrypoint] external host-runtime binding: keeping root only for the ryeosd host-runtime bootstrap, which drops to the binding's account before the daemon runs"
-    return 0
-  fi
-  if [[ -L /data || ! -d /data ]]; then
-    echo "[entrypoint] refusing to start: /data must be a mounted directory, not a symlink or other file" >&2
-    return 1
-  fi
-  mkdir -p /data/app
-  deliver_offline_operation_request /data/app
-  chown -h "$NODE_UID:$NODE_GID" /data
-  hand_app_root_to_node_account /data/app
-  echo "[entrypoint] /data handed to the node account $NODE_UID:$NODE_GID; dropping root"
-  log_path_modes /data /data/app
-  echo "[entrypoint] umask $(umask)"
-  echo "[entrypoint] /data mount: $(awk '$2=="/data" {print $1, $3, $4}' /proc/self/mounts 2>&1 || true)"
+# Whether this process is the container's init slot. The image's ENTRYPOINT is
+# this script, so on a normal start it is pid 1, and it puts tini in that slot
+# itself (see exec_script_under_init). A start that already has an init in
+# front of it (a runtime-injected one, for instance) leaves this false and
+# runs as before.
+entrypoint_is_pid_one() {
+  [[ "$$" == 1 ]]
+}
+
+# Replace pid 1 with tini, running this script again as its child, as the
+# current account. Done only while this process is pid 1; exec keeps the pid,
+# so tini becomes pid 1 and this script is then pid 2 or higher, which is
+# what stops the second pass from doing it again. tini signals its child, the
+# daemon, and a signal between processes of one uid needs no capability, so
+# the init and the daemon always share an account on the node-account route.
+exec_script_under_init() {
+  export RYEOS_OFFLINE_OPERATION_DELIVERED=1
+  exec /usr/bin/tini -- "${BASH_SOURCE[0]}" "$@"
+}
+
+# Root phase done: drop every privilege and become the node account, with tini
+# as pid 1 when this process holds that slot. Supplementary groups, every
+# capability from the inheritable set (and from the bounding set where the
+# host allows), and the ability to regain privilege through a setuid or
+# file-capability executable are all removed in one setpriv exec, so tini
+# itself starts as the node account, never as root. The "$@" are this
+# script's own arguments.
+handoff_to_node_account() {
   local -a cap_args=(--inh-caps=-all)
+  local -a init=()
   # Some hosted sandboxes refuse changes to the capability bounding set. The
   # uid change already empties the effective and permitted sets, and
   # no_new_privs keeps them empty, so the drop proceeds without that one flag
@@ -350,11 +350,65 @@ run_as_node_account() {
   else
     echo "[entrypoint] host refuses capability bounding-set changes; dropping root without clearing the bounding set" >&2
   fi
+  if entrypoint_is_pid_one; then
+    init=(/usr/bin/tini --)
+  fi
   export HOME=/data/app
   export RYEOS_OFFLINE_OPERATION_DELIVERED=1
   exec setpriv --reuid="$NODE_UID" --regid="$NODE_GID" --clear-groups \
     --no-new-privs "${cap_args[@]}" \
-    -- "${BASH_SOURCE[0]}" "$@"
+    -- "${init[@]}" "${BASH_SOURCE[0]}" "$@"
+}
+
+# Get to the node account before any ryeos command, with tini in the init
+# slot. As root: own /data and the app root for the node account (the
+# platform mounts the volume root-owned on every boot, so this is per boot,
+# not per image), then hand off to the node account (handoff_to_node_account).
+# Already the node account: continue. Any other non-root account is the
+# platform's choice and is kept, but named. In both of those cases, when this
+# script is pid 1 it first puts tini in that slot as the same account. The
+# external host-runtime route keeps root only for its administrator
+# bootstrap, and tini stays root there; see the header.
+run_as_node_account() {
+  local uid
+  uid="$(id -u)"
+  if [[ "$uid" == "$NODE_UID" ]]; then
+    deliver_offline_operation_request /data/app
+    ! entrypoint_is_pid_one || exec_script_under_init "$@"
+    return 0
+  fi
+  if [[ "$uid" != 0 ]]; then
+    echo "[entrypoint] running as uid $uid (platform-selected), not the image's node account $NODE_UID" >&2
+    deliver_offline_operation_request /data/app
+    ! entrypoint_is_pid_one || exec_script_under_init "$@"
+    return 0
+  fi
+  if [[ -n "${RYEOS_HOST_RUNTIME_BINDING:-}" ]]; then
+    echo "[entrypoint] external host-runtime binding: keeping root only for the ryeosd host-runtime bootstrap, which drops to the binding's account before the daemon runs"
+    ! entrypoint_is_pid_one || exec_script_under_init "$@"
+    return 0
+  fi
+  if [[ -L /data || ! -d /data ]]; then
+    echo "[entrypoint] refusing to start: /data must be a mounted directory, not a symlink or other file" >&2
+    return 1
+  fi
+  # pid 1 has no signal handler until the exec below replaces it, and the
+  # kernel drops a signal sent to pid 1 that has none. Handle the stop
+  # request for this short root phase: nothing is running yet that needs
+  # cleanup, and bash runs the trap when the current foreground command (the
+  # chown walk) returns. The exec resets it.
+  if entrypoint_is_pid_one; then
+    trap 'exit 143' TERM INT
+  fi
+  mkdir -p /data/app
+  deliver_offline_operation_request /data/app
+  chown -h "$NODE_UID:$NODE_GID" /data
+  hand_app_root_to_node_account /data/app
+  echo "[entrypoint] /data handed to the node account $NODE_UID:$NODE_GID; dropping root"
+  log_path_modes /data /data/app
+  echo "[entrypoint] umask $(umask)"
+  echo "[entrypoint] /data mount: $(awk '$2=="/data" {print $1, $3, $4}' /proc/self/mounts 2>&1 || true)"
+  handoff_to_node_account "$@"
 }
 
 # Fill TRUST_ARGS only after an operator explicitly opts in to trusting
