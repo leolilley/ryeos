@@ -6115,7 +6115,7 @@ mod tests {
         let isolation = project_section(section("Isolation enforced"), &absent);
         assert_eq!(isolation[0].primary, "absent");
         assert_eq!(isolation[0].meta, None);
-        assert_eq!(isolation[0].tone.as_deref(), Some("neutral"));
+        assert_eq!(isolation[0].tone, None, "an unrecorded fact takes no tone");
 
         // Artifacts use their owner's ID/type, never a fabricated blob URI.
         let artifacts = project_section(section("Artifacts"), &response);
