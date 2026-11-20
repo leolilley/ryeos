@@ -3413,6 +3413,7 @@ dependencies = [
  "rune",
  "ryeos-client-base",
  "ryeos-client-runtime",
+ "serde",
  "serde_json",
  "serde_yaml",
  "wasm-bindgen",
