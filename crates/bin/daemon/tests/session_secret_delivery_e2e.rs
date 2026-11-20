@@ -1099,32 +1099,20 @@ async fn recovery_after_the_recipient_rule_is_withdrawn_is_refused() -> Result<(
             ),
         "a caller command on the recovering session was not refused as runtime-owned: {status} {response}"
     );
-    // The node drives the recovery itself (the reconciler resumes the
-    // retained session after the restart). With the recipient rule withdrawn
-    // that resume is refused, and the session stays `recovering`. Where the
-    // refusal surfaces today: the resume fails while verifying the recovered
-    // `session_worker` capsule, in launch preparation, before the secret
-    // delivery that would name `session_secret_revoked`
-    // (executor persistent_session.rs, recovered-dependency verification, runs
-    // ahead of the daemon's `deliver_session_secrets`). So this asserts the
-    // refusal the node does report; the typed revoked code itself is not
-    // reached by this fixture.
+    // The node drives the recovery itself: after the restart the reconciler
+    // resumes the retained session, the resume re-delivers its secrets, and the
+    // withdrawn recipient rule refuses that delivery as `session_secret_revoked`.
+    // The session stays `recovering`. The code surfaces in the daemon log and
+    // the retained evidence.
     let mut evidence = String::new();
     for _ in 0..240 {
         evidence = session_start_evidence(&mut daemon, &chain_root_id).await;
-        if evidence.contains("launch_preparation_failed")
-            && evidence.contains("verify recovered session dependency `session_worker`")
-        {
+        if evidence.contains(REVOKED_CODE) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    for expected in [
-        "\"state\":\"recovering\"",
-        "launch_preparation_failed",
-        "session-capsule/persistent-session-realization",
-        "verify recovered session dependency `session_worker`",
-    ] {
+    for expected in ["\"state\":\"recovering\"", REVOKED_CODE] {
         anyhow::ensure!(
             evidence.contains(expected),
             "recovery did not report `{expected}`: {evidence}"
