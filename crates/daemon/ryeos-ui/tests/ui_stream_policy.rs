@@ -331,7 +331,7 @@ async fn an_unauthorized_chain_is_not_found_exactly_like_an_absent_one() {
 }
 
 #[tokio::test]
-async fn open_applies_when_deny_and_pin_to_the_chain_parameter() {
+async fn open_refuses_a_chain_the_entry_condition_does_not_admit() {
     // A condition the chain does not meet.
     let (_tmp, _owner, state, session_id, principal) = seated(
         &policy(vec![chain_entry(
@@ -345,7 +345,10 @@ async fn open_applies_when_deny_and_pin_to_the_chain_parameter() {
         .err()
         .expect("an unmet condition refuses the open");
     assert!(refusal_text(&error).contains("seat_read_no_matching_entry"));
+}
 
+#[tokio::test]
+async fn open_refuses_a_denied_chain_parameter() {
     // A parameter the seat may not send.
     let (_tmp, _owner, state, session_id, principal) = seated(
         &policy(vec![chain_entry(json!({"deny_params": ["chain_root_id"]}))]),
@@ -357,7 +360,10 @@ async fn open_applies_when_deny_and_pin_to_the_chain_parameter() {
         .err()
         .expect("a denied parameter refuses the open");
     assert!(refusal_text(&error).contains("seat_read_parameter_denied"));
+}
 
+#[tokio::test]
+async fn open_pins_replace_the_requested_chain() {
     // A pin replaces what the client asked for, and the pinned chain is
     // authorized like any other.
     let (_tmp, _owner, state, session_id, principal) = seated(
@@ -392,7 +398,10 @@ async fn open_applies_when_deny_and_pin_to_the_chain_parameter() {
             .iter()
             .any(|frame| frame.to_string().contains("pinned"))
     );
+}
 
+#[tokio::test]
+async fn open_pin_cannot_widen_the_seats_chains() {
     // A pin onto a chain the seat does not own is refused as not found.
     let (_tmp, _owner, state, session_id, principal) = seated(
         &policy(vec![chain_entry(
@@ -528,7 +537,7 @@ async fn an_oversize_chain_event_ends_the_stream_with_a_refusal() {
 }
 
 #[tokio::test]
-async fn the_session_stream_is_gated_and_shaped_like_a_read() {
+async fn the_session_stream_is_refused_without_an_entry() {
     // No entry.
     let (_tmp, _owner, state, session_id, _principal) =
         seated(&policy(vec![chain_entry(json!({}))]), None);
@@ -537,7 +546,10 @@ async fn the_session_stream_is_gated_and_shaped_like_a_read() {
         .err()
         .expect("no entry for the session stream");
     assert!(refusal_text(&error).contains("seat_read_no_entry"));
+}
 
+#[tokio::test]
+async fn a_session_pin_cannot_send_a_seat_to_another_sessions_bus() {
     // A pin cannot send the seat to another session's bus.
     let (_tmp, _owner, state, session_id, _principal) = seated(
         &policy(vec![session_entry(json!({"pin": {"session_id": "other"}}))]),
@@ -551,7 +563,10 @@ async fn the_session_stream_is_gated_and_shaped_like_a_read() {
         matches!(error, RouteDispatchError::Forbidden(_)),
         "{error:?}"
     );
+}
 
+#[tokio::test]
+async fn session_hints_keep_only_what_the_entry_names() {
     // Admitted: hints keep only what the entry names.
     let (_tmp, _owner, state, session_id, _principal) =
         seated(&policy(vec![session_entry(json!({}))]), None);
