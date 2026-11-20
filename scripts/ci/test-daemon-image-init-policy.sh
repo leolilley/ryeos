@@ -125,7 +125,7 @@ for path in "$root"/Dockerfile*; do
     done
 done
 
-required_entrypoint='ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]'
+required_entrypoint='ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]'
 required_healthcheck='HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('\''http://127.0.0.1:'\''+os.environ.get('\''PORT'\'','\''8000'\'')+'\''/_ryeos/ready'\'',timeout=3).read()"]'
 for image in "${daemon_images[@]}"; do
     path="$root/$image"
@@ -145,7 +145,7 @@ for image in "${daemon_images[@]}"; do
         exit 1
     fi
     if [[ "$(grep -Fxc "$required_entrypoint" <<<"$final_stage")" -ne 1 ]]; then
-        echo "$image must declare the exact tini-wrapped entrypoint once" >&2
+        echo "$image must declare the exact entrypoint-script ENTRYPOINT once (the script puts tini in the init slot)" >&2
         exit 1
     fi
     if [[ "$(grep -Fxc "$required_healthcheck" <<<"$final_stage")" -ne 1 ]]; then
@@ -195,7 +195,7 @@ for stage in "${release_daemon_stages[@]}"; do
         }
     fi
     if [[ "$(grep -Fxc "$required_entrypoint" <<<"$final_stage")" -ne 1 ]]; then
-        echo "Dockerfile.release target $stage must declare the exact tini-wrapped entrypoint once" >&2
+        echo "Dockerfile.release target $stage must declare the exact entrypoint-script ENTRYPOINT once (the script puts tini in the init slot)" >&2
         exit 1
     fi
     if [[ "$(grep -Fxc "$required_healthcheck" <<<"$final_stage")" -ne 1 ]]; then
@@ -712,6 +712,73 @@ fi
     [[ "$RESTART_INHIBITED_HOLD_SECONDS" -gt 0 && "$RESTART_INHIBITED_HOLD_SECONDS" -le 60 ]]
     grep -Fq 'exec ryeosd "${DAEMON_ARGS[@]}"' "$root/deploy/entrypoint.sh"
     ! grep -Fq -- '--bind' <<<"$(sed -n '/exec ryeosd/,$p' "$root/deploy/entrypoint.sh")"
+
+    # The init slot. The script is pid 1 and puts tini there itself, as the
+    # account that will run the daemon, so tini needs no capability to forward
+    # the stop signal. Exercised with stand-ins for id, setpriv and exec.
+    entry_script="$root/deploy/entrypoint.sh"
+    init_log="$policy_test_root/init-log"
+    init_uid=0
+    init_pid_one=1
+    init_bounding_ok=1
+    id() { printf '%s' "$init_uid"; }
+    entrypoint_is_pid_one() { [[ "$init_pid_one" == 1 ]]; }
+    setpriv() {
+        if [[ "$1" == --bounding-set=-all ]]; then
+            [[ "$init_bounding_ok" == 1 ]]
+            return
+        fi
+        printf 'setpriv %s\n' "$*" >> "$init_log"
+    }
+    exec() { printf 'exec %s\n' "$*" >> "$init_log"; }
+    unset RYEOS_HOST_RUNTIME_BINDING RYEOS_OFFLINE_OPERATION_DELIVERED
+
+    # Root phase done, pid 1: one setpriv exec to the node account whose
+    # program is tini, then the script again. The privilege drop is whole.
+    : > "$init_log"
+    handoff_to_node_account arg1 2>/dev/null
+    [[ "$(cat "$init_log")" == "exec setpriv --reuid=$NODE_UID --regid=$NODE_GID --clear-groups --no-new-privs --inh-caps=-all --bounding-set=-all -- /usr/bin/tini -- $entry_script arg1" ]]
+    # A host that refuses bounding-set changes still drops, without that flag.
+    init_bounding_ok=0
+    : > "$init_log"
+    handoff_to_node_account 2>/dev/null
+    [[ "$(cat "$init_log")" == "exec setpriv --reuid=$NODE_UID --regid=$NODE_GID --clear-groups --no-new-privs --inh-caps=-all -- /usr/bin/tini -- $entry_script" ]]
+    init_bounding_ok=1
+    # Not pid 1 (an init already in front): the same drop, no second tini.
+    init_pid_one=0
+    : > "$init_log"
+    handoff_to_node_account 2>/dev/null
+    [[ "$(cat "$init_log")" == "exec setpriv --reuid=$NODE_UID --regid=$NODE_GID --clear-groups --no-new-privs --inh-caps=-all --bounding-set=-all -- $entry_script" ]]
+    init_pid_one=1
+
+    # Already the node account, or a platform-selected account, as pid 1:
+    # tini replaces pid 1 as that same account; no setpriv, no uid change.
+    for init_uid in "$NODE_UID" 12345; do
+        : > "$init_log"
+        run_as_node_account arg1 2>/dev/null
+        [[ "$(cat "$init_log")" == "exec /usr/bin/tini -- $entry_script arg1" ]]
+        # Second pass, now tini's child (not pid 1): continues, execs nothing.
+        init_pid_one=0
+        : > "$init_log"
+        run_as_node_account arg1 2>/dev/null
+        [[ ! -s "$init_log" ]]
+        init_pid_one=1
+    done
+
+    # The external host-runtime route stays root: tini starts as root.
+    init_uid=0
+    RYEOS_HOST_RUNTIME_BINDING=/etc/ryeos/binding.json
+    : > "$init_log"
+    run_as_node_account 2>/dev/null >/dev/null
+    [[ "$(cat "$init_log")" == "exec /usr/bin/tini -- $entry_script" ]]
+    init_pid_one=0
+    : > "$init_log"
+    run_as_node_account 2>/dev/null >/dev/null
+    [[ ! -s "$init_log" ]]
+    unset RYEOS_HOST_RUNTIME_BINDING
+    init_pid_one=1
+    unset -f id entrypoint_is_pid_one setpriv exec
+    unset RYEOS_OFFLINE_OPERATION_DELIVERED
 )
 
 # These current images require Python for readiness probes and admitted tools;
@@ -939,7 +1006,7 @@ if grep -Eq 'RYEOS_PUBLISHER_KEY|id=publisher-key|secrets\.RYEOS' "$controller_r
 fi
 controller_release_instructions="$(dockerfile_stage_instructions "$root/Dockerfile.release" "$controller_release_stage")"
 [[ "$(grep -Fxc "$required_entrypoint" <<<"$controller_release_instructions")" -eq 1 ]] || {
-    echo "Dockerfile.release target $controller_release_stage must declare the exact tini-wrapped entrypoint once" >&2
+    echo "Dockerfile.release target $controller_release_stage must declare the exact entrypoint-script ENTRYPOINT once (the script puts tini in the init slot)" >&2
     exit 1
 }
 grep -Eqi '^copy --from=released-bundles / /opt/ryeos/$' <<<"$controller_release_instructions" || {
