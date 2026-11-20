@@ -89,6 +89,17 @@ impl StateLock {
         self.inner.ensure_path_binding(&default_lock_path(app_root))
     }
 
+    /// Whether `process` has ended, resolving an incarnation recorded in
+    /// another pid namespace as ended: this guard proves the exclusive state
+    /// lock is held now, so the previous holder that recorded it has exited.
+    /// See [`lillux::ExactProcessIdentity::has_ended_holding_exclusive_lock`].
+    pub fn process_has_ended(
+        &self,
+        process: &lillux::ExactProcessIdentity,
+    ) -> std::result::Result<bool, String> {
+        process.has_ended_holding_exclusive_lock(&self.inner)
+    }
+
     /// Retain only the live controller's exclusion lifetime. The returned
     /// lease cannot be promoted into stopped-node mutation authority.
     pub fn retain(&self) -> StateLockLease {
@@ -105,6 +116,15 @@ impl std::fmt::Debug for StateLockLease {
 }
 
 impl StateLockLease {
+    /// As [`StateLock::process_has_ended`], through the retained lease of the
+    /// same exclusive lock.
+    pub fn process_has_ended(
+        &self,
+        process: &lillux::ExactProcessIdentity,
+    ) -> std::result::Result<bool, String> {
+        process.has_ended_holding_exclusive_lock(&self.inner)
+    }
+
     /// Retain the SAME concrete exclusion owner for an outside inventory while
     /// this lease still protects admitted work and durable account settlement.
     /// This supplies no stopped-node mutation authority or retirement evidence.

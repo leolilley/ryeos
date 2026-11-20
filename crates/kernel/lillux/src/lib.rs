@@ -115,10 +115,11 @@ pub use process_control::{
     require_administrator,
 };
 pub use process_control::{
-    ExactProcessIdentity, ExactProcessRoot, GroupBasis, GroupPresence, QuiescedProcessGroup,
-    QuiescedProcesses, capture_current_process_identity, capture_exact_process_identity,
-    diagnostic_process_is_live, diagnostic_process_matches_executable_name, group_presence,
-    prepare_process_group_controller, quiesce_exact_process_group,
+    ExactProcessIdentity, ExactProcessRoot, GroupBasis, GroupPresence, ProcessEndError,
+    QuiescedProcessGroup, QuiescedProcesses, capture_current_process_identity,
+    capture_exact_process_identity, current_pid_namespace, diagnostic_process_is_live,
+    diagnostic_process_matches_executable_name, group_presence, prepare_process_group_controller,
+    quiesce_exact_process_group,
 };
 pub use secure_fs::{EmptyMountTargetReservation, EphemeralDescriptorFileLink};
 pub use subordinate_process::{

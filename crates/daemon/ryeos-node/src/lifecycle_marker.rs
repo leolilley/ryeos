@@ -1192,6 +1192,7 @@ mod tests {
             target_start_time_ticks: ticks,
             group_leader_pid: pid,
             group_leader_start_time_ticks: ticks,
+            pid_namespace: "pid:[4026531836]".into(),
             group_basis: Default::default(),
         }
     }
@@ -1221,6 +1222,49 @@ mod tests {
         assert_eq!(recorded_process(&identity), RecordedProcess::Ended);
         assert!(!running_marker_not_provably_gone(&identity));
         report_previous_exit(read(tmp.path()).as_ref());
+    }
+
+    #[test]
+    fn running_marker_carries_the_pid_namespace_and_requires_it() {
+        let live = lillux::process_control::capture_current_process_identity().unwrap();
+        let marker = serde_json::to_value(running_with(live.clone())).unwrap();
+        assert_eq!(
+            marker["identity"]["pid_namespace"],
+            lillux::process_control::current_pid_namespace().unwrap()
+        );
+        let raw = serde_json::to_vec(&marker).unwrap();
+        assert!(matches!(
+            decode_marker(&raw),
+            Ok(LifecycleMarker::Running { identity, .. }) if identity == live
+        ));
+        // No legacy reader: a schema-2 marker written before the namespace
+        // field existed does not decode.
+        let mut without = marker;
+        without["identity"]
+            .as_object_mut()
+            .unwrap()
+            .remove("pid_namespace");
+        let error = decode_marker(&serde_json::to_vec(&without).unwrap()).unwrap_err();
+        assert!(
+            matches!(&error, MarkerDecodeError::Unreadable(text) if text.contains("pid_namespace")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn marker_from_another_pid_namespace_is_not_provably_gone() {
+        // Same boot, our own pid and birth, but recorded in another
+        // namespace: the numbers prove nothing, so it is neither running nor
+        // ended, and a caller holding no state lock must keep it as possibly
+        // alive.
+        let mut foreign = lillux::process_control::capture_current_process_identity().unwrap();
+        foreign.pid_namespace = "pid:[1]".to_owned();
+        let verdict = recorded_process(&foreign);
+        assert!(
+            matches!(&verdict, RecordedProcess::Indeterminate(text) if text.contains("pid namespace")),
+            "{verdict:?}"
+        );
+        assert!(running_marker_not_provably_gone(&foreign));
     }
 
     #[test]
@@ -1469,6 +1513,7 @@ mod tests {
             target_start_time_ticks: 1,
             group_leader_pid: i64::from(pid),
             group_leader_start_time_ticks: 1,
+            pid_namespace: "pid:[4026531836]".into(),
             process_scope: None,
             resource_selections: Vec::new(),
             resource_settlement_authority: None,

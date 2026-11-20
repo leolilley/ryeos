@@ -883,6 +883,7 @@ mod tests {
                 target_start_time_ticks: 5,
                 group_leader_pid: u32::MAX - 1,
                 group_leader_start_time_ticks: 5,
+                pid_namespace: "pid:[4026531836]".into(),
                 group_basis: Default::default(),
             }),
         )

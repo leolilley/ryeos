@@ -1772,7 +1772,11 @@ impl RetainedCapacityAccount {
                 let completed_here = exact == inputs.process
                     && self.completed_recovery == Some(current.recovery_attempts());
                 ensure!(
-                    completed_here || exact.has_ended().map_err(anyhow::Error::msg)?,
+                    completed_here
+                        || inputs
+                            .exclusion
+                            .process_has_ended(&exact)
+                            .map_err(anyhow::Error::msg)?,
                     "previous recovery process remains live; retain its original owner"
                 );
             }
@@ -1909,10 +1913,9 @@ impl RetainedCapacityAccount {
         if let Some(debit) = current.target().outstanding {
             budget.spend(inputs, PROCESS_OBSERVATION_WORK)?;
             ensure!(
-                debit
-                    .process
-                    .exact()?
-                    .has_ended()
+                inputs
+                    .exclusion
+                    .process_has_ended(&debit.process.exact()?)
                     .map_err(anyhow::Error::msg)?,
                 "outstanding native incarnation remains live or unproved"
             );
@@ -1930,10 +1933,9 @@ impl RetainedCapacityAccount {
         if let Some(debit) = repaired.outstanding {
             budget.budget.spend(inputs, PROCESS_OBSERVATION_WORK)?;
             ensure!(
-                debit
-                    .process
-                    .exact()?
-                    .has_ended()
+                inputs
+                    .exclusion
+                    .process_has_ended(&debit.process.exact()?)
                     .map_err(anyhow::Error::msg)?,
                 "native predecessor disposition no longer established"
             );

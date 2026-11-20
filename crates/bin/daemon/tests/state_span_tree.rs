@@ -105,6 +105,7 @@ fn state_store_write_path_emits_state_spans() {
                     target_start_time_ticks: 10,
                     group_leader_pid: 222,
                     group_leader_start_time_ticks: 20,
+                    pid_namespace: "pid:[4026531836]".into(),
                     resource_selections: Vec::new(),
                     resource_settlement_authority: None,
                     resource_operations: Vec::new(),
