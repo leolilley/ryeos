@@ -3130,6 +3130,86 @@ mod tests {
         assert_eq!(events, 2);
     }
 
+    #[test]
+    fn a_title_facet_survives_replay_from_the_event_log() {
+        use crate::objects::thread_event::NewEvent;
+        use crate::objects::{ChainStateBuilder, ChainThreadEntry, ThreadStatus};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cas_root = tmp.path().join("cas");
+        let projection = crate::test_support::TestProjection::open();
+        let older = NewEvent::new("T-root", "T-root", crate::event_types::THREAD_FACET_SET)
+            .chain_seq(1)
+            .thread_seq(1)
+            .payload(serde_json::json!({"key": "title", "value": "Old title"}))
+            .build_with_ts("2026-04-22T00:00:01Z".to_string());
+        let older_hash = write_object(&cas_root, &older.to_value());
+        let newer = NewEvent::new("T-root", "T-root", crate::event_types::THREAD_FACET_SET)
+            .chain_seq(2)
+            .thread_seq(2)
+            .prev_chain_event_hash(Some(older_hash.clone()))
+            .prev_thread_event_hash(Some(older_hash.clone()))
+            .payload(serde_json::json!({"key": "title", "value": "New title"}))
+            .build_with_ts("2026-04-22T00:00:02Z".to_string());
+        let newer_hash = write_object(&cas_root, &newer.to_value());
+        let snapshot_hash = "0".repeat(64);
+        let older_state = ChainStateBuilder::new("T-root")
+            .last_event_hash(Some(older_hash.clone()))
+            .last_chain_seq(1)
+            .updated_at("2026-04-22T00:00:01Z".to_string())
+            .thread(
+                "T-root",
+                ChainThreadEntry {
+                    snapshot_hash: snapshot_hash.clone(),
+                    last_event_hash: Some(older_hash.clone()),
+                    last_thread_seq: 1,
+                    status: ThreadStatus::Running,
+                },
+            )
+            .build();
+        let newer_state = ChainStateBuilder::new("T-root")
+            .last_event_hash(Some(newer_hash.clone()))
+            .last_chain_seq(2)
+            .updated_at("2026-04-22T00:00:02Z".to_string())
+            .thread(
+                "T-root",
+                ChainThreadEntry {
+                    snapshot_hash,
+                    last_event_hash: Some(newer_hash.clone()),
+                    last_thread_seq: 2,
+                    status: ThreadStatus::Running,
+                },
+            )
+            .build();
+
+        project_event(&projection, &older).unwrap();
+        assert_eq!(
+            walk_and_project_events_from(&projection, &cas_root, &newer_state, Some(&older_state),)
+                .unwrap(),
+            Some(1)
+        );
+        // Replaying the same delta cannot duplicate its base/derived rows.
+        walk_and_project_events_from(&projection, &cas_root, &newer_state, Some(&older_state))
+            .unwrap();
+
+        let value: Vec<u8> = projection
+            .with_sql(|connection| {
+                Ok(connection.query_row(
+                    "SELECT value FROM thread_facets WHERE thread_id='T-root' AND key='title'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        let events: i64 = projection
+            .with_sql(|connection| {
+                Ok(connection.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?)
+            })
+            .unwrap();
+        assert_eq!(value, b"New title");
+        assert_eq!(events, 2);
+    }
+
     // ── Trace-capture tests ──────────────────────────────────────
 
     #[test]

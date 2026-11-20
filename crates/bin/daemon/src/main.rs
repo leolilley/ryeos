@@ -5107,6 +5107,11 @@ async fn run(
                         config.app_root.clone(),
                         format!("sha256:{}", node_policy_snapshot.generation_digest()),
                     )));
+                    // Clients read the same signed report as facts.
+                    ext.insert(Arc::new(node_report_facts_reader(
+                        config.app_root.clone(),
+                        format!("sha256:{}", node_policy_snapshot.generation_digest()),
+                    )));
                     // A fresh external placement is admitted only while this
                     // incarnation's remaining prepaid native work and service
                     // window cover what the placement's binding declares.
@@ -7433,6 +7438,18 @@ fn node_capability_report_reader(
 ) -> ryeos_app::node_requirement_admission::NodeCapabilityReportReader {
     ryeos_app::node_requirement_admission::NodeCapabilityReportReader::new(move || {
         ryeos_node::capability_report::current_node_capability_view(&app_root, &policy_generation)
+    })
+}
+
+/// Reads the same verified, current signed report as
+/// [`node_capability_report_reader`], with its signer and measure time, for
+/// the clients' node capability service.
+fn node_report_facts_reader(
+    app_root: std::path::PathBuf,
+    policy_generation: String,
+) -> ryeos_app::node_requirement_admission::NodeReportFactsReader {
+    ryeos_app::node_requirement_admission::NodeReportFactsReader::new(move || {
+        ryeos_node::capability_report::current_node_report_facts(&app_root, &policy_generation)
     })
 }
 

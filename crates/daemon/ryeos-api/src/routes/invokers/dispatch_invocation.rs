@@ -499,6 +499,7 @@ impl CompiledDispatchInvoker {
             }),
             usage_subject_asserted_by: (!principal_id.is_empty()).then(|| principal_id.clone()),
             previous_thread_id: None,
+            initial_facets: Default::default(),
             root_admission,
             root_dispatch_evidence,
             parent_execution_context: None,
