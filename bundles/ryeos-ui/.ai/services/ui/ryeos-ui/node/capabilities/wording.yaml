@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-19T23:22:38Z:21cb42b8265eae6e540623adfd47ffa7efd2c20c6776a930d3319584bb8030f4:foZc9bNWTMVm5R5ttGSGAkBhYskInQZIlppjPphVqQBSgEYN+f1lv6muERyq3Gmf6e7P++xw87cCvafldcHQBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-20T01:05:27Z:21cb42b8265eae6e540623adfd47ffa7efd2c20c6776a930d3319584bb8030f4:foZc9bNWTMVm5R5ttGSGAkBhYskInQZIlppjPphVqQBSgEYN+f1lv6muERyq3Gmf6e7P++xw87cCvafldcHQBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/node/capabilities/wording
 version: "1.0.0"

@@ -1,13 +1,13 @@
-# ryeos:signed:2026-11-19T23:22:38Z:dc8069724fc8dd474f943e25d0f99f46fb8f642bb8e8678bfa1f8c9326d42c94:LSPiCzuDNX3Qu3neUUqi8oc06uOCNlgxqfAeEM+6oIv+mH8QQdx2rK0FnGSCp0h0LUVUIKbtEgPMEBdfrU3LDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-20T01:05:27Z:3760fe5e0e8af3349c160322e8e9957d51dd86e489d91d2f2e3046dcf14df8bc:4ASQ1D6tI4682zqMzxiBevaJMQQjpGoV0tuGLOknSin9QAbZPPmKTfZbgfm9dlJ3jqoNBKko/7NEnGcyFnipBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/node/capabilities
 version: "1.0.0"
 description: >-
-  What this node contains and proves, as facts: the report state, the isolation
-  and network mode, the host class, one row per proof the node's signed
-  capability report records, and the capabilities the caller's session holds.
-  It carries codes and values only; the signed node capability wording says
-  them in plain words.
+  What this node contains and proves, as facts read from its signed capability
+  report: the report's signer, digest and measure time, the host class, the
+  posture, whether the declared floor was met, one row per proof, and the
+  capabilities the caller's session holds. It carries codes and values only;
+  the signed node capability wording says them in plain words.
 endpoint: ui.ryeos.node.capabilities
 ui_read_only: true
 state_access: read_only_existing

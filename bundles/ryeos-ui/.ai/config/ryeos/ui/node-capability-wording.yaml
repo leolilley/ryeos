@@ -1,10 +1,10 @@
-# ryeos:signed:2026-11-19T23:22:38Z:c855578fe8331f1bb37ee0dcb0a0091808a49d7599389a3410ba8ab52c69fbce:KvDoq9LYOYfGnxAJjTIzYNYvL2rgQKwqxPenuuBpzy1CQXv+ZQvg88yIKj49d0+48R1YLHtrIW/8w3IsPpMODA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-20T01:05:27Z:6b63ee25d0ad162bc72b5af19851128ced16d7792388d7acaf0623bf927512e5:55YT+F/n4WxvSPwKQb/dO4ST+JmRHv2D0NWTntVj3FqzguFOKbyWNon3Q/M0K2+ZRmOTyfA4/uPLbbVUuSZVDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/ui
 version: "1.0.0"
 description: The sentence and tone the node moment shows for each fact the node capability service reports.
-# The node capability service reports codes: a report state, an isolation
-# mode, a network mode, a host class, and one row per proof with a state and
-# a grade. A client reads this config through the node capability wording
+# The node capability service reports codes: a report state, the posture
+# (the report's own `isolation:enforced` decision), a host class, and one row per proof with a state and
+# a grade, and when the node measured them. A client reads this config through the node capability wording
 # service and draws the sentence, in the tone, instead of the code.
 #   * `fallback` words any code a table does not list.
 #   * `isolation_modes` carries the posture: `label` is the short name and
@@ -44,13 +44,6 @@ isolation_modes:
   disabled:
     label: Trusted, not contained
     detail: This host cannot prove jobs are kept apart, so anything that runs here is code you are trusting.
-    tone: warn
-network_modes:
-  isolated:
-    label: Jobs do not share this node's network.
-    tone: good
-  host:
-    label: Jobs use this node's network directly.
     tone: warn
 host_classes:
   local:

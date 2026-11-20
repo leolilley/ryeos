@@ -2,14 +2,16 @@
 //! facts, and `ui.ryeos.node.capabilities.wording` — the signed words for
 //! those facts.
 //!
-//! The facts service reads the node's own sources and recomputes nothing: the
-//! isolation mode, network mode and host class come from the isolation policy
-//! the node is running under (the same snapshot `node/status` reports), and
-//! the proofs come from the node's signed capability report as the launch
-//! admission reader returns it, each with the grade, provider and basis the
-//! report recorded or the reason it records for a missing one. The caller's
-//! granted capabilities ride along unchanged. The response carries codes and
-//! values only; it holds no sentence.
+//! The facts come from the node's signed capability report, the one launch
+//! admission judges: it is read back, its digest and this node's signature
+//! verified, and refused unless it still describes the running node. The
+//! response carries the report's signer, digest and the time the node
+//! measured it, its host class, its proof rows (each with the grade,
+//! provider and basis the report recorded, or the reason it records for a
+//! missing one) and whether its floor was met. The posture is the report's own
+//! `isolation:enforced` row; nothing is recomputed from `node/status`. The
+//! caller's granted capabilities ride along unchanged. The response holds
+//! codes and values only; it holds no sentence of this module's own.
 //!
 //! The sentence and tone for each code come from the signed config
 //! `config:ryeos/ui/node-capability-wording`, served by the wording service.
@@ -33,10 +35,10 @@ use ryeos_api::registry::ServiceDescriptor;
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::handler_error::HandlerError;
 use ryeos_app::node_requirement_admission::{
-    NodeCapabilitySource, current_node_capabilities, is_report_unreadable,
+    NodeReportFacts, current_node_report_facts, is_report_unreadable,
 };
 use ryeos_app::state::AppState;
-use ryeos_engine::isolation::{IsolationMode, IsolationNetworkMode};
+use ryeos_engine::isolation::ISOLATION_ENFORCED;
 use ryeos_executor::executor::ServiceAvailability;
 
 pub const FACTS_SCHEMA: &str = "ryeos.ui.node.capabilities.v1";
@@ -51,8 +53,6 @@ pub const TONES: [&str; 5] = ["none", "good", "warn", "danger", "accent"];
 pub const REPORT_STATES: [&str; 4] = ["present", "not_composed", "refused", "unreadable"];
 /// Every isolation mode the facts service can emit.
 pub const ISOLATION_MODES: [&str; 2] = ["enforce", "disabled"];
-/// Every network mode the facts service can emit.
-pub const NETWORK_MODES: [&str; 2] = ["host", "isolated"];
 /// Every proof state the facts service can emit.
 pub const PROOF_STATES: [&str; 2] = ["provided", "missing"];
 /// Every proof grade the report grades a proof with.
@@ -60,49 +60,73 @@ pub const PROOF_GRADES: [&str; 4] = ["measured", "provider_attested", "peer_atte
 
 /// What reading the node's signed capability report came to.
 pub enum ReportOutcome {
-    /// The report stands and these are its proofs.
-    Present(HostCapabilities),
+    /// The report stands.
+    Present(Box<NodeReportFacts>),
     /// This node was composed with no report reader.
     NotComposed,
     /// A report is missing, stale, or does not verify; nothing this node does
-    /// while it runs changes that.
-    Refused,
+    /// while it runs changes that. The text is the node's reason.
+    Refused(String),
     /// The report could not be read at this moment.
-    Unreadable,
+    Unreadable(String),
 }
 
 /// Everything the facts are made from.
 pub struct FactInputs<'a> {
-    pub host_class: &'a str,
-    pub isolation_mode: IsolationMode,
-    pub network_mode: IsolationNetworkMode,
     pub report: ReportOutcome,
     pub granted: &'a [String],
 }
 
-fn code<T: Serialize>(value: &T) -> Value {
-    serde_json::to_value(value).unwrap_or(Value::Null)
-}
-
 /// The facts response for `inputs`.
 pub fn facts(inputs: FactInputs<'_>) -> Value {
-    let (report_state, proofs) = match &inputs.report {
-        ReportOutcome::Present(view) => ("present", proofs(view)),
-        ReportOutcome::NotComposed => ("not_composed", Vec::new()),
-        ReportOutcome::Refused => ("refused", Vec::new()),
-        ReportOutcome::Unreadable => ("unreadable", Vec::new()),
-    };
-    json!({
+    let mut response = json!({
         "schema_version": FACTS_SCHEMA,
-        "report": { "state": report_state },
-        "host": { "class": inputs.host_class },
-        "isolation": {
-            "mode": code(&inputs.isolation_mode),
-            "network_mode": code(&inputs.network_mode),
-        },
-        "proofs": proofs,
+        "host": null,
+        "isolation": { "mode": null },
+        "floor": null,
+        "proofs": [],
         "granted": inputs.granted,
-    })
+    });
+    let report = match &inputs.report {
+        ReportOutcome::Present(report) => {
+            response["host"] = json!({
+                "class": report.host_class,
+                "profile": report.profile,
+                "kernel": report.kernel_kind,
+            });
+            response["isolation"]["mode"] = posture(&report.capabilities);
+            response["floor"] = json!({
+                "admitted": report.floor_admitted,
+                "unmet": report.floor_unmet,
+            });
+            response["proofs"] = json!(proofs(&report.capabilities));
+            json!({
+                "state": "present",
+                "verified": true,
+                "signer": report.signer,
+                "digest": report.digest,
+                "measured_at": report.generated_at,
+            })
+        }
+        ReportOutcome::NotComposed => json!({ "state": "not_composed" }),
+        ReportOutcome::Refused(reason) => json!({ "state": "refused", "reason": reason }),
+        ReportOutcome::Unreadable(reason) => json!({ "state": "unreadable", "reason": reason }),
+    };
+    response["report"] = report;
+    response
+}
+
+/// The report's own isolation decision as a code: `enforce` when it records
+/// `isolation:enforced` as provided, `disabled` when it records it as
+/// refused, and nothing when it records neither.
+fn posture(view: &HostCapabilities) -> Value {
+    if view.provided.contains_key(ISOLATION_ENFORCED) {
+        json!("enforce")
+    } else if view.missing.contains_key(ISOLATION_ENFORCED) {
+        json!("disabled")
+    } else {
+        Value::Null
+    }
 }
 
 /// One row per capability name the report records, sorted by name.
@@ -130,13 +154,13 @@ fn proofs(view: &HostCapabilities) -> Vec<Value> {
 }
 
 fn read_report(state: &AppState) -> ReportOutcome {
-    if state.node_capability_report_reader().is_none() {
-        return ReportOutcome::NotComposed;
-    }
-    match current_node_capabilities(state) {
-        Ok(view) => ReportOutcome::Present(view),
-        Err(error) if is_report_unreadable(&error) => ReportOutcome::Unreadable,
-        Err(_) => ReportOutcome::Refused,
+    match current_node_report_facts(state) {
+        None => ReportOutcome::NotComposed,
+        Some(Ok(report)) => ReportOutcome::Present(Box::new(report)),
+        Some(Err(error)) if is_report_unreadable(&error) => {
+            ReportOutcome::Unreadable(format!("{error:#}"))
+        }
+        Some(Err(error)) => ReportOutcome::Refused(format!("{error:#}")),
     }
 }
 
@@ -154,11 +178,7 @@ pub async fn handle_facts(
         .map_err(|error| HandlerError::BadRequest(format!("invalid request: {error}")))?;
     let granted = ctx.scopes.clone();
     let value = tokio::task::spawn_blocking(move || {
-        let inspection = state.isolation.inspection();
         facts(FactInputs {
-            host_class: &inspection.host_class,
-            isolation_mode: state.isolation.mode(),
-            network_mode: inspection.network.mode,
             report: read_report(&state),
             granted: &granted,
         })
@@ -196,7 +216,6 @@ pub struct Wording {
     pub fallback: Entry,
     pub report_states: BTreeMap<String, Entry>,
     pub isolation_modes: BTreeMap<String, Entry>,
-    pub network_modes: BTreeMap<String, Entry>,
     pub host_classes: BTreeMap<String, Entry>,
     pub proof_states: BTreeMap<String, Entry>,
     pub grades: BTreeMap<String, Entry>,
@@ -210,7 +229,6 @@ impl Wording {
             [
                 &self.report_states,
                 &self.isolation_modes,
-                &self.network_modes,
                 &self.host_classes,
                 &self.proof_states,
                 &self.grades,
@@ -290,6 +308,7 @@ pub const WORDING_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 mod tests {
     use super::*;
     use lillux::process_control::{CapabilityEvidence, ProofSource};
+    use ryeos_app::node_requirement_admission::NodeReportFacts;
 
     fn shipped() -> Value {
         let path = ryeos_engine::test_support::workspace_root()
@@ -320,97 +339,126 @@ mod tests {
         vec!["ryeos.execute.service.projects/open".to_owned()]
     }
 
+    fn report(
+        host_class: &str,
+        provided: &[(&str, ProofSource)],
+        missing: &[(&str, &str)],
+    ) -> ReportOutcome {
+        ReportOutcome::Present(Box::new(NodeReportFacts {
+            signer: "fp:node".into(),
+            digest: "sha256:abc".into(),
+            generated_at: "2026-11-20T00:00:00Z".into(),
+            host_class: host_class.into(),
+            profile: Some("core".into()),
+            kernel_kind: "native".into(),
+            floor_admitted: missing.is_empty(),
+            floor_unmet: missing
+                .iter()
+                .map(|(name, reason)| ((*name).to_owned(), (*reason).to_owned()))
+                .collect(),
+            capabilities: view(provided, missing),
+        }))
+    }
+
     #[test]
-    fn a_contained_local_node_reports_its_measured_proofs() {
+    fn a_contained_local_node_reports_its_measured_proofs_and_signer() {
         let granted = granted();
         let value = facts(FactInputs {
-            host_class: "local",
-            isolation_mode: IsolationMode::Enforce,
-            network_mode: IsolationNetworkMode::Isolated,
-            report: ReportOutcome::Present(view(
-                &[("isolation:namespaces", ProofSource::Measured)],
+            report: report(
+                "local",
+                &[
+                    ("isolation:enforced", ProofSource::Measured),
+                    ("isolation:namespaces", ProofSource::Measured),
+                ],
                 &[],
-            )),
+            ),
             granted: &granted,
         });
         assert_eq!(value["schema_version"], FACTS_SCHEMA);
         assert_eq!(value["report"]["state"], "present");
+        assert_eq!(value["report"]["verified"], true);
+        assert_eq!(value["report"]["signer"], "fp:node");
+        assert_eq!(value["report"]["digest"], "sha256:abc");
+        assert_eq!(value["report"]["measured_at"], "2026-11-20T00:00:00Z");
         assert_eq!(value["host"]["class"], "local");
+        assert_eq!(value["host"]["kernel"], "native");
         assert_eq!(value["isolation"]["mode"], "enforce");
-        assert_eq!(value["isolation"]["network_mode"], "isolated");
-        assert_eq!(value["proofs"][0]["name"], "isolation:namespaces");
-        assert_eq!(value["proofs"][0]["state"], "provided");
-        assert_eq!(value["proofs"][0]["grade"], "measured");
+        assert_eq!(value["floor"]["admitted"], true);
+        assert_eq!(value["proofs"][1]["name"], "isolation:namespaces");
+        assert_eq!(value["proofs"][1]["state"], "provided");
+        assert_eq!(value["proofs"][1]["grade"], "measured");
         assert_eq!(value["granted"], json!(granted));
     }
 
     #[test]
     fn a_hosted_node_that_is_not_contained_names_what_it_lacks() {
         let value = facts(FactInputs {
-            host_class: "hosted",
-            isolation_mode: IsolationMode::Disabled,
-            network_mode: IsolationNetworkMode::Host,
-            report: ReportOutcome::Present(view(
+            report: report(
+                "hosted",
                 &[("storage:durable_root", ProofSource::ProviderAttested)],
-                &[("isolation:namespaces", "the host gives no namespace rights")],
-            )),
+                &[
+                    (
+                        "isolation:enforced",
+                        "isolation is not enforced on this node",
+                    ),
+                    ("isolation:namespaces", "the host gives no namespace rights"),
+                ],
+            ),
             granted: &[],
         });
         assert_eq!(value["host"]["class"], "hosted");
         assert_eq!(value["isolation"]["mode"], "disabled");
-        assert_eq!(value["isolation"]["network_mode"], "host");
+        assert_eq!(value["floor"]["admitted"], false);
+        assert_eq!(
+            value["floor"]["unmet"]["isolation:namespaces"],
+            "the host gives no namespace rights"
+        );
         let proofs = value["proofs"].as_array().unwrap();
-        assert_eq!(proofs.len(), 2);
-        assert_eq!(proofs[0]["name"], "isolation:namespaces");
-        assert_eq!(proofs[0]["state"], "missing");
-        assert_eq!(proofs[0]["reason"], "the host gives no namespace rights");
-        assert_eq!(proofs[1]["grade"], "provider_attested");
+        assert_eq!(proofs.len(), 3);
+        assert_eq!(proofs[1]["name"], "isolation:namespaces");
+        assert_eq!(proofs[1]["state"], "missing");
+        assert_eq!(proofs[2]["grade"], "provider_attested");
         assert_eq!(value["granted"], json!([]));
     }
 
     #[test]
-    fn an_unconfined_local_node_is_a_different_host_class_with_the_same_mode_code() {
+    fn a_report_that_says_nothing_of_enforcement_carries_no_posture() {
         let value = facts(FactInputs {
-            host_class: "local_unconfined",
-            isolation_mode: IsolationMode::Disabled,
-            network_mode: IsolationNetworkMode::Host,
-            report: ReportOutcome::Present(HostCapabilities::default()),
+            report: report("local_unconfined", &[], &[]),
             granted: &[],
         });
         assert_eq!(value["host"]["class"], "local_unconfined");
-        assert_eq!(value["isolation"]["mode"], "disabled");
+        assert_eq!(value["isolation"]["mode"], Value::Null);
         assert_eq!(value["proofs"], json!([]));
     }
 
     #[test]
-    fn a_report_that_does_not_stand_carries_no_proofs() {
-        for (outcome, state) in [
-            (ReportOutcome::NotComposed, "not_composed"),
-            (ReportOutcome::Refused, "refused"),
-            (ReportOutcome::Unreadable, "unreadable"),
+    fn a_report_that_does_not_stand_carries_no_host_or_proofs() {
+        for (outcome, state, reason) in [
+            (ReportOutcome::NotComposed, "not_composed", None),
+            (
+                ReportOutcome::Refused("stale".into()),
+                "refused",
+                Some("stale"),
+            ),
+            (
+                ReportOutcome::Unreadable("io".into()),
+                "unreadable",
+                Some("io"),
+            ),
         ] {
             let value = facts(FactInputs {
-                host_class: "hosted",
-                isolation_mode: IsolationMode::Disabled,
-                network_mode: IsolationNetworkMode::Host,
                 report: outcome,
                 granted: &[],
             });
             assert_eq!(value["report"]["state"], state);
+            assert_eq!(
+                value["report"].get("reason").and_then(Value::as_str),
+                reason
+            );
+            assert_eq!(value["host"], Value::Null);
             assert_eq!(value["proofs"], json!([]));
         }
-    }
-
-    #[test]
-    fn the_facts_hold_no_sentence_the_wording_could_replace() {
-        let value = facts(FactInputs {
-            host_class: "hosted",
-            isolation_mode: IsolationMode::Disabled,
-            network_mode: IsolationNetworkMode::Host,
-            report: ReportOutcome::Refused,
-            granted: &[],
-        });
-        assert!(value.get("label").is_none() && value.get("wording").is_none());
     }
 
     #[test]
@@ -458,7 +506,6 @@ mod tests {
                 &ISOLATION_MODES[..],
                 "isolation_modes",
             ),
-            (&wording.network_modes, &NETWORK_MODES[..], "network_modes"),
             (&wording.proof_states, &PROOF_STATES[..], "proof_states"),
             (&wording.grades, &PROOF_GRADES[..], "grades"),
         ] {
@@ -468,21 +515,6 @@ mod tests {
                     "{name} has no sentence for {code}"
                 );
             }
-        }
-        // The emitted sets are the types' own serialised forms.
-        for (mode, expected) in [
-            (IsolationMode::Enforce, "enforce"),
-            (IsolationMode::Disabled, "disabled"),
-        ] {
-            assert!(ISOLATION_MODES.contains(&expected));
-            assert_eq!(code(&mode), expected);
-        }
-        for (mode, expected) in [
-            (IsolationNetworkMode::Host, "host"),
-            (IsolationNetworkMode::Isolated, "isolated"),
-        ] {
-            assert!(NETWORK_MODES.contains(&expected));
-            assert_eq!(code(&mode), expected);
         }
         for source in [
             ProofSource::Measured,
