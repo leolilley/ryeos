@@ -96,6 +96,8 @@ pub struct ExecutionParams {
     /// Mirrors the same field on `dispatch::DispatchRequest` and
     /// `execution::launch::build_and_launch`'s native runtime path.
     pub pre_minted_thread_id: Option<String>,
+    /// Thread facets committed with a fresh root thread as its first events.
+    pub initial_facets: std::collections::BTreeMap<String, String>,
     /// V5.5 P2: composed capability set the daemon will enforce on
     /// every callback dispatch the spawned subprocess attempts. The
     /// caller MUST supply this explicitly — empty `Vec` means deny-all
@@ -5507,7 +5509,7 @@ pub async fn run_and_wait(
             &thread_id,
             &params.resolved,
             wait_project_authority.clone(),
-            Vec::new(),
+            ryeos_app::state_store::NewEventRecord::thread_facet_set_events(&params.initial_facets),
             Some(&wait_launch_metadata),
         )
         .map_err(|error| {
@@ -6590,7 +6592,7 @@ pub async fn run_detached(
             &thread_id,
             &params.resolved,
             bg_project_authority.clone(),
-            Vec::new(),
+            ryeos_app::state_store::NewEventRecord::thread_facet_set_events(&params.initial_facets),
             Some(&bg_launch_metadata),
         )
         .map_err(|error| {
@@ -8888,6 +8890,7 @@ pub fn execution_params_from_sealed_root_request(
         acting_principal,
         handler_context: sealed.handler_context().cloned(),
         pre_minted_thread_id: None,
+        initial_facets: Default::default(),
         effective_caps: operational_resume.effective_caps.clone(),
         provenance,
         lifecycle_authority: operational_resume.lifecycle_authority,
