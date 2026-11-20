@@ -1050,20 +1050,7 @@ impl ExactProcessIdentity {
         {
             match capture_exact_process_identity(self.target_pid, Some(self.group_leader_pid)) {
                 Ok(current) => Ok(current != *self),
-                Err(error) => {
-                    // A recorded incarnation is always a thread-group leader.
-                    // `/proc/<n>` also answers for a non-leader thread, which
-                    // pidfd_open refuses: such a coordinate holds no process,
-                    // so the recorded one has ended (a later container's
-                    // threads routinely reuse a dead daemon's number).
-                    match linux::thread_group_of(self.target_pid) {
-                        None => Ok(true),
-                        Some(Ok(group)) if group != self.target_pid => Ok(true),
-                        _ => Err(format!(
-                            "cannot classify exact process incarnation: {error}"
-                        )),
-                    }
-                }
+                Err(error) => self.classify_ended_after_capture_error(&error),
             }
         }
         #[cfg(not(target_os = "linux"))]
@@ -1071,6 +1058,83 @@ impl ExactProcessIdentity {
             Err("exact process death observation is unavailable on this OS".to_owned())
         }
     }
+
+    /// Classify this recorded incarnation after the pidfd capture of its
+    /// coordinate failed; see [`classify_after_capture_error`]. Reads only
+    /// world-readable procfs state and sends no signal.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn classify_ended_after_capture_error(&self, error: &str) -> Result<bool, String> {
+        let boot = linux::read_boot_id().ok();
+        let thread_group = linux::thread_group_of(self.target_pid);
+        let stat = linux::read_process_stat(self.target_pid)
+            .ok()
+            .map(|stat| ObservedStat {
+                start_time_ticks: stat.start_time_ticks,
+                process_group: stat.process_group,
+                state: stat.state,
+            });
+        classify_after_capture_error(self, boot.as_deref(), thread_group, stat, error)
+    }
+}
+
+/// What `/proc/<pid>/stat` shows at a recorded coordinate, read without any
+/// signal. `None` at the call site means unreadable or absent, which is never
+/// evidence either way.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ObservedStat {
+    pub(crate) start_time_ticks: u64,
+    pub(crate) process_group: i64,
+    pub(crate) state: char,
+}
+
+/// Decide whether a recorded incarnation has ended when the pidfd capture of
+/// its coordinate failed (typically EPERM on a live process of another uid,
+/// e.g. a previous container's daemon). Pure so every branch is testable
+/// without a foreign-uid process. In order:
+///
+/// 1. Boot id differs: the recorded process cannot be alive; ended.
+/// 2. No task answers at the coordinate, or it is a non-leader thread (a
+///    recorded incarnation is always a thread-group leader): ended.
+/// 3. Same boot and the occupant's birth ticks differ from the record, or
+///    (for a real process-group identity) its process group differs: the
+///    number was reused, so the recorded process is gone; ended. A recorded
+///    process cannot return, so a boot or birth mismatch is terminal.
+/// 4. Birth and group match and the occupant is Z/X: the recorded
+///    incarnation itself exited; ended.
+/// 5. Everything else stays fail-closed: a full match whose probe still
+///    fails, or an unreadable stat (hidepid, races), is not evidence.
+#[cfg(target_os = "linux")]
+pub(crate) fn classify_after_capture_error(
+    recorded: &ExactProcessIdentity,
+    current_boot: Option<&str>,
+    thread_group: Option<Result<u32, String>>,
+    stat: Option<ObservedStat>,
+    capture_error: &str,
+) -> Result<bool, String> {
+    if current_boot.is_some_and(|boot| boot != recorded.boot_id) {
+        return Ok(true);
+    }
+    match thread_group {
+        None => return Ok(true),
+        Some(Ok(group)) if group != recorded.target_pid => return Ok(true),
+        _ => {}
+    }
+    if let Some(stat) = stat {
+        // A contained identity names no group; its group fields repeat its
+        // own birth, so only the birth ticks are comparable.
+        let group_differs = recorded.group_basis == GroupBasis::ProcessGroup
+            && stat.process_group != i64::from(recorded.group_leader_pid);
+        if stat.start_time_ticks != recorded.target_start_time_ticks || group_differs {
+            return Ok(true);
+        }
+        if matches!(stat.state, 'Z' | 'X') {
+            return Ok(true);
+        }
+    }
+    Err(format!(
+        "cannot classify exact process incarnation: {capture_error}"
+    ))
 }
 
 /// Prepare this controller for the existing exact process-group lifecycle.
@@ -1871,6 +1935,121 @@ mod tests {
         child.kill().unwrap();
         child.wait().unwrap();
         assert!(identity.has_ended().unwrap());
+    }
+
+    #[cfg(target_os = "linux")]
+    mod capture_error_classification {
+        use super::*;
+
+        const EPERM: &str = "open exact process 7 pidfd: Operation not permitted (os error 1)";
+
+        fn recorded() -> ExactProcessIdentity {
+            ExactProcessIdentity {
+                boot_id: "boot-a".into(),
+                target_pid: 7,
+                target_start_time_ticks: 100,
+                group_leader_pid: 7,
+                group_leader_start_time_ticks: 100,
+                group_basis: crate::GroupBasis::ProcessGroup,
+            }
+        }
+
+        fn stat(ticks: u64, group: i64, state: char) -> Option<ObservedStat> {
+            Some(ObservedStat {
+                start_time_ticks: ticks,
+                process_group: group,
+                state,
+            })
+        }
+
+        fn classify(
+            boot: Option<&str>,
+            thread_group: Option<Result<u32, String>>,
+            stat: Option<ObservedStat>,
+        ) -> Result<bool, String> {
+            classify_after_capture_error(&recorded(), boot, thread_group, stat, EPERM)
+        }
+
+        #[test]
+        fn boot_id_difference_is_ended_even_when_stat_matches() {
+            assert_eq!(
+                classify(Some("boot-b"), Some(Ok(7)), stat(100, 7, 'S')),
+                Ok(true)
+            );
+        }
+
+        #[test]
+        fn same_boot_different_birth_is_ended() {
+            // The EPERM collision: a later container's leader of another uid.
+            assert_eq!(
+                classify(Some("boot-a"), Some(Ok(7)), stat(101, 7, 'S')),
+                Ok(true)
+            );
+        }
+
+        #[test]
+        fn same_boot_different_group_is_ended() {
+            assert_eq!(
+                classify(Some("boot-a"), Some(Ok(7)), stat(100, 9, 'S')),
+                Ok(true)
+            );
+        }
+
+        #[test]
+        fn contained_identity_ignores_the_group_field() {
+            let mut contained = recorded();
+            contained.group_basis = crate::GroupBasis::Contained;
+            let result = classify_after_capture_error(
+                &contained,
+                Some("boot-a"),
+                Some(Ok(7)),
+                stat(100, 9, 'S'),
+                EPERM,
+            );
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn full_match_with_failed_probe_stays_an_error() {
+            let error = classify(Some("boot-a"), Some(Ok(7)), stat(100, 7, 'S')).unwrap_err();
+            assert!(error.contains("cannot classify exact process incarnation"));
+            assert!(error.contains(EPERM));
+        }
+
+        #[test]
+        fn matching_exited_incarnation_is_ended() {
+            assert_eq!(
+                classify(Some("boot-a"), Some(Ok(7)), stat(100, 7, 'Z')),
+                Ok(true)
+            );
+        }
+
+        #[test]
+        fn unreadable_stat_is_not_evidence() {
+            assert!(classify(Some("boot-a"), Some(Ok(7)), None).is_err());
+            assert!(classify(None, Some(Ok(7)), None).is_err());
+            assert!(classify(Some("boot-a"), Some(Err("denied".into())), None).is_err());
+        }
+
+        #[test]
+        fn absent_coordinate_and_non_leader_thread_are_ended() {
+            assert_eq!(classify(Some("boot-a"), None, None), Ok(true));
+            assert_eq!(classify(Some("boot-a"), Some(Ok(3)), None), Ok(true));
+        }
+
+        #[test]
+        fn unreadable_boot_does_not_block_a_birth_mismatch() {
+            assert_eq!(classify(None, Some(Ok(7)), stat(5, 7, 'S')), Ok(true));
+        }
+
+        #[test]
+        fn ok_path_is_unchanged() {
+            let own = capture_exact_process_identity(std::process::id(), None).unwrap();
+            assert!(!own.has_ended().unwrap());
+            let mut reborn = own.clone();
+            reborn.target_start_time_ticks += 1;
+            assert!(reborn.has_ended().unwrap());
+        }
     }
 
     #[cfg(target_os = "linux")]
