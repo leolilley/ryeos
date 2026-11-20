@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-20T01:32:52Z:3a9fa9b4a415015009db1fe0ec4bbed7fd5fe8109b9dd7c3f9b4c2e216a2cf68:GAieS44j/ar//Ctd0MabIXi18GWgGkZTvIx5ZA42/2rTcg7sjrQvVi75unMDoiWdw5wVCWEKeZVWZzctaeeIDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T05:09:15Z:cd937ecffb0ece674fd7c396003f2655f28625e9c84f66a48becbd8de376ee5d:UPIzhpd71qOez2Ss93Q4/4NqXVqAwqdvhHTJhzqPw/eC8z6liG8VOV6oPKW2fNFEClT7/JBZT7X3a2soMuFDBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Thread timeline definition: how a chain's events fold into timeline items.
 # Declarative data read by the timeline service; the fold engine names no event type itself.
 category: ryeos/ui/timeline
@@ -37,6 +37,7 @@ events:
   thread_started: [{drop: true}]
   as_launched_resolution: [{drop: true}]
   as_launched_ref_bindings: [{drop: true}]
+  runtime_launch_facts: [{drop: true}]
   process_input_root_selected: [{drop: true}]
   provider_attempt_budget_transition_v1: [{drop: true}]
   stream_opened: [{drop: true}]
@@ -164,19 +165,6 @@ events:
     - emit:
         - type: marker
           project: {headline: {join: [{path: payload.reason, prefix: "context compacted · "}]}}
-
-  # What the launch prepared the run with: the model and provider it was bound
-  # to. A quiet row; a run with no model binding draws nothing.
-  runtime_launch_facts:
-    - when: {has: payload.facts.model_name}
-      emit:
-        - type: marker
-          project:
-            headline:
-              join:
-                - {path: payload.facts.model_name, prefix: "launched with "}
-                - {path: payload.facts.provider_id, prefix: "via "}
-    - drop: true
 
   # A continuation: the predecessor names its successor and why; the
   # successor's own record of the link adds nothing to draw.
