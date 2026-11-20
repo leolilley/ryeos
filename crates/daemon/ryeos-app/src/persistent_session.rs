@@ -7804,7 +7804,7 @@ while True:
         let spec = PlanSubprocessSpec {
             cmd: host_executable("python3"),
             verified_command: None,
-            args: vec!["-S".into(), "-c".into(), script],
+            args: vec!["-S".into(), "-c".into(), script.as_str().into()],
             cwd: None,
             env: HashMap::new(),
             env_sources: HashMap::new(),
