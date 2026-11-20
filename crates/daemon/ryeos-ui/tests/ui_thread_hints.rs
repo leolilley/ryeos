@@ -203,17 +203,26 @@ async fn a_project_attached_seat_receives_only_its_projects_threads() {
     // A teammate's thread in the same project is the project's thread.
     create_thread(&state, "T-in-a-team", "fp:teammate", Some(project_a.path()));
     create_thread(&state, "T-in-b", "fp:alice", Some(project_b.path()));
-    // The seat's own projectless thread belongs to no project it is on.
+    // A projectless thread is judged by its owner, as a seat read judges it:
+    // the seat's own is observable, another principal's is not.
     create_thread(&state, "T-free", "fp:alice", None);
+    create_thread(&state, "T-free-other", "fp:teammate", None);
     let fanout = ThreadHintFanout::new();
-    for id in ["T-in-a", "T-in-a-team", "T-in-b", "T-free"] {
+    for id in ["T-in-a", "T-in-a-team", "T-in-b", "T-free", "T-free-other"] {
         send_lifecycle(&fanout, &state, &ui, id, id).await;
     }
     let ids: Vec<String> = received(&mut rx)
         .iter()
         .map(|payload| payload["thread_id"].as_str().unwrap().to_owned())
         .collect();
-    assert_eq!(ids, vec!["T-in-a".to_owned(), "T-in-a-team".to_owned()]);
+    assert_eq!(
+        ids,
+        vec![
+            "T-in-a".to_owned(),
+            "T-in-a-team".to_owned(),
+            "T-free".to_owned()
+        ]
+    );
 }
 
 #[tokio::test]
