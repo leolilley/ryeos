@@ -56,12 +56,6 @@ struct PartialConfig {
     app_root: Option<PathBuf>,
     node_signing_key_path: Option<PathBuf>,
     authorized_keys_dir: Option<PathBuf>,
-    /// Retired: nodes initialized before the daemon stopped loading the
-    /// operator private key stored its path here. The value is never read.
-    /// Accepting it keeps the documented cure for such nodes (stop, then
-    /// `ryeos init` on the same app root) from refusing on the stored file.
-    #[serde(default, rename = "operator_signing_key_path")]
-    _retired_operator_signing_key_path: Option<serde::de::IgnoredAny>,
 }
 
 fn publish_bootstrap_config(
@@ -190,8 +184,9 @@ impl Config {
                 Some(Self::load_file(&default_config).with_context(|| {
                     format!(
                         "failed to load existing config at {path}; a stored config that does \
-                         not match the current bootstrap schema is refused — remove {path} \
-                         and re-run `ryeos init`",
+                         not match the current bootstrap schema is refused; fix the line the cause \
+                         names, or remove {path} and re-run `ryeos init` (which discards the \
+                         stored bind, socket, database and key settings)",
                         path = default_config.display()
                     )
                 })?)
@@ -315,7 +310,18 @@ impl Config {
     fn load_file(path: &Path) -> Result<PartialConfig> {
         let contents = fs::read_to_string(path)
             .with_context(|| format!("failed to read config file {}", path.display()))?;
-        serde_yaml::from_str(&contents)
+        let document: serde_yaml::Value = serde_yaml::from_str(&contents)
+            .with_context(|| format!("failed to parse config file {}", path.display()))?;
+        if document.get("operator_signing_key_path").is_some() {
+            bail!(
+                "config file {path} carries `operator_signing_key_path`, which this node no \
+                 longer reads (the daemon does not load the operator private key from \
+                 configuration); delete the \
+                 `operator_signing_key_path` line from {path} and start it again",
+                path = path.display()
+            );
+        }
+        serde_yaml::from_value(document)
             .with_context(|| format!("failed to parse config file {}", path.display()))
     }
 
@@ -492,32 +498,32 @@ mod tests {
     }
 
     #[test]
-    fn a_stored_config_with_the_retired_operator_key_path_still_loads() {
+    fn a_stored_config_with_the_retired_operator_key_path_is_refused_with_the_cure() {
         let tmp = tempfile::tempdir().unwrap();
         let app_root = tmp.path().join("node");
         let node_dir = app_root.join(ryeos_engine::AI_DIR).join("node");
         std::fs::create_dir_all(&node_dir).unwrap();
-        let stored = Config::load(&ConfigSources {
+        let sources = ConfigSources {
             app_root: Some(app_root.clone()),
             ..Default::default()
-        })
-        .unwrap();
-        let mut yaml = serde_yaml::to_string(&stored).unwrap();
+        };
+        let stored = Config::load(&sources).unwrap();
+        let current = serde_yaml::to_string(&stored).unwrap();
+        std::fs::write(node_dir.join("config.yaml"), &current).unwrap();
+        assert_eq!(Config::load(&sources).unwrap().bind, stored.bind);
+
+        let mut yaml = current.clone();
         yaml.push_str("operator_signing_key_path: /old/operator/private_key.pem\n");
         std::fs::write(node_dir.join("config.yaml"), yaml).unwrap();
-
-        let loaded = Config::load(&ConfigSources {
-            app_root: Some(app_root.clone()),
-            ..Default::default()
-        })
-        .unwrap();
-        assert_eq!(loaded.bind, stored.bind);
+        let text = format!("{:#}", Config::load(&sources).unwrap_err());
         assert!(
-            !serde_yaml::to_string(&loaded)
-                .unwrap()
-                .contains("operator_signing_key_path"),
-            "the retired path is never carried forward"
+            text.contains("delete the `operator_signing_key_path` line"),
+            "{text}"
         );
+
+        // The cure named by the refusal works and loses no other setting.
+        std::fs::write(node_dir.join("config.yaml"), current).unwrap();
+        assert_eq!(Config::load(&sources).unwrap().bind, stored.bind);
     }
 
     #[test]
