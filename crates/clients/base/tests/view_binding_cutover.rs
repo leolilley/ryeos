@@ -144,14 +144,23 @@ fn check_view_snapshots(actual: &BTreeMap<String, Value>) {
         match fs::read_to_string(&path) {
             Err(_) => report.push(format!("{view_ref}: no snapshot at {}", path.display())),
             Ok(text) => {
-                let stored: Value = serde_json::from_str(&text)
-                    .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()));
-                if &stored != snapshot {
-                    let mut lines = vec![format!("{view_ref}: behavior changed")];
-                    lines.extend(field_diff(&stored, snapshot));
-                    report.push(lines.join("\n"));
-                } else if text != stable_json(snapshot) {
+                let current = stable_json(snapshot);
+                if text == current {
+                    continue;
+                }
+                // Both sides go through the same parser so float re-reading
+                // cannot show up as a difference; only real field changes do.
+                let parse = |source: &str| -> Value {
+                    serde_json::from_str(source)
+                        .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()))
+                };
+                let lines = field_diff(&parse(&text), &parse(&current));
+                if lines.is_empty() {
                     report.push(format!("{view_ref}: snapshot file is not in stable form"));
+                } else {
+                    let mut entry = vec![format!("{view_ref}: behavior changed")];
+                    entry.extend(lines);
+                    report.push(entry.join("\n"));
                 }
             }
         }
