@@ -697,6 +697,9 @@ async fn session_start_evidence(daemon: &mut DaemonHarness, chain_root_id: &str)
             !line.contains("resolved project execution context") && !line.contains("cache metric")
         })
         .collect();
+    for line in lines.iter().filter(|line| line.contains("session_secret_")) {
+        text.push_str(&format!("secret refusal in daemon log: {line}\n"));
+    }
     text.push_str("daemon log tail:\n");
     text.push_str(&lines[lines.len().saturating_sub(40)..].join("\n"));
     text
@@ -1052,21 +1055,34 @@ async fn recovery_after_the_recipient_rule_is_withdrawn_is_refused_as_revoked() 
     common::fast_fixture::seal_initialized_state(&daemon.state_path)?;
     daemon.respawn_with(|_| {}).await?;
 
+    // A restarted session is `recovering`; the node accepts no caller command
+    // for it except an exact settled replay, because the re-attach is the
+    // runtime's own. A caller command is refused for that stated reason.
+    let (status, response) = daemon
+        .post_execute(
+            "service:worker-executions/command",
+            ".",
+            json!({
+                "chain_root_id": chain_root_id,
+                "idempotency_key": "session-secret-after-revoke",
+                "route_id": "session.inspect",
+                "payload": {},
+            }),
+        )
+        .await?;
+    anyhow::ensure!(
+        !status.is_success()
+            && response.to_string().contains(
+                "accept only an exact settled replay or the runtime-owned reattach route"
+            ),
+        "a caller command on the recovering session was not refused as runtime-owned: {status} {response}"
+    );
+    // The runtime's own re-attach is where the withdrawn rule surfaces. Wait
+    // for the node to report `session_secret_revoked` in the session status,
+    // the retained thread or the daemon log.
     let mut evidence = String::new();
-    for attempt in 0..240 {
-        let (_, response) = daemon
-            .post_execute(
-                "service:worker-executions/command",
-                ".",
-                json!({
-                    "chain_root_id": chain_root_id,
-                    "idempotency_key": format!("session-secret-after-revoke-{attempt}"),
-                    "route_id": "session.inspect",
-                    "payload": {},
-                }),
-            )
-            .await?;
-        evidence = refusal_evidence(&mut daemon, &chain_root_id, &response.to_string()).await;
+    for _ in 0..240 {
+        evidence = session_start_evidence(&mut daemon, &chain_root_id).await;
         if evidence.contains(REVOKED_CODE) {
             break;
         }
