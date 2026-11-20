@@ -134,7 +134,7 @@ impl ExternalChannelAuthority {
         lillux::sha256_hex(self.bootstrap_capability.as_bytes())
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn test_fixture(generation: &str) -> Self {
         Self {
             generation: generation.to_owned(),

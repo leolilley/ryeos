@@ -333,6 +333,90 @@ async fn unattached_trusted_holding_recovery_settles_only_an_ended_host_lifetime
     );
 }
 
+/// The periodic pass settles a predecessor session that startup left
+/// quarantined, by the same generation-gated proof, and is idempotent: a
+/// session of the running generation is never touched, and a second pass
+/// settles nothing.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn periodic_pass_settles_a_predecessor_trusted_holding_session_once() {
+    let (_tmp, _state_owner, state) = build_test_state();
+    let db = &state.state_store;
+    let (capsule_hash, _, _) = store_structured_session_capsule(&state);
+    let current =
+        serde_json::to_value(lillux::ProcessHostLifetime::capture_current().unwrap()).unwrap();
+    for (suffix, former) in [("ended", true), ("running", false)] {
+        let placement = format!("T-{suffix}");
+        let worker = format!("worker-{suffix}");
+        let profile = format!("profile-{suffix}");
+        db.create_credential_profile(NewCredentialProfile {
+            profile_id: &profile,
+            owner_principal: "fp:test",
+            home_id: &format!("home-{suffix}"),
+            activation: ryeos_app::runtime_db::CredentialActivation::Ceremony,
+        })
+        .unwrap();
+        let generation = db
+            .acquire_credential_profile(&profile, "fp:test", &worker)
+            .unwrap();
+        db.admit_dedicated_session(NewDedicatedSession {
+            placement_thread_id: &placement,
+            chain_root_id: &placement,
+            owner_principal: "fp:test",
+            admitted_capsule_hash: &capsule_hash,
+            workspace_id: &format!("W-{suffix}"),
+            candidate_required: false,
+            candidate_disposition: DedicatedCandidateDisposition::OwnerDecision,
+            credential_profile_id: &profile,
+            credential_generation: generation,
+            credential_lock_owner: &worker,
+        })
+        .unwrap();
+        let mut lifetime = current.clone();
+        lifetime["backend"]["boot_id"] = "00000000-0000-4000-8000-000000000000".into();
+        let holding = ryeos_app::runtime_db::DedicatedWorkerTrustedHolding {
+            worker_instance_id: worker.clone(),
+            boot_epoch: 1,
+            daemon_generation_id: if former {
+                "former-daemon".to_owned()
+            } else {
+                ryeos_app::runtime_db::daemon_generation_id().to_owned()
+            },
+            host_lifetime: serde_json::from_value(lifetime).unwrap(),
+        };
+        let raw = lillux::canonical_json(&serde_json::to_value(holding).unwrap()).unwrap();
+        db.with_runtime_sql_for_test(|connection| {
+            Ok(connection.execute(
+                "UPDATE dedicated_session SET worker_trusted_holding=?1 WHERE placement_thread_id=?2",
+                rusqlite::params![raw, placement],
+            )?)
+        })
+        .unwrap();
+    }
+    assert!(
+        super::reconcile::settle_predecessor_sessions_after_external_settlement(&state).unwrap()
+    );
+    let ended = db.dedicated_session("T-ended").unwrap().unwrap();
+    assert_eq!(ended.state, "terminal");
+    assert!(ended.worker_instance_id.is_none());
+    assert!(
+        db.credential_profile("profile-ended")
+            .unwrap()
+            .unwrap()
+            .lock_owner
+            .is_none()
+    );
+    let running = db.dedicated_session("T-running").unwrap().unwrap();
+    assert_eq!(running.state, "admitted");
+    assert_eq!(
+        running.worker_instance_id.as_deref(),
+        Some("worker-running")
+    );
+    assert!(
+        !super::reconcile::settle_predecessor_sessions_after_external_settlement(&state).unwrap()
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn precontact_resource_scope_recovery_discards_without_relaunch() {

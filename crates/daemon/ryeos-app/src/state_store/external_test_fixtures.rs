@@ -482,6 +482,84 @@ impl StateStore {
         Ok(())
     }
 
+    /// Leave in this Store what a daemon that died mid-lease leaves behind: a
+    /// running placement thread whose launch claim belongs to another daemon
+    /// generation, a dedicated session holding its credential profile lock for
+    /// a worker of that generation, and an external allocation that contacted
+    /// its provider and bound an occurrence but has no observed provider
+    /// terminal. The retained binding names a backend no adapter provides, so
+    /// the provider can never answer. Only a Store whose node is not running
+    /// may be seeded.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn install_unsettled_dedicated_session_allocation(
+        &self,
+        placement_thread_id: &str,
+        workspace_id: &str,
+        worker_instance_id: &str,
+    ) -> Result<()> {
+        use crate::runtime_db::external_execution::{
+            EXTERNAL_ALLOCATION_RESERVATION_SCHEMA, ExternalAllocationOccurrence,
+            ExternalAllocationOwner, ExternalAllocationReservation, ExternalDedicatedSessionOwner,
+            ExternalObservationTiming,
+        };
+        let binding =
+            crate::node_config::sections::external_execution::RetainedExternalExecutionBinding::test_fixture();
+        let channel_authority =
+            crate::vault::external_channel::ExternalChannelAuthority::test_fixture(&"3".repeat(64));
+        let now = lillux::time::timestamp_millis();
+        let reservation = ExternalAllocationReservation {
+            schema: EXTERNAL_ALLOCATION_RESERVATION_SCHEMA,
+            placement_thread_id: placement_thread_id.to_owned(),
+            admitted_capsule_hash: "a".repeat(64),
+            owner: ExternalAllocationOwner::DedicatedSession(ExternalDedicatedSessionOwner {
+                workspace_id: workspace_id.to_owned(),
+                worker_instance_id: worker_instance_id.to_owned(),
+                worker_boot_epoch: 1,
+            }),
+            base_snapshot_hash: "b".repeat(64),
+            binding_hash: binding.digest().into(),
+            capacity_owner: binding.capacity_owner().into(),
+            channel_authority_generation: "3".repeat(64),
+            channel_owner_public_key: channel_authority.owner_public_key(),
+            channel_bootstrap_capability_hash: channel_authority.bootstrap_capability_hash(),
+            admitted_adapter_request_base64: None,
+            request_digest: "e".repeat(64),
+            max_active: 1,
+            timeout_seconds: 60,
+            startup_started_at_ms: now,
+            startup_deadline_ms: now + 60_000,
+            contact_deadline_ms: now + 60_000,
+        };
+        self.install_external_placement_test_fixture_with_workspace_inner(
+            &reservation,
+            Some(&binding),
+            std::path::Path::new(EXTERNAL_PLACEMENT_TEST_PROJECT_ROOT),
+            "fp:operator",
+            false,
+            false,
+            None,
+            |_| external_placement_test_workspace_binding(&reservation),
+        )?;
+        self.claim_external_allocation_contact(placement_thread_id, &reservation.request_digest)?;
+        let occurrence = ExternalAllocationOccurrence {
+            schema: 1,
+            binding_hash: reservation.binding_hash.clone(),
+            request_digest: reservation.request_digest.clone(),
+            occurrence_id: "seeded-occurrence".into(),
+            provider_observation_digest: "f".repeat(64),
+        };
+        self.bind_external_allocation(
+            placement_thread_id,
+            &occurrence,
+            ExternalObservationTiming::Startup {
+                deadline_exceeded: false,
+                live_deadline: lillux::time::MonotonicDeadline::after(
+                    lillux::time::Duration::from_secs(60),
+                ),
+            },
+        )
+    }
+
     #[cfg(test)]
     pub(crate) fn external_candidate_test_authority(&self) -> &ryeos_state::PinnedStateAuthority {
         &self.state_authority
