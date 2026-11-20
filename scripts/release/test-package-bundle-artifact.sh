@@ -75,6 +75,8 @@ done
 [[ -n "$app_root" && -n "$source_dir" && -d "$source_dir/.ai" ]]
 [[ "$substrate_digest" == "sha256:$(printf '0%.0s' {1..64})" ]]
 [[ "$substrate_protocol" == 1 ]]
+# The real gate refuses an app root outside the verification root's storage.
+[[ "$app_root" == "${FAKE_RYEOS_VERIFY_ROOT:?}"/*/* ]]
 mkdir -p "$app_root"
 printf '%s\n' "${node_profile:-none}" >> "${FAKE_RYEOS_CALLS:?}"
 [[ -n "$node_profile" ]] || exit 2
@@ -114,6 +116,10 @@ fi
 EOF
 chmod +x "$fake_ryeos"
 
+verify_root="$tmp/verify-root"
+mkdir "$verify_root"
+export FAKE_RYEOS_VERIFY_ROOT="$verify_root"
+
 for run in one two; do
     mkdir -p "$tmp/$run"
     FAKE_RYEOS_CALLS="$tmp/$run/init-calls" \
@@ -122,7 +128,10 @@ for run in one two; do
         --source "$source_dir" \
         --output "$tmp/$run/ryeos-bundles-1.2.3-x86_64.tar.gz" \
         --source-date-epoch 1700000000 \
+        --verify-root "$verify_root" \
         --ryeos-bin "$fake_ryeos" >/dev/null
+    # Every verification app root was removed from the verification root.
+    [[ -z "$(find "$verify_root" -mindepth 1 -print -quit)" ]]
     printf '%s\n' none standard hosted-controller > "$tmp/$run/expected-init-calls"
     cmp "$tmp/$run/expected-init-calls" "$tmp/$run/init-calls"
     (cd "$tmp/$run" && sha256sum -c ryeos-bundles-1.2.3-x86_64.tar.gz.sha256)
@@ -200,6 +209,7 @@ if FAKE_RYEOS_CALLS="$tmp/missing-source-profile-calls" \
     --source "$source_dir" \
     --output "$tmp/missing-source-profile/ryeos-bundles-1.2.3-x86_64.tar.gz" \
     --source-date-epoch 1700000000 \
+    --verify-root "$verify_root" \
     --ryeos-bin "$fake_ryeos" >/dev/null 2>&1; then
     echo "expected packaging to reject a missing node init profile" >&2
     exit 1
@@ -215,6 +225,7 @@ if FAKE_RYEOS_CALLS="$tmp/mismatched-source-profile-calls" \
     --source "$source_dir" \
     --output "$tmp/mismatched-source-profile/ryeos-bundles-1.2.3-x86_64.tar.gz" \
     --source-date-epoch 1700000000 \
+    --verify-root "$verify_root" \
     --ryeos-bin "$fake_ryeos" >/dev/null 2>&1; then
     echo "expected packaging to reject a mismatched node init profile" >&2
     exit 1
@@ -228,6 +239,7 @@ if FAKE_RYEOS_CALLS="$tmp/legacy-init-input-calls" \
     --source "$source_dir" \
     --output "$tmp/legacy-init-input/ryeos-bundles-1.2.3-x86_64.tar.gz" \
     --source-date-epoch 1700000000 \
+    --verify-root "$verify_root" \
     --ryeos-bin "$fake_ryeos" >/dev/null 2>&1; then
     echo "expected packaging to reject a parallel legacy init input" >&2
     exit 1
@@ -260,6 +272,7 @@ if FAKE_RYEOS_CALLS="$tmp/private-key-init-calls" \
     --source "$source_dir" \
     --output "$tmp/private-key/ryeos-bundles-1.2.3-x86_64.tar.gz" \
     --source-date-epoch 1700000000 \
+    --verify-root "$verify_root" \
     --ryeos-bin "$fake_ryeos" >/dev/null 2>&1; then
     echo "expected private key material to be rejected" >&2
     exit 1
@@ -273,6 +286,7 @@ if FAKE_RYEOS_CALLS="$tmp/hard-link-init-calls" \
     --source "$source_dir" \
     --output "$tmp/hard-link/ryeos-bundles-1.2.3-x86_64.tar.gz" \
     --source-date-epoch 1700000000 \
+    --verify-root "$verify_root" \
     --ryeos-bin "$fake_ryeos" >/dev/null 2>&1; then
     echo "expected multiply-linked files to be rejected" >&2
     exit 1
@@ -287,7 +301,21 @@ if FAKE_RYEOS_CALLS="$tmp/rejected-init-calls" \
     --source "$source_dir" \
     --output "$tmp/rejected/ryeos-bundles-1.2.3-x86_64.tar.gz" \
     --source-date-epoch 1700000000 \
+    --verify-root "$verify_root" \
     --ryeos-bin "$fake_ryeos" >/dev/null 2>&1; then
     echo "expected non-official publisher metadata to be rejected" >&2
+    exit 1
+fi
+
+# A verification root that does not exist is refused, never defaulted.
+if FAKE_RYEOS_CALLS="$tmp/missing-verify-root-calls" \
+    "$root/scripts/release/package-bundle-artifact.sh" \
+    --version 1.2.3 \
+    --source "$source_dir" \
+    --output "$tmp/missing-verify-root/ryeos-bundles-1.2.3-x86_64.tar.gz" \
+    --source-date-epoch 1700000000 \
+    --verify-root "$tmp/absent-verify-root" \
+    --ryeos-bin "$fake_ryeos" >/dev/null 2>&1; then
+    echo "expected a missing verification root to be rejected" >&2
     exit 1
 fi

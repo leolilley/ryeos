@@ -2,16 +2,24 @@
 //! host node. This module never provisions a host service or changes node
 //! policy: both are administrator-owned prerequisites to the diagnostic.
 
+#[cfg(all(unix, feature = "handoff-test-support"))]
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+#[cfg(all(unix, feature = "handoff-test-support"))]
+use std::path::Path;
+#[cfg(all(unix, feature = "handoff-test-support"))]
+use std::path::PathBuf;
 
-use anyhow::{Context as _, Result, ensure};
+use anyhow::Result;
+#[cfg(all(unix, feature = "handoff-test-support"))]
+use anyhow::{Context as _, ensure};
+#[cfg(all(unix, feature = "handoff-test-support"))]
 use lillux::crypto::SigningKey;
 use serde_json::{Value, json};
 
 use crate::common;
 
 pub(crate) trait QualificationEndpoint {
+    #[cfg(all(unix, feature = "handoff-test-support"))]
     fn state_path(&self) -> &Path;
 
     async fn post_json(
@@ -42,6 +50,7 @@ pub(crate) trait QualificationEndpoint {
 }
 
 impl QualificationEndpoint for common::DaemonHarness {
+    #[cfg(all(unix, feature = "handoff-test-support"))]
     fn state_path(&self) -> &Path {
         &self.state_path
     }
@@ -66,6 +75,7 @@ impl QualificationEndpoint for common::DaemonHarness {
 /// The exact installed service and initialized fixture are supplied by the
 /// operator. Merely setting an address cannot turn a direct daemon into a
 /// host-associated process-scope owner.
+#[cfg(all(unix, feature = "handoff-test-support"))]
 pub(crate) struct HostBackedQualificationEndpoint {
     state_path: PathBuf,
     bind: SocketAddr,
@@ -77,6 +87,7 @@ pub(crate) struct HostBackedQualificationEndpoint {
     peer: lillux::local_ipc::AuthenticatedUnixPeer,
 }
 
+#[cfg(all(unix, feature = "handoff-test-support"))]
 impl HostBackedQualificationEndpoint {
     pub(crate) fn from_explicit_disposable_node() -> Result<Self> {
         let state_path = PathBuf::from(
@@ -194,6 +205,7 @@ impl HostBackedQualificationEndpoint {
     }
 }
 
+#[cfg(all(unix, feature = "handoff-test-support"))]
 impl QualificationEndpoint for HostBackedQualificationEndpoint {
     fn state_path(&self) -> &Path {
         &self.state_path

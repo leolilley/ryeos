@@ -2685,6 +2685,7 @@ dependencies = [
  "ryeos-node-runtime",
  "ryeos-project-capture",
  "ryeos-provider-contract",
+ "ryeos-request-signing",
  "ryeos-runtime",
  "ryeos-scheduler",
  "ryeos-scheduler-contract",
@@ -2942,6 +2943,7 @@ dependencies = [
  "lillux",
  "rand 0.8.6",
  "reqwest",
+ "ryeos-request-signing",
  "serde_json",
  "thiserror 2.0.18",
 ]
@@ -2960,6 +2962,7 @@ dependencies = [
  "reqwest",
  "ryeos-client-base",
  "ryeos-client-transport",
+ "ryeos-request-signing",
  "serde",
  "serde_json",
  "tokio",
@@ -3604,6 +3607,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-request-signing"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "ryeos-runtime"
 version = "0.5.102"
 dependencies = [
@@ -3929,6 +3940,7 @@ dependencies = [
  "ryeos-node",
  "ryeos-node-runtime",
  "ryeos-provider-contract",
+ "ryeos-request-signing",
  "ryeos-runtime",
  "ryeos-scheduler",
  "ryeos-scheduler-contract",
