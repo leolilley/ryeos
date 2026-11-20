@@ -320,7 +320,7 @@ pub(crate) async fn endorse_items(app_root: &Path, parameters: &Value) -> Result
         ),
         Some(_) => return Err(local("--lifetime-secs must be a positive whole number")),
     };
-    if standing == !items.is_empty() {
+    if standing != items.is_empty() {
         return Err(local(
             "endorse takes either --item <ref>... (these exact items) or --standing --kind <kind>... \
              (every item of those kinds the authoring key signs in the project), not both",
