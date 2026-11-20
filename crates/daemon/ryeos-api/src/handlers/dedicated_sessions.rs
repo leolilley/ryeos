@@ -11280,13 +11280,13 @@ mod tests {
         let owner = "fp:owner";
         let path = "/projects/demo";
         let base = "b".repeat(64);
-        let pin = |principal_key: String, project_path: &str, expected: &str| RetainCurrentHead {
-            principal_key,
+        let pin = |principal_key: &str, project_path: &str, expected: &str| RetainCurrentHead {
+            principal_key: principal_key.to_owned(),
             project_hash: lillux::sha256_hex(project_path.as_bytes()),
             expected_hash: expected.to_owned(),
         };
         let owner_key = ryeos_state::refs::principal_storage_key(owner).unwrap();
-        let good = pin(owner_key.clone(), path, &base);
+        let good = pin(&owner_key, path, &base);
         let check = |disposition, publication: &_| {
             super::candidate_publication_pairing_matches(
                 disposition,
@@ -11307,15 +11307,12 @@ mod tests {
         // refused under either disposition.
         for disposition in [&OwnerDecision, &RetainedForReview] {
             let other_owner = ryeos_state::refs::principal_storage_key("fp:someone-else").unwrap();
-            assert!(!check(disposition, &pin(other_owner, path, &base)));
+            assert!(!check(disposition, &pin(&other_owner, path, &base)));
             assert!(!check(
                 disposition,
-                &pin(owner_key.clone(), "/projects/other", &base)
+                &pin(&owner_key, "/projects/other", &base)
             ));
-            assert!(!check(
-                disposition,
-                &pin(owner_key.clone(), path, &"c".repeat(64))
-            ));
+            assert!(!check(disposition, &pin(&owner_key, path, &"c".repeat(64))));
             assert!(!check(disposition, &Discard));
         }
     }
