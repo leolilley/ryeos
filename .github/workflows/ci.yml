@@ -1549,8 +1549,8 @@ jobs:
           shopt -s nullglob
           for log in "$RYEOSD_TEST_STDERR_DIR"/*.stderr.log; do
             echo "== $log ($(wc -l < "$log") lines)"
-            sed 's/\x1b\[[0-9;]*m//g' "$log" | grep -E ' (WARN|ERROR) |refus|session_worker|worker|scope|exclusive|launch' \
-              | grep -v 'resolved project execution context\|cache metric' | cut -c1-500 | tail -n 40
+            sed 's/\x1b\[[0-9;]*m//g' "$log" | grep -v 'resolved project execution context\|cache metric\|admitted kind schemas\|CAS chain\|kind profiles' \
+              | cut -c1-600 | tail -n 30
           done
 
   bundle-refresh:
