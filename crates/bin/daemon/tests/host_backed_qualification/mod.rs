@@ -4,6 +4,7 @@
 
 #[cfg(all(unix, feature = "handoff-test-support"))]
 use std::net::SocketAddr;
+#[cfg(all(unix, feature = "handoff-test-support"))]
 use std::path::Path;
 #[cfg(all(unix, feature = "handoff-test-support"))]
 use std::path::PathBuf;
