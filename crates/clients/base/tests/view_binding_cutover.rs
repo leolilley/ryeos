@@ -174,7 +174,7 @@ const VIEW_BEHAVIOR_GOLDENS: &[(&str, &str)] = &[
     ),
     (
         "view:ryeos/threads/detail",
-        "01f46b7a70b7b2973270165e29e7906f861dcda17004881fa703bc0d5894246f",
+        "082d06dc2055241643ab996ddd04efa285d8effc9b8c582b05366ce032998104",
     ),
     (
         "view:ryeos/threads/history",
