@@ -103,6 +103,32 @@ pub struct NewEventRecord {
     pub payload: Value,
 }
 
+impl NewEventRecord {
+    /// A `thread_facet_set` event for `key`/`value`, stored under the class
+    /// that event type always takes (a facet is always indexed).
+    pub fn thread_facet_set(key: &str, value: &str) -> Self {
+        use ryeos_runtime::events::RuntimeEventType;
+        Self {
+            event_type: RuntimeEventType::ThreadFacetSet.as_str().to_string(),
+            storage_class: RuntimeEventType::ThreadFacetSet
+                .storage_class()
+                .as_str()
+                .to_string(),
+            payload: serde_json::json!({ "key": key, "value": value }),
+        }
+    }
+
+    /// One `thread_facet_set` event per entry, in key order.
+    pub fn thread_facet_set_events(
+        facets: &std::collections::BTreeMap<String, String>,
+    ) -> Vec<Self> {
+        facets
+            .iter()
+            .map(|(key, value)| Self::thread_facet_set(key, value))
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct NewArtifactRecord {
     pub artifact_type: String,

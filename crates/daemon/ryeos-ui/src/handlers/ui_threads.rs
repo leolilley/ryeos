@@ -1002,6 +1002,25 @@ mod tests {
         assert_eq!(facets.get("phase").map(String::as_str), Some("new"));
     }
 
+    #[test]
+    fn inspection_folds_the_title_facet_like_any_other_key() {
+        use ryeos_state::objects::EventDurability;
+        let mut facets = BTreeMap::new();
+        for value in ["First title", "Renamed"] {
+            assert!(fold_inspection_facet_event(
+                &mut facets,
+                ryeos_state::event_types::THREAD_FACET_SET,
+                EventDurability::Durable,
+                &serde_json::json!({"key": "title", "value": value}),
+            ));
+        }
+        // Newest-first history: the first folded value is the latest.
+        assert_eq!(facets.get("title").map(String::as_str), Some("First title"));
+        let complete = completed_signed_facets(facets, true).expect("exhausted history");
+        assert_eq!(complete["title"], "First title");
+        assert!(completed_signed_facets(complete, false).is_none());
+    }
+
     fn candidate(index: usize) -> ryeos_app::state_store::ThreadListItem {
         ryeos_app::state_store::ThreadListItem {
             thread_id: format!("T-{index:05}"),

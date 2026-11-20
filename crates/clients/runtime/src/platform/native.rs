@@ -445,20 +445,29 @@ impl NativeAuth {
     }
 
     /// The origin-relative launch route of `launch_url`, which may be the
-    /// route itself or an absolute URL on the configured daemon origin.
+    /// route itself or an absolute URL. An absolute URL names the origin a
+    /// browser reaches the node at (its public origin, which can differ from
+    /// the address this client connects to); the launch token is redeemed
+    /// against the configured daemon origin either way, so only the route is
+    /// taken from it.
     fn launch_path(&self, launch_url: &str) -> Result<String, RuntimeError> {
         if launch_url.starts_with("/ui/launch/") {
             return Ok(launch_url.to_owned());
         }
         let origin = self.link.base_url.trim_end_matches('/');
-        launch_url
-            .strip_prefix(origin)
-            .map(str::to_owned)
-            .ok_or_else(|| {
-                RuntimeError::BindingRequest(
-                    "minted UI launch URL does not retain the configured daemon origin".to_owned(),
-                )
-            })
+        if let Some(path) = launch_url.strip_prefix(origin) {
+            return Ok(path.to_owned());
+        }
+        let parsed = reqwest::Url::parse(launch_url).map_err(|_| {
+            RuntimeError::BindingRequest("minted UI launch URL is not a valid URL".to_owned())
+        })?;
+        if !matches!(parsed.scheme(), "http" | "https") || !parsed.path().starts_with("/ui/launch/")
+        {
+            return Err(RuntimeError::BindingRequest(
+                "minted UI launch URL is not a launch route".to_owned(),
+            ));
+        }
+        Ok(parsed.path().to_owned())
     }
 
     /// Activate a daemon-minted immutable session and adopt only the exact
@@ -796,6 +805,38 @@ mod tests {
         assert!(!bounded_token(""));
         assert!(!bounded_token("bad/token"));
         assert!(!bounded_token(&"a".repeat(65)));
+    }
+
+    fn auth_for(base_url: &str) -> NativeAuth {
+        NativeAuth {
+            link: Rc::new(Link {
+                base_url: base_url.to_owned(),
+                audience: String::new(),
+                signer: None,
+                http: reqwest::Client::new(),
+                session: RefCell::new(None),
+            }),
+            mint: None,
+        }
+    }
+
+    #[test]
+    fn launch_path_accepts_bind_and_public_origins() {
+        let auth = auth_for("http://127.0.0.1:8080");
+        let route = "/ui/launch/tok-1";
+        assert_eq!(auth.launch_path(route).unwrap(), route);
+        assert_eq!(
+            auth.launch_path("http://127.0.0.1:8080/ui/launch/tok-1")
+                .unwrap(),
+            route
+        );
+        assert_eq!(
+            auth.launch_path("https://node.example.org/ui/launch/tok-1")
+                .unwrap(),
+            route
+        );
+        assert!(auth.launch_path("https://node.example.org/other").is_err());
+        assert!(auth.launch_path("not a url").is_err());
     }
 
     #[test]
