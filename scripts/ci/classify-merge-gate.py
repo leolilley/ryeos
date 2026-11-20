@@ -43,6 +43,8 @@ def git(root: str, *args: str) -> bytes:
 
 def classify(root: str, base_ref: str) -> tuple[str, list[str], str, bool]:
     """Return (mode, changed paths, reason, bundles_changed)."""
+    if not base_ref or base_ref.startswith("-"):
+        return "full", [], f"unusable base ref {base_ref!r}", True
     try:
         base = git(root, "merge-base", "HEAD", base_ref).decode().strip()
     except Exception as error:  # missing ref, no common ancestor, git failure
