@@ -7992,11 +7992,14 @@ async fn drain_persistent_session_pool(
         DrainMode::Normal => ryeos_app::persistent_session::RetirementMode::Normal,
         DrainMode::Latched => ryeos_app::persistent_session::RetirementMode::Latched,
     };
+    // An admitted start may be inside a signed process-scope control
+    // operation; the wait covers it rather than cutting the death proof short.
+    let admitted_start_wait = ryeos_app::persistent_session::admitted_start_drain_bound(
+        Duration::from_secs(process::MAX_GRACEFUL_SHUTDOWN_GRACE_SECS),
+        state.isolation.process_scope_control_timeout().ok(),
+    );
     match tokio::task::spawn_blocking(move || {
-        pool.shutdown_and_reap_all_in(
-            Duration::from_secs(process::MAX_GRACEFUL_SHUTDOWN_GRACE_SECS),
-            retirement,
-        )
+        pool.shutdown_and_reap_all_in(admitted_start_wait, retirement)
     })
     .await
     {

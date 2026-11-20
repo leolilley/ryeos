@@ -5502,6 +5502,27 @@ fn bounded_stream_error(error: &str) -> String {
     format!("{OMITTED}{tail}")
 }
 
+/// Margin added over the control budgets an admitted start may still spend.
+const ADMITTED_START_DRAIN_MARGIN: Duration = Duration::from_secs(1);
+
+/// How long shutdown waits for admitted starts to settle. An admitted start
+/// can be inside a process-scope control operation that is bounded by the
+/// node's signed control timeout (a scope allocation, and on failure the
+/// terminate-and-wait that proves the unlaunched scope empty), and those two
+/// run back to back. Cutting such a wait short would trade the death proof
+/// for speed, so the wait is stretched to cover both plus a margin, never
+/// below the ordinary grace. A node with no process-scope policy has no such
+/// operation and keeps the grace.
+pub fn admitted_start_drain_bound(grace: Duration, control_timeout: Option<Duration>) -> Duration {
+    control_timeout.map_or(grace, |control| {
+        grace.max(
+            control
+                .saturating_mul(2)
+                .saturating_add(ADMITTED_START_DRAIN_MARGIN),
+        )
+    })
+}
+
 /// Names every admitted start still holding shutdown and the stage it is in.
 fn admitted_start_stages(state: &PoolState) -> String {
     let mut named = Vec::new();
@@ -9781,6 +9802,26 @@ while True:
         assert!(
             text.contains("exclusive start rrrrrrrr at stage provider/lease"),
             "the hold names the stage: {text}"
+        );
+    }
+
+    #[test]
+    fn admitted_start_drain_bound_covers_two_control_budgets_and_never_shrinks_the_grace() {
+        let grace = Duration::from_secs(5);
+        assert_eq!(admitted_start_drain_bound(grace, None), grace);
+        // A short control budget keeps the ordinary grace.
+        assert_eq!(
+            admitted_start_drain_bound(grace, Some(Duration::from_secs(1))),
+            grace
+        );
+        // The shipped 5 s control budget: allocate, then prove empty.
+        assert_eq!(
+            admitted_start_drain_bound(grace, Some(Duration::from_secs(5))),
+            Duration::from_secs(11)
+        );
+        assert_eq!(
+            admitted_start_drain_bound(grace, Some(Duration::MAX)),
+            Duration::MAX
         );
     }
 
