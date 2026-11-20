@@ -1,0 +1,15 @@
+[package]
+name = "ryeos-request-signing"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description = "The canonical string a key holder signs for an authenticated HTTP request, shared by signers and verifiers"
+
+[dependencies]
+sha2 = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

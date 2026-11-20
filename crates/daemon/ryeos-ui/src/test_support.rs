@@ -455,6 +455,68 @@ fn service_descriptors() -> &'static [ryeos_app::service_registry::ServiceDescri
         .as_slice()
 }
 
+/// The node policy snapshot the test state runs under; `public_origin` is the
+/// browser-session policy's configured public origin.
+fn test_node_policy(
+    public_origin: Option<String>,
+) -> Arc<ryeos_node_runtime::node_policy::NodePolicySnapshot> {
+    Arc::new(
+            ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
+                ryeos_node_runtime::node_policy::default_launch_trust_record(),
+                ryeos_node_runtime::node_policy::default_authorization_record(),
+                ryeos_node_runtime::node_policy::shipped_event_storage_record(),
+                Arc::new(
+                    ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),
+                ),
+                Arc::new(
+                    ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy {
+                        schema: 5,
+                        session_ttl_secs: 28800,
+                        session_idle_secs: 3600,
+                        launch_token_ttl_secs: 60,
+                        session_scopes: vec!["*".to_owned()],
+                        max_session_bootstrap_bytes: 4194304,
+                        max_live_binding_attachments_per_session: 16,
+                        max_presentations_per_session: 16,
+                        max_surface_instances_per_presentation: 16,
+                        shared_presentation: ryeos_node_runtime::node_policy::sections::ui_browser_sessions::SharedPresentationPolicyLimits {
+                            max_declaration_bytes: 65536,
+                            max_dialogs: 16,
+                            max_initial_surfaces: 16,
+                            max_label_bytes: 128,
+                            max_mount_id_bytes: 64,
+                        },
+                        seat: ryeos_node_runtime::node_policy::sections::ui_browser_sessions::SeatPolicy {
+                            kind: "seat_session".to_owned(),
+                            max_replay_frame_events: 64,
+                            max_replay_frame_bytes: 4194304,
+                        },
+                        public_origin,
+                    },
+                ),
+                Arc::new(
+                    ryeos_node_runtime::node_policy::sections::ui_inspection::UiInspectionPolicy {
+                        schema: 1,
+                        max_event_limit: 500,
+                        max_facet_page_events: 64,
+                        max_facet_page_bytes: 524288,
+                        max_facet_pages_per_thread: 8,
+                        max_facet_pages_total: 64,
+                    },
+                ),
+            ]),
+        )
+}
+
+/// The default test state with the browser-session policy's public origin set.
+pub fn build_test_state_with_public_origin(
+    public_origin: &str,
+) -> (tempfile::TempDir, TestStateStore, AppState) {
+    let (tmp, store, mut state) = build_test_state();
+    state.node_policy = test_node_policy(Some(public_origin.to_owned()));
+    (tmp, store, state)
+}
+
 /// Build a minimal AppState with an empty engine.
 /// Suitable only for paths that reject before canonical item resolution.
 pub fn build_test_state() -> (tempfile::TempDir, TestStateStore, AppState) {
@@ -726,51 +788,7 @@ fn build_app_state(
         external_candidate_connectors: Arc::new(Default::default()),
         external_provider_configurations: Arc::new(Default::default()),
         external_candidate_imports: Arc::new(Default::default()),
-        node_policy: Arc::new(
-            ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
-                ryeos_node_runtime::node_policy::default_launch_trust_record(),
-                ryeos_node_runtime::node_policy::default_authorization_record(),
-                ryeos_node_runtime::node_policy::shipped_event_storage_record(),
-                Arc::new(
-                    ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),
-                ),
-                Arc::new(
-                    ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy {
-                        schema: 5,
-                        session_ttl_secs: 28800,
-                        session_idle_secs: 3600,
-                        launch_token_ttl_secs: 60,
-                        session_scopes: vec!["*".to_owned()],
-                        max_session_bootstrap_bytes: 4194304,
-                        max_live_binding_attachments_per_session: 16,
-                        max_presentations_per_session: 16,
-                        max_surface_instances_per_presentation: 16,
-                        shared_presentation: ryeos_node_runtime::node_policy::sections::ui_browser_sessions::SharedPresentationPolicyLimits {
-                            max_declaration_bytes: 65536,
-                            max_dialogs: 16,
-                            max_initial_surfaces: 16,
-                            max_label_bytes: 128,
-                            max_mount_id_bytes: 64,
-                        },
-                        seat: ryeos_node_runtime::node_policy::sections::ui_browser_sessions::SeatPolicy {
-                            kind: "seat_session".to_owned(),
-                            max_replay_frame_events: 64,
-                            max_replay_frame_bytes: 4194304,
-                        },
-                    },
-                ),
-                Arc::new(
-                    ryeos_node_runtime::node_policy::sections::ui_inspection::UiInspectionPolicy {
-                        schema: 1,
-                        max_event_limit: 500,
-                        max_facet_page_events: 64,
-                        max_facet_page_bytes: 524288,
-                        max_facet_pages_per_thread: 8,
-                        max_facet_pages_total: 64,
-                    },
-                ),
-            ]),
-        ),
+        node_policy: test_node_policy(None),
         vault: Arc::new(ryeos_app::vault::EmptyVault),
         provider_env: std::sync::Arc::new(ryeos_app::vault::ProviderEnvironment::none()),
         vault_ceilings: std::sync::Arc::new(ryeos_app::vault::VaultCeilings::operator_only(
