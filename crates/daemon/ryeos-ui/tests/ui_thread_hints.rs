@@ -233,7 +233,8 @@ async fn an_undecidable_thread_produces_no_hint_and_is_counted() {
     assert!(received(&mut rx).is_empty());
 
     // Activity of an undecidable thread is withheld the same way.
-    let counts = std::collections::HashMap::from([("T-absent".to_owned(), ("T-absent".to_owned(), 3))]);
+    let counts =
+        std::collections::HashMap::from([("T-absent".to_owned(), ("T-absent".to_owned(), 3))]);
     fanout.publish_activity(&state, &ui, &counts).await;
     assert!(received(&mut rx).is_empty());
     assert_eq!(fanout.undecided_count(), 3);

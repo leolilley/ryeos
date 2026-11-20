@@ -7180,7 +7180,12 @@ async fn supervise_background_tasks(
 
     let hint_hub = state.event_streams.clone();
     let hint_state = state.clone();
-    tasks.spawn(async move { ("UI hint fanout", run_ui_hint_loop(hint_hub, ui, hint_state).await) });
+    tasks.spawn(async move {
+        (
+            "UI hint fanout",
+            run_ui_hint_loop(hint_hub, ui, hint_state).await,
+        )
+    });
 
     let first_result = tokio::select! {
         _ = shutdown_signal() => Ok(()),

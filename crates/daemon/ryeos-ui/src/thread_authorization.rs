@@ -155,7 +155,9 @@ pub(crate) struct SessionObserver {
 }
 
 impl SessionObserver {
-    pub(crate) fn new(attachments: &[std::sync::Arc<crate::browser_session::AdmittedBindingAttachment>]) -> Self {
+    pub(crate) fn new(
+        attachments: &[std::sync::Arc<crate::browser_session::AdmittedBindingAttachment>],
+    ) -> Self {
         Self {
             callers: attachments
                 .iter()

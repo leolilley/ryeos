@@ -67,10 +67,9 @@ impl ThreadHintFanout {
             None => {
                 let read_state = state.clone();
                 let id = thread_id.to_owned();
-                let loaded = tokio::task::spawn_blocking(move || {
-                    load_thread_subject(&read_state, &id)
-                })
-                .await;
+                let loaded =
+                    tokio::task::spawn_blocking(move || load_thread_subject(&read_state, &id))
+                        .await;
                 let subject = match loaded {
                     Ok(Ok(Some(subject))) => Arc::new(subject),
                     _ => return self.undecided(thread_id, "subject unreadable or absent"),
