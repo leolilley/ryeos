@@ -167,18 +167,22 @@ def main() -> None:
         raise SystemExit("--check and --refresh-digests are mutually exclusive")
     manifest = load_manifest()
     if args.refresh_digests:
+        stamped = subprocess.run(
+            [sys.executable, "-I", str(DIGEST_SCRIPT), "--stamped"],
+            capture_output=True,
+            text=True,
+        )
+        if stamped.returncode != 0:
+            raise SystemExit(f"refusing to refresh digests: {stamped.stderr.strip()}")
         for asset in manifest["assets"]:
             asset["sha256"] = hashlib.sha256(
                 (PACKAGE / asset["filename"]).read_bytes()
             ).hexdigest()
         # Record which sources this package was built from; CI recomputes the
         # digest and fails when they differ (a source changed, package not rebuilt).
-        digest = subprocess.run(
-            [sys.executable, "-I", str(DIGEST_SCRIPT), "--print"],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
+        # The digest comes from the build stamp, which the script refuses unless
+        # the package in pkg/ was built from the current sources.
+        digest = stamped.stdout.strip()
         manifest.pop("source_digest", None)
         ordered = {}
         for key, value in manifest.items():
