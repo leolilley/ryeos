@@ -176,7 +176,7 @@ fn supervised_target_uses_the_same_typed_attachment_transition() {
         .inherited_descriptor()
         .unwrap();
     let script = format!(
-        "(/bin/dd bs=1 count=1 < /proc/self/fd/{release_reader} >/dev/null 2>&1; printf executed > {}) & target=$!; printf '{{\"child-pid\":%s}}\\n' \"$target\" > /proc/self/fd/{status_fd}; wait \"$target\"",
+        "(/bin/dd bs=1 count=1 <&{release_reader} >/dev/null 2>&1; printf executed > {}) & target=$!; printf '{{\"child-pid\":%s}}\\n' \"$target\" >&{status_fd}; wait \"$target\"",
         marker.display()
     );
     let mut request = shell(script);
@@ -239,7 +239,7 @@ fn held_launcher_setup_failures_return_exact_cleanup_proof() {
         let pipe = supervised_launcher_attachment_status_pipe().unwrap();
         let status_fd = pipe.writer_descriptor().unwrap();
         let report = response.map_or_else(String::new, |document| {
-            format!("printf '%s\\n' '{document}' > /proc/self/fd/{status_fd};")
+            format!("printf '%s\\n' '{document}' >&{status_fd};")
         });
         let mut request = shell(format!(
             "{report} /bin/sleep 30; printf unexpected > {}",
@@ -494,7 +494,7 @@ fn supervised_output_overflow_before_release_fails_closed() {
         .inherited_descriptor()
         .unwrap();
     let script = format!(
-        "(/bin/dd bs=1 count=1 < /proc/self/fd/{release_reader} >/dev/null 2>&1; printf executed > {}) & target=$!; printf '{{\"child-pid\":%s}}\\n' \"$target\" > /proc/self/fd/{status_fd}; /bin/dd if=/dev/zero bs=1024 count=4 2>/dev/null; wait \"$target\"",
+        "(/bin/dd bs=1 count=1 <&{release_reader} >/dev/null 2>&1; printf executed > {}) & target=$!; printf '{{\"child-pid\":%s}}\\n' \"$target\" >&{status_fd}; /bin/dd if=/dev/zero bs=1024 count=4 2>/dev/null; wait \"$target\"",
         marker.display()
     );
     let mut request = shell(script);

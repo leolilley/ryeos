@@ -23,8 +23,6 @@ use ryeos_node_runtime::identity::NodeIdentity;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::signed_chain::{bounded_names, remove, write_private};
-
 use super::contract::{
     MAX_INBOX_REQUESTS, MAX_REQUEST_BYTES, REFUSAL_SCHEMA, Refusal, RefusalBody, RefusalReason,
     SignedRefusal, SignedRequest, is_digest,
@@ -71,6 +69,50 @@ pub struct Inbox {
     pub requests: Vec<String>,
     /// More requests than the bound were present; the rest wait.
     pub overflow: bool,
+}
+
+/// What a bounded listing of one directory found.
+pub(super) struct Names {
+    /// UTF-8 names with whether each is a regular file (links are not).
+    pub entries: Vec<(String, bool)>,
+    /// More entries than the bound exist; the listing is the first of them.
+    pub truncated: bool,
+}
+
+/// List up to `limit` entries without ever failing for having more. A
+/// missing directory has none.
+pub(super) fn bounded_names(directory: &Path, limit: usize) -> Result<Names> {
+    let reader = match std::fs::read_dir(directory) {
+        Ok(reader) => reader,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Names {
+                entries: Vec::new(),
+                truncated: false,
+            });
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("list {}", directory.display()));
+        }
+    };
+    let mut entries = Vec::new();
+    let mut truncated = false;
+    for entry in reader {
+        let entry = entry.with_context(|| format!("list {}", directory.display()))?;
+        if entries.len() >= limit {
+            truncated = true;
+            break;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let regular = entry
+            .file_type()
+            .with_context(|| format!("inspect {}", entry.path().display()))?
+            .is_file();
+        entries.push((name, regular));
+    }
+    entries.sort();
+    Ok(Names { entries, truncated })
 }
 
 /// What the inbox and the intent records still refer to.
@@ -514,6 +556,20 @@ fn read_bounded(directory: &Path, name: &str, max_bytes: u64) -> Result<Read> {
         &observation,
         max_bytes,
     )?))
+}
+
+/// Durably write a file owner-private, replacing any earlier content.
+pub(super) fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+    lillux::atomic_write_private(path, bytes)
+        .map_err(anyhow::Error::from)
+        .with_context(|| format!("write {}", path.display()))
+}
+
+/// Durably remove a file; absent is already removed.
+pub(super) fn remove(path: &Path) -> Result<()> {
+    lillux::remove_file_durable(path)
+        .map_err(anyhow::Error::from)
+        .with_context(|| format!("remove {}", path.display()))
 }
 
 #[cfg(test)]

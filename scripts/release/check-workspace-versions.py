@@ -8,10 +8,7 @@ carries the release version; each must equal VERSION. Its version is read
 from [package] or, for a pyproject.toml, [project]. Every other workspace
 member must not carry a release-grammar version (0.X.Y with X >= 5), so a
 crate bumped without being listed is caught. `version.workspace = true`
-resolves to [workspace.package] version. Every Cargo.lock under the root
-(the workspace lockfile and each nested one) must also carry the listed
-crates, where they appear as path packages, at VERSION: `cargo --locked`
-refuses a lockfile that still names the previous release version.
+resolves to [workspace.package] version.
 """
 import argparse
 import glob
@@ -58,50 +55,17 @@ def manifest_version(doc, ws_version):
     return table.get("name"), found
 
 
-LOCK_SKIP_DIRS = {".git", "target", "node_modules", ".worktrees"}
-
-
-def lockfiles(root):
-    found = []
-    for base, dirs, files in os.walk(root):
-        dirs[:] = [d for d in dirs if d not in LOCK_SKIP_DIRS]
-        if "Cargo.lock" in files:
-            found.append(os.path.normpath(os.path.relpath(os.path.join(base, "Cargo.lock"), root)))
-    return sorted(found)
-
-
-def check_lockfiles(root, version, names, member_rels):
-    """Path packages (no `source`) named by a listed crate must be at VERSION.
-
-    A Cargo.lock beside a workspace member is never read by cargo (the member
-    resolves through the workspace lockfile), so only the workspace root's and
-    those of crates outside the workspace are checked.
-    """
-    problems = []
-    for rel in lockfiles(root):
-        if os.path.dirname(rel) in member_rels:
-            continue
-        for pkg in load(os.path.join(root, rel)).get("package", []):
-            if pkg.get("name") in names and "source" not in pkg and pkg.get("version") != version:
-                problems.append((rel, pkg.get("version"),
-                                 f"lockfile entry for {pkg['name']} must be {version}"))
-    return problems
-
-
 def check(root, version, manifests):
     ws = load(os.path.join(root, "Cargo.toml")).get("workspace", {})
     ws_version = ws.get("package", {}).get("version")
     problems = []
     listed = set(manifests)
-    names = set()
     for rel in manifests:
         full = os.path.join(root, rel)
         if not os.path.isfile(full):
             problems.append((rel, None, f"listed manifest is missing"))
             continue
         name, found = manifest_version(load(full), ws_version)
-        if name:
-            names.add(name)
         if found != version:
             problems.append((rel, found, f"listed manifest must be {version}"))
     for d in member_dirs(root, ws):
@@ -112,7 +76,6 @@ def check(root, version, manifests):
         m = RELEASE_GRAMMAR.match(found) if isinstance(found, str) else None
         if m and int(m.group(1)) >= 5:
             problems.append((rel, found, "unlisted crate carries a release-grammar version"))
-    problems.extend(check_lockfiles(root, version, names, set(member_dirs(root, ws))))
     return problems
 
 
@@ -127,7 +90,7 @@ def main(argv):
         print(f"::error::{rel} has version {found!r}: {why}", file=sys.stderr)
     if bad:
         return 1
-    print(f"all listed manifests and lockfile entries are at {args.version}; no unlisted release-version crates")
+    print(f"all listed manifests are at {args.version}; no unlisted release-version crates")
     return 0
 
 

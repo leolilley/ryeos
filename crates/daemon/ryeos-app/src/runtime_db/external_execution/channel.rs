@@ -2608,7 +2608,7 @@ fn retain_external_candidate_import_tx(
         bail!("validated candidate import changed its exact channel");
     }
     let allocation = read(tx, placement)?.context("external allocation absent")?;
-    require_retained_session_owner(tx, &allocation.reservation)?;
+    require_session_owner(tx, &allocation.reservation)?;
     let (snapshot, output_capture, evidence, completion): (
         Option<String>,
         Option<String>,

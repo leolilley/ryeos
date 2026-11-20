@@ -108,38 +108,14 @@ struct TerminalEvidence<'a> {
     schema: u32,
     provider: &'static str,
     terminal_state: &'static str,
-    /// Why this observation is terminal. The reason is part of the hashed
-    /// evidence, so the provider observation digest binds it.
-    basis: TerminalBasis,
     operation_id: &'a str,
     binding_hash: &'a str,
     request_digest: &'a str,
     occurrence_id: &'a str,
     termination_request_digest: &'a str,
-    returncode: Option<i64>,
+    returncode: i64,
     facade_sha256: &'a str,
     response_sha256: &'a str,
-}
-
-/// The proof a terminal verdict rests on.
-#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum TerminalBasis {
-    /// The facade reported this exact sandbox terminated with an exit status.
-    ObservedTerminated,
-    /// This same operation's terminate request was accepted by the facade for
-    /// this exact sandbox, and the facade then definitively reported it
-    /// absent. A not-found without that accepted request is never a proof.
-    AcceptedTerminateThenNotFound,
-}
-
-/// What a terminate acknowledgement says: the facade found and tagged this
-/// sandbox and accepted the request.
-#[derive(serde::Deserialize)]
-struct TerminateAcknowledgement {
-    found: bool,
-    #[serde(default)]
-    tagged: Option<bool>,
 }
 
 fn digest_of<T: Serialize>(evidence: &T) -> Option<String> {
@@ -456,12 +432,8 @@ pub fn terminate<T: FacadeTransport>(
     if !valid_sandbox_id(&occurrence.occurrence_id) {
         return termination_pending(common, termination);
     }
-    let accepted = client
-        .terminate_by_id(&occurrence.occurrence_id)
-        .ok()
-        .and_then(|reply| reply.observation::<TerminateAcknowledgement>())
-        .is_some_and(|ack| ack.found && ack.tagged == Some(true));
-    observe_termination_with_proof(client, common, occurrence, termination, accepted)
+    let _acknowledgement = client.terminate_by_id(&occurrence.occurrence_id);
+    observe_termination(client, common, occurrence, termination)
 }
 
 /// Observe the exact occurrence: terminal only when the facade reports this
@@ -472,19 +444,6 @@ pub fn observe_termination<T: FacadeTransport>(
     occurrence: &BoundOccurrence,
     termination: &TerminationIntent,
 ) -> LifecycleAdapterResponse {
-    observe_termination_with_proof(client, common, occurrence, termination, false)
-}
-
-/// `accepted_terminate` is true only when this very operation's terminate
-/// request was acknowledged for this exact sandbox. A separate reconciliation
-/// holds no such proof, so a not-found there stays pending.
-fn observe_termination_with_proof<T: FacadeTransport>(
-    client: &FacadeClient<'_, T>,
-    common: &LifecycleOperationCommon,
-    occurrence: &BoundOccurrence,
-    termination: &TerminationIntent,
-    accepted_terminate: bool,
-) -> LifecycleAdapterResponse {
     if !valid_sandbox_id(&occurrence.occurrence_id) {
         return termination_pending(common, termination);
     }
@@ -494,30 +453,6 @@ fn observe_termination_with_proof<T: FacadeTransport>(
     let Some(observation) = reply.observation::<GetObservation>() else {
         return termination_pending(common, termination);
     };
-    if !observation.found && accepted_terminate && observation.sandbox_id.is_none() {
-        let evidence = TerminalEvidence {
-            schema: 1,
-            provider: SPEC_EVIDENCE_PROVIDER,
-            terminal_state: "terminated",
-            basis: TerminalBasis::AcceptedTerminateThenNotFound,
-            operation_id: &common.operation_id,
-            binding_hash: &common.binding_hash,
-            request_digest: &occurrence.request_digest,
-            occurrence_id: &occurrence.occurrence_id,
-            termination_request_digest: &termination.termination_request_digest,
-            returncode: None,
-            facade_sha256: &client.pin().sha256,
-            response_sha256: &reply.body_sha256,
-        };
-        return match digest_of(&evidence) {
-            Some(digest) => LifecycleAdapterResponse::OccurrenceTerminal {
-                operation_id: common.operation_id.clone(),
-                termination_request_digest: termination.termination_request_digest.clone(),
-                provider_observation_digest: digest,
-            },
-            None => termination_pending(common, termination),
-        };
-    }
     let (true, Some(id), Some("terminated"), Some(returncode), Some(true)) = (
         observation.found,
         observation.sandbox_id.as_deref(),
@@ -534,13 +469,12 @@ fn observe_termination_with_proof<T: FacadeTransport>(
         schema: 1,
         provider: SPEC_EVIDENCE_PROVIDER,
         terminal_state: "terminated",
-        basis: TerminalBasis::ObservedTerminated,
         operation_id: &common.operation_id,
         binding_hash: &common.binding_hash,
         request_digest: &occurrence.request_digest,
         occurrence_id: &occurrence.occurrence_id,
         termination_request_digest: &termination.termination_request_digest,
-        returncode: Some(returncode),
+        returncode,
         facade_sha256: &client.pin().sha256,
         response_sha256: &reply.body_sha256,
     };
@@ -1182,111 +1116,6 @@ mod tests {
             ]
         );
         assert_eq!(fake.requests.borrow()[1].1, json!({"sandbox_id": SANDBOX}));
-    }
-
-    fn accepted_ack() -> Step {
-        envelope(
-            "terminate",
-            200,
-            json!({"ok": true, "found": true, "tagged": true, "already_terminal": false}),
-        )
-    }
-
-    fn run_terminate(steps: Vec<Step>) -> LifecycleAdapterResponse {
-        let fake = Scripted::new(steps);
-        let pin = pin();
-        terminate(
-            &FacadeClient::new(&fake, &pin),
-            &common(),
-            &occurrence(),
-            &intent(),
-        )
-    }
-
-    fn digest_of_terminal(response: LifecycleAdapterResponse) -> String {
-        match response {
-            LifecycleAdapterResponse::OccurrenceTerminal {
-                provider_observation_digest,
-                ..
-            } => provider_observation_digest,
-            other => panic!("expected a terminal verdict, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn not_found_after_an_accepted_terminate_is_terminal_by_proof() {
-        let by_proof = digest_of_terminal(run_terminate(vec![
-            accepted_ack(),
-            envelope("get", 200, json!({"ok": true, "found": false})),
-        ]));
-        let observed = digest_of_terminal(run_terminate(vec![
-            accepted_ack(),
-            envelope("get", 200, get_fields(true, "terminated", Some(137))),
-        ]));
-        // The reason is part of the hashed evidence.
-        assert_ne!(by_proof, observed);
-    }
-
-    #[test]
-    fn not_found_without_an_accepted_terminate_stays_pending() {
-        for ack in [
-            Step::Fail(TransportFailure::MayHaveBeenSent),
-            Step::Fail(TransportFailure::NoRequestSent),
-            provider_error("terminate", "InternalError"),
-            refusal("terminate", "not_facade_sandbox"),
-            envelope("terminate", 200, json!({"ok": true, "found": false})),
-            envelope(
-                "terminate",
-                200,
-                json!({"ok": true, "found": true, "tagged": false}),
-            ),
-        ] {
-            let response = run_terminate(vec![
-                ack,
-                envelope("get", 200, json!({"ok": true, "found": false})),
-            ]);
-            assert!(matches!(
-                response,
-                LifecycleAdapterResponse::TerminationPending { .. }
-            ));
-        }
-        // A separate reconciliation holds no accepted request of its own.
-        let fake = Scripted::new(vec![envelope(
-            "get",
-            200,
-            json!({"ok": true, "found": false}),
-        )]);
-        let pin = pin();
-        assert!(matches!(
-            observe_termination(
-                &FacadeClient::new(&fake, &pin),
-                &common(),
-                &occurrence(),
-                &intent()
-            ),
-            LifecycleAdapterResponse::TerminationPending { .. }
-        ));
-    }
-
-    #[test]
-    fn an_accepted_terminate_then_a_failure_or_provider_error_stays_pending() {
-        for get in [
-            Step::Fail(TransportFailure::NoRequestSent),
-            Step::Fail(TransportFailure::MayHaveBeenSent),
-            provider_error("get", "InternalError"),
-            provider_error("get", "NotFoundError"),
-            refusal("get", "not_facade_sandbox"),
-            envelope(
-                "get",
-                200,
-                json!({"ok": true, "found": false, "sandbox_id": "sb-other"}),
-            ),
-        ] {
-            assert!(matches!(
-                run_terminate(vec![accepted_ack(), get]),
-                LifecycleAdapterResponse::TerminationPending { .. }
-            ));
-        }
     }
 
     #[test]

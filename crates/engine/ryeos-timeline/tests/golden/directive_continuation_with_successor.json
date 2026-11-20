@@ -2,28 +2,6 @@
   "items": [
     {
       "item": "entry",
-      "id": "mrk:4",
-      "type": "marker",
-      "state": null,
-      "tone": null,
-      "thread": "T-0001",
-      "parent": null,
-      "exchange": null,
-      "counts_as": null,
-      "slots": {
-        "headline": "launched with deepseek-v4-flash · via deepseek"
-      },
-      "seq": [
-        4,
-        4
-      ],
-      "ts": [
-        "2026-11-16T07:20:30Z",
-        "2026-11-16T07:20:30Z"
-      ]
-    },
-    {
-      "item": "entry",
       "id": "msg:6/0",
       "type": "message",
       "state": null,
@@ -102,53 +80,26 @@
       "seq": 29
     },
     {
-      "item": "cluster",
-      "id": "cl:mrk:19",
-      "headline": "2 system events",
-      "members": [
-        {
-          "id": "mrk:19",
-          "type": "marker",
-          "state": null,
-          "tone": null,
-          "thread": "T-0002",
-          "parent": null,
-          "exchange": "msg:6/0",
-          "counts_as": null,
-          "slots": {
-            "headline": "launched with deepseek-v4-flash · via deepseek"
-          },
-          "seq": [
-            19,
-            19
-          ],
-          "ts": [
-            "2026-11-16T07:20:35Z",
-            "2026-11-16T07:20:35Z"
-          ]
-        },
-        {
-          "id": "mrk:20",
-          "type": "marker",
-          "state": null,
-          "tone": null,
-          "thread": "T-0001",
-          "parent": null,
-          "exchange": "msg:6/0",
-          "counts_as": null,
-          "slots": {
-            "headline": "continued: context_window",
-            "target": "T-0002"
-          },
-          "seq": [
-            20,
-            20
-          ],
-          "ts": [
-            "2026-11-16T07:20:35Z",
-            "2026-11-16T07:20:35Z"
-          ]
-        }
+      "item": "entry",
+      "id": "mrk:20",
+      "type": "marker",
+      "state": null,
+      "tone": null,
+      "thread": "T-0001",
+      "parent": null,
+      "exchange": "msg:6/0",
+      "counts_as": null,
+      "slots": {
+        "headline": "continued: context_window",
+        "target": "T-0002"
+      },
+      "seq": [
+        20,
+        20
+      ],
+      "ts": [
+        "2026-11-16T07:20:35Z",
+        "2026-11-16T07:20:35Z"
       ]
     },
     {

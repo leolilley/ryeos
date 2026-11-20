@@ -603,7 +603,6 @@ fn capture_source_closure(
             "effective program attempted to pre-populate reserved source closure authority"
         );
     }
-    let pinned = project.is_some();
     let kind_schema = engine
         .kinds
         .get(kind)
@@ -813,12 +812,7 @@ fn capture_source_closure(
                 resolution,
                 &engine.trust_store,
                 kind,
-                owner_signer_project_root(
-                    roots,
-                    resolution.root.source_space,
-                    pinned,
-                    content_root,
-                ),
+                owner_signer_project_root(roots, resolution.root.source_space, content_root),
             )?
         }
         ryeos_engine::kind_registry::SourceClosureTestimonyDecl::OwnerSignedDigest => {
@@ -1124,23 +1118,20 @@ fn require_current_source_policy(
     Ok(())
 }
 
-/// The project a source file's signer scope is matched against. A live
-/// project is its own; a pinned generation's content root is a temporary
-/// checkout, so it is matched only on the logical project the resolution roots
-/// state, and a pinned source with no stated project names none.
+/// The project a source file's signer scope is matched against. A pinned
+/// consumer's content root is a temporary checkout, so the logical project the
+/// resolution roots state is the identity; a live project is its own.
 fn owner_signer_project_root<'a>(
     roots: &'a ryeos_engine::item_resolution::ResolutionRoots,
     source_space: ItemSpace,
-    pinned: bool,
     content_root: &'a Path,
 ) -> Option<&'a Path> {
-    if !matches!(source_space, ItemSpace::Project) {
-        return None;
-    }
-    roots
-        .logical_project_root
-        .as_deref()
-        .or_else(|| (!pinned).then_some(content_root))
+    matches!(source_space, ItemSpace::Project).then(|| {
+        roots
+            .logical_project_root
+            .as_deref()
+            .unwrap_or(content_root)
+    })
 }
 
 fn verify_owner_signed_files(
@@ -1750,14 +1741,14 @@ mod owner_signer_project_root_controls {
         let pinned = ResolutionRoots::from_flat(None, Vec::new())
             .with_logical_project_root(Some(logical.clone()));
         assert_eq!(
-            owner_signer_project_root(&pinned, ItemSpace::Project, true, checkout),
+            owner_signer_project_root(&pinned, ItemSpace::Project, checkout),
             Some(logical.as_path()),
             "a signer scoped to the logical project must be matched on it, not on the checkout"
         );
 
         let live = ResolutionRoots::from_flat(None, Vec::new());
         assert_eq!(
-            owner_signer_project_root(&live, ItemSpace::Project, false, checkout),
+            owner_signer_project_root(&live, ItemSpace::Project, checkout),
             Some(checkout),
             "a live project is its own logical project"
         );
@@ -1769,241 +1760,8 @@ mod owner_signer_project_root_controls {
         let pinned = ResolutionRoots::from_flat(None, Vec::new())
             .with_logical_project_root(Some(PathBuf::from("/work/registered-project")));
         assert_eq!(
-            owner_signer_project_root(&pinned, ItemSpace::Bundle, true, checkout),
+            owner_signer_project_root(&pinned, ItemSpace::Bundle, checkout),
             None
         );
-    }
-
-    #[test]
-    fn a_pinned_source_with_no_stated_project_names_none() {
-        let checkout = Path::new("/tmp/generation-7/checkout");
-        let unstated = ResolutionRoots::from_flat(None, Vec::new());
-        assert_eq!(
-            owner_signer_project_root(&unstated, ItemSpace::Project, true, checkout),
-            None,
-            "a temporary checkout path must never reach a signer scope"
-        );
-    }
-}
-
-#[cfg(test)]
-mod owner_signed_files_project_scope_controls {
-    use std::path::{Path, PathBuf};
-
-    use lillux::crypto::SigningKey;
-    use ryeos_engine::contracts::{ItemSourceRoot, ItemSpace};
-    use ryeos_engine::item_resolution::ResolutionRoots;
-    use ryeos_engine::resolution::{
-        KindComposedView, ResolutionOutput, ResolutionStepName, ResolvedAncestor, TrustClass,
-    };
-    use ryeos_engine::source_closure::source_view::DirectorySourceContent;
-    use ryeos_engine::source_closure::{SourceRootRequest, SourceRootSelection};
-    use ryeos_engine::trust::{
-        SignerRecord, SignerRole, SignerScope, SignerSpace, SignerStatus, TrustStore, TrustedSigner,
-    };
-    use ryeos_state::ignore::{IgnoreConfig, IgnoreMatcher};
-
-    use super::{owner_signer_project_root, verify_owner_signed_files};
-
-    const SCHEMA: &str = r##"location:
-  directory: workers
-execution:
-  aliases:
-    "@base": "tool:ryeos/base/base"
-  source_closure:
-    derived: effective_source_closure
-    location: {type: item_namespace}
-    testimony: owner_signed_files
-    max_files: 8
-    max_total_bytes: 65536
-    max_file_bytes: 32768
-    max_depth: 8
-formats:
-  - extensions: [".yaml"]
-    parser: parser:ryeos/core/yaml/yaml
-    signature:
-      prefix: "#"
-metadata:
-  rules:
-    name:
-      from: filename
-composed_value_contract:
-  root_type: mapping
-  required: {}
-effective_trust:
-  include_references: false
-resolution: []
-composer: handler:ryeos/core/identity
-"##;
-
-    struct Fixture {
-        // Keeps the temporary checkout alive for the candidate's reads.
-        checkout: tempfile::TempDir,
-        registry: ryeos_engine::kind_registry::KindRegistry,
-        candidate: ryeos_engine::source_closure::CapturedSourceCandidate,
-        resolution: ResolutionOutput,
-        author: SigningKey,
-    }
-
-    fn fixture() -> Fixture {
-        let checkout = tempfile::tempdir().unwrap();
-        let kind_key = SigningKey::from_bytes(&[121; 32]);
-        let kind_trust = TrustStore::from_signers(vec![TrustedSigner {
-            fingerprint: lillux::signature::compute_fingerprint(&kind_key.verifying_key()),
-            verifying_key: kind_key.verifying_key(),
-            label: None,
-        }]);
-        let kinds = checkout.path().join("fixture-kinds");
-        std::fs::create_dir_all(kinds.join("worker")).unwrap();
-        std::fs::write(
-            kinds.join("worker/worker.kind-schema.yaml"),
-            lillux::signature::sign_content(SCHEMA, &kind_key, "#", None),
-        )
-        .unwrap();
-        let registry =
-            ryeos_engine::kind_registry::KindRegistry::load_base(&[kinds], &kind_trust).unwrap();
-
-        let author = SigningKey::from_bytes(&[122; 32]);
-        let author_fingerprint = lillux::signature::compute_fingerprint(&author.verifying_key());
-        let prefix = PathBuf::from(".ai/workers/test/source");
-        std::fs::create_dir_all(checkout.path().join(&prefix)).unwrap();
-        let document = lillux::signature::sign_content("name: unit\n", &author, "#", None);
-        std::fs::write(checkout.path().join(&prefix).join("unit.yaml"), &document).unwrap();
-
-        let ignore = IgnoreMatcher::from_config(&IgnoreConfig {
-            patterns: Vec::new(),
-        })
-        .unwrap();
-        let source =
-            DirectorySourceContent::new(checkout.path(), "project:scope-fixture".into(), &ignore)
-                .unwrap();
-        let contract = registry
-            .get("worker")
-            .and_then(|kind| kind.execution.as_ref())
-            .and_then(|execution| execution.source_closure.as_ref())
-            .unwrap();
-        let candidate = ryeos_engine::source_closure::capture_source_candidate(
-            &source,
-            &[SourceRootRequest {
-                id: "source".into(),
-                selection: SourceRootSelection::Tree { prefix },
-            }],
-            contract,
-        )
-        .unwrap();
-        drop(source);
-
-        let resolution = ResolutionOutput {
-            root: ResolvedAncestor {
-                requested_id: "worker:test/unit".into(),
-                resolved_ref: "worker:test/unit".into(),
-                source_path: checkout.path().join(".ai/workers/test/source/unit.yaml"),
-                source_space: ItemSpace::Project,
-                source_root: ItemSourceRoot::Project,
-                trust_class: TrustClass::TrustedProject,
-                signer_fingerprint: Some(author_fingerprint),
-                alias_resolution: None,
-                added_by: ResolutionStepName::PipelineInit,
-                raw_content: "name: unit\n".into(),
-                source_content_digest: lillux::sha256_hex(document.as_bytes()),
-                raw_content_digest: lillux::sha256_hex(b"name: unit\n"),
-            },
-            ancestors: vec![],
-            references_edges: vec![],
-            referenced_items: vec![],
-            step_outputs: Default::default(),
-            effective_trust_class: TrustClass::TrustedProject,
-            composed: KindComposedView::identity(serde_yaml::from_str("name: unit\n").unwrap()),
-        };
-        Fixture {
-            checkout,
-            registry,
-            candidate,
-            resolution,
-            author,
-        }
-    }
-
-    /// The author is a project signer scoped to exactly one project path.
-    fn scoped_store(fixture: &Fixture, project: &Path) -> TrustStore {
-        let node_key = SigningKey::from_bytes(&[123; 32]).verifying_key();
-        let mut record = SignerRecord::new(
-            &fixture.author.verifying_key(),
-            "project-author",
-            SignerRole::ProjectAuthor,
-            SignerScope {
-                spaces: vec![SignerSpace::Project],
-                kinds: vec!["*".to_string()],
-                projects: vec![project.to_string_lossy().into_owned()],
-            },
-            SignerStatus::Active,
-        );
-        record.event = "e".repeat(64);
-        TrustStore::from_registry(node_key, vec![record]).unwrap()
-    }
-
-    /// Runs the real owner-testimony verifier on the project root the real
-    /// scope helper selects for these roots.
-    fn judge(
-        fixture: &Fixture,
-        store: &TrustStore,
-        roots: &ResolutionRoots,
-        pinned: bool,
-    ) -> anyhow::Result<ryeos_state::objects::SourceTestimonyProof> {
-        let kind_schema = fixture.registry.get("worker").unwrap();
-        verify_owner_signed_files(
-            &fixture.candidate,
-            "unit.yaml",
-            kind_schema,
-            &fixture.resolution,
-            store,
-            "worker",
-            owner_signer_project_root(
-                roots,
-                fixture.resolution.root.source_space,
-                pinned,
-                fixture.checkout.path(),
-            ),
-        )
-    }
-
-    #[test]
-    fn a_pinned_consumer_is_admitted_only_on_its_stated_logical_project() {
-        let fixture = fixture();
-        let logical = PathBuf::from("/work/registered-project");
-        let store = scoped_store(&fixture, &logical);
-
-        let stated =
-            ResolutionRoots::from_flat(None, Vec::new()).with_logical_project_root(Some(logical));
-        assert!(judge(&fixture, &store, &stated, true).is_ok());
-
-        let unstated = ResolutionRoots::from_flat(None, Vec::new());
-        let refusal = judge(&fixture, &store, &unstated, true)
-            .unwrap_err()
-            .to_string();
-        assert!(refusal.contains("no current owner testimony"), "{refusal}");
-
-        let other = ResolutionRoots::from_flat(None, Vec::new())
-            .with_logical_project_root(Some(PathBuf::from("/work/other-project")));
-        let refusal = judge(&fixture, &store, &other, true)
-            .unwrap_err()
-            .to_string();
-        assert!(refusal.contains("no current owner testimony"), "{refusal}");
-    }
-
-    #[test]
-    fn a_live_project_is_judged_on_its_own_root() {
-        let fixture = fixture();
-        let own = fixture.checkout.path().canonicalize().unwrap();
-        let live = ResolutionRoots::from_flat(None, Vec::new());
-
-        let store = scoped_store(&fixture, &own);
-        assert!(judge(&fixture, &store, &live, false).is_ok());
-
-        let elsewhere = scoped_store(&fixture, Path::new("/work/registered-project"));
-        let refusal = judge(&fixture, &elsewhere, &live, false)
-            .unwrap_err()
-            .to_string();
-        assert!(refusal.contains("no current owner testimony"), "{refusal}");
     }
 }

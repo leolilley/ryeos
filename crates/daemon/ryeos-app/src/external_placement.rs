@@ -7790,21 +7790,6 @@ pub fn advance_external_candidate_cleanup(
     })
 }
 
-/// Whether the placement's external allocation is still unsettled. While it
-/// is, the runtime database refuses every local completion or re-identification
-/// of the owning dedicated session, so a local settlement must wait for the
-/// allocation's observed provider terminal and leave the session quarantined.
-/// A placement with no allocation is not unsettled.
-pub fn session_has_unsettled_external_allocation(
-    state: &AppState,
-    placement: &str,
-) -> Result<bool> {
-    Ok(state
-        .state_store
-        .external_allocation(placement)?
-        .is_some_and(|record| !record.phase.is_settled()))
-}
-
 /// Commit cancellation/revocation without performing provider I/O. This is
 /// safe in failure and owner-drop paths: later recovery can only reconcile the
 /// original allocation or termination operation.
@@ -12405,7 +12390,6 @@ mod tests {
     }
 
     mod cleanup_backoff_recovery;
-    mod startup_lease_reconcile;
 
     #[test]
     fn reopened_reserved_allocation_refuses_impossible_package_before_contact() {

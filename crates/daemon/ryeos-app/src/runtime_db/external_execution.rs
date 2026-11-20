@@ -2001,93 +2001,22 @@ pub(super) fn validate_current(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// The exact dedicated-session owner a FRESH executable mutation requires:
-/// the session's allocation fields, its credential lock, and the placement
-/// thread's LIVE launch claim, which must still be the very owner recorded on
-/// the session's workspace. The claim join is what proves no other launch
-/// owner has replaced the one that created the workspace and reserved the
-/// allocation.
 fn require_session_owner(
     conn: &Connection,
     reservation: &ExternalAllocationReservation,
 ) -> Result<()> {
-    require_session_owner_with(conn, reservation, SessionClaimStanding::Live)
-}
-
-/// The exact dedicated-session owner a RETAINED obligation (restart
-/// validation, cleanup, retained import) requires. It is the same proof as
-/// [`require_session_owner`] with one recovered state accepted: a controller
-/// restart clears every launch claim of a dead daemon generation in its own
-/// committed step, so a retained allocation is routinely read after the claim
-/// is gone, and a start that dies after that clear must not wedge the next
-/// one. A claim that still exists must still equal the workspace's launch
-/// owner; an absent claim is accepted only when the workspace's recorded
-/// launch owner is the exact well-formed claimant of THIS placement thread.
-/// That record cannot have been replaced since the allocation was reserved:
-/// the workspace identity guard refuses any change to `launch_owner` while the
-/// allocation is unsettled, and the fresh admission path proved it equal to the
-/// live claim when the allocation was reserved. The session fields, the
-/// reservation's worker identity and epoch, and the credential lock owner are
-/// matched exactly as in the live proof, so this is never "any owner".
-///
-/// The claim-absent predicate checks the SHAPE of the recorded launch owner
-/// and that it names this placement thread; it does not compare against a
-/// specific nonce. It is therefore only as strong as the trigger
-/// `external_execution_workspace_identity_guard`, which refuses any update of
-/// `execution_workspace.launch_owner` (and `thread_id`, snapshots, root path)
-/// while an allocation of the session's workspace is in a phase NOT IN
-/// ('no_contact','contacted_no_occurrence','terminated'), i.e. for the whole
-/// unsettled life of the allocation. This predicate is also what
-/// `retain_external_candidate_import_tx` uses to accept a retained candidate
-/// import, so the same bound applies there.
-fn require_retained_session_owner(
-    conn: &Connection,
-    reservation: &ExternalAllocationReservation,
-) -> Result<()> {
-    require_session_owner_with(
-        conn,
-        reservation,
-        SessionClaimStanding::LiveOrClearedByDeadGeneration,
-    )
-}
-
-#[derive(Clone, Copy)]
-enum SessionClaimStanding {
-    Live,
-    LiveOrClearedByDeadGeneration,
-}
-
-fn require_session_owner_with(
-    conn: &Connection,
-    reservation: &ExternalAllocationReservation,
-    standing: SessionClaimStanding,
-) -> Result<()> {
     let owner = reservation.owner.dedicated_session()?;
-    let claim_clause = match standing {
-        SessionClaimStanding::Live => "c.thread_id IS NOT NULL AND w.launch_owner=c.claimed_by",
-        SessionClaimStanding::LiveOrClearedByDeadGeneration => {
-            "((c.thread_id IS NOT NULL AND w.launch_owner=c.claimed_by)
-              OR (c.thread_id IS NULL AND w.launch_owner IS NOT NULL
-                  AND json_valid(w.launch_owner)
-                  AND json_extract(w.launch_owner,'$.thread_id')=s.placement_thread_id
-                  AND json_type(w.launch_owner,'$.daemon_generation_id')='text'
-                  AND json_type(w.launch_owner,'$.unpredictable_nonce')='text'))"
-        }
-    };
-    let sql = format!(
+    let matched: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM dedicated_session s JOIN credential_profile p
            ON p.profile_id=s.credential_profile_id
          JOIN execution_workspace w ON w.workspace_id=s.workspace_id
-         LEFT JOIN thread_launch_claim c ON c.thread_id=s.placement_thread_id
+         JOIN thread_launch_claim c ON c.thread_id=s.placement_thread_id
          WHERE s.placement_thread_id=?1 AND s.admitted_capsule_hash=?2 AND s.workspace_id=?3
            AND s.worker_instance_id=?4 AND s.worker_boot_epoch=?5
            AND w.thread_id=s.placement_thread_id AND w.base_snapshot=?6
-           AND {claim_clause}
+           AND w.launch_owner=c.claimed_by
            AND p.credential_generation=s.credential_generation
-           AND p.lock_owner=s.worker_instance_id)"
-    );
-    let matched: bool = conn.query_row(
-        &sql,
+           AND p.lock_owner=s.worker_instance_id)",
         params![
             reservation.placement_thread_id,
             reservation.admitted_capsule_hash,
@@ -2109,9 +2038,7 @@ fn require_retained_owner(
     reservation: &ExternalAllocationReservation,
 ) -> Result<()> {
     match &reservation.owner {
-        ExternalAllocationOwner::DedicatedSession(_) => {
-            require_retained_session_owner(conn, reservation)
-        }
+        ExternalAllocationOwner::DedicatedSession(_) => require_session_owner(conn, reservation),
         ExternalAllocationOwner::DirectThread { chain_root_id, .. } => {
             // Original owner remains in the immutable reservation. Claim rotation
             // or cancellation cannot erase an occurrence's cleanup obligation.

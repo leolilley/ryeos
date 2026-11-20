@@ -48,23 +48,6 @@ struct LayerLoadPolicy<'a> {
     node_parsers: &'a ParserDispatcher,
     trust_store: &'a TrustStore,
     node_trust_store: &'a TrustStore,
-    /// The project a pinned consumer stands for; its checkout is temporary.
-    logical_project_root: Option<&'a Path>,
-}
-
-/// The project a config layer's signer scope is matched against. A live
-/// project is its own; a pinned generation is matched only on the logical
-/// project it stands for, never on its temporary checkout.
-fn layer_signer_project_root<'a>(
-    space: ItemSpace,
-    logical_project_root: Option<&'a Path>,
-    pinned: bool,
-    ai_root: &'a Path,
-) -> Option<&'a Path> {
-    if space != ItemSpace::Project {
-        return None;
-    }
-    logical_project_root.or_else(|| if pinned { None } else { ai_root.parent() })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -479,7 +462,6 @@ fn load_launch_config_snapshots_with_proof_from_authority(
                     node_parsers,
                     trust_store,
                     node_trust_store,
-                    logical_project_root: roots.logical_project_root.as_deref(),
                 };
                 for (root_index, root) in roots.ordered.iter().enumerate() {
                     observe_item_dependencies(
@@ -549,7 +531,6 @@ fn load_launch_config_snapshots_with_proof_from_authority(
                     node_parsers,
                     trust_store,
                     node_trust_store,
-                    logical_project_root: roots.logical_project_root.as_deref(),
                 };
                 for (root_index, root) in roots.ordered.iter().enumerate() {
                     let catalog_root = root.ai_root.join("config").join(prefix);
@@ -1162,12 +1143,9 @@ fn load_layer(
                 .split_once(':')
                 .map(|(kind, _)| kind)
                 .unwrap_or("config"),
-            layer_signer_project_root(
-                root.space,
-                policy.logical_project_root,
-                project_content.is_some(),
-                &root.ai_root,
-            ),
+            (root.space == ItemSpace::Project)
+                .then(|| root.ai_root.parent())
+                .flatten(),
         ),
     )
     .map_err(|error| {
@@ -1640,162 +1618,5 @@ mod tests {
             &roots,
             Some((&project_root, &content as &dyn AuthoritativeProjectContent,)),
         ));
-    }
-
-    const CONFIG_SCHEMA: &str = r##"location:
-  directory: config
-formats:
-  - extensions: [".yaml"]
-    parser: parser:ryeos/core/yaml/yaml
-    signature:
-      prefix: "#"
-metadata:
-  rules:
-    name:
-      from: filename
-composed_value_contract:
-  root_type: mapping
-  required: {}
-effective_trust:
-  include_references: false
-resolution: []
-composer: handler:ryeos/core/identity
-"##;
-
-    struct ScopedConfig {
-        kinds: KindRegistry,
-        author: lillux::crypto::SigningKey,
-        document: String,
-        // Keeps the kind schema directory alive for the registry.
-        _kind_dir: tempfile::TempDir,
-    }
-
-    fn scoped_config() -> ScopedConfig {
-        let kind_key = lillux::crypto::SigningKey::from_bytes(&[131u8; 32]);
-        let kind_trust = TrustStore::from_signers(vec![crate::trust::TrustedSigner {
-            fingerprint: lillux::signature::compute_fingerprint(&kind_key.verifying_key()),
-            verifying_key: kind_key.verifying_key(),
-            label: None,
-        }]);
-        let kind_dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(kind_dir.path().join("config")).unwrap();
-        std::fs::write(
-            kind_dir.path().join("config/config.kind-schema.yaml"),
-            lillux::signature::sign_content(CONFIG_SCHEMA, &kind_key, "#", None),
-        )
-        .unwrap();
-        let kinds = KindRegistry::load_base(&[kind_dir.path().to_path_buf()], &kind_trust).unwrap();
-        let author = lillux::crypto::SigningKey::from_bytes(&[132u8; 32]);
-        let document = lillux::signature::sign_content("name: scoped\n", &author, "#", None);
-        ScopedConfig {
-            kinds,
-            author,
-            document,
-            _kind_dir: kind_dir,
-        }
-    }
-
-    /// The author is a project signer scoped to exactly one project path.
-    fn scoped_store(config: &ScopedConfig, project: &Path) -> TrustStore {
-        use crate::trust::{SignerRecord, SignerRole, SignerScope, SignerSpace, SignerStatus};
-        let node_key = lillux::crypto::SigningKey::from_bytes(&[133u8; 32]).verifying_key();
-        let mut record = SignerRecord::new(
-            &config.author.verifying_key(),
-            "project-author",
-            SignerRole::ProjectAuthor,
-            SignerScope {
-                spaces: vec![SignerSpace::Project],
-                kinds: vec!["*".to_string()],
-                projects: vec![project.to_string_lossy().into_owned()],
-            },
-            SignerStatus::Active,
-        );
-        record.event = "e".repeat(64);
-        TrustStore::from_registry(node_key, vec![record]).unwrap()
-    }
-
-    fn declarations() -> BTreeMap<String, LaunchConfigInputDecl> {
-        BTreeMap::from([(
-            "scoped".to_string(),
-            LaunchConfigInputDecl::Item {
-                id: "scoped".to_string(),
-                required: true,
-                merge: ConfigMergeMode::DeepMerge,
-                allowed_spaces: vec![LaunchItemSpace::Project],
-                allowed_trust: vec![TrustClass::TrustedProject],
-            },
-        )])
-    }
-
-    fn pinned_load(
-        config: &ScopedConfig,
-        store: &TrustStore,
-        logical: Option<&str>,
-    ) -> Result<LaunchConfigSnapshotSet, EngineError> {
-        let checkout = PathBuf::from("/not-opened/generation-7/checkout");
-        let mut roots = project_roots(&checkout);
-        roots.logical_project_root = logical.map(PathBuf::from);
-        let content = TestProjectContent::default()
-            .with_file(".ai/config/scoped.yaml", config.document.as_bytes());
-        let parsers = crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors();
-        load_launch_config_snapshots_with_proof_under_project_authority(
-            &declarations(),
-            &roots,
-            &parsers,
-            &parsers,
-            &config.kinds,
-            store,
-            store,
-            &checkout,
-            &content,
-        )
-    }
-
-    fn assert_untrusted(result: Result<LaunchConfigSnapshotSet, EngineError>) {
-        match result {
-            Err(EngineError::LaunchConfigPolicyDenied { code, .. }) => {
-                assert_eq!(code, "launch_config_untrusted")
-            }
-            Err(other) => panic!("expected an untrusted refusal, got {other}"),
-            Ok(_) => panic!("an out-of-scope signer must not be admitted"),
-        }
-    }
-
-    #[test]
-    fn a_pinned_config_is_judged_on_its_stated_logical_project_not_its_checkout() {
-        let config = scoped_config();
-        let store = scoped_store(&config, Path::new("/work/registered-project"));
-
-        assert!(pinned_load(&config, &store, Some("/work/registered-project")).is_ok());
-        assert_untrusted(pinned_load(&config, &store, None));
-        assert_untrusted(pinned_load(&config, &store, Some("/work/other-project")));
-    }
-
-    #[test]
-    fn a_live_project_config_is_judged_on_its_own_root() {
-        let config = scoped_config();
-        let project = tempfile::tempdir().unwrap();
-        let own = project.path().canonicalize().unwrap();
-        std::fs::create_dir_all(own.join(".ai/config")).unwrap();
-        std::fs::write(own.join(".ai/config/scoped.yaml"), &config.document).unwrap();
-        let roots = project_roots(&own);
-        let parsers = crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors();
-        let load = |store: &TrustStore| {
-            load_launch_config_snapshots_with_proof(
-                &declarations(),
-                &roots,
-                &parsers,
-                &parsers,
-                &config.kinds,
-                store,
-                store,
-            )
-        };
-
-        assert!(load(&scoped_store(&config, &own)).is_ok());
-        assert_untrusted(load(&scoped_store(
-            &config,
-            Path::new("/work/registered-project"),
-        )));
     }
 }

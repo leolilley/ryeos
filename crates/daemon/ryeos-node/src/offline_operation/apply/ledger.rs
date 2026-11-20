@@ -7,65 +7,24 @@
 //! open to anything that wants the chain tip.
 
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 
-use anyhow::Result;
-use lillux::crypto::VerifyingKey;
+use anyhow::{Context, Result, ensure};
 use ryeos_node_runtime::identity::NodeIdentity;
 use serde_json::Value;
 
 use crate::offline_operation::contract::{
-    CHECKPOINT_SCHEMA, CanonicalInstant, MAX_RECEIPT_BYTES, RECEIPT_SCHEMA, ReceiptBody,
-    SignedReceipt, SignedRequest, genesis_ledger_head,
+    CHECKPOINT_SCHEMA, CanonicalInstant, CheckpointBody, MAX_RECEIPT_BYTES, RECEIPT_SCHEMA,
+    ReceiptBody, SignedCheckpoint, SignedReceipt, SignedRequest, genesis_ledger_head,
 };
-use crate::offline_operation::store::Store;
-use crate::signed_chain::{Chain, ChainEntry};
+use crate::offline_operation::store::{Store, bounded_names, remove, write_private};
 
 /// Receipts kept before rotation drops the oldest into a checkpoint.
 pub const LEDGER_ROTATE_AT: usize = 1024;
 /// Receipts kept after a rotation.
 pub const LEDGER_KEEP: usize = 512;
 
-impl ChainEntry for SignedReceipt {
-    const NOUN: &'static str = "receipt";
-    const LEDGER_NAME: &'static str = "offline-operation ledger";
-    const SCHEMA: &'static str = RECEIPT_SCHEMA;
-    const CHECKPOINT_SCHEMA: &'static str = CHECKPOINT_SCHEMA;
-    const MAX_BYTES: u64 = MAX_RECEIPT_BYTES;
-    const ROTATE_AT: usize = LEDGER_ROTATE_AT;
-    const KEEP: usize = LEDGER_KEEP;
-
-    fn genesis_head(node_fingerprint: &str) -> String {
-        genesis_ledger_head(node_fingerprint)
-    }
-
-    fn sequence(&self) -> u64 {
-        self.body.sequence
-    }
-
-    fn previous(&self) -> &str {
-        &self.body.previous
-    }
-
-    fn node_fingerprint(&self) -> &str {
-        &self.body.node_fingerprint
-    }
-
-    fn schema(&self) -> &str {
-        &self.body.schema
-    }
-
-    fn recorded_at(&self) -> &str {
-        &self.body.recorded_at
-    }
-
-    fn digest(&self) -> Result<String> {
-        SignedReceipt::digest(self)
-    }
-
-    fn verify(&self, key: &VerifyingKey) -> Result<()> {
-        SignedReceipt::verify(self, key)
-    }
-}
+const CHECKPOINT_FILE: &str = "checkpoint.json";
 
 /// What a verified read of the ledger found.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,14 +67,10 @@ impl LedgerState {
 }
 
 pub struct Ledger<'a> {
-    chain: Chain<'a, SignedReceipt>,
+    dir: PathBuf,
     node: &'a NodeIdentity,
 }
 
-#[cfg(test)]
-const CHECKPOINT_FILE: &str = "checkpoint.json";
-
-#[cfg(test)]
 fn receipt_name(sequence: u64) -> String {
     format!("{sequence:020}.json")
 }
@@ -123,40 +78,143 @@ fn receipt_name(sequence: u64) -> String {
 impl<'a> Ledger<'a> {
     pub fn new(store: &Store, node: &'a NodeIdentity) -> Self {
         Self {
-            chain: Chain::new(store.ledger_dir(), node),
+            dir: store.ledger_dir(),
             node,
         }
+    }
+
+    fn checkpoint(&self) -> Result<Option<SignedCheckpoint>> {
+        let path = self.dir.join(CHECKPOINT_FILE);
+        let Some(bytes) =
+            lillux::read_optional_regular_file_bounded_no_follow(&path, MAX_RECEIPT_BYTES)?
+        else {
+            return Ok(None);
+        };
+        let checkpoint: SignedCheckpoint =
+            serde_json::from_slice(&bytes).context("parse ledger checkpoint")?;
+        checkpoint.verify(self.node.verifying_key())?;
+        ensure!(
+            checkpoint.body.schema == CHECKPOINT_SCHEMA
+                && checkpoint.body.node_fingerprint == self.node.fingerprint(),
+            "ledger checkpoint is not this node's"
+        );
+        Ok(Some(checkpoint))
+    }
+
+    /// The sequences of the receipts present. Names that are not receipts
+    /// are ignored (a stray file does not stop the node's repair); a name that
+    /// is a receipt's but is not a regular file is an error naming it, and a
+    /// directory too full to list whole is an error, since a partial list
+    /// would read as a broken chain.
+    fn sequences(&self) -> Result<Vec<u64>> {
+        let names = bounded_names(&self.dir, LEDGER_ROTATE_AT * 4)
+            .with_context(|| format!("list the offline-operation ledger {}", self.dir.display()))?;
+        ensure!(
+            !names.truncated,
+            "the offline-operation ledger {} holds more than {} entries",
+            self.dir.display(),
+            LEDGER_ROTATE_AT * 4
+        );
+        let mut sequences = Vec::new();
+        for (name, regular) in names.entries {
+            let Some(stem) = name
+                .strip_suffix(".json")
+                .filter(|stem| stem.len() == 20 && stem.bytes().all(|b| b.is_ascii_digit()))
+            else {
+                continue;
+            };
+            ensure!(
+                regular,
+                "ledger entry {} is not a regular file",
+                self.dir.join(&name).display()
+            );
+            sequences.push(stem.parse::<u64>()?);
+        }
+        sequences.sort_unstable();
+        Ok(sequences)
+    }
+
+    fn read_receipt(&self, sequence: u64) -> Result<SignedReceipt> {
+        let path = self.dir.join(receipt_name(sequence));
+        let bytes = lillux::read_regular_file_bounded_no_follow(&path, MAX_RECEIPT_BYTES)?;
+        serde_json::from_slice(&bytes).with_context(|| format!("parse receipt {}", path.display()))
     }
 
     /// Read and verify the whole retained chain: signatures, sequence,
     /// links, and the node each receipt names.
     pub fn load(&self) -> Result<LedgerState> {
-        let mut request_digests = BTreeSet::new();
-        let mut heads = Vec::new();
-        let tip = self.chain.walk(|receipt, digest| {
-            request_digests.insert(receipt.body.request_digest.clone());
-            heads.push(digest.to_owned());
-        })?;
+        let checkpoint = self.checkpoint()?;
+        let (mut head, mut last_sequence, dropped) = match &checkpoint {
+            Some(checkpoint) => (
+                checkpoint.body.tip.clone(),
+                checkpoint.body.sequence,
+                checkpoint.body.dropped_receipts,
+            ),
+            None => (genesis_ledger_head(self.node.fingerprint()), 0, 0),
+        };
         // The starting head (genesis, or a checkpoint's tip) is a head the
         // ledger has been at: a request pinned to it is stale once a receipt
         // follows. The current head itself is never "past" (`is_past_head`).
-        let mut past_heads = BTreeSet::from([tip.start_head]);
-        past_heads.extend(heads);
+        let mut past_heads = BTreeSet::from([head.clone()]);
+        let mut request_digests = BTreeSet::new();
+        let mut retained = 0;
+        let mut oldest_recorded_at = None;
+        for sequence in self.sequences()? {
+            if sequence <= last_sequence {
+                // Already covered by the checkpoint: a rotation that died
+                // before removing it.
+                continue;
+            }
+            ensure!(
+                sequence == last_sequence + 1,
+                "ledger skips from receipt {last_sequence} to {sequence}"
+            );
+            let receipt = self.read_receipt(sequence)?;
+            receipt.verify(self.node.verifying_key())?;
+            let body = &receipt.body;
+            ensure!(
+                body.schema == RECEIPT_SCHEMA
+                    && body.sequence == sequence
+                    && body.node_fingerprint == self.node.fingerprint(),
+                "receipt {sequence} is not this ledger's"
+            );
+            ensure!(
+                body.previous == head,
+                "receipt {sequence} does not continue the chain"
+            );
+            if oldest_recorded_at.is_none() {
+                oldest_recorded_at = Some(body.recorded_at.clone());
+            }
+            head = receipt.digest()?;
+            past_heads.insert(head.clone());
+            request_digests.insert(body.request_digest.clone());
+            last_sequence = sequence;
+            retained += 1;
+        }
         Ok(LedgerState {
-            head: tip.head,
-            last_sequence: tip.last_sequence,
+            head,
+            last_sequence,
             request_digests,
             past_heads,
-            retained: tip.retained,
-            dropped_receipts: tip.dropped,
-            oldest_recorded_at: tip.oldest_recorded_at,
-            checkpoint_recorded_at: tip.checkpoint_recorded_at,
+            retained,
+            dropped_receipts: dropped,
+            oldest_recorded_at,
+            checkpoint_recorded_at: checkpoint.map(|checkpoint| checkpoint.body.recorded_at),
         })
     }
 
     /// The newest `limit` retained receipts, oldest first.
     pub fn recent(&self, state: &LedgerState, limit: usize) -> Result<Vec<SignedReceipt>> {
-        self.chain.recent(state.last_sequence, limit)
+        let sequences: Vec<u64> = self
+            .sequences()?
+            .into_iter()
+            .filter(|sequence| *sequence <= state.last_sequence)
+            .collect();
+        let start = sequences.len().saturating_sub(limit);
+        sequences[start..]
+            .iter()
+            .map(|sequence| self.read_receipt(*sequence))
+            .collect()
     }
 
     /// The retained receipt for `request_digest`, if there is one.
@@ -168,13 +226,13 @@ impl<'a> Ledger<'a> {
         if !state.request_digests.contains(request_digest) {
             return Ok(None);
         }
-        let mut sequences = self.chain.sequences()?;
+        let mut sequences = self.sequences()?;
         sequences.reverse();
         for sequence in sequences {
             if sequence > state.last_sequence {
                 continue;
             }
-            let receipt = self.chain.read_entry(sequence)?;
+            let receipt = self.read_receipt(sequence)?;
             if receipt.body.request_digest == request_digest {
                 return Ok(Some(receipt));
             }
@@ -206,7 +264,12 @@ impl<'a> Ledger<'a> {
             },
             self.node.signing_key(),
         )?;
-        self.chain.write_entry(sequence, &receipt)?;
+        let path = self.dir.join(receipt_name(sequence));
+        ensure!(
+            lillux::inspect_optional_entry_no_follow(&path)?.is_none(),
+            "receipt {sequence} already exists; the ledger will not overwrite it"
+        );
+        write_private(&path, &serde_json::to_vec(&receipt)?)?;
         let mut next = state.clone();
         next.head = receipt.digest()?;
         next.last_sequence = sequence;
@@ -218,10 +281,46 @@ impl<'a> Ledger<'a> {
             next.oldest_recorded_at = Some(receipt.body.recorded_at.clone());
         }
         if next.retained > LEDGER_ROTATE_AT {
-            self.chain.rotate()?;
+            self.rotate()?;
             return Ok((receipt, self.load()?));
         }
         Ok((receipt, next))
+    }
+
+    /// Drop the oldest receipts into a signed checkpoint that carries the
+    /// chain tip forward. The checkpoint is durable before anything is
+    /// removed, so a death in between leaves a ledger that still verifies.
+    fn rotate(&self) -> Result<()> {
+        let sequences = self.sequences()?;
+        let checkpoint = self.checkpoint()?;
+        let covered = checkpoint.as_ref().map_or(0, |c| c.body.sequence);
+        let live: Vec<u64> = sequences.into_iter().filter(|s| *s > covered).collect();
+        if live.len() <= LEDGER_KEEP {
+            return Ok(());
+        }
+        let drop_through = live[live.len() - LEDGER_KEEP - 1];
+        let tip = self.read_receipt(drop_through)?.digest()?;
+        let dropped_now = live.iter().filter(|s| **s <= drop_through).count() as u64;
+        let signed = SignedCheckpoint::sign(
+            CheckpointBody {
+                schema: CHECKPOINT_SCHEMA.to_owned(),
+                node_fingerprint: self.node.fingerprint().to_owned(),
+                sequence: drop_through,
+                tip,
+                dropped_receipts: checkpoint.as_ref().map_or(0, |c| c.body.dropped_receipts)
+                    + dropped_now,
+                recorded_at: lillux::time::iso8601_now(),
+            },
+            self.node.signing_key(),
+        )?;
+        write_private(
+            &self.dir.join(CHECKPOINT_FILE),
+            &serde_json::to_vec(&signed)?,
+        )?;
+        for sequence in live.into_iter().filter(|s| *s <= drop_through) {
+            remove(&self.dir.join(receipt_name(sequence)))?;
+        }
+        Ok(())
     }
 }
 

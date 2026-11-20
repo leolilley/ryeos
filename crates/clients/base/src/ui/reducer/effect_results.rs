@@ -512,10 +512,7 @@ impl RyeOsCore {
                 None => effect_success_notice(expected, data),
             };
             self.notice(notice, RyeOsTone::Good);
-            // A service success may have changed principal-level state (the
-            // stored theme preference), so sources that refresh on `service`
-            // read again alongside the thread lists.
-            return self.effects_for_hints(&["thread".to_string(), "service".to_string()]);
+            return self.effects_for_hint("thread");
         }
         if outcome.delivery == Some(super::dto::ThreadDelivery::Refused) {
             // A refused delivery (non-continuation target, settled
@@ -870,16 +867,6 @@ impl RyeOsCore {
             // The wording is the node's, not a project's, so any admitted
             // Surface may supply it. An unreadable response clears it, and
             // every coverage line then reads as unknown.
-            // The preference is the principal's, so any admitted Surface may
-            // supply it. A value outside the allowed list clears it, and the
-            // presentation then follows the platform.
-            Some("theme_preference") => {
-                self.data.theme_preference = data
-                    .get("theme")
-                    .and_then(serde_json::Value::as_str)
-                    .filter(|stored| crate::theme_preference::ALLOWED.contains(stored))
-                    .map(str::to_owned);
-            }
             Some("coverage_wording") => {
                 self.data.coverage_wording =
                     crate::ui::dto::RyeOsCoverageWordingDto::from_response(data).ok();
@@ -1664,78 +1651,6 @@ mod tests {
         let id = wording_fetch(&core.initial_effects()).expect("surface source fetch");
         send(&mut core, id, serde_json::json!({"fallback": {}}));
         assert!(core.data.coverage_wording.is_none());
-    }
-
-    #[test]
-    fn the_theme_preference_source_sets_the_theme_and_refetches_on_a_service_hint() {
-        let mut session = writable_session();
-        let crate::presentation::UiCompositionDefinition::Surface { surface } =
-            &mut session.binding_attachments[0].presentation.definition
-        else {
-            panic!("Surface fixture required")
-        };
-        surface.sources = serde_json::from_value(serde_json::json!({
-            "theme_preference": {
-                "ref": "service:ui/ryeos-ui/config/get",
-                "role": "theme_preference",
-                "refresh": {"on_hint": ["service"]}
-            }
-        }))
-        .unwrap();
-        let mut core = core(session);
-        let preference_fetch = |effects: &[RyeOsEffect]| {
-            effects
-                .iter()
-                .find(|effect| {
-                    matches!(
-                        &effect.kind,
-                        RyeOsEffectKind::FetchSource { request, .. }
-                            if matches!(
-                                &request.coordinate,
-                                crate::ui::binding::UiBindingCoordinate::Source { channel, .. }
-                                    if channel == "theme_preference"
-                            )
-                    )
-                })
-                .map(|effect| effect.id)
-        };
-        let send = |core: &mut RyeOsCore, id: u64, data: serde_json::Value| {
-            core.dispatch(RyeOsEvent::EffectResult {
-                result: RyeOsEffectResult {
-                    id,
-                    ok: true,
-                    kind: RyeOsEffectResultKind::SourceData,
-                    data: Some(data),
-                    error: None,
-                },
-            });
-        };
-        let theme_id = |core: &RyeOsCore| {
-            crate::ui::view_model::build_view_model(core)
-                .presentation
-                .theme
-                .id
-        };
-        // Before the preference is read the presentation follows the platform.
-        assert_eq!(theme_id(&core), "system");
-        let id = preference_fetch(&core.initial_effects()).expect("opening reads the preference");
-        send(&mut core, id, serde_json::json!({"theme": "gruvbox"}));
-        assert_eq!(core.data.theme_preference.as_deref(), Some("gruvbox"));
-        assert_eq!(theme_id(&core), "gruvbox");
-
-        // A service success reaches the `service` hint, so a changed
-        // preference is read again and applied without reopening the seat.
-        let id = preference_fetch(&core.effects_for_hint("service"))
-            .expect("a service hint reads the preference again");
-        send(&mut core, id, serde_json::json!({"theme": "paper"}));
-        assert_eq!(theme_id(&core), "paper");
-
-        // A value outside the allowed list (the earlier light/dark values
-        // included) is not applied; the presentation follows the platform.
-        let id = preference_fetch(&core.effects_for_hint("service")).expect("refetch");
-        send(&mut core, id, serde_json::json!({"theme": "dark"}));
-        assert_eq!(core.data.theme_preference, None);
-        assert_eq!(theme_id(&core), "system");
     }
 
     #[test]

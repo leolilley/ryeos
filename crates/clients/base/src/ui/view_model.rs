@@ -1048,11 +1048,7 @@ fn presentation_vm(
     RyeOsPresentationVm {
         schema_version: "ryeos.ui.presentation.v1".to_string(),
         theme: RyeOsThemeVm {
-            id: core
-                .data
-                .theme_preference
-                .clone()
-                .unwrap_or_else(|| crate::theme_preference::SYSTEM.to_string()),
+            id: "gruvbox-optic".to_string(),
             tone: RyeOsTone::Accent,
         },
         chrome: RyeOsPresentationChromeVm {
@@ -6099,27 +6095,6 @@ mod tests {
         assert_eq!(outcome[0].primary, "error");
         assert_eq!(outcome[0].meta.as_deref(), Some("boom"));
         assert_eq!(outcome[0].tone.as_deref(), Some("danger"));
-
-        // Isolation: the recorded fact shows as stored; unrecorded stays explicit.
-        for (enforced, tone) in [(true, "good"), (false, "warn")] {
-            let mut with_facts = response.clone();
-            with_facts["launch_facts"] = json!([{
-                "state": "recorded",
-                "properties": {"isolation_enforced": enforced}
-            }]);
-            let isolation = project_section(section("Isolation enforced"), &with_facts);
-            assert_eq!(isolation.len(), 1);
-            assert_eq!(isolation[0].primary, "recorded");
-            assert_eq!(isolation[0].meta.as_deref(), Some(&*enforced.to_string()));
-            assert_eq!(isolation[0].tone.as_deref(), Some(tone));
-        }
-        let mut absent = response.clone();
-        absent["launch_facts"] =
-            json!([{"state": "absent", "reason": "no_admitted_launch_capsule"}]);
-        let isolation = project_section(section("Isolation enforced"), &absent);
-        assert_eq!(isolation[0].primary, "absent");
-        assert_eq!(isolation[0].meta, None);
-        assert_eq!(isolation[0].tone, None, "an unrecorded fact takes no tone");
 
         // Artifacts use their owner's ID/type, never a fabricated blob URI.
         let artifacts = project_section(section("Artifacts"), &response);

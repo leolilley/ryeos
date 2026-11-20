@@ -49,28 +49,6 @@ with tempfile.TemporaryDirectory() as root:
     crate(root, "crates/g/two", "two", 'version = "0.4.9"')
     assert cwv.check(root, "0.5.9", listed) == []
 
-    # lockfiles: a path package of a listed crate must carry the release version,
-    # in the workspace lockfile and in a nested one; registry packages are ignored
-    lock = lambda ver: ('[[package]]\nname = "a"\nversion = "%s"\n\n[[package]]\nname = "serde"\n'
-                        'version = "1.0.0"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\n' % ver)
-    write(os.path.join(root, "Cargo.lock"), lock("0.5.9"))
-    write(os.path.join(root, "crates/a/client/Cargo.lock"), lock("0.5.9"))
-    assert cwv.check(root, "0.5.9", listed) == []
-    write(os.path.join(root, "crates/a/client/Cargo.lock"), lock("0.5.8"))
-    bad = cwv.check(root, "0.5.9", listed)
-    assert [b[0] for b in bad] == [os.path.normpath("crates/a/client/Cargo.lock")], bad
-    write(os.path.join(root, "Cargo.lock"), lock("0.5.8"))
-    assert len(cwv.check(root, "0.5.9", listed)) == 2
-    # a lockfile under target/ or .worktrees/ is not part of the release
-    write(os.path.join(root, "target/Cargo.lock"), lock("0.0.1"))
-    write(os.path.join(root, "crates/a/client/Cargo.lock"), lock("0.5.9"))
-    write(os.path.join(root, "Cargo.lock"), lock("0.5.9"))
-    assert cwv.check(root, "0.5.9", listed) == []
-
-    # a stale lockfile beside a workspace member is never read by cargo: ignored
-    write(os.path.join(root, "crates/a/Cargo.lock"), lock("0.0.1"))
-    assert cwv.check(root, "0.5.9", listed) == []
-
     mf = os.path.join(root, "list.txt")
     write(mf, "# list\ncrates/a/Cargo.toml\ncrates/a/pyproject.toml\n")
     assert cwv.read_manifests(mf) == listed

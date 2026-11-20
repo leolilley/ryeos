@@ -110,7 +110,7 @@
       "motion": [],
       "schema_version": "ryeos.ui.presentation.v1",
       "theme": {
-        "id": "system",
+        "id": "gruvbox-optic",
         "tone": "accent"
       }
     },
@@ -286,20 +286,6 @@
                 "state": "unresolved"
               },
               "title": "Execution"
-            },
-            {
-              "collapsed": false,
-              "count": 0,
-              "cursor": 0,
-              "header_selected": false,
-              "id": "view-section:ac9e168877765c7f2635e663e4cbaf732a3818c2a5e59803188f397502b22c23",
-              "rows": [],
-              "source_status": {
-                "message": "Source subject or required context is unresolved",
-                "stale": false,
-                "state": "unresolved"
-              },
-              "title": "Isolation enforced"
             },
             {
               "collapsed": false,

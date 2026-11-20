@@ -67,9 +67,8 @@ pub(super) fn refuse_overdue_external_leases(state: &AppState) -> Result<Vec<(St
     Ok(failures)
 }
 
-/// Drive every lease held for a worker of another daemon incarnation, and
-/// every other unsettled allocation of a placed session, to termination by its
-/// occurrence id. Call before the node is ready, when no
+/// Drive every lease held for a worker of another daemon incarnation to
+/// termination by its occurrence id. Call before the node is ready, when no
 /// worker of this incarnation can yet hold a lease. One provider operation is
 /// advanced per lease; a lease whose terminal is not yet observed stays
 /// quarantined and charged for the periodic cleanup pass.
@@ -100,29 +99,6 @@ pub fn terminate_predecessor_external_leases(
                 .push((record.placement_thread_id, format!("{error:#}")));
         }
     }
-    // An unsettled allocation of a placed session that holds no lease budget
-    // row is the same obligation: its session cannot be settled locally until
-    // the provider terminal is observed, so it is driven here too, before any
-    // local settlement of the session.
-    let mut placements = placements;
-    for placement in state
-        .state_store
-        .unsettled_external_allocation_placements()?
-    {
-        if placements.contains(&placement) {
-            continue;
-        }
-        let Some(record) = state.state_store.external_allocation(&placement)? else {
-            continue;
-        };
-        if matches!(
-            record.reservation.owner,
-            ExternalAllocationOwner::DedicatedSession(_)
-        ) {
-            placements.push(placement);
-        }
-    }
-    report.discovered = placements.len();
     for placement in placements {
         match advance_external_candidate_cleanup(state, &placement) {
             Ok(ExternalCandidateCleanupProgress::Proved) => report.terminated.push(placement),
