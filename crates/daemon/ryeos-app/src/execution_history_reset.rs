@@ -3750,6 +3750,11 @@ mod tests {
         let trust =
             ryeos_engine::trust::TrustStore::from_registry(*identity.verifying_key(), Vec::new())
                 .unwrap();
+        // Validating the quota reads the process-wide native state, which a
+        // concurrent host's install or teardown moves through windows that
+        // refuse as an inherited process. Hold the serial for the publish;
+        // callers must not already hold it.
+        let _serial = lillux_sqlite::test_host::serial();
         let lock = acquire_state_lock(&default_lock_path(&config.app_root)).unwrap();
         publish_policy_update(
             &config.app_root,

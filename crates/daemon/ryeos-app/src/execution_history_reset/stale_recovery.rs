@@ -1144,7 +1144,6 @@ mod tests {
     }
 
     fn node() -> Node {
-        let serial = lillux_sqlite::test_host::serial();
         let tmp = tempfile::TempDir::new().unwrap();
         let config = Config::load(&ConfigSources {
             app_root: Some(tmp.path().to_owned()),
@@ -1176,11 +1175,12 @@ mod tests {
             std::fs::create_dir_all(&path).unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
+        // After the policy install, which holds the serial itself.
         Node {
             _tmp: tmp,
             config,
             identity,
-            serial: Some(serial),
+            serial: Some(lillux_sqlite::test_host::serial()),
         }
     }
 
