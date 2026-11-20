@@ -905,7 +905,7 @@ async fn workload_receives_the_value_and_no_state_retains_it() -> Result<()> {
         .post_execute(
             "service:worker-executions/terminate",
             ".",
-            json!({"chain_root_id": chain_root_id, "reason": "completed"}),
+            json!({"chain_root_id": chain_root_id, "reason": "cancelled"}),
         )
         .await?;
     anyhow::ensure!(
