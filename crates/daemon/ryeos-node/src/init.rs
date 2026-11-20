@@ -5024,6 +5024,12 @@ mod tests {
         let Ok(path) = std::env::var(HOLD_LOCK_ENV) else {
             return;
         };
+        // A helper that outlives its parent exits by itself.
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+            eprintln!("state-lock helper process: 60 s cap reached; exiting");
+            std::process::exit(3);
+        });
         let _lock = ryeos_node_runtime::state_lock::StateLock::acquire(std::path::Path::new(&path))
             .expect("helper takes the state lock");
         println!("STATE_LOCK_HELD");
@@ -5054,18 +5060,28 @@ mod tests {
                 .stderr(std::process::Stdio::null())
                 .spawn()
                 .unwrap();
-            let mut lines = std::io::BufReader::new(child.stdout.take().unwrap()).lines();
-            // Readiness is the helper's own announcement, not a delay.
-            loop {
-                let line = lines
-                    .next()
-                    .expect("helper exited before taking the state lock")
-                    .unwrap();
-                // libtest prints `test <name> ... ` without a newline before the
-                // helper announces itself on the same line.
-                if line.contains("STATE_LOCK_HELD") {
-                    break;
+            // Readiness is the helper's own announcement, read on a thread so
+            // a helper that never announces fails the test instead of
+            // blocking it. libtest prints `test <name> ... ` without a newline
+            // before the helper announces itself on the same line.
+            let stdout = child.stdout.take().unwrap();
+            let (ready, announced) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                for line in std::io::BufReader::new(stdout).lines() {
+                    let Ok(line) = line else { break };
+                    if line.contains("STATE_LOCK_HELD") {
+                        let _ = ready.send(());
+                        return;
+                    }
                 }
+            });
+            if announced
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .is_err()
+            {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("the helper process did not take the state lock within 30 s");
             }
             Self { child }
         }
@@ -5073,8 +5089,38 @@ mod tests {
 
     impl Drop for OtherProcessHoldsStateLock {
         fn drop(&mut self) {
+            // Closing stdin would end it, but another process can hold the
+            // pipe's write end open; killing releases the lock regardless.
             drop(self.child.stdin.take());
+            let _ = self.child.kill();
             let _ = self.child.wait();
+        }
+    }
+
+    /// Aborts the whole test process, naming the test, if it is still running
+    /// after `seconds`: a hang becomes a named failure, not a job timeout.
+    struct Watchdog(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    fn watchdog(test: &'static str, seconds: u64) -> Watchdog {
+        let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = std::sync::Arc::clone(&finished);
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+            while std::time::Instant::now() < deadline {
+                if seen.load(std::sync::atomic::Ordering::SeqCst) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            eprintln!("WATCHDOG: test `{test}` still running after {seconds} s; aborting");
+            std::process::abort();
+        });
+        Watchdog(finished)
+    }
+
+    impl Drop for Watchdog {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
@@ -5118,9 +5164,21 @@ mod tests {
         use ryeos_node_runtime::state_lock::{StateLock, default_lock_path};
         let lock_path = default_lock_path(state);
         let holder = OtherProcessHoldsStateLock::start(&lock_path);
+        // A start under a held lock refuses promptly; it never waits it out.
+        let started = std::time::Instant::now();
+        assert!(
+            StateLock::acquire_with_timeout(&lock_path, std::time::Duration::from_millis(300))
+                .is_err(),
+            "the state lock is held by another process"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "refusing a held lock took {:?}",
+            started.elapsed()
+        );
         assert!(
             StateLock::acquire(&lock_path).is_err(),
-            "the state lock is held by another process"
+            "the state lock is still held by another process"
         );
         drop(holder);
         let lock = StateLock::acquire(&lock_path).expect("lock is free once the holder exits");
@@ -5140,6 +5198,10 @@ mod tests {
     #[test]
     fn foreign_namespace_debit_is_refused_while_another_process_holds_the_state_lock_and_settled_when_free()
      {
+        let _watchdog = watchdog(
+            "foreign_namespace_debit_is_refused_while_another_process_holds_the_state_lock_and_settled_when_free",
+            300,
+        );
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
         let user = tmp.path().join("home");
@@ -5159,6 +5221,10 @@ mod tests {
     #[test]
     fn foreign_namespace_recovery_process_is_refused_while_another_process_holds_the_state_lock_and_settled_when_free()
      {
+        let _watchdog = watchdog(
+            "foreign_namespace_recovery_process_is_refused_while_another_process_holds_the_state_lock_and_settled_when_free",
+            300,
+        );
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
         let user = tmp.path().join("home");
@@ -5217,6 +5283,10 @@ mod tests {
     /// and debits normally.
     #[test]
     fn the_execution_history_cut_re_records_pre_cut_capacity_records_and_the_node_starts() {
+        let _watchdog = watchdog(
+            "the_execution_history_cut_re_records_pre_cut_capacity_records_and_the_node_starts",
+            300,
+        );
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
         let user = tmp.path().join("home");
@@ -5280,6 +5350,10 @@ mod tests {
     #[test]
     fn a_cut_interrupted_between_its_writes_refuses_a_start_with_the_cure_and_the_rerun_starts_the_node()
      {
+        let _watchdog = watchdog(
+            "a_cut_interrupted_between_its_writes_refuses_a_start_with_the_cure_and_the_rerun_starts_the_node",
+            300,
+        );
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
         let user = tmp.path().join("home");
@@ -5312,6 +5386,10 @@ mod tests {
     /// decode for any other reason is refused and left as it was.
     #[test]
     fn the_cut_refuses_a_capacity_record_that_is_not_the_pre_cut_shape() {
+        let _watchdog = watchdog(
+            "the_cut_refuses_a_capacity_record_that_is_not_the_pre_cut_shape",
+            300,
+        );
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
         let user = tmp.path().join("home");
