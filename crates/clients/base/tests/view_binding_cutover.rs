@@ -58,7 +58,7 @@ const VIEW_BEHAVIOR_GOLDENS: &[(&str, &str)] = &[
     ),
     (
         "view:ryeos/item/explain",
-        "8f0baace5445cf3520b61af4693745ccb0f4f820f87228517c9aa5f23a67e10c",
+        "165aeee9cccfc85e100d6b7b778b64a0d8839bf4e987dd71cbe7534046f790eb",
     ),
     (
         "view:ryeos/item/inspector",
