@@ -1,0 +1,335 @@
+{
+  "accepted_initial_effects": [],
+  "view_model": {
+    "chrome": {
+      "health_label": "connected",
+      "health_tone": "good",
+      "subtitle": "/fixture/project",
+      "title": "RyeOS"
+    },
+    "dialogs": [],
+    "generation": 2,
+    "notices": [],
+    "now_ms": 0,
+    "overlay": {
+      "key_hints": [
+        {
+          "keys": "↑/↓",
+          "word": "move"
+        },
+        {
+          "keys": "enter",
+          "word": "open"
+        },
+        {
+          "keys": "a",
+          "word": "acknowledge"
+        },
+        {
+          "keys": "esc",
+          "word": "close"
+        }
+      ],
+      "needs_you": [],
+      "needs_you_count": null,
+      "open": false,
+      "running": [],
+      "running_count": null,
+      "selected": null
+    },
+    "presentation": {
+      "chrome": {
+        "border": "thin",
+        "status_bar": {
+          "edge": "bottom",
+          "energy": 0.0,
+          "first_run": false,
+          "key_hints": [
+            {
+              "keys": "ctrl+k",
+              "word": "open"
+            },
+            {
+              "keys": "alt+o",
+              "word": "overlay"
+            },
+            {
+              "keys": "alt+t/b",
+              "word": "bars"
+            },
+            {
+              "keys": "ctrl+←/→",
+              "word": "tab"
+            },
+            {
+              "keys": "ctrl+↑/↓",
+              "word": "move"
+            },
+            {
+              "keys": "alt+r",
+              "word": "rename"
+            }
+          ],
+          "segments": [],
+          "visible": true
+        },
+        "switcher": {
+          "edge": "left"
+        },
+        "title": "Rye OS",
+        "top_bar": {
+          "add_tab": true,
+          "tabs": [
+            {
+              "active": true,
+              "number": 1,
+              "tile_count": 1,
+              "title": "cutover-golden",
+              "view_set_id": 1
+            }
+          ],
+          "visible": false
+        },
+        "version_label": "RYE OS - unqualified"
+      },
+      "frame": {
+        "corners": {
+          "tone": "accent",
+          "visible": true
+        }
+      },
+      "metrics": {
+        "active_thread_count": 0,
+        "activity_level": 0.11999999731779099,
+        "project_count": 0,
+        "schedule_count": 0,
+        "service_count": 0,
+        "thread_count": 0,
+        "tile_count": 1
+      },
+      "motion": [],
+      "schema_version": "ryeos.ui.presentation.v1",
+      "theme": {
+        "id": "gruvbox-optic",
+        "tone": "accent"
+      }
+    },
+    "schema_version": "ryeos.ui.vm.v3",
+    "session": {
+      "posture": "observation_only",
+      "project_path": null,
+      "root_ref": "config:fixture/cutover",
+      "session_id": "cutover-session",
+      "surface_ordinal": 1,
+      "surfaces": [
+        {
+          "active": true,
+          "chip": {
+            "authored_in_project": false,
+            "mark": "initial"
+          },
+          "close_intent": null,
+          "ordinal": 1,
+          "rename_intent": {
+            "binding": {
+              "binding_attachment_id": "cutover-golden-attachment",
+              "binding_digest": "cutover-golden-binding",
+              "binding_generation": 1
+            },
+            "surface_instance_id": "22222222-2222-4222-8222-222222222222",
+            "title": "Cutover",
+            "type": "rename_surface"
+          },
+          "select_intent": {
+            "binding": {
+              "binding_attachment_id": "cutover-golden-attachment",
+              "binding_digest": "cutover-golden-binding",
+              "binding_generation": 1
+            },
+            "surface_instance_id": "22222222-2222-4222-8222-222222222222",
+            "type": "select_surface"
+          },
+          "surface_instance_id": "22222222-2222-4222-8222-222222222222",
+          "title": "Cutover"
+        }
+      ],
+      "title": "Cutover",
+      "user_principal_id": null
+    },
+    "transport": {
+      "channels": [
+        {
+          "channel": "session",
+          "freshness": "current"
+        }
+      ],
+      "freshness": "current"
+    },
+    "view_set": {
+      "center_is_empty": false,
+      "focused_tile": "2",
+      "layout_guard": "317eed5a0a787a7e0614ed276195baa21c2ef3ac9d4e8469ced533eea1d7bf4b",
+      "lens_trail": [],
+      "root": {
+        "attachment_label": null,
+        "background_transparent": false,
+        "chrome_hidden": false,
+        "current": true,
+        "focused": true,
+        "group_id": "3",
+        "instance_key": "seat:11111111-1111-4111-8111-111111111111:surface:22222222-2222-4222-8222-222222222222:tile:2",
+        "intents": [
+          {
+            "intent": {
+              "tile_id": "2",
+              "type": "close_tile"
+            },
+            "label": "Close view",
+            "title": "Close this view; its running work is unaffected"
+          }
+        ],
+        "maximized": false,
+        "tabs": [
+          {
+            "active": true,
+            "tile_id": "2",
+            "title": "Run comparison"
+          }
+        ],
+        "tile_id": "2",
+        "title": "Run comparison",
+        "type": "tile",
+        "view": {
+          "field": {
+            "changes": [],
+            "compare": [],
+            "cursor": null,
+            "data_revision": "b59477764a54365a32a702c8b7aa12f9053201ec8151c795df8fd61ed6269489",
+            "entities": [],
+            "expansions": [],
+            "groups": [
+              {
+                "aggregate": null,
+                "collapsed": false,
+                "id": "summary",
+                "label": "Comparison",
+                "layout": "flow",
+                "parent_id": null
+              },
+              {
+                "aggregate": null,
+                "collapsed": false,
+                "id": "operands",
+                "label": "Exact runs",
+                "layout": "lanes",
+                "parent_id": "summary"
+              },
+              {
+                "aggregate": {
+                  "mode": "count"
+                },
+                "collapsed": false,
+                "id": "definition",
+                "label": "Definition changes",
+                "layout": "stack",
+                "parent_id": null
+              },
+              {
+                "aggregate": {
+                  "mode": "count"
+                },
+                "collapsed": false,
+                "id": "realization",
+                "label": "Execution realization",
+                "layout": "stack",
+                "parent_id": null
+              },
+              {
+                "aggregate": null,
+                "collapsed": false,
+                "id": "cost",
+                "label": "Run cost",
+                "layout": "lanes",
+                "parent_id": null
+              }
+            ],
+            "id": "view:ryeos/runs/comparison@seat:11111111-1111-4111-8111-111111111111:surface:22222222-2222-4222-8222-222222222222:tile:2",
+            "layers": [
+              {
+                "count": 0,
+                "id": "cost",
+                "label": "Cost",
+                "visible": true
+              },
+              {
+                "count": 0,
+                "id": "definition",
+                "label": "Definition",
+                "visible": true
+              },
+              {
+                "count": 0,
+                "id": "realization",
+                "label": "Realization",
+                "visible": true
+              },
+              {
+                "count": 0,
+                "id": "summary",
+                "label": "Summary",
+                "visible": true
+              }
+            ],
+            "local_revision": "9a4ad0bdbef3d23c50b3cbe1ba5d7c842e57248140c832cff248b3a07f403df5",
+            "metrics": [],
+            "previews": [],
+            "provenance": [],
+            "relations": [],
+            "replay": {
+              "anchor": null,
+              "live_head": null,
+              "mode": "live",
+              "next": null,
+              "outside_cut": [],
+              "playing": false,
+              "previous": null,
+              "rail": []
+            },
+            "revision": "edf46aebb38ad9c62364f746b734f0d90fe82aa1d313665da07963df1719bbdc",
+            "schema_version": "ryeos.ui.field.vm.v2",
+            "search": {
+              "active_match": null,
+              "match_ids": [],
+              "query": "",
+              "truncated": false
+            },
+            "selected": null,
+            "sources": [
+              {
+                "error": null,
+                "evidence": [],
+                "evidence_omitted": 0,
+                "name": "comparison",
+                "phase": "unresolved",
+                "revision": null,
+                "source_ref": "service:ui/ryeos-ui/field/comparison",
+                "subject_fingerprint": "f44e3425fc48e86e54213e509e41e60281a108ebf08412c0a83cb216b49925c9",
+                "truncated": false
+              }
+            ],
+            "structural_revision": "fe4eab807d9e9d273a08938f346a9ae633c2a502ae5fb3f4ab3069a02b217a4d",
+            "subjects": [],
+            "title": "Run comparison",
+            "traversal": [],
+            "warnings": []
+          },
+          "type": "field"
+        }
+      },
+      "split_max_ratio": 0.8999999761581421,
+      "split_min_ratio": 0.10000000149011612,
+      "tile_count": 1,
+      "view_set_id": 1
+    }
+  }
+}
