@@ -332,13 +332,10 @@ async fn successors_keep_the_pinned_prefix_and_a_well_formed_start() {
     }
 }
 
-/// A `continuation` hook that runs the marker tool only when the event records
-/// the given hand-off point, so the marker count proves what the event carried.
-fn continuation_point_hook(point: u64) -> String {
-    format!(
-        "hooks:\n  - id: on-handoff\n    event: continuation\n    result: observation\n    condition: \"event.threshold_tokens == {point}\"\n    action:\n      primary: execute\n      item_id: \"tool:marker/marker\"\n      ref_bindings: {{}}\n      params: {{}}\n"
-    )
-}
+/// Carry two turns, and run the marker tool on a `continuation` event only when
+/// the event records a hand-off point of 32,000 tokens, so the marker count
+/// proves what the event carried.
+const CAPPED_HEADER: &str = "continuation:\n  carry_turns: 2\nhooks:\n  - id: on-handoff\n    event: continuation\n    result: observation\n    condition: \"event.threshold_tokens == 32000\"\n    action:\n      primary: execute\n      item_id: \"tool:marker/marker\"\n      ref_bindings: {}\n      params: {}\n";
 
 /// The model's hand-off cap, not the window fraction, decides where a run
 /// hands off. The window is 100,000 tokens (a 90,000 ratio point) and the
@@ -349,16 +346,11 @@ fn continuation_point_hook(point: u64) -> String {
 async fn a_capped_model_hands_off_at_the_cap_not_the_ratio() {
     const CAP: u64 = 32_000;
     let script = "steps:\n  - repeat: 200\n    tool_calls:\n      - { id: \"call_{n}\", name: bulk_bulk, arguments: {} }\n  - repeat: 5\n    text: done\n";
-    let header = format!(
-        "continuation:\n  carry_turns: 2\n{}",
-        continuation_point_hook(CAP)
-    );
-    let header: &'static str = Box::leak(header.into_boxed_str());
     let rig = start_rig(
         script,
         RigOptions {
             context_window: 100_000,
-            header_extra: header,
+            header_extra: CAPPED_HEADER,
             limits: Some((600, 600)),
             provider_top_extra: format!("handoff_token_cap: {CAP}\n"),
             marker_sleep_seconds: 0,

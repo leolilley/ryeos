@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-20T22:54:35Z:1613c1b00c15c66d0cca11ad00a14cece64052659ff858f97a7afc8b0e5f5836:Bn9ZTXxp+l9vyyDF9mk3WyaKpYBQbVfH4WgDu/SkQG7+ggfsGNlHFWz7MTmnnupmlS3CEymHBY4MjiSbiaCeAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-20T23:06:24Z:537ca4f952be09541059fcccad99542138a2d2aa620509cc330c655e9c271613:TQuuqAUEZ2uTU0Oi5VajSCn7oOnQuzM93Nj2z1F5dMeEs8BoKZ+DAyyCRpPhyDI6cUdP7Uj4lHzHVo299HAvAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/standard
@@ -406,10 +406,10 @@ entry's, and absent means the window fraction alone.
 
 ```yaml
 profiles:
-  # Opus 5.5: window 1,000,000 tokens. Cap 250,000 holds a worst-case
-  # uncached turn near 250,000 input tokens (about US$1.25 per turn at an
-  # assumed US$5 per million input tokens; the price is an assumption taken
-  # from the probe, not read from the route).
+  # A model with a 1,000,000-token window and a published input price of
+  # US$4 per million tokens (cache read US$0.20): a cap of 250,000 holds a
+  # cold-cache turn near US$1.00 of input instead of US$3.60 at 900,000.
+  # The price is the cited published figure; record its source in the row.
   - name: claude-opus-5-5
     match: ["*claude-opus-5-5"]
     handoff_token_cap: 250000
