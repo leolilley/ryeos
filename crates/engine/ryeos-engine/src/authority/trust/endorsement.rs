@@ -656,6 +656,32 @@ impl EndorsementLedger {
 struct IndexedEndorsement {
     digest: String,
     body: EndorsementBody,
+    stored: StoredEndorsement,
+}
+
+/// The endorsements one launch carries to its runtime: the live endorsements
+/// of the launch's project as the request froze them, and which signers they
+/// apply to. The daemon seals it into the launch envelope, so the runtime
+/// judges exactly what the daemon judged for the life of the launch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EndorsementSnapshot {
+    /// The launch's logical project identity: its canonical root path. The
+    /// runtime matches against this, never against its own checkout path.
+    pub project: String,
+    /// Fingerprints of the pinned authoring-role signers: their scope does not
+    /// decide trust, the endorsements do.
+    pub authoring_signers: Vec<String>,
+    /// The stored endorsements, countersigned by the node, in digest order.
+    pub endorsements: Vec<StoredEndorsement>,
+}
+
+impl EndorsementSnapshot {
+    /// Digest the launch envelope seals.
+    pub fn digest(&self) -> String {
+        let value = serde_json::to_value(self).unwrap_or(serde_json::Value::Null);
+        lillux::sha256_hex(value.to_string().as_bytes())
+    }
 }
 
 /// The live endorsements the trust decision consults: verified, signed by a
@@ -706,6 +732,7 @@ impl EndorsementIndex {
             entries.push(IndexedEndorsement {
                 digest: stored.digest.clone(),
                 body: body.clone(),
+                stored: stored.clone(),
             });
         }
         entries.sort_by(|a, b| a.digest.cmp(&b.digest));
@@ -718,6 +745,62 @@ impl EndorsementIndex {
         self.entries
             .iter()
             .any(|entry| entry.body.project == project && entry.body.covers(kind, digest, now))
+    }
+
+    /// The live endorsements of `project`, with the authoring signers they
+    /// apply to, for a launch envelope. `None` when none apply.
+    pub fn snapshot_for(
+        &self,
+        project: &str,
+        authoring_signers: Vec<String>,
+    ) -> Option<EndorsementSnapshot> {
+        let endorsements: Vec<StoredEndorsement> = self
+            .entries
+            .iter()
+            .filter(|entry| entry.body.project == project)
+            .map(|entry| entry.stored.clone())
+            .collect();
+        if endorsements.is_empty() || authoring_signers.is_empty() {
+            return None;
+        }
+        Some(EndorsementSnapshot {
+            project: project.to_owned(),
+            authoring_signers,
+            endorsements,
+        })
+    }
+
+    /// Rebuild the index a launch carries. The daemon already judged who may
+    /// endorse and sealed the snapshot; this checks that each document is
+    /// well formed, names its own digest and the snapshot's project, and
+    /// carries a valid signature under a key in `key_of`.
+    pub fn from_snapshot(
+        snapshot: &EndorsementSnapshot,
+        key_of: impl Fn(&str) -> Option<VerifyingKey>,
+    ) -> Result<Self, String> {
+        let mut entries = Vec::new();
+        for stored in &snapshot.endorsements {
+            let body = &stored.endorsement.body;
+            body.validate_shape().map_err(|e| e.to_string())?;
+            let digest = stored.endorsement.digest().map_err(|e| e.to_string())?;
+            if digest != stored.digest || body.project != snapshot.project || body.via.is_some() {
+                return Err(format!(
+                    "endorsement {} does not belong in the snapshot of project {}",
+                    stored.digest, snapshot.project
+                ));
+            }
+            let endorser = body.endorser_fingerprint().map_err(|e| e.to_string())?;
+            let key = key_of(endorser)
+                .ok_or_else(|| format!("endorser {endorser} is not a signer of this launch"))?;
+            stored.endorsement.verify(&key).map_err(|e| e.to_string())?;
+            entries.push(IndexedEndorsement {
+                digest,
+                body: body.clone(),
+                stored: stored.clone(),
+            });
+        }
+        entries.sort_by(|a, b| a.digest.cmp(&b.digest));
+        Ok(Self { entries })
     }
 
     /// Digests of the live endorsements, in order.

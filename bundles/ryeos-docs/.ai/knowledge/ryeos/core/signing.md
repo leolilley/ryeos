@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-20T23:21:17Z:f359f8fb81fe83b1300026270affee20b6afa6abdd15c81673869df16cb029b0:H39XOkAfV7WIQdhWukbjEynMXm2hv0+td0VXOy6MtGUI0/5sSMIrnsLzKSivZCTbH0oxgdqkVDn7pJ4Hrvg1CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-20T23:40:24Z:7dface0d771e3135202f9f3eae32deb63fe34da646d5c2176660c5d5ac19469d:IfNVhJIo1f4VczdJrFWZ8fYxjJ2M3fLPwaS1B87rg6/2O62Zc6Ahw4JfaWjNBsGI77+hhFrSoEBTJ1vYN5pVDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -407,6 +407,16 @@ Endorsement is narrow-only: it chooses `trusted_project` over `untrusted_project
 and nothing else. It never applies to another role's key, cannot make an
 unpinned or revoked key trusted, and cannot lift a revocation. A running node
 follows a new or revoked endorsement without a restart.
+
+A launch carries the endorsements its request froze to the runtime: the launch
+envelope (schema version 6) holds a snapshot of the live endorsements of the
+launch's project, with the pinned authoring signers they apply to, sealed by a
+digest like the signer list. The runtime judges authoring-key items by that
+snapshot against the launch's own project identity (its canonical root), not its
+checkout path, so daemon and runtime agree for the life of the launch. A
+revocation recorded mid-launch does not change that launch; the next launch
+freezes the new state. An envelope of another schema version is refused; runtime
+binaries ship in bundles, so repopulate bundles after this change.
 
 Revoking writes a node-signed tombstone named by the endorsement digest. The
 items it covered are untrusted again, and the tombstone stays in force if the

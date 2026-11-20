@@ -8098,7 +8098,16 @@ async fn run_claimed_thread_row_inner(
     let envelope = LaunchEnvelopeBuilder::new(
         cap.invocation_id.clone(),
         thread_id.clone(),
-        EnvelopeRoots::new(process_project_path.clone(), bundle_roots, trusted_signers),
+        EnvelopeRoots::new(
+            process_project_path.clone(),
+            bundle_roots,
+            trusted_signers,
+            // The endorsements this request froze, for the launch's logical
+            // project: the runtime judges what the daemon judged.
+            effective_request_snapshot
+                .trust_store
+                .launch_endorsements(engine_roots.signer_project_root()),
+        ),
         EnvelopeRequest {
             // Strip runtime-control fields from prompt inputs. Parent
             // budget/depth now travels out-of-band, but rejecting prompt leaks

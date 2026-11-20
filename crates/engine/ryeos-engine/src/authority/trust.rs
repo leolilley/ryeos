@@ -253,6 +253,16 @@ pub struct TrustStore {
     /// Endorsements that make authoring-key items trusted. Empty for stores
     /// built from raw signers or a launch envelope.
     endorsements: endorsement::EndorsementView,
+    /// Set on a store rebuilt from a launch envelope: the launch's frozen
+    /// endorsement snapshot, which fixes the project identity and names the
+    /// signers whose items it decides.
+    launch_endorsements: Option<LaunchEndorsements>,
+}
+
+#[derive(Debug, Clone)]
+struct LaunchEndorsements {
+    project: String,
+    authoring_signers: std::collections::BTreeSet<String>,
 }
 
 impl TrustStore {
@@ -264,6 +274,7 @@ impl TrustStore {
             node_key: None,
             entry_scopes: HashMap::new(),
             endorsements: endorsement::EndorsementView::default(),
+            launch_endorsements: None,
         }
     }
 
@@ -284,6 +295,7 @@ impl TrustStore {
             node_key: None,
             entry_scopes: HashMap::new(),
             endorsements: endorsement::EndorsementView::default(),
+            launch_endorsements: None,
         }
     }
 
@@ -362,6 +374,7 @@ impl TrustStore {
             node_key: None,
             entry_scopes,
             endorsements: endorsement::EndorsementView::default(),
+            launch_endorsements: None,
         })
     }
 
@@ -424,6 +437,7 @@ impl TrustStore {
             node_key: Some(node_key),
             entry_scopes: HashMap::new(),
             endorsements: endorsement::EndorsementView::default(),
+            launch_endorsements: None,
         })
     }
 
@@ -476,6 +490,54 @@ impl TrustStore {
         let identity = index.identity(lillux::time::unix_secs_now());
         self.endorsements.replace(index);
         Ok(identity)
+    }
+
+    /// The endorsements a launch of `logical_project` carries to its runtime,
+    /// taken from this store's index (a request's frozen snapshot), or `None`
+    /// when the project is unknown or nothing applies. The project identity is
+    /// the canonical root, the same one [`Self::endorsed`] matches on.
+    pub fn launch_endorsements(
+        &self,
+        logical_project: Option<&Path>,
+    ) -> Option<EndorsementSnapshot> {
+        let root = logical_project?;
+        let canonical = std::fs::canonicalize(root).ok();
+        let project = canonical.as_deref().unwrap_or(root).to_str()?.to_owned();
+        let authoring: Vec<String> = self
+            .records
+            .values()
+            .filter(|record| {
+                record.role == SignerRole::Authoring && record.status != SignerStatus::Revoked
+            })
+            .map(|record| record.fingerprint.clone())
+            .collect();
+        self.endorsements
+            .current()
+            .snapshot_for(&project, authoring)
+    }
+
+    /// Apply a launch's frozen endorsement snapshot to a store rebuilt from
+    /// its signer list: the snapshot's authoring signers are judged by the
+    /// endorsements, against the snapshot's project identity.
+    pub fn with_launch_endorsements(
+        mut self,
+        snapshot: &EndorsementSnapshot,
+    ) -> Result<Self, TrustError> {
+        let index = EndorsementIndex::from_snapshot(snapshot, |fingerprint| {
+            self.signers
+                .get(fingerprint)
+                .map(|signer| signer.verifying_key)
+        })
+        .map_err(|reason| TrustError::EndorsementRecordInvalid {
+            path: PathBuf::from("launch-endorsements"),
+            reason,
+        })?;
+        self.endorsements = endorsement::EndorsementView::frozen(index);
+        self.launch_endorsements = Some(LaunchEndorsements {
+            project: snapshot.project.clone(),
+            authoring_signers: snapshot.authoring_signers.iter().cloned().collect(),
+        });
+        Ok(self)
     }
 
     /// A copy of this store holding exactly `index`, frozen. For stores built
@@ -545,6 +607,7 @@ impl TrustStore {
             signers,
             node_key,
             endorsements: endorsement::EndorsementView::default(),
+            launch_endorsements: None,
         }
     }
 
@@ -615,6 +678,25 @@ impl TrustStore {
         context: &SignerContext<'_>,
         content_digest: &str,
     ) -> ScopeDecision {
+        if let Some(launch) = &self.launch_endorsements
+            && launch.authoring_signers.contains(fingerprint)
+        {
+            if self.endorsed(context, content_digest) {
+                return ScopeDecision::Admitted;
+            }
+            return ScopeDecision::OutOfScope {
+                label: self
+                    .signers
+                    .get(fingerprint)
+                    .and_then(|signer| signer.label.clone())
+                    .unwrap_or_default(),
+                scope: self
+                    .entry_scopes
+                    .get(fingerprint)
+                    .cloned()
+                    .unwrap_or_else(SignerScope::authoring_default),
+            };
+        }
         if let Some(record) = self.records.get(fingerprint) {
             if record.status == SignerStatus::Revoked {
                 return ScopeDecision::Revoked {
@@ -682,6 +764,16 @@ impl TrustStore {
         let Some(root) = context.project_root else {
             return false;
         };
+        // A launch's runtime matches the launch's own project identity; its
+        // process path may be a checkout of that project.
+        if let Some(launch) = &self.launch_endorsements {
+            return self.endorsements.current().covers(
+                &launch.project,
+                context.kind,
+                content_digest,
+                lillux::time::unix_secs_now(),
+            );
+        }
         // Endorsements name the project by its canonical root, however the
         // request spelled the path.
         let canonical = std::fs::canonicalize(root).ok();

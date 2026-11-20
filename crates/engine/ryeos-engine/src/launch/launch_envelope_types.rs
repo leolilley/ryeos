@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use crate::effective_program::FinalizedEffectiveProgram;
 use crate::resolution::EffectiveDefinitionDigest;
 use crate::resolution::ResolutionOutput;
-use crate::trust::{TrustStore, TrustedSignerEntry, trusted_signers_digest};
+use crate::trust::{EndorsementSnapshot, TrustStore, TrustedSignerEntry, trusted_signers_digest};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
@@ -36,7 +36,7 @@ pub use ryeos_accounting::UsdNanos;
 /// and the runtime would have no way to tell which to trust. Now there
 /// is exactly one root snapshot — `resolution.root` — and every consumer
 /// reads `path` / `digest` / `kind` / `item_id` from there.
-pub const MANAGED_LAUNCH_ENVELOPE_SCHEMA_VERSION: u32 = 5;
+pub const MANAGED_LAUNCH_ENVELOPE_SCHEMA_VERSION: u32 = 6;
 
 fn deserialize_required_nullable<'de, D, T>(
     deserializer: D,
@@ -292,25 +292,46 @@ pub struct EnvelopeRoots {
     /// by the daemon at launch; an envelope whose list does not hash to it is
     /// refused.
     pub trusted_signers_digest: String,
+    /// The endorsements the launch froze for its project, which make items the
+    /// authoring key signed trusted inside the runtime exactly as they were
+    /// for the daemon. `None` when none apply.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub endorsements: Option<EndorsementSnapshot>,
+    /// Digest of `endorsements` (empty when `None`). Sealed by the daemon at
+    /// launch; an envelope whose snapshot does not hash to it is refused.
+    pub endorsements_digest: String,
+}
+
+fn endorsements_seal(endorsements: &Option<EndorsementSnapshot>) -> String {
+    endorsements
+        .as_ref()
+        .map(EndorsementSnapshot::digest)
+        .unwrap_or_default()
 }
 
 impl EnvelopeRoots {
-    /// Build roots from a signer list, computing the sealed digest.
+    /// Build roots from a signer list and the launch's endorsement snapshot,
+    /// computing the sealed digests.
     pub fn new(
         project_root: PathBuf,
         bundle_roots: Vec<PathBuf>,
         trusted_signers: Vec<TrustedSignerEntry>,
+        endorsements: Option<EndorsementSnapshot>,
     ) -> Self {
         let trusted_signers_digest = trusted_signers_digest(&trusted_signers);
+        let endorsements_digest = endorsements_seal(&endorsements);
         Self {
             project_root,
             bundle_roots,
             trusted_signers,
             trusted_signers_digest,
+            endorsements,
+            endorsements_digest,
         }
     }
 
-    /// Refuse roots whose signer list does not hash to the sealed digest.
+    /// Refuse roots whose signer list or endorsement snapshot does not hash
+    /// to its sealed digest.
     pub fn validate_trusted_signers(&self) -> Result<(), String> {
         let observed = trusted_signers_digest(&self.trusted_signers);
         if observed != self.trusted_signers_digest {
@@ -318,6 +339,14 @@ impl EnvelopeRoots {
                 "launch envelope trusted signer list does not match its sealed digest: \
                  envelope={}, observed={}",
                 self.trusted_signers_digest, observed
+            ));
+        }
+        let observed = endorsements_seal(&self.endorsements);
+        if observed != self.endorsements_digest {
+            return Err(format!(
+                "launch envelope endorsements do not match their sealed digest: \
+                 envelope={}, observed={}",
+                self.endorsements_digest, observed
             ));
         }
         Ok(())
@@ -743,7 +772,7 @@ mod tests {
             schema_version: MANAGED_LAUNCH_ENVELOPE_SCHEMA_VERSION,
             invocation_id: "inv-abc".to_string(),
             thread_id: "T-test".to_string(),
-            roots: EnvelopeRoots::new(PathBuf::from("/project"), vec![], vec![]),
+            roots: EnvelopeRoots::new(PathBuf::from("/project"), vec![], vec![], None),
             request: EnvelopeRequest {
                 inputs: serde_json::json!({}),
                 previous_thread_id: None,
@@ -1122,7 +1151,7 @@ cost:
         let envelope = LaunchEnvelopeBuilder::new(
             "inv-builder".to_string(),
             "T-builder".to_string(),
-            EnvelopeRoots::new(PathBuf::from("/project"), vec![], vec![]),
+            EnvelopeRoots::new(PathBuf::from("/project"), vec![], vec![], None),
             EnvelopeRequest::simple(serde_json::json!({"key": "value"})),
             EnvelopePolicy::new(vec!["ryeos.execute.*".to_string()], HardLimits::default()),
             EnvelopeCallback::new(PathBuf::from("/tmp/ryeosd.sock"), "token-abc".to_string()),
@@ -1149,10 +1178,37 @@ cost:
 
     #[test]
     fn roots_refuse_signer_list_that_does_not_match_digest() {
-        let mut roots = EnvelopeRoots::new(PathBuf::from("/project"), vec![], vec![]);
+        let mut roots = EnvelopeRoots::new(PathBuf::from("/project"), vec![], vec![], None);
         roots.validate_trusted_signers().unwrap();
         roots.trusted_signers_digest = "sha256:deadbeef".to_string();
         let err = roots.validate_trusted_signers().unwrap_err();
         assert!(err.contains("sealed digest"), "{err}");
+    }
+
+    #[test]
+    fn roots_refuse_endorsements_that_do_not_match_their_seal() {
+        let snapshot = EndorsementSnapshot {
+            project: "/srv/projects/alpha".to_string(),
+            authoring_signers: vec!["a".repeat(64)],
+            endorsements: Vec::new(),
+        };
+        let mut roots = EnvelopeRoots::new(
+            PathBuf::from("/project"),
+            vec![],
+            vec![],
+            Some(snapshot.clone()),
+        );
+        roots.validate_trusted_signers().unwrap();
+        assert_eq!(roots.endorsements_digest, snapshot.digest());
+        let mut swapped = snapshot;
+        swapped.project = "/srv/projects/beta".to_string();
+        roots.endorsements = Some(swapped);
+        let err = roots.validate_trusted_signers().unwrap_err();
+        assert!(err.contains("endorsements do not match"), "{err}");
+    }
+
+    #[test]
+    fn the_wire_version_with_endorsements_is_six() {
+        assert_eq!(MANAGED_LAUNCH_ENVELOPE_SCHEMA_VERSION, 6);
     }
 }
