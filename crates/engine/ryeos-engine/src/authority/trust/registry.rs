@@ -887,7 +887,8 @@ pub fn load_event_chain(
 }
 
 /// [`load_event_chain`] with the time each event was signed, as written in
-/// its signature line.
+/// its signature line. An event whose signing time cannot be read is refused
+/// like any other unreadable record.
 pub fn load_event_chain_timed(
     events_dir: &Path,
     node_key: &VerifyingKey,
@@ -923,7 +924,11 @@ pub fn load_event_chain_timed(
             .ok()
             .and_then(|text| crate::item_resolution::parse_signature_header(text, &envelope()))
             .map(|header| header.timestamp)
-            .unwrap_or_default();
+            .filter(|at| !at.is_empty())
+            .ok_or_else(|| TrustError::RecordTampered {
+                path: path.clone(),
+                reason: "has no readable signing time in its signature line".to_string(),
+            })?;
         let expected_seq = chain.len() as u64 + 1;
         if event.seq != expected_seq {
             return Err(TrustError::EventChainBroken {
