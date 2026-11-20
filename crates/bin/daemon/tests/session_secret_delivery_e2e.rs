@@ -1101,9 +1101,9 @@ async fn recovery_after_the_recipient_rule_is_withdrawn_is_refused() -> Result<(
     );
     // The node drives the recovery itself: after the restart the reconciler
     // resumes the retained session, the resume re-delivers its secrets, and the
-    // withdrawn recipient rule refuses that delivery as `session_secret_revoked`.
-    // The session stays `recovering`. The code surfaces in the daemon log and
-    // the retained evidence.
+    // withdrawn recipient rule refuses that delivery as `session_secret_revoked`
+    // (the worker runtime's `request_failed` names it in the root thread's
+    // result). The refused resume settles the session as `terminal`, cancelled.
     let mut evidence = String::new();
     for _ in 0..240 {
         evidence = session_start_evidence(&mut daemon, &chain_root_id).await;
@@ -1112,7 +1112,12 @@ async fn recovery_after_the_recipient_rule_is_withdrawn_is_refused() -> Result<(
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    for expected in ["\"state\":\"recovering\"", REVOKED_CODE] {
+    for expected in [
+        REVOKED_CODE,
+        "vault_name_not_delivered",
+        "\"state\":\"terminal\"",
+        "\"terminal_reason\":\"cancelled\"",
+    ] {
         anyhow::ensure!(
             evidence.contains(expected),
             "recovery did not report `{expected}`: {evidence}"
