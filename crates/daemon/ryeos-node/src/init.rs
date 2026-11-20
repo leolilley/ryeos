@@ -5003,6 +5003,179 @@ mod tests {
         issued
     }
 
+    // ---- Foreign-namespace predecessors at the real native-capacity startup.
+    //
+    // A foreign-namespace identity is a real identity of this process with
+    // `pid_namespace` rewritten to another inode. That is the adversarial
+    // case for the rule: its pid, birth ticks, boot and group all match a LIVE
+    // process here, so any decision from the numbers would call it live; only
+    // the namespace says the numbers are not comparable. The recorded
+    // incarnation of a previous container is the same shape with other numbers.
+
+    const HOLD_LOCK_ENV: &str = "RYEOS_TEST_HOLD_STATE_LOCK";
+
+    /// Not a test when run normally. The parent tests re-execute this binary
+    /// with `HOLD_LOCK_ENV` set, which makes this the second process: it takes
+    /// the state lock, announces it on stdout and holds it until its stdin
+    /// closes.
+    #[test]
+    fn hold_state_lock_helper_process() {
+        use std::io::{Read as _, Write as _};
+        let Ok(path) = std::env::var(HOLD_LOCK_ENV) else {
+            return;
+        };
+        let _lock = ryeos_node_runtime::state_lock::StateLock::acquire(std::path::Path::new(&path))
+            .expect("helper takes the state lock");
+        println!("STATE_LOCK_HELD");
+        std::io::stdout().flush().unwrap();
+        let mut sink = Vec::new();
+        let _ = std::io::stdin().read_to_end(&mut sink);
+    }
+
+    /// A real second process holding the node's state lock. Dropping it closes
+    /// its stdin, which ends the helper and releases the lock.
+    struct OtherProcessHoldsStateLock {
+        child: std::process::Child,
+    }
+
+    impl OtherProcessHoldsStateLock {
+        fn start(lock_path: &Path) -> Self {
+            use std::io::BufRead as _;
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "init::tests::hold_state_lock_helper_process",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(HOLD_LOCK_ENV, lock_path)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let mut lines = std::io::BufReader::new(child.stdout.take().unwrap()).lines();
+            // Readiness is the helper's own announcement, not a delay.
+            loop {
+                let line = lines
+                    .next()
+                    .expect("helper exited before taking the state lock")
+                    .unwrap();
+                if line.trim() == "STATE_LOCK_HELD" {
+                    break;
+                }
+            }
+            Self { child }
+        }
+    }
+
+    impl Drop for OtherProcessHoldsStateLock {
+        fn drop(&mut self) {
+            drop(self.child.stdin.take());
+            let _ = self.child.wait();
+        }
+    }
+
+    fn foreign_namespace_identity() -> lillux::process_control::ExactProcessIdentity {
+        let mut foreign = lillux::process_control::capture_current_process_identity().unwrap();
+        let other = if foreign.pid_namespace == "pid:[1]" {
+            "pid:[2]"
+        } else {
+            "pid:[1]"
+        };
+        foreign.pid_namespace = other.to_owned();
+        // Matching boot, pid and birth, yet neither alive nor ended.
+        assert!(matches!(
+            foreign.observe_end(),
+            Err(lillux::ProcessEndError::ForeignPidNamespace { .. })
+        ));
+        foreign
+    }
+
+    fn ended_process_identity() -> lillux::process_control::ExactProcessIdentity {
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("read x")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let dead =
+            lillux::process_control::capture_exact_process_identity(child.id(), None).unwrap();
+        drop(child.stdin.take());
+        child.wait().unwrap();
+        assert!(dead.has_ended().unwrap());
+        dead
+    }
+
+    /// With a second process holding the lock the node cannot even take it,
+    /// so no start can obtain the witness and nothing is classified; once it
+    /// is free the very same start proceeds.
+    fn assert_startup_refused_while_held_and_proceeds_when_free(state: &Path) {
+        use ryeos_node_runtime::state_lock::{StateLock, default_lock_path};
+        let lock_path = default_lock_path(state);
+        let holder = OtherProcessHoldsStateLock::start(&lock_path);
+        assert!(
+            StateLock::acquire(&lock_path).is_err(),
+            "the state lock is held by another process"
+        );
+        drop(holder);
+        let lock = StateLock::acquire(&lock_path).expect("lock is free once the holder exits");
+        // A lock that does not protect this app root is no proof either.
+        let other_directory = tempfile::tempdir().unwrap();
+        let other = StateLock::acquire(&other_directory.path().join("other.lock")).unwrap();
+        let wrong = crate::native_capacity::startup_seams::open_and_debit(state, &other)
+            .expect_err("a lock of another root must not admit this start");
+        assert!(!format!("{wrong:#}").is_empty());
+        crate::native_capacity::startup_seams::open_and_debit(state, &lock)
+            .expect("under the state lock the foreign-namespace predecessor counts as ended");
+    }
+
+    /// Site: the outstanding debit of the previous incarnation
+    /// (`prepare_open`, before redo; the check after redo re-classifies the
+    /// same identity and is reached only after this one passed).
+    #[test]
+    fn foreign_namespace_debit_is_refused_while_another_process_holds_the_state_lock_and_settled_when_free()
+     {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        run_init(&make_opts(&state, &user)).expect("initial generation");
+        let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+            &ryeos_node_runtime::state_lock::default_lock_path(&state),
+        )
+        .unwrap();
+        node_owing_a_debit(&state, &lock, &foreign_namespace_identity());
+        drop(lock);
+        assert_startup_refused_while_held_and_proceeds_when_free(&state);
+    }
+
+    /// Site: the previous recovery process (`ensure_recovery_attempt`). The
+    /// debit's own incarnation is plainly dead; the earlier start that
+    /// charged a recovery attempt was in another pid namespace.
+    #[test]
+    fn foreign_namespace_recovery_process_is_refused_while_another_process_holds_the_state_lock_and_settled_when_free()
+     {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        run_init(&make_opts(&state, &user)).expect("initial generation");
+        let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+            &ryeos_node_runtime::state_lock::default_lock_path(&state),
+        )
+        .unwrap();
+        node_owing_a_debit(&state, &lock, &ended_process_identity());
+        crate::native_capacity::startup_seams::charge_recovery_for(
+            &state,
+            &lock,
+            &foreign_namespace_identity(),
+        )
+        .expect("a crashed start's recovery charge");
+        drop(lock);
+        assert_startup_refused_while_held_and_proceeds_when_free(&state);
+    }
+
     #[test]
     fn a_replacement_over_a_live_incarnation_debit_changes_nothing() {
         let tmp = tempfile::tempdir().unwrap();

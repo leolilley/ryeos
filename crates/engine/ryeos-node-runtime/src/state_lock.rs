@@ -105,7 +105,8 @@ impl StateLock {
         &self,
         process: &lillux::ExactProcessIdentity,
     ) -> std::result::Result<bool, String> {
-        process.has_ended_holding_exclusive_lock(&self.inner)
+        let witness = self.inner.witness().map_err(|error| error.to_string())?;
+        process.has_ended_holding_exclusive_lock(&witness)
     }
 
     /// Retain only the live controller's exclusion lifetime. The returned
@@ -130,7 +131,8 @@ impl StateLockLease {
         &self,
         process: &lillux::ExactProcessIdentity,
     ) -> std::result::Result<bool, String> {
-        process.has_ended_holding_exclusive_lock(&self.inner)
+        let witness = self.inner.witness().map_err(|error| error.to_string())?;
+        process.has_ended_holding_exclusive_lock(&witness)
     }
 
     /// Retain the SAME concrete exclusion owner for an outside inventory while

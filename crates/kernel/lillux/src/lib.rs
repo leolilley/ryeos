@@ -104,7 +104,7 @@ pub use local_ipc::{
 };
 pub use locks::{
     ExactExclusiveFileLock, ExactExclusiveFileLockObservation, ExactLockHeld, ExclusiveFileLock,
-    SharedFileLock, with_exclusive_file_lock,
+    ExclusiveLockWitness, SharedFileLock, with_exclusive_file_lock,
 };
 pub use process_control::{
     ControllerAccount, OciHookState, OciLifecycleGeneration, OciLifecycleIntent,

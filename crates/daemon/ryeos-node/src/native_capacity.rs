@@ -47,6 +47,8 @@ pub use account::reissue::{
     CapacityReissueEvidence, ReissueReport, ReissueRequest, read_capacity_reissuances,
     reissue_capacity,
 };
+#[cfg(test)]
+pub(crate) use account::startup_seams;
 pub use account::{CapacityAccountSummary, inspect_capacity_account};
 pub(crate) use account::{OperatorLineage, load_existing_capacity_binding};
 pub use factory::{

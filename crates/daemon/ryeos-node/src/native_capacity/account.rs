@@ -3043,3 +3043,66 @@ mod state_lock_proof_tests {
         require_ended_under_state_lock(&lease, &other_boot, LIVE).unwrap();
     }
 }
+
+/// Real startup entry points for tests that run against an initialised node
+/// (see the init tests). They take the held [`StateLock`] and go through the
+/// real `LiveNativeCapacityInputs::capture`, account open and the same
+/// `prepare_open` / `debit` the reservation runs; nothing here classifies a
+/// process itself.
+#[cfg(test)]
+pub(crate) mod startup_seams {
+    use super::*;
+    use ryeos_node_runtime::state_lock::StateLock;
+
+    /// Capture, open, settle whatever a predecessor left (`prepare_open`,
+    /// which reaches the previous-recovery-process and outstanding-debit
+    /// classification sites) and debit this incarnation.
+    pub(crate) fn open_and_debit(app_root: &std::path::Path, lock: &StateLock) -> Result<()> {
+        let inputs =
+            LiveNativeCapacityInputs::capture(app_root, std::sync::Arc::new(lock.retain()))?;
+        let mut account = RetainedCapacityAccount::open(&inputs)?;
+        account.prepare_open(&inputs)?;
+        ensure!(
+            account
+                .record
+                .context("opened account carries no record")?
+                .outstanding
+                .is_none(),
+            "the predecessor's debit was not settled"
+        );
+        account.debit(&inputs)
+    }
+
+    /// Leave the durable state a start that crashed right after charging a
+    /// recovery attempt leaves, with that attempt recorded for `previous`
+    /// (the process of the crashed start). This is exactly the anchor
+    /// publication `ensure_recovery_attempt` makes for the current process.
+    pub(crate) fn charge_recovery_for(
+        app_root: &std::path::Path,
+        lock: &StateLock,
+        previous: &lillux::process_control::ExactProcessIdentity,
+    ) -> Result<()> {
+        let inputs =
+            LiveNativeCapacityInputs::capture(app_root, std::sync::Arc::new(lock.retain()))?;
+        let mut account = RetainedCapacityAccount::open(&inputs)?;
+        let budget = &account.bootstrap;
+        account.anchor.load(
+            &inputs.policy,
+            &account.issuance,
+            budget.deadline,
+            &|steps| budget.spend(&inputs, steps),
+        )?;
+        let charged = account
+            .anchor
+            .current()?
+            .charge_recovery(previous, &inputs.policy)?;
+        account.anchor.publish(
+            charged,
+            &inputs.policy,
+            &account.issuance,
+            budget.deadline,
+            &|steps| budget.spend(&inputs, steps),
+        )?;
+        Ok(())
+    }
+}

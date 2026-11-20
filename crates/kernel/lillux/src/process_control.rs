@@ -1191,11 +1191,9 @@ impl ExactProcessIdentity {
     /// different proof. No typed volume kind is recorded here to refuse it.
     pub fn has_ended_holding_exclusive_lock(
         &self,
-        state_lock: &crate::ExactExclusiveFileLock,
+        state_lock: &crate::ExclusiveLockWitness<'_>,
     ) -> Result<bool, String> {
-        state_lock
-            .require_original_process()
-            .map_err(|error| error.to_string())?;
+        let _ = state_lock;
         resolve_with_exclusive_lock(self.observe_end())
     }
 
@@ -2579,7 +2577,7 @@ mod tests {
             std::fs::create_dir_all(&directory).unwrap();
             let lock =
                 crate::ExactExclusiveFileLock::acquire(&directory.join("operator.lock")).unwrap();
-            let resolved = own.has_ended_holding_exclusive_lock(&lock);
+            let resolved = own.has_ended_holding_exclusive_lock(&lock.witness().unwrap());
             drop(lock);
             let _ = std::fs::remove_dir_all(&directory);
             assert_eq!(resolved, Ok(true));
