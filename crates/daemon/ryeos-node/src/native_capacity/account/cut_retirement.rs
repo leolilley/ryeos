@@ -268,8 +268,8 @@ fn classify_account(
 ) -> Result<AccountState> {
     let mut copy = *account;
     match upgrade_record(&mut copy) {
-        Ok(false) => return Ok(AccountState::Current),
-        Ok(true) => return Ok(AccountState::AwaitsCut),
+        Ok(false) => Ok(AccountState::Current),
+        Ok(true) => Ok(AccountState::AwaitsCut),
         Err(error) => {
             // Not a whole pre-cut record. It is still ours when it is exactly
             // a prefix of the image being written followed by the suffix of
@@ -378,8 +378,9 @@ pub(crate) fn retire_with(
         downgrade_record(&target_new)
     };
 
+    // Opened writable: the account is rewritten in place.
     let account = directory
-        .open_pinned_regular(OsStr::new("account"), false)?
+        .open_pinned_regular(OsStr::new("account"), true)?
         .context("capacity account is absent")?;
     account.require_effective_user_owned()?;
     let mut account_before = [0u8; RECORD_BYTES];
