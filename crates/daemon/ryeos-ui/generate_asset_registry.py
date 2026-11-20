@@ -81,8 +81,8 @@ def validate(manifest: dict) -> None:
 
     # Rune's flattened snippet modules are exactly the declared list.
     declared = {
-        f"rune_{Path(path).stem}.js"
-        for path in tomllib.loads(SNIPPETS.read_text())["snippets"]
+        f"{entry['crate'].replace('-', '_')}_{Path(entry['path']).stem}.js"
+        for entry in tomllib.loads(SNIPPETS.read_text())["snippets"]
     }
     registered = {name for name in filenames if re.fullmatch(r"rune_.+\.js", name)}
     if registered != declared:
@@ -96,8 +96,8 @@ def validate(manifest: dict) -> None:
     bindings = next(
         asset for asset in manifest["assets"] if asset["filename"] == "ryeos_rune.js"
     )
-    for path in tomllib.loads(SNIPPETS.read_text())["fetched"]:
-        name = Path(path).name
+    for entry in tomllib.loads(SNIPPETS.read_text())["fetched"]:
+        name = Path(entry["path"]).name
         if f"{name}.gz" not in filenames:
             raise SystemExit(f"a file Rune fetches at runtime is not registered: {name}")
         if f"/ui/assets/{name}" not in bindings["imports"]:
