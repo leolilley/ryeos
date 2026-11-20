@@ -1045,6 +1045,7 @@ async fn recovery_after_the_recipient_rule_is_withdrawn_is_refused_as_revoked() 
     read_report(&report_path).await?;
 
     daemon.kill_daemon().await?;
+    common::process_scopes::reclaim_for_test(&daemon.state_path)?;
     let node = common::fast_fixture::node_signing_key();
     let other = other_principal();
     write_sealed_vault_names(&daemon.state_path, &node, &operator, &[other.as_str()])?;

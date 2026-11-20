@@ -3648,21 +3648,46 @@ fn settled_or_host_unqualified(result: Result<()>) -> Result<()> {
 }
 
 /// The terminate request that ends a session whose first command completed a
-/// turn: a completed termination must carry that command's exact completion
-/// fence, which the command response reports.
-fn completed_termination_request(
+/// turn. A completed termination must carry that command's exact completion
+/// fence, which the command observation reports once the turn has completed.
+async fn completed_termination_request(
+    daemon: &DaemonHarness,
     chain_root_id: &str,
     command_response: &serde_json::Value,
-) -> serde_json::Value {
-    let fence = command_response
-        .get("completion_fence")
-        .or_else(|| command_response.pointer("/result/completion_fence"))
-        .cloned();
-    let mut request = serde_json::json!({"chain_root_id":chain_root_id,"reason":"completed"});
-    if let Some(fence) = fence {
-        request["completion"] = fence;
+) -> Result<serde_json::Value> {
+    let command = command_response.get("result").unwrap_or(command_response);
+    let placement_thread_id = command
+        .get("placement_thread_id")
+        .and_then(serde_json::Value::as_str)
+        .with_context(|| format!("command response names no placement: {command_response}"))?;
+    let command_sequence = command
+        .get("command_sequence")
+        .and_then(serde_json::Value::as_u64)
+        .with_context(|| format!("command response names no sequence: {command_response}"))?;
+    let mut last = None;
+    for _ in 0..120 {
+        let (status, observed) = daemon
+            .post_execute(
+                "service:worker-executions/command-observation",
+                ".",
+                serde_json::json!({
+                    "chain_root_id":chain_root_id,
+                    "placement_thread_id":placement_thread_id,
+                    "command_sequence":command_sequence,
+                }),
+            )
+            .await?;
+        if let Some(fence) = observed.pointer("/result/completion_fence") {
+            return Ok(serde_json::json!({
+                "chain_root_id":chain_root_id,
+                "reason":"completed",
+                "completion":fence,
+            }));
+        }
+        last = Some((status, observed));
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    request
+    anyhow::bail!("the first command never reported a completed turn: {last:?}")
 }
 
 async fn launch_and_checkpoint_portable_worker(
@@ -3730,7 +3755,7 @@ async fn launch_and_checkpoint_portable_worker(
         .post_execute(
             "service:worker-executions/terminate",
             ".",
-            completed_termination_request(&chain_root_id, &first_command),
+            completed_termination_request(daemon, &chain_root_id, &first_command).await?,
         )
         .await?;
     anyhow::ensure!(
@@ -7142,7 +7167,7 @@ async fn portable_worker_fixture_launches_and_binds_a_real_hosted_session_on_qua
         .post_execute(
             "service:worker-executions/terminate",
             ".",
-            completed_termination_request(chain_root_id, &first_command),
+            completed_termination_request(daemon, chain_root_id, &first_command).await?,
         )
         .await?;
     anyhow::ensure!(

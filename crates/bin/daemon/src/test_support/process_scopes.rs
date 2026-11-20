@@ -257,6 +257,19 @@ pub fn launch_command(state_path: &Path) -> Result<Option<tokio::process::Comman
     Ok(Some(command))
 }
 
+/// Take the node's trees back for the test process, which in the real mode is
+/// an administrator. Offline operations that must be owned by the effective
+/// user (re-sealing the initialization transaction) need this between stopping
+/// the node and starting it again; [`launch_command`] hands the trees back to
+/// the node account. A node not in the real mode is untouched.
+pub fn reclaim_for_test(state_path: &Path) -> Result<()> {
+    let owned = match registry().lock().unwrap().get(state_path) {
+        Some(registration) => registration.owned.clone(),
+        None => return Ok(()),
+    };
+    chown_tree(&owned, 0, 0)
+}
+
 /// Fail with the cause when the node's own capability report does not show
 /// every per-scope floor entry provided. The report is the node's record of
 /// what its host proved at start, so this judges the real qualification, not
