@@ -4021,7 +4021,143 @@ enum WrapperPoll {
 }
 
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
+/// Wake cadence of the capture drains on targets without eventfd readiness.
+#[cfg(not(target_os = "linux"))]
 const CAPTURE_POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// Cleanup flag shared by the capture drains plus a level-triggered wake
+/// descriptor. Raising it both sets the flag and makes the descriptor
+/// readable, so a drain blocked in `poll(2)` on its pipe wakes at once instead
+/// of discovering the flag on a later timer tick. The descriptor is never
+/// drained: once raised it stays readable for every waiter, which also closes
+/// the window between a drain's flag check and its `poll`.
+struct DrainStop {
+    flag: Arc<AtomicBool>,
+    #[cfg(target_os = "linux")]
+    wake: OwnedFd,
+}
+
+impl DrainStop {
+    fn new() -> Result<Self, String> {
+        #[cfg(target_os = "linux")]
+        {
+            let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+            if fd < 0 {
+                return Err(format!(
+                    "create capture wake eventfd: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            Ok(Self {
+                flag: Arc::new(AtomicBool::new(false)),
+                // SAFETY: eventfd returned a new uniquely-owned descriptor.
+                wake: unsafe { OwnedFd::from_raw_fd(fd) },
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(Self {
+                flag: Arc::new(AtomicBool::new(false)),
+            })
+        }
+    }
+
+    /// The plain flag, for workers that never block on a readiness wait.
+    fn flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.flag)
+    }
+
+    fn is_raised(&self) -> bool {
+        self.flag.load(Ordering::Acquire)
+    }
+
+    fn raise(&self) {
+        self.flag.store(true, Ordering::Release);
+        #[cfg(target_os = "linux")]
+        {
+            let one: u64 = 1;
+            // A non-blocking eventfd write only fails with EAGAIN at the
+            // counter ceiling, at which point it is already readable.
+            let _ = unsafe {
+                libc::write(
+                    self.wake.as_raw_fd(),
+                    (&one as *const u64).cast(),
+                    std::mem::size_of::<u64>(),
+                )
+            };
+        }
+    }
+
+    /// Block until `source` is readable, hung up, or the stop is raised.
+    #[cfg(target_os = "linux")]
+    fn wait_readable(&self, source: &impl std::os::fd::AsRawFd) {
+        let mut fds = [
+            libc::pollfd {
+                fd: source.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: self.wake.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        // An interrupted or failed poll returns to the caller's read, which
+        // reports the real state of the pipe.
+        unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn wait_readable<T>(&self, _source: &T) {
+        thread::sleep(CAPTURE_POLL_INTERVAL);
+    }
+}
+
+/// Exit watch on the wrapper process. On Linux it is a pidfd, which becomes
+/// readable when the wrapper exits and so ends the wait at the exit instead of
+/// at a later timer tick.
+struct WrapperExitWatch {
+    #[cfg(target_os = "linux")]
+    pidfd: OwnedFd,
+}
+
+impl WrapperExitWatch {
+    fn open(pid: u32) -> Result<Self, String> {
+        #[cfg(target_os = "linux")]
+        {
+            Ok(Self {
+                pidfd: open_pidfd(pid)?,
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = pid;
+            Ok(Self {})
+        }
+    }
+
+    /// Return when the wrapper has exited or `bound` has elapsed, whichever is
+    /// first. The bound is the caller's own next obligation (its cancellation
+    /// cadence or the nearest deadline), not a poll for the exit itself.
+    fn wait(&self, bound: Duration) {
+        #[cfg(target_os = "linux")]
+        {
+            // Round up so a sub-millisecond remainder cannot spin.
+            let millis = bound.as_nanos().div_ceil(1_000_000).min(i32::MAX as u128) as i32;
+            let mut poll = libc::pollfd {
+                fd: self.pidfd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // Interruption and timeout both return to the caller's loop,
+            // which re-observes every condition.
+            unsafe { libc::poll(&mut poll, 1, millis) };
+        }
+        #[cfg(not(target_os = "linux"))]
+        thread::sleep(bound);
+    }
+}
+
 const POST_STOP_DRAIN_READS: usize = 1024;
 /// Setup limit used only when the caller gave no request deadline.
 const SUPERVISED_STATUS_SETUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -6498,7 +6634,7 @@ pub struct RunningProcess {
     stdout_capture: SharedCapture,
     stderr_capture: SharedCapture,
     stdout_reader_taken: bool,
-    drain_stop: Arc<AtomicBool>,
+    drain_stop: Arc<DrainStop>,
     output_overflow_rx: std::sync::mpsc::Receiver<CapturedStream>,
     start: Instant,
     timeout: f64,
@@ -8387,6 +8523,10 @@ impl RunningProcess {
             };
         }
         let timeout = request_timeout_duration(self.timeout);
+        let exit_watch = match WrapperExitWatch::open(self.child.id()) {
+            Ok(watch) => watch,
+            Err(error) => return self.wait_error_result(std::io::Error::other(error)),
+        };
 
         loop {
             let complete = match self.poll_native_terminal_testimony() {
@@ -8473,7 +8613,18 @@ impl RunningProcess {
                         let (out, err) = self.finish_drains();
                         return self.timeout_result(out, err);
                     }
-                    thread::sleep(self.native_terminal_wait_bound(PROCESS_POLL_INTERVAL));
+                    // Wake at the wrapper's exit. Otherwise wake at the next
+                    // obligation: the caller's cancellation and overflow
+                    // checks run every PROCESS_POLL_INTERVAL, and the
+                    // relative and absolute deadlines are met exactly.
+                    let mut bound = self.native_terminal_wait_bound(PROCESS_POLL_INTERVAL);
+                    if let Some(limit) = timeout {
+                        bound = bound.min(limit.saturating_sub(self.start.elapsed()));
+                    }
+                    if let Some(deadline) = self.absolute_deadline {
+                        bound = bound.min(deadline.remaining());
+                    }
+                    exit_watch.wait(bound);
                 }
                 Err(error) => return self.wait_error_result(error),
             }
@@ -8751,7 +8902,7 @@ impl RunningProcess {
         // output a second time merely to discard it.
         let settle_stdout = self.stdout_thread.is_some();
         let settle_stderr = self.stderr_thread.is_some();
-        self.drain_stop.store(true, Ordering::Release);
+        self.drain_stop.raise();
         if let Some(handle) = self.stdin_thread.take() {
             let _ = handle.join();
         }
@@ -10134,7 +10285,10 @@ fn lib_spawn_with_stdio(
     // Allocate captures before process creation.
     let stdout_capture = Arc::new(OutputCapture::default());
     let stderr_capture = Arc::new(OutputCapture::default());
-    let drain_stop = Arc::new(AtomicBool::new(false));
+    let drain_stop = match DrainStop::new() {
+        Ok(stop) => Arc::new(stop),
+        Err(error) => return Err(spawn_failure(start, format!("Failed to spawn: {error}"))),
+    };
     let (output_overflow_tx, output_overflow_rx) = std::sync::mpsc::channel();
     #[cfg(unix)]
     let spawn_result = spawn_command_with_fork_custody(&mut command, ordinary_fork_guard);
@@ -10311,7 +10465,7 @@ fn lib_spawn_with_stdio(
     // pipe worker even when the child never consumes the remaining input.
     let stdin_handle = running.child.stdin.take();
     running.stdin_thread =
-        match spawn_stdin_writer(stdin_handle, stdin_data, Arc::clone(&running.drain_stop)) {
+        match spawn_stdin_writer(stdin_handle, stdin_data, running.drain_stop.flag()) {
             Ok(thread) => thread,
             Err(error) => {
                 return Err(running.into_spawn_failure(spawn_failure(
@@ -10334,7 +10488,7 @@ fn lib_spawn_with_stdio(
             status_tx,
             applied_tx,
             applied_receipt_schema,
-            Arc::clone(&running.drain_stop),
+            running.drain_stop.flag(),
         ) {
             Ok(handle) => handle,
             Err(error) => {
@@ -10449,23 +10603,33 @@ fn spawn_stdin_writer(
     })))
 }
 
+/// A capture pipe a drain can both read and wait on for readiness.
+#[cfg(unix)]
+trait DrainSource: Read + Send + std::os::fd::AsRawFd + 'static {}
+#[cfg(unix)]
+impl<T: Read + Send + std::os::fd::AsRawFd + 'static> DrainSource for T {}
+#[cfg(not(unix))]
+trait DrainSource: Read + Send + 'static {}
+#[cfg(not(unix))]
+impl<T: Read + Send + 'static> DrainSource for T {}
+
 fn spawn_bounded_drain<R>(
     mut reader: R,
     limit: Option<u64>,
     stream: CapturedStream,
     capture: SharedCapture,
-    stop: Arc<AtomicBool>,
+    stop: Arc<DrainStop>,
     overflow_tx: std::sync::mpsc::Sender<CapturedStream>,
 ) -> thread::JoinHandle<()>
 where
-    R: Read + Send + 'static,
+    R: DrainSource,
 {
     thread::spawn(move || {
         let mut read_buffer = [0u8; 8192];
         let mut overflow_reported = false;
         let mut post_stop_reads = None;
         loop {
-            if stop.load(Ordering::Acquire) {
+            if stop.is_raised() {
                 let remaining = post_stop_reads.get_or_insert(POST_STOP_DRAIN_READS);
                 if *remaining == 0 {
                     let mut probe = [0u8; 1];
@@ -10517,10 +10681,11 @@ where
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    if stop.load(Ordering::Acquire) {
+                    if stop.is_raised() {
                         break;
                     }
-                    thread::sleep(CAPTURE_POLL_INTERVAL);
+                    // Sleep in the kernel until bytes, hang-up or the stop.
+                    stop.wait_readable(&reader);
                 }
                 Err(error) => {
                     capture
