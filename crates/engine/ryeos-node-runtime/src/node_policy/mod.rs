@@ -125,6 +125,9 @@ pub struct NodePolicySnapshot {
     records: BTreeMap<&'static str, Arc<dyn ErasedNodePolicy>>,
     source_files: BTreeMap<&'static str, PathBuf>,
     generation_digest: String,
+    /// Each section's own canonical content digest, so a consumer bound to one
+    /// section is not invalidated by an edit to another.
+    section_digests: BTreeMap<&'static str, String>,
 }
 
 impl std::fmt::Debug for NodePolicySnapshot {
@@ -156,6 +159,16 @@ impl NodePolicySnapshot {
         &self.generation_digest
     }
 
+    /// The canonical content digest of one section's own signed body. Unlike
+    /// [`generation_digest`](Self::generation_digest) it does not change when a
+    /// different section is edited.
+    pub fn section_digest<T: TypedNodePolicy>(&self) -> anyhow::Result<&str> {
+        self.section_digests
+            .get(T::SECTION_NAME)
+            .map(String::as_str)
+            .with_context(|| format!("compiled node policy omits `{}` digest", T::SECTION_NAME))
+    }
+
     pub fn source_file<T: TypedNodePolicy>(&self) -> anyhow::Result<&std::path::Path> {
         self.source_files
             .get(T::SECTION_NAME)
@@ -175,6 +188,7 @@ impl NodePolicySnapshot {
             records,
             source_files: BTreeMap::new(),
             generation_digest: "test-only-node-policy-snapshot".to_owned(),
+            section_digests: BTreeMap::new(),
         }
     }
 }
@@ -215,6 +229,7 @@ pub fn compile_generation(
 ) -> anyhow::Result<NodePolicySnapshot> {
     let mut records: BTreeMap<&'static str, Arc<dyn ErasedNodePolicy>> = BTreeMap::new();
     let mut source_files = BTreeMap::new();
+    let mut section_digests = BTreeMap::new();
     for section in table.sections() {
         let name = section.name();
         let body = generation
@@ -239,6 +254,7 @@ pub fn compile_generation(
             bail!("duplicate compiled node policy `{name}`");
         }
         source_files.insert(name, context.source_file);
+        section_digests.insert(name, ryeos_state::objects::canonical_value_digest(body)?);
     }
     if records.len() != generation.policies().len() {
         bail!("node policy generation contains an unregistered policy");
@@ -248,6 +264,7 @@ pub fn compile_generation(
         records,
         source_files,
         generation_digest: generation.digest().to_owned(),
+        section_digests,
     })
 }
 
