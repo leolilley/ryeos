@@ -2733,8 +2733,11 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // identities, native capacity debit and recovery records, the lifecycle
 // marker) now require `pid_namespace`, the capturer's pid-namespace inode, so
 // an epoch-141 store holding identities without it no longer decodes; the
-// reset clears the runtime-database ones, and an outstanding capacity debit or
-// recovery record written before the cut is cleared or re-issued with it.
+// reset clears the runtime-database ones, and the same cut step re-records an
+// outstanding native-capacity debit or recovery record written before the cut
+// (the capacity files live outside the runtime database) in an unknown pid
+// namespace, so the next start settles that dead incarnation under the state
+// lock. A start that meets such a record before the cut refuses with the cure.
 const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 142;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
