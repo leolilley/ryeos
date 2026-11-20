@@ -1,6 +1,6 @@
 [package]
 name = "ryeos-cli"
-version = "0.5.102"
+version = "0.6.0-ple.3"
 edition = "2024"
 license.workspace = true
 description = "CLI for Rye OS"
