@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-20T01:48:53Z:b17149a4de8169e0ccccf5792ccda52b12fe5d23d18bfa31edfe7e5ac537c3b6:52CreBoCos6iz9CHzCRAdH+uCZ+813hs25+1w4gEek4Qr8QsteOCrwnuhDsqHYszzD4lqmgvkQPMZ7hEsc0sDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-20T05:49:16Z:42b7e53377b858bd548f466a8bc8e17948c6f56d47a97ae291f2a129505f69c9:2YVPFGjGeQxgyiKBugdai5+Y6gMF1jLCjAmymzA6fYUXPmey7jYvBjFDUGNBTkjOblmzqPDmma43U0TXhGyYCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -332,8 +332,10 @@ with it present. The `external_bindings` row fails and lists each one under
 and the fix; the daemon logs a warning at startup, and the external-execution
 status lists them too. A launch that no current binding admits while retired
 bindings are installed is refused with `binding_retired_schema`, naming them.
-The fix is to retire the stale file (move it out of `.ai/node/<section>/` on the
-stopped node) and compose the binding again.
+The fix, named exactly in each row and refusal, is
+`ryeos node external-execution retire <section>/<id>` on the stopped node, then
+compose the binding again. Recompose skips and lists each stale id with this
+cure; see [`retire`](#ryeos-node-external-execution-retire).
 
 Operator note for the runtime schema cut to epoch 142: every node must run
 `ryeos node reset execution-history --schema-cut-from 141 --schema-cut-to 142`
@@ -740,6 +742,45 @@ offline operation, as they do `compose`. Recompose never waits on open work:
 a qualification occurrence or bootstrap source keeps the generation it was
 made under and is terminated through it; see
 [Runtime Snapshots](runtime-snapshots.md).
+
+A binding signed under a retired schema cannot be decoded, so recompose does
+not re-pin it. It is skipped, never silently: the report lists every skipped id
+under `stale_skipped` with the schema seen and the `retire` verb that clears
+it (the banner marks each `SKIPPED`), and naming one with `--binding` or
+recomposing a qualification whose producer is stale is refused with
+`recompose_binding_stale`. Every other decode failure stays fatal.
+
+### `ryeos node external-execution retire`
+
+```bash
+ryeos node external-execution retire <section>/<id> [--dry-run] \
+  [--app-root <dir>] [--json]
+```
+
+Removes one installed binding that is signed under a retired schema, on a
+stopped node, where `<section>` is `external_execution`,
+`runtime_snapshot_production` or `runtime_snapshot_qualification`. It reads
+the file, not a loaded snapshot, so it works when other commands cannot. It
+verifies the file's signature (the current node must have signed it), refuses
+a file whose signed schema is still admitted with `binding_not_retired_schema`
+(retiring a live binding is a different, more dangerous operation that this
+verb never performs), and removes the file atomically through the pinned
+section directory. A missing id is refused with `retire_binding_not_installed`;
+the id cannot name a path outside the section.
+
+The report names the file, the retired schema, the signer and the secret
+handle the binding carried, read from the signed body without decoding it
+under the current shape. For `external_execution` schemas 17 to 19 and
+`runtime_snapshot_production` schema 1 that is `backend`, `account` and the
+`credential_generation` (status `credential`); for
+`runtime_snapshot_qualification` schema 5 it is `none_carried`, because a
+qualification uses its producer's credential. A document that lacks the
+fields its schema promises reports `not_extractable`; nothing is guessed. The
+credential is not carried to a replacement: compose the binding again, which
+names a fresh generation, and provision it with `provision-credential`. The old
+vault entry stays in place. `--dry-run` checks everything and removes nothing.
+It is an authority-bearing offline operation, `node.external-execution.retire`;
+no shipped profile delegates it to a remote signer.
 
 ### `ryeos node external-execution provision-credential`
 

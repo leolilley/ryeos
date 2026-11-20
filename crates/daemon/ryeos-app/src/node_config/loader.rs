@@ -338,16 +338,13 @@ impl<'a> NodeConfigLoader<'a> {
                         super::coherence::retired_binding_schema(section_name, verified.body())
                     {
                         let id = verified.context().id.clone();
-                        let reason = format!(
-                            "signed under retired schema {schema}; its document is not decoded \
-                             and it authorizes nothing"
-                        );
+                        let reason = super::coherence::StaleBinding::retired_reason(schema);
                         tracing::warn!(
                             section = section_name,
                             id = %id,
                             schema,
                             file = %verified.path().display(),
-                            "node-config binding is signed under a retired schema and was not admitted; retire it and compose it again"
+                            "node-config binding is signed under a retired schema and was not admitted; retire it with `ryeos node external-execution retire <section>/<id>` and compose it again"
                         );
                         builder.stale_bindings.push(super::coherence::StaleBinding {
                             section: section.name().to_owned(),

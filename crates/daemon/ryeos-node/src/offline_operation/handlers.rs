@@ -298,6 +298,14 @@ pub struct RecomposeArguments {
     pub bindings: Vec<ryeos_app::node_config::recompose::BindingRef>,
 }
 
+/// Retire one installed binding signed under a retired schema, named
+/// `<section>/<id>`. A binding that is still current is refused.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetireArguments {
+    pub binding: ryeos_app::node_config::recompose::BindingRef,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CapacityArguments {
@@ -1237,6 +1245,19 @@ pub(super) fn recompose(ctx: &HandlerContext<'_>) -> Result<Value> {
     Ok(serde_json::to_value(report)?)
 }
 
+pub(super) fn retire(ctx: &HandlerContext<'_>) -> Result<Value> {
+    let arguments: RetireArguments = ctx.arguments()?;
+    let report = ryeos_app::node_config::retire::retire_binding(
+        ryeos_app::node_config::retire::RetireRequest {
+            app_root: ctx.app_root,
+            state_lock: ctx.state_lock,
+            binding: arguments.binding,
+            dry_run: false,
+        },
+    )?;
+    Ok(serde_json::to_value(report)?)
+}
+
 // ── Capacity and restart ─────────────────────────────────────────────────
 
 pub(super) fn capacity_reissue(ctx: &HandlerContext<'_>) -> Result<Value> {
@@ -2121,6 +2142,21 @@ managed_activation:
             serde_json::from_value::<RecomposeArguments>(json!({"bindings": ["bundles/core"]}))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn retire_arguments_name_one_binding_section_and_id() {
+        let named = json!({"binding": "external_execution/w9"});
+        assert!(serde_json::from_value::<RetireArguments>(named).is_ok());
+        for refused in [
+            json!({"binding": "bundles/core"}),
+            json!({"binding": "w9"}),
+            json!({"binding": "external_execution/../x"}),
+            json!({"binding": "external_execution/w9", "extra": 1}),
+            json!({}),
+        ] {
+            assert!(serde_json::from_value::<RetireArguments>(refused).is_err());
+        }
     }
 
     #[test]

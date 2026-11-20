@@ -58,6 +58,10 @@ pub const BINDING_SCHEMA_UNSUPPORTED: &str = "binding_schema_unsupported";
 /// A binding file is signed under a schema number this node has retired: its
 /// signature verifies, but its document is not decoded or admitted.
 pub const BINDING_RETIRED_SCHEMA: &str = "binding_retired_schema";
+/// `retire` was asked to remove a binding signed under a schema this node
+/// still admits. Removing a live binding is a different operation that the
+/// retire verb never performs.
+pub const BINDING_NOT_RETIRED_SCHEMA: &str = "binding_not_retired_schema";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -931,14 +935,22 @@ pub struct StaleBinding {
 }
 
 impl StaleBinding {
+    /// The reason text of an item set aside for its retired schema number.
+    pub fn retired_reason(schema: u64) -> String {
+        format!(
+            "signed under retired schema {schema}; its document is not decoded and it \
+             authorizes nothing"
+        )
+    }
+
     pub fn code(&self) -> &'static str {
         BINDING_RETIRED_SCHEMA
     }
 
     pub fn fix(&self) -> String {
         format!(
-            "retire the stale binding: move .ai/node/{}/{}.yaml out on the stopped node, then \
-             compose it again",
+            "retire the stale binding on the stopped node with `ryeos node external-execution \
+             retire {}/{}`, then compose it again",
             self.section, self.id
         )
     }
@@ -984,16 +996,31 @@ impl std::fmt::Display for StaleBindingRefusal {
         let named = self
             .stale
             .iter()
-            .map(|binding| format!("`{}` (schema {})", binding.id, binding.schema))
+            .map(|binding| {
+                format!(
+                    "`{}/{}` (schema {})",
+                    binding.section, binding.id, binding.schema
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let verbs = self
+            .stale
+            .iter()
+            .map(|binding| {
+                format!(
+                    "`ryeos node external-execution retire {}/{}`",
+                    binding.section, binding.id
+                )
+            })
             .collect::<Vec<_>>()
             .join(", ");
         write!(
             f,
             "{BINDING_RETIRED_SCHEMA}: no current {} binding admits this operation, and the \
              installed binding(s) {named} are signed under a retired schema; retire and \
-             compose again (move the stale file out of .ai/node/{}/ on the stopped node, then \
-             compose the binding again)",
-            self.section, self.section
+             compose again (on the stopped node run {verbs}, then compose the binding again)",
+            self.section
         )
     }
 }

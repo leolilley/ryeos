@@ -33,6 +33,7 @@
 //!   - `ryeos node external-execution snapshot-compose` — compose and install a node-signed runtime snapshot production binding on a stopped node
 //!   - `ryeos node external-execution snapshot-qualification-compose` — compose and install a node-signed snapshot qualification binding on a stopped node
 //!   - `ryeos node external-execution recompose` — re-pin installed bindings to the installed bundles after a payload change on a stopped node
+//!   - `ryeos node external-execution retire` — remove one installed binding signed under a retired schema from a stopped node
 //!
 //! One client composite is listed here for help but dispatched after the
 //! verified node config loads, because it sequences daemon commands:
@@ -181,6 +182,11 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
     LocalCommandDescriptor {
         tokens: &["node", "external-execution", "recompose"],
         summary: "Re-pin a stopped node's bindings to its installed bundles after a payload change",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "external-execution", "retire"],
+        summary: "Remove a stopped node's binding that is signed under a retired schema",
         category: "lifecycle",
     },
     LocalCommandDescriptor {
@@ -465,6 +471,13 @@ pub async fn try_dispatch(
             if argv.get(2).map(String::as_str) == Some("recompose") =>
         {
             crate::lifecycle_external_recompose::run_recompose(&argv[3..], console)
+                .map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("external-execution"))
+            if argv.get(2).map(String::as_str) == Some("retire") =>
+        {
+            crate::lifecycle_external_retire::run_retire(&argv[3..], console)
                 .map_err(map_local_err)?;
             Ok(true)
         }
@@ -5775,7 +5788,9 @@ mod tests {
         let stale = &result.detail["stale_bindings"][0];
         assert_eq!(stale["code"], "binding_retired_schema");
         assert_eq!(stale["id"], "w9");
-        assert!(stale["fix"].as_str().unwrap().contains("compose it again"));
+        let fix = stale["fix"].as_str().unwrap();
+        assert!(fix.contains("compose it again"));
+        assert!(fix.contains("ryeos node external-execution retire external_execution/w9"));
     }
 
     mod sync_apply_quarantine_doctor {
