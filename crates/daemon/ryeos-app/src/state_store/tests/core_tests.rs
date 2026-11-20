@@ -1,5 +1,6 @@
 //! Store core, selected-metadata claims, fences and direct-owner tests.
 use super::*;
+use ryeos_external_execution::guest_staging::{GUEST_PACKAGE_PREFIX, GUEST_STAGE_PREFIX};
 
 #[test]
 fn projection_records_match_canonical_events_without_rewriting_evidence() {
@@ -391,7 +392,7 @@ fn abandoned_external_guest_package_is_removed_under_pinned_state_authority() {
         .create_child(std::ffi::OsStr::new("external-guest-packages"), 0o700)
         .unwrap();
     let (name, package) = packages
-        .create_unique_child("guest-package", 0o700)
+        .create_unique_child(GUEST_PACKAGE_PREFIX, 0o700)
         .unwrap();
     let mut payload = package
         .open_regular_create(std::ffi::OsStr::new("payload"), true, true, 0o600)
@@ -422,6 +423,214 @@ fn abandoned_external_guest_package_sweep_refuses_foreign_entry() {
     );
 }
 
+fn guest_namespace() -> (
+    tempfile::TempDir,
+    lillux::PinnedDirectory,
+    lillux::PinnedDirectory,
+) {
+    let temporary = tempdir().unwrap();
+    let state = lillux::PinnedDirectory::open_or_create(temporary.path()).unwrap();
+    let packages = state
+        .create_child(std::ffi::OsStr::new("external-guest-packages"), 0o700)
+        .unwrap();
+    (temporary, state, packages)
+}
+
+fn fill_stage_tree(stage: &lillux::PinnedDirectory) {
+    let write = |dir: &lillux::PinnedDirectory, name: &str, mode: u32| {
+        let mut file = dir
+            .open_regular_create(std::ffi::OsStr::new(name), true, true, 0o600)
+            .unwrap();
+        file.write_all(b"secret").unwrap();
+        lillux::set_open_regular_file_mode(&file, mode).unwrap();
+    };
+    let base = stage
+        .create_child(std::ffi::OsStr::new("base"), 0o700)
+        .unwrap();
+    let blobs = base
+        .create_child(std::ffi::OsStr::new("blobs"), 0o700)
+        .unwrap();
+    write(&blobs, "blob", 0o400);
+    let objects = base
+        .create_child(std::ffi::OsStr::new("objects"), 0o700)
+        .unwrap();
+    write(&objects, "object", 0o400);
+    for name in ["bootstrap", "launcher", "supervisor"] {
+        write(stage, name, 0o400);
+    }
+    for index in 0..7 {
+        write(stage, &format!("input-{index:02}"), 0o400);
+        write(stage, &format!("record-{index:02}"), 0o400);
+    }
+    write(stage, "stage-manifest.json", 0o400);
+}
+
+#[test]
+fn abandoned_guest_package_without_payload_is_discarded() {
+    let (_temporary, state, packages) = guest_namespace();
+    let (with_payload, package) = packages
+        .create_unique_child(GUEST_PACKAGE_PREFIX, 0o700)
+        .unwrap();
+    package
+        .open_regular_create(std::ffi::OsStr::new("payload"), true, true, 0o600)
+        .unwrap();
+    // A kill between create_unique_child and payload creation.
+    let (empty, _) = packages
+        .create_unique_child(GUEST_PACKAGE_PREFIX, 0o700)
+        .unwrap();
+    discard_abandoned_external_guest_packages(&state).unwrap();
+    assert!(
+        packages
+            .open_child_directory(&with_payload)
+            .unwrap()
+            .is_none()
+    );
+    assert!(packages.open_child_directory(&empty).unwrap().is_none());
+}
+
+#[test]
+fn abandoned_guest_stage_of_a_dead_owner_is_discarded() {
+    let (_temporary, state, packages) = guest_namespace();
+    let (name, stage) = packages
+        .create_unique_child(GUEST_STAGE_PREFIX, 0o700)
+        .unwrap();
+    let lock = stage
+        .try_lock_exclusive()
+        .unwrap()
+        .expect("fresh stage lock");
+    fill_stage_tree(&stage);
+    // The owner died: its lock is released with its descriptor.
+    drop(lock);
+    drop(stage);
+    discard_abandoned_external_guest_packages(&state).unwrap();
+    assert!(packages.open_child_directory(&name).unwrap().is_none());
+}
+
+#[test]
+fn partial_guest_stage_of_a_dead_owner_is_discarded() {
+    let (_temporary, state, packages) = guest_namespace();
+    let (name, stage) = packages
+        .create_unique_child(GUEST_STAGE_PREFIX, 0o700)
+        .unwrap();
+    let lock = stage
+        .try_lock_exclusive()
+        .unwrap()
+        .expect("fresh stage lock");
+    let base = stage
+        .create_child(std::ffi::OsStr::new("base"), 0o700)
+        .unwrap();
+    base.create_child(std::ffi::OsStr::new("blobs"), 0o700)
+        .unwrap();
+    drop(lock);
+    drop(stage);
+    discard_abandoned_external_guest_packages(&state).unwrap();
+    assert!(packages.open_child_directory(&name).unwrap().is_none());
+}
+
+#[test]
+fn package_and_complete_stage_are_cleared_in_one_pass() {
+    let (_temporary, state, packages) = guest_namespace();
+    let (package_name, package) = packages
+        .create_unique_child(GUEST_PACKAGE_PREFIX, 0o700)
+        .unwrap();
+    package
+        .open_regular_create(std::ffi::OsStr::new("payload"), true, true, 0o600)
+        .unwrap();
+    let (stage_name, stage) = packages
+        .create_unique_child(GUEST_STAGE_PREFIX, 0o700)
+        .unwrap();
+    let lock = stage
+        .try_lock_exclusive()
+        .unwrap()
+        .expect("fresh stage lock");
+    fill_stage_tree(&stage);
+    drop(lock);
+    drop(stage);
+    drop(package);
+    discard_abandoned_external_guest_packages(&state).unwrap();
+    assert!(
+        packages
+            .open_child_directory(&package_name)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        packages
+            .open_child_directory(&stage_name)
+            .unwrap()
+            .is_none()
+    );
+    assert!(packages.entry_names_bounded(1).unwrap().is_empty());
+}
+
+#[test]
+fn guest_stage_with_a_live_owner_is_refused_and_left_intact() {
+    let (_temporary, state, packages) = guest_namespace();
+    let (name, stage) = packages
+        .create_unique_child(GUEST_STAGE_PREFIX, 0o700)
+        .unwrap();
+    let _lock = stage
+        .try_lock_exclusive()
+        .unwrap()
+        .expect("fresh stage lock");
+    fill_stage_tree(&stage);
+    let error = discard_abandoned_external_guest_packages(&state).unwrap_err();
+    assert!(format!("{error:#}").contains("live owner"), "{error:#}");
+    let kept = packages.open_child_directory(&name).unwrap().unwrap();
+    assert!(
+        kept.open_child_directory(std::ffi::OsStr::new("base"))
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn unrecognised_guest_namespace_names_are_refused_and_nothing_is_deleted() {
+    use std::os::unix::ffi::OsStrExt as _;
+    let names: Vec<std::ffi::OsString> = vec![
+        "guest-other.1.2".into(),
+        "guest-package.abc.2".into(),
+        "guest-input.1.x".into(),
+        "guest-package.1.2.3".into(),
+        "guest-input.1".into(),
+        std::ffi::OsStr::from_bytes(b"guest-package.1.\xff").to_owned(),
+    ];
+    for bad in names {
+        let (_temporary, state, packages) = guest_namespace();
+        let (good, _) = packages
+            .create_unique_child(GUEST_PACKAGE_PREFIX, 0o700)
+            .unwrap();
+        packages.create_child(&bad, 0o700).unwrap();
+        let error = discard_abandoned_external_guest_packages(&state).unwrap_err();
+        assert!(
+            format!("{error:#}").contains(GUEST_STAGE_PREFIX),
+            "{bad:?}: {error:#}"
+        );
+        assert!(packages.open_child_directory(&bad).unwrap().is_some());
+        // The unrecognised entry is refused; a recognised sibling may or may
+        // not have been swept first, but the refused entry is never touched.
+        let _ = good;
+    }
+}
+
+#[test]
+fn recognised_guest_namespace_name_that_is_a_file_is_refused() {
+    for prefix in [GUEST_PACKAGE_PREFIX, GUEST_STAGE_PREFIX] {
+        let (_temporary, state, packages) = guest_namespace();
+        let name = format!("{prefix}.7.9");
+        packages
+            .open_regular_create(std::ffi::OsStr::new(&name), true, true, 0o600)
+            .unwrap();
+        assert!(discard_abandoned_external_guest_packages(&state).is_err());
+        assert!(
+            packages
+                .open_pinned_regular(std::ffi::OsStr::new(&name), false)
+                .unwrap()
+                .is_some()
+        );
+    }
+}
+
 #[test]
 fn abandoned_external_guest_package_sweep_progresses_beyond_one_batch() {
     let temporary = tempdir().unwrap();
@@ -431,7 +640,7 @@ fn abandoned_external_guest_package_sweep_progresses_beyond_one_batch() {
         .unwrap();
     for _ in 0..1025 {
         packages
-            .create_unique_child("guest-package", 0o700)
+            .create_unique_child(GUEST_PACKAGE_PREFIX, 0o700)
             .unwrap();
     }
     discard_abandoned_external_guest_packages(&state).unwrap();
@@ -460,7 +669,7 @@ fn abandoned_external_guest_package_is_removed_on_state_store_reopen() {
     let store = open();
     let packages = store.external_guest_package_parent().unwrap();
     let (name, package) = packages
-        .create_unique_child("guest-package", 0o700)
+        .create_unique_child(GUEST_PACKAGE_PREFIX, 0o700)
         .unwrap();
     let mut payload = package
         .open_regular_create(std::ffi::OsStr::new("payload"), true, true, 0o600)

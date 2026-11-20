@@ -229,28 +229,7 @@ pub fn validate_authorized_key_directory(
 // ---------------------------------------------------------------------------
 
 fn canonical_path(uri: &axum::http::Uri) -> String {
-    let path = uri.path();
-    match uri.query() {
-        None | Some("") => path.to_string(),
-        Some(query) => {
-            let mut params: Vec<(&str, &str)> = query
-                .split('&')
-                .filter_map(|pair| pair.split_once('=').or(Some((pair, ""))))
-                .collect();
-            params.sort();
-            let sorted: Vec<String> = params
-                .iter()
-                .map(|(k, v)| {
-                    if v.is_empty() {
-                        k.to_string()
-                    } else {
-                        format!("{k}={v}")
-                    }
-                })
-                .collect();
-            format!("{path}?{}", sorted.join("&"))
-        }
-    }
+    ryeos_request_signing::canonical_path(uri.path(), uri.query())
 }
 
 /// Content hash of a `ryeos-request-v1` signed request: the bytes the caller
@@ -265,16 +244,14 @@ pub(crate) fn request_content_hash(
     nonce: &str,
     audience: &str,
 ) -> String {
-    let string_to_sign = format!(
-        "ryeos-request-v1\n{}\n{}\n{}\n{}\n{}\n{}",
-        method.to_uppercase(),
+    ryeos_request_signing::content_hash(
+        method,
         canonical_path,
         body_hash,
         timestamp,
         nonce,
         audience,
-    );
-    lillux::cas::sha256_hex(string_to_sign.as_bytes())
+    )
 }
 
 /// Recompute the request digest of a signed request this node has already
@@ -794,6 +771,40 @@ fn verify_delegated(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn verifier_matches_shared_request_signing_vectors() {
+        let vectors: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../support/ryeos-request-signing/tests/vectors/request_signing.json"
+        ))
+        .unwrap();
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        for v in vectors["vectors"].as_array().unwrap() {
+            let s = |k: &str| v[k].as_str().unwrap();
+            let uri: axum::http::Uri = s("path_and_query").parse().unwrap();
+            assert_eq!(canonical_path(&uri), s("canonical_path"), "{}", s("name"));
+            assert_eq!(
+                lillux::cas::sha256_hex(s("body").as_bytes()),
+                s("body_digest")
+            );
+            let hash = request_content_hash(
+                s("method"),
+                &canonical_path(&uri),
+                &lillux::cas::sha256_hex(s("body").as_bytes()),
+                &v["timestamp"].as_u64().unwrap().to_string(),
+                s("nonce"),
+                s("audience"),
+            );
+            assert_eq!(hash, s("content_hash"), "{}", s("name"));
+            let sig = lillux::crypto::Signer::sign(&key, hash.as_bytes());
+            assert_eq!(
+                base64::engine::general_purpose::STANDARD.encode(sig.to_bytes()),
+                s("signature"),
+                "{}",
+                s("name")
+            );
+        }
+    }
+
     use base64::Engine;
     use lillux::crypto::{EncodePrivateKey, SigningKey};
     use tempfile::TempDir;
@@ -1460,16 +1471,14 @@ mod tests {
     ) -> axum::http::HeaderMap {
         let body_hash = lillux::cas::sha256_hex(body);
         let canon = canonical_path(signed_uri);
-        let string_to_sign = format!(
-            "ryeos-request-v1\n{}\n{}\n{}\n{}\n{}\n{}",
-            method.to_uppercase(),
-            canon,
-            body_hash,
-            timestamp,
+        let content_hash = request_content_hash(
+            method,
+            &canon,
+            &body_hash,
+            &timestamp.to_string(),
             nonce,
             audience,
         );
-        let content_hash = lillux::cas::sha256_hex(string_to_sign.as_bytes());
         let sig = lillux::crypto::Signer::sign(client_key, content_hash.as_bytes());
         let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.to_bytes());
 

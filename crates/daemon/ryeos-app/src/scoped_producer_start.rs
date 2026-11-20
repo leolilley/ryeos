@@ -58,59 +58,6 @@ fn admit_recipe_subject(
     Ok(())
 }
 
-#[cfg(test)]
-mod recipe_subject_tests {
-    use super::*;
-
-    #[test]
-    fn mechanism_helpers_cannot_replace_a_consumer_subject() {
-        use ryeos_state::external_content::products::producer_recipe::ProducerRealizationMemberIdentity;
-        let member = |id: &str| ProducerRealizationMemberIdentity {
-            realization_id: id.to_owned(),
-            manifest_hash: "a".repeat(64),
-            relative_path: "bin/helper".to_owned(),
-            executable_sha256: "b".repeat(64),
-        };
-        let helpers = ProducerExecutableSource::AdmittedMechanismHelpers {
-            supervisor: member("supervisor"),
-            launcher: member("launcher"),
-        };
-        assert!(admit_recipe_subject(&helpers, "original_subject", &"c".repeat(64), false).is_ok());
-        assert!(admit_recipe_subject(&helpers, "original_subject", &"c".repeat(64), true).is_err());
-    }
-
-    #[test]
-    fn realization_executable_must_be_the_sealed_subject() {
-        let executable = ProducerExecutableSource::AdmittedRealizationMember {
-            realization_id: "codex_runtime".to_owned(),
-            manifest_hash: "a".repeat(64),
-            relative_path: "bin/codex".to_owned(),
-            executable_sha256: "b".repeat(64),
-        };
-        assert!(admit_recipe_subject(&executable, "codex_runtime", &"a".repeat(64), true).is_ok());
-        assert!(admit_recipe_subject(&executable, "other_runtime", &"a".repeat(64), true).is_err());
-        assert!(admit_recipe_subject(&executable, "codex_runtime", &"c".repeat(64), true).is_err());
-        assert!(
-            admit_recipe_subject(
-                &ProducerExecutableSource::AdmittedVerifierExecutable,
-                "codex_runtime",
-                &"a".repeat(64),
-                false,
-            )
-            .is_ok()
-        );
-        assert!(
-            admit_recipe_subject(
-                &ProducerExecutableSource::AdmittedVerifierExecutable,
-                "codex_runtime",
-                &"a".repeat(64),
-                true,
-            )
-            .is_err()
-        );
-    }
-}
-
 /// The successful return is only an attempt locator. The process and all
 /// descriptor lifelines have already been transferred to the live registry.
 pub fn start_scoped_producer(
@@ -832,5 +779,58 @@ pub mod test_support {
             self.finished.store(true, Ordering::Release);
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod recipe_subject_tests {
+    use super::*;
+
+    #[test]
+    fn mechanism_helpers_cannot_replace_a_consumer_subject() {
+        use ryeos_state::external_content::products::producer_recipe::ProducerRealizationMemberIdentity;
+        let member = |id: &str| ProducerRealizationMemberIdentity {
+            realization_id: id.to_owned(),
+            manifest_hash: "a".repeat(64),
+            relative_path: "bin/helper".to_owned(),
+            executable_sha256: "b".repeat(64),
+        };
+        let helpers = ProducerExecutableSource::AdmittedMechanismHelpers {
+            supervisor: member("supervisor"),
+            launcher: member("launcher"),
+        };
+        assert!(admit_recipe_subject(&helpers, "original_subject", &"c".repeat(64), false).is_ok());
+        assert!(admit_recipe_subject(&helpers, "original_subject", &"c".repeat(64), true).is_err());
+    }
+
+    #[test]
+    fn realization_executable_must_be_the_sealed_subject() {
+        let executable = ProducerExecutableSource::AdmittedRealizationMember {
+            realization_id: "codex_runtime".to_owned(),
+            manifest_hash: "a".repeat(64),
+            relative_path: "bin/codex".to_owned(),
+            executable_sha256: "b".repeat(64),
+        };
+        assert!(admit_recipe_subject(&executable, "codex_runtime", &"a".repeat(64), true).is_ok());
+        assert!(admit_recipe_subject(&executable, "other_runtime", &"a".repeat(64), true).is_err());
+        assert!(admit_recipe_subject(&executable, "codex_runtime", &"c".repeat(64), true).is_err());
+        assert!(
+            admit_recipe_subject(
+                &ProducerExecutableSource::AdmittedVerifierExecutable,
+                "codex_runtime",
+                &"a".repeat(64),
+                false,
+            )
+            .is_ok()
+        );
+        assert!(
+            admit_recipe_subject(
+                &ProducerExecutableSource::AdmittedVerifierExecutable,
+                "codex_runtime",
+                &"a".repeat(64),
+                true,
+            )
+            .is_err()
+        );
     }
 }

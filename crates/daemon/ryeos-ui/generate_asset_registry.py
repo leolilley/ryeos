@@ -8,6 +8,8 @@ import hashlib
 import json
 import re
 import string
+import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -15,6 +17,10 @@ ROOT = Path(__file__).resolve().parent
 MANIFEST = ROOT / "web-assets.json"
 PACKAGE = ROOT / "../../clients/rune/pkg"
 GENERATED = ROOT / "src/generated_web_assets.rs"
+DIGEST_SCRIPT = (
+    ROOT
+    / "../../../.ai/tools/ryeos/development/browser-assets-production/lib/web-package-source-digest.py"
+)
 SNIPPETS = (
     ROOT
     / "../../../.ai/tools/ryeos/development/browser-assets-production/lib/rune-snippets.toml"
@@ -165,6 +171,21 @@ def main() -> None:
             asset["sha256"] = hashlib.sha256(
                 (PACKAGE / asset["filename"]).read_bytes()
             ).hexdigest()
+        # Record which sources this package was built from; CI recomputes the
+        # digest and fails when they differ (a source changed, package not rebuilt).
+        digest = subprocess.run(
+            [sys.executable, "-I", str(DIGEST_SCRIPT), "--print"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        manifest.pop("source_digest", None)
+        ordered = {}
+        for key, value in manifest.items():
+            ordered[key] = value
+            if key == "ui_binding_revision":
+                ordered["source_digest"] = digest
+        manifest = ordered
         MANIFEST.write_text(json.dumps(manifest, indent=2) + "\n")
     validate(manifest)
     expected = render(manifest)

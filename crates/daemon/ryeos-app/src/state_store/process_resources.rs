@@ -15,11 +15,13 @@ impl ResourceScratchPhysicalReceipt {
 
 /// Authoritative original no-birth + physical removal join. No Clone/serde,
 /// decoded-record constructor, process proof or driver retirement authority.
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) struct NeverBornResourceFundingReceipt {
     pub(super) state_store: Arc<StateStore>,
     pub(super) removed: runtime_db::ProcessResourceReservationRecord,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl NeverBornResourceFundingReceipt {
     pub(crate) fn matches_original(
         self,
@@ -60,6 +62,7 @@ impl NeverBornResourceFundingReceipt {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl StateStore {
     /// Wrap the existing winning never-issued Reserved/CleanupIntent physical
     /// owner, rather than accepting a raw receipt JSON or PID absence. The
