@@ -247,8 +247,10 @@ pub fn retire_pre_cut_identity_records(
     );
     let mut report = NativeCapacityCutReport::default();
 
+    // Opened writable: the re-recording below overwrites this exact inode in
+    // place.
     let account = directory
-        .open_pinned_regular(OsStr::new("account"), false)?
+        .open_pinned_regular(OsStr::new("account"), true)?
         .context("capacity account is absent")?;
     account.require_effective_user_owned()?;
     let mut before = [0u8; RECORD_BYTES];
