@@ -2029,6 +2029,17 @@ fn require_session_owner(
 /// live claim when the allocation was reserved. The session fields, the
 /// reservation's worker identity and epoch, and the credential lock owner are
 /// matched exactly as in the live proof, so this is never "any owner".
+///
+/// The claim-absent predicate checks the SHAPE of the recorded launch owner
+/// and that it names this placement thread; it does not compare against a
+/// specific nonce. It is therefore only as strong as the trigger
+/// `external_execution_workspace_identity_guard`, which refuses any update of
+/// `execution_workspace.launch_owner` (and `thread_id`, snapshots, root path)
+/// while an allocation of the session's workspace is in a phase NOT IN
+/// ('no_contact','contacted_no_occurrence','terminated'), i.e. for the whole
+/// unsettled life of the allocation. This predicate is also what
+/// `retain_external_candidate_import_tx` uses to accept a retained candidate
+/// import, so the same bound applies there.
 fn require_retained_session_owner(
     conn: &Connection,
     reservation: &ExternalAllocationReservation,

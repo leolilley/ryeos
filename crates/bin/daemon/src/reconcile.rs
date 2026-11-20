@@ -2719,15 +2719,14 @@ async fn terminate_predecessor_external_leases(state: &AppState) -> Result<()> {
         .await
         .context("predecessor lease termination owner stopped without a result")?
         .context("discover remote leases of previous daemon incarnations")?;
-    if report.discovered != 0 {
-        tracing::warn!(
-            discovered = report.discovered,
-            terminated = report.terminated.len(),
-            pending = report.pending.len(),
-            failures = report.failures.len(),
-            "terminated remote leases of previous daemon incarnations; none is reattached"
-        );
-    }
+    tracing::info!(
+        discovered = report.discovered,
+        terminated = report.terminated.len(),
+        pending = report.pending.len(),
+        failed = report.failures.len(),
+        "predecessor external leases and session allocations driven toward their observed \
+         provider terminal at startup; none is reattached"
+    );
     for placement in report.terminated.iter().chain(&report.pending) {
         tracing::warn!(
             placement = %placement,
@@ -3157,6 +3156,10 @@ fn quiesce_unattached_worker_scopes(state: &AppState) -> Result<()> {
                     "unattached process scope and launcher belonged to an ended host lifetime",
                     true,
                 )?;
+                log_predecessor_session_settled(
+                    &session.placement_thread_id,
+                    "unattached process scope and launcher belonged to an ended host lifetime",
+                );
                 continue;
             }
             let Some(recovery) = reservation.recovery else {
@@ -3164,13 +3167,19 @@ fn quiesce_unattached_worker_scopes(state: &AppState) -> Result<()> {
                 // spawn is permitted before binding. Unlike a bound scope,
                 // this journal phase proves there is no wrapper/reap owner.
                 match reservation.allocation.discard_unlaunched() {
-                    Ok(()) => state.state_store.fail_dedicated_session_start(
-                        &session.placement_thread_id,
-                        worker_id,
-                        epoch,
-                        "discarded unbound process-scope allocation before worker contact",
-                        true,
-                    )?,
+                    Ok(()) => {
+                        state.state_store.fail_dedicated_session_start(
+                            &session.placement_thread_id,
+                            worker_id,
+                            epoch,
+                            "discarded unbound process-scope allocation before worker contact",
+                            true,
+                        )?;
+                        log_predecessor_session_settled(
+                            &session.placement_thread_id,
+                            "discarded unbound process-scope allocation before worker contact",
+                        );
+                    }
                     Err(error) => tracing::warn!(
                         placement_thread_id = %session.placement_thread_id,
                         worker_instance_id = worker_id, error,
@@ -3191,6 +3200,14 @@ fn quiesce_unattached_worker_scopes(state: &AppState) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn log_predecessor_session_settled(placement_thread_id: &str, reason: &str) {
+    tracing::info!(
+        placement_thread_id,
+        reason,
+        "predecessor session settled locally after its external allocation was settled"
+    );
 }
 
 fn warn_session_awaits_external_terminal(placement_thread_id: &str) {
@@ -3230,13 +3247,20 @@ fn settle_unattached_trusted_holding(
         worker_id,
         epoch,
     )? {
-        Proof::Ended => state.state_store.fail_dedicated_session_start(
-            placement_thread_id,
-            worker_id,
-            epoch,
-            "unattached trusted process group and launcher belonged to an ended host lifetime",
-            true,
-        ),
+        Proof::Ended => {
+            state.state_store.fail_dedicated_session_start(
+                placement_thread_id,
+                worker_id,
+                epoch,
+                "unattached trusted process group and launcher belonged to an ended host lifetime",
+                true,
+            )?;
+            log_predecessor_session_settled(
+                placement_thread_id,
+                "unattached trusted process group and launcher belonged to an ended host lifetime",
+            );
+            Ok(())
+        }
         Proof::Absent | Proof::NotEnded => {
             tracing::warn!(
                 placement_thread_id,
@@ -3331,6 +3355,10 @@ fn fence_retained_dedicated_worker(
         dead_daemon_generation = %worker.daemon_generation_id,
         cleanup_state,
         "fenced a dedicated worker retained from a previous daemon generation"
+    );
+    log_predecessor_session_settled(
+        &worker.placement_thread_id,
+        "worker of a previous daemon generation fenced",
     );
     Ok(true)
 }
