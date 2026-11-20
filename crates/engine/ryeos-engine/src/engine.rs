@@ -172,6 +172,11 @@ impl AdmittedRequestAuthoritySnapshot {
         &self.authority
     }
 
+    /// The frozen trust view this admitted request authority holds.
+    pub fn trust_store(&self) -> &TrustStore {
+        &self.authority.trust_store
+    }
+
     fn request_snapshot(&self) -> &EffectiveRequestSnapshot {
         self.request.as_ref()
     }

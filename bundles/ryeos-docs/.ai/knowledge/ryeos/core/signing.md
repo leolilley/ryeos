@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-20T23:44:57Z:e7a27df8c3ff268f3ef5960423da9e4eea22767243517e272c133af5627811b7:WrSV29jmNJuYDol2LbL3bSdAUVwenQ9KXjUz2MrUxUEF5ENUCmOE5o03XnY/p7TmrUq6ffZogWg8IA43863YBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-20T23:48:14Z:cbf092fd4f1ee82e3d07e2c71170c7bc478fc14fed8eb35300089c6c32dc1faa:3XrYDHZc0gRQVnL8TDVbRKjqTweJQML6aVHzR6+w6tuSMEgXrWvOPbgVbJyLfmv0CH1AjOxOHmA/x+o8P05nBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -417,7 +417,12 @@ launch's own project identity, its canonical root, not a checkout path. The
 signer list's digest, which every config dependency proof and cache key records,
 covers the snapshot, so a proof made under an endorsement stops matching when the
 endorsement is revoked or replaced. A launch keeps the view it froze; the next
-launch freezes the new one. An envelope of another schema version is refused;
+launch freezes the new one. One request builds every signer list from the single
+trust view it froze at admission, so a revocation between its method-config load
+and its limits load never gives two parts of it two trusts. Offline commands
+read the node's recorded endorsements when they load the registry; the only
+signer list built outside a launch is the one for a bundle release source
+generation, which holds publisher-signed configs and so carries none. An envelope of another schema version is refused;
 runtime binaries ship in bundles, so repopulate bundles after this change.
 
 Revoking writes a node-signed tombstone named by the endorsement digest. The

@@ -5,7 +5,7 @@ use lillux::crypto::SigningKey;
 use super::*;
 use crate::authority::trust::{
     SignerContext, SignerRecord, SignerScope, SignerStatus, compute_fingerprint,
-    verify_item_signature,
+    trusted_signers_digest, verify_item_signature,
 };
 use crate::contracts::{SignatureEnvelope, SignatureHeader, TrustClass};
 
@@ -655,9 +655,9 @@ fn the_store_fingerprint_moves_with_the_index() {
     assert_ne!(before, after);
 }
 
-#[test]
-fn a_live_store_follows_a_recording_and_a_snapshot_does_not() {
-    let node = Node::new();
+/// A node with a public identity and signed registry records, loaded the way
+/// the daemon loads it: the store is live.
+fn live_store(node: &Node) -> TrustStore {
     // A node with a public identity and signed registry records.
     let identity = node.path().join(".ai/node/identity");
     std::fs::create_dir_all(&identity).unwrap();
@@ -687,7 +687,13 @@ fn a_live_store_follows_a_recording_and_a_snapshot_does_not() {
         )
         .unwrap();
     }
-    let live = TrustStore::load_node_registry(node.path()).unwrap();
+    TrustStore::load_node_registry(node.path()).unwrap()
+}
+
+#[test]
+fn a_live_store_follows_a_recording_and_a_snapshot_does_not() {
+    let node = Node::new();
+    let live = live_store(&node);
     let item = signed_item(&node.authoring, "x\n");
     assert_eq!(class(&live, &item, "view", PROJECT), TrustClass::Untrusted);
     let frozen = live.snapshot();
@@ -717,6 +723,59 @@ fn a_live_store_follows_a_recording_and_a_snapshot_does_not() {
         class(&restarted, &item, "view", PROJECT),
         TrustClass::Trusted
     );
+}
+
+#[test]
+fn a_request_that_froze_its_trust_builds_one_signer_list_whatever_is_revoked_meanwhile() {
+    let node = Node::new();
+    let live = live_store(&node);
+    let item = signed_item(&node.authoring, "x\n");
+    let recorded = node
+        .record(
+            &live,
+            &node.operator,
+            node.items_body(&node.operator, PROJECT, vec![item_for("view", &item.2)]),
+        )
+        .unwrap();
+    live.refresh_endorsements(node.path()).unwrap();
+
+    // The request freezes its view at admission; its method-config load and
+    // its limits load each build a signer list from that one view.
+    let frozen = live.snapshot();
+    let project = Some(Path::new(PROJECT));
+    let at_method_config_load = live.launch_signer_entries(&frozen, project);
+
+    revoke_endorsement(
+        node.path(),
+        &node.node,
+        &live,
+        &recorded.digest,
+        &fp(&node.operator),
+        "withdrawn",
+        NOW + 5,
+    )
+    .unwrap();
+    live.refresh_endorsements(node.path()).unwrap();
+
+    let at_limits_load = live.launch_signer_entries(&frozen, project);
+    assert_eq!(
+        trusted_signers_digest(&at_method_config_load),
+        trusted_signers_digest(&at_limits_load),
+        "one request, one trust view"
+    );
+    assert!(
+        at_limits_load
+            .iter()
+            .any(|entry| entry.endorsements.is_some())
+    );
+
+    // The next request freezes the revoked state.
+    let next = live.launch_signer_entries(&live.snapshot(), project);
+    assert_ne!(
+        trusted_signers_digest(&at_limits_load),
+        trusted_signers_digest(&next)
+    );
+    assert!(next.iter().all(|entry| entry.endorsements.is_none()));
 }
 
 #[test]

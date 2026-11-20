@@ -325,7 +325,11 @@ impl EnvelopeRoots {
     }
 }
 
-/// Scoped signer entries for a trust store, in the form launch envelopes carry.
+/// Scoped signer entries for a trust store, without endorsements. A launch of
+/// a project builds its list with `TrustStore::launch_signer_entries` instead,
+/// so its authoring signers carry the request's frozen endorsements; this plain
+/// form is for trees that are not an operator's project (a release source
+/// generation, whose configs are publisher-signed and never authored).
 pub fn trusted_signer_entries(store: &TrustStore) -> Vec<TrustedSignerEntry> {
     store.signer_entries()
 }
