@@ -163,7 +163,11 @@ enum FundingPhase {
     ContactTaken,
     AttachAttempted,
     Attached,
+    // The no-birth refund route is exercised only by tests until the trusted
+    // executable route enables it.
+    #[cfg(test)]
     RefundAttempted,
+    #[cfg(test)]
     Refunded,
 }
 
@@ -180,6 +184,7 @@ pub(crate) struct OriginalFundingOwner {
     // native/driver/physical proof or no-birth/refund authority. No getter.
     held_identity: Option<crate::process::ExecutionProcessIdentity>,
     accounting: Arc<AccountingDb>,
+    #[cfg(test)]
     state_store: Arc<crate::state_store::StateStore>,
     original_budget: crate::handler_context::OriginalExecutionBudget,
     // Pinned BEFORE sampling original occupancy_start in this same daemon.
@@ -303,6 +308,7 @@ impl OriginalFundingOwner {
             request_digest: envelope.request_digest()?,
             operation_id: envelope.operation_id()?,
             accounting,
+            #[cfg(test)]
             state_store: Arc::clone(&state.state_store),
             original_budget: budget.clone(),
             original_clock_namespace,
@@ -538,6 +544,7 @@ impl OriginalFundingOwner {
         Ok((permit, window))
     }
 
+    #[cfg(test)]
     pub(crate) fn refund_never_born(
         &mut self,
         receipt: crate::state_store::NeverBornResourceFundingReceipt,
