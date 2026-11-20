@@ -3917,6 +3917,8 @@ fn main() -> Result<()> {
     #[cfg(feature = "crash-qualification-test-support")]
     ryeos_app::dedicated_session_service::test_support::initialize_from_env()
         .context("initialize exact command-settlement crash gate")?;
+    #[cfg(feature = "crash-qualification-test-support")]
+    snapshot_hold::initialize_from_env().context("initialize the held attached snapshot")?;
     ryeos_api::maintenance::install_retention_composition(retention_composition())
         .context("install the retention composition")?;
     // Recovery and launch reconstruction deserialize the complete retained
@@ -7376,6 +7378,37 @@ fn latched_attached_snapshot(state: &AppState) -> (Vec<DrainAttached>, bool) {
     (attached, clean)
 }
 
+/// Qualification-only hold of the shutdown snapshot, set by
+/// `RYEOSD_TEST_ATTACHED_SNAPSHOT_HOLD_MS`: the bound in milliseconds for
+/// which each row read waits for its thread to be settled by its launch
+/// owner. An unparseable value stops startup.
+#[cfg(feature = "crash-qualification-test-support")]
+mod snapshot_hold {
+    use anyhow::{Context as _, Result};
+    use std::sync::OnceLock;
+    use std::time::Duration;
+
+    const VARIABLE: &str = "RYEOSD_TEST_ATTACHED_SNAPSHOT_HOLD_MS";
+    static BOUND: OnceLock<Option<Duration>> = OnceLock::new();
+
+    pub(super) fn initialize_from_env() -> Result<()> {
+        let bound = match std::env::var(VARIABLE) {
+            Ok(value) => Some(Duration::from_millis(value.parse::<u64>().with_context(
+                || format!("{VARIABLE} must be a whole number of milliseconds"),
+            )?)),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(error) => return Err(error).context(VARIABLE),
+        };
+        BOUND
+            .set(bound)
+            .map_err(|_| anyhow::anyhow!("{VARIABLE} was initialized twice"))
+    }
+
+    pub(super) fn bound() -> Option<Duration> {
+        BOUND.get().copied().flatten()
+    }
+}
+
 /// One attached thread as the normal snapshot reads its durable row.
 struct AttachedRow {
     status: String,
@@ -7404,14 +7437,19 @@ impl AttachedSnapshotSource for AppState {
 
     fn read_row(&self, thread_id: &str) -> Result<Option<AttachedRow>> {
         // Qualification builds can hold the snapshot between the registry list
-        // and this row read, so a process that exits during a stop is settled
-        // by its launch owner inside that window.
+        // and this row read until the thread's launch owner has settled it,
+        // so a process that exits during a stop always lands in that window.
         #[cfg(feature = "crash-qualification-test-support")]
-        if let Some(delay_ms) = std::env::var("RYEOSD_TEST_ATTACHED_SNAPSHOT_READ_DELAY_MS")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-        {
-            std::thread::sleep(Duration::from_millis(delay_ms));
+        if let Some(bound) = snapshot_hold::bound() {
+            let deadline = Instant::now() + bound;
+            while self.still_registered(thread_id)? {
+                if Instant::now() >= deadline {
+                    anyhow::bail!(
+                        "thread {thread_id} was not settled within {bound:?} of the held snapshot"
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
         }
         Ok(self
             .state_store
@@ -10258,6 +10296,9 @@ mod shutdown_custody_tests {
         membership_released: bool,
         clear_between_list_and_read: bool,
         registry_unreadable: bool,
+        membership_unreadable: bool,
+        row_missing: bool,
+        row_unreadable: bool,
     }
 
     impl ScriptedSource {
@@ -10269,6 +10310,9 @@ mod shutdown_custody_tests {
                 membership_released: true,
                 clear_between_list_and_read: false,
                 registry_unreadable: false,
+                membership_unreadable: false,
+                row_missing: false,
+                row_unreadable: false,
             }
         }
     }
@@ -10299,6 +10343,12 @@ mod shutdown_custody_tests {
         }
 
         fn read_row(&self, _thread_id: &str) -> anyhow::Result<Option<super::AttachedRow>> {
+            if self.row_unreadable {
+                anyhow::bail!("row unreadable");
+            }
+            if self.row_missing {
+                return Ok(None);
+            }
             if self.clear_between_list_and_read {
                 // The launch owner reaps the runtime and compare-clears it:
                 // the identity and the registry entry go together.
@@ -10320,6 +10370,9 @@ mod shutdown_custody_tests {
         }
 
         fn membership_released(&self, _thread_id: &str) -> anyhow::Result<bool> {
+            if self.membership_unreadable {
+                anyhow::bail!("membership unreadable");
+            }
             Ok(self.membership_released)
         }
     }
@@ -10391,6 +10444,38 @@ mod shutdown_custody_tests {
         source.clear_between_list_and_read = true;
         source.registry_unreadable = true;
         let (_, clean, read_failed) = super::normal_attached_snapshot(&source).expect("snapshot");
+        assert!(!clean);
+        assert!(read_failed);
+    }
+
+    #[test]
+    fn unreadable_membership_after_a_null_identity_stays_unclean() {
+        let mut source = ScriptedSource::new("T-membership");
+        source.clear_between_list_and_read = true;
+        source.membership_unreadable = true;
+        let (_, clean, read_failed) = super::normal_attached_snapshot(&source).expect("snapshot");
+        assert!(!clean);
+        assert!(read_failed);
+    }
+
+    #[test]
+    fn missing_thread_row_is_unclean_without_a_read_failure() {
+        let mut source = ScriptedSource::new("T-no-row");
+        source.row_missing = true;
+        let (attached, clean, read_failed) =
+            super::normal_attached_snapshot(&source).expect("snapshot");
+        assert!(attached.is_empty());
+        assert!(!clean);
+        assert!(!read_failed);
+    }
+
+    #[test]
+    fn row_read_error_is_unclean_and_a_read_failure() {
+        let mut source = ScriptedSource::new("T-bad-row");
+        source.row_unreadable = true;
+        let (attached, clean, read_failed) =
+            super::normal_attached_snapshot(&source).expect("snapshot");
+        assert!(attached.is_empty());
         assert!(!clean);
         assert!(read_failed);
     }
