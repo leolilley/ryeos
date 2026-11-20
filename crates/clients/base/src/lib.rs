@@ -13,6 +13,7 @@ pub mod presentation;
 pub mod surface;
 pub mod text_surface;
 pub mod theme;
+pub mod theme_preference;
 pub mod ui;
 pub mod view_set;
 
