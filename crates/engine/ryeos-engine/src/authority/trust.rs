@@ -1530,6 +1530,78 @@ mod tests {
     }
 
     #[test]
+    fn event_chain_timed_returns_signing_times_and_first_pin_time() {
+        let (node_sk, node_vk, _) = gen_key();
+        let root = tempfile::tempdir().unwrap();
+        let dir = events_dir(root.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        let mk = |seq: u64, previous: Option<String>, kind, signer: &str| TrustEvent {
+            schema: TRUST_EVENT_SCHEMA.to_string(),
+            seq,
+            previous,
+            kind,
+            signer: signer.to_string(),
+            record_digest: "b".repeat(64),
+            request_digest: "c".repeat(64),
+            operator: "d".repeat(64),
+            predecessor: None,
+        };
+        let key = "a".repeat(64);
+        let other = "e".repeat(64);
+        let e1 = mk(1, None, TrustEventKind::Pinned, &key);
+        let e2 = mk(2, Some(e1.digest()), TrustEventKind::Pinned, &other);
+        let e3 = mk(3, Some(e2.digest()), TrustEventKind::Retired, &key);
+        let e4 = mk(4, Some(e3.digest()), TrustEventKind::Pinned, &key);
+        let times = [
+            "2026-01-01T00:00:00Z",
+            "2026-02-02T00:00:00Z",
+            "2026-03-03T00:00:00Z",
+            "2026-04-04T00:00:00Z",
+        ];
+        for (event, at) in [&e1, &e2, &e3, &e4].into_iter().zip(times) {
+            let body = serde_yaml::to_string(event).unwrap();
+            std::fs::write(
+                dir.join(event.file_name()),
+                lillux::signature::sign_content_at(&body, &node_sk, "#", None, at),
+            )
+            .unwrap();
+        }
+        let chain = load_event_chain_timed(&dir, &node_vk).unwrap();
+        let got: Vec<&str> = chain.iter().map(|(_, at)| at.as_str()).collect();
+        assert_eq!(got, times);
+        // Retired then pinned again: the key has been trusted since its first pin.
+        assert_eq!(key_pinned_at(&chain, &key).as_deref(), Some(times[0]));
+        assert_eq!(key_pinned_at(&chain, &other).as_deref(), Some(times[1]));
+        assert_eq!(key_pinned_at(&chain, "unknown"), None);
+    }
+
+    #[test]
+    fn event_chain_timed_refuses_an_event_without_a_signing_time() {
+        let (node_sk, node_vk, _) = gen_key();
+        let root = tempfile::tempdir().unwrap();
+        let dir = events_dir(root.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        let event = TrustEvent {
+            schema: TRUST_EVENT_SCHEMA.to_string(),
+            seq: 1,
+            previous: None,
+            kind: TrustEventKind::Init,
+            signer: "a".repeat(64),
+            record_digest: "b".repeat(64),
+            request_digest: "c".repeat(64),
+            operator: "d".repeat(64),
+            predecessor: None,
+        };
+        let body = serde_yaml::to_string(&event).unwrap();
+        std::fs::write(
+            dir.join(event.file_name()),
+            lillux::signature::sign_content_at(&body, &node_sk, "#", None, ""),
+        )
+        .unwrap();
+        assert!(load_event_chain_timed(&dir, &node_vk).is_err());
+    }
+
+    #[test]
     fn succession_requires_old_key_signature() {
         let (old_sk, old_vk, _) = gen_key();
         let (other_sk, _, _) = gen_key2();
