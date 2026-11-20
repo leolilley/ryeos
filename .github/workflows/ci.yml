@@ -1357,7 +1357,6 @@ jobs:
     env:
       RUST_MIN_STACK: 8388608
       E2E_FEATURES: scheduling,model-provider-setup,crash-qualification-test-support,handoff-test-support
-      RYEOSD_TEST_STDERR_DIR: ${{ runner.temp }}/daemon-stderr
     steps:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -1389,6 +1388,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          echo "RYEOSD_TEST_STDERR_DIR=$RUNNER_TEMP/daemon-stderr" >> "$GITHUB_ENV"
           fstype="$(stat -fc %T /sys/fs/cgroup)"
           [[ "$fstype" == cgroup2fs ]] || { echo "FAIL: /sys/fs/cgroup is $fstype, not unified cgroup v2" >&2; exit 1; }
           controllers="$(cat /sys/fs/cgroup/cgroup.controllers)"
