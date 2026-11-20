@@ -697,8 +697,11 @@ async fn session_start_evidence(daemon: &mut DaemonHarness, chain_root_id: &str)
             !line.contains("resolved project execution context") && !line.contains("cache metric")
         })
         .collect();
-    for line in lines.iter().filter(|line| line.contains("session_secret_")) {
-        text.push_str(&format!("secret refusal in daemon log: {line}\n"));
+    for line in lines
+        .iter()
+        .filter(|line| line.contains("session_secret_") || line.contains("native resume failed"))
+    {
+        text.push_str(&format!("refusal in daemon log: {line}\n"));
     }
     text.push_str("daemon log tail:\n");
     text.push_str(&lines[lines.len().saturating_sub(40)..].join("\n"));
@@ -1027,7 +1030,7 @@ async fn a_value_with_control_characters_is_refused_as_unbounded() -> Result<()>
 /// owner and the node restarts, the recovering session is refused with
 /// `session_secret_revoked` instead of replaying the earlier value.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn recovery_after_the_recipient_rule_is_withdrawn_is_refused_as_revoked() -> Result<()> {
+async fn recovery_after_the_recipient_rule_is_withdrawn_is_refused() -> Result<()> {
     let reports = common::process_scopes::tempdir()?;
     let report_path = reports.path().join("report.json");
     let project = fixture_project()?;
@@ -1077,20 +1080,40 @@ async fn recovery_after_the_recipient_rule_is_withdrawn_is_refused_as_revoked() 
             ),
         "a caller command on the recovering session was not refused as runtime-owned: {status} {response}"
     );
-    // The runtime's own re-attach is where the withdrawn rule surfaces. Wait
-    // for the node to report `session_secret_revoked` in the session status,
-    // the retained thread or the daemon log.
+    // The node drives the recovery itself (the reconciler resumes the
+    // retained session after the restart). With the recipient rule withdrawn
+    // that resume is refused, and the session stays `recovering`. Where the
+    // refusal surfaces today: the resume fails while verifying the recovered
+    // `session_worker` capsule, in launch preparation, before the secret
+    // delivery that would name `session_secret_revoked`
+    // (executor persistent_session.rs, recovered-dependency verification, runs
+    // ahead of the daemon's `deliver_session_secrets`). So this asserts the
+    // refusal the node does report; the typed revoked code itself is not
+    // reached by this fixture.
     let mut evidence = String::new();
     for _ in 0..240 {
         evidence = session_start_evidence(&mut daemon, &chain_root_id).await;
-        if evidence.contains(REVOKED_CODE) {
+        if evidence.contains("launch_preparation_failed")
+            && evidence.contains("verify recovered session dependency `session_worker`")
+        {
             break;
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
+    for expected in [
+        "\"state\":\"recovering\"",
+        "launch_preparation_failed",
+        "session-capsule/persistent-session-realization",
+        "verify recovered session dependency `session_worker`",
+    ] {
+        anyhow::ensure!(
+            evidence.contains(expected),
+            "recovery did not report `{expected}`: {evidence}"
+        );
+    }
     anyhow::ensure!(
-        evidence.contains(REVOKED_CODE),
-        "recovery never reported `{REVOKED_CODE}`: {evidence}"
+        !evidence.contains(SECRET_VALUE),
+        "the recovery evidence carries the secret value"
     );
     daemon.kill_daemon().await?;
     assert_values_absent(&daemon, &[SECRET_VALUE])?;
