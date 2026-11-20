@@ -73,10 +73,12 @@ WORKDIR /app
 # image run as ryeos (uid 10000, gid 10000), never as root: lillux refuses
 # root as the recorded actor of `ryeos node allow-restart` and
 # `ryeos node capacity reissue`, so a node running as root could never have
-# its restart inhibition cleared from inside its own container. tini stays
-# pid 1. The entrypoint starts as root only to hand /data (a platform volume,
-# mounted root-owned) to this account, then re-executes itself as ryeos
-# before any ryeos command.
+# its restart inhibition cleared from inside its own container. The
+# entrypoint script is pid 1 and starts as root only to hand /data (a
+# platform volume, mounted root-owned) to this account, then replaces itself
+# with tini running as ryeos, so the init and the daemon share one uid and
+# the init needs no capability to forward the stop signal. The script runs
+# again under tini before any ryeos command.
 RUN groupadd --gid 10000 ryeos && \
     useradd --uid 10000 --gid 10000 --home-dir /data/app --no-create-home \
       --shell /bin/bash ryeos && \
@@ -135,4 +137,4 @@ LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/_ryeos/ready',timeout=3).read()"]
 
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
