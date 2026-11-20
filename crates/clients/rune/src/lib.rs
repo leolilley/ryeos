@@ -769,7 +769,17 @@ fn view(app: &App, cx: &mut Cx<App>) -> El {
             recovery::screen(recovery, app.local.confirming_independent)
         }
         (Phase::Working, _) => recovery::working(),
-        (_, Some(vm)) => shell::shell(&vm, &app.local, &app.document_offers()),
+        (phase, Some(vm)) => {
+            // The stored preference decides the palette; `system` follows the
+            // platform. A fixture keeps whatever palette was selected for it.
+            if matches!(phase, Phase::Running(_))
+                && let Some(id) =
+                    theme::for_preference(&vm.presentation.theme.id, cx.env().system_dark)
+            {
+                theme::use_theme(id);
+            }
+            shell::shell(&vm, &app.local, &app.document_offers())
+        }
         (_, None) => shell::boot_screen(None),
     }
 }

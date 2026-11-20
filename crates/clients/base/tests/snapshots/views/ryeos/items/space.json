@@ -139,7 +139,7 @@
       "motion": [],
       "schema_version": "ryeos.ui.presentation.v1",
       "theme": {
-        "id": "gruvbox-optic",
+        "id": "system",
         "tone": "accent"
       }
     },
