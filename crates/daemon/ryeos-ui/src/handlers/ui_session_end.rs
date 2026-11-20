@@ -35,10 +35,11 @@ pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -
         .lock_seat_transition()
         .map_err(|_| HandlerError::Internal("seat transition lock poisoned".into()))?;
     ui.browser_sessions.end_session(&session_id);
+    let secure = super::ui_launch::session_cookie_secure(&state)?;
     Ok(json!({
         "session_id": session_id,
         "ended": true,
         "redirect": "/ui",
-        "cookie": super::ui_launch::cleared_session_cookie(),
+        "cookie": super::ui_launch::cleared_session_cookie(secure),
     }))
 }

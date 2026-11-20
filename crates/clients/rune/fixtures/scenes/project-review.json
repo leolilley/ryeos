@@ -1,0 +1,655 @@
+{
+ "format": 1,
+ "scene": "project-review",
+ "provenance": "synthetic",
+ "clock_ms": 1794494400000,
+ "session": {
+  "session_id": "S-fixture",
+  "project_path": "/home/fixture/ryeos-next",
+  "thread_id": "fixture-seat",
+  "chain_root_id": "fixture-chain"
+ },
+ "viewport": {
+  "width": 0,
+  "height": 0,
+  "device_pixel_ratio": 1.0
+ },
+ "surface": {
+  "root_ref": "surface:ryeos/ui/project",
+  "title": "Project",
+  "current": "last",
+  "definition": {
+   "from_bundle": "surfaces/ryeos/ui/project.yaml",
+   "patch": [
+    {
+     "path": "/tiles",
+     "value": []
+    },
+    {
+     "path": "/style/view_set_tabs",
+     "value": true
+    },
+    {
+     "path": "/views",
+     "value": {
+      "view:ryeos/threads/history": {
+       "from_bundle": "views/ryeos/threads/history.yaml"
+      },
+      "view:ryeos/thread/conversation": {
+       "from_bundle": "views/ryeos/thread/transcript.yaml",
+       "patch": [
+        {
+         "path": "/title",
+         "copy_from": {
+          "from_bundle": "views/ryeos/thread/conversation.yaml",
+          "path": "/title"
+         }
+        },
+        {
+         "path": "/input",
+         "copy_from": {
+          "from_bundle": "views/ryeos/thread/conversation.yaml",
+          "path": "/input"
+         }
+        },
+        {
+         "path": "/sources/default/params/chain_root_id",
+         "value": "chain-demo"
+        }
+       ]
+      },
+      "view:ryeos/threads/detail": {
+       "from_bundle": "views/ryeos/threads/detail.yaml",
+       "patch": [
+        {
+         "path": "/sources/detail/params/thread_id",
+         "value": "T-7f3a"
+        }
+       ]
+      }
+     }
+    },
+    {
+     "path": "/view_sets",
+     "value": [
+      {
+       "schema": 2,
+       "id": "threads",
+       "title": "Threads",
+       "root": {
+        "type": "group",
+        "views": [
+         "view:ryeos/threads/history"
+        ],
+        "active": 0
+       }
+      },
+      {
+       "schema": 2,
+       "id": "review",
+       "title": "Review",
+       "root": {
+        "type": "split",
+        "axis": "horizontal",
+        "ratio": 0.24,
+        "first": {
+         "type": "group",
+         "views": [
+          "view:ryeos/threads/history"
+         ],
+         "active": 0
+        },
+        "second": {
+         "type": "split",
+         "axis": "horizontal",
+         "ratio": 0.68,
+         "first": {
+          "type": "group",
+          "views": [
+           "view:ryeos/thread/conversation"
+          ],
+          "active": 0
+         },
+         "second": {
+          "type": "group",
+          "views": [
+           "view:ryeos/threads/detail"
+          ],
+          "active": 0
+         }
+        }
+       }
+      }
+     ]
+    }
+   ]
+  }
+ },
+ "shared": {
+  "binding_attachment_id": "shared-attachment",
+  "binding_generation": 2,
+  "binding_digest": "shared-binding",
+  "root_ref": "config:fixture/presentation",
+  "root_generation": "shared-generation",
+  "project_path": "/home/fixture/ryeos-next",
+  "subject": {
+   "kind": "unregistered_project"
+  },
+  "posture": "observation_only",
+  "binding_request_bounds": {
+   "max_request_bytes": 4096,
+   "max_input_bytes": 1024,
+   "max_seat_append_bytes": 65536
+  },
+  "presentation": {
+   "definition": {
+    "kind": "shared_presentation",
+    "config": {
+     "category": "ui",
+     "shared_presentation": {
+      "schema": 2,
+      "title": "Fixture",
+      "launcher": "launcher",
+      "dialogs": [
+       {
+        "id": "launcher",
+        "title": "Launch",
+        "view": "view:ryeos/ui/launcher"
+       }
+      ],
+      "capabilities": {
+       "sources": [],
+       "affordances": []
+      }
+     }
+    }
+   },
+   "views": {
+    "view:ryeos/ui/launcher": {
+     "from_bundle": "views/ryeos/ui/launcher.yaml"
+    }
+   }
+  }
+ },
+ "steps": [
+  {
+   "do": "toggle_top_status_bar"
+  }
+ ],
+ "sources": [
+  {
+   "view": "view:ryeos/thread/conversation",
+   "channel": "default",
+   "service": "service:ui/ryeos-ui/timeline/thread",
+   "params": {
+    "chain_root_id": "chain-demo",
+    "limit": "200"
+   },
+   "response": {
+    "chain_root_id": "chain-demo",
+    "highest_chain_seq": 40,
+    "items": [
+     {
+      "duration_s": 124,
+      "exchange": "x0",
+      "id": "rc:e0",
+      "item": "recap",
+      "members": [
+       {
+        "counts_as": null,
+        "exchange": "x0",
+        "id": "e0",
+        "item": "entry",
+        "parent": null,
+        "seq": [
+         1,
+         1
+        ],
+        "slots": {
+         "detail": "docs/overview.md",
+         "headline": "Read"
+        },
+        "state": null,
+        "thread": "T-7f3a",
+        "tone": null,
+        "ts": [
+         "t",
+         "t"
+        ],
+        "type": "activity"
+       },
+       {
+        "counts_as": null,
+        "exchange": "x0",
+        "id": "e1",
+        "item": "entry",
+        "parent": null,
+        "seq": [
+         1,
+         1
+        ],
+        "slots": {
+         "detail": "src/lib.rs",
+         "headline": "Read"
+        },
+        "state": null,
+        "thread": "T-7f3a",
+        "tone": null,
+        "ts": [
+         "t",
+         "t"
+        ],
+        "type": "activity"
+       }
+      ],
+      "seq": 12,
+      "work": 7
+     },
+     {
+      "counts_as": null,
+      "exchange": "x1",
+      "id": "mk1",
+      "item": "entry",
+      "parent": null,
+      "seq": [
+       1,
+       1
+      ],
+      "slots": {
+       "headline": "continued in a new thread"
+      },
+      "state": "noted",
+      "thread": "T-7f3a",
+      "tone": null,
+      "ts": [
+       "t",
+       "t"
+      ],
+      "type": "marker"
+     },
+     {
+      "counts_as": null,
+      "exchange": "x1",
+      "id": "m1",
+      "item": "entry",
+      "parent": null,
+      "seq": [
+       1,
+       1
+      ],
+      "slots": {
+       "body": "Check why the fetch of the release notes keeps failing, and fix it if the cause is ours."
+      },
+      "state": null,
+      "thread": "T-7f3a",
+      "tone": null,
+      "ts": [
+       "t",
+       "t"
+      ],
+      "type": "message"
+     },
+     {
+      "counts_as": null,
+      "exchange": "x1",
+      "id": "t1",
+      "item": "entry",
+      "parent": null,
+      "seq": [
+       1,
+       1
+      ],
+      "slots": {
+       "body": "The failure looks like a timeout rather than a missing page. I should read the retry settings before changing anything."
+      },
+      "state": null,
+      "thread": "T-7f3a",
+      "tone": null,
+      "ts": [
+       "t",
+       "t"
+      ],
+      "type": "thought"
+     },
+     {
+      "counts_as": null,
+      "exchange": "x1",
+      "id": "p1",
+      "item": "entry",
+      "parent": null,
+      "seq": [
+       1,
+       1
+      ],
+      "slots": {
+       "body": "I will fetch the page once more to see the failure myself, then read the retry settings.\nIf the cause is the timeout I will say so before I change it."
+      },
+      "state": null,
+      "thread": "T-7f3a",
+      "tone": null,
+      "ts": [
+       "t",
+       "t"
+      ],
+      "type": "prose"
+     },
+     {
+      "counts_as": null,
+      "exchange": "x1",
+      "id": "a1",
+      "item": "entry",
+      "parent": null,
+      "seq": [
+       1,
+       1
+      ],
+      "slots": {
+       "detail": "docs.example.org/releases",
+       "headline": "Fetching the release notes"
+      },
+      "state": "running",
+      "thread": "T-7f3a",
+      "tone": null,
+      "ts": [
+       "t",
+       "t"
+      ],
+      "type": "activity"
+     },
+     {
+      "counts_as": null,
+      "exchange": "x1",
+      "id": "a2",
+      "item": "entry",
+      "parent": null,
+      "seq": [
+       1,
+       1
+      ],
+      "slots": {
+       "detail": "src/net/retry.rs",
+       "headline": "Read"
+      },
+      "state": "done",
+      "thread": "T-7f3a",
+      "tone": "good",
+      "ts": [
+       "t",
+       "t"
+      ],
+      "type": "activity"
+     },
+     {
+      "counts_as": null,
+      "exchange": "x1",
+      "id": "a3",
+      "item": "entry",
+      "parent": null,
+      "seq": [
+       1,
+       1
+      ],
+      "slots": {
+       "detail": "docs.example.org/releases: timed out after 30 s",
+       "headline": "Fetch"
+      },
+      "state": "failed",
+      "thread": "T-7f3a",
+      "tone": "danger",
+      "ts": [
+       "t",
+       "t"
+      ],
+      "type": "activity"
+     },
+     {
+      "counts_as": null,
+      "exchange": "x1",
+      "id": "l1",
+      "item": "entry",
+      "parent": null,
+      "seq": [
+       1,
+       1
+      ],
+      "slots": {
+       "headline": "review",
+       "target": "T-e84f17c6"
+      },
+      "state": "completed",
+      "thread": "T-7f3a",
+      "tone": "good",
+      "ts": [
+       "t",
+       "t"
+      ],
+      "type": "link"
+     },
+     {
+      "counts_as": null,
+      "exchange": "x1",
+      "id": "k1",
+      "item": "entry",
+      "parent": null,
+      "seq": [
+       1,
+       1
+      ],
+      "slots": {
+       "accept_allowed": "true",
+       "approval_id": "approval-k1",
+       "detail": "~/.config/example/settings.yaml",
+       "headline": "Write a file outside the workspace",
+       "request_digest": "digest-k1"
+      },
+      "state": "pending",
+      "thread": "T-7f3a",
+      "tone": "warn",
+      "ts": [
+       "t",
+       "t"
+      ],
+      "type": "ask"
+     }
+    ],
+    "lane": {
+     "entry": "k1",
+     "label": "Waiting for approval"
+    },
+    "next_limit": null,
+    "older": 0,
+    "summary": {
+     "input_tokens": 184220,
+     "output_tokens": 21840,
+     "spend_usd": 1.62,
+     "status": "running",
+     "turns": 7
+    },
+    "timeline_contract": "ryeos.timeline.v1"
+   }
+  },
+  {
+   "view": "view:ryeos/threads/history",
+   "channel": "default",
+   "service": "service:ui/ryeos-ui/threads/list",
+   "params": {
+    "active": "",
+    "limit": 200,
+    "project": "current",
+    "project_path": "@session:project_root",
+    "sort": "watch"
+   },
+   "response": {
+    "coverage": {
+     "reason": "projection_locator_not_exhaustive",
+     "state": "observed"
+    },
+    "threads": [
+     {
+      "created_at": "2026-11-12T09:12:00Z",
+      "item_ref": "directive:ryeos/ops/base",
+      "kind": "directive_run",
+      "project": {
+       "name": "ryeos-next"
+      },
+      "status": "running",
+      "thread_id": "T-7f3a"
+     },
+     {
+      "created_at": "2026-11-12T09:05:00Z",
+      "item_ref": "graph:ryeos/review/loop",
+      "kind": "graph_run",
+      "project": {
+       "name": "ryeos-next"
+      },
+      "status": "running",
+      "thread_id": "T-9c41"
+     },
+     {
+      "created_at": "2026-11-12T08:58:00Z",
+      "item_ref": "worker:claude-code",
+      "kind": "worker_run",
+      "project": {
+       "name": "ryeos-next"
+      },
+      "status": "created",
+      "thread_id": "T-3b82"
+     },
+     {
+      "created_at": "2026-11-12T08:40:00Z",
+      "item_ref": "tool:ryeos/dev/gate",
+      "kind": "tool_run",
+      "project": {
+       "name": "ryeos-next"
+      },
+      "status": "completed",
+      "thread_id": "T-61c0"
+     },
+     {
+      "created_at": "2026-11-12T07:03:00Z",
+      "item_ref": "directive:ryeos/review/diff",
+      "kind": "directive_run",
+      "project": {
+       "name": "ryeos-next"
+      },
+      "status": "failed",
+      "thread_id": "T-5d21"
+     },
+     {
+      "created_at": "2026-11-12T06:30:00Z",
+      "item_ref": "directive:ryeos/ops/plan",
+      "kind": "directive_run",
+      "project": {
+       "name": "ryeos-next"
+      },
+      "status": "completed",
+      "thread_id": "T-2e07"
+     },
+     {
+      "created_at": "2026-11-12T03:00:00Z",
+      "item_ref": "schedule:nightly-check",
+      "kind": "schedule_run",
+      "project": {
+       "name": "ryeos-next"
+      },
+      "status": "completed",
+      "thread_id": "T-18d9"
+     },
+     {
+      "created_at": "2026-11-11T22:12:00Z",
+      "item_ref": "worker:codex",
+      "kind": "worker_run",
+      "project": {
+       "name": "ryeos-next"
+      },
+      "status": "cancelled",
+      "thread_id": "T-0a55"
+     }
+    ]
+   }
+  },
+  {
+   "view": "view:ryeos/threads/detail",
+   "channel": "detail",
+   "service": "service:ui/ryeos-ui/thread/inspect",
+   "params": {
+    "thread_id": "T-7f3a"
+   },
+   "response": {
+    "artifacts": [],
+    "evidence_coverage": [
+     {
+      "reason": "signed, available",
+      "state": "available",
+      "subject": "thread record"
+     },
+     {
+      "reason": "available, settled",
+      "state": "available",
+      "subject": "usage projection"
+     },
+     {
+      "reason": "unavailable: not yet signed",
+      "state": "unavailable",
+      "subject": "audit record"
+     }
+    ],
+    "execution_coverage": [
+     {
+      "reason": "no node-signed audit record",
+      "state": "unavailable"
+     }
+    ],
+    "execution_meta": [
+     {
+      "label": "executor",
+      "value": "directive-runtime"
+     },
+     {
+      "label": "requested by",
+      "value": "fixture-operator"
+     },
+     {
+      "label": "started",
+      "value": "09:12"
+     }
+    ],
+    "outcome_coverage": [
+     {
+      "reason": "thread still running",
+      "state": "unavailable",
+      "thread_status": "running"
+     }
+    ],
+    "result": {
+     "error": null,
+     "outcome_code": "none yet"
+    },
+    "thread": {
+     "current_site_id": "site:fixture",
+     "item_ref": "directive:ryeos/ops/base",
+     "project_root": "/home/fixture/ryeos-next",
+     "status": "running"
+    },
+    "usage": [
+     {
+      "label": "tokens in",
+      "value": "184,220"
+     },
+     {
+      "label": "tokens out",
+      "value": "21,840"
+     },
+     {
+      "label": "cost",
+      "value": "$1.62"
+     },
+     {
+      "label": "turns",
+      "value": "7"
+     }
+    ]
+   }
+  }
+ ]
+}
