@@ -1,6 +1,63 @@
 //! Thread runtime files, runtime snapshot staging and abandoned-package discard.
 use super::*;
 
+/// Name prefix of a private guest package directory. Must equal the literal
+/// `prepare_private_guest_package` passes to `create_unique_child`; the
+/// `guest_namespace_prefixes_match_the_producers` test pins that.
+pub(super) const GUEST_PACKAGE_PREFIX: &str = "guest-package";
+/// Name prefix of a staged guest-input generation. Must equal the literal
+/// `stage_guest_package` passes to `create_unique_child` (same test).
+pub(super) const GUEST_STAGE_PREFIX: &str = "guest-input";
+
+/// The closed set of children guest producers create in the external guest
+/// package namespace.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum GuestNamespaceEntry {
+    /// `guest-package.<pid>.<nonce>`: a directory holding one `payload` file.
+    Package,
+    /// `guest-input.<pid>.<nonce>`: a locked, staged package tree.
+    Stage,
+}
+
+impl GuestNamespaceEntry {
+    /// Classify by the exact `<prefix>.<u32>.<u64>` shape `create_unique_child`
+    /// produces, with canonical decimals.
+    pub(super) fn classify(name: &str) -> Option<Self> {
+        let mut parts = name.split('.');
+        let (Some(prefix), Some(pid), Some(nonce), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return None;
+        };
+        let canonical = pid
+            .parse::<u32>()
+            .ok()
+            .is_some_and(|value| value != 0 && value.to_string() == pid)
+            && nonce
+                .parse::<u64>()
+                .ok()
+                .is_some_and(|value| value.to_string() == nonce);
+        if !canonical {
+            return None;
+        }
+        match prefix {
+            GUEST_PACKAGE_PREFIX => Some(Self::Package),
+            GUEST_STAGE_PREFIX => Some(Self::Stage),
+            _ => None,
+        }
+    }
+}
+
+/// Removal budget for one staged generation: the same numbers as
+/// `ryeos_external_execution::guest_staging::staging_budget()`, which is
+/// `MAX_GUEST_STAGING_ENTRIES + 1` entries at depth 32.
+fn staging_budget() -> lillux::DirectoryTraversalBudget {
+    lillux::DirectoryTraversalBudget::new(
+        ryeos_external_execution_contract::staging_package::MAX_GUEST_STAGING_ENTRIES + 1,
+        32,
+    )
+}
+
 pub(super) fn discard_abandoned_external_guest_packages(
     runtime_state: &lillux::PinnedDirectory,
 ) -> Result<()> {
@@ -19,39 +76,54 @@ pub(super) fn discard_abandoned_external_guest_packages(
             return Ok(());
         }
         for name in names {
-            let owned_name = name.to_str().context("non-UTF8 guest package generation")?;
-            let mut components = owned_name.split('.');
-            anyhow::ensure!(
-                components.next() == Some("guest-package")
-                    && components
-                        .next()
-                        .and_then(|value| value.parse::<u32>().ok())
-                        .is_some()
-                    && components
-                        .next()
-                        .and_then(|value| value.parse::<u64>().ok())
-                        .is_some()
-                    && components.next().is_none(),
-                "unexpected entry in external guest package namespace"
-            );
+            let owned_name = name
+                .to_str()
+                .with_context(|| format!("non-UTF8 entry {name:?} in external guest package namespace; recognised forms are `{GUEST_PACKAGE_PREFIX}.<pid>.<nonce>` and `{GUEST_STAGE_PREFIX}.<pid>.<nonce>`"))?;
+            let kind = GuestNamespaceEntry::classify(owned_name).with_context(|| {
+                format!(
+                    "unexpected entry `{owned_name}` in external guest package namespace; recognised forms are `{GUEST_PACKAGE_PREFIX}.<pid>.<nonce>` and `{GUEST_STAGE_PREFIX}.<pid>.<nonce>`"
+                )
+            })?;
             let child = parent
                 .open_child_directory(&name)?
                 .context("abandoned guest package is not a directory")?;
             child.require_owner_private_directory()?;
-            anyhow::ensure!(
-                child
-                    .entry_names_bounded(2)?
-                    .iter()
-                    .all(|entry| entry == OsStr::new("payload")),
-                "abandoned guest package has an unexpected entry"
-            );
-            child.remove_contents_recursive_bounded(lillux::DirectoryTraversalBudget::new(1, 1))?;
-            anyhow::ensure!(
-                parent
-                    .remove_empty_child_if_same(&name, &child)
-                    .map(|receipt| receipt.is_some())?,
-                "abandoned guest package changed during recovery"
-            );
+            match kind {
+                GuestNamespaceEntry::Package => {
+                    anyhow::ensure!(
+                        child
+                            .entry_names_bounded(2)?
+                            .iter()
+                            .all(|entry| entry == OsStr::new("payload")),
+                        "abandoned guest package has an unexpected entry"
+                    );
+                    child.remove_contents_recursive_bounded(
+                        lillux::DirectoryTraversalBudget::new(1, 1),
+                    )?;
+                    anyhow::ensure!(
+                        parent
+                            .remove_empty_child_if_same(&name, &child)
+                            .map(|receipt| receipt.is_some())?,
+                        "abandoned guest package changed during recovery"
+                    );
+                }
+                GuestNamespaceEntry::Stage => {
+                    // A live stager holds this lock for the generation's whole
+                    // life; only a dead owner's generation can be taken.
+                    let _owner = child.try_lock_exclusive()?.with_context(|| {
+                        format!(
+                            "guest stage generation `{owned_name}` has a live owner; refusing to remove a contested generation"
+                        )
+                    })?;
+                    child.remove_contents_recursive_bounded(staging_budget())?;
+                    anyhow::ensure!(
+                        parent
+                            .remove_empty_child_if_same(&name, &child)
+                            .map(|receipt| receipt.is_some())?,
+                        "abandoned guest stage generation changed during recovery"
+                    );
+                }
+            }
         }
     }
     anyhow::ensure!(
