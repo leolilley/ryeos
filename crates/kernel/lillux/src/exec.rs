@@ -4107,6 +4107,9 @@ impl DrainStop {
         unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
     }
 
+    // Compile-only shim for targets the platform support document does not
+    // list (the node requires Linux pidfds and eventfds). It is not a runtime
+    // fallback: a supported host never reaches it.
     #[cfg(not(target_os = "linux"))]
     fn wait_readable<T>(&self, _source: &T) {
         thread::sleep(CAPTURE_POLL_INTERVAL);
@@ -4153,6 +4156,9 @@ impl WrapperExitWatch {
             // which re-observes every condition.
             unsafe { libc::poll(&mut poll, 1, millis) };
         }
+        // Compile-only shim for targets the platform support document does not
+        // list (the node requires Linux pidfds). It is not a runtime fallback:
+        // a supported host never reaches it.
         #[cfg(not(target_os = "linux"))]
         thread::sleep(bound);
     }
@@ -6635,6 +6641,10 @@ pub struct RunningProcess {
     stderr_capture: SharedCapture,
     stdout_reader_taken: bool,
     drain_stop: Arc<DrainStop>,
+    /// Exit watch on the wrapper, opened at spawn so descriptor exhaustion is
+    /// a spawn failure with the ordinary cleanup, not a failed wait on a tool
+    /// that already ran. Consumed by the wait.
+    exit_watch: Option<WrapperExitWatch>,
     output_overflow_rx: std::sync::mpsc::Receiver<CapturedStream>,
     start: Instant,
     timeout: f64,
@@ -8523,9 +8533,10 @@ impl RunningProcess {
             };
         }
         let timeout = request_timeout_duration(self.timeout);
-        let exit_watch = match WrapperExitWatch::open(self.child.id()) {
-            Ok(watch) => watch,
-            Err(error) => return self.wait_error_result(std::io::Error::other(error)),
+        let Some(exit_watch) = self.exit_watch.take() else {
+            return self.wait_error_result(std::io::Error::other(
+                "wrapper exit watch was already consumed",
+            ));
         };
 
         loop {
@@ -10385,6 +10396,7 @@ fn lib_spawn_with_stdio(
         stderr_capture,
         stdout_reader_taken: false,
         drain_stop,
+        exit_watch: None,
         output_overflow_rx,
         start,
         timeout,
@@ -10394,6 +10406,15 @@ fn lib_spawn_with_stdio(
         occupancy_watchdog: None,
         groups_terminated: false,
         wrapper_reaped: false,
+    };
+    running.exit_watch = match WrapperExitWatch::open(wrapper_pid) {
+        Ok(watch) => Some(watch),
+        Err(error) => {
+            return Err(running.into_spawn_failure(spawn_failure(
+                start,
+                format!("Failed to spawn: open wrapper exit watch: {error}"),
+            )));
+        }
     };
     if inherit_stdio {
         running.stdout_capture.state.lock().unwrap().closed = true;

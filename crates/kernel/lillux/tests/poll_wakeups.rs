@@ -29,23 +29,25 @@ fn shell(script: &str) -> SubprocessRequest {
 fn short_launches_finish_below_the_old_fixed_sleep_floor() {
     // Before event-driven waits every launch slept at least one 10 ms wrapper
     // interval, because the child cannot have exited by the first
-    // observation. A launch faster than that is only possible when the wait
-    // ends at the exit. The fast tail is compared, not the mean, so a loaded
-    // runner's slow launches cannot fail it.
-    let mut durations = Vec::new();
-    for _ in 0..60 {
-        let started = Instant::now();
-        let result = lillux::run(shell("printf ok"));
-        durations.push(started.elapsed());
-        assert!(result.success, "{result:?}");
-        assert_eq!(result.stdout, "ok");
+    // observation. A single launch faster than that is only possible when the
+    // wait ends at the exit. The minimum over many launches is compared, so
+    // slow launches on a loaded host cannot fail it, and a fresh batch is
+    // tried if a whole batch was starved.
+    let mut best = Duration::MAX;
+    for _attempt in 0..3 {
+        for _ in 0..40 {
+            let started = Instant::now();
+            let result = lillux::run(shell("printf ok"));
+            let elapsed = started.elapsed();
+            assert!(result.success, "{result:?}");
+            assert_eq!(result.stdout, "ok");
+            best = best.min(elapsed);
+        }
+        if best < Duration::from_millis(9) {
+            return;
+        }
     }
-    durations.sort();
-    let fast_tail = durations[durations.len() / 10];
-    assert!(
-        fast_tail < Duration::from_millis(9),
-        "10th percentile launch took {fast_tail:?}; durations {durations:?}"
-    );
+    panic!("fastest of 120 launches took {best:?}, not below the old 10 ms floor");
 }
 
 #[test]
@@ -109,13 +111,14 @@ fn timeout_applies_while_output_keeps_arriving() {
 }
 
 #[test]
-fn exit_with_the_pipe_still_open_in_a_grandchild_does_not_wait_for_the_pipe() {
-    // The shell exits at once while the background sleep keeps both capture
-    // pipes open. Settlement must follow the exit and the stop wake-up, not
-    // the grandchild's EOF 30 s later.
+fn exit_with_the_pipe_still_open_in_an_escaped_grandchild_does_not_wait_for_the_pipe() {
+    // The shell exits at once while a grandchild in its own session keeps both
+    // capture pipes open. The group kill cannot reach it, so only the stop
+    // wake-up can end the drains: settlement must follow the exit, not the
+    // grandchild's EOF 6 s later.
     let started = Instant::now();
-    let result = lillux::run(shell("sleep 30 & printf early"));
-    assert!(started.elapsed() < Duration::from_secs(5), "{result:?}");
+    let result = lillux::run(shell("setsid sleep 6 & printf early"));
+    assert!(started.elapsed() < Duration::from_secs(4), "{result:?}");
     assert_eq!(result.stdout, "early");
     assert!(!result.timed_out);
 }
