@@ -94,6 +94,7 @@ pub mod push_head;
 pub(crate) mod qualification_project_context;
 pub mod rebuild;
 pub mod records;
+pub mod revisions;
 pub mod remote_admit;
 pub mod remote_admit_principal;
 pub mod remote_authorize;
@@ -305,6 +306,8 @@ pub const ALL: &[ServiceDescriptor] = &[
     records::GET_DESCRIPTOR,
     records::LIST_DESCRIPTOR,
     records::KINDS_DESCRIPTOR,
+    revisions::LIST_DESCRIPTOR,
+    revisions::GET_DESCRIPTOR,
     trust_list::SHOW_DESCRIPTOR,
     bundle_remove::DESCRIPTOR,
     bundle_catalog_publish::DESCRIPTOR,

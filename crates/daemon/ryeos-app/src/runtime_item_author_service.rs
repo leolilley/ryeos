@@ -20,7 +20,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use ryeos_bundle::runtime_authority::{item_author_cap, validate_bare_id_pattern};
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::identity::authored_provenance::PROVENANCE_MARKER;
-use ryeos_engine::kind_registry::validate_metadata_anchoring;
+use ryeos_engine::kind_registry::{RuntimeAuthoring, validate_metadata_anchoring};
+use ryeos_node_runtime::item_revision::{self, ActorRole, ChainItem, ChainRefusal, RevisionHeads};
 use ryeos_runtime::authorizer::{AuthorizationPolicy, Authorizer};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -34,12 +35,15 @@ use ryeos_node_runtime::identity::NodeIdentity;
 pub struct RuntimeAuthorItemParams {
     pub thread_id: String,
     pub item_ref: String,
-    pub content: String,
+    /// The unsigned item body. Required for `create` and `upsert`; `remove`
+    /// takes none.
+    #[serde(default)]
+    pub content: Option<String>,
     #[serde(default)]
     pub mode: AuthorMode,
     #[serde(default)]
     pub format_ext: Option<String>,
-    /// Compare-and-swap guard for `mode: upsert`. An upsert over an existing
+    /// Compare-and-swap guard for `mode: upsert` and `mode: remove`. An upsert over an existing
     /// item requires it: the upsert commits only if the incumbent item's
     /// authored `content_digest` equals this value, and otherwise fails with a
     /// conflict carrying the incumbent's provenance. Absent is allowed only
@@ -87,6 +91,38 @@ pub enum AuthorItemRefusal {
     )]
     AuthoringKeyUnavailable { path: String, reason: String },
     #[error(
+        "author_item refused: remove of the existing item `{item_ref}` at {path} requires \
+         expected_digest; resend with expected_digest `{incumbent_digest}` (the incumbent's \
+         content_digest) to remove it"
+    )]
+    RemoveRequiresExpectedDigest {
+        item_ref: String,
+        path: String,
+        incumbent_digest: String,
+    },
+    #[error(
+        "author_item refused: `{item_ref}` at {path} has no runtime provenance (content_digest: \
+         none, not runtime-authored), so author_item cannot remove it; an operator-authored item \
+         is removed with `ryeos item remove`"
+    )]
+    RemoveOverUnauthoredItem { item_ref: String, path: String },
+    #[error(
+        "author_item refused: items of kind `{kind}` are not written through the authoring \
+         callback"
+    )]
+    KindNotRuntimeAuthorable { kind: String },
+    #[error("author_item refused: {0}")]
+    RevisionChain(#[source] ChainRefusal),
+    #[error(
+        "author_item refused: `{item_ref}` is {bytes} bytes signed; a revision record carries \
+         at most {limit} bytes of item"
+    )]
+    ItemTooLargeForRevision {
+        item_ref: String,
+        bytes: usize,
+        limit: usize,
+    },
+    #[error(
         "author_item refused: the authored item extends the aliased parent `{parent}`, whose \
          capabilities cannot be bounded; author the canonical ref (`kind:path`) of the parent \
          instead of an `@alias`"
@@ -98,9 +134,13 @@ impl AuthorItemRefusal {
     /// Stable code for the callback error envelope.
     pub fn code(&self) -> &'static str {
         match self {
-            Self::UpsertRequiresExpectedDigest { .. } | Self::UpsertOverUnauthoredItem { .. } => {
-                "author_item_expected_digest_required"
-            }
+            Self::UpsertRequiresExpectedDigest { .. }
+            | Self::UpsertOverUnauthoredItem { .. }
+            | Self::RemoveRequiresExpectedDigest { .. } => "author_item_expected_digest_required",
+            Self::RemoveOverUnauthoredItem { .. } => "author_item_remove_not_runtime_authored",
+            Self::KindNotRuntimeAuthorable { .. } => "author_item_kind_not_authorable",
+            Self::RevisionChain(refusal) => refusal.code(),
+            Self::ItemTooLargeForRevision { .. } => "author_item_too_large",
             Self::AuthoredCapabilityNotCovered { .. } => "authored_capability_not_covered",
             Self::AuthoringKeyUnavailable { .. } => "author_item_authoring_key_unavailable",
             Self::AliasedExtendsParent { .. } => "author_item_aliased_extends_parent",
@@ -114,6 +154,8 @@ pub enum AuthorMode {
     #[default]
     Create,
     Upsert,
+    /// Remove a runtime-authored item, guarded by `expected_digest`.
+    Remove,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -124,6 +166,12 @@ pub struct RuntimeAuthorItemResponse {
     pub signer_fingerprint: String,
     pub content_digest: String,
     pub required_capability: String,
+    /// Position of this change in the item's revision chain.
+    pub revision: u64,
+    /// Digest of the revision record this change wrote.
+    pub revision_digest: String,
+    /// Digest of the record before it; absent for the first.
+    pub previous_digest: Option<String>,
 }
 
 pub struct RuntimeItemAuthorService;
@@ -147,6 +195,7 @@ impl RuntimeItemAuthorService {
         authorizer: &Authorizer,
         cap: &CallbackCapability,
         thread_auth: &ThreadAuthState,
+        heads: &RevisionHeads,
         params: RuntimeAuthorItemParams,
     ) -> Result<RuntimeAuthorItemResponse> {
         // Candidate integration and live publication are separate authorities.
@@ -172,7 +221,13 @@ impl RuntimeItemAuthorService {
                     )?
             }
         };
-        if params.content.contains(PROVENANCE_MARKER) {
+        let content: &str = match (params.mode, params.content.as_deref()) {
+            (AuthorMode::Remove, None) => "",
+            (AuthorMode::Remove, Some(_)) => bail!("mode `remove` takes no content"),
+            (_, Some(content)) => content,
+            (_, None) => bail!("content is required for mode `create` and `upsert`"),
+        };
+        if content.contains(PROVENANCE_MARKER) {
             bail!("runtime-authored item content must not contain `{PROVENANCE_MARKER}`");
         }
 
@@ -183,6 +238,19 @@ impl RuntimeItemAuthorService {
         }
         validate_bare_id_pattern("item author target bare_id", &canonical.bare_id)
             .map_err(anyhow::Error::msg)?;
+
+        if cap
+            .provenance
+            .request_engine()
+            .kinds
+            .get(&canonical.kind)
+            .is_some_and(|schema| schema.runtime_authoring == RuntimeAuthoring::Refused)
+        {
+            return Err(AuthorItemRefusal::KindNotRuntimeAuthorable {
+                kind: canonical.kind.clone(),
+            }
+            .into());
+        }
 
         let required_cap = item_author_cap(&canonical.kind, &canonical.bare_id);
         authorizer
@@ -227,6 +295,10 @@ impl RuntimeItemAuthorService {
             .join(&canonical.bare_id);
         let target_lock = author_target_lock(&author_lock_key);
         let _commit_guard = target_lock.lock().unwrap_or_else(|e| e.into_inner());
+        // The project's own lock orders this writer against the operator's
+        // client-side signing and removal, which record revisions from their
+        // own process.
+        let _project_lock = lock_project_for_revision(project_root)?;
 
         let (ext, target_name, target) = resolve_author_target(
             kind_schema,
@@ -242,8 +314,31 @@ impl RuntimeItemAuthorService {
                 canonical.kind
             )
         })?;
+        let revision_item = ChainItem::parse(&canonical.to_string())?;
+        if params.mode == AuthorMode::Remove {
+            return Self::remove(
+                authoring,
+                engine,
+                heads,
+                RemovalTarget {
+                    project_root,
+                    canonical: &canonical,
+                    item: &revision_item,
+                    parent: &canonical_parent,
+                    name: &target_name,
+                    path: &target,
+                    ext: &ext,
+                    signature_prefix: &source_format.signature.prefix,
+                    signature_suffix: source_format.signature.suffix.as_deref(),
+                    required_cap,
+                },
+                cap,
+                thread_auth,
+                &params,
+            );
+        }
         if contains_signature_line(
-            &params.content,
+            content,
             &source_format.signature.prefix,
             source_format.signature.suffix.as_deref(),
         ) {
@@ -256,7 +351,7 @@ impl RuntimeItemAuthorService {
             .parser_dispatcher
             .dispatch(
                 &source_format.parser,
-                &params.content,
+                content,
                 Some(&target),
                 &source_format.signature,
             )
@@ -281,7 +376,7 @@ impl RuntimeItemAuthorService {
             &params.thread_id,
         )?;
 
-        let content_digest = lillux::cas::sha256_hex(params.content.as_bytes());
+        let content_digest = lillux::cas::sha256_hex(content.as_bytes());
         let provenance = json!({
             "authored_by": "runtime",
             "authored_at": lillux::time::iso8601_now(),
@@ -297,7 +392,7 @@ impl RuntimeItemAuthorService {
             "content_digest": content_digest.clone(),
         });
         let body = append_provenance_comment(
-            &params.content,
+            content,
             &source_format.signature.prefix,
             source_format.signature.suffix.as_deref(),
             &serde_json::to_string(&provenance)?,
@@ -308,6 +403,14 @@ impl RuntimeItemAuthorService {
             &source_format.signature.prefix,
             source_format.signature.suffix.as_deref(),
         );
+        if signed.len() > item_revision::MAX_INLINE_CONTENT_BYTES {
+            return Err(AuthorItemRefusal::ItemTooLargeForRevision {
+                item_ref: canonical.to_string(),
+                bytes: signed.len(),
+                limit: item_revision::MAX_INLINE_CONTENT_BYTES,
+            }
+            .into());
+        }
         let final_parsed = engine
             .parser_dispatcher
             .dispatch(
@@ -357,6 +460,8 @@ impl RuntimeItemAuthorService {
             }
         }
 
+        let before = read_incumbent_bytes(incumbent.as_mut(), &target)?;
+        check_revision_chain(project_root, &revision_item, engine, heads)?;
         write_atomic(
             &canonical_parent.directory,
             &target_name,
@@ -364,6 +469,16 @@ impl RuntimeItemAuthorService {
             &signed,
             params.mode,
             incumbent.as_ref(),
+        )?;
+        let recorded = record_revision(
+            authoring,
+            heads,
+            project_root,
+            &revision_item,
+            &ext,
+            before.as_deref(),
+            Some(&signed),
+            revision_provenance(&provenance),
         )?;
 
         Ok(RuntimeAuthorItemResponse {
@@ -373,7 +488,285 @@ impl RuntimeItemAuthorService {
             signer_fingerprint: authoring.fingerprint().to_string(),
             content_digest,
             required_capability: required_cap,
+            revision: recorded.seq,
+            revision_digest: recorded.digest,
+            previous_digest: recorded.previous_digest,
         })
+    }
+
+    /// Remove one runtime-authored item: the file goes, and a tombstone
+    /// revision is recorded. The removal obeys the upsert rule: it needs the
+    /// incumbent's `content_digest` and refuses an incumbent that carries no
+    /// runtime provenance.
+    fn remove(
+        authoring: &NodeIdentity,
+        engine: &ryeos_engine::engine::Engine,
+        heads: &RevisionHeads,
+        target: RemovalTarget<'_>,
+        cap: &CallbackCapability,
+        thread_auth: &ThreadAuthState,
+        params: &RuntimeAuthorItemParams,
+    ) -> Result<RuntimeAuthorItemResponse> {
+        let item_ref = target.canonical.to_string();
+        let mut incumbent = target
+            .parent
+            .directory
+            .open_regular(target.name, false)
+            .with_context(|| format!("open incumbent authored item {}", target.path.display()))?;
+        let state = read_incumbent_state_from_file(
+            incumbent.as_mut(),
+            target.path,
+            target.signature_prefix,
+            target.signature_suffix,
+        )?;
+        let incumbent_digest = match state {
+            IncumbentState::Missing => bail!(
+                "author_item conflict: nothing to remove: no item exists at {}",
+                target.path.display()
+            ),
+            IncumbentState::Present {
+                content_digest: None,
+                ..
+            } => {
+                return Err(AuthorItemRefusal::RemoveOverUnauthoredItem {
+                    item_ref,
+                    path: target.path.display().to_string(),
+                }
+                .into());
+            }
+            IncumbentState::Present {
+                content_digest: Some(digest),
+                ..
+            } => digest,
+        };
+        match params.expected_digest.as_deref() {
+            None => {
+                return Err(AuthorItemRefusal::RemoveRequiresExpectedDigest {
+                    item_ref,
+                    path: target.path.display().to_string(),
+                    incumbent_digest,
+                }
+                .into());
+            }
+            Some(expected) => enforce_expected_digest_from_file(
+                incumbent.as_mut(),
+                target.path,
+                expected,
+                target.signature_prefix,
+                target.signature_suffix,
+            )?,
+        }
+        let before = read_incumbent_bytes(incumbent.as_mut(), target.path)?
+            .ok_or_else(|| anyhow!("incumbent {} vanished", target.path.display()))?;
+        check_revision_chain(target.project_root, target.item, engine, heads)?;
+        remove_atomic(
+            &target.parent.directory,
+            target.name,
+            target.path,
+            incumbent
+                .as_ref()
+                .ok_or_else(|| anyhow!("incumbent {} vanished", target.path.display()))?,
+            &before,
+        )?;
+        let provenance = json!({
+            "authored_by": "runtime",
+            "thread_id": params.thread_id.clone(),
+            "invocation_id": cap.invocation_id.clone(),
+            "parent_item_ref": cap.item_ref.clone(),
+            "acting_principal": thread_auth.acting_principal.clone(),
+            "effective_bundle_id": cap.effective_bundle_id.clone(),
+            "authoring_capability": target.required_cap.clone(),
+            "action": "remove",
+        });
+        let recorded = record_revision(
+            authoring,
+            heads,
+            target.project_root,
+            target.item,
+            target.ext,
+            Some(&before),
+            None,
+            revision_provenance(&provenance),
+        )?;
+        Ok(RuntimeAuthorItemResponse {
+            item_ref: target.canonical.to_string(),
+            path: target.path.display().to_string(),
+            mode: AuthorMode::Remove,
+            signer_fingerprint: authoring.fingerprint().to_string(),
+            content_digest: incumbent_digest,
+            required_capability: target.required_cap,
+            revision: recorded.seq,
+            revision_digest: recorded.digest,
+            previous_digest: recorded.previous_digest,
+        })
+    }
+}
+
+/// What a removal acts on.
+struct RemovalTarget<'a> {
+    project_root: &'a Path,
+    canonical: &'a CanonicalRef,
+    item: &'a ChainItem,
+    parent: &'a AuthorDirectory,
+    name: &'a OsStr,
+    path: &'a Path,
+    ext: &'a str,
+    signature_prefix: &'a str,
+    signature_suffix: Option<&'a str>,
+    required_cap: String,
+}
+
+/// How long a writer waits for the project's own lock.
+const PROJECT_LOCK_WAIT: lillux::time::Duration = lillux::time::Duration::from_secs(30);
+
+fn lock_project_for_revision(project_root: &Path) -> Result<lillux::PinnedDirectoryLock> {
+    let project = lillux::PinnedDirectory::open(project_root)?.ok_or_else(|| {
+        anyhow!(
+            "authorized project root disappeared: {}",
+            project_root.display()
+        )
+    })?;
+    project
+        .lock_exclusive_with_timeout(PROJECT_LOCK_WAIT)
+        .with_context(|| {
+            format!(
+                "wait for the project lock before recording a revision in {}",
+                project_root.display()
+            )
+        })
+}
+
+/// The incumbent file's bytes, bounded; `None` when there is no incumbent.
+fn read_incumbent_bytes(
+    incumbent: Option<&mut std::fs::File>,
+    target: &Path,
+) -> Result<Option<Vec<u8>>> {
+    let Some(incumbent) = incumbent else {
+        return Ok(None);
+    };
+    incumbent
+        .rewind()
+        .with_context(|| format!("seek incumbent item {}", target.display()))?;
+    let mut bytes = Vec::new();
+    incumbent
+        .take(ryeos_engine::item_resolution::MAX_ITEM_SOURCE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read incumbent item {}", target.display()))?;
+    if bytes.len() as u64 > ryeos_engine::item_resolution::MAX_ITEM_SOURCE_BYTES {
+        bail!(
+            "incumbent item {} exceeds the item source byte limit",
+            target.display()
+        );
+    }
+    Ok(Some(bytes))
+}
+
+/// Refuse to extend a chain the project has damaged or truncated.
+fn check_revision_chain(
+    project_root: &Path,
+    item: &ChainItem,
+    engine: &ryeos_engine::engine::Engine,
+    heads: &RevisionHeads,
+) -> Result<()> {
+    item_revision::check_before_append(project_root, item, &engine.node_trust_store, heads).map_err(
+        |error| match error.downcast::<ChainRefusal>() {
+            Ok(refusal) => anyhow::Error::new(AuthorItemRefusal::RevisionChain(refusal)),
+            Err(other) => other.context("verify the item's revision chain before extending it"),
+        },
+    )
+}
+
+/// Record one change in the item's chain, signed by the authoring key, and
+/// have the node attest the new head. The file already changed: a failure
+/// here leaves an unrecorded change, which the chain's reader reports.
+#[allow(clippy::too_many_arguments)]
+fn record_revision(
+    authoring: &NodeIdentity,
+    heads: &RevisionHeads,
+    project_root: &Path,
+    item: &ChainItem,
+    ext: &str,
+    before: Option<&[u8]>,
+    after: Option<&str>,
+    provenance: std::collections::BTreeMap<String, String>,
+) -> Result<item_revision::Recorded> {
+    let recorded = item_revision::append(
+        project_root,
+        authoring.signing_key(),
+        ActorRole::Authoring,
+        item_revision::Change {
+            item,
+            file_ext: ext,
+            before,
+            after,
+            provenance,
+        },
+    )
+    .with_context(|| {
+        format!(
+            "the item `{}` changed but its revision could not be recorded; the change reads as \
+             unrecorded until it is",
+            item.item_ref()
+        )
+    })?;
+    item_revision::attest(heads, project_root, item, &recorded).with_context(|| {
+        format!(
+            "revision {} of `{}` was recorded but the node could not attest it",
+            recorded.seq,
+            item.item_ref()
+        )
+    })?;
+    Ok(recorded)
+}
+
+/// The string-valued entries of an authored-provenance object.
+fn revision_provenance(
+    provenance: &serde_json::Value,
+) -> std::collections::BTreeMap<String, String> {
+    provenance
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(key, value)| value.as_str().map(|text| (key.clone(), text.to_owned())))
+        .collect()
+}
+
+/// Remove the incumbent file if it is still exactly the bytes read.
+fn remove_atomic(
+    parent: &lillux::secure_fs::PinnedDirectory,
+    target_name: &OsStr,
+    target: &Path,
+    incumbent: &std::fs::File,
+    expected_bytes: &[u8],
+) -> Result<()> {
+    let observation = lillux::observe_open_regular_file(incumbent)?;
+    let expected_bytes = expected_bytes.to_vec();
+    parent.ensure_path_binding()?;
+    let result = parent.remove_if_same_validated_atomic(target_name, incumbent, |current| {
+        let current_observation = lillux::observe_open_regular_file(current)?;
+        if !current_observation.matches_quarantined_incumbent(&observation) {
+            bail!("runtime-authored item metadata changed before removal");
+        }
+        let current = current.try_clone()?;
+        let bytes = lillux::read_open_regular_file_stable_bounded(
+            &current,
+            &current_observation,
+            ryeos_engine::item_resolution::MAX_ITEM_SOURCE_BYTES,
+        )?;
+        if bytes != expected_bytes {
+            bail!("runtime-authored item bytes changed before removal");
+        }
+        Ok(())
+    });
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) if error.namespace_committed() => parent.sync().map_err(|sync_error| {
+            anyhow!(
+                "runtime-authored item was removed, but durability remains uncertain after retrying the parent barrier; do not repeat the mutation blindly: {error}; {sync_error:#}"
+            )
+        }),
+        Err(error) => Err(anyhow!(error))
+            .with_context(|| format!("atomically remove authored item {}", target.display())),
     }
 }
 
@@ -609,6 +1002,26 @@ fn resolve_author_target(
                 canonical_parent.path.join(name),
             ))
         }
+        AuthorMode::Remove => match (existing.as_slice(), requested_ext) {
+            ([], _) => bail!(
+                "nothing to remove: no item exists for canonical ref {}",
+                canonical
+            ),
+            ([item], requested) => match requested {
+                Some(ext) if item.ext != ext => bail!(
+                    "refusing to remove: requested `{}` but the existing item uses `{}` at {}",
+                    ext,
+                    item.ext,
+                    item.path.display()
+                ),
+                _ => Ok((item.ext.clone(), item.name.clone(), item.path.clone())),
+            },
+            (_, _) => bail!(
+                "ambiguous duplicate files for canonical ref {}: {}",
+                canonical,
+                existing_paths(&existing)
+            ),
+        },
         AuthorMode::Upsert => match requested_ext {
             Some(ext) => {
                 if let Some(other) = existing.iter().find(|item| item.ext != ext) {

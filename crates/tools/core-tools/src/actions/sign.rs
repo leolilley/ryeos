@@ -327,6 +327,7 @@ fn sign_target_descriptors(
     let kind_schema = kinds
         .get(&target.kind)
         .ok_or_else(|| anyhow!("unknown kind `{}` — no kind schema registered", target.kind))?;
+    crate::actions::revision::refuse_revision_kind(&target.kind)?;
 
     let kind_dir = source_kind_dir(kind_schema, source, project_path)?;
     let ai_root = source_ai_root(source, project_path)?;
@@ -422,6 +423,7 @@ fn sign_target_descriptors(
                 warnings,
                 executor_id,
                 resulting_content_digest,
+                content_before,
             }) => {
                 if let Some(executor_id) = executor_id {
                     pending_source_units.push(PendingProjectSourceUnit {
@@ -433,6 +435,24 @@ fn sign_target_descriptors(
                     });
                 }
                 let item_was_signed = matches!(outcome, SignOutcome::Signed { .. });
+                if item_was_signed
+                    && let Err(error) = record_signed_revision(
+                        project_path,
+                        signing_key,
+                        &display_ref,
+                        &file_path,
+                        &content_before,
+                    )
+                {
+                    report.failed.push(ItemOutcome {
+                        item_ref: display_ref,
+                        signature: None,
+                        error: Some(format!("{error:#}")),
+                        warnings,
+                        source_unit_files_signed: 0,
+                    });
+                    continue;
+                }
                 let signature = match outcome {
                     SignOutcome::Signed { report, .. } => report,
                     SignOutcome::Unchanged {
@@ -577,6 +597,7 @@ fn sign_one(
         warnings,
         executor_id: metadata.executor_id,
         resulting_content_digest,
+        content_before: content,
     })
 }
 
@@ -1376,6 +1397,36 @@ struct SignOneResult {
     warnings: Vec<String>,
     executor_id: Option<String>,
     resulting_content_digest: String,
+    /// The item file as it stood before it was signed.
+    content_before: String,
+}
+
+/// Record the signature just written as a revision of the item, signed by the
+/// operator's key.
+fn record_signed_revision(
+    project_path: Option<&Path>,
+    signing_key: &SigningKey,
+    item_ref: &str,
+    file_path: &Path,
+    content_before: &str,
+) -> Result<()> {
+    let project_root =
+        project_path.ok_or_else(|| anyhow!("project source has no authoritative root"))?;
+    let after = lillux::read_regular_file_bounded_no_follow(
+        file_path,
+        ryeos_engine::item_resolution::MAX_ITEM_SOURCE_BYTES,
+    )
+    .with_context(|| format!("read signed {}", file_path.display()))?;
+    crate::actions::revision::record_operator_change(
+        project_root,
+        signing_key,
+        item_ref,
+        file_path,
+        Some(content_before.as_bytes()),
+        Some(&after),
+        "sign",
+    )
+    .map(|_| ())
 }
 
 pub(super) enum SignOutcome {
@@ -1853,6 +1904,7 @@ printf '%s\n' fixture
             inventory_policy: Default::default(),
             launch_trust: None,
             project_shadowing: Default::default(),
+            runtime_authoring: Default::default(),
         };
 
         assert!(matches!(

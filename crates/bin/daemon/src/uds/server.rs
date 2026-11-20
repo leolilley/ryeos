@@ -1891,11 +1891,16 @@ fn handle_runtime_author_item(
     let params: RuntimeAuthorItemParams =
         serde_json::from_value(params.clone()).context("invalid runtime.author_item params")?;
     let authoring = RuntimeItemAuthorService::load_authoring_identity(&state.config.app_root)?;
+    let heads = ryeos_node_runtime::item_revision::RevisionHeads::for_writer(
+        &state.config.app_root,
+        &state.identity,
+    );
     serde_json::to_value(RuntimeItemAuthorService::author(
         &authoring,
         &state.authorizer,
         cap,
         thread_auth,
+        &heads,
         params,
     )?)
     .context("failed to encode runtime.author_item result")
