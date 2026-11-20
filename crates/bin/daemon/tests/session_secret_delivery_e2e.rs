@@ -583,7 +583,10 @@ async fn launch_session(
                 .to_string()
                 .contains("persistent-session dependency `session_worker`")
         {
-            eprintln!("session secret suite skipped: host cannot qualify process scopes");
+            // Fails the test when the real process-scope mode is selected.
+            common::process_scopes::skip_or_fail_unqualified(&format!(
+                "session secret suite: {launch}\n{stderr}"
+            ));
             return Ok(Launch::HostUnqualified);
         }
         return Ok(Launch::Rejected(format!("{status}: {launch}\n{stderr}")));

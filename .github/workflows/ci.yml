@@ -1340,6 +1340,217 @@ jobs:
             process_control::scope::tests::controller_transition_clears_all_credentials_and_sets_no_new_privileges \
             process_control::scope::readonly_delivery_grant_preserves_read_and_executable_modes
 
+  # The e2e suites that need an exclusive session skip on every other runner
+  # because a directly spawned daemon cannot qualify process scopes, and the
+  # fast fixture strips the per-scope contract on purpose. This job runs them
+  # as an administrator with RYEOS_TEST_REQUIRE_PROCESS_SCOPES=1: the authored
+  # isolation policy is kept, each node starts under a protected host-runtime
+  # binding in a delegated cgroup subtree (see test_support/process_scopes.rs),
+  # an unqualified host fails the test, and every suite must pass an exact
+  # nonzero number of tests with none skipped.
+  process-scope-e2e:
+    name: Process-scope e2e (real isolation)
+    needs: [bundles]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    if: ${{ always() && (needs.bundles.result == 'success' || needs.bundles.result == 'skipped') && (inputs.process_scope_probe || github.event_name != 'workflow_dispatch' || (inputs.run_tests && !inputs.merge_gates)) }}
+    env:
+      RUST_MIN_STACK: 8388608
+      E2E_FEATURES: scheduling,model-provider-setup,crash-qualification-test-support,handoff-test-support
+      RYEOSD_TEST_STDERR_DIR: ${{ runner.temp }}/daemon-stderr
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: process-scope-e2e-v1
+          cache-workspace-crates: true
+          cache-on-failure: true
+
+      - name: Prepare the runner
+        run: ./scripts/ci/prepare-runner.sh
+
+      - name: Probe the cgroup host
+        shell: bash
+        run: |
+          set -euo pipefail
+          fstype="$(stat -fc %T /sys/fs/cgroup)"
+          [[ "$fstype" == cgroup2fs ]] || { echo "FAIL: /sys/fs/cgroup is $fstype, not unified cgroup v2" >&2; exit 1; }
+          controllers="$(cat /sys/fs/cgroup/cgroup.controllers)"
+          echo "root cgroup.controllers: $controllers"
+          for controller in memory pids; do
+            [[ " $controllers " == *" $controller "* ]] || { echo "FAIL: root cgroup has no $controller controller" >&2; exit 1; }
+          done
+          sudo -n id
+
+      - name: Download the refreshed bundle state
+        if: ${{ needs.bundles.result == 'success' }}
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: bundle-state-${{ github.sha }}
+          path: ${{ runner.temp }}/bundle-state
+
+      - name: Restore the refreshed bundles
+        if: ${{ needs.bundles.result == 'success' }}
+        run: ./scripts/ci/unpack-bundle-state.sh "$RUNNER_TEMP/bundle-state/bundle-state.tar.zst"
+
+      - name: Restore next's bundle state (no bundles job in this run)
+        if: ${{ needs.bundles.result != 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # Restores the bundle state of the newest next CI run whose bundles job succeeded and
+        # whose artifact is live. Refused (exit 1) when the branch differs from that next commit
+        # on any path the state would write or delete, or anywhere under bundles/, because the
+        # run would then test next's version of those files; the step after this one then
+        # refreshes the bundles from the branch instead.
+        run: |
+          set -euo pipefail
+
+          repo="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
+          : "${GH_TOKEN:?GH_TOKEN is required}"
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+
+          run_id=""
+          sha=""
+          runs="$(gh api "repos/$repo/actions/workflows/ci.yml/runs?branch=next&event=push&per_page=30" \
+              --jq '.workflow_runs[] | "\(.id) \(.head_sha)"')"
+          while read -r id head; do
+              [[ -n "$id" ]] || continue
+              ok="$(gh api "repos/$repo/actions/runs/$id/jobs?per_page=100" \
+                  --jq '[.jobs[] | select(.name == "Bundle refresh for tests" and .conclusion == "success")] | length')"
+              [[ "$ok" -gt 0 ]] || continue
+              live="$(gh api "repos/$repo/actions/runs/$id/artifacts?per_page=100" \
+                  --jq "[.artifacts[] | select(.name == \"bundle-state-$head\" and (.expired | not))] | length")"
+              if [[ "$live" -gt 0 ]]; then
+                  run_id="$id"
+                  sha="$head"
+                  break
+              fi
+          done <<<"$runs"
+
+          if [[ -z "$run_id" ]]; then
+              echo "::error::No unexpired bundle state found: none of the last 30 ci.yml runs on next has a successful bundles job with a live artifact (retention is 1 day). Wait for a next CI run to finish its bundles job, or run with bundles=none."
+              exit 1
+          fi
+          echo "Bundle state comes from next $sha (ci.yml run $run_id)"
+          echo "https://github.com/$repo/actions/runs/$run_id"
+
+          gh run download "$run_id" --repo "$repo" -n "bundle-state-$sha" -D "$work/dl"
+          state="$work/dl/bundle-state.tar.zst"
+
+          # Paths the state would write or delete.
+          tar --zstd -tf "$state" | grep -v -e '^\.ci-deleted-files$' -e '/$' | sort -u > "$work/state-paths" || true
+          tar --zstd -xOf "$state" .ci-deleted-files | sort -u > "$work/deleted-paths"
+          sort -u "$work/state-paths" "$work/deleted-paths" > "$work/touched"
+
+          git fetch --no-tags --depth=1 origin "$sha"
+          git diff --name-only "$sha" HEAD | sort -u > "$work/differs"
+
+          { comm -12 "$work/touched" "$work/differs"; grep '^bundles/' "$work/differs" || true; } | sort -u > "$work/conflicts"
+          conflicts="$(cat "$work/conflicts")"
+          if [[ -n "$conflicts" ]]; then
+              echo "::error::Refusing to restore next's bundle state: this branch differs from next $sha on paths the state would overwrite or delete, or on bundle sources the state was built from, so the run would test next's version, not the branch's. Merge origin/next into the branch, or keep branch edits out of these paths."
+              while IFS= read -r path; do echo "  conflict: $path"; done <<<"$conflicts"
+              exit 1
+          fi
+
+          if grep -E -q '^(crates/|Cargo\.lock$|Cargo\.toml$)' "$work/differs"; then
+              echo "::warning::This branch differs from next $sha in crate sources; the prebuilt bundle bins were built from next and may not reflect those changes."
+          fi
+
+          ./scripts/ci/unpack-bundle-state.sh "$state"
+          {
+              echo "### Bundle state"
+              echo "next \`$sha\`, ci.yml run [$run_id](https://github.com/$repo/actions/runs/$run_id); $(wc -l < "$work/touched") paths; no branch overlap."
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+      - name: Build the e2e test binaries
+        run: |
+          set -euo pipefail
+          for suite in session_secret_delivery_e2e handoff_crash_recovery_e2e; do
+            exe="$(cargo test -p ryeosd --locked --features "$E2E_FEATURES" --test "$suite" --no-run --message-format=json \
+              | jq -r --arg suite "$suite" 'select(.profile.test == true and .target.name == $suite and .executable != null) | .executable')"
+            [[ "$(printf '%s\n' "$exe" | wc -l)" == 1 && -x "$exe" ]] || { echo "FAIL: expected exactly one $suite executable, got: $exe" >&2; exit 1; }
+            echo "$suite=$exe" >> "$RUNNER_TEMP/e2e-executables"
+          done
+          cat "$RUNNER_TEMP/e2e-executables"
+          ls -l target/debug/ryeosd
+
+      - name: Write the suite runner
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/run-suite" <<'RUN'
+          #!/bin/bash
+          # run-suite SUITE PASSED IGNORED: run one e2e test binary as an
+          # administrator under the real process-scope mode and fail unless
+          # exactly PASSED tests passed, none failed and exactly IGNORED are
+          # ignored. The mode turns every unqualified-host skip into a failure.
+          set -euo pipefail
+          suite="$1"; passed_expected="$2"; ignored_expected="$3"
+          exe="$(sed -n "s/^$suite=//p" "$RUNNER_TEMP/e2e-executables")"
+          log="$RUNNER_TEMP/$suite.log"
+          set +e
+          sudo -n -E env "PATH=$PATH" "HOME=$HOME" "TMPDIR=$TMPDIR" \
+            "RUST_MIN_STACK=$RUST_MIN_STACK" \
+            "RYEOSD_TEST_STDERR_DIR=$RYEOSD_TEST_STDERR_DIR" \
+            "RYEOS_TEST_REQUIRE_PROCESS_SCOPES=1" \
+            "RYEOS_TEST_SCOPE_ACCOUNT=$(id -u):$(id -g)" \
+            ${RYEOS_TEST_HANDLER_BIN_DIR:+"RYEOS_TEST_HANDLER_BIN_DIR=$RYEOS_TEST_HANDLER_BIN_DIR"} \
+            "$exe" --test-threads=1 2>&1 | tee "$log"
+          status="${PIPESTATUS[0]}"
+          set -e
+          result="$(grep -E '^test result: ' "$log" | tail -n 1)"
+          echo "== $suite: exit $status; $result"
+          [[ "$status" == 0 ]] || { echo "FAIL: $suite exited $status" >&2; exit 1; }
+          [[ "$result" =~ ^test\ result:\ ok\.\ ([0-9]+)\ passed\;\ ([0-9]+)\ failed\;\ ([0-9]+)\ ignored ]] || { echo "FAIL: no test result line for $suite" >&2; exit 1; }
+          passed="${BASH_REMATCH[1]}"; failed="${BASH_REMATCH[2]}"; ignored="${BASH_REMATCH[3]}"
+          [[ "$passed" == "$passed_expected" && "$failed" == 0 && "$ignored" == "$ignored_expected" ]] \
+            || { echo "FAIL: $suite expected $passed_expected passed / $ignored_expected ignored, saw $passed passed / $failed failed / $ignored ignored" >&2; exit 1; }
+          if grep -Eiq 'suite skipped|: skipped:' "$log"; then
+            echo "FAIL: $suite reported a skip" >&2; exit 1
+          fi
+          RUN
+          chmod 755 "$RUNNER_TEMP/run-suite"
+          staged="$GITHUB_WORKSPACE/bundles/core/.ai/bin/x86_64-unknown-linux-gnu"
+          if [[ -d "$staged" ]]; then echo "RYEOS_TEST_HANDLER_BIN_DIR=$staged" >> "$GITHUB_ENV"; fi
+
+      - name: Session secret delivery (real isolation)
+        run: |
+          "$RUNNER_TEMP/run-suite" session_secret_delivery_e2e 5 1
+
+      - name: Show the node capability evidence
+        if: ${{ always() }}
+        run: |
+          shopt -s nullglob
+          for log in "$RYEOSD_TEST_STDERR_DIR"/*.stderr.log; do
+            echo "== $log"
+            grep -E 'node capability report recorded' "$log" | head -n 1 || true
+          done
+
+      - name: Show daemon stderr of a failed run
+        if: ${{ failure() }}
+        run: |
+          shopt -s nullglob
+          for log in "$RYEOSD_TEST_STDERR_DIR"/*.stderr.log; do
+            echo "== $log"; tail -n 60 "$log"
+          done
+
   bundle-refresh:
     name: Bundle refresh
     runs-on: ubuntu-latest

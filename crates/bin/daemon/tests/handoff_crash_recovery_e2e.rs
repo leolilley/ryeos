@@ -3637,7 +3637,10 @@ fn settled_or_host_unqualified(result: Result<()>) -> Result<()> {
                 .downcast_ref::<HostCannotQualifyProcessScopes>()
                 .is_some() =>
         {
-            eprintln!("handoff crash suite skipped: {error}");
+            // Fails the test when the real process-scope mode is selected.
+            common::process_scopes::skip_or_fail_unqualified(&format!(
+                "handoff crash suite: {error}"
+            ));
             Ok(())
         }
         other => other,

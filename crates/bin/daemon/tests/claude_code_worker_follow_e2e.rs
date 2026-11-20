@@ -458,7 +458,10 @@ async fn run_graph(
         if Instant::now() >= deadline {
             let stderr = daemon.drain_stderr_nonblocking().await;
             if stderr.contains("qualified node process-scope support") {
-                eprintln!("claude-code follow suite skipped: host cannot qualify process scopes");
+                // Fails the test when the real process-scope mode is selected.
+                common::process_scopes::skip_or_fail_unqualified(
+                    "claude-code follow suite: no qualified node process-scope support",
+                );
                 return Ok(Run::HostUnqualified);
             }
             anyhow::bail!(
