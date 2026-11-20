@@ -1,0 +1,676 @@
+{
+ "format": 1,
+ "scene": "field",
+ "provenance": "synthetic",
+ "clock_ms": 1794494400000,
+ "session": {
+  "session_id": "S-fixture",
+  "project_path": "/home/fixture/ryeos-next",
+  "thread_id": "fixture-seat",
+  "chain_root_id": "fixture-chain"
+ },
+ "viewport": {
+  "width": 0,
+  "height": 0,
+  "device_pixel_ratio": 1.0
+ },
+ "surface": {
+  "root_ref": "surface:ryeos/ui/workbench",
+  "title": "Workbench",
+  "current": "first",
+  "definition": {
+   "name": "workbench",
+   "title": "Workbench",
+   "version": "1.0.0",
+   "tiling": {
+    "mode": "master_stack",
+    "master": {
+     "side": "left",
+     "arrange": "vertical",
+     "ratio": 0.6,
+     "count": 1
+    },
+    "stack": {
+     "arrange": "vertical"
+    },
+    "insert": "end"
+   },
+   "tiles": [
+    "view:ryeos/development/execution",
+    "view:ryeos/threads/history"
+   ],
+   "views": {
+    "view:ryeos/threads/history": {
+     "from_bundle": "views/ryeos/threads/history.yaml"
+    },
+    "view:ryeos/development/execution": {
+     "from_bundle": "views/ryeos/development/execution.yaml",
+     "patch": [
+      {
+       "path": "/sources/execution/params/thread_id",
+       "value": "T-build-root"
+      }
+     ]
+    },
+    "view:ryeos/chain/timeline": {
+     "from_bundle": "views/ryeos/chain/timeline.yaml"
+    },
+    "view:ryeos/thread/conversation": {
+     "from_bundle": "views/ryeos/thread/transcript.yaml",
+     "patch": [
+      {
+       "path": "/title",
+       "copy_from": {
+        "from_bundle": "views/ryeos/thread/conversation.yaml",
+        "path": "/title"
+       }
+      },
+      {
+       "path": "/input",
+       "copy_from": {
+        "from_bundle": "views/ryeos/thread/conversation.yaml",
+        "path": "/input"
+       }
+      },
+      {
+       "path": "/sources/default/params/chain_root_id",
+       "value": "chain-demo"
+      }
+     ]
+    },
+    "view:ryeos/schedules/list": {
+     "from_bundle": "views/ryeos/schedules/list.yaml"
+    },
+    "view:ryeos/surfaces/list": {
+     "from_bundle": "views/ryeos/surfaces/list.yaml"
+    }
+   }
+  }
+ },
+ "shared": {
+  "binding_attachment_id": "shared-attachment",
+  "binding_generation": 2,
+  "binding_digest": "shared-binding",
+  "root_ref": "config:fixture/presentation",
+  "root_generation": "shared-generation",
+  "project_path": "/home/fixture/ryeos-next",
+  "subject": {
+   "kind": "unregistered_project"
+  },
+  "posture": "observation_only",
+  "binding_request_bounds": {
+   "max_request_bytes": 4096,
+   "max_input_bytes": 1024,
+   "max_seat_append_bytes": 65536
+  },
+  "presentation": {
+   "definition": {
+    "kind": "shared_presentation",
+    "config": {
+     "category": "ui",
+     "shared_presentation": {
+      "schema": 2,
+      "title": "Fixture",
+      "launcher": "launcher",
+      "dialogs": [
+       {
+        "id": "launcher",
+        "title": "Launch",
+        "view": "view:ryeos/ui/launcher"
+       }
+      ],
+      "capabilities": {
+       "sources": [],
+       "affordances": []
+      }
+     }
+    }
+   },
+   "views": {
+    "view:ryeos/ui/launcher": {
+     "from_bundle": "views/ryeos/ui/launcher.yaml"
+    }
+   }
+  }
+ },
+ "steps": [],
+ "sources": [
+  {
+   "view": "view:ryeos/development/execution",
+   "channel": "execution",
+   "service": "service:ui/ryeos-ui/field/execution",
+   "params": {
+    "expansions": [],
+    "max_depth": 16,
+    "max_nodes": 160,
+    "thread_id": "T-build-root"
+   },
+   "response": {
+    "cursor": {
+     "mode": "live"
+    },
+    "entities": [
+     {
+      "attributes": {
+       "trust": "verified"
+      },
+      "canonical_ref": "graph:example/build-deploy",
+      "id": "item:graph:example/build-deploy@2222222222222222222222222222222222222222222222222222222222222222",
+      "kind": "item_version",
+      "label": "build-deploy",
+      "provenance": {
+       "evidence": [
+        {
+         "canonical_ref": "graph:example/build-deploy",
+         "kind": "item",
+         "source_content_digest": "2222222222222222222222222222222222222222222222222222222222222222"
+        }
+       ],
+       "source_ref": "service:fixture/field/execution",
+       "source_revision": "event:build-root:18:hash-18"
+      },
+      "source_content_digest": "2222222222222222222222222222222222222222222222222222222222222222"
+     },
+     {
+      "attributes": {},
+      "canonical_ref": "graph:example/build-deploy",
+      "effective_definition_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+      "id": "definition:graph:example/build-deploy@1111111111111111111111111111111111111111111111111111111111111111",
+      "kind": "graph_definition",
+      "label": "build-deploy@v1",
+      "provenance": {
+       "evidence": [
+        {
+         "content_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+         "kind": "admitted_launch_capsule"
+        }
+       ],
+       "source_ref": "service:fixture/field/execution",
+       "source_revision": "event:build-root:18:hash-18"
+      }
+     },
+     {
+      "attributes": {},
+      "effective_definition_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+      "id": "graph-node:graph:example/build-deploy@1111111111111111111111111111111111111111111111111111111111111111#build",
+      "kind": "graph_node",
+      "label": "build",
+      "parent_id": "definition:graph:example/build-deploy@1111111111111111111111111111111111111111111111111111111111111111",
+      "provenance": {
+       "evidence": [
+        {
+         "canonical_ref": "graph:example/build-deploy",
+         "kind": "item",
+         "source_content_digest": "2222222222222222222222222222222222222222222222222222222222222222"
+        }
+       ],
+       "source_ref": "service:fixture/field/execution",
+       "source_revision": "event:build-root:18:hash-18"
+      }
+     },
+     {
+      "attributes": {},
+      "effective_definition_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+      "id": "graph-node:graph:example/build-deploy@1111111111111111111111111111111111111111111111111111111111111111#deploy",
+      "kind": "graph_node",
+      "label": "deploy",
+      "parent_id": "definition:graph:example/build-deploy@1111111111111111111111111111111111111111111111111111111111111111",
+      "provenance": {
+       "evidence": [
+        {
+         "canonical_ref": "graph:example/build-deploy",
+         "kind": "item",
+         "source_content_digest": "2222222222222222222222222222222222222222222222222222222222222222"
+        }
+       ],
+       "source_ref": "service:fixture/field/execution",
+       "source_revision": "event:build-root:18:hash-18"
+      }
+     },
+     {
+      "attributes": {
+       "thread": {
+        "facets": {
+         "environment": "staging"
+        },
+        "id": "T-build-root"
+       }
+      },
+      "id": "thread:T-build-root",
+      "kind": "thread",
+      "label": "build root",
+      "provenance": {
+       "evidence": [
+        {
+         "kind": "thread",
+         "thread_id": "T-build-root"
+        }
+       ],
+       "source_ref": "service:fixture/field/execution",
+       "source_revision": "event:build-root:18:hash-18"
+      },
+      "status": "running"
+     },
+     {
+      "attributes": {
+       "occurrence": {
+        "attempt": 0,
+        "graph_run_id": "run-1",
+        "iteration": 0,
+        "step": 4
+       },
+       "thread": {
+        "facets": {
+         "environment": "staging"
+        },
+        "id": "T-build-root"
+       }
+      },
+      "event_ref": {
+       "chain_root_id": "T-build-root",
+       "chain_seq": 4,
+       "event_hash": "hash-4"
+      },
+      "id": "occurrence:T-build-root:run-1:4:0:0",
+      "kind": "occurrence",
+      "label": "build attempt 1",
+      "provenance": {
+       "evidence": [
+        {
+         "event": {
+          "chain_root_id": "T-build-root",
+          "chain_seq": 4,
+          "event_hash": "hash-4"
+         },
+         "kind": "event"
+        }
+       ],
+       "source_ref": "service:fixture/field/execution",
+       "source_revision": "event:build-root:18:hash-18"
+      },
+      "status": "failed"
+     },
+     {
+      "attributes": {
+       "occurrence": {
+        "attempt": 1,
+        "graph_run_id": "run-1",
+        "iteration": 0,
+        "step": 4
+       },
+       "thread": {
+        "facets": {
+         "environment": "staging"
+        },
+        "id": "T-build-root"
+       }
+      },
+      "event_ref": {
+       "chain_root_id": "T-build-root",
+       "chain_seq": 7,
+       "event_hash": "hash-7"
+      },
+      "id": "occurrence:T-build-root:run-1:4:1:0",
+      "kind": "occurrence",
+      "label": "build retry",
+      "provenance": {
+       "evidence": [
+        {
+         "event": {
+          "chain_root_id": "T-build-root",
+          "chain_seq": 7,
+          "event_hash": "hash-7"
+         },
+         "kind": "event"
+        }
+       ],
+       "source_ref": "service:fixture/field/execution",
+       "source_revision": "event:build-root:18:hash-18"
+      },
+      "status": "completed"
+     },
+     {
+      "attributes": {
+       "occurrence": {
+        "attempt": 0,
+        "graph_run_id": "run-1",
+        "iteration": 2,
+        "step": 8
+       },
+       "thread": {
+        "facets": {
+         "environment": "staging"
+        },
+        "id": "T-build-root"
+       }
+      },
+      "event_ref": {
+       "chain_root_id": "T-build-root",
+       "chain_seq": 10,
+       "event_hash": "hash-10"
+      },
+      "id": "occurrence:T-build-root:run-1:8:0:2",
+      "kind": "occurrence",
+      "label": "package iteration 2",
+      "provenance": {
+       "evidence": [
+        {
+         "event": {
+          "chain_root_id": "T-build-root",
+          "chain_seq": 10,
+          "event_hash": "hash-10"
+         },
+         "kind": "event"
+        }
+       ],
+       "source_ref": "service:fixture/field/execution",
+       "source_revision": "event:build-root:18:hash-18"
+      },
+      "status": "completed"
+     },
+     {
+      "attributes": {
+       "thread": {
+        "facets": {
+         "environment": "staging"
+        },
+        "id": "T-deploy-follow"
+       }
+      },
+      "id": "thread:T-deploy-follow",
+      "kind": "thread",
+      "label": "deploy follow",
+      "provenance": {
+       "evidence": [
+        {
+         "event": {
+          "chain_root_id": "T-build-root",
+          "chain_seq": 12,
+          "event_hash": "hash-12"
+         },
+         "kind": "event"
+        }
+       ],
+       "source_ref": "service:fixture/field/execution",
+       "source_revision": "event:build-root:18:hash-18"
+      },
+      "status": "completed"
+     },
+     {
+      "attributes": {
+       "thread": {
+        "facets": {
+         "environment": "staging"
+        },
+        "id": "T-build-continuation"
+       }
+      },
+      "id": "thread:T-build-continuation",
+      "kind": "thread",
+      "label": "build continuation",
+      "provenance": {
+       "evidence": [
+        {
+         "event": {
+          "chain_root_id": "T-build-root",
+          "chain_seq": 15,
+          "event_hash": "hash-15"
+         },
+         "kind": "event"
+        }
+       ],
+       "source_ref": "service:fixture/field/execution",
+       "source_revision": "event:build-root:18:hash-18"
+      },
+      "status": "running"
+     },
+     {
+      "artifact_ref": {
+       "artifact_id": 42,
+       "content_hash": "4444444444444444444444444444444444444444444444444444444444444444",
+       "thread_id": "T-deploy-follow"
+      },
+      "attributes": {
+       "thread": {
+        "facets": {
+         "environment": "staging"
+        },
+        "id": "T-deploy-follow"
+       }
+      },
+      "id": "artifact:T-deploy-follow:42",
+      "kind": "artifact",
+      "label": "deployment receipt",
+      "provenance": {
+       "evidence": [
+        {
+         "artifact_id": 42,
+         "content_hash": "4444444444444444444444444444444444444444444444444444444444444444",
+         "kind": "artifact",
+         "thread_id": "T-deploy-follow"
+        }
+       ],
+       "source_ref": "service:fixture/field/execution",
+       "source_revision": "event:build-root:18:hash-18"
+      }
+     }
+    ],
+    "expansions": [],
+    "metrics": [],
+    "previews": [],
+    "relations": [
+     {
+      "attributes": {},
+      "directed": true,
+      "id": "contains:definition:build",
+      "kind": "contains",
+      "provenance": {
+       "evidence": [],
+       "source_ref": "service:fixture/field/execution",
+       "source_revision": "event:build-root:18:hash-18"
+      },
+      "source_id": "definition:graph:example/build-deploy@1111111111111111111111111111111111111111111111111111111111111111",
+      "target_id": "graph-node:graph:example/build-deploy@1111111111111111111111111111111111111111111111111111111111111111#build"
+     },
+     {
+      "attributes": {},
+      "directed": true,
+      "id": "contains:definition:deploy",
+      "kind": "contains",
+      "provenance": {
+       "evidence": [],
+       "source_ref": "service:fixture/field/execution",
+       "source_revision": "event:build-root:18:hash-18"
+      },
+      "source_id": "definition:graph:example/build-deploy@1111111111111111111111111111111111111111111111111111111111111111",
+      "target_id": "graph-node:graph:example/build-deploy@1111111111111111111111111111111111111111111111111111111111111111#deploy"
+     },
+     {
+      "attributes": {},
+      "directed": true,
+      "id": "flow:build:deploy",
+      "kind": "flows_to",
+      "provenance": {
+       "evidence": [],
+       "source_ref": "service:fixture/field/execution",
+       "source_revision": "event:build-root:18:hash-18"
+      },
+      "source_id": "graph-node:graph:example/build-deploy@1111111111111111111111111111111111111111111111111111111111111111#build",
+      "target_id": "graph-node:graph:example/build-deploy@1111111111111111111111111111111111111111111111111111111111111111#deploy"
+     },
+     {
+      "attributes": {},
+      "directed": true,
+      "id": "retry:4:0:1",
+      "kind": "retried_as",
+      "provenance": {
+       "evidence": [
+        {
+         "event": {
+          "chain_root_id": "T-build-root",
+          "chain_seq": 7,
+          "event_hash": "hash-7"
+         },
+         "kind": "event"
+        }
+       ],
+       "source_ref": "service:fixture/field/execution",
+       "source_revision": "event:build-root:18:hash-18"
+      },
+      "source_id": "occurrence:T-build-root:run-1:4:0:0",
+      "target_id": "occurrence:T-build-root:run-1:4:1:0"
+     },
+     {
+      "attributes": {},
+      "directed": true,
+      "id": "follow:root:deploy",
+      "kind": "followed",
+      "provenance": {
+       "evidence": [
+        {
+         "event": {
+          "chain_root_id": "T-build-root",
+          "chain_seq": 12,
+          "event_hash": "hash-12"
+         },
+         "kind": "event"
+        }
+       ],
+       "source_ref": "service:fixture/field/execution",
+       "source_revision": "event:build-root:18:hash-18"
+      },
+      "source_id": "thread:T-build-root",
+      "target_id": "thread:T-deploy-follow"
+     },
+     {
+      "attributes": {},
+      "directed": true,
+      "id": "continue:root:next",
+      "kind": "continued",
+      "provenance": {
+       "evidence": [
+        {
+         "event": {
+          "chain_root_id": "T-build-root",
+          "chain_seq": 15,
+          "event_hash": "hash-15"
+         },
+         "kind": "event"
+        }
+       ],
+       "source_ref": "service:fixture/field/execution",
+       "source_revision": "event:build-root:18:hash-18"
+      },
+      "source_id": "thread:T-build-root",
+      "target_id": "thread:T-build-continuation"
+     },
+     {
+      "attributes": {},
+      "directed": true,
+      "id": "trace:deploy:continuation",
+      "kind": "trace_branch",
+      "provenance": {
+       "evidence": [
+        {
+         "event": {
+          "chain_root_id": "T-build-root",
+          "chain_seq": 16,
+          "event_hash": "hash-16"
+         },
+         "kind": "event"
+        }
+       ],
+       "source_ref": "service:fixture/field/execution",
+       "source_revision": "event:build-root:18:hash-18"
+      },
+      "source_id": "thread:T-deploy-follow",
+      "target_id": "thread:T-build-continuation"
+     },
+     {
+      "attributes": {},
+      "directed": true,
+      "id": "produced:deploy:receipt",
+      "kind": "produced",
+      "provenance": {
+       "evidence": [
+        {
+         "event": {
+          "chain_root_id": "T-deploy-follow",
+          "chain_seq": 9,
+          "event_hash": "follow-hash-9"
+         },
+         "kind": "event"
+        }
+       ],
+       "source_ref": "service:fixture/field/execution",
+       "source_revision": "event:build-root:18:hash-18"
+      },
+      "source_id": "thread:T-deploy-follow",
+      "target_id": "artifact:T-deploy-follow:42"
+     }
+    ],
+    "revision": "event:build-root:18:hash-18",
+    "schema_version": "ryeos.ui.field.facts.v2",
+    "source": "execution",
+    "subject": {
+     "definition_ref": "graph:example/build-deploy",
+     "effective_definition_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+     "id": "T-build-root",
+     "kind": "thread"
+    },
+    "truncated": false,
+    "warnings": []
+   }
+  },
+  {
+   "view": "view:ryeos/threads/history",
+   "channel": "default",
+   "service": "service:ui/ryeos-ui/threads/list",
+   "params": {
+    "active": "",
+    "limit": 200,
+    "project": "current",
+    "project_path": "@session:project_root",
+    "sort": "watch"
+   },
+   "response": {
+    "coverage": {
+     "reason": "projection_locator_not_exhaustive",
+     "state": "observed"
+    },
+    "threads": [
+     {
+      "created_at": "2026-11-12T09:12:00Z",
+      "item_ref": "directive:ryeos/ops/base",
+      "kind": "directive_run",
+      "project": {
+       "name": "ryeos-next"
+      },
+      "status": "running",
+      "thread_id": "T-7f3a"
+     },
+     {
+      "created_at": "2026-11-12T08:40:00Z",
+      "item_ref": "tool:ryeos/dev/gate",
+      "kind": "tool_run",
+      "project": {
+       "name": "ryeos-next"
+      },
+      "status": "completed",
+      "thread_id": "T-61c0"
+     },
+     {
+      "created_at": "2026-11-12T07:03:00Z",
+      "item_ref": "directive:ryeos/review/diff",
+      "kind": "directive_run",
+      "project": {
+       "name": "ryeos-next"
+      },
+      "status": "failed",
+      "thread_id": "T-5d21"
+     }
+    ]
+   }
+  }
+ ]
+}

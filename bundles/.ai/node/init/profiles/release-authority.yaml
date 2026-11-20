@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-19T05:44:26Z:bb249e4d2fda1d407a559a55b537c6c85aa8863edf17218314057633e59ac576:M8GcyQRjGergtC2L4YTh0vX/gUDHl+FTvkO0utfQmrg8BjP+RunmAvstmWNR8eBVpaTuyyJNt7XVHwaH57B2Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-20T00:49:13Z:a1088dffb6675e2948679effe423137b7662dc81b18da96b373c7c2e6843b003:Bs7wbVDVDUO5KaAnDzOMiZffJibhrhgKRcjKJzz7iBb3slJEB88id9YxsGdwPWy9XD/EaoGhkrJXRV5PA0NFAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - bundle-release
@@ -47,9 +47,13 @@ policies:
       control_storage_bytes: 262144
       maximum_duration_ms: 120000
     # Each epoch is a fresh allowance under the same issuance; nothing is refunded.
+    # A release authority runs in 2-hour windows (one incarnation each), so one
+    # 16-incarnation epoch is finite authority. It does not renew itself; the
+    # operator tops it up on a stopped node with `ryeos node capacity reissue`, a
+    # signed and logged act.
     renewal:
       at_orderly_rollover: false
-      operator_reissue: false
+      operator_reissue: true
       maximum_epochs: null
 
   accounting:
