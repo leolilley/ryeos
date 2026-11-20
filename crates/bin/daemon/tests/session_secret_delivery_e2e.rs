@@ -874,7 +874,14 @@ async fn workload_receives_the_value_and_no_state_retains_it() -> Result<()> {
     assert_eq!(report["secret_fd_sealed"], json!(true), "{report:#}");
 
     // 7. Neither the worker after adopting the descriptor nor the workload
-    // child holds a sealed descriptor.
+    // child holds the sealed secret descriptor. The worker may hold other
+    // memfds (on a real host its own program is a descriptor-bound memfd), so
+    // the check names the sealed secret's own memfd, taken from the report.
+    let sealed = report["secret_fd_target"]
+        .as_str()
+        .map(|target| target.trim_end_matches(" (deleted)").to_owned())
+        .context("the report names no sealed secret descriptor")?;
+    assert!(sealed.starts_with("/memfd:"), "{report:#}");
     for holder in ["worker_fds_after_close", "child_fds"] {
         let targets = report[holder]
             .as_array()
@@ -884,8 +891,8 @@ async fn workload_receives_the_value_and_no_state_retains_it() -> Result<()> {
             targets
                 .iter()
                 .filter_map(Value::as_str)
-                .all(|target| !target.contains("memfd:")),
-            "{holder} holds a sealed descriptor: {report:#}"
+                .all(|target| target.trim_end_matches(" (deleted)") != sealed),
+            "{holder} holds the sealed secret descriptor: {report:#}"
         );
     }
     assert!(
