@@ -11277,7 +11277,8 @@ mod tests {
         use ryeos_state::objects::PinnedTerminalPublication::{
             Discard, RetainCurrentHead, RetainResult,
         };
-        let owner = "fp:owner";
+        let owner = format!("fp:{}", "a".repeat(64));
+        let owner = owner.as_str();
         let path = "/projects/demo";
         let base = "b".repeat(64);
         let pin = |principal_key: &str, project_path: &str, expected: &str| RetainCurrentHead {
@@ -11286,7 +11287,7 @@ mod tests {
             expected_hash: expected.to_owned(),
         };
         let owner_key = ryeos_state::refs::principal_storage_key(owner).unwrap();
-        let good = pin(&owner_key, path, &base);
+        let good = pin(owner_key, path, &base);
         let check = |disposition, publication: &_| {
             super::candidate_publication_pairing_matches(
                 disposition,
@@ -11306,13 +11307,15 @@ mod tests {
         // A carried destination that names another owner, project or base is
         // refused under either disposition.
         for disposition in [&OwnerDecision, &RetainedForReview] {
-            let other_owner = ryeos_state::refs::principal_storage_key("fp:someone-else").unwrap();
-            assert!(!check(disposition, &pin(&other_owner, path, &base)));
+            let other_owner =
+                ryeos_state::refs::principal_storage_key(&format!("fp:{}", "d".repeat(64)))
+                    .unwrap();
+            assert!(!check(disposition, &pin(other_owner, path, &base)));
             assert!(!check(
                 disposition,
-                &pin(&owner_key, "/projects/other", &base)
+                &pin(owner_key, "/projects/other", &base)
             ));
-            assert!(!check(disposition, &pin(&owner_key, path, &"c".repeat(64))));
+            assert!(!check(disposition, &pin(owner_key, path, &"c".repeat(64))));
             assert!(!check(disposition, &Discard));
         }
     }
