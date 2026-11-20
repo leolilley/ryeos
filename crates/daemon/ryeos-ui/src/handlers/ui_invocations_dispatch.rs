@@ -433,6 +433,8 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
                     verified,
                     &invocation_ctx.scopes,
                     trusted_handler_context,
+                    super::ui_usage::ui_usage_subject(project_marker.as_deref()),
+                    session.principal_id.as_str(),
                 )
                 .await
             }
@@ -1697,6 +1699,8 @@ async fn execute_prepared_item_ref(
     verified: ryeos_engine::contracts::VerifiedItem,
     authority_scopes: &[String],
     local_handler_context: HandlerContext,
+    usage_subject: ryeos_state::UsageSubject,
+    usage_asserted_by: &str,
 ) -> Result<Value> {
     let root_canonical = CanonicalRef::parse(item_ref)
         .map_err(|e| HandlerError::BadRequest(format!("invalid item ref: {e}")))?;
@@ -1771,9 +1775,10 @@ async fn execute_prepared_item_ref(
         launch_timings: None,
         original_root_kind: root_canonical.kind.as_str(),
         pre_minted_thread_id: None,
-        usage_subject: None,
-        usage_subject_asserted_by: None,
+        usage_subject: Some(usage_subject),
+        usage_subject_asserted_by: Some(usage_asserted_by.to_string()),
         previous_thread_id: None,
+        initial_facets: Default::default(),
         root_admission: None,
         root_dispatch_evidence: None,
         parent_execution_context: None,

@@ -13,226 +13,187 @@ use ryeos_engine::item_resolution::{RegisteredBundleRoot, ResolutionRoots};
 use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
 use ryeos_engine::resolution::run_effective_item_pipeline;
 use serde_json::{Map, Value, json};
-use sha2::{Digest, Sha256};
 
-const VIEW_BEHAVIOR_GOLDENS: &[(&str, &str)] = &[
-    (
-        "view:ryeos/attention/panel",
-        "6f5bf7f0a853d18bfa440df7427fa22409ed32ac25fc8b01fd778a93373ffde9",
-    ),
-    (
-        "view:ryeos/chain/timeline",
-        "899d6a47763ec0b9f489ea40e7ffd5a0abc76d395fcaa81b02320060f53c051e",
-    ),
-    (
-        "view:ryeos/commands/grammar",
-        "6b0a7edfa5f93872ceaed0d0787432528d9599feaedfa7fdd049c34113dc9267",
-    ),
-    (
-        "view:ryeos/development/changes",
-        "ff352c3fc907a1677f924811d14a382788ed564aefce1d6b5041e0a5253c8008",
-    ),
-    (
-        "view:ryeos/development/execution",
-        "f104477b8e244e1ed462184f28deb7a085d795d0c9dfad318fdff2409143b495",
-    ),
-    (
-        "view:ryeos/development/explorer",
-        "d82814eaa1a5ab2657cf22bf5afe9319a6254e9e18b87d8cc9dc2998837f704c",
-    ),
-    (
-        "view:ryeos/development/occurrence",
-        "70b16524090c5dab11bdfb2ff76a857638bb4d77060b1d5b2dd1d0dcc93350d2",
-    ),
-    (
-        "view:ryeos/files/list",
-        "65e05d1468af70d3fc487d86c7da7ba01cd8c2eae011ebbf2ddf7128f2a014ab",
-    ),
-    (
-        "view:ryeos/home/overview",
-        "7f9e904ba4690989053dc1a128ce1a9172437646f3130a6c74c56a113e0262a6",
-    ),
-    (
-        "view:ryeos/input",
-        "ac6b07ccd38c56456122f9df214e3b7b83e979bfd78e3885aa602d606922988a",
-    ),
-    (
-        "view:ryeos/item/explain",
-        "165aeee9cccfc85e100d6b7b778b64a0d8839bf4e987dd71cbe7534046f790eb",
-    ),
-    (
-        "view:ryeos/item/inspector",
-        "61265ee7927d7534c96076981fa9dd6cb961e4ad55a56f86348b9cd559209430",
-    ),
-    (
-        "view:ryeos/items/space",
-        "cbed664b8e4e23705d3b41bd881b9c1e8351740ed99cb212d64975d371de1fb3",
-    ),
-    (
-        "view:ryeos/node/bundles",
-        "3adfd99891dc60dddd13767784da38e31813e9cf22493afe12db9b309e14f673",
-    ),
-    (
-        "view:ryeos/node/events",
-        "5609473f16a0a57f429656c64050061d4a59652cf73f555899f823e8fc69cb99",
-    ),
-    (
-        "view:ryeos/node/gc",
-        "1920644d8c5a16c5566d4eb041d4c01e92eaaf24535ab03c03a4aff307f245a0",
-    ),
-    (
-        "view:ryeos/node/machines",
-        "53c5b9844505443986c5ea7657fec834368dcac414513457a9ca8be8b4bcfb7f",
-    ),
-    (
-        "view:ryeos/node/remotes",
-        "b41fed50260fc785b613d5693093a80336ad06e864c9b2148c276d8a75426c04",
-    ),
-    (
-        "view:ryeos/node/status",
-        "d13ae92ce50c7e236b38ab0346066377267460982f431cdfedf6019c0c50ec64",
-    ),
-    (
-        "view:ryeos/node/threads/history",
-        "b2d600dc0edb853d26366cdbf0c2eb2a223b5f577b86acdd127de4bf8e12b11c",
-    ),
-    (
-        "view:ryeos/node/usage",
-        "2df5e36bef882e141c0b61fd9d1e2b4dce61e9b481f74097ea31616c3d75aca6",
-    ),
-    (
-        "view:ryeos/programs/list",
-        "5c484740917af6d2ae59372fe67e8463f5ea4ad80a3854f26317f7852c83bf57",
-    ),
-    (
-        "view:ryeos/project/document",
-        "f8ae10fb6238c2023bda383bcccfc6c05a02528d8658e028ac52ee61a6440cd1",
-    ),
-    (
-        "view:ryeos/project/files",
-        "c6606ea0d3d2d0e35079372763f343e7e1ae2a281aa9dca9c6f72fec17046bfa",
-    ),
-    (
-        "view:ryeos/project/items",
-        "5367c34a30467f1d3c6e9c223cbff5a64bfd713a145657b3caba7778adee9b9e",
-    ),
-    (
-        "view:ryeos/project/directives",
-        "618d2d9142acbdd0735f1ead9cf52a7aec1bf5fdf42f263270eab92ed13942ba",
-    ),
-    (
-        "view:ryeos/project/graphs",
-        "85e8e71d2537497eb3d73e6035ede7e5dc3177c0ea0b606c08446736aa201c13",
-    ),
-    (
-        "view:ryeos/project/knowledge",
-        "e977f7ec56e77f5be206269b6c80da4931f21ad91abc1af859e86e4a3f0ad6e7",
-    ),
-    (
-        "view:ryeos/project/schedules",
-        "56199dd5a3c02aa1e1887b5930744b24952ff142736995dc72452ac108e80d61",
-    ),
-    (
-        "view:ryeos/projects/list",
-        "aff53ed821d3dbebfc24ab059d26a4b138dea26cbc56cfe9fae5b95636305c5c",
-    ),
-    (
-        "view:ryeos/review/history",
-        "f7ba9bc61efd765d224af4e373a925f3b28573d0beffc64d3fb87c722aa12572",
-    ),
-    (
-        "view:ryeos/review/pending",
-        "2c195149b60c5cc07fd21347bda4c15748ac7c04498a810487eff175d56b1216",
-    ),
-    (
-        "view:ryeos/runs/comparison",
-        "094aff6e970bf9b1435beb0f48f9b372b576701f74de41db4fb0fcb4e2497c89",
-    ),
-    (
-        "view:ryeos/schedules/list",
-        "f0a630508f665534ea1008ab11900b9291d8e15cda5db9aa1b2d7e885d222082",
-    ),
-    (
-        "view:ryeos/sites/list",
-        "180f449aa25dae11d96188a5d0a6a06b925d3d3ea3a11c5f87cafa9b5c323604",
-    ),
-    (
-        "view:ryeos/surfaces/list",
-        "5093819b1e1289a50fc6df7d4ad063948b06c4affa1b6220b7b7f5a9b5342b5b",
-    ),
-    (
-        "view:ryeos/thread/conversation",
-        "81ec45d6a78960d7a6672e2f37679398d5277d1d1bfd0c39cb810cae3633f9d8",
-    ),
-    (
-        "view:ryeos/thread/transcript",
-        "95f894f61e93675c519031d865b2295832a84ff690ae62de7672d06bb071cc0f",
-    ),
-    (
-        "view:ryeos/thread/tree",
-        "2d05638f6700dba607bde28d83e7645b9f8b8592921a3857ac2a290748ea9208",
-    ),
-    (
-        "view:ryeos/threads/detail",
-        "01f46b7a70b7b2973270165e29e7906f861dcda17004881fa703bc0d5894246f",
-    ),
-    (
-        "view:ryeos/threads/history",
-        "efebb42a562725ecd500b1e41de69b4025b64b1b937589be0ffe25bb1980b128",
-    ),
-    (
-        "view:ryeos/threads/list",
-        "5e302817697692884d250d28384f7c0c8cf65b3aab3c81e571ed17eae70b2248",
-    ),
-    (
-        "view:ryeos/ui/launcher",
-        "7d9a23fc366ea71107e9c43a1773940acfd29e7a86ebf574369545a46b7fc287",
-    ),
-    (
-        "view:ryeos/ui/session-details",
-        "18c66da373e22e7aecb84be4acdf6e3c47014ee96b2f435024e88e03ef7752a2",
-    ),
-    (
-        "view:ryeos/ui/shortcuts",
-        "60dd115e32021b497ac6b9dac67cb784d95d6e5cebd8522b9b251646e67b2c8e",
-    ),
-    (
-        "view:ryeos/ui/status",
-        "ee9958aa7905c9cd6bd82bc865da07949546ebfcb6036175655c4fa688b32539",
-    ),
-    (
-        "view:ryeos/view-sets/library",
-        "d875b425bd728c66a8ae95558fa12b15a052e19a6f438b8361f672f438851818",
-    ),
-    (
-        "view:ryeos/work/approvals",
-        "cc8c99c3ec8a93a5a72232ef48ce95ae1a841f6e32cf3bfb5a30e59c88397514",
-    ),
-    (
-        "view:ryeos/work/candidate",
-        "3951453c1339d9fe81582d38181942f578c4eddecc68465c5a7bdf2f9b768155",
-    ),
-    (
-        "view:ryeos/work/children",
-        "f89c8fbb023515e64e8cdcf40a0ce762dfb649fb8c79992ad522a52614c3ed0f",
-    ),
-    (
-        "view:ryeos/work/evidence",
-        "e1d669dd69af03ec65ed70ae49629b6b1e2049efef05f9037a25e80efda9a35e",
-    ),
-    (
-        "view:ryeos/work/list",
-        "6c15d8600e9da37ed8954ada31a26ad7dc8556aa579f6da788fd58ab712949ab",
-    ),
-    (
-        "view:ryeos/work/overview",
-        "68b9ebbaf1ebc63a186e74271e5d787e5864800bec8822dd1683a6591cf88d2b",
-    ),
-];
+/// Environment switch: rewrite the checked-in per-view snapshots from the
+/// current tree instead of comparing against them.
+const UPDATE_SNAPSHOTS_ENV: &str = "RYEOS_UPDATE_SNAPSHOTS";
 
-fn snapshot_digest(value: &Value) -> String {
-    let bytes = serde_json::to_vec(value).expect("serialize view behavior snapshot");
-    format!("{:x}", Sha256::digest(bytes))
+fn snapshot_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots/views")
+}
+
+/// `view:ryeos/attention/panel` is stored at `<root>/ryeos/attention/panel.json`.
+fn snapshot_path(view_ref: &str) -> PathBuf {
+    let id = view_ref
+        .strip_prefix("view:")
+        .unwrap_or_else(|| panic!("view ref {view_ref} has no view: prefix"));
+    snapshot_root().join(format!("{id}.json"))
+}
+
+/// Stable text form: object keys sorted, two-space indent, trailing newline.
+fn write_stable_json(value: &Value, indent: usize, out: &mut String) {
+    let pad = |n: usize| "  ".repeat(n);
+    match value {
+        Value::Object(map) if !map.is_empty() => {
+            let sorted: BTreeMap<&String, &Value> = map.iter().collect();
+            out.push_str("{\n");
+            let last = sorted.len() - 1;
+            for (index, (key, child)) in sorted.into_iter().enumerate() {
+                out.push_str(&pad(indent + 1));
+                out.push_str(&serde_json::to_string(key).expect("serialize key"));
+                out.push_str(": ");
+                write_stable_json(child, indent + 1, out);
+                out.push_str(if index == last { "\n" } else { ",\n" });
+            }
+            out.push_str(&pad(indent));
+            out.push('}');
+        }
+        Value::Array(items) if !items.is_empty() => {
+            out.push_str("[\n");
+            let last = items.len() - 1;
+            for (index, child) in items.iter().enumerate() {
+                out.push_str(&pad(indent + 1));
+                write_stable_json(child, indent + 1, out);
+                out.push_str(if index == last { "\n" } else { ",\n" });
+            }
+            out.push_str(&pad(indent));
+            out.push(']');
+        }
+        other => out.push_str(&serde_json::to_string(other).expect("serialize leaf")),
+    }
+}
+
+fn stable_json(value: &Value) -> String {
+    let mut out = String::new();
+    write_stable_json(value, 0, &mut out);
+    out.push('\n');
+    out
+}
+
+fn flatten(prefix: &str, value: &Value, out: &mut BTreeMap<String, String>) {
+    match value {
+        Value::Object(map) if !map.is_empty() => {
+            for (key, child) in map {
+                let path = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                flatten(&path, child, out);
+            }
+        }
+        Value::Array(items) if !items.is_empty() => {
+            for (index, child) in items.iter().enumerate() {
+                flatten(&format!("{prefix}[{index}]"), child, out);
+            }
+        }
+        leaf => {
+            let mut text = serde_json::to_string(leaf).expect("serialize leaf");
+            if text.chars().count() > 160 {
+                text = text.chars().take(160).collect::<String>() + "...";
+            }
+            out.insert(prefix.to_string(), text);
+        }
+    }
+}
+
+/// One line per changed field: `path: old -> new`.
+fn field_diff(old: &Value, new: &Value) -> Vec<String> {
+    let (mut before, mut after) = (BTreeMap::new(), BTreeMap::new());
+    flatten("", old, &mut before);
+    flatten("", new, &mut after);
+    let mut lines = Vec::new();
+    for (path, old_text) in &before {
+        match after.get(path) {
+            Some(new_text) if new_text == old_text => {}
+            Some(new_text) => lines.push(format!("  {path}: {old_text} -> {new_text}")),
+            None => lines.push(format!("  {path}: {old_text} -> (removed)")),
+        }
+    }
+    for (path, new_text) in &after {
+        if !before.contains_key(path) {
+            lines.push(format!("  {path}: (absent) -> {new_text}"));
+        }
+    }
+    lines
+}
+
+fn check_view_snapshots(actual: &BTreeMap<String, Value>) {
+    let root = snapshot_root();
+    if std::env::var_os(UPDATE_SNAPSHOTS_ENV).is_some() {
+        for (view_ref, snapshot) in actual {
+            let path = snapshot_path(view_ref);
+            fs::create_dir_all(path.parent().expect("snapshot parent")).expect("create dir");
+            fs::write(&path, stable_json(snapshot))
+                .unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
+        }
+        for path in json_files_below(&root) {
+            let known = actual
+                .keys()
+                .any(|view_ref| snapshot_path(view_ref) == path);
+            if !known {
+                fs::remove_file(&path).expect("remove stale snapshot");
+            }
+        }
+        return;
+    }
+
+    let mut report = Vec::new();
+    for (view_ref, snapshot) in actual {
+        let path = snapshot_path(view_ref);
+        match fs::read_to_string(&path) {
+            Err(_) => report.push(format!("{view_ref}: no snapshot at {}", path.display())),
+            Ok(text) => {
+                let current = stable_json(snapshot);
+                if text == current {
+                    continue;
+                }
+                // Both sides go through the same parser so float re-reading
+                // cannot show up as a difference; only real field changes do.
+                let parse = |source: &str| -> Value {
+                    serde_json::from_str(source)
+                        .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()))
+                };
+                let lines = field_diff(&parse(&text), &parse(&current));
+                if lines.is_empty() {
+                    report.push(format!("{view_ref}: snapshot file is not in stable form"));
+                } else {
+                    let mut entry = vec![format!("{view_ref}: behavior changed")];
+                    entry.extend(lines);
+                    report.push(entry.join("\n"));
+                }
+            }
+        }
+    }
+    for path in json_files_below(&root) {
+        if !actual
+            .keys()
+            .any(|view_ref| snapshot_path(view_ref) == path)
+        {
+            report.push(format!("{}: snapshot has no bundled view", path.display()));
+        }
+    }
+    assert!(
+        report.is_empty(),
+        "per-view behavior snapshots differ (rerun with {UPDATE_SNAPSHOTS_ENV}=1 to rewrite):\n{}",
+        report.join("\n")
+    );
+}
+
+fn json_files_below(root: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let Ok(entries) = fs::read_dir(root) else {
+        return found;
+    };
+    for entry in entries {
+        let path = entry.expect("snapshot entry").path();
+        if path.is_dir() {
+            found.extend(json_files_below(&path));
+        } else if path.extension().is_some_and(|ext| ext == "json") {
+            found.push(path);
+        }
+    }
+    found
 }
 
 // Exercises the client-side retained initialization contract. The authored
@@ -813,7 +774,7 @@ fn every_bundled_view_resolves_and_validates_under_the_named_source_contract() {
     let surface = json!({ "views": embedded });
     let parsed = views_from_surface(Some(&surface));
     assert_eq!(parsed.len(), raw_by_ref.len());
-    let mut behavior_digests = BTreeMap::new();
+    let mut behavior_snapshots = BTreeMap::new();
     for (view_ref, binding) in parsed {
         assert_eq!(
             binding.degraded, None,
@@ -867,15 +828,8 @@ fn every_bundled_view_resolves_and_validates_under_the_named_source_contract() {
             "view_model": build_view_model(&core),
             "accepted_initial_effects": effects,
         });
-        behavior_digests.insert(view_ref, snapshot_digest(&snapshot));
+        behavior_snapshots.insert(view_ref, snapshot);
     }
 
-    let expected: BTreeMap<String, String> = VIEW_BEHAVIOR_GOLDENS
-        .iter()
-        .map(|(view_ref, digest)| ((*view_ref).to_string(), (*digest).to_string()))
-        .collect();
-    assert_eq!(
-        behavior_digests, expected,
-        "per-view behavior golden changed"
-    );
+    check_view_snapshots(&behavior_snapshots);
 }

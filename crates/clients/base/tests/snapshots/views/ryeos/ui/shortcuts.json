@@ -1,0 +1,527 @@
+{
+  "accepted_initial_effects": [],
+  "view_model": {
+    "chrome": {
+      "health_label": "connected",
+      "health_tone": "good",
+      "subtitle": "/fixture/project",
+      "title": "RyeOS"
+    },
+    "dialogs": [],
+    "generation": 2,
+    "notices": [],
+    "now_ms": 0,
+    "overlay": {
+      "key_hints": [
+        {
+          "keys": "↑/↓",
+          "word": "move"
+        },
+        {
+          "keys": "enter",
+          "word": "open"
+        },
+        {
+          "keys": "a",
+          "word": "acknowledge"
+        },
+        {
+          "keys": "esc",
+          "word": "close"
+        }
+      ],
+      "needs_you": [],
+      "needs_you_count": null,
+      "open": false,
+      "running": [],
+      "running_count": null,
+      "selected": null
+    },
+    "presentation": {
+      "chrome": {
+        "border": "thin",
+        "status_bar": {
+          "edge": "bottom",
+          "energy": 0.0,
+          "first_run": false,
+          "key_hints": [
+            {
+              "keys": "ctrl+k",
+              "word": "open"
+            },
+            {
+              "keys": "alt+o",
+              "word": "overlay"
+            },
+            {
+              "keys": "alt+t/b",
+              "word": "bars"
+            },
+            {
+              "keys": "ctrl+←/→",
+              "word": "tab"
+            },
+            {
+              "keys": "ctrl+↑/↓",
+              "word": "move"
+            },
+            {
+              "keys": "alt+r",
+              "word": "rename"
+            }
+          ],
+          "segments": [],
+          "visible": true
+        },
+        "switcher": {
+          "edge": "left"
+        },
+        "title": "Rye OS",
+        "top_bar": {
+          "add_tab": true,
+          "tabs": [
+            {
+              "active": true,
+              "number": 1,
+              "tile_count": 1,
+              "title": "cutover-golden",
+              "view_set_id": 1
+            }
+          ],
+          "visible": false
+        },
+        "version_label": "RYE OS - unqualified"
+      },
+      "frame": {
+        "corners": {
+          "tone": "accent",
+          "visible": true
+        }
+      },
+      "metrics": {
+        "active_thread_count": 0,
+        "activity_level": 0.11999999731779099,
+        "project_count": 0,
+        "schedule_count": 0,
+        "service_count": 0,
+        "thread_count": 0,
+        "tile_count": 1
+      },
+      "motion": [],
+      "schema_version": "ryeos.ui.presentation.v1",
+      "theme": {
+        "id": "gruvbox-optic",
+        "tone": "accent"
+      }
+    },
+    "schema_version": "ryeos.ui.vm.v3",
+    "session": {
+      "posture": "observation_only",
+      "project_path": null,
+      "root_ref": "config:fixture/cutover",
+      "session_id": "cutover-session",
+      "surface_ordinal": 1,
+      "surfaces": [
+        {
+          "active": true,
+          "chip": {
+            "authored_in_project": false,
+            "mark": "initial"
+          },
+          "close_intent": null,
+          "ordinal": 1,
+          "rename_intent": {
+            "binding": {
+              "binding_attachment_id": "cutover-golden-attachment",
+              "binding_digest": "cutover-golden-binding",
+              "binding_generation": 1
+            },
+            "surface_instance_id": "22222222-2222-4222-8222-222222222222",
+            "title": "Cutover",
+            "type": "rename_surface"
+          },
+          "select_intent": {
+            "binding": {
+              "binding_attachment_id": "cutover-golden-attachment",
+              "binding_digest": "cutover-golden-binding",
+              "binding_generation": 1
+            },
+            "surface_instance_id": "22222222-2222-4222-8222-222222222222",
+            "type": "select_surface"
+          },
+          "surface_instance_id": "22222222-2222-4222-8222-222222222222",
+          "title": "Cutover"
+        }
+      ],
+      "title": "Cutover",
+      "user_principal_id": null
+    },
+    "transport": {
+      "channels": [
+        {
+          "channel": "session",
+          "freshness": "current"
+        }
+      ],
+      "freshness": "current"
+    },
+    "view_set": {
+      "center_is_empty": false,
+      "focused_tile": "2",
+      "layout_guard": "317eed5a0a787a7e0614ed276195baa21c2ef3ac9d4e8469ced533eea1d7bf4b",
+      "lens_trail": [],
+      "root": {
+        "attachment_label": null,
+        "background_transparent": false,
+        "chrome_hidden": false,
+        "current": true,
+        "focused": true,
+        "group_id": "3",
+        "instance_key": "seat:11111111-1111-4111-8111-111111111111:surface:22222222-2222-4222-8222-222222222222:tile:2",
+        "intents": [
+          {
+            "intent": {
+              "tile_id": "2",
+              "type": "close_tile"
+            },
+            "label": "Close view",
+            "title": "Close this view; its running work is unaffected"
+          }
+        ],
+        "maximized": false,
+        "tabs": [
+          {
+            "active": true,
+            "tile_id": "2",
+            "title": "Shortcuts"
+          }
+        ],
+        "tile_id": "2",
+        "title": "Shortcuts",
+        "type": "tile",
+        "view": {
+          "affordance_hints": [],
+          "columns": [],
+          "provenance": "view:ryeos/ui/shortcuts",
+          "rows": [
+            {
+              "cursor": 0,
+              "expandable": false,
+              "expanded": false,
+              "glyph": "×",
+              "id": "d4777a077609785c4d45b43a816ea822a84ab10b082c2adf5b2ff94a74b7535b",
+              "intent": null,
+              "kind": "unavailable",
+              "meta": null,
+              "primary": "↑ / ↓",
+              "secondary": "Unavailable — Move the point through rows; else move focus",
+              "selected": true,
+              "tone": "neutral"
+            },
+            {
+              "cursor": 1,
+              "expandable": false,
+              "expanded": false,
+              "glyph": "×",
+              "id": "cef454567ae5c0f92dacdf0ea0a8b761016efbc70357ea3c7d8b38cbb04152f5",
+              "intent": null,
+              "kind": "unavailable",
+              "meta": null,
+              "primary": "← / →",
+              "secondary": "Unavailable — Navigate field hierarchy, expand row/feed details, or move focus",
+              "selected": false,
+              "tone": "neutral"
+            },
+            {
+              "cursor": 2,
+              "expandable": false,
+              "expanded": false,
+              "glyph": "×",
+              "id": "ae7ecab9b4377c36d5a3f433d967ca05b9917508ab7679343390c0e44775acc5",
+              "intent": null,
+              "kind": "unavailable",
+              "meta": null,
+              "primary": "Enter",
+              "secondary": "Unavailable — Activate the selected row; submit a non-filter input with text",
+              "selected": false,
+              "tone": "neutral"
+            },
+            {
+              "cursor": 3,
+              "expandable": false,
+              "expanded": false,
+              "glyph": "×",
+              "id": "6ebdc487ee84682c659269178ef4b19ee29af2801eebca1471e19693cadfa84b",
+              "intent": null,
+              "kind": "unavailable",
+              "meta": null,
+              "primary": "Alt+Enter",
+              "secondary": "Unavailable — Interrupt-submit a focused non-filter input with text",
+              "selected": false,
+              "tone": "neutral"
+            },
+            {
+              "cursor": 4,
+              "expandable": false,
+              "expanded": false,
+              "glyph": "×",
+              "id": "15737d64ff262316689306d0dfece50cabb620bfd3ca031d1e6990bf61d2d625",
+              "intent": null,
+              "kind": "unavailable",
+              "meta": null,
+              "primary": "Tab / ⇧Tab",
+              "secondary": "Unavailable — Cycle declared filter fields, accept completion, or cycle a declared route target",
+              "selected": false,
+              "tone": "neutral"
+            },
+            {
+              "cursor": 5,
+              "expandable": false,
+              "expanded": false,
+              "glyph": "×",
+              "id": "2fe63b889372dc0b439c15f80ca0a4f0b6f088ba403790a918a0fdec80849d6f",
+              "intent": null,
+              "kind": "unavailable",
+              "meta": null,
+              "primary": "Esc",
+              "secondary": "Unavailable — Close the focused dialog; otherwise end field query, blur input, cancel a running thread, or close the view",
+              "selected": false,
+              "tone": "neutral"
+            },
+            {
+              "cursor": 6,
+              "expandable": false,
+              "expanded": false,
+              "glyph": "×",
+              "id": "3d4acf86444114646f2dc42a303471f910f669afe89916edb2fefbd104f32aa2",
+              "intent": null,
+              "kind": "unavailable",
+              "meta": null,
+              "primary": "y / ⇧Y",
+              "secondary": "Unavailable — Copy the entry under the point as text / as its raw events",
+              "selected": false,
+              "tone": "neutral"
+            },
+            {
+              "cursor": 7,
+              "expandable": false,
+              "expanded": false,
+              "glyph": "×",
+              "id": "dd3849cee00d14977474aec143caf4401a472c8a70f88085462cb27cba620cb9",
+              "intent": null,
+              "kind": "unavailable",
+              "meta": null,
+              "primary": "v",
+              "secondary": "Unavailable — Inspect the raw events behind the entry",
+              "selected": false,
+              "tone": "neutral"
+            },
+            {
+              "cursor": 8,
+              "expandable": false,
+              "expanded": false,
+              "glyph": "×",
+              "id": "329cb58b9fbf7856e5332883999467bc33964eae3ba4d14d000d4db7abb8ebf1",
+              "intent": null,
+              "kind": "unavailable",
+              "meta": null,
+              "primary": "f",
+              "secondary": "Unavailable — Fold or unfold the cluster under the point",
+              "selected": false,
+              "tone": "neutral"
+            },
+            {
+              "cursor": 9,
+              "expandable": false,
+              "expanded": false,
+              "glyph": "×",
+              "id": "0d49285fce22a25d4fe33095db65beeadc619151166f4d0979c6e3337dee2fed",
+              "intent": null,
+              "kind": "unavailable",
+              "meta": null,
+              "primary": "r",
+              "secondary": "Unavailable — Retry a failed fetch in the focused view",
+              "selected": false,
+              "tone": "neutral"
+            },
+            {
+              "cursor": 10,
+              "expandable": false,
+              "expanded": false,
+              "glyph": "×",
+              "id": "a497823fe239a13e81015566e5056da88cee27c4e9160c86ea18bf566c261ca9",
+              "intent": null,
+              "kind": "unavailable",
+              "meta": null,
+              "primary": "a / d",
+              "secondary": "Unavailable — Answer the first pending ask with the key shown on its button",
+              "selected": false,
+              "tone": "neutral"
+            },
+            {
+              "cursor": 11,
+              "expandable": false,
+              "expanded": false,
+              "glyph": "×",
+              "id": "04060ccfb0d1e4d7aa66f3bc7620927b5f61d35e56056227939fa5bcdef1c0af",
+              "intent": null,
+              "kind": "unavailable",
+              "meta": null,
+              "primary": "Alt+←",
+              "secondary": "Unavailable — Return from a drill-in view",
+              "selected": false,
+              "tone": "neutral"
+            },
+            {
+              "cursor": 12,
+              "expandable": false,
+              "expanded": false,
+              "glyph": "×",
+              "id": "6a562eaba471469f42fdbf42da5410063c762336fcde27a6ddd5441c11a25be6",
+              "intent": null,
+              "kind": "unavailable",
+              "meta": null,
+              "primary": "type",
+              "secondary": "Unavailable — Edit only the focused View's declared input",
+              "selected": false,
+              "tone": "neutral"
+            },
+            {
+              "cursor": 13,
+              "expandable": false,
+              "expanded": false,
+              "glyph": "×",
+              "id": "1d088a60e29f917acc396ad8a8d3df51ca9ab27adee36082e666095938653ecc",
+              "intent": null,
+              "kind": "unavailable",
+              "meta": null,
+              "primary": "Ctrl+K",
+              "secondary": "Unavailable — Open the configured presentation launcher",
+              "selected": false,
+              "tone": "neutral"
+            },
+            {
+              "cursor": 14,
+              "expandable": false,
+              "expanded": false,
+              "glyph": "×",
+              "id": "1502475a501364366e768c22851cdb423e1837a8d684ade13daf8682b516cbc8",
+              "intent": null,
+              "kind": "unavailable",
+              "meta": null,
+              "primary": "Ctrl+← / →",
+              "secondary": "Unavailable — Switch view-set tab",
+              "selected": false,
+              "tone": "neutral"
+            },
+            {
+              "cursor": 15,
+              "expandable": false,
+              "expanded": false,
+              "glyph": "×",
+              "id": "5b2552e3f6c6c1e8ebcf16fc123fdd712f8eefd77af71de08858dfaab615df02",
+              "intent": null,
+              "kind": "unavailable",
+              "meta": null,
+              "primary": "Ctrl+U / Ctrl+D",
+              "secondary": "Unavailable — Jump the focused rows by half a screen",
+              "selected": false,
+              "tone": "neutral"
+            },
+            {
+              "cursor": 16,
+              "expandable": false,
+              "expanded": false,
+              "glyph": "×",
+              "id": "90b3ba9f01f09b9f38eceba5dc1113087125c032bc345eaf34b183843e75c68b",
+              "intent": null,
+              "kind": "unavailable",
+              "meta": null,
+              "primary": "Ctrl+↑ / ↓",
+              "secondary": "Unavailable — Move the focused tile in the stack",
+              "selected": false,
+              "tone": "neutral"
+            },
+            {
+              "cursor": 17,
+              "expandable": false,
+              "expanded": false,
+              "glyph": "×",
+              "id": "41a629d8939570b9ceddac7ed06687ffdfc0338e41c8989a9ad502a772be7f3a",
+              "intent": null,
+              "kind": "unavailable",
+              "meta": null,
+              "primary": "Ctrl+⇧+arrows",
+              "secondary": "Unavailable — Resize the focused tile",
+              "selected": false,
+              "tone": "neutral"
+            },
+            {
+              "cursor": 18,
+              "expandable": false,
+              "expanded": false,
+              "glyph": "×",
+              "id": "07cf16a64245e8255fcaaa6f36d87c61fd3fcbf21b2219ded54a841016286fb2",
+              "intent": null,
+              "kind": "unavailable",
+              "meta": null,
+              "primary": "Alt+M",
+              "secondary": "Unavailable — Promote the focused tile in a master-and-stack layout",
+              "selected": false,
+              "tone": "neutral"
+            },
+            {
+              "cursor": 19,
+              "expandable": false,
+              "expanded": false,
+              "glyph": "×",
+              "id": "e29e09679741857eae2f9a5159294f90149137eceb2e3ce651a6b26b818081b2",
+              "intent": null,
+              "kind": "unavailable",
+              "meta": null,
+              "primary": "Alt+T / Alt+B",
+              "secondary": "Unavailable — Toggle the top / bottom presentation bar",
+              "selected": false,
+              "tone": "neutral"
+            },
+            {
+              "cursor": 20,
+              "expandable": false,
+              "expanded": false,
+              "glyph": "×",
+              "id": "1a9907a931fed594e5432725f2728faf1c2a9489c633a81004daa840e215dddb",
+              "intent": null,
+              "kind": "unavailable",
+              "meta": null,
+              "primary": "Alt+Q",
+              "secondary": "Unavailable — Close the focused view; its running work is unaffected",
+              "selected": false,
+              "tone": "neutral"
+            },
+            {
+              "cursor": 21,
+              "expandable": false,
+              "expanded": false,
+              "glyph": "×",
+              "id": "7ff793b803d3ebef7963fd59a6a20e5040e6e4def7c810a6e6aa61be53981860",
+              "intent": null,
+              "kind": "unavailable",
+              "meta": null,
+              "primary": "Ctrl+C",
+              "secondary": "Unavailable — Quit",
+              "selected": false,
+              "tone": "neutral"
+            }
+          ],
+          "title": "Shortcuts",
+          "total_rows": 22,
+          "type": "rows"
+        }
+      },
+      "split_max_ratio": 0.8999999761581421,
+      "split_min_ratio": 0.10000000149011612,
+      "tile_count": 1,
+      "view_set_id": 1
+    }
+  }
+}

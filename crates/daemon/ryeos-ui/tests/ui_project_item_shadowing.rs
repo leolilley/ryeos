@@ -308,7 +308,7 @@ fn every_other_kind_still_resolves_project_first() {
         })
         .collect();
     refusing.sort_unstable();
-    assert_eq!(refusing, ["surface", "view"]);
+    assert_eq!(refusing, ["picture", "surface", "view"]);
 
     let mut checked = Vec::new();
     for kind in ["directive", "tool", "graph", "knowledge", "config"] {

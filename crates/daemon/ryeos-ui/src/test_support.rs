@@ -455,12 +455,14 @@ fn service_descriptors() -> &'static [ryeos_app::service_registry::ServiceDescri
         .as_slice()
 }
 
-/// The node policy snapshot the tests run under, with the given
-/// `ui_seat_reads` record in place of the shipped one.
+/// The node policy snapshot the test state runs under; `public_origin` is the
+/// browser-session policy's configured public origin.
 fn test_node_policy(
+    public_origin: Option<String>,
     seat_reads: Arc<dyn ryeos_node_runtime::node_policy::ErasedNodePolicy>,
-) -> ryeos_node_runtime::node_policy::NodePolicySnapshot {
-    ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
+) -> Arc<ryeos_node_runtime::node_policy::NodePolicySnapshot> {
+    Arc::new(
+            ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
                 ryeos_node_runtime::node_policy::default_launch_trust_record(),
                 ryeos_node_runtime::node_policy::default_authorization_record(),
                 ryeos_node_runtime::node_policy::shipped_event_storage_record(),
@@ -490,6 +492,7 @@ fn test_node_policy(
                             max_replay_frame_events: 64,
                             max_replay_frame_bytes: 4194304,
                         },
+                        public_origin,
                     },
                 ),
                 seat_reads,
@@ -503,30 +506,8 @@ fn test_node_policy(
                         max_facet_pages_total: 64,
                     },
                 ),
-            ])
-}
-
-/// Replace the state's `ui_seat_reads` policy with `body`, parsed and
-/// validated as the node loads it. Call before minting: a binding records
-/// what the policy then admitted.
-pub fn set_seat_reads(state: &mut AppState, body: &serde_json::Value) {
-    use ryeos_node_runtime::node_policy::NodePolicyContext;
-    use ryeos_node_runtime::node_policy::NodePolicySection as _;
-    use ryeos_node_runtime::node_policy::sections::ui_seat_reads::{
-        SECTION_NAME, UiSeatReadsPolicySection,
-    };
-
-    let record = UiSeatReadsPolicySection
-        .parse(
-            &NodePolicyContext {
-                section: SECTION_NAME.to_owned(),
-                source_file: "/test/ui_seat_reads.yaml".into(),
-                signer_fingerprint: "test".to_owned(),
-            },
-            body,
+            ]),
         )
-        .expect("test ui_seat_reads policy parses");
-    state.node_policy = Arc::new(test_node_policy(record));
 }
 
 /// The `ui_seat_reads` policy exactly as the shipped standard profile carries
@@ -555,6 +536,39 @@ pub fn shipped_seat_reads_record() -> Arc<dyn ryeos_node_runtime::node_policy::E
             &body,
         )
         .expect("shipped ui_seat_reads policy parses")
+}
+
+/// Replace the state's `ui_seat_reads` policy with `body`, parsed and
+/// validated as the node loads it. Call before minting: a binding records
+/// what the policy then admitted.
+pub fn set_seat_reads(state: &mut AppState, body: &serde_json::Value) {
+    use ryeos_node_runtime::node_policy::NodePolicyContext;
+    use ryeos_node_runtime::node_policy::NodePolicySection as _;
+    use ryeos_node_runtime::node_policy::sections::ui_seat_reads::{
+        SECTION_NAME, UiSeatReadsPolicySection,
+    };
+
+    let record = UiSeatReadsPolicySection
+        .parse(
+            &NodePolicyContext {
+                section: SECTION_NAME.to_owned(),
+                source_file: "/test/ui_seat_reads.yaml".into(),
+                signer_fingerprint: "test".to_owned(),
+            },
+            body,
+        )
+        .expect("test ui_seat_reads policy parses");
+    state.node_policy = test_node_policy(None, record);
+}
+
+/// The default test state with the browser-session policy's public origin set.
+pub fn build_test_state_with_public_origin(
+    public_origin: &str,
+) -> (tempfile::TempDir, TestStateStore, AppState) {
+    let (tmp, store, mut state) = build_test_state();
+    state.node_policy =
+        test_node_policy(Some(public_origin.to_owned()), shipped_seat_reads_record());
+    (tmp, store, state)
 }
 
 /// Build a minimal AppState with an empty engine.
@@ -828,7 +842,7 @@ fn build_app_state(
         external_candidate_connectors: Arc::new(Default::default()),
         external_provider_configurations: Arc::new(Default::default()),
         external_candidate_imports: Arc::new(Default::default()),
-        node_policy: Arc::new(test_node_policy(shipped_seat_reads_record())),
+        node_policy: test_node_policy(None, shipped_seat_reads_record()),
         vault: Arc::new(ryeos_app::vault::EmptyVault),
         provider_env: std::sync::Arc::new(ryeos_app::vault::ProviderEnvironment::none()),
         vault_ceilings: std::sync::Arc::new(ryeos_app::vault::VaultCeilings::operator_only(
