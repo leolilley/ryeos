@@ -522,6 +522,15 @@ impl DispatchError {
         {
             return StatusCode::NOT_FOUND;
         }
+        if selected_qualification_refusal(self).is_some() {
+            return StatusCode::CONFLICT;
+        }
+        if let Some(refusal) = qualification_refusal(self) {
+            return StatusCode::from_u16(ryeos_app::handler_error::qualification_refusal_status(
+                refusal,
+            ))
+            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        }
         match self {
             Self::InvalidRef(..)
             | Self::AliasCycle { .. }
@@ -617,6 +626,12 @@ impl DispatchError {
         }
         if quarantined_large_object(self).is_some() {
             return crate::execution::external_content::LARGE_OBJECT_QUARANTINED_CODE;
+        }
+        if selected_qualification_refusal(self).is_some() {
+            return ryeos_app::operator_external_content::qualification_testimony::SelectedQualificationRefused::CODE;
+        }
+        if let Some(refusal) = qualification_refusal(self) {
+            return refusal.code();
         }
         if let Some(refused) = refused_reference_large_object(self) {
             return refused.code.as_str();
@@ -750,6 +765,38 @@ pub(crate) fn refused_reference_large_object(
     }
 }
 
+/// A selection that disagrees with the remote testimony the node holds
+/// travels as an internal error's cause; it is a conflict the caller cures by
+/// changing the selection, not an internal failure, and keeps its own code.
+pub(crate) fn selected_qualification_refusal(
+    error: &DispatchError,
+) -> Option<
+    &ryeos_app::operator_external_content::qualification_testimony::SelectedQualificationRefused,
+> {
+    match error {
+        DispatchError::Internal(error) => {
+            ryeos_app::operator_external_content::qualification_testimony::SelectedQualificationRefused::find(error)
+        }
+        _ => None,
+    }
+}
+
+/// A qualification or testimony refused at admission, by policy or because it
+/// is stale, travels as an internal error's cause and keeps its own code and
+/// class status.
+pub(crate) fn qualification_refusal(
+    error: &DispatchError,
+) -> Option<&ryeos_state::external_content::products::qualification::QualificationRefused> {
+    match error {
+        DispatchError::Internal(error) => {
+            ryeos_state::external_content::products::qualification::QualificationRefused::find(
+                error,
+            )
+        }
+        _ => None,
+    }
+}
+
 /// A fresh placement refused for this incarnation's headroom travels as an
 /// internal error's cause; it is a capacity refusal with its own code and
 /// fields, not an internal failure.
@@ -768,6 +815,56 @@ pub(crate) fn native_headroom_refusal(
 mod tests {
     use super::*;
     use axum::http::StatusCode;
+
+    #[test]
+    fn selected_qualification_refusal_is_a_typed_non_retryable_conflict() {
+        let refusal = anyhow::Error::new(
+            ryeos_app::operator_external_content::qualification_testimony::SelectedQualificationRefused::new(
+                "remote product testimony differs from the selected qualification",
+            ),
+        )
+        .context("admit root product selections");
+        let err = DispatchError::Internal(refusal);
+        assert_eq!(err.http_status(), StatusCode::CONFLICT);
+        assert_eq!(err.code(), "selected_qualification_refused");
+        assert!(!err.retryable());
+        let payload = crate::structured_error::dispatch_error_value(&err);
+        assert_eq!(payload["code"], "selected_qualification_refused");
+        assert_eq!(payload["retryable"], false);
+    }
+
+    #[test]
+    fn qualification_refusals_map_by_class_and_are_not_retryable() {
+        use ryeos_state::external_content::products::qualification::QualificationRefused;
+        for (error, code, expected) in [
+            (
+                QualificationRefused::policy_denied("lane not allowed"),
+                "qualification_policy_denied",
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                QualificationRefused::stale("policy changed since acceptance"),
+                "qualification_stale",
+                StatusCode::CONFLICT,
+            ),
+        ] {
+            let err = DispatchError::Internal(error.context("admit root product selections"));
+            assert_eq!(err.http_status(), expected);
+            assert_eq!(err.code(), code);
+            assert!(!err.retryable());
+            let payload = crate::structured_error::dispatch_error_value(&err);
+            assert_eq!(payload["code"], code);
+            assert_eq!(payload["retryable"], false);
+        }
+    }
+
+    #[test]
+    fn a_genuine_internal_error_stays_500_internal() {
+        let err = DispatchError::Internal(anyhow::anyhow!("disk exploded"));
+        assert_eq!(err.http_status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(err.code(), "internal");
+        assert!(!err.retryable());
+    }
 
     #[test]
     fn direct_continuation_refusal_is_a_typed_client_error() {
