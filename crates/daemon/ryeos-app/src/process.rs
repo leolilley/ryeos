@@ -2029,7 +2029,7 @@ mod tests {
             target_start_time_ticks: 5,
             group_leader_pid: 77,
             group_leader_start_time_ticks: 5,
-            pid_namespace: "pid:[4026531836]".into(),
+            pid_namespace: lillux::current_pid_namespace().unwrap(),
             group_basis: lillux::GroupBasis::Contained,
         };
         let error = execution_process_identity_from_lillux(contained.clone(), None)
@@ -2097,7 +2097,7 @@ mod tests {
             "schema_version": PROCESS_IDENTITY_SCHEMA_VERSION,
             "boot_id": "fixture-boot", "target_pid": 40,
             "target_start_time_ticks": 200, "group_leader_pid": 39,
-            "group_leader_start_time_ticks": 190, "pid_namespace": "pid:[4026531836]", "process_scope": null,
+            "group_leader_start_time_ticks": 190, "pid_namespace": lillux::current_pid_namespace().unwrap(), "process_scope": null,
             "resource_selections": [], "resource_operations": [],
             "resource_settlement_authority": null,
             "resource_allocation_limit": null,
@@ -2254,7 +2254,7 @@ mod tests {
             "schema_version": PROCESS_IDENTITY_SCHEMA_VERSION,
             "boot_id": "fixture-boot", "target_pid": 40,
             "target_start_time_ticks": 200, "group_leader_pid": 39,
-            "group_leader_start_time_ticks": 190, "pid_namespace": "pid:[4026531836]", "process_scope": null,
+            "group_leader_start_time_ticks": 190, "pid_namespace": lillux::current_pid_namespace().unwrap(), "process_scope": null,
             "resource_selections": [], "resource_operations": [],
             "resource_settlement_authority": null,
             "resource_allocation_limit": null,

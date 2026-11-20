@@ -4312,7 +4312,7 @@ mod tests {
                     target_start_time_ticks: 10,
                     group_leader_pid: 424242,
                     group_leader_start_time_ticks: 10,
-                    pid_namespace: "pid:[4026531836]".into(),
+                    pid_namespace: lillux::current_pid_namespace().unwrap(),
                     resource_selections: Vec::new(),
                     resource_settlement_authority: None,
                     resource_operations: Vec::new(),

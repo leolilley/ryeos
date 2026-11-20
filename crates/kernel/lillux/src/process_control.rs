@@ -2201,7 +2201,7 @@ mod tests {
                     group_leader_pid: pid,
                     group_leader_start_time_ticks: ticks,
                     group_basis: crate::GroupBasis::ProcessGroup,
-                    pid_namespace: "pid:[4026531836]".into(),
+                    pid_namespace: "pid:[4026532001]".into(),
                 };
                 // The namespace is not part of the persisted digest.
                 let other_namespace = super::ExactProcessIdentity {
@@ -2233,7 +2233,7 @@ mod tests {
             group_leader_pid: 2,
             group_leader_start_time_ticks: 1,
             group_basis: crate::GroupBasis::ProcessGroup,
-            pid_namespace: "pid:[4026531836]".into(),
+            pid_namespace: "pid:[4026532001]".into(),
         };
         assert!(invalid.incarnation_digest_bytes().is_err());
     }
@@ -2275,7 +2275,7 @@ mod tests {
         use super::*;
 
         const EPERM: &str = "open exact process 7 pidfd: Operation not permitted (os error 1)";
-        const NS: &str = "pid:[4026531836]";
+        const NS: &str = "pid:[4026532001]";
         const OTHER_NS: &str = "pid:[4026532999]";
 
         fn recorded() -> ExactProcessIdentity {
@@ -2636,7 +2636,7 @@ mod tests {
 
         #[test]
         fn identity_with_a_malformed_namespace_is_incomplete() {
-            for bad in ["", "pid:[]", "pid:[12x]", "net:[4026531836]", "4026531836"] {
+            for bad in ["", "pid:[]", "pid:[12x]", "net:[4026532001]", "4026532001"] {
                 let mut identity = recorded();
                 identity.pid_namespace = bad.into();
                 assert!(identity.validate().is_err(), "{bad}");
