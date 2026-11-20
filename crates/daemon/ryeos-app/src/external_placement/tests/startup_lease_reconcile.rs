@@ -8,11 +8,13 @@ use super::*;
 const PLACEMENT: &str = "T-one";
 
 struct Restarted {
-    _owner: crate::state_store::test_native::TestStateStore,
+    // Field order is drop order: every clone of the Store and the controller
+    // lifetime goes before the owner that closes them.
     store: Arc<crate::state_store::StateStore>,
     lifetime: Arc<StateLockLease>,
     reservation: ExternalAllocationReservation,
     binding: RetainedExternalExecutionBinding,
+    _owner: crate::state_store::test_native::TestStateStore,
 }
 
 impl Restarted {
@@ -121,11 +123,11 @@ fn restarted_with_cleared_claim() -> Restarted {
     // retained allocation.
     let (owner, store, lifetime) = reopen_placement_store(&lock_path);
     Restarted {
-        _owner: owner,
         store,
         lifetime,
         reservation,
         binding,
+        _owner: owner,
     }
 }
 
