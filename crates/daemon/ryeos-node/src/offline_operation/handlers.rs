@@ -1279,13 +1279,26 @@ pub(super) fn allow_restart(ctx: &HandlerContext<'_>) -> Result<Value> {
 
 // ── Resets ───────────────────────────────────────────────────────────────
 
-pub(super) fn reset_execution_history(ctx: &HandlerContext<'_>) -> Result<Value> {
+pub(crate) fn reset_execution_history(ctx: &HandlerContext<'_>) -> Result<Value> {
     let arguments: ExecutionHistoryResetArguments = ctx.arguments()?;
+    let mut capacity_cut = None;
     if let Some(cut) = &arguments.schema_cut {
         ensure!(
             cut.from != cut.to,
             "execution-history schema cut must name distinct epochs"
         );
+        // Native-capacity records written before pid namespaces were recorded
+        // live outside the runtime database this reset retires, so the cut
+        // re-records them here, under the same exclusive state lock. A no-op
+        // unless a capacity file carries exactly that pre-cut shape.
+        let report = crate::native_capacity::retire_pre_cut_identity_records(
+            ctx.app_root,
+            ctx.state_lock,
+        )
+        .context("native-capacity records of the previous schema could not be re-recorded")?;
+        ctx.host
+            .observe_report(TypedReport::NativeCapacityCut(&report));
+        capacity_cut = Some(report);
     }
     let options = ExecutionHistoryResetOptions {
         app_root: Some(ctx.app_root.to_path_buf()),
@@ -1310,7 +1323,63 @@ pub(super) fn reset_execution_history(ctx: &HandlerContext<'_>) -> Result<Value>
     .context("offline execution-history reset failed")?;
     ctx.host
         .observe_report(TypedReport::ExecutionHistoryReset(&report));
-    Ok(serde_json::to_value(report)?)
+    let mut value = serde_json::to_value(report)?;
+    if let (Some(capacity), Some(object)) = (capacity_cut, value.as_object_mut()) {
+        object.insert(
+            "native_capacity_cut".to_owned(),
+            serde_json::to_value(capacity)?,
+        );
+    }
+    Ok(value)
+}
+
+/// The reset exactly as the offline operation `node.reset.execution-history`
+/// runs it, for tests against an initialised node.
+#[cfg(test)]
+pub(crate) fn reset_execution_history_for_test(
+    app_root: &Path,
+    state_lock: &ryeos_node_runtime::state_lock::StateLock,
+    from: u32,
+    to: u32,
+) -> Result<Value> {
+    use crate::offline_operation::contract::{REQUEST_SCHEMA, RequestBody, SignedRequest};
+    use crate::offline_operation::host::BareHost;
+    use crate::offline_operation::table::VerifiedInputs;
+    let node = ryeos_node_runtime::identity::NodeIdentity::load(
+        &ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).node_signing_key_path(),
+    )?;
+    let request = RequestBody {
+        schema: REQUEST_SCHEMA.to_owned(),
+        node_fingerprint: node.fingerprint().to_owned(),
+        signer_fingerprint: "b".repeat(64),
+        signer_grant_digest: None,
+        signer_origin_site_id: None,
+        operation: "node.reset.execution-history".to_owned(),
+        arguments: json!({
+            "discard_project_heads": false,
+            "schema_cut": { "from": from, "to": to },
+            "discard_unreadable_lifetime_fence_after_reboot": false,
+        }),
+        inputs: BTreeMap::new(),
+        expected_result: BTreeMap::new(),
+        precondition: BTreeMap::new(),
+        issued_at: "2026-11-13T00:00:00Z".to_owned(),
+        not_after: "2026-11-13T01:00:00Z".to_owned(),
+    };
+    let inputs = VerifiedInputs::new(BTreeMap::new());
+    reset_execution_history(&HandlerContext {
+        app_root,
+        state_lock,
+        request: &request,
+        signed: &SignedRequest {
+            body: request.clone(),
+            signature: String::new(),
+        },
+        request_digest: &"c".repeat(64),
+        inputs: &inputs,
+        host: &BareHost,
+        node: &node,
+    })
 }
 
 pub(super) fn reset_execution_history_scratch(ctx: &HandlerContext<'_>) -> Result<Value> {

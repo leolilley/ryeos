@@ -31,6 +31,7 @@ use ryeos_node_runtime::state_lock::{StateLock, StateLockLease};
 use std::sync::Mutex;
 
 mod anchor;
+pub(crate) mod cut_retirement;
 #[cfg(all(test, target_os = "linux"))]
 mod persistence_controls;
 pub(super) mod reanchor;

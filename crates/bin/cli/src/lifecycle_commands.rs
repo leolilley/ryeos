@@ -1611,6 +1611,7 @@ fn run_execution_history_reset_command(
     let app_root = ryeos_node::NodeConfig::load_local(args.app_root.clone())?.app_root;
     let progress =
         crate::tty::ExecutionHistoryResetProgress::new(!args.json, console.capabilities());
+    let mut capacity_cut = None;
     let (report, progress) = if args.dry_run {
         // A preview changes nothing, so it is not an operation; it only needs
         // the existing lock held read-only.
@@ -1675,8 +1676,9 @@ fn run_execution_history_reset_command(
             std::collections::BTreeMap::new(),
         )?;
         host.finish_progress()?;
-        let report = host
-            .take_captured()
+        let captured = host.take_captured();
+        capacity_cut = captured.native_capacity_cut;
+        let report = captured
             .execution_history
             .context("the reset reported nothing")?;
         (report, None)
@@ -1783,6 +1785,12 @@ fn run_execution_history_reset_command(
                     custody.scratch_roots_absent,
                 ),
             },
+        ),
+        crate::tty::Row::key_value(
+            "native capacity records of the previous schema",
+            capacity_cut
+                .as_ref()
+                .map_or_else(|| "not part of this run".to_owned(), |cut| cut.summary()),
         ),
         crate::tty::Row::key_value("reservation released", report.released_sha256.clone()),
         crate::tty::Row::key_value(

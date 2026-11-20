@@ -5176,6 +5176,132 @@ mod tests {
         assert_startup_refused_while_held_and_proceeds_when_free(&state);
     }
 
+    // ---- Pre-cut capacity records of a killed daemon.
+
+    /// A node whose capacity files hold what a killed daemon of the previous
+    /// schema left: an outstanding debit and a charged recovery attempt, both
+    /// naming dead incarnations, stored with identities that lack
+    /// `pid_namespace`. `mutate` may damage the stored identity further.
+    fn node_with_pre_cut_capacity_records(
+        state: &Path,
+        user: &Path,
+        mutate: &dyn Fn(String) -> String,
+    ) -> (
+        ryeos_node_runtime::state_lock::StateLock,
+        crate::native_capacity::CapacityAccountSummary,
+    ) {
+        run_init(&make_opts(state, user)).expect("initial generation");
+        let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+            &ryeos_node_runtime::state_lock::default_lock_path(state),
+        )
+        .unwrap();
+        node_owing_a_debit(state, &lock, &ended_process_identity());
+        crate::native_capacity::startup_seams::charge_recovery_for(
+            state,
+            &lock,
+            &ended_process_identity(),
+        )
+        .expect("a killed start's recovery charge");
+        let summary = crate::native_capacity::inspect_capacity_account(state)
+            .unwrap()
+            .expect("capacity account");
+        assert!(summary.outstanding_incarnation && summary.recovery_attempts_used == 1);
+        crate::native_capacity::downgrade_to_pre_cut_for_test(state, mutate).unwrap();
+        (lock, summary)
+    }
+
+    /// The documented cut, run as the offline operation runs it, retires the
+    /// pre-cut records and the node then starts, settles the dead incarnation
+    /// and debits normally.
+    #[test]
+    fn the_execution_history_cut_re_records_pre_cut_capacity_records_and_the_node_starts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        let (lock, before) = node_with_pre_cut_capacity_records(&state, &user, &|json| json);
+        // The pre-cut files do not decode, and the refusal names the cure.
+        let refused = crate::native_capacity::startup_seams::open_and_debit(&state, &lock)
+            .expect_err("a pre-cut record cannot start");
+        let refused = format!("{refused:#}");
+        assert!(
+            refused.contains("predates recorded pid namespaces")
+                && refused.contains("ryeos node reset execution-history --confirm"),
+            "{refused}"
+        );
+        assert!(crate::native_capacity::inspect_capacity_account(&state).is_err());
+
+        let epoch = ryeos_app::runtime_db::RuntimeDb::current_operator_schema_epoch();
+        let report = crate::offline_operation::handlers::reset_execution_history_for_test(
+            &state,
+            &lock,
+            epoch - 1,
+            epoch,
+        )
+        .expect("the documented cut");
+        assert_eq!(
+            report["native_capacity_cut"],
+            serde_json::json!({"anchor_rewritten": true, "account_rewritten": true})
+        );
+        // Idempotent: a rerun finds nothing left to re-record.
+        let again = crate::offline_operation::handlers::reset_execution_history_for_test(
+            &state,
+            &lock,
+            epoch - 1,
+            epoch,
+        )
+        .expect("the cut reruns");
+        assert_eq!(
+            again["native_capacity_cut"],
+            serde_json::json!({"anchor_rewritten": false, "account_rewritten": false})
+        );
+
+        crate::native_capacity::startup_seams::open_and_debit(&state, &lock)
+            .expect("the node starts, settles the dead incarnation and debits");
+        let after = crate::native_capacity::inspect_capacity_account(&state)
+            .unwrap()
+            .expect("capacity account");
+        // Same epoch; the settlement spent one more recovery attempt and
+        // refunded nothing; the new incarnation took the next sequence.
+        assert_eq!(after.epoch, before.epoch);
+        assert_eq!(after.sequence, before.sequence + 1);
+        assert_eq!(
+            after.recovery_attempts_used,
+            before.recovery_attempts_used + 1
+        );
+        assert!(after.outstanding_incarnation);
+        assert!(after.incarnations_remaining <= before.incarnations_remaining);
+    }
+
+    /// The step keys on the exact pre-cut shape: a record that fails to
+    /// decode for any other reason is refused and left as it was.
+    #[test]
+    fn the_cut_refuses_a_capacity_record_that_is_not_the_pre_cut_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        // An identity of the old shape that is also damaged: a renamed key.
+        let (lock, _) = node_with_pre_cut_capacity_records(&state, &user, &|json| {
+            json.replace("\"target_pid\"", "\"target_pidx\"")
+        });
+        let files =
+            |name: &str| std::fs::read(state.join(".ai/node/native-capacity").join(name)).unwrap();
+        let (account, anchor) = (files("account"), files("anchor"));
+        let epoch = ryeos_app::runtime_db::RuntimeDb::current_operator_schema_epoch();
+        let error = crate::offline_operation::handlers::reset_execution_history_for_test(
+            &state,
+            &lock,
+            epoch - 1,
+            epoch,
+        )
+        .expect_err("a damaged record is not the pre-cut shape");
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("not the pre-cut shape") || rendered.contains("pre-cut"),
+            "{rendered}"
+        );
+        assert_eq!((files("account"), files("anchor")), (account, anchor));
+    }
+
     #[test]
     fn a_replacement_over_a_live_incarnation_debit_changes_nothing() {
         let tmp = tempfile::tempdir().unwrap();

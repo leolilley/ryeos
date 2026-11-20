@@ -132,7 +132,17 @@ impl RetainedAnchor {
         let identity = pin.identity()?;
         let mut bytes = [0; ANCHOR_BYTES];
         pin.read_exact_stable_into(&mut bytes, deadline)?;
-        let redo = AccountRedo::decode(&bytes, policy, issuance)?;
+        let redo = AccountRedo::decode(&bytes, policy, issuance).map_err(|error| {
+            if super::cut_retirement::is_pre_cut_anchor(&bytes) {
+                error.context(
+                    "this capacity record was written by a daemon that predates recorded pid namespaces; \
+                     with the node stopped, run `ryeos node reset execution-history --confirm \
+                     --schema-cut-from <previous epoch> --schema-cut-to <current epoch>` once to re-record it, then start the node",
+                )
+            } else {
+                error
+            }
+        })?;
         self.parent
             .require_pinned_regular_entry_fixed(&pin)
             .map_err(anyhow::Error::msg)?;
