@@ -1,26 +1,71 @@
-# ryeos:signed:2026-11-18T07:43:25Z:5d237c8ebc487e41b19c6c4d9518212cad376b4989b3231b17d940ed8a48a520:2i1QCp+cQKbKzwdE8VKoqa1rYsukUcFMSpbsWQNcyjoJ/vXIfLDCLtVMyGau4D1oWU+Hl4Z+hBOEkUeXWqxNBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-# The JavaScript snippet modules the pinned Rune renderer emits, as paths relative to the
-# Rune crate root. This is the one declared list: build-rune-web.sh refuses any snippet
-# outside it and flattens each to rune_<file stem>.js, check-rune-snippets.py compares it
-# with the pinned Rune source, publish.sh derives its inventory from the registry built
-# from it, and generate_asset_registry.py requires the registry to carry exactly these.
-# A Rune pin bump that adds or drops a snippet changes this list and nothing else by hand.
-snippets = [
-  "src/platform/web/bridge.js",
-  "src/platform/web/health.js",
-  "src/platform/web/pipelines.js",
-  "src/platform/web/platform.js",
-  "src/platform/web/platform_text.js",
-  "src/platform/web/segmenter.js",
-]
-# The files the pinned Rune renderer fetches at runtime beside its bindings module, as paths
-# relative to the Rune crate root; each is served under its file name. With `embedded-fonts`
-# Rune compiles in Inter cut to Latin, Greek and Cyrillic text and fetches these full faces
-# after its first frame. build-rune-web.sh packages exactly these from the pinned Rune source,
+# ryeos:signed:2026-11-20T02:05:53Z:94454e69d7a3217859434f0be1e4cb86e9443df641169e52a9c504cf81b375f2:B2F6Jh52MnueMLh3TMmq/jjG44O7iSKwp+AfZYaQT/F/3TKpSkcF5Z37eS6/pQ8RZ8I1qfrgCNH0nFeGM1FJDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# The JavaScript snippet modules the pinned Rune renderer links, as {crate, path}: `crate` is
+# the Rune package name and `path` is relative to that package's root. Rune is several
+# packages, and each can declare snippets. This is the one declared list: build-rune-web.sh
+# refuses any snippet outside it (wasm-bindgen emits ./snippets/<crate>-<hash>/<path>) and
+# flattens each to <crate with - as _>_<file stem>.js, refusing a build in which two entries
+# flatten to one name; check-rune-snippets.py compares it with the pinned Rune source;
+# publish.sh derives its inventory from the registry built from it; and
+# generate_asset_registry.py requires the registry to carry exactly these. A Rune pin bump
+# that adds or drops a snippet changes this list and nothing else by hand.
+
+[[snippets]]
+crate = "rune"
+path = "src/platform/web/bridge.js"
+
+[[snippets]]
+crate = "rune"
+path = "src/platform/web/health.js"
+
+[[snippets]]
+crate = "rune"
+path = "src/platform/web/pipelines.js"
+
+[[snippets]]
+crate = "rune"
+path = "src/platform/web/platform.js"
+
+[[snippets]]
+crate = "rune-spell"
+path = "src/web.js"
+
+[[snippets]]
+crate = "rune-text"
+path = "src/fonts/platform_text.js"
+
+[[snippets]]
+crate = "rune-text"
+path = "src/raster/browser_platform.js"
+
+[[snippets]]
+crate = "rune-text"
+path = "src/segmenter/web.js"
+
+# Snippet modules Rune packages declare that this renderer does not link, so wasm-bindgen emits
+# none for them (the declaring function is never called). check-rune-snippets.py requires
+# every module the pinned source declares to be in `snippets` or here; the build still refuses
+# an emitted module that is not in `snippets`, so linking one of these fails until it moves up.
+
+[[unlinked]]
+crate = "rune-image"
+path = "src/from_url.js"
+
+# The files the pinned Rune renderer fetches at runtime beside its bindings module, as
+# {crate, path} with `path` relative to that Rune package's root; each is served under its
+# file name. With `embedded-fonts` Rune compiles in Inter cut to Latin, Greek and Cyrillic text
+# and fetches these full faces after its first frame (rune-text names them; the faces ship in
+# the rune package). build-rune-web.sh packages exactly these from the pinned Rune source,
 # check-rune-snippets.py compares them with that source, and generate_asset_registry.py
 # requires the registry to carry them.
-fetched = [
-  "assets/web/Inter-Regular.ttf",
-  "assets/web/Inter-Medium.ttf",
-  "assets/web/Inter-SemiBold.ttf",
-]
+
+[[fetched]]
+crate = "rune"
+path = "assets/web/Inter-Regular.ttf"
+
+[[fetched]]
+crate = "rune"
+path = "assets/web/Inter-Medium.ttf"
+
+[[fetched]]
+crate = "rune"
+path = "assets/web/Inter-SemiBold.ttf"
