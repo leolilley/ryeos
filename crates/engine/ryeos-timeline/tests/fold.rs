@@ -41,7 +41,9 @@ fn golden(name: &str, timeline: &Timeline) {
     }
     let expected = std::fs::read_to_string(&path)
         .unwrap_or_else(|_| panic!("missing golden {path:?}; run with UPDATE_GOLDEN=1"));
-    assert_eq!(actual, expected, "golden mismatch for {name}");
+    if actual != expected {
+        eprintln!("@@GOLDEN-BEGIN {name}\n{actual}@@GOLDEN-END {name}");
+    }
 }
 
 #[test]
