@@ -292,6 +292,20 @@
               "count": 0,
               "cursor": 0,
               "header_selected": false,
+              "id": "view-section:ac9e168877765c7f2635e663e4cbaf732a3818c2a5e59803188f397502b22c23",
+              "rows": [],
+              "source_status": {
+                "message": "Source subject or required context is unresolved",
+                "stale": false,
+                "state": "unresolved"
+              },
+              "title": "Isolation enforced"
+            },
+            {
+              "collapsed": false,
+              "count": 0,
+              "cursor": 0,
+              "header_selected": false,
               "id": "view-section:a1135d6fe95f4c1847ede4790b383359404618140305a93993d0fc69aa350471",
               "rows": [],
               "source_status": {
