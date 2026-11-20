@@ -215,14 +215,124 @@ pub(super) fn is_pre_cut_anchor(bytes: &[u8; ANCHOR_BYTES]) -> bool {
     upgrade_anchor(&mut copy).unwrap_or(false)
 }
 
+/// The cure a refusal names, shared by every start-path refusal that meets a
+/// pre-cut capacity file.
+pub(super) const PRE_CUT_CURE: &str = "this capacity record was written by a daemon that predates recorded pid namespaces; with the node stopped, run `ryeos node reset execution-history --confirm --schema-cut-from <previous epoch> --schema-cut-to <current epoch>` once to re-record it, then start the node";
+
+/// Inverse of the one re-recording this step makes, so a half-written account
+/// can be recognised against the image it was being rewritten from. Only an
+/// identity in [`PRE_CUT_PID_NAMESPACE`] has a predecessor image; any other
+/// record is returned unchanged.
+fn downgrade_record(new: &[u8; RECORD_BYTES]) -> [u8; RECORD_BYTES] {
+    let mut out = *new;
+    if out[100] != 1 {
+        return out;
+    }
+    let slot = &mut out[PROCESS_START..PROCESS_END];
+    let length = usize::from(u16::from_le_bytes([slot[0], slot[1]]));
+    if length == 0 || length > PROCESS_STORAGE_BYTES - 2 {
+        return *new;
+    }
+    let Ok(json) = std::str::from_utf8(&slot[2..2 + length]) else {
+        return *new;
+    };
+    let suffix = format!(",\"pid_namespace\":\"{PRE_CUT_PID_NAMESPACE}\"}}");
+    let Some(old) = json.strip_suffix(&suffix) else {
+        return *new;
+    };
+    let old = format!("{old}}}");
+    slot[..2].copy_from_slice(&(old.len() as u16).to_le_bytes());
+    slot[2..].fill(0);
+    slot[2..2 + old.len()].copy_from_slice(old.as_bytes());
+    let checksum = record_checksum(&out);
+    out[PAYLOAD_BYTES..].copy_from_slice(&checksum);
+    out
+}
+
+/// What the account must be, given the anchor's target image `target`: the
+/// image itself, its pre-cut predecessor image, or a torn mixture of the two
+/// left by a rewrite that died partway. `None` means it is none of those.
+#[derive(Debug, PartialEq, Eq)]
+enum AccountState {
+    /// Already decodable in the current shape: nothing for the cut to do.
+    Current,
+    /// The account holds the pre-cut image (or a tear toward the current one)
+    /// and must be rewritten to `target`.
+    AwaitsCut,
+}
+
+fn classify_account(
+    account: &[u8; RECORD_BYTES],
+    target_old: &[u8; RECORD_BYTES],
+    target_new: &[u8; RECORD_BYTES],
+) -> Result<AccountState> {
+    let mut copy = *account;
+    match upgrade_record(&mut copy) {
+        Ok(false) => return Ok(AccountState::Current),
+        Ok(true) => return Ok(AccountState::AwaitsCut),
+        Err(error) => {
+            // Not a whole pre-cut record. It is still ours when it is exactly
+            // a prefix of the image being written followed by the suffix of
+            // the pre-cut image it replaces: the in-place rewrite's own tear.
+            if target_old != target_new
+                && super::settlement_transition_bytes(account, target_old, target_new, true)
+            {
+                return Ok(AccountState::AwaitsCut);
+            }
+            Err(error)
+        }
+    }
+}
+
+/// Whether the account is waiting for the cut's account rewrite, judged
+/// against the anchor's target image. Start uses it to name the cure instead
+/// of reporting a generic corrupt account.
+pub(super) fn account_awaits_cut(
+    account: &[u8; RECORD_BYTES],
+    anchor_target: &[u8; RECORD_BYTES],
+) -> bool {
+    let target_old = downgrade_record(anchor_target);
+    matches!(
+        classify_account(account, &target_old, anchor_target),
+        Ok(AccountState::AwaitsCut)
+    ) && account != anchor_target
+}
+
+/// The points at which the cut can be interrupted, for the fault parameter of
+/// [`retire_with`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CutStep {
+    /// Everything is planned and checked; nothing has been written.
+    Planned,
+    /// The anchor carries the re-recorded identities; the account is untouched.
+    AnchorReplaced,
+    /// Both files are final.
+    Done,
+}
+
 /// The cut step. With the node stopped and its exclusive state lock held,
-/// re-record every pre-cut identity in the capacity account and redo anchor.
-/// Idempotent: current files are left untouched, and a rerun after an
-/// interruption finishes whichever file remains. Refuses any capacity file
-/// that does not decode for another reason.
+/// re-record every pre-cut identity in the capacity redo anchor and then the
+/// account. The anchor goes FIRST, because once it is current-shaped the
+/// account is derived from it: the anchor's target image is what the account
+/// must hold, and its pre-cut form is recomputable, so a rewrite that dies
+/// anywhere (before the anchor, between the two files, or inside the
+/// account's in-place write) is recognised and finished by a rerun, and a
+/// start that meets the in-between state names this command as its cure.
+///
+/// Both files are checked before the first write, so a capacity file that is
+/// not the pre-cut shape is refused with nothing changed. Idempotent:
+/// current files are left untouched.
 pub fn retire_pre_cut_identity_records(
     app_root: &Path,
     state_lock: &StateLock,
+) -> Result<NativeCapacityCutReport> {
+    retire_with(app_root, state_lock, &mut |_| Ok(()))
+}
+
+pub(crate) fn retire_with(
+    app_root: &Path,
+    state_lock: &StateLock,
+    fault: &mut dyn FnMut(CutStep) -> Result<()>,
 ) -> Result<NativeCapacityCutReport> {
     state_lock.ensure_protects_app_root(app_root)?;
     let Some(directory) =
@@ -245,46 +355,61 @@ pub fn retire_pre_cut_identity_records(
                 == lillux::PinnedEntryType::Regular),
         "capacity namespace retains unexpected entries; stopped operator resolution required"
     );
-    let mut report = NativeCapacityCutReport::default();
+
+    // Read and plan both files before writing either.
+    let anchor = directory
+        .open_pinned_regular(OsStr::new("anchor"), false)?
+        .context("capacity redo is absent")?;
+    anchor.require_effective_user_owned()?;
+    let anchor_identity = anchor.identity()?;
+    let mut anchor_before = [0u8; ANCHOR_BYTES];
+    anchor.read_exact_stable_into(&mut anchor_before, deadline)?;
+    let mut anchor_after = anchor_before;
+    let anchor_changed = upgrade_anchor(&mut anchor_after)?;
+    let target_of = |bytes: &[u8; ANCHOR_BYTES]| -> Result<[u8; RECORD_BYTES]> {
+        Ok(bytes[TARGET_START..TARGET_START + RECORD_BYTES].try_into()?)
+    };
+    let target_new = target_of(&anchor_after)?;
+    // The image the account was being rewritten from: the old anchor's own
+    // target when it is still pre-cut, else its recomputed predecessor.
+    let target_old = if anchor_changed {
+        target_of(&anchor_before)?
+    } else {
+        downgrade_record(&target_new)
+    };
 
     let account = directory
         .open_pinned_regular(OsStr::new("account"), false)?
         .context("capacity account is absent")?;
     account.require_effective_user_owned()?;
-    let mut before = [0u8; RECORD_BYTES];
-    account.read_exact_stable_into(&mut before, deadline)?;
-    let mut after = before;
-    if upgrade_record(&mut after)? {
-        let mut scratch = [0u8; RECORD_BYTES];
-        account.overwrite_fixed_if_matches(&before, &after, &mut scratch, deadline)?;
-        account.sync_exact(deadline)?;
-        report.account_rewritten = true;
-    }
+    let mut account_before = [0u8; RECORD_BYTES];
+    account.read_exact_stable_into(&mut account_before, deadline)?;
+    let rewrite_account = match classify_account(&account_before, &target_old, &target_new)? {
+        AccountState::Current => false,
+        AccountState::AwaitsCut => true,
+    };
+    fault(CutStep::Planned)?;
 
-    let anchor = directory
-        .open_pinned_regular(OsStr::new("anchor"), false)?
-        .context("capacity redo is absent")?;
-    anchor.require_effective_user_owned()?;
-    let identity = anchor.identity()?;
-    let mut before = [0u8; ANCHOR_BYTES];
-    anchor.read_exact_stable_into(&mut before, deadline)?;
-    let mut after = before;
-    if upgrade_anchor(&mut after)? {
+    let mut report = NativeCapacityCutReport::default();
+    if anchor_changed {
         directory.replace_pinned_bytes_if_matches_atomic(
             OsStr::new("anchor"),
             Some(&anchor),
             |incumbent| {
                 incumbent.require_effective_user_owned()?;
                 ensure!(
-                    incumbent.identity()? == identity,
+                    incumbent.identity()? == anchor_identity,
                     "capacity redo incumbent replaced"
                 );
                 let mut now = [0u8; ANCHOR_BYTES];
                 incumbent.read_exact_stable_into(&mut now, deadline)?;
-                ensure!(now == before, "capacity redo incumbent bytes changed");
+                ensure!(
+                    now == anchor_before,
+                    "capacity redo incumbent bytes changed"
+                );
                 Ok(())
             },
-            &after,
+            &anchor_after,
             0o600,
         )?;
         let published = directory
@@ -294,7 +419,34 @@ pub fn retire_pre_cut_identity_records(
         directory.sync()?;
         report.anchor_rewritten = true;
     }
+    fault(CutStep::AnchorReplaced)?;
+
+    if rewrite_account {
+        // A whole pre-cut record keeps its own image (the redo model already
+        // repairs a record at the anchor's before image); only a tear toward
+        // the anchor's target is finished to that target.
+        let mut converted = account_before;
+        let target = if upgrade_record(&mut converted).unwrap_or(false) {
+            converted
+        } else {
+            target_new
+        };
+        let mut scratch = [0u8; RECORD_BYTES];
+        account.overwrite_fixed_if_matches(&account_before, &target, &mut scratch, deadline)?;
+        account.sync_exact(deadline)?;
+        report.account_rewritten = true;
+    }
+    fault(CutStep::Done)?;
     Ok(report)
+}
+
+#[cfg(test)]
+pub(crate) fn retire_with_fault_for_test(
+    app_root: &Path,
+    state_lock: &StateLock,
+    fault: &mut dyn FnMut(CutStep) -> Result<()>,
+) -> Result<NativeCapacityCutReport> {
+    retire_with(app_root, state_lock, fault)
 }
 
 /// Write the predecessor shape for tests: every stored identity loses its
@@ -348,4 +500,227 @@ pub(crate) fn downgrade_to_pre_cut_for_test(
     anchor[ANCHOR_PAYLOAD_BYTES..].copy_from_slice(&checksum);
     std::fs::write(&anchor_path, anchor)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod interruption_tests {
+    use super::super::redo::{AccountRedo, Operation, controls};
+    use super::*;
+    use ryeos_node_runtime::state_lock::{StateLock, default_lock_path};
+
+    struct Node {
+        _temporary: tempfile::TempDir,
+        root: std::path::PathBuf,
+        lock: StateLock,
+        policy:
+            ryeos_node_runtime::node_policy::sections::native_capacity::NodeNativeCapacityPolicy,
+        issuance: [u8; 32],
+    }
+
+    impl Node {
+        /// A capacity directory holding a debit's redo anchor and account,
+        /// as a killed daemon of the previous schema left them.
+        fn pre_cut() -> Self {
+            use std::os::unix::fs::PermissionsExt as _;
+            let temporary = tempfile::tempdir().unwrap();
+            let root = temporary.path().to_path_buf();
+            let directory = root.join(".ai/node/native-capacity");
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let (policy, genesis, debit_target) = controls::fixture();
+            let debit = genesis
+                .successor(Operation::Debit, debit_target, &policy)
+                .unwrap();
+            for (name, bytes) in [
+                ("anchor", debit.encode(&policy).unwrap().to_vec()),
+                (
+                    "account",
+                    super::super::encode(debit.target()).unwrap().to_vec(),
+                ),
+            ] {
+                let path = directory.join(name);
+                std::fs::write(&path, bytes).unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            let lock = StateLock::acquire(&default_lock_path(&root)).unwrap();
+            let issuance = debit.target().issuance_digest;
+            downgrade_to_pre_cut_for_test(&root, &|json| json).unwrap();
+            Self {
+                _temporary: temporary,
+                root,
+                lock,
+                policy,
+                issuance,
+            }
+        }
+
+        fn files(&self) -> (Vec<u8>, Vec<u8>) {
+            let directory = self.root.join(".ai/node/native-capacity");
+            (
+                std::fs::read(directory.join("anchor")).unwrap(),
+                std::fs::read(directory.join("account")).unwrap(),
+            )
+        }
+
+        fn write_account(&self, bytes: &[u8]) {
+            std::fs::write(self.root.join(".ai/node/native-capacity/account"), bytes).unwrap();
+        }
+
+        fn cut(&self) -> Result<NativeCapacityCutReport> {
+            retire_pre_cut_identity_records(&self.root, &self.lock)
+        }
+
+        fn cut_failing_at(&self, step: CutStep) -> anyhow::Error {
+            retire_with(&self.root, &self.lock, &mut |at| {
+                ensure!(at != step, "injected failure at {at:?}");
+                Ok(())
+            })
+            .expect_err("the injected failure interrupts the cut")
+        }
+
+        /// The anchor's decoded redo and the account's acceptance by the
+        /// existing redo model, which is all a start has to repair with.
+        fn start_view(&self) -> (AccountRedo, bool) {
+            let (anchor, account) = self.files();
+            let redo =
+                AccountRedo::decode(&anchor.try_into().unwrap(), &self.policy, &self.issuance)
+                    .unwrap();
+            let accepted = redo
+                .accepts_account_bytes(&account.try_into().unwrap())
+                .unwrap();
+            (redo, accepted)
+        }
+    }
+
+    /// The final files of an uninterrupted cut over the same fixture.
+    fn uninterrupted() -> (Vec<u8>, Vec<u8>) {
+        let node = Node::pre_cut();
+        let report = node.cut().unwrap();
+        assert_eq!(
+            report,
+            NativeCapacityCutReport {
+                anchor_rewritten: true,
+                account_rewritten: true
+            }
+        );
+        node.files()
+    }
+
+    #[test]
+    fn an_uninterrupted_cut_leaves_decodable_files_with_the_identity_in_an_unknown_namespace() {
+        let node = Node::pre_cut();
+        // Before the cut the anchor does not decode.
+        let (anchor, _) = node.files();
+        assert!(
+            AccountRedo::decode(&anchor.try_into().unwrap(), &node.policy, &node.issuance).is_err()
+        );
+        node.cut().unwrap();
+        let (redo, accepted) = node.start_view();
+        assert!(accepted);
+        let debit = redo.target().outstanding.expect("the debit is retained");
+        assert_eq!(
+            debit.process.exact().unwrap().pid_namespace,
+            PRE_CUT_PID_NAMESPACE
+        );
+        // Nothing left to do on a rerun.
+        let files = node.files();
+        assert!(node.cut().unwrap().is_empty());
+        assert_eq!(node.files(), files);
+    }
+
+    #[test]
+    fn a_cut_interrupted_before_any_write_changes_nothing_and_the_rerun_converges() {
+        let reference = uninterrupted();
+        let node = Node::pre_cut();
+        let before = node.files();
+        let error = node.cut_failing_at(CutStep::Planned);
+        assert!(format!("{error:#}").contains("injected failure"));
+        assert_eq!(node.files(), before);
+        node.cut().unwrap();
+        assert_eq!(node.files(), reference);
+    }
+
+    #[test]
+    fn a_cut_interrupted_between_its_two_writes_is_named_to_start_and_the_rerun_converges() {
+        let reference = uninterrupted();
+        let node = Node::pre_cut();
+        node.cut_failing_at(CutStep::AnchorReplaced);
+        // The anchor is current, the account is still the pre-cut image.
+        let (redo, accepted) = node.start_view();
+        // The existing redo model cannot repair that account, so a start
+        // would refuse it as corruption; instead it is recognised as waiting
+        // for this cut and the refusal names the cure.
+        assert!(!accepted);
+        let (_, account) = node.files();
+        let target = super::super::encode(redo.target()).unwrap();
+        assert!(account_awaits_cut(&account.try_into().unwrap(), &target));
+        let report = node.cut().unwrap();
+        assert_eq!(
+            report,
+            NativeCapacityCutReport {
+                anchor_rewritten: false,
+                account_rewritten: true
+            }
+        );
+        assert_eq!(node.files(), reference);
+    }
+
+    #[test]
+    fn a_cut_that_dies_inside_the_account_write_is_recognised_and_finished() {
+        let reference = uninterrupted();
+        let node = Node::pre_cut();
+        let (_, old_account) = node.files();
+        let root = node.root.clone();
+        let tear_offset = PROCESS_START + 8;
+        let error = retire_with(&node.root, &node.lock, &mut |step| {
+            if step == CutStep::AnchorReplaced {
+                // What the account looks like when its in-place rewrite
+                // stopped partway: a prefix of the target, then the old tail.
+                let (anchor, _) = {
+                    let directory = root.join(".ai/node/native-capacity");
+                    (std::fs::read(directory.join("anchor")).unwrap(), ())
+                };
+                let target = &anchor[TARGET_START..TARGET_START + RECORD_BYTES];
+                let mut torn = old_account.clone();
+                torn[..tear_offset].copy_from_slice(&target[..tear_offset]);
+                std::fs::write(root.join(".ai/node/native-capacity/account"), torn).unwrap();
+                anyhow::bail!("injected tear");
+            }
+            Ok(())
+        })
+        .expect_err("the tear interrupts the cut");
+        assert!(format!("{error:#}").contains("injected tear"));
+        let (redo, accepted) = node.start_view();
+        assert!(!accepted, "the redo model cannot repair this tear");
+        let (_, torn) = node.files();
+        assert_ne!(torn, old_account);
+        let target = super::super::encode(redo.target()).unwrap();
+        assert!(account_awaits_cut(&torn.try_into().unwrap(), &target));
+        node.cut().unwrap();
+        assert_eq!(node.files(), reference);
+    }
+
+    #[test]
+    fn a_cut_interrupted_after_both_writes_is_complete_and_the_rerun_is_a_no_op() {
+        let reference = uninterrupted();
+        let node = Node::pre_cut();
+        node.cut_failing_at(CutStep::Done);
+        assert_eq!(node.files(), reference);
+        assert!(node.cut().unwrap().is_empty());
+        assert_eq!(node.files(), reference);
+    }
+
+    #[test]
+    fn an_account_that_is_not_the_pre_cut_image_is_refused_with_both_files_untouched() {
+        let node = Node::pre_cut();
+        let (_, mut account) = node.files();
+        // Damage outside the identity: the checksum no longer holds and the
+        // bytes are neither the pre-cut image nor a tear toward the target.
+        account[40] ^= 0xff;
+        node.write_account(&account);
+        let before = node.files();
+        let error = node.cut().expect_err("not the pre-cut shape");
+        assert!(format!("{error:#}").contains("checksum"), "{error:#}");
+        assert_eq!(node.files(), before);
+    }
 }

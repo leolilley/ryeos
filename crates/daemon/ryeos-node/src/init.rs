@@ -5274,6 +5274,40 @@ mod tests {
         assert!(after.incarnations_remaining <= before.incarnations_remaining);
     }
 
+    /// A cut that dies between its two writes leaves the anchor re-recorded and
+    /// the account not yet: a start refuses it naming the cure rather than as
+    /// corruption, and rerunning the cut lets the node start.
+    #[test]
+    fn a_cut_interrupted_between_its_writes_refuses_a_start_with_the_cure_and_the_rerun_starts_the_node()
+     {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        let (lock, _) = node_with_pre_cut_capacity_records(&state, &user, &|json| json);
+        let interrupted =
+            crate::native_capacity::retire_with_fault_for_test(&state, &lock, &mut |step| {
+                if step == crate::native_capacity::CutStep::AnchorReplaced {
+                    anyhow::bail!("injected interruption");
+                }
+                Ok(())
+            })
+            .expect_err("the cut is interrupted");
+        assert!(format!("{interrupted:#}").contains("injected interruption"));
+        let refused = crate::native_capacity::startup_seams::open_and_debit(&state, &lock)
+            .expect_err("a half-cut account cannot start");
+        let refused = format!("{refused:#}");
+        assert!(
+            refused.contains("predates recorded pid namespaces")
+                && refused.contains("ryeos node reset execution-history --confirm"),
+            "{refused}"
+        );
+        let rerun = crate::native_capacity::retire_pre_cut_identity_records(&state, &lock)
+            .expect("the cut reruns");
+        assert!(!rerun.anchor_rewritten && rerun.account_rewritten);
+        crate::native_capacity::startup_seams::open_and_debit(&state, &lock)
+            .expect("the node starts once the cut has finished");
+    }
+
     /// The step keys on the exact pre-cut shape: a record that fails to
     /// decode for any other reason is refused and left as it was.
     #[test]

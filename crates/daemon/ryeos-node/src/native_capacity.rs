@@ -35,7 +35,9 @@ pub const MAX_FINALIZATION_ATTEMPTS: u8 = 4;
 
 pub use account::NativeCapacityAccountBinding;
 #[cfg(test)]
-pub(crate) use account::cut_retirement::downgrade_to_pre_cut_for_test;
+pub(crate) use account::cut_retirement::{
+    CutStep, downgrade_to_pre_cut_for_test, retire_with_fault_for_test,
+};
 pub use account::cut_retirement::{NativeCapacityCutReport, retire_pre_cut_identity_records};
 pub(crate) use account::prepare_initial_capacity_binding;
 pub use account::reanchor::{
