@@ -128,6 +128,49 @@ pub(crate) fn authorize_exact_thread_subjects_for(
     }
 }
 
+/// The signed subject of one thread, `None` when no such thread exists.
+/// This is the read half of [`authorize_exact_thread_subjects_for`] for a
+/// caller that judges the same subject for many seats.
+pub(crate) fn load_thread_subject(
+    state: &AppState,
+    thread_id: &str,
+) -> Result<Option<AuthoritativeThreadSubject>, HandlerError> {
+    let mut subjects = state
+        .state_store
+        .authoritative_thread_subjects(&[thread_id])
+        .map_err(|error| {
+            tracing::error!(error = %format!("{error:#}"), "exact thread authority read failed");
+            HandlerError::Internal("exact thread authority read failed".to_string())
+        })?;
+    Ok(subjects.pop().flatten())
+}
+
+/// What one browser session may observe: the union of what each of its
+/// attachments authorizes as a seat, by the same signed-subject judgement as
+/// [`authorize_exact_thread_subjects_for`]. An attachment whose project
+/// authority cannot be validated authorizes nothing, and a session with no
+/// attachment observes nothing.
+pub(crate) struct SessionObserver {
+    callers: Vec<ExactThreadCaller>,
+}
+
+impl SessionObserver {
+    pub(crate) fn new(attachments: &[std::sync::Arc<crate::browser_session::AdmittedBindingAttachment>]) -> Self {
+        Self {
+            callers: attachments
+                .iter()
+                .filter_map(|attachment| {
+                    ExactThreadCaller::from_seat(&SeatCaller::Attachment(attachment.clone())).ok()
+                })
+                .collect(),
+        }
+    }
+
+    pub(crate) fn observes(&self, subject: &AuthoritativeThreadSubject) -> bool {
+        self.callers.iter().any(|caller| caller.authorizes(subject))
+    }
+}
+
 /// A selected-thread check does not authorize the ancestor/sibling/descendant
 /// closure returned by `execution_tree`. Validate every bounded structural
 /// member against its signed subject before any decorated tree or evidence is
