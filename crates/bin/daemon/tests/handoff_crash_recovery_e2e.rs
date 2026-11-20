@@ -7167,7 +7167,7 @@ async fn portable_worker_fixture_launches_and_binds_a_real_hosted_session_on_qua
         .post_execute(
             "service:worker-executions/terminate",
             ".",
-            completed_termination_request(daemon, chain_root_id, &first_command).await?,
+            completed_termination_request(&daemon, chain_root_id, &first_command).await?,
         )
         .await?;
     anyhow::ensure!(
