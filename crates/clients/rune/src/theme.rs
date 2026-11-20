@@ -40,6 +40,13 @@ impl ThemeId {
     }
 }
 
+/// The palette a stored preference selects, given the platform's light/dark
+/// preference: `system` maps to the shared pair, a palette id to itself, and
+/// anything else to nothing.
+pub fn for_preference(stored: &str, system_dark: bool) -> Option<ThemeId> {
+    ryeos_client_base::theme_preference::resolve(stored, system_dark).and_then(ThemeId::from_name)
+}
+
 /// The theme in force. Night until something selects another.
 static THEME: AtomicU8 = AtomicU8::new(0);
 
@@ -501,6 +508,22 @@ mod tests {
             assert_eq!(p.tone(RyeOsTone::Accent, fallback), t.accent);
             assert_eq!(p.tone(RyeOsTone::Neutral, fallback), fallback);
         }
+    }
+
+    #[test]
+    fn the_palettes_are_exactly_the_ids_the_daemon_accepts() {
+        let ours: Vec<&str> = ThemeId::ALL.iter().map(|id| id.name()).collect();
+        assert_eq!(ours, ryeos_client_base::theme_preference::PALETTE_IDS);
+    }
+
+    #[test]
+    fn a_stored_preference_selects_its_palette() {
+        use super::for_preference;
+        assert_eq!(for_preference("gruvbox", true), Some(ThemeId::Gruvbox));
+        assert_eq!(for_preference("paper", true), Some(ThemeId::Paper));
+        assert_eq!(for_preference("system", true), Some(ThemeId::Night));
+        assert_eq!(for_preference("system", false), Some(ThemeId::Paper));
+        assert_eq!(for_preference("dark", true), None);
     }
 
     #[test]

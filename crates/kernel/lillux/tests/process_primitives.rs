@@ -679,7 +679,7 @@ fn supervised_launcher_protocol_shell_after(
     let wrapper_script = format!(
         "/bin/sh -c 'exec /bin/sh -c \"$1\"' \
          ryeos-target '{script}' & target=$!; sleep {report_delay_secs}; \
-         printf '{{\"child-pid\":%s}}\\n' \"$target\" >&{status_fd}; wait \"$target\""
+         printf '{{\"child-pid\":%s}}\\n' \"$target\" > /proc/self/fd/{status_fd}; wait \"$target\""
     );
     let mut request = sh(&["-c", &wrapper_script]);
     request.envs = path_env();
@@ -835,7 +835,7 @@ fn reported_target_exit_still_cleans_up_same_group_descendants() {
 fn malformed_launcher_status_fails_closed_and_kills_wrapper() {
     let status = supervised_launcher_status_pipe().expect("status pipe");
     let status_fd = status.writer_descriptor().unwrap() as i32;
-    let wrapper_script = format!("printf 'not-json\\n' >&{status_fd}; sleep 30");
+    let wrapper_script = format!("printf 'not-json\\n' > /proc/self/fd/{status_fd}; sleep 30");
     let mut request = sh(&["-c", &wrapper_script]);
     request.envs = path_env();
     request.inherited_fds.push(status.writer);
@@ -858,7 +858,7 @@ fn launcher_namespace_identity_fields_are_accepted_but_remain_closed() {
     let status = supervised_launcher_status_pipe().expect("status pipe");
     let status_fd = status.writer_descriptor().unwrap() as i32;
     let wrapper_script = format!(
-        "sleep 30 & target=$!; printf '{{\"child-pid\":%s,\"ipc-namespace\":1,\"mnt-namespace\":2,\"net-namespace\":3,\"uts-namespace\":4}}\\n' \"$target\" >&{status_fd}; wait \"$target\""
+        "sleep 30 & target=$!; printf '{{\"child-pid\":%s,\"ipc-namespace\":1,\"mnt-namespace\":2,\"net-namespace\":3,\"uts-namespace\":4}}\\n' \"$target\" > /proc/self/fd/{status_fd}; wait \"$target\""
     );
     let mut request = sh(&["-c", &wrapper_script]);
     request.envs = path_env();
@@ -870,8 +870,9 @@ fn launcher_namespace_identity_fields_are_accepted_but_remain_closed() {
 
     let status = supervised_launcher_status_pipe().expect("status pipe");
     let status_fd = status.writer_descriptor().unwrap() as i32;
-    let wrapper_script =
-        format!("printf '{{\"child-pid\":123,\"unexpected-namespace\":1}}\\n' >&{status_fd}");
+    let wrapper_script = format!(
+        "printf '{{\"child-pid\":123,\"unexpected-namespace\":1}}\\n' > /proc/self/fd/{status_fd}"
+    );
     let mut request = sh(&["-c", &wrapper_script]);
     request.envs = path_env();
     request.inherited_fds.push(status.writer);
@@ -907,8 +908,9 @@ fn launcher_stderr_is_retained_when_status_closes_before_target_identity() {
 fn duplicate_launcher_status_keys_fail_closed() {
     let status = supervised_launcher_status_pipe().expect("status pipe");
     let status_fd = status.writer_descriptor().unwrap() as i32;
-    let wrapper_script =
-        format!("printf '%s\\n' '{{\"child-pid\":123,\"child-pid\":124}}' >&{status_fd}; sleep 30");
+    let wrapper_script = format!(
+        "printf '%s\\n' '{{\"child-pid\":123,\"child-pid\":124}}' > /proc/self/fd/{status_fd}; sleep 30"
+    );
     let mut request = sh(&["-c", &wrapper_script]);
     request.envs = path_env();
     request.inherited_fds.push(status.writer);
@@ -930,7 +932,7 @@ fn nested_duplicate_launcher_status_keys_fail_closed() {
     let status = supervised_launcher_status_pipe().expect("status pipe");
     let status_fd = status.writer_descriptor().unwrap() as i32;
     let wrapper_script = format!(
-        "printf '%s\\n' '{{\"refused\":{{\"code\":\"one\",\"code\":\"two\"}}}}' >&{status_fd}; sleep 30"
+        "printf '%s\\n' '{{\"refused\":{{\"code\":\"one\",\"code\":\"two\"}}}}' > /proc/self/fd/{status_fd}; sleep 30"
     );
     let mut request = sh(&["-c", &wrapper_script]);
     request.envs = path_env();
@@ -953,7 +955,7 @@ fn typed_launcher_refusal_is_retained_without_starting_a_target() {
     let status = supervised_launcher_status_pipe().expect("status pipe");
     let status_fd = status.writer_descriptor().unwrap() as i32;
     let wrapper_script = format!(
-        "printf '%s\\n' '{{\"refused\":{{\"code\":\"launch_refused\",\"message\":\"policy refused\",\"details\":{{}}}}}}' >&{status_fd}"
+        "printf '%s\\n' '{{\"refused\":{{\"code\":\"launch_refused\",\"message\":\"policy refused\",\"details\":{{}}}}}}' > /proc/self/fd/{status_fd}"
     );
     let mut request = sh(&["-c", &wrapper_script]);
     request.inherited_fds.push(status.writer);

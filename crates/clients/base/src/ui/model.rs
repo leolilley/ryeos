@@ -476,6 +476,11 @@ pub struct RyeOsDataState {
     /// reads as unknown rather than showing codes.
     #[serde(default)]
     pub coverage_wording: Option<super::dto::RyeOsCoverageWordingDto>,
+    /// The principal's stored theme preference, from the surface source with
+    /// the `theme_preference` role. Absent until read; the presentation then
+    /// follows the platform (`system`).
+    #[serde(default)]
+    pub theme_preference: Option<String>,
     pub projects: Option<RyeOsProjectsDto>,
     pub threads: Option<RyeOsThreadsDto>,
     pub files: Option<RyeOsFilesDto>,

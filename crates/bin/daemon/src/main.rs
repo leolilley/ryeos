@@ -93,6 +93,10 @@ struct LifecycleExitGuard {
     // The recorded marker is the provisional finalizing reason, which only
     // this run's completed finalizer may replace.
     provisional: bool,
+    // The node journal, once the node identity that signs it is loaded. A
+    // run that exits before then wrote no start record and writes no exit.
+    journal: Option<ryeos_node::node_journal::NodeJournal>,
+    exit_journaled: bool,
 }
 
 impl LifecycleExitGuard {
@@ -107,6 +111,8 @@ impl LifecycleExitGuard {
             launch_route,
             recorded: false,
             provisional: false,
+            journal: None,
+            exit_journaled: false,
         }
     }
 
@@ -119,6 +125,31 @@ impl LifecycleExitGuard {
             self.launch_route,
         );
         self.recorded = true;
+        self.journal_exit(reason, error);
+    }
+
+    /// Journal this run's final handled exit once. The provisional finalizing
+    /// reason is not a final exit and is skipped. A journal write failure is
+    /// reported and never changes the exit: the lifecycle marker is the
+    /// authority on how this run ended, the journal is its history.
+    fn journal_exit(&mut self, reason: &str, error: Option<&str>) {
+        if reason == lifecycle_marker::FINALIZING_REASON || self.exit_journaled {
+            return;
+        }
+        let Some(journal) = &self.journal else {
+            return;
+        };
+        self.exit_journaled = true;
+        let facts = ryeos_node::node_journal::ExitFacts {
+            reason,
+            error,
+            pid: std::process::id(),
+            started_at: &self.started_at,
+            launch_route: self.launch_route,
+        };
+        if let Err(error) = journal.record_exit(&facts) {
+            tracing::warn!(error = %error, "failed to journal the daemon exit");
+        }
     }
 
     fn record_provisional(&mut self, staged_reason: &str, staged_detail: Option<&str>) {
@@ -163,6 +194,7 @@ impl LifecycleExitGuard {
             )
         {
             self.provisional = false;
+            self.journal_exit(reason, error);
         }
     }
 }
@@ -4429,6 +4461,42 @@ async fn run(
             if let Some(runtime) = &external_host_runtime {
                 runtime.binding().verify_loaded_node_identity(&identity)?;
             }
+            // The node journal's own start record, and the unclean exit the
+            // previous marker shows, signed by the node key just loaded. A
+            // journal that does not verify refuses the start with that cause;
+            // a write that fails is reported and the start goes on.
+            {
+                use ryeos_node::node_journal::{JournalError, NodeJournal, StartFacts};
+                let journal = NodeJournal::for_app_root(&config.app_root, identity.clone());
+                let guard = composition
+                    .lifecycle_exit
+                    .as_mut()
+                    .context("daemon lifecycle owner is absent")?;
+                let unclean = lifecycle_marker::inferred_unclean_exit(previous_exit.as_ref());
+                let version = build.version.to_string();
+                let revision = build.revision.to_string();
+                let profile = build.profile.to_string();
+                let started = StartFacts {
+                    version: &version,
+                    revision: Some(&revision),
+                    profile: Some(&profile),
+                    pid: std::process::id(),
+                    started_at: &guard.started_at,
+                    launch_route: guard.launch_route,
+                };
+                match journal.record_start(unclean.as_ref(), &started) {
+                    Ok(()) => {}
+                    Err(JournalError::Integrity(error)) => {
+                        return Err(error).context(
+                            "node journal does not verify; start refused and the journal left in place",
+                        );
+                    }
+                    Err(JournalError::Write(error)) => {
+                        tracing::warn!(error = %format!("{error:#}"), "failed to journal the daemon start");
+                    }
+                }
+                guard.journal = Some(journal);
+            }
             ryeos_api::auth::validate_authorized_key_directory(
                 &config.authorized_keys_dir,
                 &identity,
@@ -6763,6 +6831,16 @@ async fn run_periodic_recovery_pass(
             .context("periodic external candidate cleanup recovery")?,
         "periodic",
     );
+    // A session left quarantined at startup because its external allocation
+    // had no observed provider terminal is settled once the pass above has
+    // recorded that terminal.
+    if reconcile::settle_predecessor_sessions_after_external_settlement(state)
+        .context("periodic settlement of predecessor sessions after external settlement")?
+    {
+        tracing::info!(
+            "periodic recovery settled predecessor sessions whose external allocation settled"
+        );
+    }
     let recovered_activations =
         ryeos_api::handlers::external_content_activate::recover_durable_activations(state)
             .await
@@ -8106,6 +8184,20 @@ async fn drain_persistent_session_workers(
             }
         };
 
+        // The fence re-identifies the session, which the runtime database
+        // refuses while its external allocation is unsettled. A reaped worker
+        // is proved dead; its row is left to the periodic settlement, as for a
+        // latched stop.
+        if cleanup_state == "reaped"
+            && ryeos_app::external_placement::session_has_unsettled_external_allocation(
+                state,
+                &worker.placement_thread_id,
+            )
+            .unwrap_or(true)
+        {
+            deferred.workers.push(worker.worker_instance_id.clone());
+            continue;
+        }
         let fenced = match latch.refresh(mode) {
             DrainMode::Latched => None,
             DrainMode::Normal => Some(state.state_store.fence_abandoned_worker_process(
