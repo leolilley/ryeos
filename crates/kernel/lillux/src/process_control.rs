@@ -815,6 +815,27 @@ pub fn require_current_process_identity_fixed(
             Ok(unsafe { OwnedFd::from_raw_fd(raw as i32) })
         }
         fn require_pid_namespace(expected: &str) -> Result<(), &'static str> {
+            // /proc must be this process's own pid namespace view.
+            let mut own = [0u8; 16];
+            let own_size = unsafe {
+                libc::readlink(c"/proc/self".as_ptr(), own.as_mut_ptr().cast(), own.len())
+            };
+            let pid = unsafe { libc::getpid() } as u32;
+            let mut digits = [0u8; 10];
+            let mut count = 0;
+            let mut value = pid;
+            loop {
+                digits[count] = b'0' + (value % 10) as u8;
+                count += 1;
+                value /= 10;
+                if value == 0 {
+                    break;
+                }
+            }
+            digits[..count].reverse();
+            if own_size <= 0 || own[..own_size as usize] != digits[..count] {
+                return Err("native admission cannot trust this process's procfs");
+            }
             let mut link = [0u8; 64];
             let size = unsafe {
                 libc::readlink(
@@ -1157,7 +1178,17 @@ impl ExactProcessIdentity {
     /// previous daemon held it (in this or another container sharing the
     /// volume) has released it by exiting, and that daemon is the incarnation
     /// the custody records name. Every other classification is unchanged and
-    /// still fails closed. Callers without the lock must use [`Self::has_ended`].
+    /// still fails closed, including an observer whose own `/proc` is not its
+    /// pid namespace's (never ended, lock or not). Callers without the lock
+    /// must use [`Self::has_ended`].
+    ///
+    /// The proof is only as strong as the lock: it is a real `flock` on a file
+    /// of the data volume, and it excludes every other incarnation only on a
+    /// volume where `flock` is real and shared by all of them (a local or
+    /// block volume mounted by every container that can run the node). A
+    /// shared network volume (NFS) or an object-store mount does not give
+    /// that, so such a volume must not rely on this path; it needs a
+    /// different proof. No typed volume kind is recorded here to refuse it.
     pub fn has_ended_holding_exclusive_lock(
         &self,
         state_lock: &crate::ExactExclusiveFileLock,
@@ -1262,8 +1293,11 @@ fn end_gate(
 /// without a foreign-uid process. In order:
 ///
 /// 1. Boot id differs: ended.
-/// 2. Observer pid namespace differs or is unreadable: indeterminate, see
-///    [`end_gate`]; nothing below is consulted.
+/// 2. Observer pid namespace differs or is unreadable (including a mounted
+///    procfs that is not this process's own pid namespace view, which cannot
+///    be recorded or trusted): indeterminate, see [`end_gate`]; nothing below
+///    is consulted. An unreadable or untrusted observer namespace is
+///    `Unclassified` and never resolved by the lock proof.
 /// 3. No task answers at the coordinate, or it is a non-leader thread (a
 ///    recorded incarnation is always a thread-group leader): ended.
 /// 4. Same boot and namespace and the occupant's birth ticks differ from the
@@ -1786,16 +1820,46 @@ mod linux {
     }
 
     /// The calling process's pid namespace link (`pid:[<inode>]`).
+    ///
+    /// Refused unless the mounted procfs belongs to this process's own pid
+    /// namespace: `/proc/self` must name this process's pid. Otherwise
+    /// `/proc/self/ns/pid` would name the wrong namespace and the observer
+    /// cannot trust its own `/proc`.
     pub(super) fn read_self_pid_namespace() -> Result<String, String> {
-        let link = std::fs::read_link("/proc/self/ns/pid")
-            .map_err(|error| format!("read Linux pid namespace: {error}"))?;
-        let value = link
-            .to_str()
-            .ok_or_else(|| "Linux pid namespace link is not UTF-8".to_owned())?;
-        if !crate::process_control::valid_pid_namespace(value) {
+        observer_namespace(
+            std::fs::read_link("/proc/self")
+                .map(|link| link.to_string_lossy().into_owned())
+                .map_err(|error| format!("read /proc/self: {error}")),
+            std::process::id(),
+            std::fs::read_link("/proc/self/ns/pid")
+                .map_err(|error| format!("read Linux pid namespace: {error}"))
+                .and_then(|link| {
+                    link.into_os_string()
+                        .into_string()
+                        .map_err(|_| "Linux pid namespace link is not UTF-8".to_owned())
+                }),
+        )
+    }
+
+    /// Pure decision of [`read_self_pid_namespace`], with both procfs reads
+    /// injected: `proc_self` is `readlink /proc/self`, `namespace` is
+    /// `readlink /proc/self/ns/pid`.
+    pub(super) fn observer_namespace(
+        proc_self: Result<String, String>,
+        pid: u32,
+        namespace: Result<String, String>,
+    ) -> Result<String, String> {
+        let proc_self = proc_self?;
+        if proc_self != pid.to_string() {
+            return Err(format!(
+                "procfs is not this process's pid namespace view (/proc/self is `{proc_self}`, this process is {pid}); its pid namespace cannot be recorded or trusted"
+            ));
+        }
+        let value = namespace?;
+        if !crate::process_control::valid_pid_namespace(&value) {
             return Err("Linux pid namespace link has an unexpected form".to_owned());
         }
-        Ok(value.to_owned())
+        Ok(value)
     }
 
     /// Thread ids listed under `/proc/<pid>/task`; any error is an error.
@@ -2321,6 +2385,37 @@ mod tests {
                 "cannot classify exact process incarnation".into(),
             )));
             assert!(refused.unwrap_err().contains("cannot classify"));
+        }
+
+        #[test]
+        fn procfs_of_another_namespace_is_unrecordable_and_never_ended() {
+            let ns = || Ok(NS.to_owned());
+            assert_eq!(
+                linux::observer_namespace(Ok("42".into()), 42, ns()),
+                Ok(NS.to_owned())
+            );
+            // /proc mounted from another pid namespace: /proc/self names
+            // another number, so /proc/self/ns/pid names the wrong namespace.
+            for proc_self in [
+                Ok("7".to_owned()),
+                Ok("self".to_owned()),
+                Err("denied".into()),
+            ] {
+                let refused = linux::observer_namespace(proc_self, 42, ns());
+                assert!(refused.is_err(), "{refused:?}");
+            }
+            assert!(linux::observer_namespace(Ok("42".into()), 42, Err("x".into())).is_err());
+            // At compare the refused read is `None`: Unclassified, and the
+            // lock proof does not resolve it.
+            let result = classify_in(Some("boot-a"), None, Some(Ok(7)), stat(100, 7, 'S'), None);
+            let reason = unclassified(result.clone());
+            assert!(reason.contains("pid namespace"), "{reason}");
+            assert!(resolve_with_exclusive_lock(result).is_err());
+        }
+
+        #[test]
+        fn this_process_procfs_is_trusted() {
+            assert!(current_pid_namespace().is_ok());
         }
 
         #[test]

@@ -1655,6 +1655,26 @@ pub(super) fn quote_capacity_settlement_attempt()
     })
 }
 
+/// Require that a previous native incarnation has ended, classified under the
+/// exclusive state lock. The lock is a parameter, not a flag: the only
+/// caller-reachable source is [`LiveNativeCapacityInputs::state_lock_proof`],
+/// which keeps the lock held through this classification and the decision the
+/// caller makes from it. Under the lock an incarnation recorded in another pid
+/// namespace counts as ended; every other indeterminate stays an error.
+fn require_ended_under_state_lock(
+    state_lock: &StateLockLease,
+    process: &lillux::process_control::ExactProcessIdentity,
+    live_message: &str,
+) -> Result<()> {
+    ensure!(
+        state_lock
+            .process_has_ended(process)
+            .map_err(anyhow::Error::msg)?,
+        "{live_message}"
+    );
+    Ok(())
+}
+
 impl RetainedCapacityAccount {
     pub(super) fn open(inputs: &LiveNativeCapacityInputs) -> Result<Self> {
         inputs.require_original(false)?;
@@ -1771,14 +1791,13 @@ impl RetainedCapacityAccount {
                 let exact = previous.exact()?;
                 let completed_here = exact == inputs.process
                     && self.completed_recovery == Some(current.recovery_attempts());
-                ensure!(
-                    completed_here
-                        || inputs
-                            .exclusion
-                            .process_has_ended(&exact)
-                            .map_err(anyhow::Error::msg)?,
-                    "previous recovery process remains live; retain its original owner"
-                );
+                if !completed_here {
+                    require_ended_under_state_lock(
+                        inputs.state_lock_proof(),
+                        &exact,
+                        "previous recovery process remains live; retain its original owner",
+                    )?;
+                }
             }
             self.recovery_admission =
                 Some(current.charge_recovery(&inputs.process, &inputs.policy)?);
@@ -1912,13 +1931,11 @@ impl RetainedCapacityAccount {
         // has its own never-mapped/release route below.
         if let Some(debit) = current.target().outstanding {
             budget.spend(inputs, PROCESS_OBSERVATION_WORK)?;
-            ensure!(
-                inputs
-                    .exclusion
-                    .process_has_ended(&debit.process.exact()?)
-                    .map_err(anyhow::Error::msg)?,
-                "outstanding native incarnation remains live or unproved"
-            );
+            require_ended_under_state_lock(
+                inputs.state_lock_proof(),
+                &debit.process.exact()?,
+                "outstanding native incarnation remains live or unproved",
+            )?;
         }
         self.ensure_recovery_attempt(inputs)?;
         let budget = self
@@ -1932,13 +1949,11 @@ impl RetainedCapacityAccount {
         let repaired = *self.anchor.current()?.target();
         if let Some(debit) = repaired.outstanding {
             budget.budget.spend(inputs, PROCESS_OBSERVATION_WORK)?;
-            ensure!(
-                inputs
-                    .exclusion
-                    .process_has_ended(&debit.process.exact()?)
-                    .map_err(anyhow::Error::msg)?,
-                "native predecessor disposition no longer established"
-            );
+            require_ended_under_state_lock(
+                inputs.state_lock_proof(),
+                &debit.process.exact()?,
+                "native predecessor disposition no longer established",
+            )?;
             let target = CapacityRecord {
                 outstanding: None,
                 ..repaired
@@ -2961,5 +2976,70 @@ mod issuance_digest_tests {
             let issued: [u8; 32] = sha2::Sha256::digest(canonical.as_bytes()).into();
             assert_eq!(binding.issuance_digest().unwrap(), issued);
         }
+    }
+}
+
+#[cfg(test)]
+mod state_lock_proof_tests {
+    use super::*;
+    use ryeos_node_runtime::state_lock::StateLock;
+
+    const LIVE: &str = "previous process remains live";
+
+    fn lease() -> (tempfile::TempDir, StateLock) {
+        let directory = tempfile::tempdir().unwrap();
+        let lock = StateLock::acquire(&directory.path().join("operator.lock")).unwrap();
+        (directory, lock)
+    }
+
+    fn foreign() -> lillux::process_control::ExactProcessIdentity {
+        let mut process = lillux::process_control::capture_current_process_identity().unwrap();
+        process.pid_namespace = "pid:[1]".to_owned();
+        process
+    }
+
+    /// The three startup sites (`ensure_recovery_attempt` and `prepare_open`
+    /// before and after redo) each classify through exactly this function,
+    /// with the lease from `LiveNativeCapacityInputs::state_lock_proof`.
+    /// Building real inputs needs a fully initialized node, so the shared
+    /// decision is driven here with a real lock file; the init tests cover
+    /// the surrounding flows.
+    #[test]
+    fn foreign_namespace_without_the_lock_proof_is_an_error() {
+        let process = foreign();
+        // Without the proof the only classification is `has_ended`, which
+        // fails closed.
+        let error = process.has_ended().unwrap_err();
+        assert!(error.contains("pid:[1]"), "{error}");
+        assert!(matches!(
+            process.observe_end(),
+            Err(lillux::ProcessEndError::ForeignPidNamespace { .. })
+        ));
+    }
+
+    #[test]
+    fn foreign_namespace_under_the_state_lock_counts_as_ended() {
+        let (_directory, lock) = lease();
+        let lease = lock.retain();
+        require_ended_under_state_lock(&lease, &foreign(), LIVE).unwrap();
+    }
+
+    #[test]
+    fn the_lock_does_not_end_a_live_incarnation_of_this_namespace() {
+        let (_directory, lock) = lease();
+        let lease = lock.retain();
+        let live = lillux::process_control::capture_current_process_identity().unwrap();
+        let error = require_ended_under_state_lock(&lease, &live, LIVE).unwrap_err();
+        assert!(error.to_string().contains(LIVE), "{error}");
+    }
+
+    #[test]
+    fn a_different_boot_is_ended_with_or_without_the_lock() {
+        let (_directory, lock) = lease();
+        let lease = lock.retain();
+        let mut other_boot = foreign();
+        other_boot.boot_id = "00000000-0000-4000-8000-000000000000".to_owned();
+        assert_eq!(other_boot.has_ended(), Ok(true));
+        require_ended_under_state_lock(&lease, &other_boot, LIVE).unwrap();
     }
 }

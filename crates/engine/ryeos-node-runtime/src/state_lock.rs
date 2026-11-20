@@ -7,6 +7,14 @@
 //! Uses `flock(LOCK_EX | LOCK_NB)` for non-blocking exclusive access. The lock
 //! is automatically released when the file descriptor is closed (process exit,
 //! including panic).
+//!
+//! The lock is a real `flock` on a file of the data volume. Holding it proves
+//! that no other incarnation holds it (and so that a previous holder, in this
+//! or another container, has exited) only on a volume where `flock` is real
+//! and shared by every incarnation. A shared network volume (NFS) or an
+//! object-store mount does not give that; such a volume must not rely on the
+//! lock-proof liveness path (`process_has_ended`). No typed volume kind is
+//! recorded for the state directory, so nothing here refuses such a volume.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

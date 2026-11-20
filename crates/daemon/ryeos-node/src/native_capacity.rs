@@ -483,6 +483,17 @@ impl RetainedInput {
 }
 
 impl LiveNativeCapacityInputs {
+    /// The exclusive state lock the composition took BEFORE these inputs
+    /// existed: `capture` verifies the lease protects the app root before any
+    /// state is read, and this value keeps it held for as long as `self`
+    /// lives. Classifying a previous incarnation through it therefore happens
+    /// under the lock actually held across the classification and the
+    /// decision that follows it, never one taken afterwards or released
+    /// between.
+    pub(super) fn state_lock_proof(&self) -> &StateLockLease {
+        &self.exclusion
+    }
+
     /// Called from the real composition after signed bootstrap and before its
     /// first SQLite call. Capture has no signing, journal publication or native
     /// SQLite effects. The composition keeps an alias of the returned owner
