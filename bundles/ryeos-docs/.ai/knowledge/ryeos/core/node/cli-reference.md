@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-20T07:30:31Z:dea2f7dbea4bb4bdc95b5083e23ee6e33e0d7af10eea1feec9cb799e82ccdc2d:ThOrwbKo6i+y3p6+o6AJav8DHMqdSjjiJx/5A40mNpdMB1/NngElzEKCQt1PUIBuKDRgVfnnwlLsZ/+fXUBdBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-20T22:52:41Z:021d3e7c6cd8415de8978d6ee13216d33aea3bf98609a4a60b84440f42af2544:sE4seecK53H+BNjdJ6EF+AXiWu6W6NPMdxUog9O7aqbUyBCJOCakh13008OfrLrdgLMOb/bi6bSees86MKwDDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -341,6 +341,11 @@ Operator note for the runtime schema cut to epoch 142: every node must run
 `ryeos node reset execution-history --confirm --schema-cut-from 141 --schema-cut-to 142`
 on its next upgrade, because retained binding generations in the runtime
 database embed the binding document and earlier schemas no longer validate.
+The same cut changes the retained execution realization's `isolation_policy_digest`
+property from the digest of the whole node-policy generation to the digest of the
+isolation policy's own section, so a recovered session now survives edits to
+other policy sections; a session retained before the cut would contradict its
+realization on recovery, and the reset clears it.
 This is the command the daemon's start refusal names, with the stored and
 current epochs filled in. It does not retire project HEADs, so candidates
 retained against them keep their base fences; no epoch cut needs

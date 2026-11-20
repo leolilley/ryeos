@@ -2738,6 +2738,12 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // (the capacity files live outside the runtime database) in an unknown pid
 // namespace, so the next start settles that dead incarnation under the state
 // lock. A start that meets such a record before the cut refuses with the cure.
+// The same cut also changes what a retained execution realization's
+// `isolation_policy_digest` property means: it was the digest of the whole
+// node-policy generation and is now the digest of the isolation policy's own
+// signed section, so a recovered session survives edits to other sections. A
+// realization stored before the cut carries the old value and would contradict
+// its capsule on recovery; the reset clears the retained sessions it belongs to.
 const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 142;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
