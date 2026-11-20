@@ -1283,8 +1283,69 @@ struct SessionGroup {
 /// its callback can prepare or contact a process. This is retention, not spawn,
 /// resource admission, physical removal, or settlement authority. No decoder,
 /// public constructor, pool back-reference or alternate registry exists.
+/// Where an admitted start is while it holds shutdown open. A start moves
+/// forward through these as its owner advances it, so a shutdown that times
+/// out on one can name the exact stage it was waiting for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum AdmittedStartStage {
+    /// Capacity admitted; the worker process is being prepared and spawned.
+    Spawn = 0,
+    /// Waiting on the external provider or its lease/allocation.
+    ProviderLease = 1,
+    /// Process running; waiting for the worker's readiness frame.
+    Readiness = 2,
+    /// Readiness proved; binding the process into the pool.
+    Bind = 3,
+    /// Bound; the caller's durable binding commit has not released the start.
+    Callback = 4,
+}
+
+impl AdmittedStartStage {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Spawn => "spawn",
+            Self::ProviderLease => "provider/lease",
+            Self::Readiness => "readiness",
+            Self::Bind => "bind",
+            Self::Callback => "callback",
+        }
+    }
+
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::ProviderLease,
+            2 => Self::Readiness,
+            3 => Self::Bind,
+            4 => Self::Callback,
+            _ => Self::Spawn,
+        }
+    }
+}
+
+/// Shared, lock-free stage of one admitted start.
+#[derive(Clone, Default)]
+pub struct AdmittedStartStageCell(Arc<std::sync::atomic::AtomicU8>);
+
+impl AdmittedStartStageCell {
+    pub fn set(&self, stage: AdmittedStartStage) {
+        self.0.store(stage as u8, Ordering::Release);
+    }
+
+    pub fn get(&self) -> AdmittedStartStage {
+        AdmittedStartStage::from_u8(self.0.load(Ordering::Acquire))
+    }
+}
+
+/// What a readiness wait must honour: the daemon stop and the start's stage.
+struct ReadyGate<'a> {
+    shutdown: &'a AtomicBool,
+    stage: &'a AdmittedStartStageCell,
+}
+
 pub struct PersistentSessionPooledStart {
     retained: Mutex<PooledStartRetention>,
+    stage: AdmittedStartStageCell,
     // SAME actual callback owner; readable before selected retention locking.
     original_callback_budget: OnceLock<crate::handler_context::OriginalExecutionBudget>,
     callback_in_flight: AtomicBool,
@@ -1778,6 +1839,7 @@ impl PersistentSessionPooledStart {
             }),
             original_callback_budget: OnceLock::new(),
             callback_in_flight: AtomicBool::new(true),
+            stage: AdmittedStartStageCell::default(),
         }
     }
 
@@ -2398,6 +2460,11 @@ impl PersistentSessionPooledStart {
         self.callback_in_flight.load(Ordering::Acquire)
     }
 
+    /// The caller's start callback records the stage it has reached.
+    pub fn note_stage(&self, stage: AdmittedStartStage) {
+        self.stage.set(stage);
+    }
+
     fn complete_callback(&self) {
         // Called only with PoolState held AFTER final admission/failure state.
         let mut retained = self.retained.lock().unwrap_or_else(|p| p.into_inner());
@@ -2762,6 +2829,8 @@ struct PoolState {
     /// caller's durable binding publication. Shutdown waits for these exact
     /// ownership units before snapshotting and reaping the pool.
     exclusive_starts_in_flight: usize,
+    /// The stage of each exclusive start counted above, by session id.
+    exclusive_start_stages: HashMap<String, AdmittedStartStageCell>,
     /// Once process-tree cleanup cannot be proved, the pool admits no further
     /// work in this daemon generation. Capacity must never be recycled while
     /// an old ownership unit may still exist.
@@ -3012,6 +3081,7 @@ pub struct ExclusivePersistentSessionReservation {
     contract: GroupContract,
     active: bool,
     start_guard: Option<ExclusivePersistentSessionStartGuard>,
+    stage: AdmittedStartStageCell,
 }
 
 /// Move-only ownership of one admitted exclusive start. It begins at capacity
@@ -3019,6 +3089,7 @@ pub struct ExclusivePersistentSessionReservation {
 /// process release, pool binding, and the caller's durable binding commit.
 pub struct ExclusivePersistentSessionStartGuard {
     inner: Arc<PoolInner>,
+    session_id: String,
     active: bool,
 }
 
@@ -3058,6 +3129,7 @@ impl PersistentSessionPool {
                 exclusive_exit_reason: HashMap::new(),
                 exclusive_notes: HashMap::new(),
                 exclusive_starts_in_flight: 0,
+                exclusive_start_stages: HashMap::new(),
                 cleanup_unproved: None,
             }),
             changed: Condvar::new(),
@@ -3130,6 +3202,11 @@ impl PersistentSessionPool {
         Ok(PersistentSessionContractEligibility::Ready)
     }
 
+    /// True once daemon shutdown has closed admission.
+    pub fn is_shutting_down(&self) -> bool {
+        self.inner.shutdown.load(Ordering::Acquire)
+    }
+
     /// Reserve node-wide capacity for one session-owned process. This shares
     /// the same aggregate admission counters as pooled persistent workers but
     /// never grants request reuse or cross-session lookup.
@@ -3192,6 +3269,10 @@ impl PersistentSessionPool {
             },
         );
         state.exclusive_starts_in_flight = exclusive_starts_in_flight;
+        let stage = AdmittedStartStageCell::default();
+        state
+            .exclusive_start_stages
+            .insert(session_id.to_owned(), stage.clone());
         Ok(ExclusivePersistentSessionReservation {
             inner: Arc::clone(&self.inner),
             backlog: Arc::clone(&self.streams.backlog),
@@ -3200,8 +3281,10 @@ impl PersistentSessionPool {
             active: true,
             start_guard: Some(ExclusivePersistentSessionStartGuard {
                 inner: Arc::clone(&self.inner),
+                session_id: session_id.to_owned(),
                 active: true,
             }),
+            stage,
         })
     }
 
@@ -4293,7 +4376,10 @@ impl PersistentSessionPool {
                         wire,
                         lifecycle,
                         Arc::clone(&self.streams.backlog),
-                        &self.inner.shutdown,
+                        ReadyGate {
+                            shutdown: &self.inner.shutdown,
+                            stage: &original_start.stage,
+                        },
                     ),
                     Err(error) => Err(PooledReadyFailure {
                         cleanup_unproved: original_start.has_retained_custody()
@@ -4339,6 +4425,7 @@ impl PersistentSessionPool {
                         process.leased.store(true, Ordering::Release);
                         // The SAME start stays owned/in-flight through reader admission.
                         group.processes.push(Arc::clone(&process));
+                        original_start.stage.set(AdmittedStartStage::Bind);
                         let original_published = original_start.publish();
                         let closed = self.inner.shutdown.load(Ordering::Acquire);
                         drop(state);
@@ -4567,7 +4654,10 @@ impl PersistentSessionPool {
             {
                 let remaining = deadline.remaining();
                 if remaining.is_zero() {
-                    bail!("persistent-session shutdown timed out waiting for admitted starts");
+                    bail!(
+                        "persistent-session shutdown timed out waiting for admitted starts: {}",
+                        admitted_start_stages(&state)
+                    );
                 }
                 let (next, wait) = self
                     .inner
@@ -4582,7 +4672,10 @@ impl PersistentSessionPool {
                         .any(|group| group.starts.iter().any(|start| start.is_in_flight()))
                         || state.exclusive_starts_in_flight != 0)
                 {
-                    bail!("persistent-session shutdown timed out waiting for admitted starts");
+                    bail!(
+                        "persistent-session shutdown timed out waiting for admitted starts: {}",
+                        admitted_start_stages(&state)
+                    );
                 }
             }
             if !state.exclusive_reservations.is_empty() {
@@ -4695,6 +4788,12 @@ impl PersistentSessionPool {
 }
 
 impl ExclusivePersistentSessionReservation {
+    /// The start's owner records the stage it has reached, so a stalled
+    /// shutdown names it.
+    pub fn note_stage(&self, stage: AdmittedStartStage) {
+        self.stage.set(stage);
+    }
+
     /// Complete readiness and publish the process into the exclusive registry.
     /// The caller must already have persisted the exact held-process identity
     /// before supplying a released process here.
@@ -4760,10 +4859,14 @@ impl ExclusivePersistentSessionReservation {
             &self.contract.wire,
             &self.contract.lifecycle,
             Arc::clone(&self.backlog),
-            &self.inner.shutdown,
+            ReadyGate {
+                shutdown: &self.inner.shutdown,
+                stage: &self.stage,
+            },
             Some(registration.clone()),
         ) {
             Ok(process) => {
+                self.stage.set(AdmittedStartStage::Bind);
                 let process = Arc::new(process);
                 let mut process_guard =
                     ExclusiveReadyProcessGuard::new(Arc::clone(&process), registration);
@@ -4931,6 +5034,7 @@ impl ExclusivePersistentSessionReservation {
         state.exclusive_reservations.remove(&self.session_id);
         ready_process_guard.disarm();
         self.active = false;
+        self.stage.set(AdmittedStartStage::Callback);
         let start_guard = self
             .start_guard
             .take()
@@ -5007,6 +5111,7 @@ impl ExclusivePersistentSessionStartGuard {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.exclusive_starts_in_flight = state.exclusive_starts_in_flight.saturating_sub(1);
+        state.exclusive_start_stages.remove(&self.session_id);
         self.active = false;
         self.inner.changed.notify_all();
     }
@@ -5397,13 +5502,35 @@ fn bounded_stream_error(error: &str) -> String {
     format!("{OMITTED}{tail}")
 }
 
+/// Names every admitted start still holding shutdown and the stage it is in.
+fn admitted_start_stages(state: &PoolState) -> String {
+    let mut named = Vec::new();
+    for (key, group) in &state.groups {
+        for start in group.starts.iter().filter(|start| start.is_in_flight()) {
+            named.push(format!(
+                "pooled start in group {} at stage {}",
+                key.get(..8).unwrap_or(key),
+                start.stage.get().name()
+            ));
+        }
+    }
+    for (session_id, stage) in &state.exclusive_start_stages {
+        named.push(format!(
+            "exclusive start {} at stage {}",
+            session_id.get(..8).unwrap_or(session_id),
+            stage.get().name()
+        ));
+    }
+    named.join("; ")
+}
+
 fn ready_pooled_process(
     mut started: StartedPersistentSession,
     original_start: Arc<PersistentSessionPooledStart>,
     wire: &PersistentSessionWireContract,
     lifecycle: &PersistentSessionLifecycleContract,
     backlog: Arc<BacklogBudget>,
-    shutdown: &AtomicBool,
+    gate: ReadyGate<'_>,
 ) -> std::result::Result<SessionProcess, PooledReadyFailure> {
     if original_start.has_original_trusted_obligation() {
         // Keep the original refusal: no held/runtime/driver readiness join exists.
@@ -5459,7 +5586,7 @@ fn ready_pooled_process(
             original_start,
         });
     }
-    match ready_process(started, wire, lifecycle, backlog, shutdown) {
+    match ready_process(started, wire, lifecycle, backlog, gate) {
         Ok(mut process) => {
             process.pooled_start = Some(original_start);
             Ok(process)
@@ -5496,9 +5623,9 @@ fn ready_process(
     wire: &PersistentSessionWireContract,
     lifecycle: &PersistentSessionLifecycleContract,
     backlog: Arc<BacklogBudget>,
-    shutdown: &AtomicBool,
+    gate: ReadyGate<'_>,
 ) -> std::result::Result<SessionProcess, ReadyProcessFailure> {
-    ready_process_registered(started, wire, lifecycle, backlog, shutdown, None)
+    ready_process_registered(started, wire, lifecycle, backlog, gate, None)
 }
 
 fn ready_process_registered(
@@ -5506,7 +5633,7 @@ fn ready_process_registered(
     wire: &PersistentSessionWireContract,
     lifecycle: &PersistentSessionLifecycleContract,
     backlog: Arc<BacklogBudget>,
-    shutdown: &AtomicBool,
+    gate: ReadyGate<'_>,
     registration: Option<ExclusiveCustodyRegistration>,
 ) -> std::result::Result<SessionProcess, ReadyProcessFailure> {
     let StartedPersistentSession {
@@ -5617,6 +5744,7 @@ fn ready_process_registered(
             anyhow!(error).context("configure persistent-session channel as nonblocking"),
         ));
     }
+    gate.stage.set(AdmittedStartStage::Readiness);
     let deadline = MonotonicDeadline::after(timeout);
     let mut reader = FrameReader::default();
     let frame = match loop {
@@ -5626,7 +5754,7 @@ fn ready_process_registered(
             // abandoned: the refusal below kills and reaps the exact process,
             // so the admitted start settles inside the drain instead of
             // outliving it for the rest of the readiness timeout.
-            Ok(None) if shutdown.load(Ordering::Acquire) => {
+            Ok(None) if gate.shutdown.load(Ordering::Acquire) => {
                 break Err(anyhow!(
                     "persistent-session readiness abandoned for daemon shutdown"
                 ));
@@ -7525,7 +7653,10 @@ mod tests {
             &test_wire(),
             &owned_start_lifecycle(),
             backlog,
-            &pool.inner.shutdown,
+            ReadyGate {
+                shutdown: &pool.inner.shutdown,
+                stage: &AdmittedStartStageCell::default(),
+            },
         ) {
             Ok(process) => process,
             Err(failure) => panic!("returned actual owner lost readiness: {}", failure.error),
@@ -8130,7 +8261,10 @@ while True:
             &test_wire(),
             &owned_start_lifecycle(),
             Arc::clone(&pool.streams.backlog),
-            &pool.inner.shutdown,
+            ReadyGate {
+                shutdown: &pool.inner.shutdown,
+                stage: &AdmittedStartStageCell::default(),
+            },
         )
         .map_err(|failure| failure.error)
     }
@@ -8166,7 +8300,10 @@ while True:
             &test_wire(),
             &owned_start_lifecycle(),
             Arc::clone(&pool.streams.backlog),
-            &pool.inner.shutdown,
+            ReadyGate {
+                shutdown: &pool.inner.shutdown,
+                stage: &AdmittedStartStageCell::default(),
+            },
         ) {
             Ok(process) => {
                 let _ = process.retire();
@@ -9629,17 +9766,69 @@ while True:
         let pool = PersistentSessionPool::new();
         let lifecycle = test_lifecycle();
         let wire = test_wire();
-        let _reservation = pool
+        let reservation = pool
             .reserve_exclusive(&"r".repeat(64), &lifecycle, &wire)
             .unwrap();
+        reservation.note_stage(AdmittedStartStage::ProviderLease);
         let error = pool
             .shutdown_and_reap_all(Duration::from_millis(300))
             .expect_err("a start that never settles keeps shutdown unproved");
+        let text = error.to_string();
+        assert!(
+            text.contains("timed out waiting for admitted starts"),
+            "{text}"
+        );
+        assert!(
+            text.contains("exclusive start rrrrrrrr at stage provider/lease"),
+            "the hold names the stage: {text}"
+        );
+    }
+
+    #[test]
+    fn shutdown_holds_with_a_named_leg_when_an_admitted_start_cannot_prove_cleanup() {
+        let pool = PersistentSessionPool::new();
+        let mut lifecycle = test_lifecycle();
+        lifecycle.ready_timeout_ms = 2_000;
+        let wire = test_wire();
+        let session_id = "t".repeat(64);
+        let reservation = pool
+            .reserve_exclusive(&session_id, &lifecycle, &wire)
+            .unwrap();
+        let shutdown_pool = pool.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let shutdown = std::thread::spawn(move || {
+            done_tx
+                .send(shutdown_pool.shutdown_and_reap_all(Duration::from_secs(5)))
+                .unwrap();
+        });
+        while !pool.inner.shutdown.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+        // The process comes back from the start with a retirement observer
+        // that cannot prove its cleanup.
+        let mut started = fake_framed_session().unwrap();
+        started.retirement_observer = Some(Arc::new(|| Err(anyhow!("cleanup proof unavailable"))));
+        let error = reservation
+            .bind(started)
+            .err()
+            .expect("an unprovable start must be refused");
         assert!(
             error
-                .to_string()
-                .contains("timed out waiting for admitted starts")
+                .downcast_ref::<PersistentSessionCleanupUnproved>()
+                .is_some(),
+            "{error:#}"
         );
+        let outcome = done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("shutdown must answer once the start releases");
+        let failure = outcome.expect_err("an unproved start must keep shutdown unproved");
+        assert!(
+            failure
+                .to_string()
+                .contains("unproved exclusive custody owners"),
+            "{failure:#}"
+        );
+        shutdown.join().unwrap();
     }
 
     #[test]
