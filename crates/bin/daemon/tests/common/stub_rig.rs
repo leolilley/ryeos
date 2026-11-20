@@ -378,6 +378,10 @@ pub struct RigOptions {
     pub exec_yaml: Option<String>,
     /// The continuation runtime config, including the compaction policy.
     pub continuation_yaml: Option<String>,
+    /// A runtime recovery stage the directive runtime reports and then blocks
+    /// at (needs a daemon built with `crash-qualification-test-support`); the
+    /// rig's `phase_gate` observes it.
+    pub phase_cut: Option<&'static str>,
     pub context_window: u64,
     pub header_extra: &'static str,
     pub limits: Option<(u64, u64)>,
@@ -412,6 +416,7 @@ impl Default for RigOptions {
         Self {
             exec_yaml: None,
             continuation_yaml: None,
+            phase_cut: None,
             context_window: 200_000,
             header_extra: "",
             limits: None,
@@ -441,6 +446,8 @@ pub struct Rig {
     /// fixture state was ready (just before the daemon was spawned).
     pub spawn_at: Instant,
     pub started_at: Instant,
+    /// Observes the runtime stage named by `RigOptions::phase_cut`.
+    pub phase_gate: Option<common::runtime_phase_cut::RuntimePhaseCutGate>,
 }
 
 impl Rig {
@@ -472,6 +479,14 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
     let top_extra = opts.provider_top_extra.clone();
     let usage_extra = opts.provider_usage_extra.clone();
     let cache_tariff = opts.provider_cache_tariff;
+    let (phase_gate, mut phase_child) = match opts.phase_cut {
+        Some(stage) => {
+            let (gate, child) = common::runtime_phase_cut::RuntimePhaseCutGate::pair(stage)?;
+            (Some(gate), Some(child))
+        }
+        None => (None, None),
+    };
+    let phase_stage = opts.phase_cut;
     let spawn_cell: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
     let spawn_cell_tweak = spawn_cell.clone();
     let started_at = Instant::now();
@@ -502,6 +517,12 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
     let (h, fixture) = DaemonHarness::start_fast_with(plant, move |cmd| {
         if let Ok(filter) = std::env::var("PROBE_RUST_LOG") {
             cmd.env("RUST_LOG", filter);
+        }
+        if let (Some(child), Some(stage)) = (phase_child.as_mut(), phase_stage) {
+            child
+                .configure_command(cmd, stage)
+                .expect("configure the runtime phase-cut channel");
+            cmd.env("RYEOS_DIRECTIVE_TEST_BLOCK_AT", stage);
         }
         *spawn_cell_tweak.lock().expect("spawn cell") = Some(Instant::now());
     })
@@ -580,6 +601,7 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
         publisher: fixture.publisher.clone(),
         spawn_at,
         started_at,
+        phase_gate,
     })
 }
 

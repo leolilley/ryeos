@@ -5529,4 +5529,55 @@ mod tests {
                 .any(|m| m.text().is_some_and(|t| t.contains("were clipped")))
         );
     }
+
+    #[tokio::test]
+    async fn a_continuation_predecessor_with_an_unfinished_turn_is_refused() {
+        // A marker with no final and no recorded refusal: a lost process, a
+        // budget stop, an auth failure. Not a refusal the policy answers.
+        let callback = make_callback(vec![
+            event_at("cognition_in", 1, input_with_origin("task")),
+            event_at("cognition_in", 2, json!({"turn": 1, "purpose": "turn"})),
+            event_at("cognition_out", 3, out(1, "one")),
+            event_at("cognition_in", 4, json!({"turn": 2, "purpose": "turn"})),
+        ]);
+        let error = load_resume_state(
+            &callback,
+            "T-test",
+            CarryPolicy::turns(8),
+            ResumeMode::Continuation,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("unfinished provider turn"),
+            "{error:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_predecessor_that_recorded_a_refusal_reports_its_code_to_the_successor() {
+        let mut events = vec![event_at("cognition_in", 1, input_with_origin("task"))];
+        events.extend(refusal_events());
+        let callback = make_callback(events);
+        let loaded = load_resume_state(
+            &callback,
+            "T-test",
+            CarryPolicy::turns(8),
+            ResumeMode::Continuation,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            loaded.refused_code.as_deref(),
+            Some("provider_context_length_exceeded")
+        );
+        assert_eq!(loaded.last_turn_coordinate, 2);
+        assert_eq!(loaded.turns_completed, 1);
+    }
+
+    fn input_with_origin(text: &str) -> Value {
+        json!({"origin": "launch", "parts": text_parts(text), "pinned": true})
+    }
 }

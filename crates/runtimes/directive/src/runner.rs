@@ -1897,18 +1897,11 @@ impl Runner {
         // The record carries the pinned inputs: refuse before a paid call that
         // could not be recorded.
         let summary = &self.compaction.summary;
-        let pinned_bytes =
-            serde_json::to_vec(&plan.pinned_inputs).map_or(usize::MAX, |bytes| bytes.len());
-        let reserve = usize::try_from(summary.max_output_tokens.saturating_mul(8))
-            .unwrap_or(usize::MAX)
-            .saturating_add(16 * 1024);
-        if pinned_bytes.saturating_add(reserve)
-            > ryeos_runtime::cognition::MAX_COMPACTION_RECORD_BYTES
-        {
-            return Err(CompactionFailure::Failed(format!(
-                "the pinned inputs are {pinned_bytes} bytes, too large for a compaction record to carry"
-            )));
-        }
+        crate::compaction::pinned_inputs_fit_a_record(
+            &plan.pinned_inputs,
+            summary.max_output_tokens,
+        )
+        .map_err(CompactionFailure::Failed)?;
         let input_budget = ((self.context_window as f64 * summary.input_ratio) as u64)
             .saturating_sub(summary.max_output_tokens);
         let rendered =
@@ -1992,6 +1985,7 @@ impl Runner {
         self.result_guard = rebuilt.result_guard;
         self.wrap_up_delivered = rebuilt.deadline_wrap_up_delivered;
         self.compaction_memo = Some(CompactionMemo::of(&record));
+        block_at_directive_recovery_test_cut(&self.callback, "compaction_recorded").await;
         self.refused_code = None;
         self.start_over_ceiling = false;
         tracing::info!(
@@ -3392,6 +3386,13 @@ impl Runner {
                                     ),
                                 };
                                 continue;
+                            }
+                            if self.summary_job.is_some() {
+                                block_at_directive_recovery_test_cut(
+                                    &self.callback,
+                                    "compaction_summary_recorded",
+                                )
+                                .await;
                             }
                             if let Some(job) = self.summary_job.as_mut() {
                                 // The summary is not a conversation turn: it
@@ -4883,6 +4884,8 @@ impl Runner {
                 }
 
                 State::Compacting { trigger } => {
+                    block_at_directive_recovery_test_cut(&self.callback, "compaction_started")
+                        .await;
                     let outcome = match self.compaction.summary.mode {
                         SummaryMode::None => self.finish_compaction(&trigger, None).await,
                         SummaryMode::Model => match self.begin_summary_call(&trigger).await {

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-19T18:46:59Z:436be7c6f23647b8752a2d73c158a623df4da9a6280f51b9aa5d818ce45cd66a:D+eFPJJO5NZ52MjRoVlqXFx12CgbxKDyHFmlF/w9RiO1PIgFDRdDu0/USbDl8nY6/7NLcJi1kxXkstRYFEW+BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-20T05:51:57Z:436be7c6f23647b8752a2d73c158a623df4da9a6280f51b9aa5d818ce45cd66a:D+eFPJJO5NZ52MjRoVlqXFx12CgbxKDyHFmlF/w9RiO1PIgFDRdDu0/USbDl8nY6/7NLcJi1kxXkstRYFEW+BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [fundamentals, directives, workflows, prompts]
 version: "2.1.0"

@@ -225,6 +225,26 @@ pub fn render_for_summary(replaced: &[FoldedMessage], budget_tokens: u64) -> Ren
     }
 }
 
+/// Whether the pinned inputs, with room for a summary of up to
+/// `max_output_tokens`, fit the bound on a compaction record. Checked before
+/// the paid summary call, so a call whose result could not be recorded is not
+/// made.
+pub fn pinned_inputs_fit_a_record(
+    pinned: &[CognitionInput],
+    max_output_tokens: u64,
+) -> Result<(), String> {
+    let bytes = serde_json::to_vec(pinned).map_or(usize::MAX, |bytes| bytes.len());
+    let reserve = usize::try_from(max_output_tokens.saturating_mul(8))
+        .unwrap_or(usize::MAX)
+        .saturating_add(16 * 1024);
+    if bytes.saturating_add(reserve) > ryeos_runtime::cognition::MAX_COMPACTION_RECORD_BYTES {
+        return Err(format!(
+            "the pinned inputs are {bytes} bytes, too large for a compaction record to carry"
+        ));
+    }
+    Ok(())
+}
+
 /// Read the tool results of `messages` (the kept turns, oldest first) under
 /// `rule`: every result but the newest `keep_recent` whose text is longer than
 /// `over_bytes` becomes its head, a marker naming what was left out, and its
@@ -537,6 +557,14 @@ mod tests {
                 "{field} is required"
             );
         }
+    }
+
+    #[test]
+    fn pinned_inputs_over_the_record_bound_are_refused_before_a_paid_call() {
+        let small = vec![CognitionInput::text("launch", "task").pinned()];
+        assert!(pinned_inputs_fit_a_record(&small, 2_000).is_ok());
+        let huge = vec![CognitionInput::text("launch", "x".repeat(200 * 1024)).pinned()];
+        assert!(pinned_inputs_fit_a_record(&huge, 2_000).is_err());
     }
 
     #[test]
