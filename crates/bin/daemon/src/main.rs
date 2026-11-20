@@ -3898,6 +3898,13 @@ fn main() -> Result<()> {
             Err(error) => Err(error),
         };
     }
+    // A supervisor that started this node from a descriptor-bound image left
+    // that descriptor inheritable. No worker or tool this node spawns may
+    // receive it, so it becomes close-on-exec before anything is spawned.
+    #[cfg(target_os = "linux")]
+    lillux::protect_running_image_descriptors()
+        .map_err(anyhow::Error::msg)
+        .context("protect the running image descriptor from exec")?;
     let external_host_runtime =
         ryeos_node::host_runtime::ExternalHostRuntime::take_from_environment()
             .context("consume inherited external host-runtime authority")?;

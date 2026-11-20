@@ -2898,6 +2898,56 @@ pub fn configure_inherited_descriptor_authorities(
     configure_inherited_fds(command, authorities)
 }
 
+/// Make every inherited descriptor of this process's own executable image
+/// close-on-exec, returning how many it protected.
+///
+/// A supervisor that starts a node from a descriptor-bound image leaves that
+/// descriptor open and inheritable in the node. The node has no use for it
+/// after exec, and a child it spawns must receive only the descriptors the
+/// spawn names, so the image descriptor must never reach a worker. Call this
+/// while the process is still single-threaded, before any child is spawned.
+#[cfg(target_os = "linux")]
+pub fn protect_running_image_descriptors() -> Result<usize, String> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let image = std::fs::metadata("/proc/self/exe")
+        .map_err(|error| format!("inspect the running image: {error}"))?;
+    let mut protected = 0;
+    let entries =
+        std::fs::read_dir("/proc/self/fd").map_err(|error| format!("list descriptors: {error}"))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let Some(fd) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        if fd <= libc::STDERR_FILENO {
+            continue;
+        }
+        let Ok(target) = std::fs::metadata(entry.path()) else {
+            continue;
+        };
+        if target.dev() != image.dev() || target.ino() != image.ino() {
+            continue;
+        }
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags < 0 || flags & libc::FD_CLOEXEC != 0 {
+            continue;
+        }
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+            return Err(format!(
+                "protect image descriptor {fd}: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        protected += 1;
+    }
+    Ok(protected)
+}
+
 /// Returns a file that writes to this process's standard output through a
 /// duplicate of descriptor 1.
 ///
@@ -15965,5 +16015,45 @@ mod supervised_setup_deadline_tests {
             supervised_barrier_setup_deadline(start, 0.0),
             start + SUPERVISED_STATUS_SETUP_TIMEOUT
         );
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod running_image_descriptor_tests {
+    use super::protect_running_image_descriptors;
+    use std::os::fd::AsRawFd as _;
+
+    fn close_on_exec(fd: i32) -> bool {
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert!(flags >= 0, "read descriptor flags");
+        flags & libc::FD_CLOEXEC != 0
+    }
+
+    /// A supervisor that execs a node from a descriptor-bound image leaves
+    /// that descriptor inheritable. It must become close-on-exec, and only
+    /// descriptors of the running image are touched.
+    #[test]
+    fn an_inheritable_descriptor_of_the_running_image_becomes_close_on_exec() {
+        let image = std::fs::File::open("/proc/self/exe").unwrap();
+        let unrelated = std::fs::File::open("/proc/self/status").unwrap();
+        let (image_fd, unrelated_fd) = (image.as_raw_fd(), unrelated.as_raw_fd());
+        // Rust opens with close-on-exec; clear it as the supervisor's exec does.
+        for fd in [image_fd, unrelated_fd] {
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            assert!(unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } >= 0);
+        }
+        assert!(!close_on_exec(image_fd) && !close_on_exec(unrelated_fd));
+        let protected = protect_running_image_descriptors().unwrap();
+        assert!(protected >= 1, "the image descriptor is protected");
+        assert!(
+            close_on_exec(image_fd),
+            "the image descriptor is close-on-exec"
+        );
+        assert!(
+            !close_on_exec(unrelated_fd),
+            "a descriptor of another file is left as it was"
+        );
+        // A second call finds nothing left to protect.
+        assert_eq!(protect_running_image_descriptors().unwrap(), 0);
     }
 }
