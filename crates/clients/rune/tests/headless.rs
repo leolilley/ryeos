@@ -87,6 +87,36 @@ fn type_text(rt: &mut Runtime<App>, text: &str) {
     }
 }
 
+/// Every checked-in scene file loads into a core, and its dress (if it names
+/// one) is known.
+#[test]
+fn every_scene_file_loads() {
+    for scene in presentation::SCENES {
+        presentation::core(scene).unwrap_or_else(|error| panic!("scene {scene}: {error}"));
+        let _ = presentation::dress(scene);
+    }
+}
+
+/// The scene files on disk are exactly the scenes the fixture lists.
+#[test]
+fn scene_list_matches_files() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/scenes");
+    let mut on_disk: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| {
+            let name = entry.unwrap().file_name().into_string().unwrap();
+            name.strip_suffix(".json").unwrap().to_owned()
+        })
+        .collect();
+    on_disk.sort();
+    let mut listed: Vec<String> = presentation::SCENES
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    listed.sort();
+    assert_eq!(on_disk, listed);
+}
+
 #[test]
 fn an_opened_launcher_takes_typing_without_a_click() {
     let mut rt = shell("launcher", (1280.0, 800.0));
