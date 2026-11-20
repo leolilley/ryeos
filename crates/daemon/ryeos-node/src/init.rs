@@ -5024,6 +5024,12 @@ mod tests {
         let Ok(path) = std::env::var(HOLD_LOCK_ENV) else {
             return;
         };
+        // A helper that outlives its parent exits by itself.
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+            eprintln!("state-lock helper process: 60 s cap reached; exiting");
+            std::process::exit(3);
+        });
         let _lock = ryeos_node_runtime::state_lock::StateLock::acquire(std::path::Path::new(&path))
             .expect("helper takes the state lock");
         println!("STATE_LOCK_HELD");
@@ -5054,18 +5060,28 @@ mod tests {
                 .stderr(std::process::Stdio::null())
                 .spawn()
                 .unwrap();
-            let mut lines = std::io::BufReader::new(child.stdout.take().unwrap()).lines();
-            // Readiness is the helper's own announcement, not a delay.
-            loop {
-                let line = lines
-                    .next()
-                    .expect("helper exited before taking the state lock")
-                    .unwrap();
-                // libtest prints `test <name> ... ` without a newline before the
-                // helper announces itself on the same line.
-                if line.contains("STATE_LOCK_HELD") {
-                    break;
+            // Readiness is the helper's own announcement, read on a thread so
+            // a helper that never announces fails the test instead of
+            // blocking it. libtest prints `test <name> ... ` without a newline
+            // before the helper announces itself on the same line.
+            let stdout = child.stdout.take().unwrap();
+            let (ready, announced) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                for line in std::io::BufReader::new(stdout).lines() {
+                    let Ok(line) = line else { break };
+                    if line.contains("STATE_LOCK_HELD") {
+                        let _ = ready.send(());
+                        return;
+                    }
                 }
+            });
+            if announced
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .is_err()
+            {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("the helper process did not take the state lock within 30 s");
             }
             Self { child }
         }
@@ -5073,8 +5089,38 @@ mod tests {
 
     impl Drop for OtherProcessHoldsStateLock {
         fn drop(&mut self) {
+            // Closing stdin would end it, but another process can hold the
+            // pipe's write end open; killing releases the lock regardless.
             drop(self.child.stdin.take());
+            let _ = self.child.kill();
             let _ = self.child.wait();
+        }
+    }
+
+    /// Aborts the whole test process, naming the test, if it is still running
+    /// after `seconds`: a hang becomes a named failure, not a job timeout.
+    struct Watchdog(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    fn watchdog(test: &'static str, seconds: u64) -> Watchdog {
+        let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = std::sync::Arc::clone(&finished);
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+            while std::time::Instant::now() < deadline {
+                if seen.load(std::sync::atomic::Ordering::SeqCst) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            eprintln!("WATCHDOG: test `{test}` still running after {seconds} s; aborting");
+            std::process::abort();
+        });
+        Watchdog(finished)
+    }
+
+    impl Drop for Watchdog {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
@@ -5118,9 +5164,21 @@ mod tests {
         use ryeos_node_runtime::state_lock::{StateLock, default_lock_path};
         let lock_path = default_lock_path(state);
         let holder = OtherProcessHoldsStateLock::start(&lock_path);
+        // A start under a held lock refuses promptly; it never waits it out.
+        let started = std::time::Instant::now();
+        assert!(
+            StateLock::acquire_with_timeout(&lock_path, std::time::Duration::from_millis(300))
+                .is_err(),
+            "the state lock is held by another process"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "refusing a held lock took {:?}",
+            started.elapsed()
+        );
         assert!(
             StateLock::acquire(&lock_path).is_err(),
-            "the state lock is held by another process"
+            "the state lock is still held by another process"
         );
         drop(holder);
         let lock = StateLock::acquire(&lock_path).expect("lock is free once the holder exits");
@@ -5140,6 +5198,10 @@ mod tests {
     #[test]
     fn foreign_namespace_debit_is_refused_while_another_process_holds_the_state_lock_and_settled_when_free()
      {
+        let _watchdog = watchdog(
+            "foreign_namespace_debit_is_refused_while_another_process_holds_the_state_lock_and_settled_when_free",
+            300,
+        );
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
         let user = tmp.path().join("home");
@@ -5159,6 +5221,10 @@ mod tests {
     #[test]
     fn foreign_namespace_recovery_process_is_refused_while_another_process_holds_the_state_lock_and_settled_when_free()
      {
+        let _watchdog = watchdog(
+            "foreign_namespace_recovery_process_is_refused_while_another_process_holds_the_state_lock_and_settled_when_free",
+            300,
+        );
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
         let user = tmp.path().join("home");
@@ -5217,6 +5283,10 @@ mod tests {
     /// and debits normally.
     #[test]
     fn the_execution_history_cut_re_records_pre_cut_capacity_records_and_the_node_starts() {
+        let _watchdog = watchdog(
+            "the_execution_history_cut_re_records_pre_cut_capacity_records_and_the_node_starts",
+            300,
+        );
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
         let user = tmp.path().join("home");
@@ -5232,6 +5302,17 @@ mod tests {
         );
         assert!(crate::native_capacity::inspect_capacity_account(&state).is_err());
 
+        // A node that has run has a State store and a Runtime store; a freshly
+        // initialised one has neither, so establish them the way a first live
+        // boot does. The reset issues its own native host, hence the serial.
+        let config =
+            ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+                app_root: Some(state.clone()),
+                ..Default::default()
+            })
+            .unwrap();
+        ryeos_app::runtime_db::test_native::seed_node(&config, true);
+        let _serial = lillux_sqlite::test_host::serial();
         let epoch = ryeos_app::runtime_db::RuntimeDb::current_operator_schema_epoch();
         let report = crate::offline_operation::handlers::reset_execution_history_for_test(
             &state,
@@ -5274,10 +5355,52 @@ mod tests {
         assert!(after.incarnations_remaining <= before.incarnations_remaining);
     }
 
+    /// A cut that dies between its two writes leaves the anchor re-recorded and
+    /// the account not yet: a start refuses it naming the cure rather than as
+    /// corruption, and rerunning the cut lets the node start.
+    #[test]
+    fn a_cut_interrupted_between_its_writes_refuses_a_start_with_the_cure_and_the_rerun_starts_the_node()
+     {
+        let _watchdog = watchdog(
+            "a_cut_interrupted_between_its_writes_refuses_a_start_with_the_cure_and_the_rerun_starts_the_node",
+            300,
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        let (lock, _) = node_with_pre_cut_capacity_records(&state, &user, &|json| json);
+        let interrupted =
+            crate::native_capacity::retire_with_fault_for_test(&state, &lock, &mut |step| {
+                if step == crate::native_capacity::CutStep::AnchorReplaced {
+                    anyhow::bail!("injected interruption");
+                }
+                Ok(())
+            })
+            .expect_err("the cut is interrupted");
+        assert!(format!("{interrupted:#}").contains("injected interruption"));
+        let refused = crate::native_capacity::startup_seams::open_and_debit(&state, &lock)
+            .expect_err("a half-cut account cannot start");
+        let refused = format!("{refused:#}");
+        assert!(
+            refused.contains("predates recorded pid namespaces")
+                && refused.contains("ryeos node reset execution-history --confirm"),
+            "{refused}"
+        );
+        let rerun = crate::native_capacity::retire_pre_cut_identity_records(&state, &lock)
+            .expect("the cut reruns");
+        assert!(!rerun.anchor_rewritten && rerun.account_rewritten);
+        crate::native_capacity::startup_seams::open_and_debit(&state, &lock)
+            .expect("the node starts once the cut has finished");
+    }
+
     /// The step keys on the exact pre-cut shape: a record that fails to
     /// decode for any other reason is refused and left as it was.
     #[test]
     fn the_cut_refuses_a_capacity_record_that_is_not_the_pre_cut_shape() {
+        let _watchdog = watchdog(
+            "the_cut_refuses_a_capacity_record_that_is_not_the_pre_cut_shape",
+            300,
+        );
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
         let user = tmp.path().join("home");

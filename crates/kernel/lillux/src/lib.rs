@@ -51,6 +51,8 @@ pub use custody::{
 };
 pub use environment::take_environment_values;
 pub use exec::InheritedReadonlyDocument;
+#[cfg(target_os = "linux")]
+pub use exec::protect_running_image_descriptors;
 pub use exec::take_inherited_duplex_channel_from_env;
 pub use exec::{
     AbortedProcess, AttachmentAbortError, AttachmentReleaseError, CooperativeChildTermination,

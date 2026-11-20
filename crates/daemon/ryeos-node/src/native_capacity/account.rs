@@ -1916,8 +1916,14 @@ impl RetainedCapacityAccount {
         let bytes = self
             .account
             .read_bytes(budget.deadline, &|steps| budget.spend(inputs, steps))?;
+        let accepted = current.accepts_account_bytes(&bytes)?;
+        // An account the cut left behind (the anchor already re-recorded, the
+        // account not yet) is not corruption: name the cure.
+        if !accepted && cut_retirement::account_awaits_cut(&bytes, &encode(current.target())?) {
+            anyhow::bail!(cut_retirement::PRE_CUT_CURE);
+        }
         ensure!(
-            current.accepts_account_bytes(&bytes)?,
+            accepted,
             "capacity account corruption has no permitted redo"
         );
         let needs_repair = bytes != encode(current.target())?;
