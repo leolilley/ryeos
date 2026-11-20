@@ -1215,12 +1215,14 @@ impl CallbackClient {
     pub async fn emit_turn_start(
         &self,
         turn: u32,
+        purpose: crate::cognition::TurnPurpose,
         tools_offered: Option<Vec<String>>,
     ) -> Result<()> {
         self.append_runtime_event(
             RuntimeEventType::CognitionIn,
             crate::cognition::to_payload(&crate::cognition::TurnMarker {
                 turn,
+                purpose,
                 tools_offered,
             })?,
         )
@@ -1793,17 +1795,40 @@ mod tests {
 
     #[tokio::test]
     async fn the_turn_marker_names_offered_tools_only_when_given() {
+        use crate::cognition::TurnPurpose;
         let (callback, recorder) = make_recorder_client();
-        callback.emit_turn_start(1, None).await.unwrap();
         callback
-            .emit_turn_start(2, Some(vec!["only_tool".to_string()]))
+            .emit_turn_start(1, TurnPurpose::Turn, None)
+            .await
+            .unwrap();
+        callback
+            .emit_turn_start(
+                2,
+                TurnPurpose::CompactionSummaryOverflow,
+                Some(vec!["only_tool".to_string()]),
+            )
             .await
             .unwrap();
         let events = recorder.events.lock().unwrap();
-        assert_eq!(events[0].1, json!({"turn": 1}));
+        assert_eq!(events[0].1, json!({"turn": 1, "purpose": "turn"}));
         assert_eq!(
             events[1].1,
-            json!({"turn": 2, "tools_offered": ["only_tool"]})
+            json!({
+                "turn": 2,
+                "purpose": "compaction_summary_overflow",
+                "tools_offered": ["only_tool"]
+            })
+        );
+    }
+
+    #[test]
+    fn a_turn_marker_without_a_purpose_is_refused() {
+        let mut assembler = crate::events::CognitionInAssembler::default();
+        assert!(assembler.push(&json!({"turn": 1})).is_err());
+        assert!(
+            assembler
+                .push(&json!({"turn": 1, "purpose": "something_else"}))
+                .is_err()
         );
     }
 

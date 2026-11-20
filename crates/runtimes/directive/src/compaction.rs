@@ -97,6 +97,7 @@ pub fn fixed_note(plan: &Plan) -> Summary {
 
 /// The conversation a compaction leaves: the pinned inputs, the summary, the
 /// kept messages.
+#[cfg(test)]
 pub fn compacted_messages(
     folded: &[FoldedMessage],
     plan: &Plan,
@@ -302,11 +303,18 @@ pub fn build_record(
             keep_recent: policy.clip.keep_recent,
         }
     });
-    let mut after = compacted_messages(&basis.folded, plan, &summary);
+    // The estimate is over the bytes the rebuild reads: the pinned inputs, the
+    // summary, and the kept turns as the raw events give them, clipped once.
+    let mut kept = basis.raw_kept_messages(plan.kept_from_turn)?;
     if let Some(rule) = &clip {
-        let kept_from = after.len() - (basis.folded.len() - plan.cut);
-        clip_tool_results(&mut after[kept_from..], rule);
+        clip_tool_results(&mut kept, rule);
     }
+    let mut after = crate::launch_records::messages_of(&plan.pinned_inputs);
+    after.push(ProviderMessage::new(
+        ryeos_provider_contract::Role::User,
+        summary.parts.clone(),
+    ));
+    after.extend(kept);
     let size_before = crate::estimate::estimate_tokens(&before, images);
     let size_after = crate::estimate::estimate_tokens(&after, images);
     let ineffective =

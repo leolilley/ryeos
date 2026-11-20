@@ -67,10 +67,13 @@ pub struct ResumeState {
     pub spawns_before_window: u32,
     /// The latest compaction on the path, as far as the live run needs it.
     pub compaction: Option<CompactionMemo>,
-    /// The turn coordinate a continuation predecessor ended on without
-    /// completing: its request was refused. A successor of such a thread
-    /// starts by compacting.
-    pub predecessor_rejected_turn: Option<u32>,
+    /// The trigger of the compaction summary call this thread had in flight
+    /// when its process was lost (a same-thread recovery re-enters it).
+    pub active_summary_trigger: Option<String>,
+    /// The code of the refusal the path's latest provider turn recorded, when
+    /// no completed turn or compaction follows it: the request that was
+    /// refused is still to be retried.
+    pub refused_code: Option<String>,
     /// Continuation predecessors this thread has on its path.
     pub chain_depth: u32,
     /// A compacted start that is still over the continuation threshold: the
@@ -140,6 +143,9 @@ pub enum ResumeDisposition {
         trigger: String,
         summary: Vec<ryeos_provider_contract::Part>,
     },
+    /// The thread recorded the refusal of a request the compaction policy
+    /// answers by continuing; only the handoff to the successor is left.
+    ForkAfterRefusal,
 }
 
 #[derive(Debug, Clone)]
@@ -238,6 +244,7 @@ pub async fn load_resume_state(
         source_thread_ids,
         anchor,
     } = replay_window(callback, &path).await?;
+    refuse_markers_without_purpose(&events)?;
     let seed = anchor
         .as_ref()
         .map(|anchor| anchor.payload.seed.clone())
@@ -303,18 +310,22 @@ pub async fn load_resume_state(
         ResultGuard::new()
     };
     let turn_progress = recover_turn_progress_from(&events, &seed)?;
-    let unfinished_turn = recover_unfinished_provider_turn(
+    let unfinished = recover_unfinished_provider_turn(
         &events,
         &source_thread_ids,
         previous_thread_id,
         seed.last_coordinate,
     )?;
-    // A thread of this exact process generation has a turn in flight. A
-    // settled predecessor that ended on a turn marker had its request refused.
-    let (active_provider_turn, predecessor_rejected_turn) = match mode {
-        ResumeMode::NativeSameThread => (unfinished_turn, None),
-        ResumeMode::Continuation => (None, unfinished_turn),
-    };
+    // A settled predecessor with a turn that never completed is a record
+    // defect: a refusal the policy answers is recorded as a final turn.
+    if mode == ResumeMode::Continuation && unfinished.is_some() {
+        anyhow::bail!("resume: continuation predecessor contains an unfinished provider turn");
+    }
+    let active_provider_turn = unfinished.map(|turn| turn.turn);
+    let active_summary_trigger = unfinished
+        .and_then(|turn| turn.purpose.summary_trigger())
+        .map(str::to_string);
+    let refused_code = recover_refused_code(&events);
     let provider_retry_testimony_digests =
         recover_provider_retry_testimonies(&events, &source_thread_ids, previous_thread_id, mode)?;
     let thread_usage = recover_thread_usage(&events, turn_progress)?;
@@ -401,7 +412,8 @@ pub async fn load_resume_state(
         compaction: anchor
             .as_ref()
             .map(|anchor| CompactionMemo::of(&anchor.payload)),
-        predecessor_rejected_turn,
+        active_summary_trigger,
+        refused_code,
         chain_depth,
         start_over_ceiling,
     })
@@ -632,20 +644,52 @@ pub(crate) async fn load_compaction_basis(
         source_thread_ids,
         anchor,
     } = replay_window(callback, &path).await?;
-    let seed = anchor
-        .as_ref()
-        .map(|anchor| anchor.payload.seed.clone())
-        .unwrap_or_default();
-    let progress = recover_turn_progress_from(&events, &seed)?;
-    let folded = fold_messages_anchored(&events, anchor.as_ref().map(|anchor| anchor.chain_seq))?;
-    Ok(CompactionBasis {
-        folded,
-        events,
-        source_thread_ids,
-        seed,
-        anchor,
-        completed_turns: progress.completed,
-    })
+    CompactionBasis::from_window(events, source_thread_ids, anchor)
+}
+
+impl CompactionBasis {
+    fn from_window(
+        events: Vec<ReplayedEventRecord>,
+        source_thread_ids: Vec<String>,
+        anchor: Option<AnchorRecord>,
+    ) -> Result<Self> {
+        refuse_markers_without_purpose(&events)?;
+        let seed = anchor
+            .as_ref()
+            .map(|anchor| anchor.payload.seed.clone())
+            .unwrap_or_default();
+        let progress = recover_turn_progress_from(&events, &seed)?;
+        let folded =
+            fold_messages_anchored(&events, anchor.as_ref().map(|anchor| anchor.chain_seq))?;
+        Ok(Self {
+            folded,
+            events,
+            source_thread_ids,
+            seed,
+            anchor,
+            completed_turns: progress.completed,
+        })
+    }
+
+    /// The messages the rebuild after a compaction keeping `kept_turn` first
+    /// reads for the kept turns, before any clipping: the raw events from that
+    /// turn's marker on. A compaction's size estimate is taken over these, so it
+    /// agrees with the bytes the fold produces.
+    pub fn raw_kept_messages(&self, kept_turn: u32) -> Result<Vec<ProviderMessage>> {
+        let marker = self
+            .events
+            .iter()
+            .rposition(|event| turn_start_coordinate(event).ok().flatten() == Some(kept_turn))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "compaction: no turn marker for kept turn {kept_turn} in the window"
+                )
+            })?;
+        Ok(fold_messages_anchored(&self.events[marker..], None)?
+            .into_iter()
+            .map(|folded| folded.message)
+            .collect())
+    }
 }
 
 /// Consecutive machine continuation edges that end at the path's last thread,
@@ -719,7 +763,10 @@ fn trailing_length_turns(events: &[ReplayedEventRecord]) -> Result<u32> {
     let mut count = 0u32;
     for event in events.iter().rev() {
         // A compaction's summary call is not a turn of the conversation.
-        if final_cognition_turn(event)?.is_none() || is_compaction_summary_turn(event) {
+        if final_cognition_turn(event)?.is_none()
+            || is_compaction_summary_turn(event)
+            || is_refusal_final(event)
+        {
             continue;
         }
         if event.payload.get("finish").and_then(Value::as_str) != Some("length") {
@@ -756,6 +803,52 @@ fn replayed_cognition_out(event: &ReplayedEventRecord) -> Result<CognitionOutPay
 }
 
 /// Whether a final `cognition_out` is a compaction's summary call.
+/// Whether a final `cognition_out` records the refusal of a request the
+/// compaction policy answers by continuing.
+fn is_refusal_final(event: &ReplayedEventRecord) -> bool {
+    refusal_code_of(event).is_some()
+}
+
+fn refusal_code_of(event: &ReplayedEventRecord) -> Option<&str> {
+    if event.event_type != "cognition_out" {
+        return None;
+    }
+    event
+        .payload
+        .get("finish")
+        .and_then(Value::as_str)
+        .and_then(ryeos_runtime::cognition::provider_refusal_code)
+}
+
+/// The refusal the path's latest provider turn or compaction recorded, when
+/// the latest is a refusal: nothing has completed or compacted since.
+fn recover_refused_code(events: &[ReplayedEventRecord]) -> Option<String> {
+    for event in events.iter().rev() {
+        if event.event_type == "cognition_compaction" {
+            return None;
+        }
+        if final_cognition_turn(event).ok().flatten().is_none() {
+            continue;
+        }
+        return refusal_code_of(event).map(str::to_string);
+    }
+    None
+}
+
+/// A turn marker recorded before markers carried their purpose is refused: no
+/// reader parses the old shape.
+fn refuse_markers_without_purpose(events: &[ReplayedEventRecord]) -> Result<()> {
+    for event in events {
+        if event.event_type == "cognition_in"
+            && event.payload.get("turn").is_some()
+            && event.payload.get("purpose").is_none()
+        {
+            return Err(ResumeFoldError::MarkerWithoutPurpose.into());
+        }
+    }
+    Ok(())
+}
+
 fn is_compaction_summary_turn(event: &ReplayedEventRecord) -> bool {
     event
         .payload
@@ -1339,7 +1432,10 @@ fn recover_turn_progress_from(
             );
         }
         progress.last_coordinate = turn;
-        if is_interrupted_turn(event) || is_compaction_summary_turn(event) {
+        if is_interrupted_turn(event)
+            || is_compaction_summary_turn(event)
+            || is_refusal_final(event)
+        {
             continue;
         }
         progress.completed = progress
@@ -1375,7 +1471,8 @@ fn recover_active_provider_turn(
         recover_unfinished_provider_turn(events, source_thread_ids, current_thread_id, 0)?;
     Ok((mode == ResumeMode::NativeSameThread)
         .then_some(unfinished)
-        .flatten())
+        .flatten()
+        .map(|turn| turn.turn))
 }
 
 /// The turn coordinate the path's last thread started and never completed.
@@ -1387,16 +1484,18 @@ fn recover_unfinished_provider_turn(
     source_thread_ids: &[String],
     current_thread_id: &str,
     last_final_seed: u32,
-) -> Result<Option<u32>> {
+) -> Result<Option<UnfinishedTurn>> {
     if events.len() != source_thread_ids.len() {
         anyhow::bail!("resume: replay source/event cardinality mismatch");
     }
     let mut last_final = last_final_seed;
-    let mut current_active = None;
+    let mut current_active: Option<u32> = None;
+    let mut current_purpose = ryeos_runtime::cognition::TurnPurpose::Turn;
     for (event, source_thread_id) in events.iter().zip(source_thread_ids) {
         if source_thread_id == current_thread_id
             && let Some(turn) = turn_start_coordinate(event)?
         {
+            current_purpose = turn_marker_purpose(event)?;
             let expected = last_final
                 .checked_add(1)
                 .ok_or_else(|| anyhow::anyhow!("resume: provider-turn coordinate overflow"))?;
@@ -1426,7 +1525,35 @@ fn recover_unfinished_provider_turn(
             last_final = turn;
         }
     }
-    Ok(current_active)
+    Ok(current_active.map(|turn| UnfinishedTurn {
+        turn,
+        purpose: current_purpose,
+    }))
+}
+
+/// A turn that started and has no final yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UnfinishedTurn {
+    turn: u32,
+    purpose: ryeos_runtime::cognition::TurnPurpose,
+}
+
+/// The purpose a turn marker records; a marker without it is refused.
+fn turn_marker_purpose(
+    event: &ReplayedEventRecord,
+) -> Result<ryeos_runtime::cognition::TurnPurpose> {
+    let marker: ryeos_runtime::TurnMarker = match serde_json::from_value(event.payload.clone()) {
+        Ok(marker) => marker,
+        Err(_) if event.payload.get("purpose").is_none() => {
+            return Err(ResumeFoldError::MarkerWithoutPurpose.into());
+        }
+        Err(error) => {
+            return Err(
+                anyhow::Error::new(error).context("resume: invalid cognition_in turn marker")
+            );
+        }
+    };
+    Ok(marker.purpose)
 }
 
 fn recover_provider_retry_testimonies(
@@ -1564,6 +1691,9 @@ fn recover_resume_disposition(
         return Ok(ResumeDisposition::ContinueProvider);
     };
 
+    if is_refusal_final(last_cognition) {
+        return Ok(ResumeDisposition::ForkAfterRefusal);
+    }
     if is_compaction_summary_turn(last_cognition)
         && !events[last_cognition_index + 1..]
             .iter()
@@ -1700,7 +1830,7 @@ fn recover_thread_usage(
         let Some(turn) = final_cognition_turn(event)? else {
             continue;
         };
-        if is_interrupted_turn(event) {
+        if is_interrupted_turn(event) || is_refusal_final(event) {
             if unconsumed_settlement_turn == Some(u64::from(turn)) {
                 unconsumed_settlement_turn = None;
             }
@@ -1845,7 +1975,7 @@ pub(crate) fn fold_messages_anchored(
             // provider history. The final transcript-bearing cognition_out
             // emitted at turn completion is folded below.
             "cognition_out" if is_stream_fragment(event) => {}
-            "cognition_out" if is_compaction_summary_turn(event) => {}
+            "cognition_out" if is_compaction_summary_turn(event) || is_refusal_final(event) => {}
             "cognition_out" => {
                 let out = replayed_cognition_out(event)?;
                 messages.push(FoldedMessage {
@@ -1963,6 +2093,9 @@ pub enum ResumeFoldError {
     PinnedInputsExceedWindow { ceiling: u64 },
     /// A compacted conversation is still larger than the ceiling.
     CompactedStartExceedsWindow { ceiling: u64 },
+    /// A provider turn marker without its `purpose`: the record was written
+    /// before markers carried it, and there is no reader for that shape.
+    MarkerWithoutPurpose,
     /// The record moves on while calls of a tool batch have no result.
     /// Records written before a failed `directive_return` answered the calls
     /// after it (they were left with no start and no result) read this way
@@ -1981,6 +2114,7 @@ impl ResumeFoldError {
             Self::OrphanToolResult { .. } => "resume_orphan_tool_result",
             Self::PinnedInputsExceedWindow { .. } => "resume_pinned_exceeds_window",
             Self::CompactedStartExceedsWindow { .. } => "resume_compacted_start_exceeds_window",
+            Self::MarkerWithoutPurpose => "resume_marker_without_purpose",
             Self::UnsettledToolBatch { .. } => "resume_unsettled_tool_batch",
         }
     }
@@ -2005,6 +2139,10 @@ impl std::fmt::Display for ResumeFoldError {
             Self::PinnedInputsExceedWindow { ceiling } => write!(
                 f,
                 "{code}: pinned inputs alone exceed the {ceiling}-token ceiling of the model window"
+            ),
+            Self::MarkerWithoutPurpose => write!(
+                f,
+                "{code}: a provider turn marker has no purpose; the record predates the marker's purpose and is not read"
             ),
             Self::CompactedStartExceedsWindow { ceiling } => write!(
                 f,
@@ -3529,7 +3667,7 @@ mod tests {
             ReplayedEventRecord {
                 chain_seq: 0,
                 event_type: "cognition_in".to_string(),
-                payload: json!({"turn": 1}),
+                payload: json!({"turn": 1, "purpose": "turn"}),
             },
             ReplayedEventRecord {
                 chain_seq: 0,
@@ -3720,7 +3858,7 @@ mod tests {
             payload,
         };
         let mut events = vec![
-            record(json!({"turn": 1})),
+            record(json!({"turn": 1, "purpose": "turn"})),
             record(input("Deadline notice: about 5 seconds remain")),
         ];
         events.extend(
@@ -3909,7 +4047,7 @@ mod tests {
             ReplayedEventRecord {
                 chain_seq: 0,
                 event_type: "cognition_in".to_string(),
-                payload: json!({"turn": 1}),
+                payload: json!({"turn": 1, "purpose": "turn"}),
             },
             ReplayedEventRecord {
                 chain_seq: 0,
@@ -4043,7 +4181,7 @@ mod tests {
             ReplayedEventRecord {
                 chain_seq: 0,
                 event_type: "cognition_in".to_string(),
-                payload: json!({"turn": 1}),
+                payload: json!({"turn": 1, "purpose": "turn"}),
             },
             retry_event(&advance),
         ];
@@ -4097,7 +4235,7 @@ mod tests {
             ReplayedEventRecord {
                 chain_seq: 0,
                 event_type: "cognition_in".to_string(),
-                payload: json!({"turn": 1}),
+                payload: json!({"turn": 1, "purpose": "turn"}),
             },
             retry_event(&retry_advance(1, 2, "skipped")),
         ];
@@ -4192,7 +4330,7 @@ mod tests {
         let prelude = ReplayedEventRecord {
             chain_seq: 0,
             event_type: "cognition_in".to_string(),
-            payload: json!({"turn": 1}),
+            payload: json!({"turn": 1, "purpose": "turn"}),
         };
         let sources = vec!["T-current".to_string(); 2];
         let mut event = retry_event(&status);
@@ -5075,11 +5213,15 @@ mod tests {
     /// turn 5, the record, then turn 6.
     fn windowed_events() -> Vec<ReplayedEventRecord> {
         vec![
-            event_at("cognition_in", 20, json!({"turn": 3})),
+            event_at("cognition_in", 20, json!({"turn": 3, "purpose": "turn"})),
             event_at("cognition_out", 21, out(3, "kept three")),
-            event_at("cognition_in", 22, json!({"turn": 4})),
+            event_at("cognition_in", 22, json!({"turn": 4, "purpose": "turn"})),
             event_at("cognition_out", 23, out(4, "kept four")),
-            event_at("cognition_in", 24, json!({"turn": 5})),
+            event_at(
+                "cognition_in",
+                24,
+                json!({"turn": 5, "purpose": "compaction_summary_pressure"}),
+            ),
             event_at(
                 "cognition_out",
                 25,
@@ -5094,7 +5236,7 @@ mod tests {
                 26,
                 serde_json::to_value(compaction_record("pressure")).unwrap(),
             ),
-            event_at("cognition_in", 27, json!({"turn": 6})),
+            event_at("cognition_in", 27, json!({"turn": 6, "purpose": "turn"})),
             event_at("cognition_out", 28, out(6, "after")),
         ]
     }
@@ -5181,23 +5323,210 @@ mod tests {
     }
 
     #[test]
-    fn a_predecessor_that_ended_on_a_refused_request_is_read_not_refused() {
-        // Turn 2's marker with no completed turn after it: a refused request.
+    fn an_unfinished_marker_is_reported_with_its_purpose() {
+        use ryeos_runtime::cognition::TurnPurpose;
         let events = vec![
-            event_at("cognition_in", 1, json!({"turn": 1})),
+            event_at("cognition_in", 1, json!({"turn": 1, "purpose": "turn"})),
             event_at("cognition_out", 2, out(1, "one")),
-            event_at("cognition_in", 3, json!({"turn": 2})),
+            event_at(
+                "cognition_in",
+                3,
+                json!({"turn": 2, "purpose": "compaction_summary_overflow"}),
+            ),
         ];
-        let sources = vec!["T-old".to_string(); events.len()];
+        let sources = vec!["T".to_string(); events.len()];
         assert_eq!(
-            recover_unfinished_provider_turn(&events, &sources, "T-old", 0).unwrap(),
-            Some(2)
+            recover_unfinished_provider_turn(&events, &sources, "T", 0).unwrap(),
+            Some(UnfinishedTurn {
+                turn: 2,
+                purpose: TurnPurpose::CompactionSummaryOverflow
+            })
         );
     }
 
     #[test]
-    fn an_operator_follow_up_edge_is_not_a_machine_continuation() {
-        assert!(machine_edge(false));
-        assert!(!machine_edge(true));
+    fn a_marker_without_a_purpose_is_refused_with_its_stable_code() {
+        let events = vec![event_at("cognition_in", 1, json!({"turn": 1}))];
+        let error = refuse_markers_without_purpose(&events).unwrap_err();
+        let typed = error.downcast_ref::<ResumeFoldError>().unwrap();
+        assert_eq!(typed.code(), "resume_marker_without_purpose");
+        let sources = vec!["T".to_string()];
+        assert!(
+            recover_unfinished_provider_turn(&events, &sources, "T", 0)
+                .unwrap_err()
+                .downcast_ref::<ResumeFoldError>()
+                .is_some()
+        );
+    }
+
+    fn refusal_events() -> Vec<ReplayedEventRecord> {
+        vec![
+            event_at("cognition_in", 1, json!({"turn": 1, "purpose": "turn"})),
+            event_at("cognition_out", 2, out(1, "one")),
+            event_at("cognition_in", 3, json!({"turn": 2, "purpose": "turn"})),
+            event_at(
+                "cognition_out",
+                4,
+                json!({
+                    "turn": 2,
+                    "parts": text_parts("refused"),
+                    "finish": "provider_refused_provider_context_length_exceeded",
+                }),
+            ),
+        ]
+    }
+
+    #[test]
+    fn a_refusal_final_is_data_not_a_conversation_turn() {
+        let events = refusal_events();
+        // Not a message, and no completed turn, but the coordinate is used.
+        let folded = fold_messages(&events).unwrap();
+        assert_eq!(folded.len(), 1);
+        let progress = recover_turn_progress(&events).unwrap();
+        assert_eq!(progress.last_coordinate, 2);
+        assert_eq!(progress.completed, 1);
+        // The marker has its final, so nothing is unfinished.
+        let sources = vec!["T".to_string(); events.len()];
+        assert_eq!(
+            recover_unfinished_provider_turn(&events, &sources, "T", 0).unwrap(),
+            None
+        );
+        assert_eq!(
+            recover_refused_code(&events).as_deref(),
+            Some("provider_context_length_exceeded")
+        );
+        // A completed turn or a compaction after it ends the pending retry.
+        let mut later = events.clone();
+        later.push(event_at(
+            "cognition_in",
+            5,
+            json!({"turn": 3, "purpose": "turn"}),
+        ));
+        later.push(event_at("cognition_out", 6, out(3, "three")));
+        assert_eq!(recover_refused_code(&later), None);
+        let tools = recover_tool_state(&events, &sources).unwrap();
+        assert_eq!(
+            recover_resume_disposition(&events, &tools).unwrap(),
+            ResumeDisposition::ForkAfterRefusal
+        );
+    }
+
+    /// Turns 3 to 8 each call a tool with a large result; a first compaction
+    /// (kept turns 3 on) sits after turn 5.
+    fn two_compaction_events() -> Vec<ReplayedEventRecord> {
+        let big = "z".repeat(600);
+        let mut events = Vec::new();
+        let mut seq = 10;
+        let mut push = |events: &mut Vec<ReplayedEventRecord>, kind: &str, payload: Value| {
+            seq += 1;
+            events.push(event_at(kind, seq, payload));
+        };
+        let turn = |events: &mut Vec<ReplayedEventRecord>,
+                    push: &mut dyn FnMut(&mut Vec<ReplayedEventRecord>, &str, Value),
+                    n: u32| {
+            let call = format!("c{n}");
+            let operation = directive_tool_operation_id("T", n, 0);
+            push(
+                events,
+                "cognition_in",
+                json!({"turn": n, "purpose": "turn"}),
+            );
+            push(
+                events,
+                "cognition_out",
+                out_calls(n, json!([{"id": call, "name": "big", "arguments": {}}])),
+            );
+            push(
+                events,
+                "tool_call_start",
+                json!({"operation_id": operation, "call_id": call, "tool": "big", "turn": n, "call_index": 0}),
+            );
+            push(
+                events,
+                "tool_call_result",
+                result(&operation, &call, "big", &format!("{n}{big}")),
+            );
+        };
+        for n in 3..=5 {
+            turn(&mut events, &mut push, n);
+        }
+        let first = serde_json::to_value(compaction_record("pressure")).unwrap();
+        push(&mut events, "cognition_compaction", first);
+        for n in 6..=8 {
+            turn(&mut events, &mut push, n);
+        }
+        events
+    }
+
+    #[test]
+    fn a_second_compactions_size_estimate_is_the_size_of_what_the_fold_rebuilds() {
+        let events = two_compaction_events();
+        let sources = vec!["T".to_string(); events.len()];
+        let first_seq = events
+            .iter()
+            .find(|event| event.event_type == "cognition_compaction")
+            .unwrap()
+            .chain_seq;
+        let mut first = compaction_record("pressure");
+        first.clip = Some(ryeos_runtime::ClipRule {
+            over_bytes: 100,
+            head_bytes: 10,
+            tail_bytes: 10,
+            keep_recent: 1,
+        });
+        let mut events = events;
+        for event in &mut events {
+            if event.event_type == "cognition_compaction" {
+                event.payload = serde_json::to_value(&first).unwrap();
+            }
+        }
+        let basis = CompactionBasis::from_window(
+            events.clone(),
+            sources,
+            Some(AnchorRecord {
+                chain_seq: first_seq,
+                payload: first,
+            }),
+        )
+        .unwrap();
+        let mut policy = crate::directive::CompactionConfig::default();
+        policy.keep_turns = 2;
+        policy.summary.mode = crate::directive::SummaryMode::None;
+        policy.clip = crate::directive::ClipConfig {
+            tool_results: crate::directive::ClipMode::Clip,
+            over_bytes: 100,
+            head_bytes: 10,
+            tail_bytes: 10,
+            keep_recent: 1,
+        };
+        let plan = crate::compaction::plan(&basis.folded, policy.keep_turns).expect("a cut");
+        assert_eq!(plan.kept_from_turn, 7);
+        let summary = crate::compaction::fixed_note(&plan);
+        let record =
+            crate::compaction::build_record(&basis, &plan, summary, "pressure", &policy, None)
+                .unwrap();
+        // The rebuild reads the window from the kept turn's marker, with the
+        // new record in it.
+        let marker = events
+            .iter()
+            .rposition(|event| turn_start_coordinate(event).ok().flatten() == Some(7))
+            .unwrap();
+        let mut window = events[marker..].to_vec();
+        window.push(event_at(
+            "cognition_compaction",
+            9_999,
+            serde_json::to_value(&record).unwrap(),
+        ));
+        let rebuilt = fold_messages_anchored(&window, Some(9_999)).unwrap();
+        let rebuilt: Vec<ProviderMessage> = rebuilt.into_iter().map(|f| f.message).collect();
+        assert_eq!(
+            record.size_after,
+            crate::estimate::estimate_tokens(&rebuilt, None)
+        );
+        assert!(
+            rebuilt
+                .iter()
+                .any(|m| m.text().is_some_and(|t| t.contains("were clipped")))
+        );
     }
 }

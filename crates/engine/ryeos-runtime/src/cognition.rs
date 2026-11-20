@@ -129,12 +129,57 @@ impl CognitionInput {
     }
 }
 
+/// What a provider turn is for. Required on every turn marker.
+///
+/// Schema note: the required `purpose` is a stored-shape change. A marker
+/// recorded before it lacks the field and is refused by the readers that parse
+/// markers (`resume_marker_without_purpose`); there is no reader for the old
+/// shape. The runtime operator schema epoch cut that carries this change is
+/// epoch 142 (the cut that follows epoch 141, which retired bindings of an
+/// earlier transport contract): an epoch-141 store holds markers without
+/// `purpose`, is a predecessor, and is reset without decoding with
+/// `ryeos node reset execution-history --schema-cut-from 141 --schema-cut-to 142`.
+/// That epoch cut also needs its constant bumped in the runtime database
+/// module, which this change does not do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnPurpose {
+    /// An ordinary model turn.
+    Turn,
+    /// The summary call of a compaction started by context pressure.
+    CompactionSummaryPressure,
+    /// The summary call of a compaction started by a refused request.
+    CompactionSummaryOverflow,
+}
+
+impl TurnPurpose {
+    /// The purpose of the summary call of a compaction with this trigger.
+    pub fn for_summary(trigger: &str) -> Result<Self> {
+        match trigger {
+            "pressure" => Ok(Self::CompactionSummaryPressure),
+            "overflow" => Ok(Self::CompactionSummaryOverflow),
+            other => bail!("{other:?} is not a compaction trigger with a summary call"),
+        }
+    }
+
+    /// The trigger of the compaction a summary call serves.
+    pub fn summary_trigger(self) -> Option<&'static str> {
+        match self {
+            Self::Turn => None,
+            Self::CompactionSummaryPressure => Some("pressure"),
+            Self::CompactionSummaryOverflow => Some("overflow"),
+        }
+    }
+}
+
 /// The `cognition_in` payload that opens a provider turn. It carries no
 /// conversation content.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TurnMarker {
     pub turn: u32,
+    /// What the turn is for. Required; see [`TurnPurpose`] for the schema cut.
+    pub purpose: TurnPurpose,
     /// The tool names offered on this turn, recorded only when the offered
     /// set differs from the tool inventory in force.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -501,6 +546,24 @@ impl FrameRecord {
         payload.validate()?;
         Ok(Self { payload, inventory })
     }
+}
+
+/// The start of the `finish` of a final turn that records a provider refusal
+/// the compaction policy answers: the refusal's code follows it
+/// (`provider_refused_provider_context_length_exceeded`). Its text is the
+/// refusal, not a conversation turn.
+pub const FINISH_PROVIDER_REFUSED: &str = "provider_refused";
+
+/// The `finish` of the final turn that records a refusal with `code`.
+pub fn provider_refused_finish(code: &str) -> String {
+    format!("{FINISH_PROVIDER_REFUSED}_{code}")
+}
+
+/// The refusal code a final turn's `finish` names, when it records one.
+pub fn provider_refusal_code(finish: &str) -> Option<&str> {
+    finish
+        .strip_prefix(FINISH_PROVIDER_REFUSED)
+        .and_then(|rest| rest.strip_prefix('_'))
 }
 
 /// The start of the `finish` of a turn that is a compaction's summary call;

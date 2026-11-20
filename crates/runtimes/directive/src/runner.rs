@@ -611,6 +611,12 @@ pub enum State {
     /// The compaction's summary call settled: write the record and rebuild the
     /// conversation from it.
     FinishingCompaction,
+    /// A refused request the compaction policy answers: record the refusal as a
+    /// final turn at the refused coordinate, then continue into the successor.
+    ForkingAfterRefusal {
+        code: String,
+        detail: String,
+    },
 
     Finalizing {
         result: Value,
@@ -722,8 +728,12 @@ pub struct Runner {
     compaction: CompactionConfig,
     /// The latest compaction on the path, as far as the run needs it.
     compaction_memo: Option<CompactionMemo>,
-    /// A predecessor's request was refused: the run starts by compacting.
-    start_with_overflow_compaction: bool,
+    /// The code of the refusal the path's latest provider turn recorded, with
+    /// nothing completed or compacted since: the run starts by compacting when
+    /// the policy answers that code.
+    refused_code: Option<String>,
+    /// The trigger of the compaction summary call this thread had in flight.
+    resume_summary_trigger: Option<String>,
     /// What a `context_pressure` hook's action chooses between.
     pressure_hook: Option<PressureHook>,
     /// The compaction's summary call in flight.
@@ -1582,7 +1592,8 @@ impl Runner {
             provider_retry_testimony_digests: std::collections::BTreeSet::new(),
             compaction: CompactionConfig::default(),
             compaction_memo: None,
-            start_with_overflow_compaction: false,
+            refused_code: None,
+            resume_summary_trigger: None,
             pressure_hook: None,
             summary_job: None,
             compaction_retry_at_turn: 0,
@@ -1643,7 +1654,8 @@ impl Runner {
         let trailing_length_turns = resume.trailing_length_turns;
         let last_turn_coordinate = resume.last_turn_coordinate;
         let compaction_memo = resume.compaction.clone();
-        let start_with_overflow_compaction = resume.predecessor_rejected_turn.is_some();
+        let refused_code = resume.refused_code.clone();
+        let resume_summary_trigger = resume.active_summary_trigger.clone();
         let chain_depth = resume.chain_depth;
         let start_over_ceiling = resume.start_over_ceiling;
         if let Some(active_turn) = resume_active_provider_turn {
@@ -1733,7 +1745,8 @@ impl Runner {
         runner.compaction_memo = compaction_memo;
         runner.chain_depth = chain_depth;
         runner.start_over_ceiling = start_over_ceiling;
-        runner.start_with_overflow_compaction = start_with_overflow_compaction;
+        runner.refused_code = refused_code;
+        runner.resume_summary_trigger = resume_summary_trigger;
         runner.return_nudge_sent = recovered_return_nudge_seen(
             &runner.messages,
             &runner.return_nudge,
@@ -1799,6 +1812,8 @@ impl Runner {
                 .overflow_codes
                 .iter()
                 .any(|named| named == code)
+            || ryeos_runtime::cognition::provider_refused_finish(code).len()
+                > ryeos_runtime::cognition::MAX_TOKEN_BYTES
         {
             return OverflowRecovery::NotApplicable;
         }
@@ -1977,7 +1992,7 @@ impl Runner {
         self.result_guard = rebuilt.result_guard;
         self.wrap_up_delivered = rebuilt.deadline_wrap_up_delivered;
         self.compaction_memo = Some(CompactionMemo::of(&record));
-        self.start_with_overflow_compaction = false;
+        self.refused_code = None;
         self.start_over_ceiling = false;
         tracing::info!(
             trigger,
@@ -2197,22 +2212,18 @@ impl Runner {
                         daemon-owned attempt ledger; native recovery refuses a second contact"
                     .to_string(),
             }
+        } else if let Some(trigger) = self.resume_summary_trigger.take() {
+            // The thread's turn marker names a compaction summary call that
+            // never completed: it is re-issued at its own coordinate, by the
+            // ledger's rules for an unknown outcome.
+            State::Compacting { trigger }
         } else if self.compaction.enabled
-            && self.resume_active_provider_turn.is_some()
-            && self.compaction_due(
-                self.continuation
-                    .estimate_live_context_tokens(&self.messages),
-            )
-        {
-            // A turn started and never completed while the conversation was at
-            // the compaction trigger: it was the compaction's summary call, as
-            // a regular turn would have compacted first. It is re-issued at
-            // its own coordinate, by the ledger's rules for an unknown outcome.
-            State::Compacting {
-                trigger: "pressure".to_string(),
-            }
-        } else if self.compaction.enabled
-            && self.start_with_overflow_compaction
+            && self.refused_code.as_deref().is_some_and(|code| {
+                self.compaction
+                    .overflow_codes
+                    .iter()
+                    .any(|named| named == code)
+            })
             && self.resume_pending_tools.is_empty()
         {
             // The predecessor's request was refused as too long: this thread's
@@ -2260,6 +2271,7 @@ impl Runner {
                 ResumeDisposition::FinalizeDirectiveReturn { outputs } => {
                     State::FinalizingDirectiveReturn { outputs }
                 }
+                ResumeDisposition::ForkAfterRefusal => State::Continued,
                 ResumeDisposition::FinishCompaction { trigger, summary } => {
                     self.summary_job = Some(SummaryJob {
                         trigger,
@@ -2364,7 +2376,27 @@ impl Runner {
                             .collect();
                         let tools_offered =
                             (offered != self.inventory_tool_names).then_some(offered);
-                        if let Err(e) = self.callback.emit_turn_start(turn, tools_offered).await {
+                        let purpose = match self.summary_job.as_ref() {
+                            Some(job) => {
+                                match ryeos_runtime::cognition::TurnPurpose::for_summary(
+                                    &job.trigger,
+                                ) {
+                                    Ok(purpose) => purpose,
+                                    Err(error) => {
+                                        state = State::Errored {
+                                            error: format!("compaction_failed: {error:#}"),
+                                        };
+                                        continue;
+                                    }
+                                }
+                            }
+                            None => ryeos_runtime::cognition::TurnPurpose::Turn,
+                        };
+                        if let Err(e) = self
+                            .callback
+                            .emit_turn_start(turn, purpose, tools_offered)
+                            .await
+                        {
                             state = State::RecoveryRequired {
                                 error: format!(
                                     "resume-critical callback emit_turn_start failed: {e}"
@@ -3809,8 +3841,12 @@ impl Runner {
                                             let live_context = self
                                                 .continuation
                                                 .estimate_live_context_tokens(&self.messages);
+                                            let fork = || State::ForkingAfterRefusal {
+                                                code: rejection.code.clone(),
+                                                detail: error.clone(),
+                                            };
                                             self.pressure_hook = Some(PressureHook {
-                                                compact: State::Continued,
+                                                compact: fork(),
                                                 skip: State::Errored {
                                                     error: error.clone(),
                                                 },
@@ -3823,7 +3859,7 @@ impl Runner {
                                                     live_context,
                                                     Some(&rejection),
                                                 ),
-                                                resume_to: Box::new(State::Continued),
+                                                resume_to: Box::new(fork()),
                                             }
                                         }
                                         OverflowRecovery::Exhausted => State::Errored {
@@ -4859,6 +4895,23 @@ impl Runner {
                         },
                     };
                     self.after_compaction(&trigger, outcome)
+                }
+
+                State::ForkingAfterRefusal { code, detail } => {
+                    let finish = ryeos_runtime::cognition::provider_refused_finish(&code);
+                    let parts = vec![Part::text(bound_diagnostic(&detail))];
+                    match self
+                        .callback
+                        .emit_turn_complete(turn, &finish, None, parts, None, Vec::new())
+                        .await
+                    {
+                        Ok(()) => State::Continued,
+                        Err(e) => State::RecoveryRequired {
+                            error: format!(
+                                "resume-critical callback emit_turn_complete (refusal) failed: {e}"
+                            ),
+                        },
+                    }
                 }
 
                 State::FinishingCompaction => {
