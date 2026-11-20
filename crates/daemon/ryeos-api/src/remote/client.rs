@@ -2215,7 +2215,7 @@ impl RemoteClient {
         let nonce = base64::engine::general_purpose::STANDARD.encode(nonce_bytes);
 
         let body_hash = lillux::cas::sha256_hex(body);
-        let canon_path = ryeos_ui_presentation_contract::request_signing::canonical_path_and_query(
+        let canon_path = ryeos_request_signing::canonical_path_and_query(
             path_and_query,
         );
 

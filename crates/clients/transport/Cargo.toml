@@ -10,7 +10,7 @@ base64     = { workspace = true }
 hex        = { workspace = true }
 lillux     = { workspace = true }
 rand       = { workspace = true }
-ryeos-ui-presentation-contract = { workspace = true }
+ryeos-request-signing = { workspace = true }
 reqwest    = { workspace = true, features = ["rustls-tls"] }
 serde_json = { workspace = true }
 thiserror  = { workspace = true }

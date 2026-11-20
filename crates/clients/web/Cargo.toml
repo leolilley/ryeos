@@ -20,7 +20,7 @@ rand = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 ryeos-client-base = { workspace = true }
 ryeos-client-transport = { workspace = true }
-ryeos-ui-presentation-contract = { workspace = true }
+ryeos-request-signing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

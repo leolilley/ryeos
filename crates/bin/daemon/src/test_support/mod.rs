@@ -2226,7 +2226,7 @@ pub fn build_signed_headers_for_bytes(
     );
 
     let body_hash = lillux::cas::sha256_hex(body);
-    let content_hash = ryeos_ui_presentation_contract::request_signing::content_hash(
+    let content_hash = ryeos_request_signing::content_hash(
         method, path, &body_hash, &timestamp, &nonce, &audience,
     );
     let sig: lillux::crypto::Signature = user_key.sign(content_hash.as_bytes());

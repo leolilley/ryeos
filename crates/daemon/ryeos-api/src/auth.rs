@@ -229,7 +229,7 @@ pub fn validate_authorized_key_directory(
 // ---------------------------------------------------------------------------
 
 fn canonical_path(uri: &axum::http::Uri) -> String {
-    ryeos_ui_presentation_contract::request_signing::canonical_path(uri.path(), uri.query())
+    ryeos_request_signing::canonical_path(uri.path(), uri.query())
 }
 
 /// Content hash of a `ryeos-request-v1` signed request: the bytes the caller
@@ -244,7 +244,7 @@ pub(crate) fn request_content_hash(
     nonce: &str,
     audience: &str,
 ) -> String {
-    ryeos_ui_presentation_contract::request_signing::content_hash(
+    ryeos_request_signing::content_hash(
         method,
         canonical_path,
         body_hash,
@@ -774,7 +774,7 @@ mod tests {
     #[test]
     fn verifier_matches_shared_request_signing_vectors() {
         let vectors: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../clients/presentation-contract/tests/vectors/request_signing.json"
+            "../../../support/ryeos-request-signing/tests/vectors/request_signing.json"
         ))
         .unwrap();
         let key = SigningKey::from_bytes(&[7u8; 32]);

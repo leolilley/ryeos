@@ -310,7 +310,7 @@ impl WebSigner {
         timestamp: u64,
         nonce: &str,
     ) -> Result<SignedHeaders> {
-        use ryeos_ui_presentation_contract::request_signing as rs;
+        use ryeos_request_signing as rs;
         let content_hash = rs::content_hash(
             method,
             &rs::canonical_path_and_query(path_and_query),
@@ -362,7 +362,7 @@ mod tests {
     #[test]
     fn signed_headers_match_shared_vectors() {
         let vectors: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../presentation-contract/tests/vectors/request_signing.json"
+            "../../../../support/ryeos-request-signing/tests/vectors/request_signing.json"
         ))
         .unwrap();
         let seed = vectors["signing_key_seed_byte"].as_u64().unwrap() as u8;
