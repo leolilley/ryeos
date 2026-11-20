@@ -340,13 +340,51 @@ struct TerminalEvidence<'a> {
     schema: u32,
     provider: &'static str,
     terminal_state: &'static str,
+    /// Why this observation is terminal; hashed into the provider observation
+    /// digest.
+    basis: TerminalBasis,
     operation_id: &'a str,
     binding_hash: &'a str,
     request_digest: &'a str,
     occurrence_id: &'a str,
     termination_request_digest: &'a str,
-    terminated_at: &'a str,
+    terminated_at: Option<&'a str>,
     sandbox_response_sha256: &'a str,
+}
+
+/// The proof a terminal verdict rests on.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum TerminalBasis {
+    /// The provider reported this exact sandbox terminated.
+    ObservedTerminated,
+    /// This same operation's terminate request got a 2xx from the provider,
+    /// and the provider then definitively answered 404 for this exact owner
+    /// and sandbox id. A 404 without that accepted request is never a proof.
+    AcceptedTerminateThenNotFound,
+}
+
+/// How a termination GET's status reads, given whether this operation's own
+/// terminate request was accepted. Only an exact 200 body or a definitive 404
+/// after an accepted request can settle; every other status (5xx, auth, rate
+/// limit) is left pending.
+#[derive(Debug, PartialEq, Eq)]
+enum TerminationGetStatus {
+    ReadBody,
+    NotFoundByProof,
+    Pending,
+}
+
+fn classify_termination_get(status: u16, accepted_terminate: bool) -> TerminationGetStatus {
+    match status {
+        200 => TerminationGetStatus::ReadBody,
+        404 if accepted_terminate => TerminationGetStatus::NotFoundByProof,
+        _ => TerminationGetStatus::Pending,
+    }
+}
+
+fn terminate_request_accepted(status: u16) -> bool {
+    (200..300).contains(&status)
 }
 
 #[derive(Serialize)]
@@ -1384,7 +1422,7 @@ fn terminate(
     };
     // The POST acknowledgement alone is never terminal evidence. Whether it
     // succeeds, fails, or times out, only an exact subsequent GET may settle.
-    let _termination_ack = send_api_request(
+    let accepted_terminate = send_api_request(
         network,
         &url,
         "POST",
@@ -1393,7 +1431,8 @@ fn terminate(
         deadline,
         settings,
         cancellation,
-    );
+    )
+    .is_ok_and(|response| terminate_request_accepted(response.status));
     observe_termination_with_network(
         common,
         occurrence,
@@ -1402,6 +1441,7 @@ fn terminate(
         provider_spec,
         egress_policy,
         provider_spec.termination_observation_route(),
+        accepted_terminate,
         network,
         &credential,
         deadline,
@@ -1438,6 +1478,7 @@ fn observe_termination(
         provider_spec,
         egress_policy,
         provider_spec.reconciliation_route(),
+        false,
         network,
         &credential,
         deadline,
@@ -1453,6 +1494,7 @@ fn observe_termination_with_network(
     provider_spec: &ProviderSpec,
     egress_policy: &provider_spec::EgressPolicy,
     route: Option<RouteName>,
+    accepted_terminate: bool,
     network: &NetworkContext,
     credential: &Zeroizing<String>,
     deadline: MonotonicDeadline,
@@ -1496,12 +1538,39 @@ fn observe_termination_with_network(
     ) else {
         return pending();
     };
-    let (status, bytes) = match read_response(response) {
-        Ok(value) => value,
+    let status = response.status;
+    let verdict = classify_termination_get(status, accepted_terminate);
+    if verdict == TerminationGetStatus::Pending {
+        return pending();
+    }
+    let bytes = match read_response(response) {
+        Ok((_, bytes)) => bytes,
+        Err(()) if verdict == TerminationGetStatus::NotFoundByProof => Vec::new(),
         Err(()) => return pending(),
     };
-    if status != 200 {
-        return pending();
+    if verdict == TerminationGetStatus::NotFoundByProof {
+        let response_sha256 = lillux::sha256_hex(&bytes);
+        let evidence = TerminalEvidence {
+            schema: 1,
+            provider: "render-sandbox-early-access",
+            terminal_state: "terminated",
+            basis: TerminalBasis::AcceptedTerminateThenNotFound,
+            operation_id: &common.operation_id,
+            binding_hash: &common.binding_hash,
+            request_digest: &occurrence.request_digest,
+            occurrence_id: &occurrence.occurrence_id,
+            termination_request_digest: &termination.termination_request_digest,
+            terminated_at: None,
+            sandbox_response_sha256: &response_sha256,
+        };
+        let Ok(evidence_bytes) = canonical_json(&evidence) else {
+            return pending();
+        };
+        return LifecycleAdapterResponse::OccurrenceTerminal {
+            operation_id: common.operation_id.clone(),
+            termination_request_digest: termination.termination_request_digest.clone(),
+            provider_observation_digest: lillux::sha256_hex(&evidence_bytes),
+        };
     }
     let sandbox: RenderSandbox = match from_json_slice_strict(
         &bytes,
@@ -1520,12 +1589,13 @@ fn observe_termination_with_network(
         schema: 1,
         provider: "render-sandbox-early-access",
         terminal_state: "terminated",
+        basis: TerminalBasis::ObservedTerminated,
         operation_id: &common.operation_id,
         binding_hash: &common.binding_hash,
         request_digest: &occurrence.request_digest,
         occurrence_id: &occurrence.occurrence_id,
         termination_request_digest: &termination.termination_request_digest,
-        terminated_at,
+        terminated_at: Some(terminated_at),
         sandbox_response_sha256: &response_sha256,
     };
     let Ok(evidence_bytes) = canonical_json(&evidence) else {
@@ -2644,5 +2714,70 @@ mod offline_fixture_tests {
             accepted_create_response(201, &serde_json::to_vec(&altered).unwrap(), &projection)
                 .is_none()
         );
+    }
+    #[test]
+    fn a_not_found_settles_only_after_this_operations_accepted_terminate() {
+        // No accepted terminate: a 404 is never a proof.
+        assert_eq!(
+            classify_termination_get(404, false),
+            TerminationGetStatus::Pending
+        );
+        assert_eq!(
+            classify_termination_get(404, true),
+            TerminationGetStatus::NotFoundByProof
+        );
+        assert_eq!(
+            classify_termination_get(200, false),
+            TerminationGetStatus::ReadBody
+        );
+        // Server errors, auth failures, rate limits and the like stay pending
+        // whether or not the terminate request was accepted.
+        for status in [
+            301, 400, 401, 403, 408, 409, 410, 422, 429, 500, 502, 503, 504,
+        ] {
+            for accepted in [false, true] {
+                assert_eq!(
+                    classify_termination_get(status, accepted),
+                    TerminationGetStatus::Pending,
+                    "{status} {accepted}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn only_a_2xx_answer_counts_as_an_accepted_terminate() {
+        for status in [200, 201, 202, 204] {
+            assert!(terminate_request_accepted(status), "{status}");
+        }
+        for status in [0, 199, 301, 400, 401, 403, 404, 409, 429, 500, 503] {
+            assert!(!terminate_request_accepted(status), "{status}");
+        }
+    }
+
+    #[test]
+    fn the_terminal_basis_is_bound_into_the_evidence_digest() {
+        let digest = |basis: TerminalBasis| {
+            let evidence = TerminalEvidence {
+                schema: 1,
+                provider: "render-sandbox-early-access",
+                terminal_state: "terminated",
+                basis,
+                operation_id: "op",
+                binding_hash: "b",
+                request_digest: "r",
+                occurrence_id: "sbx",
+                termination_request_digest: "t",
+                terminated_at: None,
+                sandbox_response_sha256: "s",
+            };
+            lillux::sha256_hex(&canonical_json(&evidence).unwrap())
+        };
+        assert_ne!(
+            digest(TerminalBasis::ObservedTerminated),
+            digest(TerminalBasis::AcceptedTerminateThenNotFound)
+        );
+        let json = serde_json::to_value(TerminalBasis::AcceptedTerminateThenNotFound).unwrap();
+        assert_eq!(json, "accepted_terminate_then_not_found");
     }
 }

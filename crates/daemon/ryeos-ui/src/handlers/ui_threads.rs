@@ -491,6 +491,22 @@ pub async fn handle_inspect(
     let execution = execution_meta_rows(thread_meta.value(), &thread.thread.executor_ref);
     let execution_coverage = thread_meta.coverage();
 
+    // The realization the launch recorded, read through the same verified
+    // capsule path the comparison uses. Nothing here is recomputed.
+    let launch_facts = launch_facts_rows(
+        state
+            .state_store
+            .admitted_execution_comparison_evidence(&signed.thread_id)
+            .map(|found| {
+                found.map(|evidence| {
+                    (
+                        evidence.execution_realization_hash,
+                        evidence.execution_realization.properties,
+                    )
+                })
+            }),
+    );
+
     // No signed follow-state fold exists here. The empty value is paired with
     // explicit unavailable coverage, not a claim that no follow fact exists.
     let follow = Value::Array(Vec::new());
@@ -540,6 +556,7 @@ pub async fn handle_inspect(
         "pending": pending,
         "execution_meta": execution,
         "execution_coverage": [execution_coverage],
+        "launch_facts": launch_facts,
         "follow": follow,
         "evidence_coverage": evidence_coverage,
     });
@@ -550,6 +567,38 @@ pub async fn handle_inspect(
             .insert("thread_meta".to_string(), meta);
     }
     Ok(response)
+}
+
+/// The launch facts the thread's admitted realization recorded, as one row.
+/// `state` is `recorded` (with the realization's properties exactly as
+/// stored), `absent` (the thread has no admitted capsule) or `unavailable`
+/// (the retained evidence could not be read or verified). A realization that
+/// recorded no `isolation_enforced` property, as an external endpoint does,
+/// is `recorded` without that key and says so in `reason`; no default is
+/// invented for a fact that was not recorded.
+fn launch_facts_rows(evidence: anyhow::Result<Option<(String, BTreeMap<String, Value>)>>) -> Value {
+    let row = match evidence {
+        Ok(Some((realization_hash, properties))) => {
+            let mut row = serde_json::json!({
+                "state": "recorded",
+                "execution_realization_hash": realization_hash,
+                "properties": properties,
+            });
+            if !properties.contains_key("isolation_enforced") {
+                row["reason"] = Value::from("isolation_enforced_not_recorded");
+            }
+            row
+        }
+        Ok(None) => serde_json::json!({
+            "state": "absent",
+            "reason": "no_admitted_launch_capsule",
+        }),
+        Err(_) => serde_json::json!({
+            "state": "unavailable",
+            "reason": "launch_evidence_unreadable",
+        }),
+    };
+    Value::Array(vec![row])
 }
 
 /// Label/value rows for a chain's settled usage totals, in the same row shape
@@ -792,6 +841,45 @@ pub const INSPECT_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_facts_report_recorded_isolation_true_and_false_as_stored() {
+        for enforced in [true, false] {
+            let properties = BTreeMap::from([
+                ("isolation_enforced".to_owned(), Value::Bool(enforced)),
+                (
+                    "isolation_policy_digest".to_owned(),
+                    Value::String("d".repeat(64)),
+                ),
+            ]);
+            let rows = launch_facts_rows(Ok(Some(("h".repeat(64), properties))));
+            let row = &rows.as_array().unwrap()[0];
+            assert_eq!(row["state"], "recorded");
+            assert_eq!(row["properties"]["isolation_enforced"], enforced);
+            assert_eq!(row["properties"]["isolation_policy_digest"], "d".repeat(64));
+            assert!(row.get("reason").is_none());
+        }
+    }
+
+    #[test]
+    fn launch_facts_without_the_isolation_property_invent_no_default() {
+        let rows = launch_facts_rows(Ok(Some(("h".repeat(64), BTreeMap::new()))));
+        let row = &rows.as_array().unwrap()[0];
+        assert_eq!(row["state"], "recorded");
+        assert_eq!(row["reason"], "isolation_enforced_not_recorded");
+        assert!(row["properties"].get("isolation_enforced").is_none());
+    }
+
+    #[test]
+    fn launch_facts_state_absence_and_unreadable_evidence_explicitly() {
+        let absent = launch_facts_rows(Ok(None));
+        assert_eq!(absent[0]["state"], "absent");
+        assert_eq!(absent[0]["reason"], "no_admitted_launch_capsule");
+        assert!(absent[0].get("properties").is_none());
+        let unreadable = launch_facts_rows(Err(anyhow::anyhow!("corrupt")));
+        assert_eq!(unreadable[0]["state"], "unavailable");
+        assert!(unreadable[0].get("properties").is_none());
+    }
 
     #[test]
     fn chain_usage_rows_render_every_total_as_label_value() {
