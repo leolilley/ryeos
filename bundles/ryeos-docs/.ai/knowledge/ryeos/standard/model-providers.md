@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-20T23:06:24Z:537ca4f952be09541059fcccad99542138a2d2aa620509cc330c655e9c271613:TQuuqAUEZ2uTU0Oi5VajSCn7oOnQuzM93Nj2z1F5dMeEs8BoKZ+DAyyCRpPhyDI6cUdP7Uj4lHzHVo299HAvAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-20T23:14:24Z:e5085b0beabd24ce1d04941c4ec701d88fbcb70e69e250a11b9f2662033de5bd:kQ508wrKMIu999tRh+NG0doLNmADAPcMd9zvzxb/1Pzti2uQ5yGsV/wTLQooyXmR5Fbe24wCxmN+rM9I/c40AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/standard
@@ -406,10 +406,10 @@ entry's, and absent means the window fraction alone.
 
 ```yaml
 profiles:
-  # A model with a 1,000,000-token window and a published input price of
-  # US$4 per million tokens (cache read US$0.20): a cap of 250,000 holds a
-  # cold-cache turn near US$1.00 of input instead of US$3.60 at 900,000.
-  # The price is the cited published figure; record its source in the row.
+  # A model with a 1,000,000-token window and an input price of US$4 per
+  # million tokens (cache read US$0.20): a cap of 250,000 holds a cold-cache
+  # turn near US$1.00 of input instead of US$3.60 at 900,000. Record the
+  # price's source and whether it was measured or only published in the row.
   - name: claude-opus-5-5
     match: ["*claude-opus-5-5"]
     handoff_token_cap: 250000
@@ -432,6 +432,12 @@ re-checks it against a node's configured `successor_start_tokens` times two. At
 launch the cap must not exceed the context window the directive or tier names;
 a cap above it fails launch preparation with `handoff_token_cap_invalid`. A
 directive cannot set or override the cap.
+
+The point is compared with an estimate of the live context (characters divided
+by four, plus declared image costs; the system prompt and tool definitions are
+not counted), not with the provider's reported prompt tokens. For English prose
+that overcounts (measured about 1.2x on one Opus prefix); code and JSON can
+undercount. Treat the cap as a cost target within roughly 20 percent.
 
 Choose the cap from the model's price row so a worst-case turn (cold cache, full
 input price) at the cap stays under the per-turn spend the operator will risk.
