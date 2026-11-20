@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-20T02:05:53Z:6f3811c552a1ffe792bfa387b560f349ddcb2df3304d199dfa4fc44b3c77d0af:SybxDCpj+DEhbugIs/PGxQgVY3VPth+iq+ypREXkTuNKCfaKh2zCNUmYBbip/PysOAF1jKl3cL/KXUOTYnt7Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-20T10:04:57Z:371bf1802bb37b7ff8992f55b8340ee21c235d193891cfcd6239c9e3e6c139ca:th2Q6BtsF2zStS7yDnJP/apEp0ZOcXJrIsz5oe68kPXPE1TChwSPXq+g5oOeypfQAFOJ6a2k2cFaDBJxL3KqBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Externally invoked host helper in the development bundle; lib/ is excluded
 # from Tool resolution, so this is signed source, not an admitted Tool. It
 # grants no RyeOS authority. Run it from a checkout of this repository.
@@ -53,6 +53,12 @@ if [[ $# -gt 0 ]]; then
 fi
 
 snippet_list=$(dirname "$0")/rune-snippets.toml
+digest_tool=$(dirname "$0")/web-package-source-digest.py
+# The build stamp says which sources the package files were built from. A build that does
+# not finish leaves none, and the registry generator refuses to record digests without one.
+stamp=$renderer/.pkg-build-stamp
+rm -f "$stamp"
+built_from=$(python3 -I "$digest_tool" --root "$root" --print)
 
 locked=$(python3 -I -c 'import sys, tomllib; print(next(p["version"] for p in tomllib.load(open(sys.argv[1], "rb"))["package"] if p["name"] == "wasm-bindgen"))' "$renderer/Cargo.lock")
 if [[ $("$bindgen" --version) != "wasm-bindgen $locked" ]]; then
@@ -148,6 +154,8 @@ for source in map(pathlib.Path, sys.argv[2:]):
     (dest / f"{source.name}.gz").write_bytes(packed)
     print(f"{source.name}: {len(data):,} bytes, {len(packed):,} gzip")
 PY
+
+python3 -I "$digest_tool" --root "$root" --write-stamp "$dest" "$built_from"
 
 if [[ -z $out ]]; then
     python3 -I "$root/crates/daemon/ryeos-ui/generate_asset_registry.py" --refresh-digests
