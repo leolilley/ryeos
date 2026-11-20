@@ -2815,6 +2815,7 @@ mod tests {
         let mut command = std::process::Command::new(std::env::current_exe().unwrap());
         command
             .args([
+                "--ignored",
                 "--exact",
                 "process_control::scope::tests::controller_transition_clears_all_credentials_and_sets_no_new_privileges",
                 "--nocapture",

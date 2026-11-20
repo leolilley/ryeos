@@ -1119,6 +1119,11 @@ jobs:
             cargo test -p lillux --locked --lib -- --ignored --test-threads=1 "$@" 2>&1 | tee "$log"
           fi
           passed="$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed; 0 failed.*/\1/p' "$log" | tail -n 1)"
+          # A child the tests re-execute that filters its own test out as
+          # ignored ran nothing, so its "pass" is empty.
+          if grep -q 'test result: ok\. 0 passed; 0 failed; [1-9][0-9]* ignored' "$log"; then
+            echo "FAIL: a re-executed child ran no test (reported ignored)" >&2; exit 1
+          fi
           [[ "$passed" == "$expected" ]] || { echo "FAIL: expected $expected ignored tests to pass, saw '${passed:-none}'" >&2; exit 1; }
           RUN
           chmod 755 "$RUNNER_TEMP/run-ignored"
