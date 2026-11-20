@@ -4031,7 +4031,7 @@ const CAPTURE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// drained: once raised it stays readable for every waiter, which also closes
 /// the window between a drain's flag check and its `poll`.
 struct DrainStop {
-    flag: Arc<AtomicBool>,
+    flag: AtomicBool,
     #[cfg(target_os = "linux")]
     wake: OwnedFd,
 }
@@ -4048,7 +4048,7 @@ impl DrainStop {
                 ));
             }
             Ok(Self {
-                flag: Arc::new(AtomicBool::new(false)),
+                flag: AtomicBool::new(false),
                 // SAFETY: eventfd returned a new uniquely-owned descriptor.
                 wake: unsafe { OwnedFd::from_raw_fd(fd) },
             })
@@ -4056,14 +4056,9 @@ impl DrainStop {
         #[cfg(not(target_os = "linux"))]
         {
             Ok(Self {
-                flag: Arc::new(AtomicBool::new(false)),
+                flag: AtomicBool::new(false),
             })
         }
-    }
-
-    /// The plain flag, for workers that never block on a readiness wait.
-    fn flag(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.flag)
     }
 
     fn is_raised(&self) -> bool {
@@ -4090,10 +4085,22 @@ impl DrainStop {
     /// Block until `source` is readable, hung up, or the stop is raised.
     #[cfg(target_os = "linux")]
     fn wait_readable(&self, source: &impl std::os::fd::AsRawFd) {
+        self.wait_for(source.as_raw_fd(), libc::POLLIN);
+    }
+
+    /// Block until `sink` accepts bytes, is closed by its reader, or the stop
+    /// is raised.
+    #[cfg(target_os = "linux")]
+    fn wait_writable(&self, sink: &impl std::os::fd::AsRawFd) {
+        self.wait_for(sink.as_raw_fd(), libc::POLLOUT);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn wait_for(&self, fd: i32, events: i16) {
         let mut fds = [
             libc::pollfd {
-                fd: source.as_raw_fd(),
-                events: libc::POLLIN,
+                fd,
+                events,
                 revents: 0,
             },
             libc::pollfd {
@@ -4102,17 +4109,19 @@ impl DrainStop {
                 revents: 0,
             },
         ];
-        // An interrupted or failed poll returns to the caller's read, which
-        // reports the real state of the pipe.
+        // An interrupted or failed poll returns to the caller's own I/O
+        // attempt, which reports the real state of the descriptor.
         unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
     }
 
-    // Compile-only shim for targets the platform support document does not
-    // list (the node requires Linux pidfds and eventfds). It is not a runtime
-    // fallback: a supported host never reaches it.
     #[cfg(not(target_os = "linux"))]
     fn wait_readable<T>(&self, _source: &T) {
         thread::sleep(CAPTURE_POLL_INTERVAL);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn wait_writable<T>(&self, _sink: &T) {
+        thread::sleep(PROCESS_POLL_INTERVAL);
     }
 }
 
@@ -7743,6 +7752,13 @@ impl RunningProcess {
     // One nonblocking observation of the sole existing receiver per core loop.
     // Empty preserves it for a later slice; no public DTO delivery or replay.
     fn poll_selected_applied_receipt_for_collection(&mut self) -> Result<bool, String> {
+        self.poll_selected_applied_receipt_within(Duration::ZERO)
+    }
+
+    /// As the nonblocking poll, but a still-empty receipt channel is awaited
+    /// for up to `wait` instead of reported at once. The status reader sends
+    /// the receipt or ends the channel, which wakes this wait immediately.
+    fn poll_selected_applied_receipt_within(&mut self, wait: Duration) -> Result<bool, String> {
         if let Some(failure) = &self.applied_receipt_failure {
             return Err(failure.clone());
         }
@@ -7777,7 +7793,18 @@ impl RunningProcess {
                 .map(|_| true);
         }
         let observation = match self.applied_receipt_rx.as_ref() {
-            Some(receiver) => match receiver.try_recv() {
+            Some(receiver) => match if wait.is_zero() {
+                receiver.try_recv()
+            } else {
+                receiver.recv_timeout(wait).map_err(|error| match error {
+                    std::sync::mpsc::RecvTimeoutError::Timeout => {
+                        std::sync::mpsc::TryRecvError::Empty
+                    }
+                    std::sync::mpsc::RecvTimeoutError::Disconnected => {
+                        std::sync::mpsc::TryRecvError::Disconnected
+                    }
+                })
+            } {
                 Ok(observation) => observation,
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
                     if original.has_elapsed() {
@@ -7992,14 +8019,68 @@ impl RunningProcess {
         })
     }
 
+    /// Longest a natural wait may block before its own deadline or the
+    /// original native-settlement deadline requires a fresh decision. Events
+    /// (receipt, testimony, target exit, wrapper exit) end the wait sooner.
     fn natural_wait_poll_bound(&self, deadline: Instant) -> Duration {
-        if self.native_settlement.is_none() {
-            PROCESS_POLL_INTERVAL
-        } else {
-            self.native_terminal_wait_bound(
-                PROCESS_POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())),
-            )
+        self.native_terminal_wait_bound(deadline.saturating_duration_since(Instant::now()))
+    }
+
+    /// Block until the wrapper's exit watch fires or `bound` elapses.
+    fn wait_wrapper_exit_event(&self, bound: Duration) -> Result<(), String> {
+        self.exit_watch
+            .as_ref()
+            .ok_or_else(|| "wrapper exit watch is missing".to_owned())?
+            .wait(bound);
+        Ok(())
+    }
+
+    /// Block until the native-terminal testimony pipe or the held target's
+    /// exit becomes ready, or `bound` elapses. These are the only two things
+    /// an exited wrapper with incomplete testimony can be waiting for. The
+    /// wrapper's own exit watch is deliberately not included: it is already
+    /// readable in this state, so waiting on it would return at once and spin.
+    #[cfg(target_os = "linux")]
+    fn wait_native_terminal_event(&self, bound: Duration) -> Result<(), String> {
+        let channel = self
+            .native_settlement
+            .as_ref()
+            .ok_or("native terminal wait without a settlement channel")?;
+        let mut fds = Vec::with_capacity(2);
+        if !channel.exact_eof {
+            fds.push(libc::pollfd {
+                fd: channel.reader.file().as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            });
         }
+        if !matches!(
+            channel.pin_observation,
+            NativeTerminalPinObservation::Exited
+        ) {
+            let pin = self
+                .attachment_target_lifetime
+                .as_ref()
+                .ok_or("native terminal target lifetime pin is missing")?;
+            fds.push(libc::pollfd {
+                fd: pin.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            });
+        }
+        if fds.is_empty() {
+            return Err("native terminal wait has no pending event source".to_owned());
+        }
+        let millis = bound.as_nanos().div_ceil(1_000_000).min(i32::MAX as u128) as i32;
+        // Readiness, timeout and interruption all return to the caller's
+        // loop, which re-observes the testimony and the target.
+        unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, millis) };
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn wait_native_terminal_event(&self, _bound: Duration) -> Result<(), String> {
+        Err("native terminal collection requires Linux".to_owned())
     }
 
     /// Wait up to `timeout` for a natural process exit without terminating a
@@ -8103,7 +8184,8 @@ impl RunningProcess {
         };
         loop {
             if retain_selected_result {
-                match self.poll_selected_applied_receipt_for_collection() {
+                let receipt_bound = self.natural_wait_poll_bound(deadline);
+                match self.poll_selected_applied_receipt_within(receipt_bound) {
                     Ok(true) => {}
                     Ok(false) => {
                         let bound = self.natural_wait_poll_bound(deadline);
@@ -8126,7 +8208,8 @@ impl RunningProcess {
                             }
                             return NaturalWaitCoreOutcome::Incomplete(self);
                         }
-                        thread::sleep(bound);
+                        // The receipt wait above already blocked for the
+                        // whole bound; observe the new state.
                         continue;
                     }
                     Err(failure) => {
@@ -8151,7 +8234,16 @@ impl RunningProcess {
                     if bound.is_zero() {
                         return NaturalWaitCoreOutcome::Incomplete(self);
                     }
-                    thread::sleep(bound);
+                    // Not the wrapper's exit watch: it is already readable.
+                    if let Err(error) = self.wait_native_terminal_event(bound) {
+                        if retain_selected_result
+                            && let Some(channel) = self.native_settlement.as_mut()
+                        {
+                            channel.failure = Some(error);
+                            channel.selected_wait_phase = SelectedNativeTerminalWaitPhase::Failed;
+                        }
+                        return NaturalWaitCoreOutcome::Failed(self);
+                    }
                 }
                 Ok(WrapperPoll::ExitedUnreaped) => {
                     // WNOWAIT retains the exact wrapper identity while the
@@ -8284,7 +8376,15 @@ impl RunningProcess {
                     if bound.is_zero() {
                         return NaturalWaitCoreOutcome::Incomplete(self);
                     }
-                    thread::sleep(bound);
+                    if let Err(error) = self.wait_wrapper_exit_event(bound) {
+                        if retain_selected_result
+                            && let Some(channel) = self.native_settlement.as_mut()
+                        {
+                            channel.failure = Some(error);
+                            channel.selected_wait_phase = SelectedNativeTerminalWaitPhase::Failed;
+                        }
+                        return NaturalWaitCoreOutcome::Failed(self);
+                    }
                 }
                 Err(error) => {
                     if retain_selected_result && let Some(channel) = self.native_settlement.as_mut()
@@ -8533,11 +8633,6 @@ impl RunningProcess {
             };
         }
         let timeout = request_timeout_duration(self.timeout);
-        let Some(exit_watch) = self.exit_watch.take() else {
-            return self.wait_error_result(std::io::Error::other(
-                "wrapper exit watch was already consumed",
-            ));
-        };
 
         loop {
             let complete = match self.poll_native_terminal_testimony() {
@@ -8575,7 +8670,15 @@ impl RunningProcess {
             }
             match poll_wrapper(&mut self.child) {
                 Ok(WrapperPoll::ExitedUnreaped) if !complete => {
-                    thread::sleep(self.native_terminal_wait_bound(PROCESS_POLL_INTERVAL));
+                    // The wrapper has exited, so its exit watch is already
+                    // readable and would spin here. What remains pending is
+                    // the testimony pipe and the held target's exit; wait on
+                    // those, capped at the cancellation cadence.
+                    if let Err(error) = self.wait_native_terminal_event(
+                        self.native_terminal_wait_bound(PROCESS_POLL_INTERVAL),
+                    ) {
+                        return self.wait_error_result(std::io::Error::other(error));
+                    }
                 }
                 Ok(WrapperPoll::ExitedUnreaped) => {
                     // Preserve the wrapper as an unreaped zombie until every
@@ -8635,7 +8738,9 @@ impl RunningProcess {
                     if let Some(deadline) = self.absolute_deadline {
                         bound = bound.min(deadline.remaining());
                     }
-                    exit_watch.wait(bound);
+                    if let Err(error) = self.wait_wrapper_exit_event(bound) {
+                        return self.wait_error_result(std::io::Error::other(error));
+                    }
                 }
                 Err(error) => return self.wait_error_result(error),
             }
@@ -8863,13 +8968,14 @@ impl RunningProcess {
             match poll_wrapper(&mut self.child) {
                 Ok(WrapperPoll::ExitedUnreaped) => break,
                 Ok(WrapperPoll::Running) => {
-                    if Instant::now() >= deadline {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
                         return Err(format!(
                             "wrapper {} did not exit before cleanup deadline",
                             self.wrapper_pid
                         ));
                     }
-                    thread::sleep(PROCESS_POLL_INTERVAL);
+                    self.wait_wrapper_exit_event(remaining)?;
                 }
                 Err(error) => {
                     return Err(format!(
@@ -10486,7 +10592,7 @@ fn lib_spawn_with_stdio(
     // pipe worker even when the child never consumes the remaining input.
     let stdin_handle = running.child.stdin.take();
     running.stdin_thread =
-        match spawn_stdin_writer(stdin_handle, stdin_data, running.drain_stop.flag()) {
+        match spawn_stdin_writer(stdin_handle, stdin_data, Arc::clone(&running.drain_stop)) {
             Ok(thread) => thread,
             Err(error) => {
                 return Err(running.into_spawn_failure(spawn_failure(
@@ -10509,7 +10615,7 @@ fn lib_spawn_with_stdio(
             status_tx,
             applied_tx,
             applied_receipt_schema,
-            running.drain_stop.flag(),
+            Arc::clone(&running.drain_stop),
         ) {
             Ok(handle) => handle,
             Err(error) => {
@@ -10601,7 +10707,7 @@ fn lib_spawn_with_stdio(
 fn spawn_stdin_writer(
     stdin: Option<process::ChildStdin>,
     data: Option<String>,
-    stop: Arc<AtomicBool>,
+    stop: Arc<DrainStop>,
 ) -> Result<Option<thread::JoinHandle<()>>, String> {
     let (Some(mut stdin), Some(data)) = (stdin, data) else {
         return Ok(None);
@@ -10610,13 +10716,15 @@ fn spawn_stdin_writer(
     Ok(Some(thread::spawn(move || {
         let bytes = data.as_bytes();
         let mut written = 0;
-        while written < bytes.len() && !stop.load(Ordering::Acquire) {
+        while written < bytes.len() && !stop.is_raised() {
             match stdin.write(&bytes[written..]) {
                 Ok(0) => break,
                 Ok(count) => written += count,
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(PROCESS_POLL_INTERVAL);
+                    // Sleep in the kernel until the child drains the pipe, the
+                    // child closes it, or the stop is raised.
+                    stop.wait_writable(&stdin);
                 }
                 Err(_) => break,
             }
@@ -10756,7 +10864,7 @@ fn spawn_supervised_launcher_status_reader(
         std::sync::mpsc::Sender<Result<crate::LinuxSandboxAppliedLaunchReceipt, String>>,
     >,
     applied_schema: Option<String>,
-    stop: Arc<AtomicBool>,
+    stop: Arc<DrainStop>,
 ) -> Result<thread::JoinHandle<()>, String> {
     if applied_tx.is_some() != applied_schema.is_some() {
         return Err("applied-launch status channel lacks its exact schema".into());
@@ -10772,7 +10880,7 @@ fn spawn_supervised_launcher_status_reader(
         let mut buffer = [0u8; 4096];
 
         loop {
-            if stop.load(Ordering::Acquire) {
+            if stop.is_raised() {
                 break;
             }
             match reader.file().read(&mut buffer) {
@@ -10833,10 +10941,12 @@ fn spawn_supervised_launcher_status_reader(
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    if stop.load(Ordering::Acquire) {
+                    if stop.is_raised() {
                         break;
                     }
-                    thread::sleep(PROCESS_POLL_INTERVAL);
+                    // Sleep in the kernel until the launcher writes, closes
+                    // the channel, or the stop is raised.
+                    stop.wait_readable(reader.file());
                 }
                 Err(error) => {
                     if let Some(tx) = initial_tx.take() {
@@ -10860,7 +10970,7 @@ fn spawn_supervised_launcher_status_reader(
         std::sync::mpsc::Sender<Result<crate::LinuxSandboxAppliedLaunchReceipt, String>>,
     >,
     _applied_schema: Option<String>,
-    _stop: Arc<AtomicBool>,
+    _stop: Arc<DrainStop>,
 ) -> Result<thread::JoinHandle<()>, String> {
     Err("supervised launcher status descriptors are unsupported on this platform".to_owned())
 }
@@ -11023,7 +11133,7 @@ mod applied_status_tests {
             initial_tx,
             Some(applied_tx),
             Some(TEST_SCHEMA.to_owned()),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(DrainStop::new().unwrap()),
         )
         .unwrap();
         let descriptor = pipe.writer.inherited_descriptor().unwrap();
@@ -12109,6 +12219,10 @@ fn wait_owned_process_group_quiescent(
                 "process group {pgid} retained live member after termination"
             ));
         }
+        // Group emptiness has no kernel event: a process group exposes no
+        // descriptor that becomes readable when its last member leaves, and
+        // the retained leader's pidfd already fired. Membership is therefore
+        // re-read on a short cadence, and only while a member is present.
         thread::sleep(PROCESS_POLL_INTERVAL);
     }
 }
@@ -12366,6 +12480,8 @@ fn wait_exact_child_exit_unreaped(pid: u32, timeout: Duration) -> Result<(), Str
         .checked_add(timeout)
         .ok_or_else(|| "child-exit observation deadline overflow".to_string())?;
     let pid = i32::try_from(pid).map_err(|_| "PID exceeds pid_t".to_string())?;
+    let mut exit_watch: Option<OwnedFd> = None;
+    let mut watch_open_retried = false;
     loop {
         let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
         let result = unsafe {
@@ -12380,12 +12496,39 @@ fn wait_exact_child_exit_unreaped(pid: u32, timeout: Duration) -> Result<(), Str
             if unsafe { status.si_pid() } != 0 {
                 return Ok(());
             }
-            if Instant::now() >= deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
                 return Err(format!(
                     "process-group leader {pid} did not exit before cleanup deadline"
                 ));
             }
-            thread::sleep(PROCESS_POLL_INTERVAL);
+            // The leader is an unreaped child here, so its PID still names it
+            // exactly and a pidfd opened now becomes readable at its exit.
+            if exit_watch.is_none() {
+                match open_pidfd(pid as u32) {
+                    Ok(watch) => exit_watch = Some(watch),
+                    // One re-observation covers a reap between the check
+                    // above and the open (the next pass reads ECHILD); a
+                    // second failure is real and fails closed.
+                    Err(_) if !watch_open_retried => {
+                        watch_open_retried = true;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            if let Some(watch) = exit_watch.as_ref() {
+                let millis = remaining
+                    .as_nanos()
+                    .div_ceil(1_000_000)
+                    .min(i32::MAX as u128) as i32;
+                let mut poll = libc::pollfd {
+                    fd: watch.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                unsafe { libc::poll(&mut poll, 1, millis) };
+            }
             continue;
         }
         let error = std::io::Error::last_os_error();
@@ -12410,6 +12553,9 @@ fn complete_attachment_cleanup(pidfd: i32, pgid: i64) {
         if force_attachment_cleanup(pgid, pidfd, ATTACHMENT_ABORT_SETTLE_TIMEOUT).is_ok() {
             return;
         }
+        // Retry pacing after a failed cleanup proof, not a wait for an event:
+        // the failed attempt already waited on its own events, and nothing
+        // signals that a retry has become possible.
         thread::sleep(PROCESS_POLL_INTERVAL);
     }
 }
@@ -14494,7 +14640,17 @@ fn do_stream(
     } else {
         None
     };
-    let stream_stop = Arc::new(AtomicBool::new(false));
+    let stream_stop = match DrainStop::new() {
+        Ok(stop) => Arc::new(stop),
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_thread.join();
+            let _ = stderr_thread.join();
+            eprintln!("Failed to create stream stop: {error}");
+            return 125;
+        }
+    };
     let mut stdin_thread = match spawn_stdin_writer(
         child.stdin.take(),
         stdin_data.map(str::to_owned),
@@ -14504,7 +14660,7 @@ fn do_stream(
         Err(error) => {
             let _ = child.kill();
             let _ = child.wait();
-            stream_stop.store(true, Ordering::Release);
+            stream_stop.raise();
             let _ = stdout_thread.join();
             let _ = stderr_thread.join();
             eprintln!("Failed to configure nonblocking stdin: {error}");
@@ -14515,7 +14671,7 @@ fn do_stream(
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                stream_stop.store(true, Ordering::Release);
+                stream_stop.raise();
                 if let Some(handle) = stdin_thread.take() {
                     let _ = handle.join();
                 }
@@ -14527,7 +14683,7 @@ fn do_stream(
                 if timeout_rx.as_ref().is_some_and(|rx| rx.try_recv().is_ok()) {
                     let _ = child.kill();
                     let _ = child.wait();
-                    stream_stop.store(true, Ordering::Release);
+                    stream_stop.raise();
                     if let Some(handle) = stdin_thread.take() {
                         let _ = handle.join();
                     }
@@ -14541,7 +14697,7 @@ fn do_stream(
             Err(e) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                stream_stop.store(true, Ordering::Release);
+                stream_stop.raise();
                 if let Some(handle) = stdin_thread.take() {
                     let _ = handle.join();
                 }
