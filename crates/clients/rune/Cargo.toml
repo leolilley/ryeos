@@ -15,7 +15,7 @@ description = "RyeOS in Rune: the GPU renderer for the browser and, later, a nat
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-rune = { git = "https://github.com/leolilley/rune", rev = "cc754dd38d85f0fe577d900013d4ae5e21dd649e", default-features = false, features = ["embedded-fonts", "webgl"] }
+rune = { git = "https://github.com/leolilley/rune", rev = "124c84b8a8176a917d27cfec2df160f6fd08e9bc", default-features = false, features = ["embedded-fonts", "webgl"] }
 ryeos-client-base = { path = "../base" }
 ryeos-client-runtime = { path = "../runtime" }
 serde_json = { version = "1", features = ["raw_value"] }
@@ -53,6 +53,7 @@ strip = true
 # Rune builds against its own patched copies of these crates (its `vendor/` directory). A
 # dependency's `[patch]` does not reach the workspace that depends on it, so this workspace names
 # them here, at the same revision as the `rune` dependency above.
-wgpu-hal = { git = "https://github.com/leolilley/rune", rev = "cc754dd38d85f0fe577d900013d4ae5e21dd649e" }
-winit = { git = "https://github.com/leolilley/rune", rev = "cc754dd38d85f0fe577d900013d4ae5e21dd649e" }
-parley_engine = { git = "https://github.com/leolilley/rune", rev = "cc754dd38d85f0fe577d900013d4ae5e21dd649e" }
+wgpu-hal = { git = "https://github.com/leolilley/rune", rev = "124c84b8a8176a917d27cfec2df160f6fd08e9bc" }
+winit = { git = "https://github.com/leolilley/rune", rev = "124c84b8a8176a917d27cfec2df160f6fd08e9bc" }
+sctk-adwaita = { git = "https://github.com/leolilley/rune", rev = "124c84b8a8176a917d27cfec2df160f6fd08e9bc" }
+parley_engine = { git = "https://github.com/leolilley/rune", rev = "124c84b8a8176a917d27cfec2df160f6fd08e9bc" }
