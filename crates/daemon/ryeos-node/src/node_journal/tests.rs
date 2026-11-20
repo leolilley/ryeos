@@ -444,7 +444,7 @@ fn endorsement_events_are_journaled_with_their_digest_endorser_and_head() {
         assert_eq!(record.body.detail["project"], "/srv/projects/alpha");
     }
     assert_eq!(revoked.body.detail["reason"], "withdrawn");
-    assert!(accepted.body.detail.get("reason").is_none());
+    assert!(!accepted.body.detail.contains_key("reason"));
 
     let read = fx.journal().read().unwrap();
     assert_eq!(read.records.len(), 2);
