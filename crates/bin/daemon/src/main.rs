@@ -1511,7 +1511,7 @@ impl DaemonSelectedComposition {
                     error = %format!("{error:#}"),
                     "latched-drain facts were not recorded; resume re-arm is held"
                 );
-                DrainOutcome::Unproved
+                DrainOutcome::Unproved("latched-drain facts were not recorded".to_owned())
             }
         }
     }
@@ -3299,7 +3299,9 @@ struct DeferredRows {
 #[derive(Debug)]
 enum DrainOutcome {
     Clean,
-    Unproved,
+    /// Process custody is unresolved. Carries the open legs in words, so a
+    /// hold reports why it holds.
+    Unproved(String),
     /// Normal-mode drain whose only open leg was the launch-owner wait: every
     /// process, pool, worker and import leg proved clean and the registry
     /// legs held at the time. The hold may re-read the registry legs and, if
@@ -3360,8 +3362,10 @@ fn shutdown_drain_disposition(
         Ok(DrainOutcome::ProcessCleanRowsDeferred(deferred)) => {
             ShutdownDrainDisposition::ProcessCleanRowsDeferred { deferred }
         }
-        Ok(DrainOutcome::Unproved) => ShutdownDrainDisposition::HoldUnproved {
-            drain_error: "shutdown coordinator reported unresolved process custody".to_owned(),
+        Ok(DrainOutcome::Unproved(open_legs)) => ShutdownDrainDisposition::HoldUnproved {
+            drain_error: format!(
+                "shutdown coordinator reported unresolved process custody (open: {open_legs})"
+            ),
             prior_daemon_error,
             recheck: false,
         },
@@ -3920,6 +3924,8 @@ fn main() -> Result<()> {
     #[cfg(feature = "crash-qualification-test-support")]
     ryeos_app::dedicated_session_service::test_support::initialize_from_env()
         .context("initialize exact command-settlement crash gate")?;
+    #[cfg(feature = "crash-qualification-test-support")]
+    snapshot_hold::initialize_from_env().context("initialize the held attached snapshot")?;
     ryeos_api::maintenance::install_retention_composition(retention_composition())
         .context("install the retention composition")?;
     // Recovery and launch reconstruction deserialize the complete retained
@@ -7379,19 +7385,138 @@ fn latched_attached_snapshot(state: &AppState) -> (Vec<DrainAttached>, bool) {
     (attached, clean)
 }
 
+/// Qualification-only hold of the shutdown snapshot, set by
+/// `RYEOSD_TEST_ATTACHED_SNAPSHOT_HOLD_MS`: the bound in milliseconds for
+/// which the snapshot, after listing, waits for one listed thread to be
+/// settled by its launch owner. An unparseable value stops startup.
+#[cfg(feature = "crash-qualification-test-support")]
+mod snapshot_hold {
+    use anyhow::{Context as _, Result};
+    use std::sync::OnceLock;
+    use std::time::Duration;
+
+    const VARIABLE: &str = "RYEOSD_TEST_ATTACHED_SNAPSHOT_HOLD_MS";
+    static BOUND: OnceLock<Option<Duration>> = OnceLock::new();
+
+    pub(super) fn initialize_from_env() -> Result<()> {
+        let bound = match std::env::var(VARIABLE) {
+            Ok(value) => Some(Duration::from_millis(value.parse::<u64>().with_context(
+                || format!("{VARIABLE} must be a whole number of milliseconds"),
+            )?)),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(error) => return Err(error).context(VARIABLE),
+        };
+        BOUND
+            .set(bound)
+            .map_err(|_| anyhow::anyhow!("{VARIABLE} was initialized twice"))
+    }
+
+    pub(super) fn bound() -> Option<Duration> {
+        BOUND.get().copied().flatten()
+    }
+}
+
+/// One attached thread as the normal snapshot reads its durable row.
+struct AttachedRow {
+    status: String,
+    identity: Option<process::ExecutionProcessIdentity>,
+    cancellation_mode: Option<ryeos_engine::contracts::CancellationMode>,
+}
+
+/// The reads the normal attached snapshot makes. The registry list and the
+/// durable row are separate store reads, so a launch owner can compare-clear
+/// a reaped process between them; the snapshot re-reads the registry and the
+/// workspace membership to tell that settlement from lost custody.
+trait AttachedSnapshotSource {
+    fn list_attached(&self) -> Result<Vec<String>>;
+    fn read_row(&self, thread_id: &str) -> Result<Option<AttachedRow>>;
+    fn still_registered(&self, thread_id: &str) -> Result<bool>;
+    /// True when the thread holds no workspace membership.
+    fn membership_released(&self, thread_id: &str) -> Result<bool>;
+}
+
+impl AttachedSnapshotSource for AppState {
+    fn list_attached(&self) -> Result<Vec<String>> {
+        let listed = self
+            .state_store
+            .list_attached_thread_ids()
+            .context("list attached threads during shutdown")?;
+        // Qualification builds can hold the snapshot between the registry
+        // list and the row reads until one listed thread has been settled by
+        // its launch owner, so a process that exits during a stop always
+        // lands in that window. The hold never waits on a particular thread:
+        // other attached threads, such as a running tool, stay attached.
+        #[cfg(feature = "crash-qualification-test-support")]
+        if let Some(bound) = snapshot_hold::bound() {
+            // The wait runs on a runtime worker; block_in_place hands the
+            // worker's other tasks (the launch owners being waited for) to
+            // another thread so the hold cannot starve them.
+            tokio::task::block_in_place(|| {
+                let deadline = Instant::now() + bound;
+                while self.state_store.list_attached_thread_ids()?.len() >= listed.len() {
+                    if Instant::now() >= deadline {
+                        anyhow::bail!(
+                            "no listed thread was settled within {bound:?} of the held snapshot"
+                        );
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Ok::<(), anyhow::Error>(())
+            })?;
+        }
+        Ok(listed)
+    }
+
+    fn read_row(&self, thread_id: &str) -> Result<Option<AttachedRow>> {
+        Ok(self
+            .state_store
+            .get_thread(thread_id)?
+            .map(|thread| AttachedRow {
+                status: thread.status,
+                identity: thread.runtime.process_identity,
+                cancellation_mode: thread
+                    .runtime
+                    .launch_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.cancellation_mode),
+            }))
+    }
+
+    fn still_registered(&self, thread_id: &str) -> Result<bool> {
+        Ok(self
+            .state_store
+            .list_attached_thread_ids()?
+            .iter()
+            .any(|id| id == thread_id))
+    }
+
+    fn membership_released(&self, thread_id: &str) -> Result<bool> {
+        Ok(self
+            .state_store
+            .thread_workspace_binding(thread_id)?
+            .is_none())
+    }
+}
+
 /// Attached processes read from their durable rows. Returns the snapshot,
 /// whether it is clean, and whether any row read failed.
-fn normal_attached_snapshot(state: &AppState) -> Result<(Vec<DrainAttached>, bool, bool)> {
-    let attached_ids = state
-        .state_store
-        .list_attached_thread_ids()
-        .context("list attached threads during shutdown")?;
+///
+/// Attachment admission is closed before this runs, so no attachment is
+/// added while it reads. A listed thread whose row identity is now NULL was
+/// either compare-cleared by its launch owner after the process was reaped,
+/// which removes the registry entry and requires that the row hold no
+/// workspace membership, or carries a NULL identity with membership still
+/// held (an old borrower), which stays fenced. Only the first is settlement.
+fn normal_attached_snapshot(
+    source: &impl AttachedSnapshotSource,
+) -> Result<(Vec<DrainAttached>, bool, bool)> {
+    let attached_ids = source.list_attached()?;
     let mut clean = true;
     let mut read_failed = false;
     let mut attached = Vec::with_capacity(attached_ids.len());
     for thread_id in attached_ids {
-        let thread = match state.state_store.get_thread(&thread_id) {
-            Ok(Some(thread)) => thread,
+        let row = match source.read_row(&thread_id) {
+            Ok(Some(row)) => row,
             Ok(None) => {
                 clean = false;
                 tracing::warn!(thread_id, "attached runtime row has no thread");
@@ -7404,23 +7529,39 @@ fn normal_attached_snapshot(state: &AppState) -> Result<(Vec<DrainAttached>, boo
                 continue;
             }
         };
-        let Some(identity) = thread.runtime.process_identity.clone() else {
-            clean = false;
-            tracing::warn!(thread_id, "attached row lost its durable process identity");
+        let Some(identity) = row.identity else {
+            let settled = match (
+                source.still_registered(&thread_id),
+                source.membership_released(&thread_id),
+            ) {
+                (Ok(registered), Ok(released)) => !registered && released,
+                (registered, released) => {
+                    read_failed = true;
+                    tracing::warn!(
+                        thread_id,
+                        registry_error = ?registered.err().map(|error| error.to_string()),
+                        membership_error = ?released.err().map(|error| error.to_string()),
+                        "could not classify an attached row without a process identity"
+                    );
+                    false
+                }
+            };
+            if settled {
+                tracing::info!(
+                    thread_id,
+                    "attached process was settled by its launch owner during the snapshot"
+                );
+            } else {
+                clean = false;
+                tracing::warn!(thread_id, "attached row lost its durable process identity");
+            }
             continue;
         };
-        let action = process::resolve_shutdown_action(
-            thread
-                .runtime
-                .launch_metadata
-                .as_ref()
-                .and_then(|metadata| metadata.cancellation_mode),
-        );
         attached.push(DrainAttached {
             thread_id,
-            status: Some(thread.status),
+            status: Some(row.status),
             identity,
-            action,
+            action: process::resolve_shutdown_action(row.cancellation_mode),
         });
     }
     Ok((attached, clean, read_failed))
@@ -7561,7 +7702,7 @@ async fn drain_running_threads(state: &AppState, latch: &DrainLatch) -> DrainOut
     // rejected and its spawn owner aborts the exact process.
     if let Err(error) = state.state_store.close_process_attachment_admission() {
         tracing::error!(error = %error, "failed to close process attachment admission");
-        return DrainOutcome::Unproved;
+        return DrainOutcome::Unproved("attachment admission close failed".to_owned());
     }
 
     // Snapshot every root attachment before retiring independent hosted
@@ -7579,7 +7720,7 @@ async fn drain_running_threads(state: &AppState, latch: &DrainLatch) -> DrainOut
             Ok((attached, clean, _)) => (attached, clean),
             Err(error) => {
                 tracing::error!(error = %format!("{error:#}"), "failed to snapshot attached threads during shutdown");
-                return DrainOutcome::Unproved;
+                return DrainOutcome::Unproved("attached snapshot unreadable".to_owned());
             }
         },
     };
@@ -7620,7 +7761,7 @@ async fn drain_running_threads(state: &AppState, latch: &DrainLatch) -> DrainOut
                 error = %error,
                 "failed to list in-process handlers during shutdown"
             );
-            return DrainOutcome::Unproved;
+            return DrainOutcome::Unproved("in-process handler list unreadable".to_owned());
         }
     };
     if !attached.is_empty() {
@@ -7898,6 +8039,38 @@ struct DrainLegs {
     launch_owners_drained: bool,
 }
 
+/// The legs of a drain that are not proved, named for the hold's report.
+fn open_legs(legs: &DrainLegs) -> String {
+    let named = [
+        (
+            "external_candidate_imports",
+            legs.external_candidate_imports_drained,
+        ),
+        (
+            "persistent_session_pool",
+            legs.persistent_session_pool_drained,
+        ),
+        (
+            "persistent_session_workers",
+            legs.persistent_session_workers_drained,
+        ),
+        ("attached_snapshot", legs.attached_snapshot_clean),
+        ("attached_drain", legs.attached_drained),
+        ("in_process_drain", legs.in_process_drained),
+        (
+            "in_process_authoritative_audit",
+            legs.in_process_authoritative_clean,
+        ),
+        ("launch_owners", legs.launch_owners_drained),
+    ];
+    named
+        .into_iter()
+        .filter(|(_, proved)| !proved)
+        .map(|(name, _)| name)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Selects the drain outcome from its legs. Only a Normal stop whose sole
 /// open leg is the launch-owner wait may recover later; any other false leg,
 /// or a Latched stop, is plain `Unproved`.
@@ -7912,7 +8085,7 @@ fn drain_verdict(legs: DrainLegs, mode: DrainMode, deferred: DeferredRows) -> Dr
     let clean = other_legs_clean && legs.launch_owners_drained;
     match (clean, mode) {
         (false, DrainMode::Normal) if other_legs_clean => DrainOutcome::UnprovedLaunchOwnersOnly,
-        (false, _) => DrainOutcome::Unproved,
+        (false, _) => DrainOutcome::Unproved(open_legs(&legs)),
         (true, DrainMode::Normal) => DrainOutcome::Clean,
         (true, DrainMode::Latched) => DrainOutcome::ProcessCleanRowsDeferred(deferred),
     }
@@ -9879,7 +10052,7 @@ mod shutdown_custody_tests {
         let dropped = Arc::new(AtomicBool::new(false));
         let mut custody = Some(DropObserved(Arc::clone(&dropped)));
         let mut future = Box::pin(complete_shutdown_drain(
-            Ok(DrainOutcome::Unproved),
+            Ok(DrainOutcome::Unproved("test".to_owned())),
             &prior,
             &mut custody,
             |_| String::new(),
@@ -10018,11 +10191,12 @@ mod shutdown_custody_tests {
 
     #[tokio::test]
     async fn latched_or_plain_unproved_never_rechecks() {
-        let (released, calls) =
-            run_hold(DrainOutcome::Unproved, Duration::from_millis(700), |_| {
-                HoldRecheck::Cleared
-            })
-            .await;
+        let (released, calls) = run_hold(
+            DrainOutcome::Unproved("test".to_owned()),
+            Duration::from_millis(700),
+            |_| HoldRecheck::Cleared,
+        )
+        .await;
         assert!(!released);
         assert_eq!(calls, 0);
     }
@@ -10094,7 +10268,7 @@ mod shutdown_custody_tests {
         ));
         assert!(matches!(
             verdict(only_owners, DrainMode::Latched),
-            DrainOutcome::Unproved
+            DrainOutcome::Unproved(_)
         ));
         let others: [fn(&mut DrainLegs); 7] = [
             |l| l.external_candidate_imports_drained = false,
@@ -10112,7 +10286,7 @@ mod shutdown_custody_tests {
                     break_leg(&mut legs);
                     legs.launch_owners_drained = owners_drained;
                     assert!(
-                        matches!(verdict(legs, mode), DrainOutcome::Unproved),
+                        matches!(verdict(legs, mode), DrainOutcome::Unproved(_)),
                         "another false leg is plain Unproved"
                     );
                 }
@@ -10130,6 +10304,222 @@ mod shutdown_custody_tests {
         .await;
         assert!(!released);
         assert!(calls >= 2, "the hold kept re-checking after the panic");
+    }
+
+    /// A scripted store: `list_attached` returns the ids, and `read_row` can
+    /// first apply a launch owner's compare-clear, which is the interleaving
+    /// between the registry list and the durable row read.
+    struct ScriptedSource {
+        ids: Vec<String>,
+        registered: std::cell::RefCell<Vec<String>>,
+        identity_present: std::cell::RefCell<bool>,
+        membership_released: bool,
+        clear_between_list_and_read: bool,
+        registry_unreadable: bool,
+        membership_unreadable: bool,
+        row_missing: bool,
+        row_unreadable: bool,
+    }
+
+    impl ScriptedSource {
+        fn new(thread_id: &str) -> Self {
+            Self {
+                ids: vec![thread_id.to_owned()],
+                registered: std::cell::RefCell::new(vec![thread_id.to_owned()]),
+                identity_present: std::cell::RefCell::new(true),
+                membership_released: true,
+                clear_between_list_and_read: false,
+                registry_unreadable: false,
+                membership_unreadable: false,
+                row_missing: false,
+                row_unreadable: false,
+            }
+        }
+    }
+
+    fn test_identity() -> super::process::ExecutionProcessIdentity {
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "boot_id": "boot",
+            "target_pid": 4242,
+            "target_start_time_ticks": 1,
+            "group_leader_pid": 4242,
+            "group_leader_start_time_ticks": 1,
+            "process_scope": null,
+            "resource_selections": [],
+            "resource_settlement_authority": null,
+            "resource_operations": [],
+            "resource_allocation_limit": null,
+            "resource_occupancy_start": null,
+            "resource_occupancy_limit": null,
+            "resource_cleanup_allowance_ms": null,
+        }))
+        .expect("test identity")
+    }
+
+    impl super::AttachedSnapshotSource for ScriptedSource {
+        fn list_attached(&self) -> anyhow::Result<Vec<String>> {
+            Ok(self.ids.clone())
+        }
+
+        fn read_row(&self, _thread_id: &str) -> anyhow::Result<Option<super::AttachedRow>> {
+            if self.row_unreadable {
+                anyhow::bail!("row unreadable");
+            }
+            if self.row_missing {
+                return Ok(None);
+            }
+            if self.clear_between_list_and_read {
+                // The launch owner reaps the runtime and compare-clears it:
+                // the identity and the registry entry go together.
+                *self.identity_present.borrow_mut() = false;
+                self.registered.borrow_mut().clear();
+            }
+            Ok(Some(super::AttachedRow {
+                status: "running".to_owned(),
+                identity: self.identity_present.borrow().then(test_identity),
+                cancellation_mode: None,
+            }))
+        }
+
+        fn still_registered(&self, thread_id: &str) -> anyhow::Result<bool> {
+            if self.registry_unreadable {
+                anyhow::bail!("registry unreadable");
+            }
+            Ok(self.registered.borrow().iter().any(|id| id == thread_id))
+        }
+
+        fn membership_released(&self, _thread_id: &str) -> anyhow::Result<bool> {
+            if self.membership_unreadable {
+                anyhow::bail!("membership unreadable");
+            }
+            Ok(self.membership_released)
+        }
+    }
+
+    #[test]
+    fn identity_cleared_between_list_and_read_is_settlement_not_lost_custody() {
+        let mut source = ScriptedSource::new("T-follow");
+        source.clear_between_list_and_read = true;
+        let (attached, clean, read_failed) =
+            super::normal_attached_snapshot(&source).expect("snapshot");
+        assert!(attached.is_empty(), "nothing is left to kill");
+        assert!(
+            clean,
+            "a settled process does not make the snapshot unclean"
+        );
+        assert!(!read_failed);
+        // The orderly stop is reached: every other leg is proved.
+        let mut legs = all_legs();
+        legs.attached_snapshot_clean = clean;
+        assert!(matches!(
+            drain_verdict(legs, DrainMode::Normal, DeferredRows::default()),
+            DrainOutcome::Clean
+        ));
+    }
+
+    #[test]
+    fn live_identity_is_snapshotted_for_the_kill() {
+        let source = ScriptedSource::new("T-live");
+        let (attached, clean, _) = super::normal_attached_snapshot(&source).expect("snapshot");
+        assert!(clean);
+        assert_eq!(attached.len(), 1);
+        assert_eq!(attached[0].thread_id, "T-live");
+    }
+
+    #[test]
+    fn snapshot_after_the_clear_does_not_list_the_settled_child() {
+        let mut source = ScriptedSource::new("T-gone");
+        source.ids.clear();
+        source.registered.borrow_mut().clear();
+        let (attached, clean, read_failed) =
+            super::normal_attached_snapshot(&source).expect("snapshot");
+        assert!(attached.is_empty() && clean && !read_failed);
+    }
+
+    #[test]
+    fn null_identity_with_membership_still_held_stays_unclean() {
+        let mut source = ScriptedSource::new("T-borrower");
+        source.clear_between_list_and_read = true;
+        source.membership_released = false;
+        let (attached, clean, _) = super::normal_attached_snapshot(&source).expect("snapshot");
+        assert!(attached.is_empty());
+        assert!(!clean, "a NULL identity that kept its membership is fenced");
+    }
+
+    #[test]
+    fn null_identity_still_registered_stays_unclean() {
+        let source = ScriptedSource::new("T-lost");
+        *source.identity_present.borrow_mut() = false;
+        let (_, clean, _) = super::normal_attached_snapshot(&source).expect("snapshot");
+        assert!(
+            !clean,
+            "a registered entry with no durable identity is lost custody"
+        );
+    }
+
+    #[test]
+    fn unreadable_registry_after_a_null_identity_stays_unclean() {
+        let mut source = ScriptedSource::new("T-unreadable");
+        source.clear_between_list_and_read = true;
+        source.registry_unreadable = true;
+        let (_, clean, read_failed) = super::normal_attached_snapshot(&source).expect("snapshot");
+        assert!(!clean);
+        assert!(read_failed);
+    }
+
+    #[test]
+    fn unreadable_membership_after_a_null_identity_stays_unclean() {
+        let mut source = ScriptedSource::new("T-membership");
+        source.clear_between_list_and_read = true;
+        source.membership_unreadable = true;
+        let (_, clean, read_failed) = super::normal_attached_snapshot(&source).expect("snapshot");
+        assert!(!clean);
+        assert!(read_failed);
+    }
+
+    #[test]
+    fn missing_thread_row_is_unclean_without_a_read_failure() {
+        let mut source = ScriptedSource::new("T-no-row");
+        source.row_missing = true;
+        let (attached, clean, read_failed) =
+            super::normal_attached_snapshot(&source).expect("snapshot");
+        assert!(attached.is_empty());
+        assert!(!clean);
+        assert!(!read_failed);
+    }
+
+    #[test]
+    fn row_read_error_is_unclean_and_a_read_failure() {
+        let mut source = ScriptedSource::new("T-bad-row");
+        source.row_unreadable = true;
+        let (attached, clean, read_failed) =
+            super::normal_attached_snapshot(&source).expect("snapshot");
+        assert!(attached.is_empty());
+        assert!(!clean);
+        assert!(read_failed);
+    }
+
+    #[test]
+    fn unproved_hold_names_the_open_snapshot_leg() {
+        let mut legs = all_legs();
+        legs.attached_snapshot_clean = false;
+        let outcome = drain_verdict(legs, DrainMode::Normal, DeferredRows::default());
+        let DrainOutcome::Unproved(open) = &outcome else {
+            panic!("an open snapshot leg is Unproved");
+        };
+        assert_eq!(open, "attached_snapshot");
+        match super::shutdown_drain_disposition(Ok(outcome), &Ok(())) {
+            super::ShutdownDrainDisposition::HoldUnproved {
+                drain_error,
+                recheck,
+                ..
+            } => {
+                assert!(drain_error.contains("attached_snapshot"), "{drain_error}");
+                assert!(!recheck);
+            }
+            _ => panic!("expected a hold"),
+        }
     }
 
     #[test]
