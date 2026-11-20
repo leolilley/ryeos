@@ -1796,7 +1796,12 @@ mod tests {
         let rows = stale_binding_report(&snapshot);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["code"], BINDING_RETIRED_SCHEMA);
-        assert!(rows[0]["fix"].as_str().unwrap().contains("old.yaml"));
+        assert!(
+            rows[0]["fix"]
+                .as_str()
+                .unwrap()
+                .contains("retire runtime_snapshot_production/old")
+        );
         let refusal = snapshot.absent_binding_error(
             runtime_snapshot_production::SECTION_NAME,
             None,
