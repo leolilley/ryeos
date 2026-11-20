@@ -1,7 +1,7 @@
 {
   "schema_version": "ryeos.ui.asset-manifest.v1",
   "ui_binding_revision": "ryeos.ui.binding.v15",
-  "source_digest": "f7a083da281db679ac970c9587b2d2adfb137f1ed24c3813e96284b16f93a44e",
+  "source_digest": "3c80ef8c1859106ab4e2c3cb4134f308f998b4c28aa6ca1b74ec1f62790173da",
   "assets": [
     {
       "route": "/ui",
@@ -30,7 +30,7 @@
       "filename": "ryeos_rune.js",
       "mime": "application/javascript; charset=utf-8",
       "cache": "no-cache",
-      "sha256": "568684847f688f38c1fb509e827319582d06df4047dcae461fa1aceb70016a57",
+      "sha256": "0ff721fc60fdf64f751a97150149f661382dff6271e73e89fade426fa6a8a93e",
       "imports": [
         "/ui/assets/rune_bridge.js",
         "/ui/assets/rune_health.js",
@@ -115,7 +115,7 @@
       "filename": "ryeos_rune_bg.wasm.gz",
       "mime": "application/wasm",
       "cache": "no-cache",
-      "sha256": "3b2b74754f6b671b9129ac12d4ef8b1f6da08b4991d0e29fd201a05e9d2079d5",
+      "sha256": "fbe1e5061bdbb0dcfc253ebe1d1adf23ce20ca4bcbb021a20531409f4e0421c0",
       "imports": [],
       "encoding": "gzip"
     },
