@@ -1110,7 +1110,14 @@ jobs:
           set -euo pipefail
           expected="$1"; shift
           log="$(mktemp)"
-          cargo test -p lillux --locked --lib -- --ignored --test-threads=1 "$@" 2>&1 | tee "$log"
+          # A test that drops privilege re-executes its own binary as another
+          # account, so that binary must sit where the account can reach it
+          # (LILLUX_TEST_BINARY); otherwise cargo runs it from the target dir.
+          if [[ -n "${LILLUX_TEST_BINARY:-}" ]]; then
+            "$LILLUX_TEST_BINARY" --ignored --test-threads=1 "$@" 2>&1 | tee "$log"
+          else
+            cargo test -p lillux --locked --lib -- --ignored --test-threads=1 "$@" 2>&1 | tee "$log"
+          fi
           passed="$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed; 0 failed.*/\1/p' "$log" | tail -n 1)"
           [[ "$passed" == "$expected" ]] || { echo "FAIL: expected $expected ignored tests to pass, saw '${passed:-none}'" >&2; exit 1; }
           RUN
@@ -1138,7 +1145,13 @@ jobs:
 
       - name: Group 4 - root
         run: |
-          sudo -n -E env "PATH=$PATH" "HOME=$HOME" "$RUNNER_TEMP/run-ignored" 2 \
+          # The credential-transition test re-executes the test binary as
+          # uid 65534, which cannot traverse the runner's home: install the
+          # exact binary where every account can execute it.
+          bin="$(cargo test -p lillux --locked --lib --no-run --message-format=json | jq -r 'select(.profile.test == true and .executable != null) | .executable')"
+          [[ "$(printf '%s\n' "$bin" | wc -l)" == 1 && -x "$bin" ]] || { echo "FAIL: expected exactly one lillux test executable, got: $bin" >&2; exit 1; }
+          sudo -n install -D -m 755 "$bin" /opt/ryeos-root-tests/lillux-tests
+          sudo -n -E env "PATH=$PATH" "HOME=$HOME" LILLUX_TEST_BINARY=/opt/ryeos-root-tests/lillux-tests "$RUNNER_TEMP/run-ignored" 2 \
             process_control::scope::tests::controller_transition_clears_all_credentials_and_sets_no_new_privileges \
             process_control::scope::readonly_delivery_grant_preserves_read_and_executable_modes
 
