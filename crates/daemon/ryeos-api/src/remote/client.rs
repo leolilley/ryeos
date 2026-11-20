@@ -64,6 +64,15 @@ pub fn map_remote_call_error(
     let status = http.status.as_u16();
     let remote_body = serde_json::from_str::<Value>(&http.body)
         .unwrap_or_else(|_| Value::String(http.body.clone()));
+    // The remote's own typed refusal says whether reissuing can succeed; the
+    // wrapper follows it. Only a body that does not say falls back to the
+    // status class.
+    let retryable = remote_body
+        .get("retryable")
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| {
+            http.status.is_server_error() || http.status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        });
     crate::handler_error::HandlerError::Structured {
         code: "remote_http_error".to_owned(),
         status,
@@ -76,8 +85,7 @@ pub fn map_remote_call_error(
                 "status":status,
                 "body":remote_body,
             },
-            "retryable":http.status.is_server_error()
-                || http.status == reqwest::StatusCode::TOO_MANY_REQUESTS,
+            "retryable":retryable,
         }),
     }
 }
@@ -5725,6 +5733,51 @@ mod tests {
             }
             other => panic!("unexpected mapped error: {other:?}"),
         }
+    }
+
+    fn wrapped_retryable(status: reqwest::StatusCode, body: serde_json::Value) -> Value {
+        let error = anyhow::Error::new(RemoteHttpError {
+            method: "POST",
+            url: "https://target.invalid/execute/launch".to_owned(),
+            status,
+            body: body.to_string(),
+        });
+        match map_remote_call_error(error, "target launch") {
+            crate::handler_error::HandlerError::Structured { body, .. } => {
+                body["retryable"].clone()
+            }
+            other => panic!("unexpected mapped error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wrapper_retryable_follows_the_remote_body_when_it_says() {
+        let server = reqwest::StatusCode::INTERNAL_SERVER_ERROR;
+        let client = reqwest::StatusCode::CONFLICT;
+        assert_eq!(
+            wrapped_retryable(server, serde_json::json!({"code":"x","retryable":false})),
+            false
+        );
+        assert_eq!(
+            wrapped_retryable(client, serde_json::json!({"code":"x","retryable":true})),
+            true
+        );
+        assert_eq!(
+            wrapped_retryable(
+                reqwest::StatusCode::FORBIDDEN,
+                serde_json::json!({"code":"qualification_policy_denied","retryable":false})
+            ),
+            false
+        );
+        // A body that does not say falls back to the status class.
+        assert_eq!(
+            wrapped_retryable(server, serde_json::json!({"code":"x"})),
+            true
+        );
+        assert_eq!(
+            wrapped_retryable(client, serde_json::json!({"code":"x"})),
+            false
+        );
     }
 
     #[test]
