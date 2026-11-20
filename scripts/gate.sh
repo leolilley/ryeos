@@ -320,10 +320,10 @@ if [[ -n "$crash_run_archive" ]]; then
         -E "binary($phase_test)" "${partition_args[@]}" --test-threads 1)
     gate_info "qualifying crash phase $crash_phase${crash_partition:+ (partition $crash_partition)}"
     case "$crash_phase" in
-        directive|schedule-deploy)
+        directive)
             "${run_phase[@]}"
             ;;
-        reset-scheduler)
+        schedule-deploy|reset-scheduler)
             RYEOS_TEST_CLI_BINARY="$archive_extract_dir/target/crash-qualification/debug/ryeos" \
                 "${run_phase[@]}"
             ;;
@@ -459,16 +459,11 @@ if [[ "$refresh_bundles" == "1" \
     trap - EXIT
     gate_info "retained explicit handoff qualification report: $handoff_report"
 
-    gate_info "qualifying project schedule deploy crash cuts"
-    "$CARGO" nextest run -p ryeosd \
-        --features "$crash_qualification_features" \
-        --test project_schedule_deploy_e2e \
-        "${cargo_jobs_args[@]}" --test-threads 1
-
     # The offline reset runs in the CLI process, so the CLI beside ryeosd must
     # carry the selected scheduler participant and its reset crash cuts. It is
     # built into its own target directory so the normal CLI beside ryeosd is
-    # not replaced, and the test is pointed at it explicitly.
+    # not replaced, and the tests are pointed at it explicitly. The schedule
+    # deploy phase also names it: its doctor reader runs the real CLI.
     gate_info "building the crash-qualification ryeos CLI for scheduler reset cuts"
     cli_jobs_args=()
     [[ "$build_jobs" != "0" ]] && cli_jobs_args=(-j "$build_jobs")
@@ -477,6 +472,12 @@ if [[ "$refresh_bundles" == "1" \
         --target-dir "$crash_cli_target" \
         --features scheduling,model-provider-setup,ryeos-scheduler-service/crash-qualification-test-support \
         "${cli_jobs_args[@]}"
+    gate_info "qualifying project schedule deploy crash cuts"
+    RYEOS_TEST_CLI_BINARY="$crash_cli_target/debug/ryeos" "$CARGO" nextest run -p ryeosd \
+        --features "$crash_qualification_features" \
+        --test project_schedule_deploy_e2e \
+        "${cargo_jobs_args[@]}" --test-threads 1
+
     gate_info "qualifying scheduler execution-history reset crash cuts"
     RYEOS_TEST_CLI_BINARY="$crash_cli_target/debug/ryeos" "$CARGO" nextest run -p ryeosd \
         --features "$crash_qualification_features" \
