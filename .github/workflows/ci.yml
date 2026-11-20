@@ -672,7 +672,7 @@ jobs:
         run: >-
           ./scripts/gate.sh
           --nextest-run-archive "$RUNNER_TEMP/test-archive/workspace.tar.zst"
-          -E 'test(/authority::isolation::tests::disabled_/) | test(/unwritable/) | binary(launch_trust_floor_e2e) | binary(vault_provider_narrow_e2e) | binary(launch_trust_scheduler_e2e) | binary(launch_trust_hook_e2e)'
+          -E 'test(/authority::isolation::tests::disabled_/) | test(/unwritable/) | binary(launch_trust_floor_e2e) | binary(vault_provider_narrow_e2e) | binary(launch_trust_scheduler_e2e) | binary(launch_trust_hook_e2e) | test(/host_service::installation::tests::the_hosts_own_sudo/)'
 
   scheduler-compositions:
     name: Scheduler composition checks

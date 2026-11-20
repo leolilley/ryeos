@@ -362,4 +362,17 @@ mod tests {
         // Normalizes to "/" at worst; the directory check or parent lookup refuses.
         assert!(resolve_elevation_links(&dir.path().join("l"), uid(), &dir_ok(uid())).is_err());
     }
+
+    /// The host's own elevation utility must pin through whatever links it
+    /// sits behind. On a host whose `/usr/bin/sudo` is a link (sudo-rs) this is
+    /// the real chain; elsewhere it is the plain regular file. A host without
+    /// sudo has nothing to prove.
+    #[test]
+    fn the_hosts_own_sudo_pins_through_its_links() {
+        let sudo = Path::new("/usr/bin/sudo");
+        if std::fs::symlink_metadata(sudo).is_err() {
+            return;
+        }
+        pin_administrator_elevator(sudo).expect("the host's own sudo pins");
+    }
 }
