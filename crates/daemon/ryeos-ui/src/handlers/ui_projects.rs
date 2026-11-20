@@ -1690,7 +1690,21 @@ impl RyeOsPrincipalStoreExt for PrincipalStore {
     }
 
     fn load_ui_config(&self) -> Result<RyeOsConfigFile> {
-        let config: RyeOsConfigFile = self.load_yaml(&self.paths().ryeos_config())?;
+        let path = self.paths().ryeos_config();
+        let mut config: RyeOsConfigFile = self.load_yaml(&path)?;
+        // A stored theme outside the allowed list (the earlier `light` and
+        // `dark` values) must not take every config read and update down with
+        // it. It reads as `system`, and the next config update writes a valid
+        // value back. The cure is named so the file can also be fixed by hand.
+        if !ryeos_client_base::theme_preference::ALLOWED.contains(&config.theme.as_str()) {
+            tracing::warn!(
+                file = %path.display(),
+                stored = %config.theme,
+                allowed = %ryeos_client_base::theme_preference::ALLOWED.join(", "),
+                "stored theme is not an allowed value and reads as system; set the `theme:` line in this file to one of the allowed values, or change the theme in the UI"
+            );
+            config.theme = ryeos_client_base::theme_preference::SYSTEM.to_string();
+        }
         validate_ui_config(&config)?;
         Ok(config)
     }
