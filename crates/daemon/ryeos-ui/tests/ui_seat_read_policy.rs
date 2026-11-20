@@ -473,3 +473,97 @@ async fn a_condition_the_call_does_not_meet_is_refused() {
     .unwrap_or_else(|error| panic!("matching read: {}", refusal_text(&error)));
     assert!(ok["result"]["result"]["threads"].is_array());
 }
+
+/// Every service a shipped view or Surface binds as a source is either a UI
+/// plane service or has a policy entry in every shipped init profile, so no
+/// shipped source attenuates for want of an entry.
+#[test]
+fn every_shipped_source_has_an_entry_in_every_profile() {
+    use ryeos_node_runtime::node_policy::NodePolicyContext;
+    use ryeos_node_runtime::node_policy::NodePolicySection as _;
+    use ryeos_node_runtime::node_policy::sections::ui_seat_reads::{
+        SECTION_NAME, UiSeatReadsPolicy, UiSeatReadsPolicySection,
+    };
+
+    fn collect(value: &serde_yaml::Value, in_sources: bool, found: &mut Vec<String>) {
+        match value {
+            serde_yaml::Value::Mapping(map) => {
+                for (key, child) in map {
+                    let key = key.as_str().unwrap_or_default();
+                    if in_sources
+                        && key == "ref"
+                        && let Some(reference) = child.as_str()
+                    {
+                        found.push(reference.to_owned());
+                    }
+                    collect(child, in_sources || key == "sources", found);
+                }
+            }
+            serde_yaml::Value::Sequence(items) => {
+                for item in items {
+                    collect(item, in_sources, found);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn yaml_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                yaml_files(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "yaml") {
+                out.push(path);
+            }
+        }
+    }
+
+    let root = ryeos_engine::test_support::workspace_root();
+    let ai = root.join("bundles/ryeos-ui/.ai");
+    let mut files = Vec::new();
+    yaml_files(&ai.join("views"), &mut files);
+    yaml_files(&ai.join("surfaces"), &mut files);
+    let mut sources = Vec::new();
+    for file in &files {
+        let parsed: serde_yaml::Value =
+            serde_yaml::from_str(&std::fs::read_to_string(file).unwrap()).unwrap();
+        collect(&parsed, false, &mut sources);
+    }
+    sources.retain(|reference| {
+        reference.starts_with("service:")
+            && !ryeos_ui::seat_read_policy::is_ui_plane_service(reference)
+    });
+    sources.sort();
+    sources.dedup();
+    assert!(
+        sources.iter().any(|source| source == "service:node/status"),
+        "the sweep found no shipped sources: {sources:?}"
+    );
+
+    let mut profiles = Vec::new();
+    yaml_files(&root.join("bundles/.ai/node/init/profiles"), &mut profiles);
+    assert_eq!(profiles.len(), 15);
+    for path in profiles {
+        let profile: serde_json::Value =
+            serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let record = UiSeatReadsPolicySection
+            .parse(
+                &NodePolicyContext {
+                    section: SECTION_NAME.to_owned(),
+                    source_file: path.clone(),
+                    signer_fingerprint: "test".to_owned(),
+                },
+                &profile["policies"][SECTION_NAME],
+            )
+            .unwrap_or_else(|error| panic!("{}: {error:#}", path.display()));
+        let policy = record.as_any().downcast_ref::<UiSeatReadsPolicy>().unwrap();
+        for source in &sources {
+            assert!(
+                !policy.entries_for(source).is_empty(),
+                "{} has no entry for shipped source {source}",
+                path.display()
+            );
+        }
+    }
+}

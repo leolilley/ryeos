@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-20T07:31:15Z:42a70845d78743d0faced17afcdcb5cfb2af64ad5c91e6187af5488710392a16:3pP+9pr7fMTtuOuatuFnKMrHi504S6aDU3/3EJgHU8dc/DJkDLr4idvvSc9zeWR2wgAjwgGWNHp76LEwvl5uCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-20T12:21:41Z:9974eddaf3bcdcc5cc9520e46408584d5eff02aa26a8217c5137287bfbc8f7fd:znBDHksFpM17rXh1ysbhZ7IxL7O1nUTUxBaYjL/YdH4Qx0cXe8S57h0OfnBu0geurT1z5KKUVdkef/V8LEMYDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -756,3 +756,23 @@ policies:
           - /payload/updated_at
         max_result_bytes: 4096
         max_items: 4
+      # The pending approvals of a hosted work chain, as the Approvals view
+      # reads them. The service already answers only for a chain the caller
+      # owns. Each approval keeps its identifiers, digest, state, times and the
+      # public part of its requested authority.
+      - target: service:worker-executions/approvals
+        classes: [local_operator, hosted_principal]
+        keep:
+          - /approvals/*/chain_root_id
+          - /approvals/*/placement_thread_id
+          - /approvals/*/approval_id
+          - /approvals/*/worker_boot_epoch
+          - /approvals/*/request_digest
+          - /approvals/*/operation_class
+          - /approvals/*/requested_authority/accept_allowed
+          - /approvals/*/requested_authority/display
+          - /approvals/*/state
+          - /approvals/*/expires_at_ms
+          - /approvals/*/created_at_ms
+        max_result_bytes: 262144
+        max_items: 256

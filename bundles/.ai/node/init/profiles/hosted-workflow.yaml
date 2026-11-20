@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-20T07:31:15Z:1bf237b84307d0df1397e4cee9088a4db5a6cf3d12ebf3dcaf1bb52d6faa06b1:ldmnHYBFM/LrHYMgt7Q99a/n7pcCpfklo1Q+FCOkb1dutLiW/45OiJMGxgKqaWj1xxIfCJulUJYjhE/3D9wrDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-20T12:21:41Z:a3a3062128d16441f10d5757353290c171390f934315217f198fa108a9b88b92:V1vGNvNJOjHoLr5SXPnlrC8kTUCgCOFiiCB3k1VTzcnOupy55OL461EI4aMuyc75PKUEKTlWNGKv/tcitDumCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - codex
@@ -697,3 +697,23 @@ policies:
           - /payload/updated_at
         max_result_bytes: 4096
         max_items: 4
+      # The pending approvals of a hosted work chain, as the Approvals view
+      # reads them. The service already answers only for a chain the caller
+      # owns. Each approval keeps its identifiers, digest, state, times and the
+      # public part of its requested authority.
+      - target: service:worker-executions/approvals
+        classes: [local_operator, hosted_principal]
+        keep:
+          - /approvals/*/chain_root_id
+          - /approvals/*/placement_thread_id
+          - /approvals/*/approval_id
+          - /approvals/*/worker_boot_epoch
+          - /approvals/*/request_digest
+          - /approvals/*/operation_class
+          - /approvals/*/requested_authority/accept_allowed
+          - /approvals/*/requested_authority/display
+          - /approvals/*/state
+          - /approvals/*/expires_at_ms
+          - /approvals/*/created_at_ms
+        max_result_bytes: 262144
+        max_items: 256
