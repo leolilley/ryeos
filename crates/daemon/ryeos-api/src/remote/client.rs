@@ -5854,6 +5854,13 @@ mod tests {
             wrapped_retryable(client, serde_json::json!({"code":"x","retryable":true})),
             true
         );
+        assert_eq!(
+            wrapped_retryable(
+                reqwest::StatusCode::FORBIDDEN,
+                serde_json::json!({"code":"qualification_policy_denied","retryable":false})
+            ),
+            false
+        );
         // A body that does not say falls back to the status class.
         assert_eq!(
             wrapped_retryable(server, serde_json::json!({"code":"x"})),

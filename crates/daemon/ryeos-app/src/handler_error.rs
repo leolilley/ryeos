@@ -148,6 +148,37 @@ pub fn selected_qualification_handler_error(
     }
 }
 
+/// The HTTP status of a qualification admission refusal: 403 when the
+/// receiving policy denies it (as for the other policy refusals, the caller is
+/// known but the policy does not admit the request), 409 when what it was
+/// issued or accepted against has moved on and only a fresh issue or
+/// acceptance cures it.
+pub fn qualification_refusal_status(
+    refusal: &ryeos_state::external_content::products::qualification::QualificationRefused,
+) -> u16 {
+    use ryeos_state::external_content::products::qualification::QualificationRefusalClass;
+    match refusal.class {
+        QualificationRefusalClass::PolicyDenied => 403,
+        QualificationRefusalClass::Stale => 409,
+    }
+}
+
+/// The structured response for a qualification admission refusal; never
+/// retryable as is.
+pub fn qualification_refusal_handler_error(
+    refusal: &ryeos_state::external_content::products::qualification::QualificationRefused,
+) -> HandlerError {
+    HandlerError::Structured {
+        code: refusal.code().to_owned(),
+        status: qualification_refusal_status(refusal),
+        body: serde_json::json!({
+            "code": refusal.code(),
+            "error": refusal.to_string(),
+            "retryable": false,
+        }),
+    }
+}
+
 /// Operator-correctable refusals raised deep in app code keep their own
 /// type (and their full message for non-HTTP callers); this is the single
 /// place they become a structured response.
@@ -171,6 +202,9 @@ fn typed_operator_refusal(error: &(dyn std::error::Error + 'static)) -> Option<H
         .downcast_ref::<crate::operator_external_content::qualification_testimony::SelectedQualificationRefused>()
     {
         return Some(selected_qualification_handler_error(refused));
+    }
+    if let Some(refused) = error.downcast_ref::<ryeos_state::external_content::products::qualification::QualificationRefused>() {
+        return Some(qualification_refusal_handler_error(refused));
     }
     if let Some(engine_error) = error.downcast_ref::<ryeos_engine::error::EngineError>() {
         return project_shadow_handler_error(engine_error);
@@ -288,5 +322,36 @@ mod project_shadow_tests {
             other => panic!("expected the typed refusal, got {other:?}"),
         }
         assert!(extract_handler_error(&anyhow::anyhow!("boom")).is_none());
+    }
+
+    #[test]
+    fn qualification_refusals_map_by_class_and_are_not_retryable() {
+        use ryeos_state::external_content::products::qualification::QualificationRefused;
+        for (error, code, expected) in [
+            (
+                QualificationRefused::policy_denied("lane not allowed"),
+                "qualification_policy_denied",
+                403,
+            ),
+            (
+                QualificationRefused::stale("policy changed since acceptance"),
+                "qualification_stale",
+                409,
+            ),
+        ] {
+            let wrapped = error.context("admit remote testimony");
+            match extract_handler_error(&wrapped) {
+                Some(HandlerError::Structured {
+                    code: got,
+                    status,
+                    body,
+                }) => {
+                    assert_eq!(got, code);
+                    assert_eq!(status, expected);
+                    assert_eq!(body["retryable"], false);
+                }
+                other => panic!("expected the typed refusal, got {other:?}"),
+            }
+        }
     }
 }

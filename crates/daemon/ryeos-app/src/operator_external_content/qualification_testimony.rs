@@ -30,7 +30,7 @@ use ryeos_state::external_content::products::publication::{
     ProductCaptureCoordinate, VerifiedProductWitness,
 };
 use ryeos_state::external_content::products::qualification::{
-    ProductQualificationEvidence, ProductQualificationPolicySource,
+    ProductQualificationEvidence, ProductQualificationPolicySource, QualificationRefused,
 };
 use ryeos_state::external_content::products::qualification_testimony::{
     MAX_REMOTE_QUALIFICATION_ACCEPTANCE_EVIDENCE_BYTES,
@@ -1384,10 +1384,11 @@ fn require_origin_policy(
         RemoteQualificationEvidence::Content(evidence) => {
             evidence.validate()?;
             current.validate()?;
-            ensure!(
-                &evidence.purpose.policy_source == current,
-                "qualification no longer matches the exact current policy"
-            );
+            if &evidence.purpose.policy_source != current {
+                return Err(QualificationRefused::stale(
+                    "qualification no longer matches the exact current policy",
+                ));
+            }
             evidence
                 .result
                 .validate_claims_for(&current.policy, required_claims)
