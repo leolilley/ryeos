@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# ryeos:signed:2026-11-20T04:17:21Z:9ffaed5cb34a67fea588ec56add057d4b12880b0603f4a74ebbc2b074f1a7faf:kxv1QwE+qLsk4yU1kqM/d9ZBFEcSpjdCcEAlzVSYjZExJvGDx2PQ4vAY1qLIhNBOln3IHuAY2/DCWUCIHLaoCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# Externally invoked host helper in the development bundle; lib/ is excluded
+# from Tool resolution, so this is signed source, not an admitted Tool. It
+# grants no RyeOS authority. Run it from a checkout of this repository.
+# Decide whether a merge-gate CI run may use the UI-only gate (full on any doubt).
 """Decide whether a merge-gate run may use the UI-only gate.
 
 Prints `mode=ui-only` or `mode=full` (the form a GitHub Actions output file

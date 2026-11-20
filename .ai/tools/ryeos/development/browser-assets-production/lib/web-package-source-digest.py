@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# ryeos:signed:2026-11-20T04:17:21Z:1d8fe9fab8e65a237cec621465d2b17b64091c27bd353391bbb6b6169221522a:b13VptyW8yezSNVEkE+ZszglYC7rpwiQ2kLXDyjqmM0MMjQWfDjwG3PTNkZbFxHw0VOmY38bNlGOdxo8nz5pAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# Externally invoked host helper in the development bundle; lib/ is excluded
+# from Tool resolution, so this is signed source, not an admitted Tool. It
+# grants no RyeOS authority. Run it from a checkout of this repository.
+# Digest of the sources the checked-in browser package is built from; CI compares it with the one recorded in web-assets.json.
 """Digest of the sources that determine the checked-in browser package.
 
 The package under crates/clients/rune/pkg is built by a slow wasm build and is
@@ -86,7 +91,7 @@ def digest(root: Path) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--root", default=str(Path(__file__).resolve().parents[2]))
+    parser.add_argument("--root", default=str(Path(__file__).resolve().parents[6]))
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--print", action="store_true")
     mode.add_argument("--check", action="store_true")

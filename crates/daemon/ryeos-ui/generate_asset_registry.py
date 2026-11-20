@@ -17,7 +17,10 @@ ROOT = Path(__file__).resolve().parent
 MANIFEST = ROOT / "web-assets.json"
 PACKAGE = ROOT / "../../clients/rune/pkg"
 GENERATED = ROOT / "src/generated_web_assets.rs"
-DIGEST_SCRIPT = ROOT / "../../../scripts/ci/web-package-source-digest.py"
+DIGEST_SCRIPT = (
+    ROOT
+    / "../../../.ai/tools/ryeos/development/browser-assets-production/lib/web-package-source-digest.py"
+)
 SNIPPETS = (
     ROOT
     / "../../../.ai/tools/ryeos/development/browser-assets-production/lib/rune-snippets.toml"

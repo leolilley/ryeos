@@ -13,18 +13,20 @@ import tempfile
 import unittest
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
+TOP = Path(__file__).resolve().parents[2]
+DIGEST = TOP / ".ai/tools/ryeos/development/browser-assets-production/lib/web-package-source-digest.py"
+CLASSIFY = TOP / ".ai/tools/ryeos/development/repository-validation/lib/classify-merge-gate.py"
 
 
-def load(name: str, filename: str):
-    spec = importlib.util.spec_from_file_location(name, HERE / filename)
+def load(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
-digest_mod = load("digest_mod", "web-package-source-digest.py")
-classify_mod = load("classify_mod", "classify-merge-gate.py")
+digest_mod = load("digest_mod", DIGEST)
+classify_mod = load("classify_mod", CLASSIFY)
 
 
 def git(root: Path, *args: str) -> None:
@@ -99,7 +101,7 @@ class Classifier(unittest.TestCase):
     def test_not_a_repository_is_full_via_cli(self):
         with tempfile.TemporaryDirectory() as tmp:
             done = subprocess.run(
-                ["python3", "-I", str(HERE / "classify-merge-gate.py"), "--root", tmp],
+                ["python3", "-I", str(CLASSIFY), "--root", tmp],
                 capture_output=True,
                 text=True,
             )
@@ -134,7 +136,7 @@ class Digest(unittest.TestCase):
             manifest["source_digest"] = recorded
         write(root, digest_mod.MANIFEST, json.dumps(manifest))
         return subprocess.run(
-            ["python3", "-I", str(HERE / "web-package-source-digest.py"), "--root", str(root), "--check"],
+            ["python3", "-I", str(DIGEST), "--root", str(root), "--check"],
             capture_output=True,
         ).returncode
 
