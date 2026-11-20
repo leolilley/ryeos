@@ -2306,13 +2306,13 @@ mod tests {
 
         #[test]
         fn foreign_namespace_resolves_to_ended_only_with_the_lock_proof() {
-            let foreign = Err(ProcessEndError::ForeignPidNamespace {
+            let foreign = ProcessEndError::ForeignPidNamespace {
                 recorded: NS.into(),
                 observer: OTHER_NS.into(),
-            });
-            assert_eq!(resolve_with_exclusive_lock(foreign.clone()), Ok(true));
+            };
+            assert_eq!(resolve_with_exclusive_lock(Err(foreign.clone())), Ok(true));
             // Without proof the same observation is an error, never "ended".
-            let error = foreign.unwrap_err().to_string();
+            let error = foreign.to_string();
             assert!(error.contains(NS) && error.contains(OTHER_NS), "{error}");
             // The proof changes nothing else.
             assert_eq!(resolve_with_exclusive_lock(Ok(false)), Ok(false));
