@@ -184,8 +184,9 @@ impl Config {
                 Some(Self::load_file(&default_config).with_context(|| {
                     format!(
                         "failed to load existing config at {path}; a stored config that does \
-                         not match the current bootstrap schema is refused — remove {path} \
-                         and re-run `ryeos init`",
+                         not match the current bootstrap schema is refused; fix the line the cause \
+                         names, or remove {path} and re-run `ryeos init` (which discards the \
+                         stored bind, socket, database and key settings)",
                         path = default_config.display()
                     )
                 })?)
