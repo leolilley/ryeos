@@ -20,6 +20,39 @@ use ryeos_state::queries::ThreadUsageTotals;
 #[serde(deny_unknown_fields)]
 pub struct UsageRequest {}
 
+/// Usage-subject namespace for work a browser seat launches.
+pub(crate) const UI_USAGE_NAMESPACE: &str = "ui";
+
+/// Subject used when the seat is not bound to a project.
+const PROJECTLESS_SUBJECT: &str = "projectless";
+
+/// Longest project identity carried verbatim as a usage subject. A longer or
+/// unprintable identity is carried as its content digest instead, so a launch
+/// is never refused over how the project path is spelled.
+const MAX_VERBATIM_SUBJECT_BYTES: usize = 256;
+
+/// The usage subject for work launched from a seat acting on `project`
+/// (the seat's stable project query identity, or `None` when projectless).
+/// Launch attribution and the activity read both derive it here, so a launch
+/// and the later windowed summary always name the same subject.
+pub fn ui_usage_subject(project: Option<&str>) -> ryeos_state::UsageSubject {
+    let subject = match project {
+        None => PROJECTLESS_SUBJECT.to_string(),
+        Some(identity)
+            if !identity.is_empty()
+                && identity.len() <= MAX_VERBATIM_SUBJECT_BYTES
+                && !identity.chars().any(char::is_control) =>
+        {
+            identity.to_string()
+        }
+        Some(identity) => format!("sha256:{}", lillux::sha256_hex(identity.as_bytes())),
+    };
+    ryeos_state::UsageSubject {
+        namespace: UI_USAGE_NAMESPACE.to_string(),
+        subject,
+    }
+}
+
 /// One observed chain with usage, ready to project.
 struct ChainUsage {
     chain_root_id: String,
@@ -146,6 +179,20 @@ pub const USAGE_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seat_usage_subject_names_the_project_and_always_validates() {
+        let subject = ui_usage_subject(Some("/work/project"));
+        assert_eq!(subject.namespace, "ui");
+        assert_eq!(subject.subject, "/work/project");
+        subject.validate().unwrap();
+        assert_eq!(ui_usage_subject(None).subject, "projectless");
+        for odd in ["/w/\u{7}x".to_string(), "/p".repeat(200), String::new()] {
+            let subject = ui_usage_subject(Some(&odd));
+            assert!(subject.subject.starts_with("sha256:"));
+            subject.validate().unwrap();
+        }
+    }
 
     fn chain(id: &str, spend: f64, input: i64) -> ChainUsage {
         ChainUsage {

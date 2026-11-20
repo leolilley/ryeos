@@ -1,0 +1,149 @@
+# ryeos:signed:2026-11-20T01:05:27Z:6b63ee25d0ad162bc72b5af19851128ced16d7792388d7acaf0623bf927512e5:55YT+F/n4WxvSPwKQb/dO4ST+JmRHv2D0NWTntVj3FqzguFOKbyWNon3Q/M0K2+ZRmOTyfA4/uPLbbVUuSZVDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/ui
+version: "1.0.0"
+description: The sentence and tone the node moment shows for each fact the node capability service reports.
+# The node capability service reports codes: a report state, the posture
+# (the report's own `isolation:enforced` decision), a host class, and one row per proof with a state and
+# a grade, and when the node measured them. A client reads this config through the node capability wording
+# service and draws the sentence, in the tone, instead of the code.
+#   * `fallback` words any code a table does not list.
+#   * `isolation_modes` carries the posture: `label` is the short name and
+#     `detail` the sentence that says what it means for work run here.
+#   * `host_classes` says what kind of machine the node runs on, by the host
+#     class the node was set up under.
+#   * `guarantees` is what a person is told the node can or cannot prove, in
+#     plain words, by the capability name the node's report uses. A proof
+#     whose name is not listed here is not shown.
+#   * `grants` says what the session's own grant lets a person do, by the
+#     capability name the session holds. A grant not listed here is not shown.
+# Tone is one of none, good, warn, danger, accent. A sentence is plain, in
+# normal case, and says what the node does or cannot show.
+fallback:
+  label: This node has not said.
+  tone: none
+report_states:
+  present:
+    label: This node has reported what it can prove.
+    tone: none
+  not_composed:
+    label: This node has not reported what it can prove yet.
+    tone: warn
+  refused:
+    label: This node has not reported what it can prove yet.
+    detail: Its last report is missing, out of date, or does not check out. Restarting the node records a new one.
+    tone: warn
+  unreadable:
+    label: This node's report could not be read just now.
+    detail: Try again in a moment.
+    tone: warn
+isolation_modes:
+  enforce:
+    label: Contained
+    detail: This host proves each job runs on its own, with its own limits.
+    tone: good
+  disabled:
+    label: Trusted, not contained
+    detail: This host cannot prove jobs are kept apart, so anything that runs here is code you are trusting.
+    tone: warn
+host_classes:
+  local:
+    label: This computer
+    detail: It runs on a machine you control.
+    tone: none
+  local_unconfined:
+    label: This computer, without enclosures
+    detail: It runs on a machine you control and does not enclose jobs.
+    tone: warn
+  hosted:
+    label: A hosted service
+    detail: It runs on a hosted machine that cannot keep jobs apart.
+    tone: none
+proof_states:
+  provided:
+    label: yes
+    tone: good
+  missing:
+    label: no
+    tone: warn
+grades:
+  measured:
+    label: Checked on this machine
+    tone: good
+  provider_attested:
+    label: Reported by the hosting service
+    tone: none
+  peer_attested:
+    label: Reported by another node
+    tone: none
+  trusted:
+    label: Accepted on trust
+    tone: warn
+guarantees:
+  isolation:namespaces:
+    label: Each job kept apart
+    detail: Each job gets its own view of the machine.
+    tone: none
+  limits:scope:
+    label: Its own limits
+    detail: Each job has its own memory and process limits.
+    tone: none
+  accounting:
+    label: Use is measured
+    detail: What each job used is measured.
+    tone: none
+  residency:locked:
+    label: Secrets never reach disk
+    detail: Secrets in memory are locked there.
+    tone: none
+  residency:swap_limit:
+    label: Secrets never reach disk
+    detail: Memory the node holds is kept from swap.
+    tone: none
+  residency:swap_absent:
+    label: Secrets never reach disk
+    detail: The host reports no swap.
+    tone: none
+  storage:durable_root:
+    label: State survives a restart
+    detail: The node's state sits on storage that outlives the process.
+    tone: none
+  persistence:durable_state:
+    label: State survives a restart
+    detail: The node's state is kept on durable storage.
+    tone: none
+  credential:private_home:
+    label: Logins are private to this node
+    detail: Credentials live in a directory only this node's account can reach.
+    tone: none
+  sessions:trusted_process_group:
+    label: Jobs end when the node ends
+    detail: The container enclosure ends every job with the node.
+    tone: none
+grants:
+  ryeos.execute.service.projects/list:
+    label: See your projects
+    tone: none
+  ryeos.execute.service.projects/open:
+    label: Open projects
+    tone: none
+  ryeos.execute.service.projects/add:
+    label: Add projects
+    tone: none
+  ryeos.execute.service.commands/submit:
+    label: Start threads
+    tone: none
+  ryeos.execute.service.threads/input:
+    label: Answer a running thread
+    tone: none
+  ryeos.execute.service.events/chain_replay:
+    label: Watch threads run
+    tone: none
+  ryeos.execute.service.worker-executions/approvals:
+    label: See what is waiting for approval
+    tone: none
+  ryeos.execute.service.worker-executions/resolve-approval:
+    label: Approve or decline
+    tone: none
+  ryeos.execute.service.node/status:
+    label: Read this node's status
+    tone: none

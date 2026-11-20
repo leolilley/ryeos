@@ -1,5 +1,8 @@
 //! Thread runtime files, runtime snapshot staging and abandoned-package discard.
 use super::*;
+use ryeos_external_execution::guest_staging::{
+    GUEST_PACKAGE_PREFIX, GUEST_STAGE_PREFIX, GuestNamespaceEntry, staging_budget,
+};
 
 pub(super) fn discard_abandoned_external_guest_packages(
     runtime_state: &lillux::PinnedDirectory,
@@ -19,39 +22,54 @@ pub(super) fn discard_abandoned_external_guest_packages(
             return Ok(());
         }
         for name in names {
-            let owned_name = name.to_str().context("non-UTF8 guest package generation")?;
-            let mut components = owned_name.split('.');
-            anyhow::ensure!(
-                components.next() == Some("guest-package")
-                    && components
-                        .next()
-                        .and_then(|value| value.parse::<u32>().ok())
-                        .is_some()
-                    && components
-                        .next()
-                        .and_then(|value| value.parse::<u64>().ok())
-                        .is_some()
-                    && components.next().is_none(),
-                "unexpected entry in external guest package namespace"
-            );
+            let owned_name = name
+                .to_str()
+                .with_context(|| format!("non-UTF8 entry {name:?} in external guest package namespace; recognised forms are `{GUEST_PACKAGE_PREFIX}.<pid>.<nonce>` and `{GUEST_STAGE_PREFIX}.<pid>.<nonce>`"))?;
+            let kind = GuestNamespaceEntry::classify(owned_name).with_context(|| {
+                format!(
+                    "unexpected entry `{owned_name}` in external guest package namespace; recognised forms are `{GUEST_PACKAGE_PREFIX}.<pid>.<nonce>` and `{GUEST_STAGE_PREFIX}.<pid>.<nonce>`"
+                )
+            })?;
             let child = parent
                 .open_child_directory(&name)?
                 .context("abandoned guest package is not a directory")?;
             child.require_owner_private_directory()?;
-            anyhow::ensure!(
-                child
-                    .entry_names_bounded(2)?
-                    .iter()
-                    .all(|entry| entry == OsStr::new("payload")),
-                "abandoned guest package has an unexpected entry"
-            );
-            child.remove_contents_recursive_bounded(lillux::DirectoryTraversalBudget::new(1, 1))?;
-            anyhow::ensure!(
-                parent
-                    .remove_empty_child_if_same(&name, &child)
-                    .map(|receipt| receipt.is_some())?,
-                "abandoned guest package changed during recovery"
-            );
+            match kind {
+                GuestNamespaceEntry::Package => {
+                    anyhow::ensure!(
+                        child
+                            .entry_names_bounded(2)?
+                            .iter()
+                            .all(|entry| entry == OsStr::new("payload")),
+                        "abandoned guest package has an unexpected entry"
+                    );
+                    child.remove_contents_recursive_bounded(
+                        lillux::DirectoryTraversalBudget::new(1, 1),
+                    )?;
+                    anyhow::ensure!(
+                        parent
+                            .remove_empty_child_if_same(&name, &child)
+                            .map(|receipt| receipt.is_some())?,
+                        "abandoned guest package changed during recovery"
+                    );
+                }
+                GuestNamespaceEntry::Stage => {
+                    // A live stager holds this lock for the generation's whole
+                    // life; only a dead owner's generation can be taken.
+                    let _owner = child.try_lock_exclusive()?.with_context(|| {
+                        format!(
+                            "guest stage generation `{owned_name}` has a live owner; refusing to remove a contested generation"
+                        )
+                    })?;
+                    child.remove_contents_recursive_bounded(staging_budget())?;
+                    anyhow::ensure!(
+                        parent
+                            .remove_empty_child_if_same(&name, &child)
+                            .map(|receipt| receipt.is_some())?,
+                        "abandoned guest stage generation changed during recovery"
+                    );
+                }
+            }
         }
     }
     anyhow::ensure!(

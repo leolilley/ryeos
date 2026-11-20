@@ -826,6 +826,217 @@ async fn e2e_directive_operator_follow_up_successor_completes() {
     drop(mock);
 }
 
+// ── Thread title: stamped with the thread by `threads/input` ───────────
+
+/// A directive whose single required input is the operator text a
+/// `threads/input` launch binds as `input`.
+fn plant_input_directive(root: &Path, rel_path: &str, signer: &SigningKey) -> anyhow::Result<()> {
+    let path = root.join(format!(".ai/directives/{rel_path}.md"));
+    std::fs::create_dir_all(path.parent().expect("directive parent dir"))?;
+    let body = format!(
+        r#"---
+name: {rel_path}
+category: ""
+description: "thread title e2e fixture"
+inputs:
+  - name: input
+    type: string
+    required: true
+model:
+  tier: general
+---
+Respond to: ${{inputs.input}}
+"#
+    );
+    let signed = lillux::signature::sign_content(&body, signer, "<!--", Some("-->"));
+    std::fs::write(&path, signed)?;
+    Ok(())
+}
+
+async fn input_post(
+    h: &DaemonHarness,
+    project_path: &str,
+    body: serde_json::Value,
+) -> (reqwest::StatusCode, serde_json::Value) {
+    h.post_execute("service:threads/input", project_path, body)
+        .await
+        .expect("post /execute (service:threads/input)")
+}
+
+async fn title_of(h: &DaemonHarness, thread_id: &str) -> Option<String> {
+    h.get_thread(thread_id)
+        .await
+        .expect("threads/get")
+        .expect("thread is known")
+        .pointer("/facets/title")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_threads_input_stamps_a_title_with_the_thread() {
+    let mock = MockProvider::start(vec![
+        MockResponse::Text("one".into()),
+        MockResponse::Text("two".into()),
+        MockResponse::Text("three".into()),
+        MockResponse::Text("four".into()),
+    ])
+    .await;
+    let mock_url = mock.base_url.clone();
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_workflow_bundles(state_path, fixture)?;
+        register_mock_provider_bundle(state_path, &mock_url, fixture)
+    };
+    let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
+        .await
+        .expect("start daemon with mock provider + workflow bundles");
+    let project = tempfile::tempdir().expect("project tempdir");
+    let project_path = project.path().to_str().unwrap().to_string();
+    plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
+    plant_input_directive(project.path(), "title/dir", &fixture.publisher)
+        .expect("plant directive");
+    let fresh = |input: &str, title: Option<&str>| {
+        let mut body = serde_json::json!({
+            "input": input,
+            "target": {
+                "kind": "fresh",
+                "item_ref": "directive:title/dir",
+                "project_path": project_path.clone(),
+                "ref_bindings": {},
+            },
+        });
+        if let Some(title) = title {
+            body["title"] = serde_json::json!(title);
+        }
+        body
+    };
+
+    // Refusals leave no thread behind: over-length, blank and control-character
+    // titles are bad requests.
+    for bad in ["x".repeat(161), "   ".to_string(), "a\nb".to_string()] {
+        let (status, body) = input_post(&h, &project_path, fresh("hello", Some(&bad))).await;
+        assert_eq!(
+            status,
+            reqwest::StatusCode::BAD_REQUEST,
+            "title {bad:?} must be refused: {body:#}"
+        );
+    }
+    assert!(
+        h.list_threads(50)
+            .await
+            .expect("threads/list")
+            .iter()
+            .all(|t| t.item_ref != "directive:title/dir"),
+        "a refused title must not launch a thread"
+    );
+
+    // Fresh launch without a title: derived from the first non-empty line.
+    let (status, body) = input_post(
+        &h,
+        &project_path,
+        fresh("\n  Plan   the trip  \nsecond line", None),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body:#}");
+    let first = body
+        .pointer("/result/thread_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| panic!("no thread_id: {body:#}"))
+        .to_string();
+    assert_eq!(title_of(&h, &first).await.as_deref(), Some("Plan the trip"));
+    // The stamp is an event of the thread itself, so it survives a rebuild.
+    let events = h
+        .thread_events(&first)
+        .await
+        .expect("events/replay")
+        .expect("thread is known");
+    assert!(
+        events.iter().any(|(kind, payload)| {
+            kind == "thread_facet_set"
+                && payload["key"] == "title"
+                && payload["value"] == "Plan the trip"
+        }),
+        "the title must be a thread_facet_set event: {events:#?}"
+    );
+    // The list row carries it as `facets.title`.
+    let (_, listed) = h
+        .post_execute(
+            "service:threads/list",
+            ".",
+            serde_json::json!({ "limit": 50 }),
+        )
+        .await
+        .expect("threads/list");
+    let row = listed
+        .pointer("/result/threads")
+        .and_then(|v| v.as_array())
+        .and_then(|rows| rows.iter().find(|row| row["thread_id"] == first.as_str()))
+        .unwrap_or_else(|| panic!("first thread not listed: {listed:#}"));
+    assert_eq!(row["facets"]["title"], "Plan the trip");
+    poll_thread(&h, |t| t.thread_id == first, true)
+        .await
+        .expect("first thread settles");
+
+    // A continuation inherits its predecessor's title.
+    let (status, body) = input_post(
+        &h,
+        &project_path,
+        serde_json::json!({
+            "input": "and then what",
+            "target": {"kind": "thread", "thread_id": first.clone()},
+        }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body:#}");
+    let second = completed_successor(&mut h, &body, &first).await;
+    assert_eq!(
+        title_of(&h, &second).await.as_deref(),
+        Some("Plan the trip")
+    );
+
+    // A supplied title wins over the inherited one, and is checked on this
+    // path too.
+    let (status, _) = input_post(
+        &h,
+        &project_path,
+        serde_json::json!({
+            "input": "rename",
+            "title": "y".repeat(161),
+            "target": {"kind": "thread", "thread_id": second.clone()},
+        }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+    let (status, body) = input_post(
+        &h,
+        &project_path,
+        serde_json::json!({
+            "input": "rename",
+            "title": "  Packing list ",
+            "target": {"kind": "thread", "thread_id": second.clone()},
+        }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body:#}");
+    let third = completed_successor(&mut h, &body, &second).await;
+    assert_eq!(title_of(&h, &third).await.as_deref(), Some("Packing list"));
+    // The predecessors keep theirs.
+    assert_eq!(title_of(&h, &first).await.as_deref(), Some("Plan the trip"));
+
+    // An explicit title on a fresh launch overrides the derived one.
+    let (status, body) = input_post(&h, &project_path, fresh("ignored", Some("Chosen"))).await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body:#}");
+    let fourth = body
+        .pointer("/result/thread_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| panic!("no thread_id: {body:#}"))
+        .to_string();
+    assert_eq!(title_of(&h, &fourth).await.as_deref(), Some("Chosen"));
+
+    drop(project);
+    drop(mock);
+}
+
 // ── Operator rebind: continue a thread on a different model binding ────
 //
 // The directive carries no model of its own; the launch binds one at the
