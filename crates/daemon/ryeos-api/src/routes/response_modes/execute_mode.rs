@@ -2451,6 +2451,7 @@ async fn admit_execution_with_publication(
         usage_subject,
         usage_subject_asserted_by,
         previous_thread_id: None,
+        initial_facets: Default::default(),
         root_admission: local_root_admission,
         root_dispatch_evidence: local_root_dispatch_evidence,
         parent_execution_context: None,

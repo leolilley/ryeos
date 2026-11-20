@@ -579,10 +579,12 @@ WORKDIR /app
 # image run as ryeos (uid 10000, gid 10000), never as root: lillux refuses
 # root as the recorded actor of `ryeos node allow-restart` and
 # `ryeos node capacity reissue`, so a node running as root could never have
-# its restart inhibition cleared from inside its own container. tini stays
-# pid 1. The entrypoint starts as root only to hand /data (a platform volume,
-# mounted root-owned) to this account, then re-executes itself as ryeos
-# before any ryeos command.
+# its restart inhibition cleared from inside its own container. The
+# entrypoint script is pid 1 and starts as root only to hand /data (a
+# platform volume, mounted root-owned) to this account, then replaces itself
+# with tini running as ryeos, so the init and the daemon share one uid and
+# the init needs no capability to forward the stop signal. The script runs
+# again under tini before any ryeos command.
 RUN groupadd --gid 10000 ryeos && \
     useradd --uid 10000 --gid 10000 --home-dir /data/app --no-create-home \
       --shell /bin/bash ryeos && \
@@ -635,7 +637,7 @@ LABEL io.ryeos.bundle-protocol="1.0"
 LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/_ryeos/ready',timeout=3).read()"]
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 FROM workflow-runtime AS ryeos-local-inference
 COPY --from=local-inference-pair /build/target/local-inference/ryeosd /usr/local/bin/ryeosd
@@ -669,7 +671,7 @@ LABEL io.ryeos.bundle-protocol="1.0"
 LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/_ryeos/ready',timeout=3).read()"]
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 FROM workflow-runtime AS ryeos-central-host
 COPY --from=central-host-pair /build/target/central-host/ryeosd /usr/local/bin/ryeosd
@@ -704,7 +706,7 @@ LABEL io.ryeos.bundle-protocol="1.0"
 LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/_ryeos/ready',timeout=3).read()"]
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 # Hard-contained worker packaging only. An external installed Lillux adapter
 # prepares /data/app and the protected authority. This target never initializes
@@ -772,10 +774,12 @@ WORKDIR /app
 # image run as ryeos (uid 10000, gid 10000), never as root: lillux refuses
 # root as the recorded actor of `ryeos node allow-restart` and
 # `ryeos node capacity reissue`, so a node running as root could never have
-# its restart inhibition cleared from inside its own container. tini stays
-# pid 1. The entrypoint starts as root only to hand /data (a platform volume,
-# mounted root-owned) to this account, then re-executes itself as ryeos
-# before any ryeos command.
+# its restart inhibition cleared from inside its own container. The
+# entrypoint script is pid 1 and starts as root only to hand /data (a
+# platform volume, mounted root-owned) to this account, then replaces itself
+# with tini running as ryeos, so the init and the daemon share one uid and
+# the init needs no capability to forward the stop signal. The script runs
+# again under tini before any ryeos command.
 RUN groupadd --gid 10000 ryeos && \
     useradd --uid 10000 --gid 10000 --home-dir /data/app --no-create-home \
       --shell /bin/bash ryeos && \
@@ -824,7 +828,7 @@ LABEL io.ryeos.bundle-seed-mode="first-boot-only"
 LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/_ryeos/ready',timeout=3).read()"]
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 FROM hosted-runtime AS ryeos-hosted-workflow
 COPY --from=hosted-workflow-pair /build/target/hosted-workflow/ryeosd /usr/local/bin/ryeosd
@@ -859,7 +863,7 @@ LABEL io.ryeos.bundle-protocol="1.0"
 LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/_ryeos/ready',timeout=3).read()"]
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 # Composition images. Each is one bundle set with its exact native features;
 # the capability floor the node holds is selected at first boot from the
@@ -891,7 +895,7 @@ LABEL io.ryeos.bundle-protocol="1.0"
 LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/_ryeos/ready',timeout=3).read()"]
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 FROM hosted-runtime AS ryeos-core-scheduling
 COPY --from=core-scheduling-pair /build/target/core-scheduling/ryeosd /usr/local/bin/ryeosd
@@ -920,7 +924,7 @@ LABEL io.ryeos.bundle-protocol="1.0"
 LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/_ryeos/ready',timeout=3).read()"]
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 FROM hosted-runtime AS ryeos-core-workflow
 COPY --from=core-workflow-pair /build/target/core-workflow/ryeosd /usr/local/bin/ryeosd
@@ -949,7 +953,7 @@ LABEL io.ryeos.bundle-protocol="1.0"
 LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/_ryeos/ready',timeout=3).read()"]
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 FROM hosted-runtime AS ryeos-core-knowledge
 COPY --from=core-knowledge-pair /build/target/core-knowledge/ryeosd /usr/local/bin/ryeosd
@@ -978,7 +982,7 @@ LABEL io.ryeos.bundle-protocol="1.0"
 LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/_ryeos/ready',timeout=3).read()"]
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 # The remote-authoring controller runs Codex workers, so it uses the workflow
 # runtime with Node.js beside Python.
@@ -1012,7 +1016,7 @@ LABEL io.ryeos.bundle-protocol="1.0"
 LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/_ryeos/ready',timeout=3).read()"]
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 # The remote-authoring controller built from the already-published, officially
 # signed release bundles. The build context `released-bundles` is a directory
@@ -1115,4 +1119,4 @@ LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
 LABEL io.ryeos.bundle-source="release:v$VERSION"
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/_ryeos/ready',timeout=3).read()"]
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

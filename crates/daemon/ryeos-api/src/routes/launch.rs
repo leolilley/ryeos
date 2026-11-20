@@ -212,6 +212,8 @@ pub(crate) struct DispatchLaunchOptions {
     /// Chained-resume turn: daemon-internal callers only (the
     /// thread-input service); never populated from raw HTTP bodies.
     pub previous_thread_id: Option<String>,
+    /// Thread facets committed with the new root thread as its first events.
+    pub initial_facets: BTreeMap<String, String>,
     /// Optional request-local observability, never execution authority.
     pub launch_timings: Option<ryeos_app::launch_stage_timings::LaunchStageTimings>,
     lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
@@ -300,6 +302,7 @@ impl DispatchLaunchOptions {
             usage_subject_asserted_by: None,
             call: None,
             previous_thread_id: None,
+            initial_facets: BTreeMap::new(),
             launch_timings: None,
             lifecycle_authority,
             root_admission,
@@ -315,6 +318,11 @@ impl DispatchLaunchOptions {
         publication: Option<Arc<ryeos_executor::SelectedApplicationPublication>>,
     ) -> Self {
         self.application_publication = publication;
+        self
+    }
+
+    pub(crate) fn with_initial_facets(mut self, facets: BTreeMap<String, String>) -> Self {
+        self.initial_facets = facets;
         self
     }
 
@@ -698,6 +706,7 @@ fn spawn_dispatch_launch_inner(
     let usage_subject_asserted_by = options.usage_subject_asserted_by;
     let call = options.call;
     let previous_thread_id = options.previous_thread_id;
+    let initial_facets = options.initial_facets;
     let launch_timings = options.launch_timings;
     let lifecycle_authority = options.lifecycle_authority;
     let root_admission = options.root_admission;
@@ -766,6 +775,7 @@ fn spawn_dispatch_launch_inner(
             usage_subject,
             usage_subject_asserted_by,
             previous_thread_id,
+            initial_facets,
             root_admission: Some(root_admission.clone()),
             root_dispatch_evidence: Some(root_dispatch_evidence),
             parent_execution_context: None,
