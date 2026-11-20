@@ -5302,30 +5302,28 @@ mod tests {
         );
         assert!(crate::native_capacity::inspect_capacity_account(&state).is_err());
 
+        // The documented command, through the real offline handler. A node
+        // that was initialised but never started has no runtime database for
+        // the history reset itself to retire, so that half refuses; the
+        // capacity step runs first, in the same handler, and has already
+        // re-recorded the files by then.
         let epoch = ryeos_app::runtime_db::RuntimeDb::current_operator_schema_epoch();
-        let report = crate::offline_operation::handlers::reset_execution_history_for_test(
+        let history = crate::offline_operation::handlers::reset_execution_history_for_test(
             &state,
             &lock,
             epoch - 1,
             epoch,
         )
-        .expect("the documented cut");
-        assert_eq!(
-            report["native_capacity_cut"],
-            serde_json::json!({"anchor_rewritten": true, "account_rewritten": true})
+        .expect_err("a never-started node has no runtime database to reset");
+        assert!(
+            format!("{history:#}").contains("Existing Runtime source main was absent"),
+            "{history:#}"
         );
-        // Idempotent: a rerun finds nothing left to re-record.
-        let again = crate::offline_operation::handlers::reset_execution_history_for_test(
-            &state,
-            &lock,
-            epoch - 1,
-            epoch,
-        )
-        .expect("the cut reruns");
-        assert_eq!(
-            again["native_capacity_cut"],
-            serde_json::json!({"anchor_rewritten": false, "account_rewritten": false})
-        );
+        // The step re-recorded both files and a rerun finds nothing left.
+        assert!(crate::native_capacity::inspect_capacity_account(&state).is_ok());
+        let again = crate::native_capacity::retire_pre_cut_identity_records(&state, &lock)
+            .expect("the cut reruns");
+        assert!(again.is_empty(), "{again:?}");
 
         crate::native_capacity::startup_seams::open_and_debit(&state, &lock)
             .expect("the node starts, settles the dead incarnation and debits");
