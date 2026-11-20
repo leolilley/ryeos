@@ -128,6 +128,19 @@ fn installed_daemon() -> Result<PathBuf> {
     Ok(installed)
 }
 
+/// A temporary directory the node can use. A directory the test creates is
+/// owned by the test process, which in the real mode is an administrator, and
+/// the node account could not enter it; here it belongs to the node account.
+/// Without the real mode this is an ordinary temporary directory.
+pub fn tempdir() -> Result<tempfile::TempDir> {
+    let directory = tempfile::tempdir()?;
+    if required() {
+        let (uid, gid) = account()?;
+        chown_tree(&[directory.path().to_path_buf()], uid, gid)?;
+    }
+    Ok(directory)
+}
+
 /// Provision the delegation and protected binding for the node at
 /// `state_path` and make `owned` (every tree the node reads or writes) belong
 /// to the node account. Called once, before the first start.
