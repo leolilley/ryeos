@@ -901,6 +901,25 @@ async fn workload_receives_the_value_and_no_state_retains_it() -> Result<()> {
             "{holder} holds the sealed secret descriptor: {report:#}"
         );
     }
+    // The node's own executable image never reaches a worker or its child.
+    for holder in ["worker_fds_after_close", "child_fds"] {
+        let image_descriptors: Vec<&str> = report[holder]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|target| {
+                Path::new(target.trim_end_matches(" (deleted)"))
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("ryeosd"))
+            })
+            .collect();
+        assert!(
+            image_descriptors.is_empty(),
+            "{holder} holds the node's executable image: {image_descriptors:?}"
+        );
+    }
     assert!(
         !report.to_string().contains(SECRET_VALUE),
         "the report must carry digests only"

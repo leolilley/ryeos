@@ -435,9 +435,17 @@ send('ready', None, {'boot_identity':boot})
 while True:
     frame = receive()
     if frame['kind'] == 'request':
+        observations = [{'kind':'remote_thread','id':session_id}]
+        if isinstance(frame['body'], dict) and frame['body'].get('route_id') == 'session.start':
+            # The start command runs one real turn to completion, so the
+            # node holds its exact completed-command fence.
+            observations += [
+                {'kind':'state','expected':'idle','next':'turn_running','turn_id':'turn-handoff-fixture-start'},
+                {'kind':'state','expected':'turn_running','next':'idle','completed_turn_id':'turn-handoff-fixture-start'},
+            ]
         send('final', frame['request_id'], {
             'response':{'result':{'session_id':session_id}},
-            'session_observations':[{'kind':'remote_thread','id':session_id}],
+            'session_observations':observations,
             'result_retention':'durable'
         })
     elif frame['kind'] == 'cancel':

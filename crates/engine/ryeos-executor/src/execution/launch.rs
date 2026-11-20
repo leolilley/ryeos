@@ -11838,7 +11838,7 @@ pub fn prepare_and_spawn_existing_native_resume_recovery(
             }
             Err(error) => tracing::error!(
                 thread_id = %thread_id,
-                error = %error,
+                error = %format!("{error:#}"),
                 "prepared managed native resume failed"
             ),
         }

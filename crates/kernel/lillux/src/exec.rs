@@ -2898,6 +2898,56 @@ pub fn configure_inherited_descriptor_authorities(
     configure_inherited_fds(command, authorities)
 }
 
+/// Make every inherited descriptor of this process's own executable image
+/// close-on-exec, returning how many it protected.
+///
+/// A supervisor that starts a node from a descriptor-bound image leaves that
+/// descriptor open and inheritable in the node. The node has no use for it
+/// after exec, and a child it spawns must receive only the descriptors the
+/// spawn names, so the image descriptor must never reach a worker. Call this
+/// while the process is still single-threaded, before any child is spawned.
+#[cfg(target_os = "linux")]
+pub fn protect_running_image_descriptors() -> Result<usize, String> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let image = std::fs::metadata("/proc/self/exe")
+        .map_err(|error| format!("inspect the running image: {error}"))?;
+    let mut protected = 0;
+    let entries =
+        std::fs::read_dir("/proc/self/fd").map_err(|error| format!("list descriptors: {error}"))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let Some(fd) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        if fd <= libc::STDERR_FILENO {
+            continue;
+        }
+        let Ok(target) = std::fs::metadata(entry.path()) else {
+            continue;
+        };
+        if target.dev() != image.dev() || target.ino() != image.ino() {
+            continue;
+        }
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags < 0 || flags & libc::FD_CLOEXEC != 0 {
+            continue;
+        }
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+            return Err(format!(
+                "protect image descriptor {fd}: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        protected += 1;
+    }
+    Ok(protected)
+}
+
 /// Returns a file that writes to this process's standard output through a
 /// duplicate of descriptor 1.
 ///
