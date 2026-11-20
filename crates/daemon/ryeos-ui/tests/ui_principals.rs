@@ -72,14 +72,14 @@ async fn ryeos_config_is_isolated_by_durable_user_principal() {
     let updated = ryeos_ui::seat_auth::with_compiled_ui_attachment(
         attachment_a.clone(),
         ryeos_ui::handlers::ui_projects::handle_config_update(
-            json!({ "theme": "dark" }),
+            json!({ "theme": "gruvbox" }),
             ctx_a.clone(),
             Arc::new(state.clone()),
         ),
     )
     .await
     .expect("principal A should update config");
-    assert_eq!(updated["theme"], "dark");
+    assert_eq!(updated["theme"], "gruvbox");
 
     let loaded_a = ryeos_ui::seat_auth::with_compiled_ui_attachment(
         attachment_a,
@@ -91,7 +91,7 @@ async fn ryeos_config_is_isolated_by_durable_user_principal() {
     )
     .await
     .expect("principal A should read updated config");
-    assert_eq!(loaded_a["theme"], "dark");
+    assert_eq!(loaded_a["theme"], "gruvbox");
 
     let (ctx_b, attachment_b) = session_context(&state, &principal_b);
     let loaded_b = ryeos_ui::seat_auth::with_compiled_ui_attachment(
@@ -113,6 +113,56 @@ async fn ryeos_config_is_isolated_by_durable_user_principal() {
             .join(principal_a_key)
             .join("space/.ai/config/ryeos-ui.yaml")
             .is_file()
+    );
+}
+
+#[tokio::test]
+async fn a_stored_light_or_dark_theme_reads_as_system_and_can_be_replaced() {
+    let (tmp, _state_owner, state) = build_test_state();
+    let principal = format!("fp:{}", "dd".repeat(32));
+    let (ctx, attachment) = session_context(&state, &principal);
+    let call = |params: serde_json::Value, update: bool| {
+        let (ctx, attachment, state) = (ctx.clone(), attachment.clone(), Arc::new(state.clone()));
+        async move {
+            if update {
+                ryeos_ui::seat_auth::with_compiled_ui_attachment(
+                    attachment,
+                    ryeos_ui::handlers::ui_projects::handle_config_update(params, ctx, state),
+                )
+                .await
+            } else {
+                ryeos_ui::seat_auth::with_compiled_ui_attachment(
+                    attachment,
+                    ryeos_ui::handlers::ui_projects::handle_config_get(params, ctx, state),
+                )
+                .await
+            }
+        }
+    };
+    call(json!({ "theme": "gruvbox" }), true)
+        .await
+        .expect("writes the config file");
+    let file = tmp
+        .path()
+        .join(".ai/principals")
+        .join("dd".repeat(32))
+        .join("space/.ai/config/ryeos-ui.yaml");
+    let text = std::fs::read_to_string(&file).expect("config file");
+    std::fs::write(&file, text.replace("theme: gruvbox", "theme: dark")).expect("rewrite");
+
+    // The whole config still reads; only the theme is treated as unset.
+    let loaded = call(json!(null), false).await.expect("config still reads");
+    assert_eq!(loaded["theme"], "system");
+    assert_eq!(loaded["landing_view"], "projects");
+    // And a config update still works and writes a valid theme back.
+    let updated = call(json!({ "theme": "paper" }), true)
+        .await
+        .expect("update works over the stale theme");
+    assert_eq!(updated["theme"], "paper");
+    assert!(
+        std::fs::read_to_string(&file)
+            .unwrap()
+            .contains("theme: paper")
     );
 }
 
