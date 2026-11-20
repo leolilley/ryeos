@@ -4999,7 +4999,7 @@ mod tests {
             &as_capacity_policy(&operator_body),
         )
         .expect("the binding in force");
-        crate::native_capacity::leave_outstanding_debit(state, &in_force, process).unwrap();
+        crate::native_capacity::leave_outstanding_debit(state, &in_force, process, lock).unwrap();
         issued
     }
 

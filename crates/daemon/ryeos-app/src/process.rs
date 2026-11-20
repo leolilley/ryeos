@@ -1216,6 +1216,7 @@ fn pin_exact(
     identity: &lillux::ExactProcessIdentity,
 ) -> std::result::Result<PinnedProcess, IdentityPinError> {
     let pid = i64::from(identity.target_pid);
+    require_comparable_coordinate(identity)?;
     let pin = open_pidfd(pid)?;
     let boot_id = read_boot_id().map_err(|_| IdentityPinError::Unavailable)?;
     if boot_id != identity.boot_id {
@@ -1230,6 +1231,62 @@ fn pin_exact(
         return Err(IdentityPinError::Stale);
     }
     Ok(pin)
+}
+
+/// The shared pid-namespace gate for every pin of a recorded coordinate. A
+/// numeric pid and birth ticks recorded in another pid namespace name no
+/// process here, so they must never be pinned, judged, or signalled: a foreign
+/// or unreadable namespace is `Unavailable` (fail closed, never dead). A boot
+/// that ended the incarnation is `Stale`. The rule itself lives in Lillux.
+#[cfg(target_os = "linux")]
+fn require_comparable_coordinate(
+    identity: &lillux::ExactProcessIdentity,
+) -> std::result::Result<(), IdentityPinError> {
+    comparable_gate(identity.end_precheck())
+}
+
+/// Map Lillux's boot/namespace decision onto a pin outcome. `Ok(false)` has
+/// no meaning for a precheck and fails closed with every error.
+#[cfg(target_os = "linux")]
+fn comparable_gate(
+    decision: Option<std::result::Result<bool, lillux::ProcessEndError>>,
+) -> std::result::Result<(), IdentityPinError> {
+    match decision {
+        None => Ok(()),
+        Some(Ok(true)) => Err(IdentityPinError::Stale),
+        Some(Ok(false) | Err(_)) => Err(IdentityPinError::Unavailable),
+    }
+}
+
+/// [`exact_process_liveness`] for a caller that holds the node's exclusive
+/// state lock (the witness is the proof, not a flag). An incarnation recorded
+/// in another pid namespace is then `DeadOrStale`: the lock is exclusive for
+/// its volume, so the daemon that recorded it has exited. Every other
+/// classification, including an untrusted observer namespace, is unchanged.
+/// Callers without the lock must use [`exact_process_liveness`].
+pub fn exact_process_liveness_holding_exclusive_lock(
+    identity: &lillux::ExactProcessIdentity,
+    state_lock: &lillux::ExclusiveLockWitness<'_>,
+) -> IdentityLiveness {
+    match identity.end_precheck_holding_exclusive_lock(state_lock) {
+        Some(Ok(true)) => IdentityLiveness::DeadOrStale,
+        _ => exact_process_liveness(identity),
+    }
+}
+
+/// [`execution_liveness`] for a caller that holds the node's exclusive state
+/// lock; see [`exact_process_liveness_holding_exclusive_lock`].
+pub fn execution_liveness_holding_exclusive_lock(
+    identity: &ExecutionProcessIdentity,
+    state_lock: &lillux::ExclusiveLockWitness<'_>,
+) -> IdentityLiveness {
+    let Ok(exact) = lillux_process_identity(identity) else {
+        return IdentityLiveness::Unavailable;
+    };
+    match exact.end_precheck_holding_exclusive_lock(state_lock) {
+        Some(Ok(true)) => IdentityLiveness::DeadOrStale,
+        _ => execution_liveness(identity),
+    }
 }
 
 /// Whether the persisted target still names the exact live incarnation.
@@ -1508,6 +1565,9 @@ fn pin_process(
     expected_pgrp: Option<i64>,
 ) -> std::result::Result<PinnedProcess, IdentityPinError> {
     validate_identity_shape(identity)?;
+    require_comparable_coordinate(
+        &lillux_process_identity(identity).map_err(|_| IdentityPinError::Unavailable)?,
+    )?;
     let pin = open_pidfd(pid)?;
     let boot_id = read_boot_id().map_err(|_| IdentityPinError::Unavailable)?;
     if boot_id != identity.boot_id {
@@ -1852,6 +1912,12 @@ mod tests {
     use std::process::{Command, Stdio};
     use tempfile::TempDir;
 
+    /// The observer's own pid namespace: a recorded coordinate is only judged
+    /// by pid evidence when it was observed in this namespace.
+    fn own_namespace() -> String {
+        lillux::process_control::current_pid_namespace().unwrap()
+    }
+
     /// An identity retained by its PID-namespace init whose init no longer
     /// exists (a PID no kernel can allocate), so settlement is decided by the
     /// containment record rather than by any numeric group.
@@ -1862,7 +1928,7 @@ mod tests {
             "schema_version": PROCESS_IDENTITY_SCHEMA_VERSION,
             "boot_id": boot, "target_pid": gone,
             "target_start_time_ticks": 200, "group_leader_pid": gone,
-            "group_leader_start_time_ticks": 190, "pid_namespace": "pid:[4026531836]",
+            "group_leader_start_time_ticks": 190, "pid_namespace": own_namespace(),
             "process_scope": {
                 "version": 5, "control_timeout": {"secs": 5, "nanos": 0},
                 "configuration": {"version": 3, "backend": {"implementation": "pid_namespace_init"}},
@@ -2229,6 +2295,184 @@ mod tests {
         value["schema_version"] = (PROCESS_IDENTITY_SCHEMA_VERSION - 1).into();
         let old: ExecutionProcessIdentity = serde_json::from_value(value).unwrap();
         assert!(validate_execution_process_identity_shape(&old).is_err());
+    }
+
+    /// A running process in its own group, with both identity forms of it.
+    fn running_group_leader() -> (
+        std::process::Child,
+        ExecutionProcessIdentity,
+        lillux::ExactProcessIdentity,
+    ) {
+        let child = unsafe {
+            Command::new("sleep")
+                .arg("30")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .pre_exec(|| {
+                    if libc::setpgid(0, 0) == 0 {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::last_os_error())
+                    }
+                })
+                .spawn()
+                .expect("spawn sleeper")
+        };
+        let pgid = i64::from(child.id());
+        let identity =
+            capture_execution_process_identity(pgid, Some(pgid)).expect("capture identity");
+        let exact = lillux_process_identity(&identity).unwrap();
+        (child, identity, exact)
+    }
+
+    fn end_sleeper(mut child: std::process::Child) {
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    fn lock_in(directory: &TempDir) -> lillux::ExactExclusiveFileLock {
+        lillux::ExactExclusiveFileLock::acquire(&directory.path().join("state.lock")).unwrap()
+    }
+
+    const FOREIGN_NS: &str = "pid:[1]";
+
+    #[test]
+    fn same_namespace_liveness_is_unchanged() {
+        let (child, identity, exact) = running_group_leader();
+        assert_eq!(exact_process_liveness(&exact), IdentityLiveness::Alive);
+        assert_eq!(execution_liveness(&identity), IdentityLiveness::Alive);
+        // A reused birth in the same namespace is dead, as before.
+        let mut reborn = exact.clone();
+        reborn.target_start_time_ticks += 1;
+        assert_eq!(
+            exact_process_liveness(&reborn),
+            IdentityLiveness::DeadOrStale
+        );
+        let mut reborn_exec = identity.clone();
+        reborn_exec.target_start_time_ticks += 1;
+        assert_eq!(
+            execution_liveness(&reborn_exec),
+            IdentityLiveness::DeadOrStale
+        );
+        // The lock proof changes nothing for a comparable coordinate.
+        let directory = TempDir::new().unwrap();
+        let lock = lock_in(&directory);
+        let witness = lock.witness().unwrap();
+        assert_eq!(
+            exact_process_liveness_holding_exclusive_lock(&exact, &witness),
+            IdentityLiveness::Alive
+        );
+        assert_eq!(
+            execution_liveness_holding_exclusive_lock(&identity, &witness),
+            IdentityLiveness::Alive
+        );
+        assert_eq!(
+            exact_process_liveness_holding_exclusive_lock(&reborn, &witness),
+            IdentityLiveness::DeadOrStale
+        );
+        end_sleeper(child);
+    }
+
+    #[test]
+    fn foreign_namespace_without_the_lock_is_never_dead() {
+        let (child, mut identity, mut exact) = running_group_leader();
+        identity.pid_namespace = FOREIGN_NS.into();
+        exact.pid_namespace = FOREIGN_NS.into();
+        // The numeric coordinate matches a live local process, and a
+        // mismatching birth would otherwise read as dead: neither is judged.
+        assert_eq!(
+            exact_process_liveness(&exact),
+            IdentityLiveness::Unavailable
+        );
+        assert_eq!(execution_liveness(&identity), IdentityLiveness::Unavailable);
+        assert_eq!(
+            execution_group_liveness(&identity),
+            IdentityLiveness::Unavailable
+        );
+        let mut mismatched = identity.clone();
+        mismatched.target_start_time_ticks += 1;
+        assert_eq!(
+            execution_liveness(&mismatched),
+            IdentityLiveness::Unavailable
+        );
+        // And no signal is sent through a foreign coordinate.
+        let killed = kill_by_action(&identity, ShutdownAction::Hard);
+        assert!(!killed.success, "{}", killed.method);
+        assert!(
+            lillux::diagnostic_process_is_live(child.id()),
+            "a foreign-namespace identity must not signal a local pid"
+        );
+        // A different boot still proves the incarnation ended.
+        exact.boot_id = "00000000-0000-4000-8000-000000000000".into();
+        assert_eq!(
+            exact_process_liveness(&exact),
+            IdentityLiveness::DeadOrStale
+        );
+        end_sleeper(child);
+    }
+
+    #[test]
+    fn foreign_namespace_with_the_lock_witness_is_ended() {
+        let (child, mut identity, mut exact) = running_group_leader();
+        identity.pid_namespace = FOREIGN_NS.into();
+        exact.pid_namespace = FOREIGN_NS.into();
+        let directory = TempDir::new().unwrap();
+        let lock = lock_in(&directory);
+        let witness = lock.witness().unwrap();
+        assert_eq!(
+            exact_process_liveness_holding_exclusive_lock(&exact, &witness),
+            IdentityLiveness::DeadOrStale
+        );
+        assert_eq!(
+            execution_liveness_holding_exclusive_lock(&identity, &witness),
+            IdentityLiveness::DeadOrStale
+        );
+        // The proof is per call: the unproven functions still fail closed.
+        assert_eq!(
+            exact_process_liveness(&exact),
+            IdentityLiveness::Unavailable
+        );
+        end_sleeper(child);
+    }
+
+    #[test]
+    fn an_untrusted_or_foreign_namespace_decision_never_reads_as_dead() {
+        use lillux::ProcessEndError::{ForeignPidNamespace, Unclassified};
+        // Comparable coordinate: the caller's own pidfd evidence decides.
+        assert!(comparable_gate(None).is_ok());
+        // A boot that ended the incarnation is stale (dead).
+        assert_eq!(
+            comparable_gate(Some(Ok(true))),
+            Err(IdentityPinError::Stale)
+        );
+        // Foreign namespace and an observer whose procfs cannot be trusted
+        // (unreadable or not its own namespace view) both fail closed.
+        assert_eq!(
+            comparable_gate(Some(Err(ForeignPidNamespace {
+                recorded: FOREIGN_NS.into(),
+                observer: "pid:[2]".into(),
+            }))),
+            Err(IdentityPinError::Unavailable)
+        );
+        assert_eq!(
+            comparable_gate(Some(Err(Unclassified(
+                "cannot read the observer's pid namespace".into()
+            )))),
+            Err(IdentityPinError::Unavailable)
+        );
+        // The lock proof resolves only the foreign case, in Lillux, never an
+        // unreadable observer namespace.
+        let directory = TempDir::new().unwrap();
+        let lock = lock_in(&directory);
+        let witness = lock.witness().unwrap();
+        let (child, _, mut exact) = running_group_leader();
+        exact.pid_namespace = FOREIGN_NS.into();
+        assert_eq!(
+            exact.end_precheck_holding_exclusive_lock(&witness),
+            Some(Ok(true))
+        );
+        end_sleeper(child);
     }
 
     #[test]

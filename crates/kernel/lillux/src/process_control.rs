@@ -1197,6 +1197,39 @@ impl ExactProcessIdentity {
         resolve_with_exclusive_lock(self.observe_end())
     }
 
+    /// The boot and pid-namespace gate of [`Self::observe_end`] alone, for a
+    /// caller that decides liveness by its own pidfd evidence but must not
+    /// compare numeric coordinates across namespaces. `None` means the
+    /// coordinate is comparable and the caller's own evidence decides;
+    /// `Some(Ok(true))` is a boot that ended the incarnation; a foreign or
+    /// unreadable namespace is `Some(Err(..))`, never "ended" and never "alive".
+    pub fn end_precheck(&self) -> Option<Result<bool, ProcessEndError>> {
+        #[cfg(target_os = "linux")]
+        {
+            let boot = linux::read_boot_id().ok();
+            let observer = linux::read_self_pid_namespace().ok();
+            end_gate(self, boot.as_deref(), observer.as_deref())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Some(Err(ProcessEndError::Unclassified(
+                "exact process death observation is unavailable on this OS".to_owned(),
+            )))
+        }
+    }
+
+    /// [`Self::end_precheck`] for a caller holding the node's exclusive state
+    /// lock: a foreign pid namespace resolves as ended exactly as in
+    /// [`Self::has_ended_holding_exclusive_lock`]; everything else is
+    /// unchanged and an untrusted observer namespace stays an error.
+    pub fn end_precheck_holding_exclusive_lock(
+        &self,
+        state_lock: &crate::ExclusiveLockWitness<'_>,
+    ) -> Option<Result<bool, String>> {
+        let _ = state_lock;
+        self.end_precheck().map(resolve_with_exclusive_lock)
+    }
+
     /// Classify this recorded incarnation after the pidfd capture of its
     /// coordinate failed; see [`classify_after_capture_error`]. Reads only
     /// world-readable procfs state and sends no signal.

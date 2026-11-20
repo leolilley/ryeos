@@ -109,6 +109,15 @@ impl StateLock {
         process.has_ended_holding_exclusive_lock(&witness)
     }
 
+    /// The typed proof that this process holds the exclusive state lock now.
+    /// Stopped-node operations that already hold the lock pass it down so a
+    /// previous incarnation recorded in another pid namespace is classified
+    /// as ended through [`lillux::ExactProcessIdentity::has_ended_holding_exclusive_lock`].
+    /// The witness borrows this guard, so it cannot outlive the lock.
+    pub fn witness(&self) -> Result<lillux::ExclusiveLockWitness<'_>> {
+        self.inner.witness()
+    }
+
     /// Retain only the live controller's exclusion lifetime. The returned
     /// lease cannot be promoted into stopped-node mutation authority.
     pub fn retain(&self) -> StateLockLease {
