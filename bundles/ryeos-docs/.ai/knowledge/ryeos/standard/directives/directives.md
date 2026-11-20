@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-20T05:51:57Z:436be7c6f23647b8752a2d73c158a623df4da9a6280f51b9aa5d818ce45cd66a:D+eFPJJO5NZ52MjRoVlqXFx12CgbxKDyHFmlF/w9RiO1PIgFDRdDu0/USbDl8nY6/7NLcJi1kxXkstRYFEW+BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-20T05:52:12Z:464cd3a96a814e91ba83980a14c9328912c439c6a66e3d79a7e983bb69e06a00:L+qBsCSsSQxnIzKrwh/T+/LFmOkxmGKIqvKoISPQ/EELEOY3BIme5KpyeSKRg22XDJQ6scek0ieiKcLDUkvkCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [fundamentals, directives, workflows, prompts]
 version: "2.1.0"
@@ -321,6 +321,13 @@ against the directive's turn limit, and follows the directive's
 `provider_contact` rule on an unknown outcome. A crash after the summary
 settles finishes the record from the retained summary with no second call. A
 summary call that fails ends the run with `compaction_summary_failed`.
+A request refused with an overflow code is recorded as a final turn at the refused
+coordinate with `finish: provider_refused_<code>` (not a conversation turn and
+not a completed turn); the successor, and a recovery of it, start by compacting
+when the path's latest provider turn is such a refusal. A continuation
+predecessor with any other unfinished turn is refused, and a turn marker's
+`purpose` names a compaction summary call so a recovery re-enters it with its
+trigger.
 
 Live context reaching `trigger_ratio` compacts in place. A request the provider
 refuses with an overflow code settles the thread `continued` when the policy
