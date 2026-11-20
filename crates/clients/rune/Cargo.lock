@@ -3327,8 +3327,16 @@ dependencies = [
  "lillux",
  "rand 0.8.6",
  "reqwest",
+ "ryeos-request-signing",
  "serde_json",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ryeos-request-signing"
+version = "0.1.0"
+dependencies = [
+ "sha2",
 ]
 
 [[package]]
