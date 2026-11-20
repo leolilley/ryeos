@@ -58,16 +58,50 @@ pub(crate) fn verify_persistent_session_selected(
         resource_authority,
         selected_resources.selections(),
     )?;
-    if existing.launch_authority_digest != authority.digest()?
-        || existing.effective_definition_digest != effective_definition_digest
-        || existing.artifact_identity_digest != authority.artifact_identity_digest()?
-        || existing.execution_closure_digest != authority.execution_closure_digest()?
-        || existing.contract_ref != contract_ref
-        || existing.contract_digest != contract_digest
-        || existing.components != execution_components(state, resolution)?
-        || existing.properties != properties
-    {
-        anyhow::bail!("persistent-session execution realization contradicts its admitted capsule");
+    let mut contradicted = Vec::new();
+    if existing.launch_authority_digest != authority.digest()? {
+        contradicted.push("launch_authority_digest");
+    }
+    if existing.effective_definition_digest != effective_definition_digest {
+        contradicted.push("effective_definition_digest");
+    }
+    if existing.artifact_identity_digest != authority.artifact_identity_digest()? {
+        contradicted.push("artifact_identity_digest");
+    }
+    if existing.execution_closure_digest != authority.execution_closure_digest()? {
+        contradicted.push("execution_closure_digest");
+    }
+    if existing.contract_ref != contract_ref {
+        contradicted.push("contract_ref");
+    }
+    if existing.contract_digest != contract_digest {
+        contradicted.push("contract_digest");
+    }
+    if existing.components != execution_components(state, resolution)? {
+        contradicted.push("components");
+    }
+    if existing.properties != properties {
+        // Name the properties that differ (names only, never values).
+        let differing: Vec<&str> = existing
+            .properties
+            .keys()
+            .chain(properties.keys())
+            .map(String::as_str)
+            .filter(|name| existing.properties.get(*name) != properties.get(*name))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        tracing::warn!(
+            differing = ?differing,
+            "persistent-session execution properties differ from the admitted realization"
+        );
+        contradicted.push("properties");
+    }
+    if !contradicted.is_empty() {
+        anyhow::bail!(
+            "persistent-session execution realization contradicts its admitted capsule ({})",
+            contradicted.join(", ")
+        );
     }
     verify_realization_node_evidence(state, &existing)?;
     verify_realization_components(state, &existing)?;
