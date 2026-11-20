@@ -11,7 +11,7 @@ use crate::layout::{LayoutTree, Rect, SplitAxis, layout_rects};
 use crate::surface::{ArrangeSpec, SideSpec, TilingModeSpec, TilingSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -326,8 +326,10 @@ pub struct ViewSet {
     /// Canonical placement authority. Ordering is derived from this tree;
     /// never add a separately mutable ordered tile list alongside it.
     pub root: Option<LayoutTree>,
-    /// Per-tile view + local state.
-    pub tiles: HashMap<TileId, TileState>,
+    /// Per-tile view + local state, in tile-id order: everything that walks
+    /// the tiles (mounting views, fetching their sources) sees the same order
+    /// every run, so the same inputs build the same core.
+    pub tiles: BTreeMap<TileId, TileState>,
     /// Focused tile. Dangling when the center is empty.
     pub focused_tile: TileId,
     /// Presentation-only isolation of one mounted tile. The canonical layout
@@ -345,7 +347,7 @@ impl ViewSet {
         surface: &crate::ids::SurfaceInstanceId,
     ) -> Self {
         let mut center_tiles = Vec::with_capacity(views.len());
-        let mut tiles = HashMap::new();
+        let mut tiles = BTreeMap::new();
         for view in views {
             // Initial mounts and later opens share one identity allocator.
             // Reusing 1..N per view set aliases source and input coordinates.
@@ -391,8 +393,8 @@ impl ViewSet {
     ) -> Self {
         fn duplicate_tree(
             tree: &LayoutTree,
-            source: &HashMap<TileId, TileState>,
-            destination: &mut HashMap<TileId, TileState>,
+            source: &BTreeMap<TileId, TileState>,
+            destination: &mut BTreeMap<TileId, TileState>,
             presentation: &crate::ids::PresentationId,
             surface: &crate::ids::SurfaceInstanceId,
         ) -> LayoutTree {
