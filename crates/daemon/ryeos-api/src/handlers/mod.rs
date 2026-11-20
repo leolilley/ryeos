@@ -94,7 +94,6 @@ pub mod push_head;
 pub(crate) mod qualification_project_context;
 pub mod rebuild;
 pub mod records;
-pub mod revisions;
 pub mod remote_admit;
 pub mod remote_admit_principal;
 pub mod remote_authorize;
@@ -127,6 +126,7 @@ pub mod remote_vault_list;
 pub mod remote_vault_set;
 pub mod remote_worker_workflows;
 pub mod renew_key;
+pub mod revisions;
 pub mod revoke_key;
 #[cfg(feature = "scheduling")]
 pub mod scheduler_deregister;

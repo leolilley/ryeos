@@ -85,14 +85,30 @@ pub fn run_item_remove(
     item_ref: &str,
     project_path: &Path,
 ) -> Result<ItemRemoveReport> {
+    let authoring = super::sign::load_offline_authoring(app_root)?;
+    remove_item(
+        &authoring.kinds,
+        &authoring.signing_key,
+        item_ref,
+        project_path,
+    )
+}
+
+/// [`run_item_remove`] over an already-admitted kind registry and the
+/// operator key the caller holds.
+pub fn remove_item(
+    kinds: &ryeos_engine::kind_registry::KindRegistry,
+    signing_key: &SigningKey,
+    item_ref: &str,
+    project_path: &Path,
+) -> Result<ItemRemoveReport> {
     let canonical = CanonicalRef::parse(item_ref)
         .map_err(|error| anyhow!("malformed canonical ref `{item_ref}`: {error}"))?;
     if canonical.suffix.is_some() {
         bail!("malformed canonical ref `{item_ref}`: remove refs do not support suffixes");
     }
     refuse_revision_kind(&canonical.kind)?;
-    let authoring = super::sign::load_offline_authoring(app_root)?;
-    let kind_schema = authoring.kinds.get(&canonical.kind).ok_or_else(|| {
+    let kind_schema = kinds.get(&canonical.kind).ok_or_else(|| {
         anyhow!(
             "unknown kind `{}` — no kind schema registered",
             canonical.kind
@@ -188,10 +204,10 @@ pub fn run_item_remove(
     }
     let recorded = record_operator_change(
         project_path,
-        &authoring.signing_key,
+        signing_key,
         &canonical.to_string(),
         &file_path,
-        Some(&before),
+        Some(before.as_slice()),
         None,
         "remove",
     )?;

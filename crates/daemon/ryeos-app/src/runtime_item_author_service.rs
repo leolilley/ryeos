@@ -477,7 +477,7 @@ impl RuntimeItemAuthorService {
             &revision_item,
             &ext,
             before.as_deref(),
-            Some(&signed),
+            Some(signed.as_str()),
             revision_provenance(&provenance),
         )?;
 
@@ -584,7 +584,7 @@ impl RuntimeItemAuthorService {
             target.project_root,
             target.item,
             target.ext,
-            Some(&before),
+            Some(before.as_slice()),
             None,
             revision_provenance(&provenance),
         )?;
@@ -1497,6 +1497,56 @@ fn require_no_incumbent(target: &Path, prefix: &str, suffix: Option<&str>) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remove_params_parse_without_content() {
+        let params: RuntimeAuthorItemParams = serde_json::from_value(json!({
+            "thread_id": "T-1",
+            "item_ref": "graph:a/b",
+            "mode": "remove",
+            "expected_digest": "digest"
+        }))
+        .unwrap();
+        assert_eq!(params.mode, AuthorMode::Remove);
+        assert!(params.content.is_none());
+    }
+
+    #[test]
+    fn remove_and_chain_refusals_keep_their_typed_codes() {
+        let remove_unguarded = AuthorItemRefusal::RemoveRequiresExpectedDigest {
+            item_ref: "graph:a/b".to_owned(),
+            path: "/p/.ai/graphs/a/b.yaml".to_owned(),
+            incumbent_digest: "d".to_owned(),
+        };
+        assert_eq!(
+            remove_unguarded.code(),
+            "author_item_expected_digest_required"
+        );
+        assert!(remove_unguarded.to_string().contains("expected_digest `d`"));
+        let remove_operator_item = AuthorItemRefusal::RemoveOverUnauthoredItem {
+            item_ref: "graph:a/b".to_owned(),
+            path: "/p/.ai/graphs/a/b.yaml".to_owned(),
+        };
+        assert_eq!(
+            remove_operator_item.code(),
+            "author_item_remove_not_runtime_authored"
+        );
+        assert!(
+            remove_operator_item
+                .to_string()
+                .contains("ryeos item remove")
+        );
+        let kind = AuthorItemRefusal::KindNotRuntimeAuthorable {
+            kind: "revision".to_owned(),
+        };
+        assert_eq!(kind.code(), "author_item_kind_not_authorable");
+        let truncated = AuthorItemRefusal::RevisionChain(ChainRefusal::Truncated {
+            item_ref: "graph:a/b".to_owned(),
+            head_seq: 3,
+            tip_seq: 1,
+        });
+        assert_eq!(truncated.code(), "revision_chain_truncated");
+    }
 
     #[test]
     fn unguarded_upsert_over_existing_item_is_refused() {

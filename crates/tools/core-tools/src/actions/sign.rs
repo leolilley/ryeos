@@ -1423,7 +1423,7 @@ fn record_signed_revision(
         item_ref,
         file_path,
         Some(content_before.as_bytes()),
-        Some(&after),
+        Some(after.as_slice()),
         "sign",
     )
     .map(|_| ())
@@ -1566,6 +1566,125 @@ mod tests {
             .with_node_trust_store(trust_store)
             .with_composers(composers)
             .with_registered_bundle_roots(registered_roots)
+    }
+
+    fn revision_bodies(
+        project: &Path,
+        kind: &str,
+        bare_id: &str,
+    ) -> Vec<ryeos_node_runtime::item_revision::RevisionBody> {
+        let directory = project.join(".ai/revisions").join(kind).join(bare_id);
+        let mut names: Vec<_> = std::fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+            .iter()
+            .map(|name| {
+                let text = std::fs::read_to_string(directory.join(name)).unwrap();
+                let body = lillux::signature::strip_signature_lines_with_envelope(&text, "#", None);
+                serde_yaml::from_str(&body).unwrap()
+            })
+            .collect()
+    }
+
+    fn no_ignore() -> ryeos_state::ignore::IgnoreMatcher {
+        ryeos_state::ignore::IgnoreMatcher::from_config(&ryeos_state::ignore::IgnoreConfig {
+            patterns: Vec::new(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn operator_sign_and_remove_are_recorded_as_operator_signed_revisions() {
+        let project_dir = tempfile::tempdir().unwrap();
+        let project = project_dir.path();
+        let item = project.join(".ai/knowledge/notes/a.yaml");
+        std::fs::create_dir_all(item.parent().unwrap()).unwrap();
+        std::fs::write(&item, "title: first\n").unwrap();
+        let key = SigningKey::generate(&mut OsRng);
+        let engine = live_bundle_engine(&key);
+        let ignore = no_ignore();
+        let sign = || {
+            let report =
+                run_sign_online("knowledge:notes/a", project, &engine, &ignore, &key).unwrap();
+            assert!(report.is_total_success(), "{report:?}");
+        };
+
+        sign();
+        let signed_once = std::fs::read(&item).unwrap();
+        std::fs::write(&item, "title: second\n").unwrap();
+        sign();
+        let signed_twice = std::fs::read(&item).unwrap();
+        // Signing an already-signed item changes nothing and records nothing.
+        sign();
+
+        let removed = crate::actions::revision::remove_item(
+            &engine.kinds,
+            &key,
+            "knowledge:notes/a",
+            project,
+        )
+        .unwrap();
+        assert_eq!(removed.revision, 3);
+        assert!(!item.exists());
+
+        let bodies = revision_bodies(project, "knowledge", "notes/a");
+        assert_eq!(bodies.len(), 3);
+        let fingerprint = format!(
+            "fp:{}",
+            lillux::signature::compute_fingerprint(&key.verifying_key())
+        );
+        assert!(bodies.iter().all(|body| {
+            body.actor.fingerprint == fingerprint
+                && body.actor.role == ryeos_node_runtime::item_revision::ActorRole::Operator
+        }));
+        assert_eq!(
+            bodies[0].before_digest,
+            Some(lillux::sha256_hex(b"title: first\n"))
+        );
+        assert_eq!(
+            bodies[0].after_digest,
+            Some(lillux::sha256_hex(&signed_once))
+        );
+        assert_eq!(
+            bodies[1].before_digest,
+            Some(lillux::sha256_hex(b"title: second\n"))
+        );
+        assert_eq!(
+            bodies[1].after_digest,
+            Some(lillux::sha256_hex(&signed_twice))
+        );
+        assert_eq!(bodies[2].before_digest, bodies[1].after_digest);
+        assert!(bodies[2].is_tombstone());
+        assert_eq!(bodies[2].provenance["action"], "remove");
+        assert_eq!(bodies[0].provenance["action"], "sign");
+    }
+
+    #[test]
+    fn revision_records_cannot_be_signed_or_removed_by_hand() {
+        let project_dir = tempfile::tempdir().unwrap();
+        let key = SigningKey::generate(&mut OsRng);
+        let engine = live_bundle_engine(&key);
+        let ignore = no_ignore();
+        let error = run_sign_online(
+            "revision:knowledge/notes/a/00000001",
+            project_dir.path(),
+            &engine,
+            &ignore,
+            &key,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("revision records"), "{error:#}");
+        let error = crate::actions::revision::remove_item(
+            &engine.kinds,
+            &key,
+            "revision:knowledge/notes/a/00000001",
+            project_dir.path(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("revision records"), "{error:#}");
     }
 
     #[test]
