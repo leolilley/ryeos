@@ -21,11 +21,6 @@ on:
         required: true
         default: false
         type: boolean
-      gate_base:
-        description: "merge_gates only: the ref the branch is classified against (the diff since its merge base). Leave at origin/next; a probe branch that already contains reviewed CI changes sets another branch to rehearse the UI-only gate."
-        required: false
-        default: origin/next
-        type: string
       refresh_bundles:
         description: "Run the expensive bundle refresh/populate path"
         required: true
@@ -107,7 +102,6 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           MERGE_GATES: ${{ inputs.merge_gates }}
-          GATE_BASE: ${{ inputs.gate_base }}
         run: |
           set -uo pipefail
           if [[ "$EVENT" != workflow_dispatch || "$MERGE_GATES" != true ]]; then
@@ -119,7 +113,7 @@ jobs:
             exit 0
           fi
           # A classifier fault must leave the output unset (the job defaults it to full).
-          if ! python3 -I scripts/ci/classify-merge-gate.py --base-ref "${GATE_BASE:-origin/next}" > "$RUNNER_TEMP/classification"; then
+          if ! python3 -I scripts/ci/classify-merge-gate.py --base-ref origin/next > "$RUNNER_TEMP/classification"; then
             echo "### Gate: full (classifier failed)" | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
