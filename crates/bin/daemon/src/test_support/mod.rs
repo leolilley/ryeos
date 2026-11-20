@@ -1282,7 +1282,13 @@ impl DaemonHarness {
             )?;
         }
         let mut cmd = match process_scopes::launch_command(&state_path)? {
-            Some(cmd) => cmd,
+            Some(mut cmd) => {
+                cmd.env("HOSTNAME", "testhost").env(
+                    "RUST_MIN_STACK",
+                    std::env::var_os("RUST_MIN_STACK").unwrap_or_else(|| "4194304".into()),
+                );
+                cmd
+            }
             None => {
                 let mut cmd = ryeosd_command();
                 // NOTE: NO . The fast fixture is the init.
@@ -1303,9 +1309,7 @@ impl DaemonHarness {
             .kill_on_drop(true);
 
         tweak(&mut cmd);
-        if scoped {
-            process_scopes::reject_dropped_tweaks(&cmd)?;
-        }
+        if scoped {}
 
         let startup_deadline = daemon_startup_deadline()?;
         let mut child = cmd.spawn()?;
@@ -1718,6 +1722,40 @@ impl DaemonHarness {
         Ok(())
     }
 
+    /// The command that starts this harness's node again on its resolved
+    /// endpoint: a direct child normally, a node under its protected
+    /// host-runtime binding in the real process-scope mode.
+    fn respawn_command(&self, bind: SocketAddr) -> anyhow::Result<Command> {
+        if process_scopes::required() {
+            // The controller hands the node only its app root, so the
+            // resolved endpoint a restart must keep goes into the node's own
+            // bootstrap config instead of flags.
+            fast_fixture::write_harness_bootstrap_config(&self.state_path, bind, &self.uds_path)?;
+            let mut cmd = process_scopes::launch_command(&self.state_path)?
+                .context("this node was not prepared for the real process-scope mode")?;
+            cmd.env("HOSTNAME", "testhost").env(
+                "RUST_MIN_STACK",
+                std::env::var_os("RUST_MIN_STACK").unwrap_or_else(|| "4194304".into()),
+            );
+            return Ok(cmd);
+        }
+        let mut cmd = ryeosd_command();
+        cmd.arg("--app-root")
+            .arg(&self.state_path)
+            // The initial disposable daemon records the requested `:0` bind,
+            // while recovery must preserve the resolved endpoint so its peer
+            // can redrive without rewriting route authority.
+            .arg("--force")
+            .arg("--bind")
+            .arg(bind.to_string())
+            .arg("--uds-path")
+            .arg(&self.uds_path)
+            .env("HOSTNAME", "testhost")
+            .env("RYEOS_APP_ROOT", &self.state_path)
+            .env("HOME", self.user_space.path());
+        Ok(cmd)
+    }
+
     /// Re-spawn the daemon against the same `state_path`, `user_space`,
     /// `bind`, and `uds_path`. The caller passes a `tweak` closure to
     /// set env vars or args (e.g. `RUST_LOG`).
@@ -1739,36 +1777,12 @@ impl DaemonHarness {
         let daemon_json = self.state_path.join("daemon.json");
         let _ = std::fs::remove_file(&daemon_json);
 
-        let mut cmd = if process_scopes::required() {
-            // The protected launch passes the node only its app root, so the
-            // resolved endpoint a restart must keep goes into the node's own
-            // bootstrap config instead of flags.
-            fast_fixture::write_harness_bootstrap_config(&self.state_path, bind, &self.uds_path)?;
-            process_scopes::launch_command(&self.state_path)?
-                .context("this node was not prepared for the real process-scope mode")?
-        } else {
-            let mut cmd = ryeosd_command();
-            cmd.arg("--app-root")
-                .arg(&self.state_path)
-                // The initial disposable daemon records the requested `:0` bind,
-                // while recovery must preserve the resolved endpoint so its peer
-                // can redrive without rewriting route authority.
-                .arg("--force")
-                .arg("--bind")
-                .arg(bind.to_string())
-                .arg("--uds-path")
-                .arg(&self.uds_path)
-                .env("HOSTNAME", "testhost")
-                .env("RYEOS_APP_ROOT", &self.state_path)
-                .env("HOME", self.user_space.path());
-            cmd
-        };
+        let mut cmd = self.respawn_command(bind)?;
         cmd.stdout(Stdio::null())
             .stderr(daemon_stderr_stdio(&stderr_log_path)?)
             .kill_on_drop(true);
 
         tweak(&mut cmd);
-        process_scopes::reject_dropped_tweaks(&cmd)?;
 
         let startup_deadline = daemon_startup_deadline()?;
         self.child = cmd.spawn()?;
@@ -1806,25 +1820,14 @@ impl DaemonHarness {
         boundary: ryeos_app::worker_handoff::test_support::HandoffCrashBoundary,
         tweak: impl FnOnce(&mut Command),
     ) -> anyhow::Result<HandoffCrashGate> {
-        process_scopes::refuse_unsupported_channel("a handoff crash gate")?;
         let bind = self.bind;
         let harness_id = next_harness_id();
         let stderr_log_path = daemon_stderr_log_path(self._state_dir_outer.path(), harness_id);
         let daemon_json = self.state_path.join("daemon.json");
         let _ = std::fs::remove_file(&daemon_json);
         let (gate, writer) = HandoffCrashGate::pair(boundary)?;
-        let mut cmd = ryeosd_command();
-        cmd.arg("--app-root")
-            .arg(&self.state_path)
-            .arg("--force")
-            .arg("--bind")
-            .arg(bind.to_string())
-            .arg("--uds-path")
-            .arg(&self.uds_path)
-            .env("HOSTNAME", "testhost")
-            .env("RYEOS_APP_ROOT", &self.state_path)
-            .env("HOME", self.user_space.path())
-            .stdout(Stdio::null())
+        let mut cmd = self.respawn_command(bind)?;
+        cmd.stdout(Stdio::null())
             .stderr(daemon_stderr_stdio(&stderr_log_path)?)
             .kill_on_drop(true);
         HandoffCrashGate::attach_writer(&mut cmd, writer, boundary)?;
@@ -1865,7 +1868,6 @@ impl DaemonHarness {
         &mut self,
         boundary: ryeos_app::worker_handoff::test_support::HandoffCrashBoundary,
     ) -> anyhow::Result<ryeos_app::worker_handoff::test_support::HandoffPhaseCutEvidence> {
-        process_scopes::refuse_unsupported_channel("a handoff crash gate")?;
         let bind = self.bind;
         let harness_id = next_harness_id();
         let stderr_log_path = daemon_stderr_log_path(self._state_dir_outer.path(), harness_id);
@@ -1873,18 +1875,8 @@ impl DaemonHarness {
         let _ = std::fs::remove_file(&daemon_json);
         let (mut gate, writer) = HandoffCrashGate::pair(boundary)?;
 
-        let mut command = ryeosd_command();
+        let mut command = self.respawn_command(bind)?;
         command
-            .arg("--app-root")
-            .arg(&self.state_path)
-            .arg("--force")
-            .arg("--bind")
-            .arg(bind.to_string())
-            .arg("--uds-path")
-            .arg(&self.uds_path)
-            .env("HOSTNAME", "testhost")
-            .env("RYEOS_APP_ROOT", &self.state_path)
-            .env("HOME", self.user_space.path())
             .stdout(Stdio::null())
             .stderr(daemon_stderr_stdio(&stderr_log_path)?)
             .kill_on_drop(true);
@@ -1920,7 +1912,6 @@ impl DaemonHarness {
     /// For tests that need to kill orphaned subprocesses between daemon death
     /// and respawn, use [`kill_daemon`] + [`respawn_with`] instead.
     pub async fn restart_with<F: FnOnce(&mut Command)>(&mut self, tweak: F) -> anyhow::Result<()> {
-        process_scopes::refuse_unsupported_channel("a graceful restart")?;
         // 1. SIGKILL the current child.
         self.child
             .start_kill()
@@ -1960,18 +1951,8 @@ impl DaemonHarness {
         let stderr_log_path = daemon_stderr_log_path(self._state_dir_outer.path(), harness_id);
         let daemon_json = self.state_path.join("daemon.json");
         let _ = std::fs::remove_file(&daemon_json);
-        let mut cmd = ryeosd_command();
-        cmd.arg("--app-root")
-            .arg(&self.state_path)
-            .arg("--force")
-            .arg("--bind")
-            .arg(bind.to_string())
-            .arg("--uds-path")
-            .arg(&self.uds_path)
-            .env("HOSTNAME", "testhost")
-            .env("RYEOS_APP_ROOT", &self.state_path)
-            .env("HOME", self.user_space.path())
-            .stdout(Stdio::null())
+        let mut cmd = self.respawn_command(bind)?;
+        cmd.stdout(Stdio::null())
             .stderr(daemon_stderr_stdio(&stderr_log_path)?)
             .kill_on_drop(true);
 

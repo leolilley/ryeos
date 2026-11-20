@@ -13,7 +13,9 @@
 //! * the daemon is started the way an external supervisor starts one: the
 //!   test process, running as an administrator on a disposable host, provisions
 //!   a delegated cgroup subtree, writes the protected host-runtime binding
-//!   and starts `ryeosd host-runtime --binding <path>`, which places the node
+//!   and starts the node through the same controller launch as
+//!   `ryeosd host-runtime --binding <path>` (test-only spawn variant, so the
+//!   test keeps the node as its child and can pass crash gates), which places the node
 //!   in its controller leaf and drops to the node account;
 //! * a host that cannot qualify the scopes is a failure ([`skip_or_fail_unqualified`]
 //!   panics) and the node's own capability report must show the per-scope
@@ -128,44 +130,6 @@ fn installed_daemon() -> Result<PathBuf> {
     Ok(installed)
 }
 
-/// A harness path whose test channel (an inherited descriptor, extra
-/// arguments or extra environment) the protected host-runtime entry cannot
-/// carry: the controller hands the node only its app root and an empty
-/// environment. In the real mode such a start fails with the cause, so a test
-/// that needs the channel is never silently run without it.
-pub fn refuse_unsupported_channel(what: &str) -> Result<()> {
-    anyhow::ensure!(
-        !required(),
-        "{what} cannot run in the real process-scope mode: the protected host-runtime entry carries no inherited descriptor, argument or environment into the node"
-    );
-    Ok(())
-}
-
-/// In the real mode, fail when a test's launch tweak added anything the
-/// protected host-runtime entry would silently drop. `HOSTNAME` is the one
-/// accepted variable: the node does not read it.
-pub fn reject_dropped_tweaks(command: &tokio::process::Command) -> Result<()> {
-    if !required() {
-        return Ok(());
-    }
-    let std_command = command.as_std();
-    let extra_args: Vec<String> = std_command
-        .get_args()
-        .skip(3)
-        .map(|arg| arg.to_string_lossy().into_owned())
-        .collect();
-    let extra_env: Vec<String> = std_command
-        .get_envs()
-        .filter(|(name, _)| *name != std::ffi::OsStr::new("HOSTNAME"))
-        .map(|(name, _)| name.to_string_lossy().into_owned())
-        .collect();
-    anyhow::ensure!(
-        extra_args.is_empty() && extra_env.is_empty(),
-        "the test added launch arguments {extra_args:?} or environment {extra_env:?} that the protected host-runtime entry cannot carry into the node"
-    );
-    Ok(())
-}
-
 /// A temporary directory the node can use. A directory the test creates is
 /// owned by the test process, which in the real mode is an administrator, and
 /// the node account could not enter it; here it belongs to the node account.
@@ -249,11 +213,15 @@ pub fn launch_command(state_path: &Path) -> Result<Option<tokio::process::Comman
     };
     let (uid, gid) = account()?;
     chown_tree(&registration.owned, uid, gid)?;
-    let mut command = tokio::process::Command::new(&registration.daemon);
-    command
-        .arg("host-runtime")
-        .arg("--binding")
-        .arg(&registration.binding);
+    // The same placement, credential drop and inherited binding as the
+    // protected `host-runtime` entry, returned as a command this process
+    // spawns as its own child, so the node's arguments, environment and
+    // inherited descriptors (a crash gate) can be added.
+    let command = ryeos_node::host_runtime::spawn_external_controller_command(
+        &registration.binding,
+        &registration.daemon,
+    )?;
+    let command = tokio::process::Command::from(command);
     Ok(Some(command))
 }
 
