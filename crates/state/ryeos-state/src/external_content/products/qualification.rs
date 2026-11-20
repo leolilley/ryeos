@@ -24,6 +24,66 @@ use crate::objects::{
     SessionProcessEnvironmentValue, canonical_value_digest, validate_session_process_environment,
 };
 
+/// How a qualification or its testimony was refused at admission: by the
+/// receiving policy, or because what it was issued or accepted against has
+/// since moved on. Both are caller-curable conflicts, never server faults;
+/// each travels as an `anyhow` cause and keeps its message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QualificationRefusalClass {
+    /// The signed policy does not allow this lane, attester, claim, verifier
+    /// or origin holding.
+    PolicyDenied,
+    /// The qualification, acceptance or testimony no longer matches the
+    /// current policy, verifier or artifact, or is expired or out of its
+    /// issue window; only a fresh issue or acceptance cures it.
+    Stale,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QualificationRefused {
+    pub class: QualificationRefusalClass,
+    message: String,
+}
+
+impl QualificationRefused {
+    pub const POLICY_DENIED_CODE: &'static str = "qualification_policy_denied";
+    pub const STALE_CODE: &'static str = "qualification_stale";
+
+    pub fn policy_denied(message: impl Into<String>) -> anyhow::Error {
+        anyhow::Error::new(Self {
+            class: QualificationRefusalClass::PolicyDenied,
+            message: message.into(),
+        })
+    }
+
+    pub fn stale(message: impl Into<String>) -> anyhow::Error {
+        anyhow::Error::new(Self {
+            class: QualificationRefusalClass::Stale,
+            message: message.into(),
+        })
+    }
+
+    pub fn code(&self) -> &'static str {
+        match self.class {
+            QualificationRefusalClass::PolicyDenied => Self::POLICY_DENIED_CODE,
+            QualificationRefusalClass::Stale => Self::STALE_CODE,
+        }
+    }
+
+    /// The refusal in `error`'s cause chain, if any.
+    pub fn find(error: &anyhow::Error) -> Option<&Self> {
+        error.chain().find_map(|cause| cause.downcast_ref::<Self>())
+    }
+}
+
+impl std::fmt::Display for QualificationRefused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for QualificationRefused {}
+
 pub mod remote_verifier_source;
 
 pub const PRODUCT_QUALIFICATION_POLICY_SCHEMA: &str = "ryeos.product_qualification_policy.v5";
@@ -1165,7 +1225,9 @@ impl ProductQualificationResult {
                 .iter()
                 .any(|claim| self.claims.binary_search(claim).is_err())
         {
-            bail!("qualification claims exceed the signed allowance or omit a required claim");
+            return Err(QualificationRefused::policy_denied(
+                "qualification claims exceed the signed allowance or omit a required claim",
+            ));
         }
         Ok(())
     }
@@ -1979,7 +2041,9 @@ impl ProductQualificationEvidence {
             || self.verifier.effective_definition_digest
                 != current_verifier_effective_definition_digest
         {
-            bail!("qualification no longer matches the exact current policy and verifier");
+            return Err(QualificationRefused::stale(
+                "qualification no longer matches the exact current policy and verifier",
+            ));
         }
         self.result
             .validate_claims_for(&current_policy.policy, required_claims)
@@ -1995,7 +2059,9 @@ impl ProductQualificationEvidence {
         self.validate()?;
         current.validate()?;
         if &self.verifier.artifact_identity != current {
-            bail!("qualification no longer matches the exact current verifier runtime artifact");
+            return Err(QualificationRefused::stale(
+                "qualification no longer matches the exact current verifier runtime artifact",
+            ));
         }
         Ok(())
     }

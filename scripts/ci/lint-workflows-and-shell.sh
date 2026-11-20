@@ -46,5 +46,6 @@ PATH="$tool_dir:$PATH" "$actionlint" -color
     .ai/tools/ryeos/development/interactive-host/lib/dev-ui-assets.sh \
     tests/e2e/execute-stream/smoke.sh \
     tests/e2e/installed-resume/smoke.sh \
+    tests/e2e/init-profiles/check.sh \
     scripts/populate-bundles.sh \
     deploy/entrypoint.sh
