@@ -519,6 +519,42 @@ pub enum PreviousRun {
     },
 }
 
+/// A previous run that ended without a handled exit: its marker still says
+/// `running` and the exact process it names is gone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UncleanExit {
+    /// The recorded daemon's pid, for display only; the verdict is the exact
+    /// identity's.
+    pub pid: u32,
+    pub started_at: String,
+    pub launch_route: Option<LaunchRoute>,
+}
+
+/// The unclean exit `previous` shows, if it shows one. A `running` marker
+/// names a run that is over exactly when [`recorded_process`] proves its
+/// recorded incarnation ended: another boot, an absent process, or another
+/// birth at the same pid (a container restart reuses the pid, including this
+/// process's own). A run still running, one that cannot be classified, and a
+/// retired marker of an older schema are never an unclean exit.
+pub fn inferred_unclean_exit(previous: Option<&PreviousRun>) -> Option<UncleanExit> {
+    let Some(PreviousRun::Marker(LifecycleMarker::Running {
+        identity,
+        started_at,
+        launch_route,
+        schema_version: _,
+        pending_latched_drain: _,
+        carrier_incarnation: _,
+    })) = previous
+    else {
+        return None;
+    };
+    (recorded_process(identity) == RecordedProcess::Ended).then(|| UncleanExit {
+        pid: identity.target_pid,
+        started_at: started_at.clone(),
+        launch_route: *launch_route,
+    })
+}
+
 /// The previous run's marker, read before this start overwrites it. `None`
 /// means no marker exists. An unreadable marker (bad bytes, over its bound,
 /// a refused pinned open) is an error: the start must fail closed and leave
@@ -1268,6 +1304,40 @@ mod tests {
     }
 
     #[test]
+    fn the_journal_infers_an_unclean_exit_only_from_an_ended_exact_identity() {
+        let running = |identity| PreviousRun::Marker(running_with(identity));
+        let live = lillux::process_control::capture_current_process_identity().unwrap();
+        // Still the running incarnation: not an exit.
+        assert!(inferred_unclean_exit(Some(&running(live.clone()))).is_none());
+        // Another boot: ended; the pid is only displayed.
+        let exit = inferred_unclean_exit(Some(&running(identity_at(
+            "00000000-dead-beef-0000-000000000000",
+            u32::MAX - 1,
+            5,
+        ))))
+        .expect("another boot ended the recorded run");
+        assert_eq!(exit.pid, u32::MAX - 1);
+        assert_eq!(exit.started_at, "2026-01-01T00:00:00Z");
+        assert_eq!(exit.launch_route, Some(LaunchRoute::Direct));
+        // Our own pid at another birth (a restarted container): ended.
+        let mut recycled = live.clone();
+        recycled.target_start_time_ticks += 1;
+        assert!(inferred_unclean_exit(Some(&running(recycled))).is_some());
+        // A foreign pid namespace cannot be classified: never an exit.
+        let mut foreign = live;
+        foreign.pid_namespace = "pid:[1]".to_owned();
+        assert!(inferred_unclean_exit(Some(&running(foreign))).is_none());
+        // A retired older-schema marker, no marker, and a handled exit.
+        assert!(
+            inferred_unclean_exit(Some(&PreviousRun::RetiredStaleRunning {
+                found_schema: None
+            }))
+            .is_none()
+        );
+        assert!(inferred_unclean_exit(None).is_none());
+    }
+
+    #[test]
     fn same_boot_different_birth_at_our_own_pid_is_ended() {
         let live = lillux::process_control::capture_current_process_identity().unwrap();
         let mut recycled = live.clone();
@@ -1361,6 +1431,37 @@ mod tests {
         };
         assert_eq!(recorded_process(&identity), RecordedProcess::Ended);
         report_previous_exit(read(tmp.path()).as_ref());
+    }
+
+    #[test]
+    fn unclean_exit_is_inferred_only_from_a_running_marker_of_a_gone_process() {
+        let running = |pid| LifecycleMarker::Running {
+            pid,
+            started_at: "2026-01-01T00:00:00Z".into(),
+            launch_route: Some(LaunchRoute::Supervised),
+            pending_latched_drain: None,
+            carrier_incarnation: None,
+        };
+        assert_eq!(
+            inferred_unclean_exit(Some(&running(u32::MAX - 1))),
+            Some(UncleanExit {
+                pid: u32::MAX - 1,
+                started_at: "2026-01-01T00:00:00Z".into(),
+                launch_route: Some(LaunchRoute::Supervised),
+            })
+        );
+        // A previous run that reused this process's pid is still a previous run.
+        assert!(inferred_unclean_exit(Some(&running(std::process::id()))).is_some());
+        assert!(inferred_unclean_exit(None).is_none());
+        let exited = exited_marker(
+            "signal",
+            "2026-01-01T00:00:00Z",
+            None,
+            LaunchRoute::Direct,
+            None,
+            None,
+        );
+        assert!(inferred_unclean_exit(Some(&exited)).is_none());
     }
 
     #[test]
