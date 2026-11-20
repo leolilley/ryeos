@@ -537,7 +537,9 @@ mod tests {
             std::fs::create_dir_all(&path).unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
-        drop(StateLock::acquire(&default_lock_path(&config.app_root)).unwrap());
+        drop(
+            super::super::tests::acquire_state_lock(&default_lock_path(&config.app_root)).unwrap(),
+        );
         drop(ryeos_state::CasMutationGuard::acquire_exclusive(&runtime).unwrap());
         Node { _tmp: tmp, config }
     }

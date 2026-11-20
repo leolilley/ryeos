@@ -62,7 +62,8 @@ pub use policy::{
     IsolationLimitsPolicy, IsolationLiveProjectPolicy, IsolationMode, IsolationNetworkMode,
     IsolationNetworkPolicy, IsolationNetworkRuntimeFile, IsolationPolicy, IsolationPolicyDocument,
     IsolationProcessScopePolicy, IsolationSharedFilesystemPolicy, MAX_HOST_CLASSES,
-    floor_requires_outright, nested_sandbox_from, valid_host_class_name,
+    MAX_PROCESS_SCOPE_CONTROL_TIMEOUT_MS, floor_requires_outright, nested_sandbox_from,
+    valid_host_class_name,
 };
 use provenance::redacted_plan_digest;
 pub use provenance::{
@@ -1696,6 +1697,15 @@ impl IsolationRuntime {
             return Err(refused(
                 "required process scopes require a positive control deadline".to_owned(),
             ));
+        }
+        if let IsolationProcessScopePolicy::Required { control_timeout_ms } = &policy.process_scopes
+            && *control_timeout_ms > MAX_PROCESS_SCOPE_CONTROL_TIMEOUT_MS
+        {
+            return Err(EngineError::IsolationPolicyValueAboveMaximum {
+                field: "process_scopes.control_timeout_ms",
+                value_ms: *control_timeout_ms,
+                maximum_ms: MAX_PROCESS_SCOPE_CONTROL_TIMEOUT_MS,
+            });
         }
         if policy.mode == IsolationMode::Enforce {
             validate_enforced_limits(&policy.limits)?;
@@ -13490,6 +13500,55 @@ mod tests {
                 .to_string()
                 .contains("has not qualified nested-sandbox")
         );
+    }
+
+    #[test]
+    fn control_timeout_maximum_is_accepted_at_the_boundary_and_refused_above() {
+        let mut policy = IsolationPolicy::disabled_for_authoring();
+        policy.requires_capabilities = vec!["recovery:scope".into(), "termination:scope".into()];
+        policy.process_scopes = IsolationProcessScopePolicy::Required {
+            control_timeout_ms: MAX_PROCESS_SCOPE_CONTROL_TIMEOUT_MS,
+        };
+        IsolationRuntime::validate_policy(&policy).unwrap();
+        policy.process_scopes = IsolationProcessScopePolicy::Required {
+            control_timeout_ms: MAX_PROCESS_SCOPE_CONTROL_TIMEOUT_MS + 1,
+        };
+        match IsolationRuntime::validate_policy(&policy).unwrap_err() {
+            EngineError::IsolationPolicyValueAboveMaximum {
+                field,
+                value_ms,
+                maximum_ms,
+            } => {
+                assert_eq!(field, "process_scopes.control_timeout_ms");
+                assert_eq!(value_ms, MAX_PROCESS_SCOPE_CONTROL_TIMEOUT_MS + 1);
+                assert_eq!(maximum_ms, MAX_PROCESS_SCOPE_CONTROL_TIMEOUT_MS);
+            }
+            other => panic!("expected the typed maximum refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_shipped_profile_signs_a_control_timeout_within_the_maximum() {
+        let profiles = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../bundles/.ai/node/init/profiles");
+        let mut seen = 0;
+        for entry in std::fs::read_dir(&profiles).unwrap() {
+            let path = entry.unwrap().path();
+            let text = std::fs::read_to_string(&path).unwrap();
+            for line in text.lines() {
+                let Some(value) = line.trim().strip_prefix("control_timeout_ms:") else {
+                    continue;
+                };
+                let value: u64 = value.trim().parse().unwrap();
+                assert!(
+                    (1..=MAX_PROCESS_SCOPE_CONTROL_TIMEOUT_MS).contains(&value),
+                    "{} signs control_timeout_ms {value}",
+                    path.display()
+                );
+                seen += 1;
+            }
+        }
+        assert!(seen > 0, "no shipped profile declares a control timeout");
     }
 
     #[test]

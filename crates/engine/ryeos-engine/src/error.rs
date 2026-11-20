@@ -398,6 +398,15 @@ pub enum EngineError {
     #[error("isolation policy refused execution: {reason}")]
     IsolationPolicyRefused { reason: String },
 
+    #[error(
+        "isolation policy field `{field}` is {value_ms} ms, above the maximum of {maximum_ms} ms"
+    )]
+    IsolationPolicyValueAboveMaximum {
+        field: &'static str,
+        value_ms: u64,
+        maximum_ms: u64,
+    },
+
     // ── Lifecycle ────────────────────────────────────────────────────
     #[error("invalid state transition from `{from}` on event `{event}`")]
     InvalidStateTransition { from: String, event: String },

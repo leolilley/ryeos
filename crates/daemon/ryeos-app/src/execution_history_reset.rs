@@ -3620,6 +3620,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn runtime_phase_references_join_the_native_census() {
+        // Every test here reads or moves process-wide native state.
+        let _test_serial = lillux_sqlite::test_host::serial();
         use lillux_sqlite::test_host::TestNativeHost;
         let host = TestNativeHost::acquire();
         let reference = || {
@@ -3731,6 +3733,16 @@ mod tests {
         }
     }
 
+    /// Take the operator state lock at `lock_path` in a fixture. A fixture
+    /// often drops one guard and takes the next on the same path at once, but
+    /// a dropped lock's descriptor close is deferred while any thread of this
+    /// test process holds a quiesced fork window (another test spawning a
+    /// child), so the kernel lock outlives the guard briefly. The bounded
+    /// wait is for exactly that deferred close; it never weakens exclusion.
+    pub(super) fn acquire_state_lock(lock_path: &Path) -> anyhow::Result<StateLock> {
+        StateLock::acquire_with_timeout(lock_path, std::time::Duration::from_secs(60))
+    }
+
     pub(super) fn install_offline_policy(
         config: &Config,
         identity: &ryeos_node_runtime::identity::NodeIdentity,
@@ -3759,7 +3771,12 @@ mod tests {
         let trust =
             ryeos_engine::trust::TrustStore::from_registry(*identity.verifying_key(), Vec::new())
                 .unwrap();
-        let lock = StateLock::acquire(&default_lock_path(&config.app_root)).unwrap();
+        // Validating the quota reads the process-wide native state, which a
+        // concurrent host's install or teardown moves through windows that
+        // refuse as an inherited process. Hold the serial for the publish;
+        // callers must not already hold it.
+        let _serial = lillux_sqlite::test_host::serial();
+        let lock = acquire_state_lock(&default_lock_path(&config.app_root)).unwrap();
         publish_policy_update(
             &config.app_root,
             &NodePolicyUpdate::initial(generation),
@@ -3779,6 +3796,8 @@ mod tests {
     /// run in a child process; without its root variable it does nothing.
     #[test]
     fn failed_acquisition_attempt_child() {
+        // Every test here reads or moves process-wide native state.
+        let _test_serial = lillux_sqlite::test_host::serial();
         use super::original_quota_claim::QuotaCustodyFailure;
         let Some(root) = std::env::var_os(FAILED_ACQUISITION_ROOT) else {
             return;
@@ -3828,6 +3847,8 @@ mod tests {
     /// only with that process, and ending it refunds nothing.
     #[test]
     fn real_reset_retains_published_claim_when_runtime_inspection_cannot_open() {
+        // Every test here reads or moves process-wide native state.
+        let _test_serial = lillux_sqlite::test_host::serial();
         let tmp = TempDir::new().unwrap();
         let config = Config::load(&ConfigSources {
             app_root: Some(tmp.path().to_owned()),
@@ -3870,7 +3891,7 @@ mod tests {
         let original = std::fs::read(&reserved[0]).unwrap();
         assert!(!config.db_path.exists());
 
-        let state_lock = StateLock::acquire(&default_lock_path(tmp.path())).unwrap();
+        let state_lock = acquire_state_lock(&default_lock_path(tmp.path())).unwrap();
         let runtime = lillux::PinnedDirectory::open(&config.runtime_state_dir())
             .unwrap()
             .unwrap();
@@ -3895,6 +3916,8 @@ mod tests {
 
     #[test]
     fn original_quota_reservation_retains_exact_owner_and_refuses_overcommit() {
+        // Every test here reads or moves process-wide native state.
+        let _test_serial = lillux_sqlite::test_host::serial();
         use super::original_quota_claim::{OriginalQuotaClaim, QuotaCustodyFailure};
         let tmp = TempDir::new().unwrap();
         let config = Config::load(&ConfigSources {
@@ -3907,7 +3930,7 @@ mod tests {
                 .unwrap();
         crate::runtime_db::test_native::seed_node(&config, false);
         install_offline_policy(&config, &identity, true);
-        let state_lock = StateLock::acquire(&default_lock_path(tmp.path())).unwrap();
+        let state_lock = acquire_state_lock(&default_lock_path(tmp.path())).unwrap();
         let runtime = lillux::PinnedDirectory::open(&config.runtime_state_dir())
             .unwrap()
             .unwrap();
@@ -4091,6 +4114,8 @@ mod tests {
 
     #[test]
     fn offline_policy_keeps_actual_signed_generation_and_original_root_bindings() {
+        // Every test here reads or moves process-wide native state.
+        let _test_serial = lillux_sqlite::test_host::serial();
         let tmp = TempDir::new().unwrap();
         let config = Config::load(&ConfigSources {
             app_root: Some(tmp.path().join("node")),
@@ -4102,7 +4127,7 @@ mod tests {
                 .unwrap();
         std::fs::create_dir_all(config.runtime_state_dir()).unwrap();
         install_offline_policy(&config, &identity, true);
-        let state_lock = StateLock::acquire(&default_lock_path(&config.app_root)).unwrap();
+        let state_lock = acquire_state_lock(&default_lock_path(&config.app_root)).unwrap();
         let runtime = lillux::PinnedDirectory::open(&config.runtime_state_dir())
             .unwrap()
             .unwrap();
@@ -4151,6 +4176,8 @@ mod tests {
 
     #[test]
     fn reset_requires_real_signed_enabled_policy_before_database_acquisition() {
+        // Every test here reads or moves process-wide native state.
+        let _test_serial = lillux_sqlite::test_host::serial();
         for disabled in [false, true] {
             let tmp = TempDir::new().unwrap();
             let config = Config::load(&ConfigSources {
@@ -4165,7 +4192,7 @@ mod tests {
             if disabled {
                 install_offline_policy(&config, &identity, false);
             } else {
-                drop(StateLock::acquire(&default_lock_path(tmp.path())).unwrap());
+                drop(acquire_state_lock(&default_lock_path(tmp.path())).unwrap());
             }
             let runtime_names = || {
                 let mut names = std::fs::read_dir(config.runtime_state_dir())
@@ -4219,6 +4246,8 @@ mod tests {
 
     #[test]
     fn incompatible_runtime_accounting_is_explicitly_unavailable_not_zero() {
+        // Every test here reads or moves process-wide native state.
+        let _test_serial = lillux_sqlite::test_host::serial();
         let accounting = RuntimeThreadHistoryAccounting::UnavailableIncompatibleSchema;
         assert_eq!(accounting.total_rows(), None);
         assert_eq!(
@@ -4229,6 +4258,8 @@ mod tests {
 
     #[test]
     fn current_runtime_accounting_reports_exact_counts() {
+        // Every test here reads or moves process-wide native state.
+        let _test_serial = lillux_sqlite::test_host::serial();
         let accounting = RuntimeThreadHistoryAccounting::Exact {
             counts: RuntimeThreadHistoryDiscardReport {
                 thread_runtime: 3,
@@ -4242,6 +4273,8 @@ mod tests {
 
     #[test]
     fn execution_history_reset_closure_knows_provider_records_and_local_observations() {
+        // Every test here reads or moves process-wide native state.
+        let _test_serial = lillux_sqlite::test_host::serial();
         crate::object_contracts::install().unwrap();
         let coordinate = local_coordinate();
         let terminal = local_terminal();
@@ -4312,6 +4345,8 @@ mod tests {
 
     #[test]
     fn reset_acknowledges_scheduler_before_removing_cross_store_marker() {
+        // Every test here reads or moves process-wide native state.
+        let _test_serial = lillux_sqlite::test_host::serial();
         struct Participant {
             completed: std::sync::atomic::AtomicBool,
             retired: std::sync::atomic::AtomicBool,
@@ -4434,7 +4469,7 @@ mod tests {
                 .unwrap();
         install_offline_policy(&config, &identity, true);
         crate::runtime_db::test_native::seed_node(&config, true);
-        drop(StateLock::acquire(&default_lock_path(tmp.path())).unwrap());
+        drop(acquire_state_lock(&default_lock_path(tmp.path())).unwrap());
         let _serial = lillux_sqlite::test_host::serial();
         let participant = Participant {
             completed: std::sync::atomic::AtomicBool::new(false),
@@ -4540,6 +4575,8 @@ mod tests {
     /// run in a child process; without its root variable it does nothing.
     #[test]
     fn scheduler_refused_attempt_child() {
+        // Every test here reads or moves process-wide native state.
+        let _test_serial = lillux_sqlite::test_host::serial();
         let Some(root) = std::env::var_os(REFUSED_ATTEMPT_ROOT) else {
             return;
         };
@@ -4572,6 +4609,8 @@ mod tests {
     /// registration, ends only with that process.
     #[test]
     fn scheduler_refusal_past_its_window_leaves_a_settlement_the_next_reset_resumes() {
+        // Every test here reads or moves process-wide native state.
+        let _test_serial = lillux_sqlite::test_host::serial();
         let tmp = TempDir::new().unwrap();
         let config = Config::load(&ConfigSources {
             app_root: Some(tmp.path().to_owned()),
@@ -4583,7 +4622,7 @@ mod tests {
                 .unwrap();
         install_offline_policy(&config, &identity, true);
         crate::runtime_db::test_native::seed_node(&config, true);
-        drop(StateLock::acquire(&default_lock_path(tmp.path())).unwrap());
+        drop(acquire_state_lock(&default_lock_path(tmp.path())).unwrap());
 
         let child = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
@@ -4651,6 +4690,8 @@ mod tests {
 
     #[test]
     fn confirmed_schema_reset_never_reports_post_reset_zero_as_exact() {
+        // Every test here reads or moves process-wide native state.
+        let _test_serial = lillux_sqlite::test_host::serial();
         let accounting =
             completed_runtime_accounting(true, RuntimeThreadHistoryDiscardReport::default());
         assert!(matches!(
@@ -4661,6 +4702,8 @@ mod tests {
 
     #[test]
     fn absent_scheduler_participant_refuses_artifacts_without_mutation() {
+        // Every test here reads or moves process-wide native state.
+        let _test_serial = lillux_sqlite::test_host::serial();
         let tmp = TempDir::new().unwrap();
         let config = Config::load(&ConfigSources {
             app_root: Some(tmp.path().to_owned()),
@@ -4683,6 +4726,8 @@ mod tests {
 
     #[test]
     fn absent_scheduler_participant_accepts_only_an_empty_node_schedules_directory() {
+        // Every test here reads or moves process-wide native state.
+        let _test_serial = lillux_sqlite::test_host::serial();
         let tmp = TempDir::new().unwrap();
         let config = Config::load(&ConfigSources {
             app_root: Some(tmp.path().to_owned()),
@@ -4892,7 +4937,7 @@ mod tests {
             ryeos_node_runtime::identity::NodeIdentity::create(&config.node_signing_key_path)
                 .unwrap();
         install_offline_policy(&config, &identity, true);
-        let state_lock = StateLock::acquire(&default_lock_path(&config.app_root)).unwrap();
+        let state_lock = acquire_state_lock(&default_lock_path(&config.app_root)).unwrap();
         fixture_operational_source::establish(directory, namespace).unwrap();
         let policy =
             OfflineResetPolicyOwner::load(&config, &identity, &state_lock, directory, namespace)
@@ -4929,6 +4974,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn scheduler_preview_retains_real_native_close_proof_without_mutating_source() {
+        // Every test here reads or moves process-wide native state.
+        let _test_serial = lillux_sqlite::test_host::serial();
         const TEST: &str = concat!(
             module_path!(),
             "::scheduler_preview_retains_real_native_close_proof_without_mutating_source"
@@ -5049,6 +5096,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn genuine_native_interval_blocks_seal_until_original_closed_ack() {
+        // Every test here reads or moves process-wide native state.
+        let _test_serial = lillux_sqlite::test_host::serial();
         const TEST: &str = concat!(
             module_path!(),
             "::genuine_native_interval_blocks_seal_until_original_closed_ack"
@@ -5149,6 +5198,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn genuine_never_started_seal_rejects_foreign_issuer_and_retains_charge() {
+        // Every test here reads or moves process-wide native state.
+        let _test_serial = lillux_sqlite::test_host::serial();
         const TEST: &str = concat!(
             module_path!(),
             "::genuine_never_started_seal_rejects_foreign_issuer_and_retains_charge"
@@ -5231,6 +5282,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn scheduler_accounting_failure_retains_actual_native_close_proof() {
+        // Every test here reads or moves process-wide native state.
+        let _test_serial = lillux_sqlite::test_host::serial();
         const TEST: &str = concat!(
             module_path!(),
             "::scheduler_accounting_failure_retains_actual_native_close_proof"
@@ -5315,6 +5368,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn scheduler_partial_acquisition_release_never_supplies_completed_accounting() {
+        // Every test here reads or moves process-wide native state.
+        let _test_serial = lillux_sqlite::test_host::serial();
         const TEST: &str = concat!(
             module_path!(),
             "::scheduler_partial_acquisition_release_never_supplies_completed_accounting"
@@ -5429,6 +5484,8 @@ mod tests {
 
     #[test]
     fn actual_copy_drop_does_not_refund_original_role_or_reservation() {
+        // Every test here reads or moves process-wide native state.
+        let _test_serial = lillux_sqlite::test_host::serial();
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("scheduler.sqlite3"), b"original").unwrap();
         let source = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
@@ -5483,6 +5540,8 @@ mod tests {
 
     #[test]
     fn both_real_inspection_destinations_share_original_sql_budget_without_refund() {
+        // Every test here reads or moves process-wide native state.
+        let _test_serial = lillux_sqlite::test_host::serial();
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("scheduler.sqlite3"), b"scheduler bytes").unwrap();
         std::fs::write(tmp.path().join("runtime.sqlite3"), b"runtime bytes").unwrap();
@@ -5542,6 +5601,8 @@ mod tests {
 
     #[test]
     fn original_inspection_parent_lock_survives_copy_views_and_guard_custody() {
+        // Every test here reads or moves process-wide native state.
+        let _test_serial = lillux_sqlite::test_host::serial();
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("scheduler.sqlite3"), b"original").unwrap();
         let source = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
@@ -5584,6 +5645,8 @@ mod tests {
 
     #[test]
     fn created_root_evidence_binds_actual_inode_before_body_and_survives_drop() {
+        // Every test here reads or moves process-wide native state.
+        let _test_serial = lillux_sqlite::test_host::serial();
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("scheduler.sqlite3"), b"original").unwrap();
         let source = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
@@ -5642,6 +5705,8 @@ mod tests {
 
     #[test]
     fn uncertain_created_evidence_ack_retains_root_before_any_body_work() {
+        // Every test here reads or moves process-wide native state.
+        let _test_serial = lillux_sqlite::test_host::serial();
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("scheduler.sqlite3"), b"original").unwrap();
         let source = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
@@ -5687,6 +5752,8 @@ mod tests {
 
     #[test]
     fn identical_created_evidence_at_new_inode_refuses_sql_issue() {
+        // Every test here reads or moves process-wide native state.
+        let _test_serial = lillux_sqlite::test_host::serial();
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("scheduler.sqlite3"), b"original").unwrap();
         let source = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
@@ -5722,6 +5789,8 @@ mod tests {
 
     #[test]
     fn issued_copy_refuses_foreign_output_before_creating_data() {
+        // Every test here reads or moves process-wide native state.
+        let _test_serial = lillux_sqlite::test_host::serial();
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("scheduler.sqlite3"), b"original").unwrap();
         let source = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
@@ -5762,6 +5831,8 @@ mod tests {
 
     #[test]
     fn scheduler_preview_rejects_replacement_before_copy_and_retains_claim() {
+        // Every test here reads or moves process-wide native state.
+        let _test_serial = lillux_sqlite::test_host::serial();
         use super::original_quota_claim::QuotaCustodyFailure;
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("scheduler.sqlite3");
@@ -5802,6 +5873,8 @@ mod tests {
 
     #[test]
     fn scheduler_preview_absent_source_never_invokes_decoder() {
+        // Every test here reads or moves process-wide native state.
+        let _test_serial = lillux_sqlite::test_host::serial();
         let tmp = TempDir::new().unwrap();
         let directory = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
         let namespace = directory.lock_exclusive().unwrap();
@@ -5830,6 +5903,8 @@ mod tests {
 
     #[test]
     fn scheduler_preview_absent_main_refuses_each_orphan_sidecar_unchanged() {
+        // Every test here reads or moves process-wide native state.
+        let _test_serial = lillux_sqlite::test_host::serial();
         for name in [
             "scheduler.sqlite3-wal",
             "scheduler.sqlite3-shm",
@@ -5876,6 +5951,8 @@ mod tests {
 
     #[test]
     fn scheduler_preview_absent_main_refuses_nonregular_sidecars_unchanged() {
+        // Every test here reads or moves process-wide native state.
+        let _test_serial = lillux_sqlite::test_host::serial();
         for name in [
             "scheduler.sqlite3-wal",
             "scheduler.sqlite3-shm",
@@ -5923,6 +6000,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn scheduler_preview_absent_main_refuses_symlink_sidecars_unchanged() {
+        // Every test here reads or moves process-wide native state.
+        let _test_serial = lillux_sqlite::test_host::serial();
         for name in [
             "scheduler.sqlite3-wal",
             "scheduler.sqlite3-shm",
@@ -5982,6 +6061,8 @@ mod refusal_layer_tests {
     /// both is classified by the later refusal, and still names the earlier.
     #[test]
     fn a_missing_copy_proof_classifies_over_the_accounting_refusal() {
+        // Every test here reads or moves process-wide native state.
+        let _test_serial = lillux_sqlite::test_host::serial();
         let wrap = |error: anyhow::Error| {
             anyhow::Error::new(SchedulerCopyRefusal {
                 error,

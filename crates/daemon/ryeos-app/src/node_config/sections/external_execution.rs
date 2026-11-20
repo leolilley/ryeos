@@ -851,7 +851,7 @@ impl RetainedExternalExecutionBinding {
         serde_json::to_value(&Self::test_fixture().document).expect("fixture binding document")
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn test_fixture() -> Self {
         use base64::{Engine as _, engine::general_purpose::STANDARD};
 

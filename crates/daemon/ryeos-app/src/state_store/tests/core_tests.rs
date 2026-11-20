@@ -2822,3 +2822,162 @@ fn settled_thread_fact_is_appended_once_and_refuses_contradictory_replays() {
         "the same key with different testimony is refused"
     );
 }
+
+fn invariant_test_identity(pid: i64) -> crate::process::ExecutionProcessIdentity {
+    crate::process::ExecutionProcessIdentity {
+        schema_version: crate::process::PROCESS_IDENTITY_SCHEMA_VERSION,
+        process_scope: None,
+        boot_id: "test-boot".into(),
+        target_pid: pid,
+        target_start_time_ticks: 11,
+        group_leader_pid: pid,
+        group_leader_start_time_ticks: 11,
+        resource_selections: Vec::new(),
+        resource_settlement_authority: None,
+        resource_operations: Vec::new(),
+        resource_allocation_limit: None,
+        resource_occupancy_start: None,
+        resource_occupancy_limit: None,
+        resource_cleanup_allowance_ms: None,
+    }
+}
+
+fn is_listed_attached(store: &StateStore, thread_id: &str) -> bool {
+    store
+        .list_attached_thread_ids()
+        .unwrap()
+        .iter()
+        .any(|id| id == thread_id)
+}
+
+fn durable_identity_present(store: &StateStore, thread_id: &str) -> bool {
+    store
+        .get_thread(thread_id)
+        .unwrap()
+        .unwrap()
+        .runtime
+        .process_identity
+        .is_some()
+}
+
+/// The shutdown snapshot lists attached threads and then reads each row. It
+/// classifies a NULL identity as a settlement only because the compare-clear
+/// removes the registry entry in the same locked step: a row read as NULL is
+/// never still listed, and a thread absent from the list never still holds an
+/// identity.
+#[test]
+fn owned_compare_clear_removes_identity_and_registry_entry_together() {
+    let store = test_store();
+    let thread_id = "T-invariant-owned";
+    store
+        .create_thread_for_test(&thread_record(thread_id, thread_id))
+        .unwrap();
+    let claim = store
+        .claim_thread_launch_active(thread_id, "claim-invariant", "daemon:test")
+        .unwrap()
+        .unwrap();
+    let identity = invariant_test_identity(22001);
+    store
+        .attach_new_thread_process(
+            thread_id,
+            identity.target_pid,
+            identity.group_leader_pid,
+            &identity,
+            &crate::launch_metadata::RuntimeLaunchMetadata::default(),
+            Some(&claim.claimed_by),
+        )
+        .unwrap();
+    assert!(is_listed_attached(&store, thread_id));
+    assert!(durable_identity_present(&store, thread_id));
+    assert!(
+        store
+            .clear_thread_process_if_matches_owned(thread_id, &identity, &claim.claimed_by)
+            .unwrap()
+    );
+    assert!(!durable_identity_present(&store, thread_id));
+    assert!(!is_listed_attached(&store, thread_id));
+    assert!(store.thread_workspace_binding(thread_id).unwrap().is_none());
+}
+
+/// The workspace settlement is the other clear. It releases membership with
+/// the identity and the registry entry.
+#[test]
+fn workspace_settlement_removes_identity_membership_and_registry_entry_together() {
+    let (store, root_binding) = workspace_binding_fixture();
+    let child = "T-invariant-workspace";
+    let binding = workspace_child_fixture(&store, "T-workspace-root", child, &root_binding);
+    store.bind_thread_workspace(child, &binding).unwrap();
+    let identity = attach_workspace_test_process(&store, &binding);
+    assert!(is_listed_attached(&store, child));
+    assert!(durable_identity_present(&store, child));
+    assert!(store.thread_workspace_binding(child).unwrap().is_some());
+    assert!(
+        store
+            .settle_reaped_thread_workspace_owned(child, &binding, &identity)
+            .unwrap()
+    );
+    assert!(!durable_identity_present(&store, child));
+    assert!(!is_listed_attached(&store, child));
+    assert!(store.thread_workspace_binding(child).unwrap().is_none());
+}
+
+/// A reader racing the compare-clear, in the snapshot's own order, never sees
+/// a state the snapshot would misclassify: not listed with the identity still
+/// present, or a NULL read followed by a later listing.
+#[test]
+fn concurrent_reader_never_sees_listed_and_identity_out_of_step() {
+    const ROUNDS: i64 = 40;
+    let store = test_store();
+    for round in 0..ROUNDS {
+        let thread_id = format!("T-invariant-race-{round}");
+        store
+            .create_thread_for_test(&thread_record(&thread_id, &thread_id))
+            .unwrap();
+        let claim = store
+            .claim_thread_launch_active(&thread_id, &format!("claim-race-{round}"), "daemon:test")
+            .unwrap()
+            .unwrap();
+        let identity = invariant_test_identity(23000 + round);
+        store
+            .attach_new_thread_process(
+                &thread_id,
+                identity.target_pid,
+                identity.group_leader_pid,
+                &identity,
+                &crate::launch_metadata::RuntimeLaunchMetadata::default(),
+                Some(&claim.claimed_by),
+            )
+            .unwrap();
+        let reader_store: &StateStore = &store;
+        let reader_thread = thread_id.clone();
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(move || {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+                loop {
+                    let listed_first = is_listed_attached(reader_store, &reader_thread);
+                    let present = durable_identity_present(reader_store, &reader_thread);
+                    if !listed_first {
+                        assert!(!present, "a thread absent from the list kept its identity");
+                    }
+                    if !present {
+                        assert!(
+                            !is_listed_attached(reader_store, &reader_thread),
+                            "a NULL identity was still listed afterwards"
+                        );
+                        return;
+                    }
+                    assert!(std::time::Instant::now() < deadline, "clear never observed");
+                }
+            });
+            for _ in 0..(round % 5) {
+                std::thread::yield_now();
+            }
+            assert!(
+                store
+                    .clear_thread_process_if_matches_owned(&thread_id, &identity, &claim.claimed_by)
+                    .unwrap()
+            );
+            reader.join().expect("reader saw an inconsistent state");
+        });
+    }
+}

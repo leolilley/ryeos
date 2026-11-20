@@ -41,7 +41,7 @@ fn history_reset_composes_replay_cutover_and_preserves_stable_credentials() {
     // State and a current Runtime store, established the way a first live
     // boot establishes them.
     crate::runtime_db::test_native::seed_node(&config, true);
-    drop(StateLock::acquire(&default_lock_path(tmp.path())).unwrap());
+    drop(super::tests::acquire_state_lock(&default_lock_path(tmp.path())).unwrap());
 
     let profile = ryeos_state::operational::OperationalCredentialProfileRecord {
         profile_id: "retained-active".to_owned(),
@@ -188,7 +188,7 @@ fn history_reset_composes_replay_cutover_and_preserves_stable_credentials() {
     // attempt holds the Runtime store through the original mutation path.
     {
         let host = ryeos_state::test_support::shared_test_host();
-        let state_lock = StateLock::acquire(&default_lock_path(tmp.path())).unwrap();
+        let state_lock = super::tests::acquire_state_lock(&default_lock_path(tmp.path())).unwrap();
         let directory = lillux::PinnedDirectory::open(&runtime_state_dir)
             .unwrap()
             .unwrap();

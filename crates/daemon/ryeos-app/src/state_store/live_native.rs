@@ -1403,11 +1403,10 @@ impl std::fmt::Debug for LiveStateStoreOpenFailure {
 }
 impl std::fmt::Display for LiveStateStoreOpenFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "live StateStore partial startup retained: {}",
-            self.error
-        )
+        // The refusing cause is this error's `source`, so an `{:#}` chain
+        // names it once, with each of its own contexts, instead of repeating
+        // it inside this line.
+        f.write_str("live StateStore partial startup retained")
     }
 }
 impl std::error::Error for LiveStateStoreOpenFailure {
