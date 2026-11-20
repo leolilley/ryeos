@@ -221,8 +221,41 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
     // a request or durable row.
     let project_marker = crate::seat_auth::attachment_project_query_identity(&attachment)?
         .map(|path| path.to_string_lossy().into_owned());
-    let bound = resolve_binding_request(&attachment, &req, project_marker.as_deref())?;
+    let mut bound = resolve_binding_request(&attachment, &req, project_marker.as_deref())?;
     let item_ref = bound.target.identity.canonical_ref.clone();
+    // Every read passes the node's seat read policy: parameters are pinned and
+    // checked here, and the returned shaping decides what the result may
+    // disclose. A read is a bound source, or any target declared read-only.
+    let seat_reads = if matches!(req.coordinate, UiBindingCoordinate::Source { .. })
+        || bound.target.source_safe
+    {
+        let policy = state
+            .node_policy
+            .require::<ryeos_node_runtime::node_policy::sections::ui_seat_reads::UiSeatReadsPolicy>(
+        )?;
+        let admitted = crate::seat_read_policy::decide(
+            policy,
+            ryeos_node_runtime::node_policy::sections::ui_seat_reads::SeatClass::of_session(
+                session.user_principal_id.as_deref(),
+            ),
+            &item_ref,
+            &bound.target.parameter_schema,
+            Some(crate::seat_read_policy::RequestFacts {
+                params: std::mem::take(&mut bound.params),
+                session: crate::seat_read_policy::SessionFacts {
+                    principal_id: &attachment.compiled_binding.binding.principal_id,
+                    project_root: project_marker.as_deref(),
+                },
+            }),
+        )
+        .map_err(|refusal| HandlerError::Forbidden(refusal.to_string()))?;
+        bound.params = admitted.params.ok_or_else(|| {
+            HandlerError::Internal("seat read policy returned no parameters for a call".into())
+        })?;
+        admitted.shaping
+    } else {
+        None
+    };
     let invocation_ctx = invocation_context_for_session(&session);
     let prepared = prepare_item_ref(
         &invocation_ctx,
@@ -414,6 +447,18 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
         })?;
     }
     let mut publish = || -> Result<Value> {
+        if let Some(shaping) = &seat_reads {
+            let slot: &mut Value = if bound.target.result_effect.is_some() {
+                &mut result
+            } else {
+                result.get_mut("result").ok_or_else(|| {
+                    HandlerError::Internal("service execution returned no result envelope".into())
+                })?
+            };
+            *slot = shaping
+                .apply(std::mem::take(slot))
+                .map_err(|refusal| HandlerError::Forbidden(refusal.to_string()))?;
+        }
         if let Some(expected) = &expected_opening {
             let actual = result
                 .get("ui_transition")

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-19T05:44:26Z:e406277349a94b32e2e89f903f5f8e719404869565932ed3972d4d18c0ef80af:RuZFjEFj4CHJxJpmsdhDNT5PeOVsSLPqGA72PdDlpG6TZsVndavDud+C+hAGE4vwtPNyspnSPdaRqJp29//uDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-20T01:53:45Z:9392bded3e842f443770cc8d0b1979ab9354a5048e02519b26d07ca514aa77de:f1HSBIFFVG5RBNM2N5HwGT0UPpRytoGt4MKHMBHNv91dftGwuzPpVY1ntuWHnK3hK5RjlL1Ru3iq5UWLN895CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -598,3 +598,170 @@ policies:
     max_facet_page_bytes: 524288
     max_facet_pages_per_thread: 8
     max_facet_pages_total: 64
+  # What a UI seat may read through a bound source. A service with no entry is
+  # not readable by a seat; a service under ui/ryeos-ui/ scopes its own result
+  # and is outside this list. `keep` is an allowlist of result fields: filesystem
+  # paths and operator-only fields are left out, and so is any field a later
+  # release adds until an entry names it.
+  ui_seat_reads:
+    schema: 1
+    reads:
+      - target: service:node/status
+        classes: [local_operator, hosted_principal]
+        keep:
+          - /node_id
+          - /version
+          - /revision
+          - /build_date
+          - /started_at
+          - /uptime_seconds
+          - /bind
+          - /active_threads
+          - /isolation/mode
+          - /isolation/filesystem_mode
+          - /isolation/network_mode
+          - /isolation/version
+          - /isolation/policy_digest
+          - /isolation/backend
+          - /isolation/process_scopes
+          - /thread_projection
+          - /pending_head_transitions
+          - /accounting
+        max_result_bytes: 65536
+        max_items: 64
+      - target: service:bundle/list
+        classes: [local_operator, hosted_principal]
+        keep:
+          - /bundles/*/name
+        max_result_bytes: 65536
+        max_items: 512
+      - target: service:projects/list
+        classes: [local_operator, hosted_principal]
+        keep:
+          - /version
+          - /projects/*/local_id
+          - /projects/*/name
+          - /projects/*/root
+          - /projects/*/added_at
+          - /projects/*/tags
+          - /projects/*/exists
+          - /projects/*/current
+          - /projects/*/registered
+        max_result_bytes: 1048576
+        max_items: 1024
+      - target: service:commands/list
+        classes: [local_operator, hosted_principal]
+        keep:
+          - /commands/*/name
+          - /commands/*/tokens
+          - /commands/*/description
+          - /commands/*/arguments
+          - /commands/*/forms
+          - /commands/*/defaults
+          - /commands/*/parameter_binding
+          - /commands/*/control_flags
+          - /commands/*/project
+          - /commands/*/invocable
+        max_result_bytes: 4194304
+        max_items: 4096
+      - target: service:threads/list
+        classes: [local_operator, hosted_principal]
+        keep:
+          - /next_cursor
+          - /threads/*/thread_id
+          - /threads/*/chain_root_id
+          - /threads/*/kind
+          - /threads/*/status
+          - /threads/*/item_ref
+          - /threads/*/launch_mode
+          - /threads/*/current_site_id
+          - /threads/*/origin_site_id
+          - /threads/*/upstream_thread_id
+          - /threads/*/successor_thread_id
+          - /threads/*/created_at
+          - /threads/*/updated_at
+          - /threads/*/execution
+          - /threads/*/follow
+          - /threads/*/pending
+          - /threads/*/facets
+          - /threads/*/current_node
+          - /threads/*/error
+        max_result_bytes: 4194304
+        max_items: 2048
+      - target: service:scheduler/list
+        classes: [local_operator, hosted_principal]
+        keep:
+          - /identity_filtered
+          - /node_owned_included
+          - /anonymous
+          - /note
+          - /schedules/*/schedule_id
+          - /schedules/*/item_ref
+          - /schedules/*/schedule_type
+          - /schedules/*/expression
+          - /schedules/*/timezone
+          - /schedules/*/enabled
+          - /schedules/*/registered_at
+          - /schedules/*/misfire_policy
+          - /schedules/*/overlap_policy
+          - /schedules/*/lateness_grace_secs
+          - /schedules/*/last_scheduled_at
+          - /schedules/*/last_reserved_at
+          - /schedules/*/last_dispatched_at
+          - /schedules/*/last_fire_status
+          - /schedules/*/last_fire_reason
+          - /schedules/*/last_fire_outcome
+          - /schedules/*/current_due_at
+          - /schedules/*/current_due_within_grace
+          - /schedules/*/misfire_horizon_exclusive
+          - /schedules/*/next_fire_at
+          - /schedules/*/cursor_last_scheduled_at
+          - /schedules/*/cursor_next_fire_at
+          - /schedules/*/cursor_updated_at
+          - /schedules/*/cursor_fresh
+          - /schedules/*/decision
+          - /schedules/*/decision_reason
+          - /schedules/*/lifetime_exhausted
+          - /schedules/*/total_fires
+        max_result_bytes: 1048576
+        max_items: 2048
+      - target: service:items/effective
+        classes: [local_operator, hosted_principal]
+        # A seat resolves bundle items only; it does not choose a project path.
+        deny_params: [project_path]
+        keep:
+          - /requested_ref
+          - /canonical_ref
+          - /kind
+          - /trusted
+          - /trust_class
+          - /root_trust_class
+          - /shadows_bundle_item
+          - /policy_facts
+          - /diagnostics
+          - /provenance/root/requested_id
+          - /provenance/root/resolved_ref
+          - /provenance/root/source_space
+          - /provenance/root/trust_class
+          - /provenance/root/signer_fingerprint
+          - /provenance/root/raw_content_digest
+          - /provenance/ancestors/*/requested_id
+          - /provenance/ancestors/*/resolved_ref
+          - /provenance/ancestors/*/source_space
+          - /provenance/ancestors/*/trust_class
+          - /provenance/ancestors/*/signer_fingerprint
+          - /provenance/ancestors/*/raw_content_digest
+          - /authorship
+          - /as_launched
+        max_result_bytes: 1048576
+        max_items: 2048
+      - target: service:node/locality/groups
+        classes: [local_operator, hosted_principal]
+        keep:
+          - /schema
+          - /as_of
+          - /groups
+          - /invalid_declarations/*/label
+          - /invalid_declarations/*/code
+        max_result_bytes: 1048576
+        max_items: 1024

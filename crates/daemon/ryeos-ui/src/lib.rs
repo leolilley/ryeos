@@ -13,6 +13,7 @@ pub mod handlers;
 pub mod invokers;
 mod phase_timing;
 pub mod seat_auth;
+pub mod seat_read_policy;
 pub mod session_authority;
 pub mod session_bus;
 pub mod state;

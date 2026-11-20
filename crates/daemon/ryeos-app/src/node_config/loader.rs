@@ -4,8 +4,8 @@
 //!
 //! Section directories support recursive subfolders. For example:
 //!
-//!   .ai/node/routes/ui/ryeos-ui/dimension-get.yaml
-//!   .ai/node/routes/ui/ryeos-ui/items/list.yaml
+//!   .ai/node/routes/ui/session/current.yaml
+//!   .ai/node/routes/ui/session/seat/open.yaml
 //!   .ai/node/commands/web.yaml
 //!
 //! The section invariant requires the file to live under
@@ -1303,17 +1303,17 @@ mod tests {
             )
             .expect("load full node config with RyeOS UI bundle");
 
-        let ryeos_dimension_route = snapshot
+        let nested_route = snapshot
             .routes
             .iter()
-            .find(|route| route.path == "/ui/api/ryeos-ui/dimension")
-            .expect("RyeOS UI dimension route should load from nested route directory");
+            .find(|route| route.path == "/ui/api/session/current")
+            .expect("RyeOS UI session route should load from nested route directory");
         assert!(
-            ryeos_dimension_route
+            nested_route
                 .source_file
-                .ends_with(".ai/node/routes/ui/ryeos-ui/dimension-get.yaml"),
+                .ends_with(".ai/node/routes/ui/session/current.yaml"),
             "route source should preserve nested path, got {}",
-            ryeos_dimension_route.source_file.display()
+            nested_route.source_file.display()
         );
         assert!(
             snapshot.routes.iter().any(|route| route.path == "/ui"),
@@ -1323,8 +1323,9 @@ mod tests {
             snapshot
                 .routes
                 .iter()
-                .any(|route| route.path == "/ui/api/items/effective"),
-            "browser-session effective item route should load from nested route directory"
+                .all(|route| route.path != "/ui/api/items/effective"
+                    && !route.path.starts_with("/ui/api/ryeos-ui/")),
+            "UI reads are reachable only through seat dispatch, not direct signed routes"
         );
         assert!(
             snapshot

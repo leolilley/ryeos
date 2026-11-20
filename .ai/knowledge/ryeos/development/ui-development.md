@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-18T07:43:25Z:c486cf89b7ee0c30abd57bef68b0b535c1e0cab4a907f1931b80858951832b98:P5lxyvNGYx1iDdZse3SgclRp9nk9KT7tOXYVkvfW6HoD9I0pIowmSbvWoPW+3El9qwEwckuf0Z4PnyMgkAcBBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-20T01:58:54Z:30d4f989fb5070e49f5359954e1966da73c26ce75da6d5ec857d9ad1154de4b0:CQU1ym+pM7+5MFTH61Ue/Q5imqDbLiP7yppaq1R7UUr4sq/KEGrWvXiJ1wif8o56ylEZAwvesqFy9QosGDASAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-development"
@@ -273,6 +273,19 @@ admitted attachment and composition, rather than replacing the browser session.
 Late results must still match their original attachment and mounted view before
 updating presentation. Current policy and attachment admission are also checked
 by the daemon; client checks do not grant authority.
+
+A source a Surface binds is read by a seat only when the node's signed
+`ui_seat_reads` policy has an entry for its service that admits the seat's class
+(`local_operator` or `hosted_principal`, from whether the session carries a
+hosted principal). A service with no entry is attenuated at mint and refused at
+dispatch; services under `ui/ryeos-ui/` scope their own results and are exempt.
+An entry can pin parameters to session values, forbid parameters, condition on
+parameter values, and keep only listed result fields (`keep` is an allowlist, so
+fields a later release adds are dropped) within a byte and item bound; a result
+over its bound is refused, never cut. The policy only narrows: it grants no
+capability. Adding a new read to a shipped Surface means adding its entry to
+every init profile; nodes that predate the section need
+`ryeos node reset policy-generation`.
 
 Attachment count is bounded by the signed `ui_browser_sessions` node policy.
 There is no daemon fallback value. Test fixtures must supply that policy too.
