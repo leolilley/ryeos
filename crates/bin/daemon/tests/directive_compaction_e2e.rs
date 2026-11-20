@@ -660,14 +660,14 @@ async fn a_hook_can_trigger_a_compaction_when_the_policy_only_observes() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_overflow_after_an_earlier_compaction_still_recovers() {
     let script = format!(
-        "steps:\n  - repeat: 14\n    {TURN}  - fail: {{ status: 400, body: \"context length exceeded: prompt is too long\" }}\n  - text: done\n"
+        "steps:\n  - repeat: 7\n    {TURN}  - fail: {{ status: 400, body: \"context length exceeded: prompt is too long\" }}\n  - text: done\n"
     );
     let rig = start_rig(
         &script,
         RigOptions {
             context_window: 2000,
             continuation_yaml: Some(continuation_yaml(
-                "  trigger_ratio: 0.4\n  keep_turns: 2\n  min_turns_between: 2\n  summary:\n    mode: none\n",
+                "  trigger_ratio: 0.4\n  keep_turns: 2\n  min_turns_between: 4\n  summary:\n    mode: none\n",
             )),
             header_extra: CONTINUING,
             provider_top_extra: REJECTION_ROWS.to_string(),
