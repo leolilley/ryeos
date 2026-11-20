@@ -226,7 +226,17 @@ impl Wording {
 /// Parse a verified config body into the response clients read. The envelope
 /// fields are dropped first; any other unknown field is refused, an empty
 /// sentence is refused and a tone outside the closed list is refused.
-pub fn response_from_config(mut value: Value) -> Result<Value, String> {
+pub fn response_from_config(value: Value) -> Result<Value, String> {
+    let wording = wording_from_config(value)?;
+    let mut response = serde_json::to_value(&wording).map_err(|error| error.to_string())?;
+    if let Some(object) = response.as_object_mut() {
+        object.insert("schema_version".into(), json!(WORDING_CONTRACT));
+    }
+    Ok(response)
+}
+
+/// Parse and check a verified config body.
+pub fn wording_from_config(mut value: Value) -> Result<Wording, String> {
     let Some(object) = value.as_object_mut() else {
         return Err("node capability wording is not a mapping".into());
     };
@@ -248,11 +258,7 @@ pub fn response_from_config(mut value: Value) -> Result<Value, String> {
             ));
         }
     }
-    let mut response = serde_json::to_value(&wording).map_err(|error| error.to_string())?;
-    if let Some(object) = response.as_object_mut() {
-        object.insert("schema_version".into(), json!(WORDING_CONTRACT));
-    }
-    Ok(response)
+    Ok(wording)
 }
 
 /// Resolve and verify the signed wording.
@@ -444,8 +450,7 @@ mod tests {
     /// so a code added there without a sentence here fails this test.
     #[test]
     fn the_shipped_wording_covers_every_code_the_facts_service_can_emit() {
-        let wording: Wording =
-            serde_json::from_value(response_from_config(shipped()).unwrap()).unwrap();
+        let wording = wording_from_config(shipped()).unwrap();
         for (table, codes, name) in [
             (&wording.report_states, &REPORT_STATES[..], "report_states"),
             (
