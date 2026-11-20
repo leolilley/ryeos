@@ -147,6 +147,27 @@ pub async fn handle_activity(
         { "label": format!("observed cancelled · {window}"), "value": count_of("cancelled").to_string() },
     ]);
 
+    // Windowed usage for this seat's project: the per-subject summary for the
+    // subject UI launches carry, restricted to the acting principal. A failed
+    // read is reported as unavailable, never as zero usage.
+    let project_identity = caller
+        .project_query_identity()
+        .ok()
+        .flatten()
+        .map(|path| path.to_string_lossy().into_owned());
+    let usage_subject = super::ui_usage::ui_usage_subject(project_identity.as_deref());
+    let usage_rows =
+        state
+            .state_store
+            .summarize_usage_by_subject(ryeos_state::queries::UsageSummaryFilter {
+                namespace: Some(&usage_subject.namespace),
+                subject: Some(&usage_subject.subject),
+                asserted_by: Some(caller.principal_id()),
+                settled_at_gte: Some(&since_iso),
+                settled_at_lt: None,
+            });
+    let (usage, usage_coverage) = usage_observation(usage_rows, &window);
+
     let event_limit = req.event_limit.clamp(1, MAX_EVENT_LIMIT);
     let mut events = Vec::new();
     let mut bytes_read = 0;
@@ -201,8 +222,43 @@ pub async fn handle_activity(
         "coverage": {"state":"observed", "reason":"authorized_projection_subset_not_exhaustive"},
         "pulse_coverage": {"state":"observed", "reason":"authorized_subject_subset_not_totals", "observed_threads":observed_len, "thread_limit":MAX_ACTIVITY_THREADS},
         "events_coverage": events_coverage,
-        "usage_coverage": {"state":"unavailable", "reason":"signed_scoped_usage_not_available"},
+        "usage": usage,
+        "usage_coverage": usage_coverage,
     }))
+}
+
+/// Windowed usage rows and their coverage. Observed only when the summary
+/// answered with attributed usage; an empty or failed read is unavailable,
+/// since work launched outside a seat carries no seat attribution.
+fn usage_observation(
+    rows: Result<Vec<ryeos_state::queries::UsageSummaryRow>>,
+    window: &str,
+) -> (Value, Value) {
+    let unavailable = || {
+        (
+            serde_json::json!([]),
+            serde_json::json!({"state":"unavailable", "reason":"signed_scoped_usage_not_available"}),
+        )
+    };
+    let Ok(rows) = rows else {
+        return unavailable();
+    };
+    if rows.is_empty() {
+        return unavailable();
+    }
+    let input: i64 = rows.iter().map(|row| row.input_tokens).sum();
+    let output: i64 = rows.iter().map(|row| row.output_tokens).sum();
+    let turns: i64 = rows.iter().map(|row| row.completed_turns).sum();
+    let spend: f64 = rows.iter().map(|row| row.spend_usd).sum();
+    (
+        serde_json::json!([
+            { "label": format!("observed input tokens · {window}"), "value": input.to_string() },
+            { "label": format!("observed output tokens · {window}"), "value": output.to_string() },
+            { "label": format!("observed spend (USD) · {window}"), "value": format!("{spend:.4}") },
+            { "label": format!("observed completed turns · {window}"), "value": turns.to_string() },
+        ]),
+        serde_json::json!({"state":"observed", "reason":"settled_usage_projection_not_signed_testimony"}),
+    )
 }
 
 fn finish_event_observation(
@@ -289,6 +345,37 @@ mod tests {
             prev_thread_event_hash: None,
             payload: serde_json::json!({}),
         }
+    }
+
+    fn usage_row(input: i64, spend: f64) -> ryeos_state::queries::UsageSummaryRow {
+        ryeos_state::queries::UsageSummaryRow {
+            namespace: "ui".into(),
+            subject: "projectless".into(),
+            provider_id: None,
+            model: None,
+            profile: None,
+            chain_count: 1,
+            thread_count: 1,
+            completed_turns: 1,
+            input_tokens: input,
+            output_tokens: 1,
+            spend_usd: spend,
+        }
+    }
+
+    #[test]
+    fn usage_is_observed_only_when_the_summary_has_attributed_rows() {
+        let (rows, coverage) =
+            usage_observation(Ok(vec![usage_row(5, 0.5), usage_row(7, 0.25)]), "1d");
+        assert_eq!(coverage["state"], "observed");
+        assert_eq!(rows[0]["value"], "12");
+        assert_eq!(rows[2]["value"], "0.7500");
+        let (rows, coverage) = usage_observation(Ok(Vec::new()), "1d");
+        assert_eq!(coverage["state"], "unavailable");
+        assert!(rows.as_array().unwrap().is_empty());
+        let (_, coverage) = usage_observation(Err(anyhow::anyhow!("read failed")), "1d");
+        assert_eq!(coverage["state"], "unavailable");
+        assert_eq!(coverage["reason"], "signed_scoped_usage_not_available");
     }
 
     #[test]
