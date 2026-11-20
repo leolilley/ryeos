@@ -282,6 +282,40 @@ async fn status(
     Ok(result)
 }
 
+/// Whether a hosted session's pinned terminal publication is consistent with
+/// its recorded disposition. A pin that carries a HEAD destination must name
+/// the owner, the target project and the base snapshot exactly, whichever
+/// disposition the session has: the destination is admitted authority, and a
+/// bounded (review) session may carry one because launch admits it, even though
+/// it never publishes through it. An interactive session needs the destination
+/// to be publishable at all, so it cannot carry a bare retained result.
+fn candidate_publication_pairing_matches(
+    disposition: &ryeos_app::runtime_db::DedicatedCandidateDisposition,
+    terminal_publication: &ryeos_state::objects::PinnedTerminalPublication,
+    owner_principal: &str,
+    target_project_path: &str,
+    base_snapshot_hash: &str,
+) -> anyhow::Result<bool> {
+    use ryeos_app::runtime_db::DedicatedCandidateDisposition::{OwnerDecision, RetainedForReview};
+    use ryeos_state::objects::PinnedTerminalPublication::{RetainCurrentHead, RetainResult};
+    Ok(match (disposition, terminal_publication) {
+        (
+            OwnerDecision | RetainedForReview,
+            RetainCurrentHead {
+                principal_key,
+                project_hash,
+                expected_hash,
+            },
+        ) => {
+            principal_key.as_str() == ryeos_state::refs::principal_storage_key(owner_principal)?
+                && project_hash == &lillux::sha256_hex(target_project_path.as_bytes())
+                && expected_hash == base_snapshot_hash
+        }
+        (RetainedForReview, RetainResult) => true,
+        _ => false,
+    })
+}
+
 async fn candidate_result(
     req: ryeos_app::hosted_candidate_result::HostedCandidateResultRequest,
     ctx: HandlerContext,
@@ -392,28 +426,14 @@ async fn candidate_result(
         state.threads.site_id(),
     )
     .map_err(internal)?;
-    let publication_authority_matches = match (&session.candidate_disposition, terminal_publication)
-    {
-        (
-            ryeos_app::runtime_db::DedicatedCandidateDisposition::OwnerDecision,
-            ryeos_state::objects::PinnedTerminalPublication::RetainCurrentHead {
-                principal_key,
-                project_hash,
-                expected_hash,
-            },
-        ) => {
-            principal_key.as_str()
-                == ryeos_state::refs::principal_storage_key(&session.owner_principal)
-                    .map_err(internal)?
-                && project_hash == &lillux::sha256_hex(target_project_path.as_bytes())
-                && expected_hash == base_snapshot_hash
-        }
-        (
-            ryeos_app::runtime_db::DedicatedCandidateDisposition::RetainedForReview,
-            ryeos_state::objects::PinnedTerminalPublication::RetainResult,
-        ) => true,
-        _ => false,
-    };
+    let publication_authority_matches = candidate_publication_pairing_matches(
+        &session.candidate_disposition,
+        terminal_publication,
+        &session.owner_principal,
+        target_project_path,
+        base_snapshot_hash,
+    )
+    .map_err(internal)?;
     if stable_project_identity != &expected_identity.normalized_logical_key
         || !publication_authority_matches
     {
@@ -11248,6 +11268,57 @@ mod evaluator_contract_tests;
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn candidate_publication_pairing_accepts_each_admitted_pairing_and_only_exact_fences() {
+        use ryeos_app::runtime_db::DedicatedCandidateDisposition::{
+            OwnerDecision, RetainedForReview,
+        };
+        use ryeos_state::objects::PinnedTerminalPublication::{
+            Discard, RetainCurrentHead, RetainResult,
+        };
+        let owner = "fp:owner";
+        let path = "/projects/demo";
+        let base = "b".repeat(64);
+        let pin = |principal_key: String, project_path: &str, expected: &str| RetainCurrentHead {
+            principal_key,
+            project_hash: lillux::sha256_hex(project_path.as_bytes()),
+            expected_hash: expected.to_owned(),
+        };
+        let owner_key = ryeos_state::refs::principal_storage_key(owner).unwrap();
+        let good = pin(owner_key.clone(), path, &base);
+        let check = |disposition, publication: &_| {
+            super::candidate_publication_pairing_matches(
+                disposition,
+                publication,
+                owner,
+                path,
+                &base,
+            )
+            .unwrap()
+        };
+        // Interactive: the destination is required, exactly.
+        assert!(check(&OwnerDecision, &good));
+        assert!(!check(&OwnerDecision, &RetainResult));
+        // Bounded review: a bare retained result, or a destination that is exact.
+        assert!(check(&RetainedForReview, &RetainResult));
+        assert!(check(&RetainedForReview, &good));
+        // A carried destination that names another owner, project or base is
+        // refused under either disposition.
+        for disposition in [&OwnerDecision, &RetainedForReview] {
+            let other_owner = ryeos_state::refs::principal_storage_key("fp:someone-else").unwrap();
+            assert!(!check(disposition, &pin(other_owner, path, &base)));
+            assert!(!check(
+                disposition,
+                &pin(owner_key.clone(), "/projects/other", &base)
+            ));
+            assert!(!check(
+                disposition,
+                &pin(owner_key.clone(), path, &"c".repeat(64))
+            ));
+            assert!(!check(disposition, &Discard));
+        }
+    }
     use super::{discard_placement_admitted, qualification_placement_admitted};
 
     #[test]
