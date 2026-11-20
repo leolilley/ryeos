@@ -96,7 +96,10 @@ if slot is not None:
 report['worker_fds_after_close'] = descriptor_targets()
 if NAME in values:
     report['worker_sha256'] = hashlib.sha256(values[NAME].encode()).hexdigest()
-    script = 'printf %s "$' + NAME + '" | sha256sum | cut -d" " -f1; for f in /proc/self/fd/*; do readlink "$f"; done'
+    # The shell's own glob-expansion directory descriptor is listed but is
+    # already closed when its entry is read, so that readlink fails; the probe
+    # reports descriptors, not the listing's exit status.
+    script = 'printf %s "$' + NAME + '" | sha256sum | cut -d" " -f1; for f in /proc/self/fd/*; do readlink "$f" || true; done'
     child = subprocess.run(
         ['/bin/sh', '-c', script],
         env={'PATH': '/usr/bin:/bin', NAME: values[NAME]},
