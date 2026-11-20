@@ -4866,28 +4866,6 @@ mod tests {
         (state_lock, claim, work)
     }
 
-    /// [`issue_inspection_claim`] under the process-wide native test serial,
-    /// for a test that reads guarded SQLite evidence (such as the inspection
-    /// copy) without installing a host. Such a read is refused while another
-    /// test's host installs, tears down or holds projection leases, so the
-    /// serial is returned with the claim and held until the test ends. Do not
-    /// use it where the test later acquires a host on the same thread.
-    fn issue_inspection_serialized(
-        directory: &lillux::PinnedDirectory,
-        namespace: &lillux::PinnedDirectoryLock,
-        db_target: &Path,
-    ) -> (
-        StateLock,
-        Arc<OriginalQuotaClaim>,
-        Arc<dyn lillux_sqlite::SqliteInspectionCopyWork>,
-        lillux_sqlite::test_host::TestHostSerial,
-    ) {
-        // The fixture's own source seeding installs and releases a host, so
-        // the serial is taken only once the claim is issued.
-        let (state_lock, claim, work) = issue_inspection_claim(directory, namespace, db_target);
-        (state_lock, claim, work, lillux_sqlite::test_host::serial())
-    }
-
     /// The claim's own offline native host, filed in a fresh controller the
     /// way a reset files it, with the serial guard that excludes every test
     /// host while it lives. Nothing here releases that host, so a test that
@@ -5493,8 +5471,8 @@ mod tests {
         std::fs::write(tmp.path().join("scheduler.sqlite3"), b"original").unwrap();
         let source = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
         let namespace = source.lock_exclusive().unwrap();
-        let (_state_lock, claim, work, _serial) =
-            issue_inspection_serialized(&source, &namespace, &tmp.path().join("runtime.sqlite3"));
+        let (_state_lock, claim, work) =
+            issue_inspection_claim(&source, &namespace, &tmp.path().join("runtime.sqlite3"));
         let record = tmp
             .path()
             .join(".ai/node/offline-reset-quota")
@@ -5550,8 +5528,8 @@ mod tests {
         std::fs::write(tmp.path().join("runtime.sqlite3"), b"runtime bytes").unwrap();
         let source = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
         let namespace = source.lock_exclusive().unwrap();
-        let (_state_lock, claim, work, _serial) =
-            issue_inspection_serialized(&source, &namespace, &tmp.path().join("runtime.sqlite3"));
+        let (_state_lock, claim, work) =
+            issue_inspection_claim(&source, &namespace, &tmp.path().join("runtime.sqlite3"));
         let (scheduler, scheduler_lease) = crate::runtime_db::create_sqlite_inspection_copy(
             &source,
             std::ffi::OsStr::new("scheduler.sqlite3"),
@@ -5610,8 +5588,8 @@ mod tests {
         std::fs::write(tmp.path().join("scheduler.sqlite3"), b"original").unwrap();
         let source = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
         let namespace = source.lock_exclusive().unwrap();
-        let (_state_lock, claim, work, _serial) =
-            issue_inspection_serialized(&source, &namespace, &tmp.path().join("runtime.sqlite3"));
+        let (_state_lock, claim, work) =
+            issue_inspection_claim(&source, &namespace, &tmp.path().join("runtime.sqlite3"));
         let parent_path = tmp.path().join(".ai/node/offline-reset-inspections");
         let parent = lillux::PinnedDirectory::open(&parent_path)
             .unwrap()
@@ -5654,8 +5632,8 @@ mod tests {
         std::fs::write(tmp.path().join("scheduler.sqlite3"), b"original").unwrap();
         let source = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
         let namespace = source.lock_exclusive().unwrap();
-        let (_state_lock, claim, work, _serial) =
-            issue_inspection_serialized(&source, &namespace, &tmp.path().join("runtime.sqlite3"));
+        let (_state_lock, claim, work) =
+            issue_inspection_claim(&source, &namespace, &tmp.path().join("runtime.sqlite3"));
         let (copy, lease) = crate::runtime_db::create_sqlite_inspection_copy(
             &source,
             std::ffi::OsStr::new("scheduler.sqlite3"),
@@ -5714,8 +5692,8 @@ mod tests {
         std::fs::write(tmp.path().join("scheduler.sqlite3"), b"original").unwrap();
         let source = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
         let namespace = source.lock_exclusive().unwrap();
-        let (_state_lock, claim, work, _serial) =
-            issue_inspection_serialized(&source, &namespace, &tmp.path().join("runtime.sqlite3"));
+        let (_state_lock, claim, work) =
+            issue_inspection_claim(&source, &namespace, &tmp.path().join("runtime.sqlite3"));
         original_quota_claim::fail_next_created_evidence_ack();
         let error = match crate::runtime_db::create_sqlite_inspection_copy(
             &source,
@@ -5761,8 +5739,8 @@ mod tests {
         std::fs::write(tmp.path().join("scheduler.sqlite3"), b"original").unwrap();
         let source = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
         let namespace = source.lock_exclusive().unwrap();
-        let (_state_lock, _claim, work, _serial) =
-            issue_inspection_serialized(&source, &namespace, &tmp.path().join("runtime.sqlite3"));
+        let (_state_lock, _claim, work) =
+            issue_inspection_claim(&source, &namespace, &tmp.path().join("runtime.sqlite3"));
         let (copy, _lease) = crate::runtime_db::create_sqlite_inspection_copy(
             &source,
             std::ffi::OsStr::new("scheduler.sqlite3"),
@@ -5798,8 +5776,8 @@ mod tests {
         std::fs::write(tmp.path().join("scheduler.sqlite3"), b"original").unwrap();
         let source = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
         let namespace = source.lock_exclusive().unwrap();
-        let (_state_lock, _claim, work, _serial) =
-            issue_inspection_serialized(&source, &namespace, &tmp.path().join("runtime.sqlite3"));
+        let (_state_lock, _claim, work) =
+            issue_inspection_claim(&source, &namespace, &tmp.path().join("runtime.sqlite3"));
         let name = std::ffi::OsStr::new("scheduler.sqlite3");
         let allocated = work.clone().create_destination(&source, name).unwrap();
         let foreign = TempDir::new().unwrap();
@@ -5842,7 +5820,7 @@ mod tests {
         std::fs::write(&path, b"database").unwrap();
         let directory = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
         let namespace = directory.lock_exclusive().unwrap();
-        let (_state_lock, quota_claim, copy_work, _serial) = issue_inspection_serialized(
+        let (_state_lock, quota_claim, copy_work) = issue_inspection_claim(
             &directory,
             &namespace,
             &directory.path().join("runtime.sqlite3"),
@@ -5881,7 +5859,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let directory = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
         let namespace = directory.lock_exclusive().unwrap();
-        let (_state_lock, quota_claim, copy_work, _serial) = issue_inspection_serialized(
+        let (_state_lock, quota_claim, copy_work) = issue_inspection_claim(
             &directory,
             &namespace,
             &directory.path().join("runtime.sqlite3"),
@@ -5917,7 +5895,7 @@ mod tests {
             let sidecar = tmp.path().join(name);
             let directory = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
             let namespace = directory.lock_exclusive().unwrap();
-            let (_state_lock, quota_claim, copy_work, _serial) = issue_inspection_serialized(
+            let (_state_lock, quota_claim, copy_work) = issue_inspection_claim(
                 &directory,
                 &namespace,
                 &directory.path().join("runtime.sqlite3"),
@@ -5965,7 +5943,7 @@ mod tests {
             let sidecar = tmp.path().join(name);
             let directory = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
             let namespace = directory.lock_exclusive().unwrap();
-            let (_state_lock, quota_claim, copy_work, _serial) = issue_inspection_serialized(
+            let (_state_lock, quota_claim, copy_work) = issue_inspection_claim(
                 &directory,
                 &namespace,
                 &directory.path().join("runtime.sqlite3"),
@@ -6016,7 +5994,7 @@ mod tests {
             let sidecar = tmp.path().join(name);
             let directory = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
             let namespace = directory.lock_exclusive().unwrap();
-            let (_state_lock, quota_claim, copy_work, _serial) = issue_inspection_serialized(
+            let (_state_lock, quota_claim, copy_work) = issue_inspection_claim(
                 &directory,
                 &namespace,
                 &directory.path().join("runtime.sqlite3"),
