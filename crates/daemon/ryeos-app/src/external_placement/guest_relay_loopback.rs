@@ -476,6 +476,7 @@ impl ExternalPlacementBackend for GuestRelayLoopbackBackend {
             provider_observation_digest: lillux::sha256_hex(
                 format!("loopback-terminated:{}", occurrence.occurrence_id).as_bytes(),
             ),
+            basis: ryeos_external_execution_contract::TerminalBasis::ObservedTerminated,
         })
     }
 

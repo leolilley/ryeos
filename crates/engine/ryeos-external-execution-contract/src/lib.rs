@@ -73,7 +73,7 @@ pub const fn operator_network_inputs() -> OperatorNetworkInputSources {
     }
 }
 
-pub const LIFECYCLE_ADAPTER_PROTOCOL: &str = "ryeos.external-execution.lifecycle-adapter.v3";
+pub const LIFECYCLE_ADAPTER_PROTOCOL: &str = "ryeos.external-execution.lifecycle-adapter.v4";
 pub const PROVIDER_DECLARATION_PROTOCOL: &str = "ryeos.external-execution.provider-declaration.v2";
 pub const PROVIDER_CONFIGURATION_PROTOCOL: &str =
     "ryeos.external-execution.provider-configuration.v1";
@@ -1317,6 +1317,72 @@ impl LifecycleGuestPackageDelivery {
 #[serde(deny_unknown_fields)]
 pub struct TerminationIntent {
     pub termination_request_digest: String,
+    /// When the occurrence's lease can last at the latest, as the controller
+    /// derived it. A provider answer of not-found can settle termination by
+    /// elapsed time only when this is `Bounded` and the adapter's own grace
+    /// has passed.
+    pub latest_lease_end: LatestLeaseEnd,
+}
+
+/// Upper bound on a stated latest lease end, in Unix milliseconds (year
+/// 3000). It keeps adding an adapter's grace free of overflow and refuses a
+/// garbage timestamp instead of treating it as an end that never comes.
+pub const MAX_LATEST_LEASE_END_UNIX_MS: i64 = 32_503_680_000_000;
+
+/// The latest wall-clock moment an occurrence's lease can still be running.
+///
+/// `Unbounded` is a real state, not an absent value: an occurrence admitted
+/// without a provider-attested lifetime bound has no moment after which its
+/// not-found proves anything, so elapsed time never settles it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum LatestLeaseEnd {
+    Bounded { unix_ms: i64 },
+    Unbounded,
+}
+
+impl LatestLeaseEnd {
+    pub fn validate(&self) -> Result<()> {
+        if let Self::Bounded { unix_ms } = self {
+            ensure!(
+                (1..=MAX_LATEST_LEASE_END_UNIX_MS).contains(unix_ms),
+                "latest lease end is outside its bounds"
+            );
+        }
+        Ok(())
+    }
+
+    /// Whether `now_unix_ms` is past this end plus `grace_ms`. False when the
+    /// lease is unbounded, when the stated end is invalid, or when the clock
+    /// reads no time after the epoch.
+    pub fn is_past_with_grace(&self, now_unix_ms: i64, grace_ms: i64) -> bool {
+        match self {
+            Self::Bounded { unix_ms }
+                if self.validate().is_ok() && now_unix_ms > 0 && grace_ms >= 0 =>
+            {
+                unix_ms
+                    .checked_add(grace_ms)
+                    .is_some_and(|limit| now_unix_ms > limit)
+            }
+            _ => false,
+        }
+    }
+}
+
+/// The proof a terminal verdict rests on. The adapter hashes it into the
+/// provider observation digest and also reports it on the response, so the
+/// controller can record why a lease was treated as ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalBasis {
+    /// The provider reported this exact occurrence terminated.
+    ObservedTerminated,
+    /// This same operation's terminate request was accepted, and the provider
+    /// then definitively answered not-found for this exact occurrence.
+    AcceptedTerminateThenNotFound,
+    /// The provider definitively answered not-found for this exact
+    /// occurrence after its bounded lease and the adapter's grace had passed.
+    PastLatestLeaseEndNotFound,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1372,6 +1438,7 @@ pub enum LifecycleAdapterResponse {
         operation_id: String,
         termination_request_digest: String,
         provider_observation_digest: String,
+        basis: TerminalBasis,
     },
     TerminationPending {
         operation_id: String,
@@ -1693,12 +1760,18 @@ impl LifecycleAdapterResponse {
                 Self::OccurrenceTerminal {
                     termination_request_digest,
                     provider_observation_digest,
+                    basis,
                     ..
                 },
             ) => {
                 ensure!(
                     termination_request_digest == &termination.termination_request_digest,
                     "termination response changed its request identity"
+                );
+                ensure!(
+                    *basis != TerminalBasis::PastLatestLeaseEndNotFound
+                        || matches!(termination.latest_lease_end, LatestLeaseEnd::Bounded { .. }),
+                    "termination response claims a lease end the request did not state"
                 );
                 digest(provider_observation_digest, "provider terminal observation")
             }
@@ -1808,7 +1881,8 @@ impl SupervisorActivationIntent {
 
 impl TerminationIntent {
     fn validate(&self) -> Result<()> {
-        digest(&self.termination_request_digest, "termination request")
+        digest(&self.termination_request_digest, "termination request")?;
+        self.latest_lease_end.validate()
     }
 }
 
@@ -2755,6 +2829,95 @@ mod tests {
     }
 
     #[test]
+    fn latest_lease_end_is_validated_and_decides_only_when_bounded_and_past() {
+        let end = LatestLeaseEnd::Bounded { unix_ms: 1_000_000 };
+        assert!(end.validate().is_ok());
+        for bad in [0, -1, MAX_LATEST_LEASE_END_UNIX_MS + 1, i64::MAX, i64::MIN] {
+            assert!(
+                LatestLeaseEnd::Bounded { unix_ms: bad }.validate().is_err(),
+                "{bad}"
+            );
+        }
+        assert!(LatestLeaseEnd::Unbounded.validate().is_ok());
+        // Strictly past end plus grace.
+        assert!(!end.is_past_with_grace(1_000_000 + 600_000, 600_000));
+        assert!(end.is_past_with_grace(1_000_000 + 600_001, 600_000));
+        assert!(!end.is_past_with_grace(999_999, 600_000));
+        // An unreadable clock, an unbounded lease and an invalid end never decide.
+        assert!(!end.is_past_with_grace(0, 0));
+        assert!(!end.is_past_with_grace(-5, 0));
+        assert!(!LatestLeaseEnd::Unbounded.is_past_with_grace(i64::MAX, 0));
+        assert!(!LatestLeaseEnd::Bounded { unix_ms: 0 }.is_past_with_grace(i64::MAX, 0));
+        let request = |latest_lease_end| LifecycleAdapterRequest::Terminate {
+            common: common(),
+            occurrence: BoundOccurrence {
+                request_digest: "e".repeat(64),
+                occurrence_id: "occurrence".into(),
+            },
+            termination: TerminationIntent {
+                termination_request_digest: "f".repeat(64),
+                latest_lease_end,
+            },
+        };
+        assert!(request(end).validate().is_ok());
+        assert!(
+            request(LatestLeaseEnd::Bounded { unix_ms: 0 })
+                .validate()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn termination_intent_wire_shape_is_exact() {
+        let ok = br#"{"termination_request_digest":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","latest_lease_end":{"kind":"bounded","unix_ms":5}}"#;
+        assert!(from_json_slice_strict::<TerminationIntent>(ok, 1024).is_ok());
+        let unbounded = br#"{"termination_request_digest":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","latest_lease_end":{"kind":"unbounded"}}"#;
+        assert!(from_json_slice_strict::<TerminationIntent>(unbounded, 1024).is_ok());
+        let missing = br#"{"termination_request_digest":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}"#;
+        assert!(from_json_slice_strict::<TerminationIntent>(missing, 1024).is_err());
+        let extra = br#"{"termination_request_digest":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","latest_lease_end":{"kind":"unbounded","unix_ms":5}}"#;
+        assert!(from_json_slice_strict::<TerminationIntent>(extra, 1024).is_err());
+    }
+
+    #[test]
+    fn past_end_basis_requires_a_stated_lease_end() {
+        let request = |latest_lease_end| LifecycleAdapterRequest::Terminate {
+            common: common(),
+            occurrence: BoundOccurrence {
+                request_digest: "e".repeat(64),
+                occurrence_id: "occurrence".into(),
+            },
+            termination: TerminationIntent {
+                termination_request_digest: "f".repeat(64),
+                latest_lease_end,
+            },
+        };
+        let response = |basis| LifecycleAdapterResponse::OccurrenceTerminal {
+            operation_id: "allocation-1".into(),
+            termination_request_digest: "f".repeat(64),
+            provider_observation_digest: "a".repeat(64),
+            basis,
+        };
+        let bounded = request(LatestLeaseEnd::Bounded { unix_ms: 5 });
+        let unbounded = request(LatestLeaseEnd::Unbounded);
+        assert!(
+            response(TerminalBasis::PastLatestLeaseEndNotFound)
+                .validate_for(&bounded)
+                .is_ok()
+        );
+        assert!(
+            response(TerminalBasis::PastLatestLeaseEndNotFound)
+                .validate_for(&unbounded)
+                .is_err()
+        );
+        assert!(
+            response(TerminalBasis::ObservedTerminated)
+                .validate_for(&unbounded)
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn operation_mismatch_and_unknown_or_duplicate_fields_refuse() {
         let request = LifecycleAdapterRequest::Terminate {
             common: common(),
@@ -2764,6 +2927,7 @@ mod tests {
             },
             termination: TerminationIntent {
                 termination_request_digest: "f".repeat(64),
+                latest_lease_end: LatestLeaseEnd::Unbounded,
             },
         };
         let wrong = LifecycleAdapterResponse::AllocationPending {

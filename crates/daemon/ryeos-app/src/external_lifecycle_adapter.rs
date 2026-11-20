@@ -46,10 +46,11 @@ use ryeos_external_execution_contract::{
     LIFECYCLE_PROVIDER_SPEC_SHA256_ENV, LIFECYCLE_REMAINING_TIMEOUT_MS_ENV,
     LIFECYCLE_RESOLVER_FD_ENV, LIFECYCLE_RESOLVER_PRESENT_ENV, LIFECYCLE_RESOLVER_SHA256_ENV,
     LIFECYCLE_SETTINGS_FD_ENV, LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV, LIFECYCLE_SIGNED_IMPORT_FD_ENV,
-    LIFECYCLE_SUPERVISOR_FD_ENV, LifecycleAdapterInspectionRequest,
+    LIFECYCLE_SUPERVISOR_FD_ENV, LatestLeaseEnd, LifecycleAdapterInspectionRequest,
     LifecycleAdapterInspectionResponse, LifecycleAdapterRequest, LifecycleAdapterResponse,
     LifecycleArtifactInspection, LifecycleArtifactRole, LifecycleGuestPackageDelivery,
-    LifecycleOperationCommon, MAX_LIFECYCLE_GUEST_FRAME_MESSAGE_BYTES, MAX_LIFECYCLE_REQUEST_BYTES,
+    LifecycleOperationCommon, MAX_LATEST_LEASE_END_UNIX_MS,
+    MAX_LIFECYCLE_GUEST_FRAME_MESSAGE_BYTES, MAX_LIFECYCLE_REQUEST_BYTES,
     MAX_LIFECYCLE_RESPONSE_BYTES, SupervisorActivationIntent, TerminationIntent,
     from_json_slice_strict,
 };
@@ -2733,6 +2734,7 @@ impl ExecutableExternalPlacementBackend {
         };
         let termination = TerminationIntent {
             termination_request_digest: intent.termination_request_digest.clone(),
+            latest_lease_end: latest_lease_end(reservation),
         };
         let request = if reconcile {
             LifecycleAdapterRequest::ReconcileTermination {
@@ -2770,15 +2772,56 @@ impl ExecutableExternalPlacementBackend {
         {
             LifecycleAdapterResponse::OccurrenceTerminal {
                 provider_observation_digest,
+                basis,
                 ..
             } => Ok(ExternalTerminationResolution::Terminal {
                 provider_observation_digest,
+                basis,
             }),
             LifecycleAdapterResponse::TerminationPending { .. } => {
                 Ok(ExternalTerminationResolution::Pending)
             }
             _ => anyhow::bail!("lifecycle adapter returned a non-termination response"),
         }
+    }
+}
+
+/// The latest wall-clock moment this placement's lease can still be running,
+/// stated to the adapter on every termination contact.
+///
+/// A lease is admitted only when its provider attests that it ends within the
+/// reserved lifetime, and that admission is retained on the reservation. Its
+/// creation request is bounded by the reservation's contact deadline, so the
+/// lease cannot have begun later than that deadline and ends no later than the
+/// deadline plus the reserved lifetime. The moment the occurrence was bound is
+/// not retained (the allocation row's update time moves with every later
+/// phase change), and the contact deadline is the latest creation time the
+/// retained reservation proves. A placement with no retained admission has no
+/// attested lifetime bound, so its lease end is `Unbounded`; so is one whose
+/// end cannot be stated within the contract's bound.
+fn latest_lease_end(reservation: &ExternalAllocationReservation) -> LatestLeaseEnd {
+    latest_lease_end_from(
+        reservation.admitted_adapter_request_base64.is_some(),
+        reservation.contact_deadline_ms,
+        reservation.timeout_seconds,
+    )
+}
+
+fn latest_lease_end_from(
+    lease_admitted: bool,
+    contact_deadline_ms: i64,
+    lifetime_seconds: u32,
+) -> LatestLeaseEnd {
+    if !lease_admitted {
+        return LatestLeaseEnd::Unbounded;
+    }
+    let end = i64::from(lifetime_seconds)
+        .checked_mul(1_000)
+        .and_then(|lifetime_ms| contact_deadline_ms.checked_add(lifetime_ms))
+        .filter(|end| (1..=MAX_LATEST_LEASE_END_UNIX_MS).contains(end));
+    match end {
+        Some(unix_ms) => LatestLeaseEnd::Bounded { unix_ms },
+        None => LatestLeaseEnd::Unbounded,
     }
 }
 
@@ -3238,6 +3281,35 @@ mod tests {
             format!("{error:#}").starts_with("upload refused: its source is "),
             "{error:#}"
         );
+    }
+
+    #[test]
+    fn latest_lease_end_is_bounded_only_for_an_admitted_lease_and_within_the_contract() {
+        assert_eq!(
+            latest_lease_end_from(true, 1_000_000, 600),
+            LatestLeaseEnd::Bounded { unix_ms: 1_600_000 }
+        );
+        // No retained admission: no attested lifetime bound.
+        assert_eq!(
+            latest_lease_end_from(false, 1_000_000, 600),
+            LatestLeaseEnd::Unbounded
+        );
+        // A statement the contract would refuse is never sent.
+        for (deadline, lifetime) in [
+            (0, 0),
+            (-5, 1),
+            (i64::MAX, 1),
+            (MAX_LATEST_LEASE_END_UNIX_MS, 1),
+        ] {
+            assert_eq!(
+                latest_lease_end_from(true, deadline, lifetime),
+                LatestLeaseEnd::Unbounded,
+                "{deadline} {lifetime}"
+            );
+        }
+        latest_lease_end_from(true, 1_000_000, u32::MAX)
+            .validate()
+            .unwrap();
     }
 
     #[test]

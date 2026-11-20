@@ -36,7 +36,7 @@ use ryeos_external_execution_contract::{
     LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV, LIFECYCLE_SIGNED_IMPORT_FD_ENV,
     LifecycleAdapterInspectionRequest, LifecycleAdapterInspectionResponse, LifecycleAdapterRequest,
     LifecycleAdapterResponse, LifecycleArtifactInspection, LifecycleArtifactRole,
-    MAX_LIFECYCLE_PROVIDER_SPEC_BYTES, MAX_LIFECYCLE_REQUEST_BYTES, canonical_json,
+    MAX_LIFECYCLE_PROVIDER_SPEC_BYTES, MAX_LIFECYCLE_REQUEST_BYTES, TerminalBasis, canonical_json,
     from_json_slice_strict,
 };
 use ryeos_http_transport::{
@@ -352,33 +352,31 @@ struct TerminalEvidence<'a> {
     sandbox_response_sha256: &'a str,
 }
 
-/// The proof a terminal verdict rests on.
-#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-enum TerminalBasis {
-    /// The provider reported this exact sandbox terminated.
-    ObservedTerminated,
-    /// This same operation's terminate request got a 2xx from the provider,
-    /// and the provider then definitively answered 404 for this exact owner
-    /// and sandbox id. A 404 without that accepted request is never a proof.
-    AcceptedTerminateThenNotFound,
-}
-
-/// How a termination GET's status reads, given whether this operation's own
-/// terminate request was accepted. Only an exact 200 body or a definitive 404
-/// after an accepted request can settle; every other status (5xx, auth, rate
-/// limit) is left pending.
+/// How a termination GET's status reads. Only an exact 200 body or a
+/// definitive 404 under one of two proofs can settle: this operation's own
+/// accepted terminate request, or the lease having run past its stated latest
+/// end plus the adapter's grace. Every other status (5xx, auth, rate limit)
+/// is left pending, however late.
 #[derive(Debug, PartialEq, Eq)]
 enum TerminationGetStatus {
     ReadBody,
-    NotFoundByProof,
+    NotFound(TerminalBasis),
     Pending,
 }
 
-fn classify_termination_get(status: u16, accepted_terminate: bool) -> TerminationGetStatus {
+fn classify_termination_get(
+    status: u16,
+    accepted_terminate: bool,
+    past_latest_lease_end: bool,
+) -> TerminationGetStatus {
     match status {
         200 => TerminationGetStatus::ReadBody,
-        404 if accepted_terminate => TerminationGetStatus::NotFoundByProof,
+        404 if accepted_terminate => {
+            TerminationGetStatus::NotFound(TerminalBasis::AcceptedTerminateThenNotFound)
+        }
+        404 if past_latest_lease_end => {
+            TerminationGetStatus::NotFound(TerminalBasis::PastLatestLeaseEndNotFound)
+        }
         _ => TerminationGetStatus::Pending,
     }
 }
@@ -1539,22 +1537,26 @@ fn observe_termination_with_network(
         return pending();
     };
     let status = response.status;
-    let verdict = classify_termination_get(status, accepted_terminate);
+    let verdict = classify_termination_get(
+        status,
+        accepted_terminate,
+        ryeos_remote_lease_core::lease_end_passed(&termination.latest_lease_end),
+    );
     if verdict == TerminationGetStatus::Pending {
         return pending();
     }
     let bytes = match read_response(response) {
         Ok((_, bytes)) => bytes,
-        Err(()) if verdict == TerminationGetStatus::NotFoundByProof => Vec::new(),
+        Err(()) if matches!(verdict, TerminationGetStatus::NotFound(_)) => Vec::new(),
         Err(()) => return pending(),
     };
-    if verdict == TerminationGetStatus::NotFoundByProof {
+    if let TerminationGetStatus::NotFound(basis) = verdict {
         let response_sha256 = lillux::sha256_hex(&bytes);
         let evidence = TerminalEvidence {
             schema: 1,
             provider: "render-sandbox-early-access",
             terminal_state: "terminated",
-            basis: TerminalBasis::AcceptedTerminateThenNotFound,
+            basis,
             operation_id: &common.operation_id,
             binding_hash: &common.binding_hash,
             request_digest: &occurrence.request_digest,
@@ -1570,6 +1572,7 @@ fn observe_termination_with_network(
             operation_id: common.operation_id.clone(),
             termination_request_digest: termination.termination_request_digest.clone(),
             provider_observation_digest: lillux::sha256_hex(&evidence_bytes),
+            basis,
         };
     }
     let sandbox: RenderSandbox = match from_json_slice_strict(
@@ -1605,6 +1608,7 @@ fn observe_termination_with_network(
         operation_id: common.operation_id.clone(),
         termination_request_digest: termination.termination_request_digest.clone(),
         provider_observation_digest: lillux::sha256_hex(&evidence_bytes),
+        basis: TerminalBasis::ObservedTerminated,
     }
 }
 
@@ -2716,33 +2720,69 @@ mod offline_fixture_tests {
         );
     }
     #[test]
-    fn a_not_found_settles_only_after_this_operations_accepted_terminate() {
-        // No accepted terminate: a 404 is never a proof.
+    fn a_not_found_settles_only_with_one_of_the_two_proofs() {
+        use TerminalBasis::{AcceptedTerminateThenNotFound, PastLatestLeaseEndNotFound};
+        // No proof: a 404 is never terminal.
         assert_eq!(
-            classify_termination_get(404, false),
+            classify_termination_get(404, false, false),
             TerminationGetStatus::Pending
         );
+        // Rule (a): this operation's accepted terminate.
         assert_eq!(
-            classify_termination_get(404, true),
-            TerminationGetStatus::NotFoundByProof
+            classify_termination_get(404, true, false),
+            TerminationGetStatus::NotFound(AcceptedTerminateThenNotFound)
         );
+        // Rule (b): past the latest lease end plus grace.
         assert_eq!(
-            classify_termination_get(200, false),
-            TerminationGetStatus::ReadBody
+            classify_termination_get(404, false, true),
+            TerminationGetStatus::NotFound(PastLatestLeaseEndNotFound)
         );
+        // An accepted terminate is the stronger basis when both hold.
+        assert_eq!(
+            classify_termination_get(404, true, true),
+            TerminationGetStatus::NotFound(AcceptedTerminateThenNotFound)
+        );
+        for proofs in [(false, false), (true, false), (false, true), (true, true)] {
+            assert_eq!(
+                classify_termination_get(200, proofs.0, proofs.1),
+                TerminationGetStatus::ReadBody
+            );
+        }
         // Server errors, auth failures, rate limits and the like stay pending
-        // whether or not the terminate request was accepted.
+        // whatever proof holds, even long past the lease end.
         for status in [
             301, 400, 401, 403, 408, 409, 410, 422, 429, 500, 502, 503, 504,
         ] {
-            for accepted in [false, true] {
+            for proofs in [(false, false), (true, false), (false, true), (true, true)] {
                 assert_eq!(
-                    classify_termination_get(status, accepted),
+                    classify_termination_get(status, proofs.0, proofs.1),
                     TerminationGetStatus::Pending,
-                    "{status} {accepted}"
+                    "{status} {proofs:?}"
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_lease_end_proof_is_off_for_an_unbounded_lease_and_before_the_end() {
+        use ryeos_external_execution_contract::LatestLeaseEnd;
+        let past = LatestLeaseEnd::Bounded { unix_ms: 1_000 };
+        let future = LatestLeaseEnd::Bounded {
+            unix_ms: ryeos_external_execution_contract::MAX_LATEST_LEASE_END_UNIX_MS,
+        };
+        assert!(ryeos_remote_lease_core::lease_end_passed(&past));
+        assert!(!ryeos_remote_lease_core::lease_end_passed(&future));
+        assert!(!ryeos_remote_lease_core::lease_end_passed(
+            &LatestLeaseEnd::Unbounded
+        ));
+        // An invalid stated end is refused at request validation and never
+        // reads as passed.
+        assert!(!ryeos_remote_lease_core::lease_end_passed(
+            &LatestLeaseEnd::Bounded { unix_ms: 0 }
+        ));
+        assert!(!ryeos_remote_lease_core::lease_end_passed(
+            &LatestLeaseEnd::Bounded { unix_ms: i64::MAX }
+        ));
     }
 
     #[test]
@@ -2776,6 +2816,10 @@ mod offline_fixture_tests {
         assert_ne!(
             digest(TerminalBasis::ObservedTerminated),
             digest(TerminalBasis::AcceptedTerminateThenNotFound)
+        );
+        assert_ne!(
+            digest(TerminalBasis::AcceptedTerminateThenNotFound),
+            digest(TerminalBasis::PastLatestLeaseEndNotFound)
         );
         let json = serde_json::to_value(TerminalBasis::AcceptedTerminateThenNotFound).unwrap();
         assert_eq!(json, "accepted_terminate_then_not_found");

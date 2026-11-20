@@ -1337,6 +1337,7 @@ fn reconcile_termination(
                 "occurrence_fenced_before_spawn",
                 &serde_json::json!({"activation": activation, "termination": intent}),
             )?,
+            basis: ryeos_external_execution_contract::TerminalBasis::ObservedTerminated,
         });
     }
     let Some(terminal_file) =
@@ -1381,6 +1382,7 @@ fn reconcile_termination(
             "occurrence_terminal",
             &serde_json::json!({"terminal": terminal, "termination": intent}),
         )?,
+        basis: ryeos_external_execution_contract::TerminalBasis::ObservedTerminated,
     })
 }
 
@@ -2426,6 +2428,7 @@ mod tests {
             .unwrap();
             let termination = ryeos_external_execution_contract::TerminationIntent {
                 termination_request_digest: "d".repeat(64),
+                latest_lease_end: ryeos_external_execution_contract::LatestLeaseEnd::Unbounded,
             };
             let request = LifecycleAdapterRequest::ReconcileTermination {
                 common,
