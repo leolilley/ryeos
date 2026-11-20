@@ -5061,7 +5061,9 @@ mod tests {
                     .next()
                     .expect("helper exited before taking the state lock")
                     .unwrap();
-                if line.trim() == "STATE_LOCK_HELD" {
+                // libtest prints `test <name> ... ` without a newline before the
+                // helper announces itself on the same line.
+                if line.contains("STATE_LOCK_HELD") {
                     break;
                 }
             }
