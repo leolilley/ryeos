@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-20T01:31:58Z:aaad79f78234a727ea8e8945459521181bbadc2a72f984d7c09f2b749297d84d:ZcA7DyXVkuoaoYTJNMHJqeU4Q11BMuR8vxzdbVZddutXQpzJ+pK/sa/zecaAvrfEmhgV6i2ng6CYZtaxy1soAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T22:21:29Z:862c435bd950cf8856122ec57f60a7177eb712850c4c0d6286265f4fdf141b2f:GrGG/x7qJT5JBL6v3HdRgepvM4Rw4JH+CUWL84ezSLu/MN70jh4Ac49vVZ7vY3ky9D37AlUgqx49UlakWroaAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-node
 title: Node
 version: "1.0.0"
@@ -23,8 +23,6 @@ capabilities:
     - ryeos.execute.service.ui/ryeos-ui/item/inspect
     - ryeos.execute.service.ui/ryeos-ui/remotes/list
     - ryeos.execute.service.ui/ryeos-ui/gc/status
-    - ryeos.execute.service.ui/ryeos-ui/work/attention
-    - ryeos.execute.service.ui/ryeos-ui/work/approval-history
   affordances:
     - ryeos.execute.service.projects/open
     - ryeos.execute.service.projects/add
