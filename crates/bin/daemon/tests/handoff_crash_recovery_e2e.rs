@@ -435,9 +435,17 @@ send('ready', None, {'boot_identity':boot})
 while True:
     frame = receive()
     if frame['kind'] == 'request':
+        observations = [{'kind':'remote_thread','id':session_id}]
+        if isinstance(frame['body'], dict) and frame['body'].get('route_id') == 'session.start':
+            # The start command runs one real turn to completion, so the
+            # node holds its exact completed-command fence.
+            observations += [
+                {'kind':'state','expected':'idle','next':'turn_running','turn_id':'turn-handoff-fixture-start'},
+                {'kind':'state','expected':'turn_running','next':'idle','completed_turn_id':'turn-handoff-fixture-start'},
+            ]
         send('final', frame['request_id'], {
             'response':{'result':{'session_id':session_id}},
-            'session_observations':[{'kind':'remote_thread','id':session_id}],
+            'session_observations':observations,
             'result_retention':'durable'
         })
     elif frame['kind'] == 'cancel':
@@ -2946,7 +2954,7 @@ fn export_exact_chain_head(
 }
 
 fn create_source_abort_authority() -> Result<SourceAbortAuthority> {
-    let state_root = tempfile::tempdir()?;
+    let state_root = common::process_scopes::tempdir()?;
     let identity_path = state_root
         .path()
         .join(ryeos_engine::AI_DIR)
@@ -3637,11 +3645,57 @@ fn settled_or_host_unqualified(result: Result<()>) -> Result<()> {
                 .downcast_ref::<HostCannotQualifyProcessScopes>()
                 .is_some() =>
         {
-            eprintln!("handoff crash suite skipped: {error}");
+            // Fails the test when the real process-scope mode is selected.
+            common::process_scopes::skip_or_fail_unqualified(&format!(
+                "handoff crash suite: {error}"
+            ));
             Ok(())
         }
         other => other,
     }
+}
+
+/// The terminate request that ends a session whose first command completed a
+/// turn. A completed termination must carry that command's exact completion
+/// fence, which the command observation reports once the turn has completed.
+async fn completed_termination_request(
+    daemon: &DaemonHarness,
+    chain_root_id: &str,
+    command_response: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    let command = command_response.get("result").unwrap_or(command_response);
+    let placement_thread_id = command
+        .get("placement_thread_id")
+        .and_then(serde_json::Value::as_str)
+        .with_context(|| format!("command response names no placement: {command_response}"))?;
+    let command_sequence = command
+        .get("command_sequence")
+        .and_then(serde_json::Value::as_u64)
+        .with_context(|| format!("command response names no sequence: {command_response}"))?;
+    let mut last = None;
+    for _ in 0..120 {
+        let (status, observed) = daemon
+            .post_execute(
+                "service:worker-executions/command-observation",
+                ".",
+                serde_json::json!({
+                    "chain_root_id":chain_root_id,
+                    "placement_thread_id":placement_thread_id,
+                    "command_sequence":command_sequence,
+                }),
+            )
+            .await?;
+        if let Some(fence) = observed.pointer("/result/completion_fence") {
+            return Ok(serde_json::json!({
+                "chain_root_id":chain_root_id,
+                "reason":"completed",
+                "completion":fence,
+            }));
+        }
+        last = Some((status, observed));
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    anyhow::bail!("the first command never reported a completed turn: {last:?}")
 }
 
 async fn launch_and_checkpoint_portable_worker(
@@ -3702,14 +3756,14 @@ async fn launch_and_checkpoint_portable_worker(
         last_command = Some(response);
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    command_result.with_context(|| {
+    let first_command = command_result.with_context(|| {
         format!("portable worker never accepted its first command: {last_command:?}")
     })?;
     let (status, terminated) = daemon
         .post_execute(
             "service:worker-executions/terminate",
             ".",
-            serde_json::json!({"chain_root_id":chain_root_id,"reason":"completed"}),
+            completed_termination_request(daemon, &chain_root_id, &first_command).await?,
         )
         .await?;
     anyhow::ensure!(
@@ -4117,7 +4171,7 @@ impl RealPortableHandoff {
 }
 
 async fn start_real_portable_handoff() -> Result<RealPortableHandoff> {
-    let project = tempfile::tempdir()?;
+    let project = common::process_scopes::tempdir()?;
     std::fs::create_dir_all(project.path().join(".ai"))?;
     std::fs::write(
         project.path().join("fixture.txt"),
@@ -7053,7 +7107,7 @@ async fn portable_worker_fixture_launches_and_binds_a_real_hosted_session() -> R
 
 async fn portable_worker_fixture_launches_and_binds_a_real_hosted_session_on_qualified_host()
 -> Result<()> {
-    let project = tempfile::tempdir()?;
+    let project = common::process_scopes::tempdir()?;
     std::fs::create_dir_all(project.path().join(".ai"))?;
     std::fs::write(
         project.path().join("fixture.txt"),
@@ -7114,17 +7168,14 @@ async fn portable_worker_fixture_launches_and_binds_a_real_hosted_session_on_qua
         last_command = Some(response);
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let _command = command_result.with_context(|| {
+    let first_command = command_result.with_context(|| {
         format!("portable worker never accepted its first command: {last_command:?}")
     })?;
     let (status, terminated) = daemon
         .post_execute(
             "service:worker-executions/terminate",
             ".",
-            serde_json::json!({
-                "chain_root_id":chain_root_id,
-                "reason":"completed",
-            }),
+            completed_termination_request(&daemon, chain_root_id, &first_command).await?,
         )
         .await?;
     anyhow::ensure!(
@@ -7227,7 +7278,7 @@ async fn settled_portable_command_lost_ack_replays_after_real_daemon_restart_on_
     const LAUNCH_ID: &str = "L-22222222222222222222222222222222";
     const COMMAND_KEY: &str = "portable-lost-ack-session-start";
 
-    let project = tempfile::tempdir()?;
+    let project = common::process_scopes::tempdir()?;
     std::fs::create_dir_all(project.path().join(".ai"))?;
     std::fs::write(project.path().join("fixture.txt"), b"lost-ack fixture\n")?;
     let (mut cut_gate, mut cut_child) = DedicatedCommandCutGate::pair(COMMAND_KEY)?;

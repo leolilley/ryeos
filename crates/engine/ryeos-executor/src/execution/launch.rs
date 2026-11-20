@@ -11787,6 +11787,20 @@ fn attached_identity_launch_blocker(
     }
 }
 
+/// Every cause of an error, outermost first, joined by `: `. A typed error's
+/// alternate formatting prints only its own message, so a failure that crosses
+/// a typed boundary would otherwise be logged without its cause.
+fn error_cause_chain(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
+}
+
 /// Claim-guarded entry for a SAME-THREAD native-resume crash recovery (the
 /// reconciler's `NativeResume` for a runtime-registry kind, e.g. graph). Claims
 /// the launch lease (so only one launcher acts), skips a thread that already
@@ -11838,7 +11852,7 @@ pub fn prepare_and_spawn_existing_native_resume_recovery(
             }
             Err(error) => tracing::error!(
                 thread_id = %thread_id,
-                error = %error,
+                error = %error_cause_chain(&error),
                 "prepared managed native resume failed"
             ),
         }

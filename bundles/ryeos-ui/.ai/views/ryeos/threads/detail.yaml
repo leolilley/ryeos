@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-20T01:32:52Z:8bb47e9a7fe3b13208d000235a77b609316357e2242080ff6b822c904c64fa31:KPWrNP6l9giCl/KlALZQ4k+oG01jT6aowYs259gbhocqyQqvjS3Qkn6BOQ9WG19ynVeCDvrxYboSjfjtc6oOBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-19T05:58:47Z:6e3a0c7a74b2cf61a952d2bbf6026151d8a2ef0873449238fe42c0d960003eb3:SEqy2h1AVMfkHCeSXkeMShJnanHC+ccJzws93Pm9DtZayMBb+/0yryGDwrIe/2+N1OFXe/UpZc9KT5CVQZs6DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: thread-detail
 version: "1.0.0"
 description: >-
@@ -67,22 +67,6 @@ sections:
     projection:
       primary: label
       meta: value
-
-  # The containment fact the launch recorded: whether isolation was enforced
-  # for this run, read from the admitted realization as stored. A thread with no
-  # admitted record says so; nothing here is a default.
-  - title: Isolation enforced
-    source_channel: detail
-    collection: launch_facts
-    projection:
-      primary: state
-      meta: properties.isolation_enforced
-      tone:
-        field: properties.isolation_enforced
-        map: { "true": good, "false": warn }
-        default: neutral
-      expand:
-        fields: [state, reason, properties.isolation_enforced, properties.isolation_policy_digest, properties.isolation_backend_inspection_digest]
 
   # Rows are `{label, value}`: the name leads (primary) and the figure follows
   # (meta), as in every other section.
