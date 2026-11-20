@@ -216,6 +216,7 @@ pub fn decide<'a>(
     }
     let candidates: Vec<&SeatReadEntry> = policy
         .entries_for(target_ref)
+        .into_iter()
         .filter(|entry| entry.classes.contains(&class))
         .collect();
     if candidates.is_empty() {

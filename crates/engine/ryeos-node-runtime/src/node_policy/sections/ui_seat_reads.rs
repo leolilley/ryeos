@@ -305,13 +305,11 @@ impl UiSeatReadsPolicy {
     }
 
     /// The entries for one target, in file order.
-    pub fn entries_for<'a>(
-        &'a self,
-        target: &'a str,
-    ) -> impl Iterator<Item = &'a SeatReadEntry> + 'a {
+    pub fn entries_for(&self, target: &str) -> Vec<&SeatReadEntry> {
         self.reads
             .iter()
-            .filter(move |entry| entry.target == target)
+            .filter(|entry| entry.target == target)
+            .collect()
     }
 }
 
@@ -404,8 +402,8 @@ mod tests {
         let policy = parsed.as_any().downcast_ref::<UiSeatReadsPolicy>().unwrap();
         assert_eq!(policy.reads.len(), 1);
         assert_eq!(policy.reads[0].keep[1].text(), "/isolation/mode");
-        assert_eq!(policy.entries_for("service:node/status").count(), 1);
-        assert_eq!(policy.entries_for("service:node/other").count(), 0);
+        assert_eq!(policy.entries_for("service:node/status").len(), 1);
+        assert_eq!(policy.entries_for("service:node/other").len(), 0);
     }
 
     #[test]
