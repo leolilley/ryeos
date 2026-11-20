@@ -1393,11 +1393,13 @@ mod tests {
                 && text.contains("/etc/other-hosts"),
             "{text}"
         );
-        let mut optional = shape.clone();
-        optional.network_inputs.as_mut().unwrap().hosts.required = false;
-        let text = shape.first_difference(&optional).unwrap();
+        let mut flipped = shape.clone();
+        let declared = shape.network_inputs.as_ref().unwrap().hosts.required;
+        flipped.network_inputs.as_mut().unwrap().hosts.required = !declared;
+        let text = shape.first_difference(&flipped).unwrap();
         assert!(
-            text.contains("network_inputs.hosts.required") && text.contains("true versus false"),
+            text.contains("network_inputs.hosts.required")
+                && text.contains(&format!("{declared} versus {}", !declared)),
             "{text}"
         );
         let mut shapeless = shape.clone();
