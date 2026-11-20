@@ -54,6 +54,57 @@ pub struct Request {
     /// construction). Omission means cooperative `Steer`.
     #[serde(default)]
     pub intent: LiveInputIntent,
+    /// Optional title for the thread this input launches, stamped as the
+    /// `title` facet in the same commit as the thread. Absent: a fresh launch
+    /// derives one from `input`, a continuation inherits its predecessor's.
+    /// Unused when the input folds into a running thread.
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
+/// Facet key carrying a thread's human title.
+const TITLE_FACET_KEY: &str = "title";
+/// Longest accepted title, in Unicode scalar values.
+const TITLE_MAX_SCALARS: usize = 160;
+/// Longest stretch of `input` a derived title keeps, in Unicode scalar values.
+const DERIVED_TITLE_MAX_SCALARS: usize = 80;
+
+/// An explicit title: trimmed, 1..=160 Unicode scalars, no control characters.
+fn validate_title(raw: &str) -> Result<String, HandlerError> {
+    let title = raw.trim();
+    let scalars = title.chars().count();
+    if scalars == 0 || scalars > TITLE_MAX_SCALARS {
+        return Err(HandlerError::BadRequest(format!(
+            "title must be 1..={TITLE_MAX_SCALARS} characters after trimming; got {scalars}"
+        )));
+    }
+    if title.chars().any(char::is_control) {
+        return Err(HandlerError::BadRequest(
+            "title must not contain control characters".to_string(),
+        ));
+    }
+    Ok(title.to_string())
+}
+
+/// The default title for operator `input`: its first non-empty line with
+/// whitespace and control characters collapsed to single spaces, cut to at
+/// most 80 Unicode scalar values on a scalar boundary, with a single `…`
+/// appended only when something was cut. `None` when no line has any text.
+fn derive_title(input: &str) -> Option<String> {
+    let line = input.split(['\n', '\r']).find_map(|line| {
+        let collapsed = line
+            .split(|c: char| c.is_whitespace() || c.is_control())
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        (!collapsed.is_empty()).then_some(collapsed)
+    })?;
+    let mut scalars = line.chars();
+    let kept: String = scalars.by_ref().take(DERIVED_TITLE_MAX_SCALARS).collect();
+    if scalars.next().is_none() {
+        return Some(kept);
+    }
+    Some(format!("{}…", kept.trim_end()))
 }
 
 #[derive(serde::Deserialize)]
@@ -604,10 +655,12 @@ pub async fn handle(
         input,
         target,
         intent,
+        title,
     } = req;
     if input.trim().is_empty() {
         return Err(HandlerError::BadRequest("input is empty".to_string()));
     }
+    let explicit_title = title.as_deref().map(validate_title).transpose()?;
     let is_interrupt = intent.is_interrupt();
     let operator_input = LiveInput::new(input.clone(), intent);
     let input_bytes = serialized_live_input_bytes(&operator_input);
@@ -680,7 +733,14 @@ pub async fn handle(
                 state: &state,
                 lifecycle_authority: resolved_authority.lifecycle,
             })?
-            .retain_captured_generation(project_ctx.take_captured_generation());
+            .retain_captured_generation(project_ctx.take_captured_generation())
+            .with_initial_facets(
+                explicit_title
+                    .clone()
+                    .or_else(|| derive_title(&input))
+                    .map(|title| BTreeMap::from([(TITLE_FACET_KEY.to_string(), title)]))
+                    .unwrap_or_default(),
+            );
             let (handle, ready) = crate::routes::launch::spawn_dispatch_launch_with_handoff(
                 &state,
                 parsed_ref,
@@ -992,6 +1052,22 @@ pub async fn handle(
         .map_err(build_and_launch_error)?;
     if let Some(rebound) = prepared.rebound() {
         initial_audit_events.push(launch_binding_rebound_event(rebound));
+    }
+    // The successor keeps its predecessor's title unless one is supplied.
+    let successor_title = match explicit_title {
+        Some(title) => Some(title),
+        None => state
+            .state_store
+            .get_facets(&previous.thread_id)
+            .map_err(|error| HandlerError::Internal(format!("{error:#}")))?
+            .into_iter()
+            .find_map(|(key, value)| (key == TITLE_FACET_KEY).then_some(value)),
+    };
+    if let Some(title) = successor_title {
+        initial_audit_events.push(ryeos_app::state_store::NewEventRecord::thread_facet_set(
+            TITLE_FACET_KEY,
+            &title,
+        ));
     }
 
     let successor_record = ryeos_app::state_store::NewThreadRecord {
@@ -1651,5 +1727,90 @@ mod tests {
                 other => panic!("{status} must be refused, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn derived_title_is_the_first_non_empty_line_with_whitespace_collapsed() {
+        assert_eq!(
+            derive_title("\n  \r\n\t Fix   the\tlogin  bug \nsecond line").as_deref(),
+            Some("Fix the login bug")
+        );
+        assert_eq!(derive_title("one line").as_deref(), Some("one line"));
+    }
+
+    #[test]
+    fn derived_title_without_any_text_is_none() {
+        assert_eq!(derive_title(" \n\t \u{7} \r\n"), None);
+    }
+
+    #[test]
+    fn derived_title_turns_control_characters_into_separators() {
+        assert_eq!(derive_title("a\u{0}b\u{7}\u{7}c").as_deref(), Some("a b c"));
+    }
+
+    #[test]
+    fn derived_title_cuts_at_80_scalars_and_marks_only_a_cut() {
+        let exact = "x".repeat(80);
+        assert_eq!(derive_title(&exact).as_deref(), Some(exact.as_str()));
+        let long = "x".repeat(81);
+        assert_eq!(
+            derive_title(&long).as_deref(),
+            Some(format!("{}…", "x".repeat(80)).as_str())
+        );
+    }
+
+    #[test]
+    fn derived_title_cuts_on_a_scalar_boundary_for_multibyte_text() {
+        // 3-byte and 4-byte scalars: a byte cut at 80 would split one.
+        let wide = "界".repeat(100);
+        let title = derive_title(&wide).expect("title");
+        assert_eq!(title, format!("{}…", "界".repeat(80)));
+        let emoji = "😀".repeat(81);
+        let title = derive_title(&emoji).expect("title");
+        assert_eq!(title.chars().count(), 81);
+        assert!(title.starts_with(&"😀".repeat(80)) && title.ends_with('…'));
+        // A cut that would leave a trailing space drops it before the mark.
+        let spaced = format!("{} {}", "a".repeat(79), "b".repeat(10));
+        assert_eq!(
+            derive_title(&spaced).as_deref(),
+            Some(format!("{}…", "a".repeat(79)).as_str())
+        );
+    }
+
+    #[test]
+    fn an_explicit_title_is_trimmed_and_bounded_in_scalars() {
+        assert_eq!(
+            validate_title("  Plan the move  ").unwrap(),
+            "Plan the move"
+        );
+        assert_eq!(
+            validate_title(&"界".repeat(160)).unwrap().chars().count(),
+            160
+        );
+        for bad in [
+            String::new(),
+            "   ".to_string(),
+            "界".repeat(161),
+            "two\nlines".to_string(),
+            "bell\u{7}".to_string(),
+            "tab\there".to_string(),
+        ] {
+            assert!(
+                matches!(validate_title(&bad), Err(HandlerError::BadRequest(_))),
+                "{bad:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn the_request_takes_an_optional_title() {
+        let target = json!({"kind": "thread", "thread_id": "T-1"});
+        let without: Request =
+            serde_json::from_value(json!({"input": "hi", "target": target})).unwrap();
+        assert!(without.title.is_none());
+        let with: Request =
+            serde_json::from_value(json!({"input": "hi", "target": target, "title": "A title"}))
+                .unwrap();
+        assert_eq!(with.title.as_deref(), Some("A title"));
     }
 }

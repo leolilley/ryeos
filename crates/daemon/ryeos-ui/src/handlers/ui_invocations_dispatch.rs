@@ -1733,6 +1733,7 @@ async fn execute_prepared_item_ref(
         usage_subject: Some(usage_subject),
         usage_subject_asserted_by: Some(usage_asserted_by.to_string()),
         previous_thread_id: None,
+        initial_facets: Default::default(),
         root_admission: None,
         root_dispatch_evidence: None,
         parent_execution_context: None,

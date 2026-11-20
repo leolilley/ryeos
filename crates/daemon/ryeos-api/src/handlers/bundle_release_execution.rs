@@ -588,6 +588,7 @@ pub(crate) async fn execute_pinned_graph(
         usage_subject: None,
         usage_subject_asserted_by: None,
         previous_thread_id: None,
+        initial_facets: Default::default(),
         root_admission: None,
         root_dispatch_evidence: None,
         parent_execution_context: None,
