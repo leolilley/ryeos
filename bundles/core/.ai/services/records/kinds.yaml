@@ -1,0 +1,9 @@
+# ryeos:signed:2026-11-20T01:48:38Z:f1925bc8320781b291f549ccd72c2dc0e94e140de8f94e7030f6f3ca2c29a211:2cnHhch7K1dMzc/+G6W5b4ekjsPiKh8KcdbQ9Xe/l/wJH7/DAzeQNnAi9rSey6kifEt3MdNTPPsFd/XWTyLqCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: records.kinds
+availability: both
+ui_read_only: true
+state_access: read_only_existing
+record_thread: false
+required_caps: ["ryeos.execute.service.records/kinds"]
+description: "List the record kinds installed bundles declare, and whether this node can serve each"

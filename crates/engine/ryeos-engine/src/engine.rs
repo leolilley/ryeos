@@ -1065,6 +1065,11 @@ impl CheckedEngineGeneration<'_> {
         self.engine.signer_label(fingerprint)
     }
 
+    /// See [`Engine::installed_bundle_config_ids`].
+    pub fn installed_bundle_config_ids(&self, prefix: &str) -> Result<Vec<String>, EngineError> {
+        self.engine.installed_bundle_config_ids(prefix)
+    }
+
     /// See [`Engine::load_trusted_bundle_config`].
     pub fn load_trusted_bundle_config(
         &self,
@@ -1620,6 +1625,27 @@ impl Engine {
         };
         crate::config_loading::load_and_verify_trusted_config_file(&layer.path, &load_context)
             .map(Some)
+    }
+
+    /// The ids of the Configs that installed bundles ship under `prefix`
+    /// (a bare-id prefix such as `ryeos/core/records/`), sorted. Only
+    /// installed bundles are listed, never a project, and listing verifies
+    /// nothing: a caller loads each id through
+    /// [`Self::load_trusted_bundle_config`], which does.
+    pub fn installed_bundle_config_ids(&self, prefix: &str) -> Result<Vec<String>, EngineError> {
+        let Some(schema) = self.kinds.get("config") else {
+            return Ok(Vec::new());
+        };
+        let roots = self.resolution_roots(None);
+        let mut ids: Vec<String> =
+            crate::item_resolution::try_enumerate_kind_refs(&roots, schema, "config")?
+                .into_iter()
+                .map(|item| item.bare_id)
+                .filter(|id| id.starts_with(prefix))
+                .collect();
+        ids.sort();
+        ids.dedup();
+        Ok(ids)
     }
 
     /// The label the node's trust registry records for a signer, when it

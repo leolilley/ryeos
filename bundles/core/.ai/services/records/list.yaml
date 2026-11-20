@@ -1,0 +1,9 @@
+# ryeos:signed:2026-11-20T01:48:38Z:8a6c1642b6dbfbd0158271bdab94bd218e87476f54739920a8ab93048b015f6c:Z/eOS+CWBxwNnVCTXjwuoZ96ExnYRvCW0k7aX4yzHoDJ/98P03GRC8z3cZ6zCPDFawhWEfOr3x6W8NsWT4aeDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: records.list
+availability: both
+ui_read_only: true
+state_access: read_only_existing
+record_thread: false
+required_caps: ["ryeos.execute.service.records/list"]
+description: "List the signed records of one declared kind, each with its key, hash, declared summary and verification"
