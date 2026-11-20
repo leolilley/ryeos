@@ -1466,10 +1466,11 @@ async fn planned_rollover_with_a_settling_follow_child_exits_75_and_the_run_resu
                 "RUST_LOG",
                 "info,ryeos_directive_runtime=debug,ryeosd=debug",
             )
-            // Each row read of the drain's snapshot waits (up to 60 s) until
-            // the follow child's launch owner has settled it, so the child
-            // always settles between the list and the read.
-            .env("RYEOSD_TEST_ATTACHED_SNAPSHOT_HOLD_MS", "60000");
+            // After listing, the drain's snapshot waits (up to 30 s) until
+            // one listed thread, the follow child, has been settled by its
+            // launch owner, so the child always settles between the list and
+            // the row read. The running tool thread stays attached.
+            .env("RYEOSD_TEST_ATTACHED_SNAPSHOT_HOLD_MS", "30000");
     };
     let (mut harness, fixture) = DaemonHarness::start_fast_with(plant, log_env)
         .await

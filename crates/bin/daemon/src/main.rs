@@ -7387,8 +7387,8 @@ fn latched_attached_snapshot(state: &AppState) -> (Vec<DrainAttached>, bool) {
 
 /// Qualification-only hold of the shutdown snapshot, set by
 /// `RYEOSD_TEST_ATTACHED_SNAPSHOT_HOLD_MS`: the bound in milliseconds for
-/// which each row read waits for its thread to be settled by its launch
-/// owner. An unparseable value stops startup.
+/// which the snapshot, after listing, waits for one listed thread to be
+/// settled by its launch owner. An unparseable value stops startup.
 #[cfg(feature = "crash-qualification-test-support")]
 mod snapshot_hold {
     use anyhow::{Context as _, Result};
@@ -7437,26 +7437,26 @@ trait AttachedSnapshotSource {
 
 impl AttachedSnapshotSource for AppState {
     fn list_attached(&self) -> Result<Vec<String>> {
-        self.state_store
+        let listed = self
+            .state_store
             .list_attached_thread_ids()
-            .context("list attached threads during shutdown")
-    }
-
-    fn read_row(&self, thread_id: &str) -> Result<Option<AttachedRow>> {
-        // Qualification builds can hold the snapshot between the registry list
-        // and this row read until the thread's launch owner has settled it,
-        // so a process that exits during a stop always lands in that window.
+            .context("list attached threads during shutdown")?;
+        // Qualification builds can hold the snapshot between the registry
+        // list and the row reads until one listed thread has been settled by
+        // its launch owner, so a process that exits during a stop always
+        // lands in that window. The hold never waits on a particular thread:
+        // other attached threads, such as a running tool, stay attached.
         #[cfg(feature = "crash-qualification-test-support")]
         if let Some(bound) = snapshot_hold::bound() {
             // The wait runs on a runtime worker; block_in_place hands the
-            // worker's other tasks (the launch owner being waited for) to
+            // worker's other tasks (the launch owners being waited for) to
             // another thread so the hold cannot starve them.
             tokio::task::block_in_place(|| {
                 let deadline = Instant::now() + bound;
-                while self.still_registered(thread_id)? {
+                while self.state_store.list_attached_thread_ids()?.len() >= listed.len() {
                     if Instant::now() >= deadline {
                         anyhow::bail!(
-                            "thread {thread_id} was not settled within {bound:?} of the held snapshot"
+                            "no listed thread was settled within {bound:?} of the held snapshot"
                         );
                     }
                     std::thread::sleep(Duration::from_millis(5));
@@ -7464,6 +7464,10 @@ impl AttachedSnapshotSource for AppState {
                 Ok::<(), anyhow::Error>(())
             })?;
         }
+        Ok(listed)
+    }
+
+    fn read_row(&self, thread_id: &str) -> Result<Option<AttachedRow>> {
         Ok(self
             .state_store
             .get_thread(thread_id)?
