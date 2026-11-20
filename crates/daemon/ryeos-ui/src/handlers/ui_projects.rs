@@ -1574,7 +1574,11 @@ fn apply_config_update_staged(
     req: UpdateConfigRequest,
 ) -> Result<()> {
     if let Some(theme) = req.theme.as_deref() {
-        validate_choice("theme", theme, &["system", "light", "dark"])?;
+        validate_choice(
+            "theme",
+            theme,
+            &ryeos_client_base::theme_preference::ALLOWED,
+        )?;
     }
     if let Some(landing_view) = req.landing_view.as_deref() {
         validate_choice("landing_view", landing_view, &["projects"])?;
@@ -1805,7 +1809,11 @@ fn ensure_version(label: &str, found: u32, expected: u32) -> Result<()> {
 
 fn validate_ui_config(config: &RyeOsConfigFile) -> Result<()> {
     ensure_version("ryeos-ui.yaml", config.version, RYEOS_UI_CONFIG_VERSION)?;
-    validate_choice("theme", &config.theme, &["system", "light", "dark"])?;
+    validate_choice(
+        "theme",
+        &config.theme,
+        &ryeos_client_base::theme_preference::ALLOWED,
+    )?;
     validate_choice("landing_view", &config.landing_view, &["projects"])?;
     validate_saved_view_set_templates(&config.saved_view_sets).map_err(HandlerError::BadRequest)?;
     validate_particular_view_set_resumes(&config.particular_view_sets)
@@ -2514,8 +2522,16 @@ mod tests {
 
     #[test]
     fn invalid_config_choices_are_rejected() {
-        let err = validate_choice("theme", "neon", &["system", "light", "dark"]).unwrap_err();
+        let allowed = &ryeos_client_base::theme_preference::ALLOWED;
+        let err = validate_choice("theme", "neon", allowed).unwrap_err();
         assert!(err.to_string().contains("invalid theme value 'neon'"));
+        // The earlier light/dark values are not palettes and are refused.
+        for old in ["light", "dark"] {
+            assert!(validate_choice("theme", old, allowed).is_err());
+        }
+        for accepted in ["system", "night", "paper", "gruvbox"] {
+            validate_choice("theme", accepted, allowed).unwrap();
+        }
     }
 
     #[test]

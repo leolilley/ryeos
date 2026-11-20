@@ -72,14 +72,14 @@ async fn ryeos_config_is_isolated_by_durable_user_principal() {
     let updated = ryeos_ui::seat_auth::with_compiled_ui_attachment(
         attachment_a.clone(),
         ryeos_ui::handlers::ui_projects::handle_config_update(
-            json!({ "theme": "dark" }),
+            json!({ "theme": "gruvbox" }),
             ctx_a.clone(),
             Arc::new(state.clone()),
         ),
     )
     .await
     .expect("principal A should update config");
-    assert_eq!(updated["theme"], "dark");
+    assert_eq!(updated["theme"], "gruvbox");
 
     let loaded_a = ryeos_ui::seat_auth::with_compiled_ui_attachment(
         attachment_a,
@@ -91,7 +91,7 @@ async fn ryeos_config_is_isolated_by_durable_user_principal() {
     )
     .await
     .expect("principal A should read updated config");
-    assert_eq!(loaded_a["theme"], "dark");
+    assert_eq!(loaded_a["theme"], "gruvbox");
 
     let (ctx_b, attachment_b) = session_context(&state, &principal_b);
     let loaded_b = ryeos_ui::seat_auth::with_compiled_ui_attachment(
