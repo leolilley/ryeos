@@ -9785,6 +9785,27 @@ while True:
     }
 
     #[test]
+    fn shutdown_hold_names_the_spawn_stage_of_an_exclusive_start_that_has_not_advanced() {
+        // The Q local Worker start admits through `reserve_exclusive` and
+        // spawns locally before `bind`; it records the spawn stage and never a
+        // provider stage, so a hold on it names the spawn leg.
+        let pool = PersistentSessionPool::new();
+        let reservation = pool
+            .reserve_exclusive(&"u".repeat(64), &test_lifecycle(), &test_wire())
+            .unwrap();
+        reservation.note_stage(AdmittedStartStage::Spawn);
+        let error = pool
+            .shutdown_and_reap_all(Duration::from_millis(300))
+            .expect_err("a start still spawning holds shutdown");
+        assert!(
+            error
+                .to_string()
+                .contains("exclusive start uuuuuuuu at stage spawn"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
     fn shutdown_holds_with_a_named_leg_when_an_admitted_start_cannot_prove_cleanup() {
         let pool = PersistentSessionPool::new();
         let mut lifecycle = test_lifecycle();
