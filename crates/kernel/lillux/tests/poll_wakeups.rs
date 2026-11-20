@@ -218,9 +218,12 @@ fn supervised_shell(target_script: &str) -> SubprocessRequest {
 #[test]
 fn supervised_launch_does_not_wait_on_status_or_exit_timers() {
     // The old status reader slept 10 ms whenever the channel was empty, and
-    // the wrapper wait slept 10 ms per check, so a supervised launch could not
-    // finish under 10 ms.
-    let bound = Duration::from_millis(10);
+    // the wrapper wait slept 10 ms per check, so a supervised launch paid at
+    // least that plus up to 50 ms of drain sleep before returning. The bound
+    // sits well above a normal supervised launch (three process creations) so
+    // a slow runner passes, and below the old per-launch cost the fastest of
+    // up to 90 launches could not have beaten.
+    let bound = Duration::from_millis(20);
     let best = fastest_launch(3, 30, bound, || {
         let running = lillux::spawn(supervised_shell("exit 0"))
             .unwrap_or_else(|failure| panic!("supervised spawn: {}", failure.stderr));
@@ -257,7 +260,9 @@ fn silent_supervised_launcher_still_fails_at_the_request_deadline() {
 
 #[test]
 fn natural_wait_ends_at_the_exit_not_at_a_timer() {
-    let bound = Duration::from_millis(10);
+    // Old floor: one 10 ms sleep per observation plus the drain sleeps. The
+    // bound leaves room for a slow runner's process creation.
+    let bound = Duration::from_millis(15);
     let best = fastest_launch(3, 30, bound, || {
         let running = lillux::spawn(shell("printf done")).unwrap();
         let result = running

@@ -4114,11 +4114,17 @@ impl DrainStop {
         unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
     }
 
+    // Compile-only shim for targets the platform support document does not
+    // list (the node requires Linux eventfds). It is not a runtime fallback:
+    // a supported host never reaches it.
     #[cfg(not(target_os = "linux"))]
     fn wait_readable<T>(&self, _source: &T) {
         thread::sleep(CAPTURE_POLL_INTERVAL);
     }
 
+    // Compile-only shim for targets the platform support document does not
+    // list (the node requires Linux eventfds). It is not a runtime fallback:
+    // a supported host never reaches it.
     #[cfg(not(target_os = "linux"))]
     fn wait_writable<T>(&self, _sink: &T) {
         thread::sleep(PROCESS_POLL_INTERVAL);
@@ -8035,9 +8041,10 @@ impl RunningProcess {
         Ok(())
     }
 
-    /// Block until the native-terminal testimony pipe or the held target's
-    /// exit becomes ready, or `bound` elapses. These are the only two things
-    /// an exited wrapper with incomplete testimony can be waiting for. The
+    /// Block until the native-terminal testimony pipe becomes ready (or, once
+    /// testimony is decoded, the held target's exit), or `bound` elapses.
+    /// These are the only things an exited wrapper with incomplete testimony
+    /// can be waiting for. The
     /// wrapper's own exit watch is deliberately not included: it is already
     /// readable in this state, so waiting on it would return at once and spin.
     #[cfg(target_os = "linux")]
@@ -8054,10 +8061,18 @@ impl RunningProcess {
                 revents: 0,
             });
         }
-        if !matches!(
-            channel.pin_observation,
-            NativeTerminalPinObservation::Exited
-        ) {
+        // The target's exit is observed only once testimony exists (the pin
+        // is not read before then), so before that it cannot be the wait's
+        // event: an already-exited target would leave its pidfd readable and
+        // spin the caller against an unchanged testimony pipe. Until a
+        // testimony record is decoded the pipe alone decides when to look
+        // again.
+        if channel.testimony.is_some()
+            && !matches!(
+                channel.pin_observation,
+                NativeTerminalPinObservation::Exited
+            )
+        {
             let pin = self
                 .attachment_target_lifetime
                 .as_ref()
@@ -8369,6 +8384,14 @@ impl RunningProcess {
                     return NaturalWaitCoreOutcome::Completed(self, Some(result));
                 }
                 Ok(WrapperPoll::Running) => {
+                    // The testimony pipe and the target pin are read only when
+                    // the wrapper has exited or this slice ends, not while it
+                    // runs. That is safe: a frame is capped at 4096 bytes,
+                    // below the pipe's buffer, so an unread writer is never
+                    // blocked by this wait; and the original-deadline expiry
+                    // is checked in `poll_native_terminal_testimony` before
+                    // its sticky already-exited return, so a late read cannot
+                    // turn an expired window into success.
                     if Instant::now() >= deadline {
                         return NaturalWaitCoreOutcome::Incomplete(self);
                     }
@@ -15010,6 +15033,58 @@ mod native_terminal_existing_wait_tests {
         let mut frame = serde_json::to_vec(&record).unwrap();
         frame.push(b'\n');
         (running, writer, frame, receipt_sender, applied)
+    }
+
+    fn thread_cpu_time() -> Duration {
+        let mut now = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        assert_eq!(
+            unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) },
+            0
+        );
+        Duration::new(now.tv_sec as u64, now.tv_nsec as u32)
+    }
+
+    #[test]
+    fn exited_target_with_open_testimony_pipe_waits_without_spinning_and_fails_closed() {
+        if !fork_creation_custody_tests::run_isolated_in(
+            module_path!(),
+            "exited_target_with_open_testimony_pipe_waits_without_spinning_and_fails_closed",
+        ) {
+            return;
+        }
+        // The target exits at once; the testimony write end stays open (as if
+        // a descendant held it) and no record is ever written.
+        let (mut running, writer, _frame) = selected_live_child_with_testimony("0.05");
+        running
+            .native_settlement
+            .as_mut()
+            .unwrap()
+            .original_deadline = crate::time::MonotonicDeadline::after(Duration::from_millis(700));
+        let cpu_before = thread_cpu_time();
+        let started = Instant::now();
+        let outcome = selected_wait(running, Duration::from_secs(3));
+        let elapsed = started.elapsed();
+        let cpu = thread_cpu_time() - cpu_before;
+        match outcome {
+            SelectedNativeTerminalWaitOutcome::Failed(owner) => owner.abort(),
+            SelectedNativeTerminalWaitOutcome::Collected(owner)
+            | SelectedNativeTerminalWaitOutcome::Incomplete(owner) => {
+                owner.abort();
+                panic!("an unfinished testimony window must fail closed at its deadline");
+            }
+        }
+        drop(writer);
+        assert!(elapsed >= Duration::from_millis(600), "{elapsed:?}");
+        assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
+        // Waiting for the pipe costs almost no CPU; a loop re-polling an
+        // already-readable target descriptor would burn about all of it.
+        assert!(
+            cpu < elapsed / 4,
+            "the wait spun: {cpu:?} of CPU in {elapsed:?}"
+        );
     }
 
     // Negative collection controls only: this ordinary child supplies no
