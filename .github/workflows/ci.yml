@@ -1534,6 +1534,12 @@ jobs:
               echo "next \`$sha\`, ci.yml run [$run_id](https://github.com/$repo/actions/runs/$run_id); $(wc -l < "$work/touched") paths; no branch overlap."
           } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
+      - name: No shipped build resolves a test-support feature
+        # The same static check the rust-policy job runs: cargo tree only, no
+        # compile. Run here too so this job shows the production feature
+        # sets lack lillux's test-only controller spawn.
+        run: ./scripts/ci/check-test-support-feature-leak.sh
+
       - name: Build the e2e test binaries
         run: |
           set -euo pipefail
