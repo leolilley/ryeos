@@ -503,7 +503,6 @@ impl FrameRecord {
     }
 }
 
-/// Serialise a typed payload to the JSON an event carries.
 /// The start of the `finish` of a turn that is a compaction's summary call;
 /// the compaction's trigger follows it (`compaction_summary_pressure`). Its
 /// text is the summary, not a conversation turn: a fold never turns it into a
@@ -548,7 +547,6 @@ pub struct WindowSeed {
     pub images: u64,
     pub image_bytes: u64,
     /// The image attachments the node already stores for the run.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub image_stored: Vec<String>,
 }
 
@@ -586,7 +584,6 @@ pub struct CompactionPayload {
     /// Whether a model wrote the summary or it is the policy's fixed note.
     pub summary_model_call: bool,
     /// Messages the summary call's bounded input left out.
-    #[serde(default)]
     pub omitted_from_input: u32,
     /// The pinned inputs in force, with their acknowledgements, in order.
     pub pinned: Vec<CognitionInput>,
@@ -596,13 +593,12 @@ pub struct CompactionPayload {
     pub size_before: u64,
     pub size_after: u64,
     /// The reduction fell short of the policy's floor.
-    #[serde(default)]
     pub ineffective: bool,
     /// Compactions and overflow recoveries up to and including this one.
     pub compactions: u32,
     pub overflow_recoveries: u32,
-    /// How the kept turns' tool results are clipped, when they are.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// How the kept turns' tool results are clipped, when they are. Always
+    /// present on the record; `null` means not clipped.
     pub clip: Option<ClipRule>,
 }
 
@@ -634,6 +630,7 @@ impl CompactionPayload {
     }
 }
 
+/// Serialise a typed payload to the JSON an event carries.
 pub fn to_payload<T: Serialize>(payload: &T) -> Result<Value> {
     Ok(serde_json::to_value(payload)?)
 }

@@ -73,6 +73,9 @@ pub struct ResumeState {
     pub predecessor_rejected_turn: Option<u32>,
     /// Continuation predecessors this thread has on its path.
     pub chain_depth: u32,
+    /// A compacted start that is still over the continuation threshold: the
+    /// run compacts again before its first request when its policy allows.
+    pub start_over_ceiling: bool,
 }
 
 /// What a run keeps in memory of the latest compaction on its path.
@@ -226,11 +229,7 @@ pub async fn load_resume_state(
     // its continuation predecessor, never a child), and replaying each turn
     // thread-scoped structurally excludes those children.
     let path = continuation_path(callback, previous_thread_id).await?;
-    let chain_depth = u32::try_from(match mode {
-        ResumeMode::NativeSameThread => path.len().saturating_sub(1),
-        ResumeMode::Continuation => path.len(),
-    })
-    .unwrap_or(u32::MAX);
+    let chain_depth = count_machine_edges(callback, &path).await?;
 
     // A path that holds a compaction replays from the compaction's kept turns
     // on, not from its start: the compaction carries what came before.
@@ -331,7 +330,7 @@ pub async fn load_resume_state(
     // pinned inputs, then the most recent turns.
     let trailing_length_turns = trailing_length_turns(&events[own_start..])?;
     let frame = latest_frame(&events)?;
-    let (messages, wrap_up_delivered) = match anchor.as_ref() {
+    let (messages, wrap_up_delivered, start_over_ceiling) = match anchor.as_ref() {
         // A compacted conversation is the compaction's own fold; it is not cut
         // again. A successor's start must still fit the window.
         Some(anchor) => {
@@ -339,15 +338,9 @@ pub async fn load_resume_state(
             let delivered = folded.iter().any(is_wrap_up_notice);
             let messages: Vec<ProviderMessage> =
                 folded.into_iter().map(|folded| folded.message).collect();
-            if mode == ResumeMode::Continuation
-                && crate::estimate::estimate_tokens(&messages, images) > carry.ceiling_tokens
-            {
-                return Err(ResumeFoldError::CompactedStartExceedsWindow {
-                    ceiling: carry.ceiling_tokens,
-                }
-                .into());
-            }
-            (messages, delivered)
+            let over = mode == ResumeMode::Continuation
+                && crate::estimate::estimate_tokens(&messages, images) > carry.ceiling_tokens;
+            (messages, delivered, over)
         }
         None => {
             let predecessor = fold_messages(&events[..own_start])?;
@@ -367,7 +360,7 @@ pub async fn load_resume_state(
                     .iter()
                     .any(|notice| messages.contains(notice));
             messages.extend(own.into_iter().map(|folded| folded.message));
-            (messages, delivered)
+            (messages, delivered, false)
         }
     };
     // The whole rebuilt conversation, predecessors' carry and own part, must
@@ -410,6 +403,7 @@ pub async fn load_resume_state(
             .map(|anchor| CompactionMemo::of(&anchor.payload)),
         predecessor_rejected_turn,
         chain_depth,
+        start_over_ceiling,
     })
 }
 
@@ -536,6 +530,11 @@ async fn locate_window(
         return Ok(None);
     };
     let kept = anchor.payload.kept_from_turn;
+    // Every `cognition_in` of a thread (turn markers and inputs) is read to
+    // find the first kept turn's marker; the first kept turn is recent, so the
+    // search stops in the anchor's thread or the one before it. A thread with
+    // more of them than the replay ceiling allows fails typed
+    // (`replay_ceiling_exceeded`) before its window is read.
     for index in (0..=anchor_thread).rev() {
         let page = callback
             .replay_thread_with_budget(
@@ -649,6 +648,39 @@ pub(crate) async fn load_compaction_basis(
     })
 }
 
+/// Consecutive machine continuation edges that end at the path's last thread,
+/// newest first. An edge into a thread that began with an operator input (a
+/// follow-up) is not one, and ends the count: the daemon exempts those edges
+/// from the chain depth limit, and so does this. A live steer inside a thread
+/// also carries the operator origin, so it can only make the count shorter.
+async fn count_machine_edges(callback: &CallbackClient, path: &[String]) -> Result<u32> {
+    let mut count = 0u32;
+    for thread_id in path.iter().skip(1).rev() {
+        let page = callback
+            .replay_thread_with_budget(
+                thread_id,
+                Some(&["cognition_in"]),
+                &mut RuntimeReplayBudget::default(),
+            )
+            .await?;
+        let operator_input = page.events.iter().any(|event| {
+            event.event_type == "cognition_in"
+                && event.payload.get("origin").and_then(Value::as_str) == Some("operator")
+        });
+        if !machine_edge(operator_input) {
+            break;
+        }
+        count = count.saturating_add(1);
+    }
+    Ok(count)
+}
+
+/// Whether the edge into a thread is a machine continuation, given whether the
+/// thread opened with an operator input.
+fn machine_edge(operator_input: bool) -> bool {
+    !operator_input
+}
+
 /// What the whole path has stored of tool images: how many were admitted and
 /// how many distinct bytes they hold, and which attachments the node therefore
 /// already stores. Seeds the run's limits and keeps a repeated image from
@@ -686,7 +718,8 @@ fn is_wrap_up_notice(folded: &FoldedMessage) -> bool {
 fn trailing_length_turns(events: &[ReplayedEventRecord]) -> Result<u32> {
     let mut count = 0u32;
     for event in events.iter().rev() {
-        if final_cognition_turn(event)?.is_none() {
+        // A compaction's summary call is not a turn of the conversation.
+        if final_cognition_turn(event)?.is_none() || is_compaction_summary_turn(event) {
             continue;
         }
         if event.payload.get("finish").and_then(Value::as_str) != Some("length") {
@@ -5160,5 +5193,11 @@ mod tests {
             recover_unfinished_provider_turn(&events, &sources, "T-old", 0).unwrap(),
             Some(2)
         );
+    }
+
+    #[test]
+    fn an_operator_follow_up_edge_is_not_a_machine_continuation() {
+        assert!(machine_edge(false));
+        assert!(!machine_edge(true));
     }
 }

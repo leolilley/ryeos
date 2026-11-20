@@ -510,6 +510,20 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
         .config
         .continuation_runtime
         .chain_depth_limit;
+    if let Err(refusal) = bootstrap_output
+        .config
+        .continuation_runtime
+        .compaction
+        .validate()
+    {
+        return runner::refuse_launch(
+            &callback,
+            &envelope.thread_id,
+            &format!("compaction_policy_invalid: {refusal}"),
+            budget.cost(),
+        )
+        .await;
+    }
     let compaction_policy = bootstrap_output
         .config
         .continuation_runtime
@@ -581,6 +595,26 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
                     return Err(error);
                 }
             };
+            // A compacted start still over the window is only workable when the
+            // policy can compact it again.
+            if loaded.start_over_ceiling
+                && !bootstrap_output
+                    .config
+                    .continuation_runtime
+                    .compaction
+                    .enabled
+            {
+                return runner::refuse_launch(
+                    &callback,
+                    &envelope.thread_id,
+                    &resume::ResumeFoldError::CompactedStartExceedsWindow {
+                        ceiling: carry.ceiling_tokens,
+                    }
+                    .to_string(),
+                    budget.cost(),
+                )
+                .await;
+            }
             (!(same_thread_resume && loaded.has_no_launch_records())).then_some(loaded)
         }
         None => None,
@@ -590,6 +624,15 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
         let resume_id = resume_id
             .as_deref()
             .expect("a resume has a thread to resume");
+        // The edge into this thread: a machine continuation extends the
+        // chain's machine depth, an operator follow-up starts it again.
+        if !same_thread_resume {
+            resume_state.chain_depth = if envelope.request.suppress_stimulus {
+                resume_state.chain_depth.saturating_add(1)
+            } else {
+                0
+            };
+        }
         // A provider entry may refuse a mid-conversation change of the system
         // text, the tool inventory or the reasoning policy. That is decided
         // before the thread is continued or anything is recorded, so a refused

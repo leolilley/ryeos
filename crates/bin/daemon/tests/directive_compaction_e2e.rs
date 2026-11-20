@@ -653,3 +653,41 @@ async fn a_hook_can_trigger_a_compaction_when_the_policy_only_observes() {
     let records = chain_payloads(&rig.h, &id, "cognition_compaction").await;
     assert_eq!(records.len(), 1, "{records:?}");
 }
+
+/// A refusal after a compaction is already on the path: the successor's start
+/// is built from that compaction, and its first act is the overflow
+/// compaction, not a refusal of its start.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_overflow_after_an_earlier_compaction_still_recovers() {
+    let script = format!(
+        "steps:\n  - repeat: 14\n    {TURN}  - fail: {{ status: 400, body: \"context length exceeded: prompt is too long\" }}\n  - text: done\n"
+    );
+    let rig = start_rig(
+        &script,
+        RigOptions {
+            context_window: 2000,
+            continuation_yaml: Some(continuation_yaml(
+                "  trigger_ratio: 0.4\n  keep_turns: 2\n  min_turns_between: 2\n  summary:\n    mode: none\n",
+            )),
+            header_extra: CONTINUING,
+            provider_top_extra: REJECTION_ROWS.to_string(),
+            limits: Some((300, 300)),
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    let id = launch_on(&rig).await.expect("launch");
+    let chain = wait_chain_settled(&rig, &id).await;
+    let records = chain_payloads(&rig.h, &id, "cognition_compaction").await;
+    assert!(
+        records.iter().any(|r| r["trigger"] == "pressure"),
+        "a compaction was already on the path: {records:?}"
+    );
+    assert!(
+        records.iter().any(|r| r["trigger"] == "overflow"),
+        "the refusal was answered by a compaction: {records:?} chain={chain:?}"
+    );
+    assert!(chain.iter().any(|(_, s)| s == "continued"), "{chain:?}");
+    assert!(chain.iter().any(|(_, s)| s == "completed"), "{chain:?}");
+}

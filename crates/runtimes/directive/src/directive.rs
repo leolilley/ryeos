@@ -224,6 +224,42 @@ impl Default for CompactionConfig {
     }
 }
 
+impl CompactionConfig {
+    /// Refuse values that cannot work: ratios outside their range, no kept
+    /// turns, no overflow codes while the policy is on.
+    pub fn validate(&self) -> Result<(), String> {
+        let ratio = |name: &str, value: f64, low_open: bool| -> Result<(), String> {
+            let ok = value.is_finite()
+                && value <= 1.0
+                && if low_open { value > 0.0 } else { value >= 0.0 };
+            ok.then_some(())
+                .ok_or_else(|| format!("compaction.{name} {value} is outside its range"))
+        };
+        ratio("trigger_ratio", self.trigger_ratio, true)?;
+        ratio("summary.input_ratio", self.summary.input_ratio, true)?;
+        if !(self.min_reduction_ratio.is_finite() && (0.0..1.0).contains(&self.min_reduction_ratio))
+        {
+            return Err(format!(
+                "compaction.min_reduction_ratio {} is outside [0, 1)",
+                self.min_reduction_ratio
+            ));
+        }
+        if self.keep_turns == 0 {
+            return Err("compaction.keep_turns must be at least 1".to_string());
+        }
+        if self.summary.max_output_tokens == 0 {
+            return Err("compaction.summary.max_output_tokens must be at least 1".to_string());
+        }
+        if self.enabled && self.overflow_codes.is_empty() {
+            return Err(
+                "compaction.overflow_codes may not be empty while compaction is enabled"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
 fn default_compaction_trigger_ratio() -> f64 {
     0.70
 }
@@ -979,6 +1015,23 @@ pub fn normalize_finish_reason(raw: Option<&str>) -> FinishReason {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_compaction_policy_refuses_values_that_cannot_work() {
+        assert!(CompactionConfig::default().validate().is_ok());
+        for bad in [
+            "trigger_ratio: 0\n",
+            "trigger_ratio: 1.5\n",
+            "min_reduction_ratio: 1\n",
+            "keep_turns: 0\n",
+            "summary:\n    input_ratio: 0\n",
+            "enabled: true\n  overflow_codes: []\n",
+        ] {
+            let config: CompactionConfig =
+                serde_yaml::from_str(&bad.replace("\n  ", "\n")).unwrap();
+            assert!(config.validate().is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn the_compaction_policy_is_off_by_default_and_every_field_is_defaulted() {

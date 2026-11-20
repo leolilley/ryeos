@@ -16,7 +16,6 @@ pub struct ReplayedEventRecord {
     pub payload: Value,
     /// The event's position in its chain. Replay pages are ordered by it, so a
     /// reader can start a later replay at an event it found in an earlier one.
-    #[serde(default)]
     pub chain_seq: i64,
 }
 

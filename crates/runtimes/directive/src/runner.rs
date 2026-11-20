@@ -735,6 +735,9 @@ pub struct Runner {
     /// Continuation predecessors of this thread, and the most a chain may have.
     chain_depth: u32,
     chain_depth_limit: u32,
+    /// The compacted start of this thread is still over the continuation
+    /// threshold: it compacts again before its first request.
+    start_over_ceiling: bool,
 }
 
 /// The two states a `context_pressure` hook chooses between.
@@ -749,6 +752,8 @@ struct SummaryJob {
     messages: Vec<ProviderMessage>,
     omitted_from_input: u32,
     result: Option<Vec<Part>>,
+    /// The summary ended at the output limit: it is cut off and not carried.
+    truncated: bool,
 }
 
 /// How the compaction policy answers a refusal.
@@ -1583,6 +1588,7 @@ impl Runner {
             compaction_retry_at_turn: 0,
             chain_depth: 0,
             chain_depth_limit: u32::MAX,
+            start_over_ceiling: false,
         }
     }
 
@@ -1639,6 +1645,7 @@ impl Runner {
         let compaction_memo = resume.compaction.clone();
         let start_with_overflow_compaction = resume.predecessor_rejected_turn.is_some();
         let chain_depth = resume.chain_depth;
+        let start_over_ceiling = resume.start_over_ceiling;
         if let Some(active_turn) = resume_active_provider_turn {
             let expected = last_turn_coordinate
                 .checked_add(1)
@@ -1725,6 +1732,7 @@ impl Runner {
         runner.consecutive_length_turns = trailing_length_turns;
         runner.compaction_memo = compaction_memo;
         runner.chain_depth = chain_depth;
+        runner.start_over_ceiling = start_over_ceiling;
         runner.start_with_overflow_compaction = start_with_overflow_compaction;
         runner.return_nudge_sent = recovered_return_nudge_seen(
             &runner.messages,
@@ -1871,7 +1879,21 @@ impl Runner {
         let Some(plan) = crate::compaction::plan(&basis.folded, self.compaction.keep_turns) else {
             return Ok(false);
         };
+        // The record carries the pinned inputs: refuse before a paid call that
+        // could not be recorded.
         let summary = &self.compaction.summary;
+        let pinned_bytes =
+            serde_json::to_vec(&plan.pinned_inputs).map_or(usize::MAX, |bytes| bytes.len());
+        let reserve = usize::try_from(summary.max_output_tokens.saturating_mul(8))
+            .unwrap_or(usize::MAX)
+            .saturating_add(16 * 1024);
+        if pinned_bytes.saturating_add(reserve)
+            > ryeos_runtime::cognition::MAX_COMPACTION_RECORD_BYTES
+        {
+            return Err(CompactionFailure::Failed(format!(
+                "the pinned inputs are {pinned_bytes} bytes, too large for a compaction record to carry"
+            )));
+        }
         let input_budget = ((self.context_window as f64 * summary.input_ratio) as u64)
             .saturating_sub(summary.max_output_tokens);
         let rendered =
@@ -1884,6 +1906,7 @@ impl Runner {
             ],
             omitted_from_input: rendered.omitted,
             result: None,
+            truncated: false,
         });
         Ok(true)
     }
@@ -1955,6 +1978,7 @@ impl Runner {
         self.wrap_up_delivered = rebuilt.deadline_wrap_up_delivered;
         self.compaction_memo = Some(CompactionMemo::of(&record));
         self.start_with_overflow_compaction = false;
+        self.start_over_ceiling = false;
         tracing::info!(
             trigger,
             size_before = record.size_before,
@@ -2006,6 +2030,12 @@ impl Runner {
             },
             Err(CompactionFailure::Failed(error)) => {
                 tracing::warn!(%error, "compaction failed; the run carries on uncompacted");
+                // Not tried again every turn: a paid summary call must not
+                // repeat after each settled turn.
+                self.compaction_retry_at_turn = self
+                    .harness
+                    .turns_used()
+                    .saturating_add(self.compaction.keep_turns.max(1));
                 onward
             }
         }
@@ -2191,6 +2221,15 @@ impl Runner {
             State::Compacting {
                 trigger: "overflow".to_string(),
             }
+        } else if self.compaction.enabled
+            && self.start_over_ceiling
+            && self.resume_pending_tools.is_empty()
+        {
+            // The compacted start is still over the continuation threshold:
+            // compact it again before the first request.
+            State::Compacting {
+                trigger: "pressure".to_string(),
+            }
         } else if !self.resume_pending_tools.is_empty() {
             let pending = std::mem::take(&mut self.resume_pending_tools);
             if batch_is_lifecycle_bearing(&pending) {
@@ -2227,6 +2266,7 @@ impl Runner {
                         messages: Vec::new(),
                         omitted_from_input: 0,
                         result: Some(summary),
+                        truncated: false,
                     });
                     State::FinishingCompaction
                 }
@@ -3326,6 +3366,7 @@ impl Runner {
                                 // goes into the compaction record, not into the
                                 // conversation.
                                 job.result = Some(recorded_parts);
+                                job.truncated = ended_at_output_limit;
                                 state = State::FinishingCompaction;
                                 continue;
                             }
@@ -4829,6 +4870,13 @@ impl Runner {
                     };
                     // Only text is a summary: a call the model made although no
                     // tools were offered is not carried.
+                    if job.truncated {
+                        state = State::Errored {
+                            error: "compaction_summary_failed: the summary was cut off at the output limit and is not carried"
+                                .to_string(),
+                        };
+                        continue;
+                    }
                     let parts: Vec<Part> = job
                         .result
                         .unwrap_or_default()
@@ -5106,8 +5154,7 @@ impl Runner {
                     // carry-on-uncompacted behaviour a gentler design would
                     // have: the failed call burned a turn coordinate, and
                     // carrying on would need a failure-final record that every
-                    // recovery reader skips. The alternative is written up in
-                    // the design's pending decisions.
+                    // recovery reader skips.
                     let error = if self.summary_job.take().is_some() {
                         format!("compaction_summary_failed: {error}")
                     } else {

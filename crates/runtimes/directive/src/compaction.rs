@@ -492,6 +492,46 @@ mod tests {
     }
 
     #[test]
+    fn a_compaction_record_without_one_of_its_fields_is_refused() {
+        let folded = conversation(8);
+        let plan = plan(&folded, 3).expect("a cut");
+        let record = ryeos_runtime::CompactionPayload {
+            turn: 0,
+            trigger: "pressure".to_string(),
+            replaces_from_turn: plan.replaces_from_turn,
+            replaces_to_turn: plan.replaces_to_turn,
+            kept_from_turn: plan.kept_from_turn,
+            summary: fixed_note(&plan).parts,
+            summary_model_call: false,
+            omitted_from_input: 0,
+            pinned: plan.pinned_inputs.clone(),
+            seed: ryeos_runtime::WindowSeed::default(),
+            settled_turns: 8,
+            size_before: 10,
+            size_after: 5,
+            ineffective: false,
+            compactions: 1,
+            overflow_recoveries: 0,
+            clip: None,
+        };
+        let whole = serde_json::to_value(&record).unwrap();
+        assert!(serde_json::from_value::<ryeos_runtime::CompactionPayload>(whole.clone()).is_ok());
+        for field in [
+            "clip",
+            "omitted_from_input",
+            "ineffective",
+            "summary_model_call",
+        ] {
+            let mut cut = whole.clone();
+            cut.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<ryeos_runtime::CompactionPayload>(cut).is_err(),
+                "{field} is required"
+            );
+        }
+    }
+
+    #[test]
     fn the_fixed_note_names_the_range_and_the_rebuilt_conversation_leads_with_the_pinned_input() {
         let folded = conversation(8);
         let plan = plan(&folded, 3).expect("a cut");
