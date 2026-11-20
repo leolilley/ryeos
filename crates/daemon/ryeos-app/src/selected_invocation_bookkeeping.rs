@@ -106,6 +106,7 @@ struct Record {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SelectedBookkeepingError {
+    #[cfg(any(test, feature = "test-support"))]
     Capacity,
     WrongIdentity,
     WrongState,
@@ -132,6 +133,7 @@ pub(crate) struct SelectedInvocationBookkeeping {
     identity: Arc<StoreIdentity>,
     generation: Option<String>,
     slots: [Option<Record>; CAPACITY],
+    #[cfg(any(test, feature = "test-support"))]
     next_nonce: u64,
     next_borrower: u64,
 }
@@ -142,6 +144,7 @@ impl SelectedInvocationBookkeeping {
             identity: Arc::new(StoreIdentity),
             generation: None,
             slots: std::array::from_fn(|_| None),
+            #[cfg(any(test, feature = "test-support"))]
             next_nonce: 1,
             next_borrower: 1,
         }
@@ -198,6 +201,7 @@ impl SelectedInvocationBookkeeping {
     }
 
     // Deliberately private: only transition controls can reserve/install today.
+    #[cfg(any(test, feature = "test-support"))]
     fn pending(
         &mut self,
         generation: &SelectedGeneration,
