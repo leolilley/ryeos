@@ -2226,16 +2226,9 @@ pub fn build_signed_headers_for_bytes(
     );
 
     let body_hash = lillux::cas::sha256_hex(body);
-    let string_to_sign = format!(
-        "ryeos-request-v1\n{}\n{}\n{}\n{}\n{}\n{}",
-        method.to_uppercase(),
-        path,
-        body_hash,
-        timestamp,
-        nonce,
-        audience,
+    let content_hash = ryeos_request_signing::content_hash(
+        method, path, &body_hash, &timestamp, &nonce, &audience,
     );
-    let content_hash = lillux::cas::sha256_hex(string_to_sign.as_bytes());
     let sig: lillux::crypto::Signature = user_key.sign(content_hash.as_bytes());
     let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.to_bytes());
 
