@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-19T16:51:25Z:199acfdc5858524da3d29c5cfe4c4d6fa0b5346597c089fe909bda4a9a9986f6:IsOVQtnn6bl1B49YQ2kGtS3tb85XH43lhy9xSwVij5N6lbI+jCeT1kyg1TmlF71GPZpOfBYrDflWcjPzjstpAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-20T00:00:05Z:793a5a4822a43baf9f83ce12ef5b7131519e75c952514755c770a68c93f2b8d7:1pQ7KoGlNSWVEJf60N3hKICAe/6p0ktQyxkrOIVz3UJ134KseLKUVjXE4bfrROpHglYWy1QvwuS6oGj4mH6mBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -322,6 +322,18 @@ are not read. A binding file in a schema the node no longer admits fails the
 schema and protocol seen and those admitted. At run time, an operation through
 a production binding whose pinned adapter generation is not installed is
 refused with HTTP 409 `binding_artifact_not_installed`, naming the same pin.
+
+A binding file signed under a schema number the node has retired (a closed
+list: when a document shape changes, the old number moves there) is not
+decoded and is not admitted. Its signature is still verified, so a tampered or
+corrupt file stays a fatal load error. The node starts and offline commands run
+with it present. The `external_bindings` row fails and lists each one under
+`stale_bindings` with code `binding_retired_schema`, the file, the schema seen
+and the fix; the daemon logs a warning at startup, and the external-execution
+status lists them too. A launch that no current binding admits while retired
+bindings are installed is refused with `binding_retired_schema`, naming them.
+The fix is to retire the stale file (move it out of `.ai/node/<section>/` on the
+stopped node) and compose the binding again.
 
 The `external_capacity` and `credential_profiles` rows ask the running daemon
 (`service:external-execution/status`, a 10 s deadline) what still holds

@@ -113,6 +113,7 @@ pub(crate) struct NodeConfigSnapshotBuilder {
     bundles: Vec<BundleRecord>,
     routes: Vec<RawRouteSpec>,
     commands: Vec<CommandRecord>,
+    stale_bindings: Vec<super::coherence::StaleBinding>,
     command_registration_authority: CommandRegistrationAuthority,
 }
 
@@ -129,6 +130,7 @@ impl NodeConfigSnapshotBuilder {
             bundles: validate_prospective_bundle_records(bundles)?,
             routes: Vec::new(),
             commands: Vec::new(),
+            stale_bindings: Vec::new(),
             command_registration_authority,
         })
     }
@@ -250,6 +252,7 @@ impl NodeConfigSnapshotBuilder {
             bundles: self.bundles,
             routes: self.routes,
             commands: self.commands,
+            stale_bindings: self.stale_bindings,
         })
     }
 }
@@ -328,6 +331,33 @@ impl<'a> NodeConfigLoader<'a> {
                         &node_fingerprint,
                         &scan_root.source,
                     )?;
+                    // The signature and signer are verified above. A body signed
+                    // under a schema number this node retired is set aside
+                    // undecoded; any other parse failure stays fatal.
+                    if let Some(schema) =
+                        super::coherence::retired_binding_schema(section_name, verified.body())
+                    {
+                        let id = verified.context().id.clone();
+                        let reason = format!(
+                            "signed under retired schema {schema}; its document is not decoded \
+                             and it authorizes nothing"
+                        );
+                        tracing::warn!(
+                            section = section_name,
+                            id = %id,
+                            schema,
+                            file = %verified.path().display(),
+                            "node-config binding is signed under a retired schema and was not admitted; retire it and compose it again"
+                        );
+                        builder.stale_bindings.push(super::coherence::StaleBinding {
+                            section: section.name().to_owned(),
+                            id,
+                            schema,
+                            file: verified.path().display().to_string(),
+                            reason,
+                        });
+                        continue;
+                    }
                     let record = section
                         .parse(verified.context(), verified.body())
                         .with_context(|| {
@@ -1333,6 +1363,191 @@ mod tests {
                 .any(|route| route.path == "/ui/api/invocations/dispatch"),
             "browser-session invocation route should load from nested route directory"
         );
+    }
+
+    /// Writes one node-signed item for each case and loads the node config.
+    struct RetiredFixture {
+        system: tempfile::TempDir,
+        trust: ryeos_engine::trust::TrustStore,
+        identity: ryeos_node_runtime::identity::NodeIdentity,
+    }
+
+    impl RetiredFixture {
+        fn new() -> Self {
+            let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .ancestors()
+                .find(|p| p.join("bundles").is_dir())
+                .unwrap()
+                .to_path_buf();
+            let system = temp_system_with_command_registration_policy(&workspace);
+            let identity = ryeos_node_runtime::identity::NodeIdentity::load(
+                &system.path().join(".ai/node/identity/private_key.pem"),
+            )
+            .unwrap();
+            Self {
+                system,
+                trust: ryeos_engine::test_support::live_trust_store(),
+                identity,
+            }
+        }
+
+        fn write(&self, section: &str, id: &str, body: &Value) -> PathBuf {
+            let dir = self.system.path().join(".ai/node").join(section);
+            fs::create_dir_all(&dir).unwrap();
+            let path = dir.join(format!("{id}.yaml"));
+            fs::write(
+                &path,
+                ryeos_node_runtime::node_document::render_signed_item(
+                    section,
+                    id,
+                    body,
+                    &self.identity,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            path
+        }
+
+        fn load(&self) -> Result<NodeConfigSnapshot> {
+            NodeConfigLoader {
+                app_root: self.system.path(),
+                trust_store: &self.trust,
+            }
+            .load_full(
+                &NodeConfigTable::new(),
+                &[],
+                &command_policy([]),
+                &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
+            )
+        }
+    }
+
+    fn placement_body(schema: u64) -> Value {
+        let mut body = super::super::sections::external_execution::RetainedExternalExecutionBinding::test_fixture_document_value();
+        body["schema"] = Value::from(schema);
+        body
+    }
+
+    #[test]
+    fn retired_schema_binding_is_set_aside_with_its_signature_verified() {
+        use super::super::sections::{
+            external_execution, runtime_snapshot_production, runtime_snapshot_qualification,
+        };
+        let fixture = RetiredFixture::new();
+        // Old shape: no `required` on the network inputs, so it cannot decode.
+        let mut old = placement_body(19);
+        old["provider_network_inputs"] = serde_json::json!({"inputs": [{"unknown_old": true}]});
+        fixture.write(external_execution::SECTION_NAME, "old-placement", &old);
+        fixture.write(
+            runtime_snapshot_production::SECTION_NAME,
+            "old-producer",
+            &serde_json::json!({"kind": "node", "schema": 1, "protocol": "any"}),
+        );
+        fixture.write(
+            runtime_snapshot_qualification::SECTION_NAME,
+            "old-qualification",
+            &serde_json::json!({"kind": "node", "schema": 5, "protocol": "any"}),
+        );
+        let snapshot = fixture.load().unwrap();
+        assert!(snapshot.external_execution.is_empty());
+        assert!(snapshot.runtime_snapshot_production.is_empty());
+        assert!(snapshot.runtime_snapshot_qualification.is_empty());
+        let mut stale = snapshot
+            .stale_bindings
+            .iter()
+            .map(|binding| {
+                (
+                    binding.section.as_str(),
+                    binding.id.as_str(),
+                    binding.schema,
+                )
+            })
+            .collect::<Vec<_>>();
+        stale.sort();
+        assert_eq!(
+            stale,
+            [
+                ("external_execution", "old-placement", 19),
+                ("runtime_snapshot_production", "old-producer", 1),
+                ("runtime_snapshot_qualification", "old-qualification", 5),
+            ]
+        );
+        assert!(
+            snapshot.stale_bindings[0]
+                .fix()
+                .contains("compose it again")
+        );
+        // Every retired item is also reported as a typed refusal on demand.
+        let refusal = snapshot.absent_binding_error(
+            external_execution::SECTION_NAME,
+            Some("old-placement"),
+            "absent",
+        );
+        let refusal = refusal
+            .downcast_ref::<super::super::coherence::StaleBindingRefusal>()
+            .expect("typed retired-binding refusal");
+        assert_eq!(
+            refusal.code(),
+            super::super::coherence::BINDING_RETIRED_SCHEMA
+        );
+        assert!(refusal.to_string().contains("old-placement"));
+        assert!(refusal.to_string().contains("retire and compose again"));
+        // An id that is not stale stays a plain absence.
+        let plain = snapshot.absent_binding_error(
+            external_execution::SECTION_NAME,
+            Some("other"),
+            "absent",
+        );
+        assert!(
+            plain
+                .downcast_ref::<super::super::coherence::StaleBindingRefusal>()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn retired_schema_with_a_bad_signature_is_still_fatal() {
+        use super::super::sections::external_execution::SECTION_NAME;
+        let fixture = RetiredFixture::new();
+        let path = fixture.write(SECTION_NAME, "tampered", &placement_body(19));
+        fixture.load().unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("schema: 19"), "{text}");
+        fs::write(&path, text.replace("schema: 19", "schema: 18")).unwrap();
+        let error = fixture.load().unwrap_err();
+        assert!(
+            format!("{error:#}").contains("failed to verify node config item"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn current_schema_decode_errors_and_unlisted_schemas_stay_fatal() {
+        use super::super::sections::external_execution::SECTION_NAME;
+        let fixture = RetiredFixture::new();
+        let mut missing = placement_body(20);
+        missing.as_object_mut().unwrap().remove("account");
+        let path = fixture.write(SECTION_NAME, "primary", &missing);
+        let error = fixture.load().unwrap_err();
+        assert!(
+            format!("{error:#}").contains("invalid external placement binding"),
+            "{error:#}"
+        );
+        // A schema number outside the closed retired list is not skipped.
+        fixture.write(SECTION_NAME, "primary", &placement_body(16));
+        let error = fixture.load().unwrap_err();
+        assert!(
+            error.chain().any(|cause| cause
+                .downcast_ref::<super::super::coherence::BindingSchemaUnsupported>()
+                .is_some()),
+            "{error:#}"
+        );
+        fs::remove_file(path).unwrap();
+        fixture.write(SECTION_NAME, "primary", &placement_body(20));
+        let snapshot = fixture.load().unwrap();
+        assert_eq!(snapshot.external_execution.len(), 1);
+        assert!(snapshot.stale_bindings.is_empty());
     }
 
     fn temp_system_with_command_registration_policy(

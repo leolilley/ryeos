@@ -100,6 +100,9 @@ pub struct NodeConfigSnapshot {
     pub routes: Vec<RawRouteSpec>,
     /// All loaded command definitions.
     pub commands: Vec<CommandRecord>,
+    /// Installed binding files set aside undecoded because they are signed
+    /// under a retired schema (signature verified, nothing admitted).
+    pub stale_bindings: Vec<coherence::StaleBinding>,
 }
 
 impl NodeConfigSnapshot {}

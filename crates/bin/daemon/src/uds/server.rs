@@ -2516,6 +2516,7 @@ mod tests {
             services: Arc::new(ryeos_api::build_service_registry()),
             service_descriptors: ryeos_api::handlers::ALL,
             node_config: Arc::new(ryeos_app::node_config::NodeConfigSnapshot {
+                stale_bindings: Vec::new(),
                 external_execution: Vec::new(),
                 runtime_snapshot_production: Vec::new(),
                 runtime_snapshot_qualification: Vec::new(),

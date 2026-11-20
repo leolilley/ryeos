@@ -1264,6 +1264,7 @@ mod tests {
             events.clone(),
         ));
         let snapshot = ryeos_app::node_config::NodeConfigSnapshot {
+            stale_bindings: Vec::new(),
             external_execution: Vec::new(),
             guest_runtime_materialization: Vec::new(),
             runtime_snapshot_production: Vec::new(),

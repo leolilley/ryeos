@@ -54,7 +54,7 @@ impl QualificationDocument {
     fn validate(&self) -> Result<()> {
         ensure!(
             self.kind == "node"
-                && self.schema == 5
+                && self.schema == 6
                 && self.protocol == "ryeos.runtime-snapshot-qualification.v5",
             "unsupported runtime snapshot qualification binding"
         );
@@ -271,7 +271,7 @@ impl InstalledRuntimeSnapshotQualificationBinding {
         let settings = serde_json::json!({"schema":1,"owner_id":"owner-1"});
         let document = QualificationDocument {
             kind: "node".into(),
-            schema: 5,
+            schema: 6,
             protocol: "ryeos.runtime-snapshot-qualification.v5".into(),
             production_binding_id: production_binding_id.to_owned(),
             production_binding_digest: production_binding_digest.to_owned(),
@@ -470,7 +470,7 @@ impl NodeConfigSection for RuntimeSnapshotQualificationSection {
         crate::node_config::coherence::require_admitted_binding_schema(
             SECTION_NAME,
             body,
-            &[5],
+            &[6],
             "ryeos.runtime-snapshot-qualification.v5",
         )?;
         let document: QualificationDocument = serde_json::from_value(body.clone())
@@ -491,7 +491,7 @@ mod tests {
         let settings = serde_json::json!({"schema":1,"owner_id":"owner-1"});
         QualificationDocument {
             kind: "node".into(),
-            schema: 5,
+            schema: 6,
             protocol: "ryeos.runtime-snapshot-qualification.v5".into(),
             production_binding_id: "test-source".into(),
             production_binding_digest: "1".repeat(64),

@@ -671,6 +671,7 @@ fn build_app_state(
 ) -> (tempfile::TempDir, TestStateStore, AppState) {
     let service_descriptors = service_descriptors();
     let snapshot = ryeos_app::node_config::NodeConfigSnapshot {
+        stale_bindings: Vec::new(),
         external_execution: Vec::new(),
         runtime_snapshot_production: Vec::new(),
         runtime_snapshot_qualification: Vec::new(),

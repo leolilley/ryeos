@@ -3418,9 +3418,11 @@ fn external_bindings_check(
     snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
 ) -> ryeos_core_tools::actions::doctor::CheckResult {
     use ryeos_core_tools::actions::doctor::{FAIL, NA, OK, WARN};
+    let stale = ryeos_app::node_config::coherence::stale_binding_report(snapshot);
     if snapshot.external_execution.is_empty()
         && snapshot.runtime_snapshot_production.is_empty()
         && snapshot.runtime_snapshot_qualification.is_empty()
+        && stale.is_empty()
     {
         return check(
             "external_bindings",
@@ -3434,14 +3436,17 @@ fn external_bindings_check(
         return check(
             "external_bindings",
             FAIL,
-            serde_json::json!({ "error": "the locked isolation runtime retains no node trust" }),
+            serde_json::json!({
+                "error": "the locked isolation runtime retains no node trust",
+                "stale_bindings": stale,
+            }),
         );
     };
     match ryeos_app::node_config::coherence::inspect_installed_binding_coherence(
         app_root, trust, snapshot,
     ) {
         Ok(report) => {
-            let status = if report.has_failures() {
+            let status = if report.has_failures() || !stale.is_empty() {
                 FAIL
             } else if report.has_warnings() {
                 WARN
@@ -3455,6 +3460,7 @@ fn external_bindings_check(
                     "bindings": report.bindings,
                     "findings": report.findings,
                     "not_checked": report.not_checked,
+                    "stale_bindings": stale,
                 }),
             )
         }
@@ -3464,6 +3470,7 @@ fn external_bindings_check(
             serde_json::json!({
                 "error": format!("{error:#}"),
                 "note": "the installed bundles' artifacts could not be inventoried",
+                "stale_bindings": stale,
             }),
         ),
     }
@@ -5744,6 +5751,32 @@ fn policy_carry_choices(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn doctor_reports_retired_bindings_as_failing_with_their_fix() {
+        let snapshot = ryeos_app::node_config::NodeConfigSnapshot {
+            external_execution: Vec::new(),
+            runtime_snapshot_production: Vec::new(),
+            guest_runtime_materialization: Vec::new(),
+            runtime_snapshot_qualification: Vec::new(),
+            bundles: Vec::new(),
+            routes: Vec::new(),
+            commands: Vec::new(),
+            stale_bindings: vec![ryeos_app::node_config::coherence::StaleBinding {
+                section: "external_execution".into(),
+                id: "w9".into(),
+                schema: 19,
+                file: "/node/.ai/node/external_execution/w9.yaml".into(),
+                reason: "signed under retired schema 19".into(),
+            }],
+        };
+        let result = external_bindings_check(std::path::Path::new("/nonexistent"), None, &snapshot);
+        assert_eq!(result.status, ryeos_core_tools::actions::doctor::FAIL);
+        let stale = &result.detail["stale_bindings"][0];
+        assert_eq!(stale["code"], "binding_retired_schema");
+        assert_eq!(stale["id"], "w9");
+        assert!(stale["fix"].as_str().unwrap().contains("compose it again"));
+    }
 
     mod sync_apply_quarantine_doctor {
         use super::*;

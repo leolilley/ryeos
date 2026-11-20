@@ -959,6 +959,7 @@ fn build_test_state() -> (
         events.clone(),
     ));
     let node_config = ryeos_app::node_config::NodeConfigSnapshot {
+        stale_bindings: Vec::new(),
         external_execution: Vec::new(),
         runtime_snapshot_production: Vec::new(),
         runtime_snapshot_qualification: Vec::new(),

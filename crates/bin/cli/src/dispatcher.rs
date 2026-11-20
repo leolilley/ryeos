@@ -2429,6 +2429,7 @@ mod tests {
         let core = root.path().join("core");
         let expected = core.join(".ai/node/commands/artifact-export.yaml");
         let snapshot = ryeos_app::node_config::NodeConfigSnapshot {
+            stale_bindings: Vec::new(),
             external_execution: Vec::new(),
             runtime_snapshot_production: Vec::new(),
             guest_runtime_materialization: Vec::new(),

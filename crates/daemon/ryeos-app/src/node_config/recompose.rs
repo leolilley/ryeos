@@ -364,6 +364,7 @@ fn installed_bindings(
         .map(|id| read_installed_binding(app_root, id, identity))
         .collect::<Result<Vec<_>>>()?;
     Ok(NodeConfigSnapshot {
+        stale_bindings: Vec::new(),
         external_execution: placement,
         runtime_snapshot_production: production,
         guest_runtime_materialization: Vec::new(),

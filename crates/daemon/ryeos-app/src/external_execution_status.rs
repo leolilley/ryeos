@@ -145,6 +145,9 @@ pub struct ExternalExecutionStatus {
     pub qualification_local_starts: Vec<QualificationStartStatus>,
     pub credential_profiles: Vec<CredentialProfileStatus>,
     pub retained_generations: Vec<RetainedGenerationStatus>,
+    /// Installed binding files set aside because they are signed under a
+    /// retired schema; each names its fix. They hold no capacity.
+    pub stale_bindings: Vec<crate::node_config::coherence::StaleBinding>,
 }
 
 impl ExternalExecutionStatus {
@@ -181,12 +184,14 @@ pub fn read(
 ) -> Result<ExternalExecutionStatus> {
     let now = lillux::time::timestamp_millis();
     let rows = store.external_execution_status_rows(now)?;
-    Ok(classify(
+    let mut status = classify(
         rows,
         &current_snapshot_bindings(node_config),
         crate::runtime_db::daemon_generation_id(),
         now,
-    ))
+    );
+    status.stale_bindings = node_config.stale_bindings.clone();
+    Ok(status)
 }
 
 /// The raw journal rows the status is built from.
@@ -557,6 +562,7 @@ pub fn classify(
         qualification_local_starts: starts,
         credential_profiles,
         retained_generations: retained_generations(&rows.snapshot_references, current_bindings),
+        stale_bindings: Vec::new(),
     }
 }
 

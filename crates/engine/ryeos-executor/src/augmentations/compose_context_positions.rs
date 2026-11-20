@@ -2488,6 +2488,7 @@ pub(crate) mod tests {
             events.clone(),
         ));
         let node_config = ryeos_app::node_config::NodeConfigSnapshot {
+            stale_bindings: Vec::new(),
             external_execution: Vec::new(),
             runtime_snapshot_production: Vec::new(),
             guest_runtime_materialization: Vec::new(),

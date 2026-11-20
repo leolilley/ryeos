@@ -1259,6 +1259,7 @@ mod tests {
     #[test]
     fn installed_help_reads_command_and_effective_item_metadata() {
         let snapshot = NodeConfigSnapshot {
+            stale_bindings: Vec::new(),
             external_execution: Vec::new(),
             runtime_snapshot_production: Vec::new(),
             guest_runtime_materialization: Vec::new(),
