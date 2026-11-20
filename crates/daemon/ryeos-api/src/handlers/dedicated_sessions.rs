@@ -11307,10 +11307,8 @@ mod tests {
         // A carried destination that names another owner, project or base is
         // refused under either disposition.
         for disposition in [&OwnerDecision, &RetainedForReview] {
-            let other_owner =
-                ryeos_state::refs::principal_storage_key(&format!("fp:{}", "d".repeat(64)))
-                    .unwrap();
-            assert!(!check(disposition, &pin(other_owner, path, &base)));
+            let other_owner = "d".repeat(64);
+            assert!(!check(disposition, &pin(&other_owner, path, &base)));
             assert!(!check(
                 disposition,
                 &pin(owner_key, "/projects/other", &base)
