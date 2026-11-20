@@ -1435,32 +1435,42 @@ mod tests {
 
     #[test]
     fn unclean_exit_is_inferred_only_from_a_running_marker_of_a_gone_process() {
-        let running = |pid| LifecycleMarker::Running {
-            pid,
-            started_at: "2026-01-01T00:00:00Z".into(),
-            launch_route: Some(LaunchRoute::Supervised),
-            pending_latched_drain: None,
-            carrier_incarnation: None,
+        let running = |identity| {
+            PreviousRun::Marker(LifecycleMarker::Running {
+                schema_version: RUNNING_MARKER_SCHEMA_VERSION,
+                identity,
+                started_at: "2026-01-01T00:00:00Z".into(),
+                launch_route: Some(LaunchRoute::Supervised),
+                pending_latched_drain: None,
+                carrier_incarnation: None,
+            })
         };
         assert_eq!(
-            inferred_unclean_exit(Some(&running(u32::MAX - 1))),
+            inferred_unclean_exit(Some(&running(identity_at(
+                "00000000-dead-beef-0000-000000000000",
+                u32::MAX - 1,
+                5
+            )))),
             Some(UncleanExit {
                 pid: u32::MAX - 1,
                 started_at: "2026-01-01T00:00:00Z".into(),
                 launch_route: Some(LaunchRoute::Supervised),
             })
         );
-        // A previous run that reused this process's pid is still a previous run.
-        assert!(inferred_unclean_exit(Some(&running(std::process::id()))).is_some());
+        // A previous run that reused this process's pid is still a previous
+        // run: the same pid at another birth is a different incarnation.
+        let mut reused = lillux::process_control::capture_current_process_identity().unwrap();
+        reused.target_start_time_ticks += 1;
+        assert!(inferred_unclean_exit(Some(&running(reused))).is_some());
         assert!(inferred_unclean_exit(None).is_none());
-        let exited = exited_marker(
+        let exited = PreviousRun::Marker(exited_marker(
             "signal",
             "2026-01-01T00:00:00Z",
             None,
             LaunchRoute::Direct,
             None,
             None,
-        );
+        ));
         assert!(inferred_unclean_exit(Some(&exited)).is_none());
     }
 
