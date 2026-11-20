@@ -224,12 +224,18 @@ RUN --mount=type=secret,id=publisher-key,required=true \
 
 FROM compiled-publication AS published
 # Never bypass official signer admission for distributable release artifacts.
+# The packaging script runs the real `ryeos init` durable-root gate on its
+# verification app roots, and that gate refuses the build container's overlay
+# filesystem. A cache mount is a separate mount of the builder's own disk, so
+# the verification roots live on one; the script removes what it creates.
 RUN --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked,from=dependency-build,source=/build/target-cache \
+    --mount=type=cache,id=ryeos-release-verify-root,target=/verify-root,sharing=locked \
     ./scripts/release/package-bundle-artifact.sh \
       --version "$VERSION" \
       --source /build/bundles \
       --output "/out/ryeos-bundles-${VERSION}-x86_64.tar.gz" \
       --source-date-epoch "$SOURCE_DATE_EPOCH" \
+      --verify-root /verify-root \
       --ryeos-bin /build/target/release/ryeos
 
 FROM compiled-publication AS development-publication
