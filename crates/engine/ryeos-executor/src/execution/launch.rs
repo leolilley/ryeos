@@ -3928,6 +3928,8 @@ pub struct BuildAndLaunchParams<'a> {
     pub parameters: &'a Value,
     pub metadata_required_secrets: &'a [String],
     pub pre_minted_thread_id: Option<&'a str>,
+    /// Thread facets committed with a fresh root thread as its first events.
+    pub initial_facets: std::collections::BTreeMap<String, String>,
     /// Chained-resume turn (see `DispatchRequest::previous_thread_id`).
     pub previous_thread_id: Option<&'a str>,
     /// Trusted parent execution context carried out-of-band from schema-driven
@@ -6820,13 +6822,16 @@ async fn build_and_launch_inner(
         }
     }
 
-    let initial_events = launch_audit_records(
+    let mut initial_events = launch_audit_records(
         params.resolved,
         authority.effective_program.resolution(),
         &authority.prepared_launch,
         &authority.augmentation_audits,
         &authority.node_requirements_met_by,
     )?;
+    initial_events.extend(ryeos_app::state_store::NewEventRecord::thread_facet_set_events(
+        &params.initial_facets,
+    ));
     if params.effect_authority.is_some() {
         let intent = params
             .state
@@ -7162,6 +7167,7 @@ async fn run_claimed_thread_row_inner(
         parameters,
         metadata_required_secrets,
         pre_minted_thread_id: _,
+        initial_facets: _,
         previous_thread_id,
         parent_execution_context,
         effect_authority: _,
@@ -9661,6 +9667,7 @@ async fn prepare_follow_child_launch_inner(
         handler_context,
         parameters: resume.parameters.clone(),
         pre_minted_thread_id: None,
+        initial_facets: Default::default(),
         effective_caps: operational_resume.effective_caps.clone(),
         provenance,
         lifecycle_authority: operational_resume.lifecycle_authority,
@@ -9688,6 +9695,7 @@ async fn prepare_follow_child_launch_inner(
             parameters: &execution.parameters,
             metadata_required_secrets: &execution.resolved.resolved_item.metadata.required_secrets,
             pre_minted_thread_id: None,
+            initial_facets: Default::default(),
             previous_thread_id: None,
             parent_execution_context: Some(&parent_context),
             effect_authority: launch_metadata.effect_authority.as_ref(),
@@ -9950,6 +9958,7 @@ async fn prepare_successor_launch_in_mode(
             parameters: &execution.parameters,
             metadata_required_secrets: &execution.resolved.resolved_item.metadata.required_secrets,
             pre_minted_thread_id: None,
+            initial_facets: Default::default(),
             previous_thread_id,
             parent_execution_context: None,
             effect_authority: metadata_template
@@ -11012,6 +11021,7 @@ async fn launch_claimed_successor(
         parameters: &params.parameters,
         metadata_required_secrets: &params.resolved.resolved_item.metadata.required_secrets,
         pre_minted_thread_id: None,
+        initial_facets: Default::default(),
         previous_thread_id: Some(&previous_thread_id),
         parent_execution_context: None,
         effect_authority: launch_metadata.effect_authority.as_ref(),
@@ -11710,6 +11720,7 @@ async fn launch_claimed_native_resume_inner(
             parameters: &params.parameters,
             metadata_required_secrets: &params.resolved.resolved_item.metadata.required_secrets,
             pre_minted_thread_id: None,
+            initial_facets: Default::default(),
             // SAME thread, not a successor — no chain braid.
             previous_thread_id: None,
             parent_execution_context: None,
@@ -11959,6 +11970,7 @@ async fn launch_admitted_root_with_claim(
             parameters: &execution.parameters,
             metadata_required_secrets: &execution.resolved.resolved_item.metadata.required_secrets,
             pre_minted_thread_id: None,
+            initial_facets: Default::default(),
             previous_thread_id: None,
             parent_execution_context: None,
             effect_authority: metadata.effect_authority.as_ref(),
@@ -12175,6 +12187,7 @@ async fn launch_claimed_follow_child(
         parameters: &params.parameters,
         metadata_required_secrets: &params.resolved.resolved_item.metadata.required_secrets,
         pre_minted_thread_id: None,
+        initial_facets: Default::default(),
         // A follow child is its OWN root chain, never a continuation braid.
         previous_thread_id: None,
         // A fresh launch injects its opening stimulus.

@@ -122,4 +122,17 @@ mod tests {
             &["ryeos.execute.service.threads/set_facet"]
         );
     }
+
+    #[test]
+    fn a_non_owner_cannot_set_the_title_facet() {
+        // The ownership guard `handle` applies before appending: a verified
+        // caller who does not own the thread gets NotFound, whatever the key.
+        let ctx = HandlerContext::new("fp:attacker".to_string(), Vec::new(), true);
+        let error = ctx
+            .require_owner(Some("fp:owner"))
+            .expect_err("non-owner must be refused");
+        assert!(matches!(error, HandlerError::NotFound), "got {error:?}");
+        let owner = HandlerContext::new("fp:owner".to_string(), Vec::new(), true);
+        assert!(owner.require_owner(Some("fp:owner")).is_ok());
+    }
 }

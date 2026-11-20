@@ -18,7 +18,8 @@ use lillux::crypto::{SigningKey, VerifyingKey};
 use ryeos_engine::trust::{
     SignerRecord, SignerRole, SignerScope, SignerStatus, SuccessionStatement, TRUST_EVENT_SCHEMA,
     TrustEvent, TrustEventKind, TrustStore, cross_check_records_against_events, events_dir,
-    load_event_chain, load_node_verifying_key, load_signer_records, registry_digest, signers_dir,
+    key_pinned_at, load_event_chain_timed, load_node_verifying_key, load_signer_records,
+    registry_digest, signers_dir,
 };
 use ryeos_node_runtime::state_lock::{StateLock, default_lock_path};
 
@@ -147,7 +148,23 @@ pub struct Outcome {
 pub struct RegistryView {
     pub records: Vec<SignerRecord>,
     pub chain: Vec<TrustEvent>,
+    /// Signing time of each chain event, as written in its signature line;
+    /// same length and order as `chain`.
+    pub signed_at: Vec<String>,
     pub registry_digest: String,
+}
+
+impl RegistryView {
+    /// When a signer's key first entered the registry.
+    pub fn pinned_at(&self, fingerprint: &str) -> Option<String> {
+        let timed: Vec<(TrustEvent, String)> = self
+            .chain
+            .iter()
+            .cloned()
+            .zip(self.signed_at.iter().cloned())
+            .collect();
+        key_pinned_at(&timed, fingerprint)
+    }
 }
 
 /// Load and cross-check the registry. Fails with the typed engine error on
@@ -156,12 +173,16 @@ pub struct RegistryView {
 pub fn load_view(app_root: &Path) -> Result<RegistryView> {
     let node_key = load_node_verifying_key(app_root)?;
     let records = load_signer_records(&signers_dir(app_root), &node_key)?;
-    let chain = load_event_chain(&events_dir(app_root), &node_key)?;
+    let (chain, signed_at): (Vec<TrustEvent>, Vec<String>) =
+        load_event_chain_timed(&events_dir(app_root), &node_key)?
+            .into_iter()
+            .unzip();
     cross_check_records_against_events(&records, &chain)?;
     let digest = registry_digest(records.iter());
     Ok(RegistryView {
         records,
         chain,
+        signed_at,
         registry_digest: digest,
     })
 }
@@ -741,5 +762,11 @@ mod tests {
         }
         let view = load_view(root.path()).unwrap();
         assert_eq!(view.chain.len(), 3);
+        assert_eq!(view.signed_at.len(), 3);
+        assert!(view.signed_at.iter().all(|at| !at.is_empty()));
+        let first = ryeos_engine::trust::compute_fingerprint(
+            &SigningKey::from_bytes(&[20u8; 32]).verifying_key(),
+        );
+        assert_eq!(view.pinned_at(&first), Some(view.signed_at[0].clone()));
     }
 }
