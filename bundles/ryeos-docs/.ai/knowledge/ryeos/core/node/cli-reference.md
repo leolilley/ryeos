@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-20T22:52:41Z:021d3e7c6cd8415de8978d6ee13216d33aea3bf98609a4a60b84440f42af2544:sE4seecK53H+BNjdJ6EF+AXiWu6W6NPMdxUog9O7aqbUyBCJOCakh13008OfrLrdgLMOb/bi6bSees86MKwDDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-19T16:51:25Z:199acfdc5858524da3d29c5cfe4c4d6fa0b5346597c089fe909bda4a9a9986f6:IsOVQtnn6bl1B49YQ2kGtS3tb85XH43lhy9xSwVij5N6lbI+jCeT1kyg1TmlF71GPZpOfBYrDflWcjPzjstpAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -322,43 +322,6 @@ are not read. A binding file in a schema the node no longer admits fails the
 schema and protocol seen and those admitted. At run time, an operation through
 a production binding whose pinned adapter generation is not installed is
 refused with HTTP 409 `binding_artifact_not_installed`, naming the same pin.
-
-A binding file signed under a schema number the node has retired (a closed
-list: when a document shape changes, the old number moves there) is not
-decoded and is not admitted. Its signature is still verified, so a tampered or
-corrupt file stays a fatal load error. The node starts and offline commands run
-with it present. The `external_bindings` row fails and lists each one under
-`stale_bindings` with code `binding_retired_schema`, the file, the schema seen
-and the fix; the daemon logs a warning at startup, and the external-execution
-status lists them too. A launch that no current binding admits while retired
-bindings are installed is refused with `binding_retired_schema`, naming them.
-The fix, named exactly in each row and refusal, is
-`ryeos node external-execution retire <section>/<id>` on the stopped node, then
-compose the binding again. Recompose skips and lists each stale id with this
-cure; see [`retire`](#ryeos-node-external-execution-retire).
-
-Operator note for the runtime schema cut to epoch 142: every node must run
-`ryeos node reset execution-history --confirm --schema-cut-from 141 --schema-cut-to 142`
-on its next upgrade, because retained binding generations in the runtime
-database embed the binding document and earlier schemas no longer validate.
-The same cut changes the retained execution realization's `isolation_policy_digest`
-property from the digest of the whole node-policy generation to the digest of the
-isolation policy's own section, so a recovered session now survives edits to
-other policy sections; a session retained before the cut would contradict its
-realization on recovery, and the reset clears it.
-This is the command the daemon's start refusal names, with the stored and
-current epochs filled in. It does not retire project HEADs, so candidates
-retained against them keep their base fences; no epoch cut needs
-`--include-project-heads`. The epoch pair is optional for the reset to cross
-the cut: it makes the authorization exact and a repeat idempotent. The reset
-covers the runtime database only. Node-config items live outside it and the
-reset does not touch them: installed `external_execution` bindings,
-`runtime_snapshot_production` and `runtime_snapshot_qualification` documents
-signed under a retired schema stay on disk and are reported as stale by
-`ryeos node doctor` until you run `ryeos node external-execution retire
-<section>/<id>` for each and compose them again. Retire reports the secret
-handle each carried; compose names a fresh credential generation, so provision
-what compose reports missing.
 
 The `external_capacity` and `credential_profiles` rows ask the running daemon
 (`service:external-execution/status`, a 10 s deadline) what still holds
@@ -753,45 +716,6 @@ offline operation, as they do `compose`. Recompose never waits on open work:
 a qualification occurrence or bootstrap source keeps the generation it was
 made under and is terminated through it; see
 [Runtime Snapshots](runtime-snapshots.md).
-
-A binding signed under a retired schema cannot be decoded, so recompose does
-not re-pin it. It is skipped, never silently: the report lists every skipped id
-under `stale_skipped` with the schema seen and the `retire` verb that clears
-it (the banner marks each `SKIPPED`), and naming one with `--binding` or
-recomposing a qualification whose producer is stale is refused with
-`recompose_binding_stale`. Every other decode failure stays fatal.
-
-### `ryeos node external-execution retire`
-
-```bash
-ryeos node external-execution retire <section>/<id> [--dry-run] \
-  [--app-root <dir>] [--json]
-```
-
-Removes one installed binding that is signed under a retired schema, on a
-stopped node, where `<section>` is `external_execution`,
-`runtime_snapshot_production` or `runtime_snapshot_qualification`. It reads
-the file, not a loaded snapshot, so it works when other commands cannot. It
-verifies the file's signature (the current node must have signed it), refuses
-a file whose signed schema is still admitted with `binding_not_retired_schema`
-(retiring a live binding is a different, more dangerous operation that this
-verb never performs), and removes the file atomically through the pinned
-section directory. A missing id is refused with `retire_binding_not_installed`;
-the id cannot name a path outside the section.
-
-The report names the file, the retired schema, the signer and the secret
-handle the binding carried, read from the signed body without decoding it
-under the current shape. For `external_execution` schemas 17 to 19 and
-`runtime_snapshot_production` schema 1 that is `backend`, `account` and the
-`credential_generation` (status `credential`); for
-`runtime_snapshot_qualification` schema 5 it is `none_carried`, because a
-qualification uses its producer's credential. A document that lacks the
-fields its schema promises reports `not_extractable`; nothing is guessed. The
-credential is not carried to a replacement: compose the binding again, which
-names a fresh generation, and provision it with `provision-credential`. The old
-vault entry stays in place. `--dry-run` checks everything and removes nothing.
-It is an authority-bearing offline operation, `node.external-execution.retire`;
-no shipped profile delegates it to a remote signer.
 
 ### `ryeos node external-execution provision-credential`
 
