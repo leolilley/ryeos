@@ -6,7 +6,9 @@
 //! mutex. The host holds that mutex guard and is therefore not `Send`: use it
 //! from the acquiring thread only, with current-thread runtimes. Test binaries
 //! that use it need nextest or `--test-threads=1`. Acquire the host before any
-//! fork lease and never wait for it while holding one.
+//! fork lease and never wait for it while holding one. The serial is
+//! reentrant per thread: a fixture or test that already holds it may take a
+//! host or a nested [`serial`] without waiting on itself.
 use crate::offline_host::{
     OfflineNativeAuthority, OfflineNativeHost, OfflineNativeHostFailure,
     offline_native_required_cleanup_steps,
@@ -138,7 +140,7 @@ pub struct TestNativeHost {
     /// Retirements to run against the finished backend terminal before the
     /// host releases, such as closed generation leases.
     after_backend: std::cell::RefCell<Vec<AfterBackend>>,
-    _serial: MutexGuard<'static, ()>,
+    _serial: SerialHold,
     _thread: PhantomData<*const ()>,
 }
 
@@ -211,10 +213,46 @@ fn install_with(
     })
 }
 
+thread_local! {
+    /// How many serial holds this thread has open. The serial is reentrant
+    /// per thread: a fixture that already holds it may take a host or a
+    /// nested serial without waiting on itself.
+    static DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// One hold of the process-wide serial. Only the outermost hold of a thread
+/// owns the mutex guard; nested holds just count, and the longest-hold record
+/// is closed when the outermost one ends.
+struct SerialHold {
+    guard: Option<MutexGuard<'static, ()>>,
+}
+impl Drop for SerialHold {
+    fn drop(&mut self) {
+        DEPTH.with(|depth| depth.set(depth.get() - 1));
+        if self.guard.is_some() {
+            clear_holder();
+        }
+    }
+}
+
 /// Take the process-wide serial guard for one host, panicking naming the
 /// current holder past the acquire deadline, or with the leaked census if a
 /// previous host could not release its arena.
-fn acquire_serial() -> MutexGuard<'static, ()> {
+fn acquire_serial() -> SerialHold {
+    let nested = DEPTH.with(|depth| {
+        let held = depth.get();
+        depth.set(held + 1);
+        held > 0
+    });
+    if nested {
+        return SerialHold { guard: None };
+    }
+    SerialHold {
+        guard: Some(lock_serial_or_panic()),
+    }
+}
+
+fn lock_serial_or_panic() -> MutexGuard<'static, ()> {
     let started = Instant::now();
     let ticket = NEXT_TICKET.fetch_add(1, Ordering::Relaxed);
     QUEUE
@@ -279,13 +317,8 @@ fn acquire_serial() -> MutexGuard<'static, ()> {
 /// The serial guard of a production host whose teardown a consumer's own
 /// controller performs. Keep it until that host is released.
 pub struct TestHostSerial {
-    _serial: MutexGuard<'static, ()>,
+    _serial: SerialHold,
     _thread: PhantomData<*const ()>,
-}
-impl Drop for TestHostSerial {
-    fn drop(&mut self) {
-        clear_holder();
-    }
 }
 
 /// The serial guard alone, for a test whose code under test issues its own
@@ -734,7 +767,6 @@ impl TestNativeHost {
     pub fn release(mut self) -> crate::offline_host::OfflineNativeReleased {
         let live = self.live.take().expect("live test host present");
         let finished = finish_with(live, self.after_backend.take());
-        clear_holder();
         match finished {
             Ok(released) => released,
             Err(retained) => {
@@ -759,7 +791,6 @@ impl TestNativeHost {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(live);
-        clear_holder();
     }
 
     /// Tear down this arena and install a fresh one under the same serial
@@ -784,7 +815,6 @@ impl Drop for TestNativeHost {
     fn drop(&mut self) {
         let Some(live) = self.live.take() else { return };
         let finished = finish_with(live, self.after_backend.take());
-        clear_holder();
         if let Err(retained) = finished {
             let census = retain_leaked(retained);
             if !std::thread::panicking() {

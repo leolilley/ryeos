@@ -1098,21 +1098,11 @@ mod tests {
         _tmp: tempfile::TempDir,
         config: Config,
         identity: NodeIdentity,
-        /// Declared last so it outlives the directory teardown. `None` only
-        /// while a test installs its own host (see `without_serial`).
-        serial: Option<lillux_sqlite::test_host::TestHostSerial>,
+        /// Declared last so it outlives the directory teardown.
+        _serial: lillux_sqlite::test_host::TestHostSerial,
     }
 
     impl Node {
-        /// Run `body` with the serial released, for a test that must acquire
-        /// a [`TestNativeHost`](lillux_sqlite::test_host::TestNativeHost) on
-        /// this thread, then take the serial back.
-        fn without_serial<T>(&mut self, body: impl FnOnce() -> T) -> T {
-            self.serial = None;
-            let out = body();
-            self.serial = Some(lillux_sqlite::test_host::serial());
-            out
-        }
         fn ledger(&self) -> PathBuf {
             self.config.app_root.join(".ai/node").join(LEDGER_DIRECTORY)
         }
@@ -1180,7 +1170,7 @@ mod tests {
             _tmp: tmp,
             config,
             identity,
-            serial: Some(lillux_sqlite::test_host::serial()),
+            _serial: lillux_sqlite::test_host::serial(),
         }
     }
 
@@ -1610,7 +1600,7 @@ mod tests {
         use super::super::creation_evidence::{
             CompletedReleaseFacts, ISSUED_RESERVATION_PIN_SLOT, ReleasedBinding, RetiredPinFact,
         };
-        let mut node = node();
+        let node = node();
         let operation = stale_claim(&node, OriginalInspectionMode::DryRun, false);
         let disposition = signed_disposition(&node, &operation);
         std::fs::write(
@@ -1619,8 +1609,7 @@ mod tests {
         )
         .unwrap();
         std::fs::remove_file(node.ledger().join(format!("reserved.{operation}"))).unwrap();
-        let released =
-            node.without_serial(|| lillux_sqlite::test_host::TestNativeHost::acquire().release());
+        let released = lillux_sqlite::test_host::TestNativeHost::acquire().release();
         let ledger = lillux::PinnedDirectory::open(&node.ledger())
             .unwrap()
             .unwrap();
