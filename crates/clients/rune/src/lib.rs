@@ -930,18 +930,21 @@ pub fn start_fixture(
     dress: Dress,
     fonts: &'static [&'static [u8]],
 ) {
-    fixture_app(core, dress, fonts).run();
+    fixture_app(core, dress, fonts, ("Inter", "IBM Plex Mono")).run();
 }
 
 /// The fixture shell as a windowless runtime at `size`, for tests that press,
-/// type and read the element tree.
+/// type and read the element tree. Both faces are the bundled Inter, so text
+/// measures the same on every machine instead of falling back to whatever
+/// the system has for the data face.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn fixture_runtime(
     core: Result<ryeos_client_base::ui::RyeOsCore, String>,
     dress: Dress,
     size: (f32, f32),
 ) -> rune::Runtime<App> {
-    fixture_app(core, dress, &[]).headless_runtime(size, rune::Env::new(true, 1.0))
+    fixture_app(core, dress, &[], ("Inter", "Inter"))
+        .headless_runtime(size, rune::Env::new(true, 1.0))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -949,12 +952,13 @@ fn fixture_app(
     core: Result<ryeos_client_base::ui::RyeOsCore, String>,
     dress: Dress,
     fonts: &'static [&'static [u8]],
+    families: (&'static str, &'static str),
 ) -> rune::App<App> {
     rune::App::new(AppSpec {
         fonts,
         poll: Some(poll),
         on_key: Some(on_key),
-        families: ("Inter", "IBM Plex Mono"),
+        families,
         ..AppSpec::new("RyeOS fixture", (1280.0, 800.0), App::new, view)
     })
     .init(move || {
