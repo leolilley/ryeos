@@ -446,6 +446,37 @@ fn write_strict(
     Ok(())
 }
 
+/// A previous run that ended without a handled exit: its marker still says
+/// `running` and its process is gone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UncleanExit {
+    pub pid: u32,
+    pub started_at: String,
+    pub launch_route: Option<LaunchRoute>,
+}
+
+/// The unclean exit `previous` shows, if it shows one. A `running` marker
+/// names a run that is over when its pid is dead, and also when the pid is
+/// this process's own: the caller holds the state lock, so no other run is
+/// live, and a container restart reuses the pid.
+pub fn inferred_unclean_exit(previous: Option<&LifecycleMarker>) -> Option<UncleanExit> {
+    let Some(LifecycleMarker::Running {
+        pid,
+        started_at,
+        launch_route,
+        pending_latched_drain: _,
+        carrier_incarnation: _,
+    }) = previous
+    else {
+        return None;
+    };
+    (*pid == std::process::id() || !process_alive(*pid)).then(|| UncleanExit {
+        pid: *pid,
+        started_at: started_at.clone(),
+        launch_route: *launch_route,
+    })
+}
+
 /// The previous run's marker, read before this start overwrites it. `None`
 /// means no marker exists. An unreadable marker (bad bytes, over its bound,
 /// a refused pinned open) is an error: the start must fail closed and leave
@@ -1037,6 +1068,37 @@ mod tests {
         // The reporter must not panic and must classify it as not-alive.
         assert!(!process_alive(u32::MAX - 1));
         report_previous_exit(read(tmp.path()).as_ref()); // smoke: logs the inferred-crash path
+    }
+
+    #[test]
+    fn unclean_exit_is_inferred_only_from_a_running_marker_of_a_gone_process() {
+        let running = |pid| LifecycleMarker::Running {
+            pid,
+            started_at: "2026-01-01T00:00:00Z".into(),
+            launch_route: Some(LaunchRoute::Supervised),
+            pending_latched_drain: None,
+            carrier_incarnation: None,
+        };
+        assert_eq!(
+            inferred_unclean_exit(Some(&running(u32::MAX - 1))),
+            Some(UncleanExit {
+                pid: u32::MAX - 1,
+                started_at: "2026-01-01T00:00:00Z".into(),
+                launch_route: Some(LaunchRoute::Supervised),
+            })
+        );
+        // A previous run that reused this process's pid is still a previous run.
+        assert!(inferred_unclean_exit(Some(&running(std::process::id()))).is_some());
+        assert!(inferred_unclean_exit(None).is_none());
+        let exited = exited_marker(
+            "signal",
+            "2026-01-01T00:00:00Z",
+            None,
+            LaunchRoute::Direct,
+            None,
+            None,
+        );
+        assert!(inferred_unclean_exit(Some(&exited)).is_none());
     }
 
     #[test]
