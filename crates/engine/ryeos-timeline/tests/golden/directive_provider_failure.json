@@ -1,5 +1,28 @@
+test every_event_type_in_the_fixtures_is_declared ... ok
 {
   "items": [
+    {
+      "item": "entry",
+      "id": "mrk:4",
+      "type": "marker",
+      "state": null,
+      "tone": null,
+      "thread": "T-0001",
+      "parent": null,
+      "exchange": null,
+      "counts_as": null,
+      "slots": {
+        "headline": "launched with gpt-5.4-nano · via zen"
+      },
+      "seq": [
+        4,
+        4
+      ],
+      "ts": [
+        "2026-11-16T03:25:31Z",
+        "2026-11-16T03:25:31Z"
+      ]
+    },
     {
       "item": "entry",
       "id": "msg:6/0",
@@ -44,6 +67,7 @@
       ],
       "ts": [
         "2026-11-16T03:25:32Z",
+test every_fixture_folds_to_its_golden ... ok
         "2026-11-16T03:25:32Z"
       ]
     }
@@ -51,6 +75,7 @@
   "undeclared": {},
   "notice_noun": {
     "key": "system_event",
+test ne_one_of_and_item_last_conditions ... ok
     "one": "system event",
     "many": "system events"
   },
