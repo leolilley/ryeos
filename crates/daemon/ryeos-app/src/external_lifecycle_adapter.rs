@@ -2812,7 +2812,7 @@ fn latest_lease_end_from(
     contact_deadline_ms: i64,
     lifetime_seconds: u32,
 ) -> LatestLeaseEnd {
-    if !lease_admitted {
+    if !lease_admitted || contact_deadline_ms <= 0 {
         return LatestLeaseEnd::Unbounded {};
     }
     let end = i64::from(lifetime_seconds)
