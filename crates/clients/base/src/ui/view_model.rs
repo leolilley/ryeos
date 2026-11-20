@@ -1048,7 +1048,11 @@ fn presentation_vm(
     RyeOsPresentationVm {
         schema_version: "ryeos.ui.presentation.v1".to_string(),
         theme: RyeOsThemeVm {
-            id: "gruvbox-optic".to_string(),
+            id: core
+                .data
+                .theme_preference
+                .clone()
+                .unwrap_or_else(|| crate::theme_preference::SYSTEM.to_string()),
             tone: RyeOsTone::Accent,
         },
         chrome: RyeOsPresentationChromeVm {
