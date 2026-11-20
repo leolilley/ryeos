@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-19T18:09:46Z:a05ff8f0767def416ceea26c62dc81d19ab884dedb849f8f967cb89d2ec5d9fc:fvY3YMzLYM/W9TYHdwcn9PBdkjN/a0Oc6Rs3Gm1yLkd3KtI9VxjP4zGc7bPF9bNPuAWb/iLBt2BWPgMI0ReDAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-20T22:54:35Z:a874af6d81044fc36bbdaff3acd4e6cfe2999ae3d52dd03cea49245caa1c5357:5pS7HF1N4u3Gs1bBT0P/WklgQeE8NfWIK/r14EVsXoiDzoiQSx8cOSKW04XtChnVn/wzn19U696jRdCk6IUsDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [fundamentals, directives, workflows, prompts]
 version: "2.1.0"
@@ -263,9 +263,10 @@ a successor whose carried start lacks it is told again, with the time left now.
 The size of a successor's start is signed runtime config
 (`ryeos-runtime/continuation`): `successor_start_tokens` (default 16000) is the
 estimated-token budget for pinned inputs plus recent turns. Pinned inputs over
-that budget are carried alone, with no recent turns; pinned inputs over the model
-window times `context_threshold_ratio` fail the successor with
-`resume_pinned_exceeds_window`. A rebuilt conversation that does not begin with a
+that budget are carried alone, with no recent turns; pinned inputs over the hand-off point
+(the model window times `context_threshold_ratio`, lowered to the model's
+`handoff_token_cap` when its provider entry declares one; see the model provider
+guide) fail the successor with `resume_pinned_exceeds_window`. A rebuilt conversation that does not begin with a
 user message, or that holds a tool call without its result (or the reverse),
 fails with `resume_start_not_user`, `resume_unanswered_tool_call` or
 `resume_orphan_tool_result`; the failure is a settled thread with that code, not a

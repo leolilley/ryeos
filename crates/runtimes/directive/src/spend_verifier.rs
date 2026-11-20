@@ -352,6 +352,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            handoff_token_cap: None,
             profiles: vec![],
         }
     }

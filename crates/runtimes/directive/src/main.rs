@@ -525,11 +525,14 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
                     .config
                     .continuation_runtime
                     .successor_start_tokens,
-                ceiling_tokens: (context_window as f64
-                    * bootstrap_output
+                ceiling_tokens: continuation::hand_off_point(
+                    context_window,
+                    bootstrap_output
                         .config
                         .continuation_runtime
-                        .context_threshold_ratio) as u64,
+                        .context_threshold_ratio,
+                    provider.handoff_token_cap,
+                ),
             };
             let loaded = match resume::load_resume_state(
                 &callback,

@@ -2,9 +2,23 @@ use ryeos_directive_definition::ImageAcceptConfig;
 
 use crate::directive::ProviderMessage;
 
+/// The live context at which a run hands off: the window fraction, lowered to
+/// the model's absolute cap when one is declared. The one definition every
+/// consumer reads (the continuation check, the successor's carry ceiling), so
+/// they cannot disagree.
+pub fn hand_off_point(context_window: u64, threshold_ratio: f64, cap: Option<u64>) -> u64 {
+    let by_ratio = (context_window as f64 * threshold_ratio) as u64;
+    match cap {
+        Some(cap) => by_ratio.min(cap),
+        None => by_ratio,
+    }
+}
+
 pub struct ContinuationCheck {
     context_window: u64,
     threshold_ratio: f64,
+    /// The model's absolute cap on the hand-off point, when declared.
+    handoff_token_cap: Option<u64>,
     /// How the model counts an image, when its entry declares image input.
     images: Option<ImageAcceptConfig>,
 }
@@ -14,8 +28,15 @@ impl ContinuationCheck {
         Self {
             context_window,
             threshold_ratio,
+            handoff_token_cap: None,
             images: None,
         }
+    }
+
+    /// The same check with the model's absolute hand-off cap.
+    pub fn with_handoff_token_cap(mut self, cap: Option<u64>) -> Self {
+        self.handoff_token_cap = cap;
+        self
     }
 
     /// The same check with the model's image cost declaration, so an image
@@ -46,8 +67,13 @@ impl ContinuationCheck {
         crate::estimate::estimate_tokens(messages, self.images.as_ref())
     }
 
+    /// The effective hand-off point.
     pub fn threshold(&self) -> u64 {
-        (self.context_window as f64 * self.threshold_ratio) as u64
+        hand_off_point(
+            self.context_window,
+            self.threshold_ratio,
+            self.handoff_token_cap,
+        )
     }
 }
 
@@ -110,6 +136,46 @@ mod tests {
     fn threshold_calculation() {
         let check = ContinuationCheck::new(200_000, 0.9);
         assert_eq!(check.threshold(), 180_000);
+    }
+
+    #[test]
+    fn absent_cap_is_the_ratio_product() {
+        assert_eq!(hand_off_point(200_000, 0.9, None), 180_000);
+        let check = ContinuationCheck::new(200_000, 0.9).with_handoff_token_cap(None);
+        assert_eq!(check.threshold(), 180_000);
+    }
+
+    #[test]
+    fn a_cap_below_the_ratio_product_wins() {
+        assert_eq!(hand_off_point(1_000_000, 0.9, Some(250_000)), 250_000);
+        let check = ContinuationCheck::new(1_000_000, 0.9).with_handoff_token_cap(Some(250_000));
+        assert_eq!(check.threshold(), 250_000);
+    }
+
+    #[test]
+    fn a_cap_above_the_ratio_product_changes_nothing() {
+        assert_eq!(hand_off_point(131_072, 0.9, Some(131_072)), 117_964);
+    }
+
+    #[test]
+    fn the_check_threshold_equals_the_carry_ceiling_definition() {
+        for (window, ratio, cap) in [
+            (200_000, 0.9, None),
+            (1_000_000, 0.9, Some(250_000)),
+            (131_072, 0.8, Some(100_000)),
+        ] {
+            let check = ContinuationCheck::new(window, ratio).with_handoff_token_cap(cap);
+            assert_eq!(check.threshold(), hand_off_point(window, ratio, cap));
+        }
+    }
+
+    #[test]
+    fn a_capped_check_continues_at_the_cap_not_the_ratio() {
+        let check = ContinuationCheck::new(1_000_000, 0.9).with_handoff_token_cap(Some(100));
+        let long = "x".repeat(2000);
+        assert!(check.should_continue_live_context(&[make_message("user", &long)]));
+        let uncapped = ContinuationCheck::new(1_000_000, 0.9);
+        assert!(!uncapped.should_continue_live_context(&[make_message("user", &long)]));
     }
 
     #[test]

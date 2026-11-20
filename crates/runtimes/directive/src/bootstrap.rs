@@ -91,6 +91,21 @@ pub fn bootstrap(
         .map_err(|e| anyhow!("loading config `ryeos-runtime/continuation`: {e}"))?
         .unwrap_or_default();
 
+    // The model's hand-off cap must leave a successor room to start and still
+    // run: at least twice the node's configured successor start budget. The
+    // provider config's own check uses the default budget; this one uses the
+    // configured value.
+    if let Some(cap) = provider_snapshot.provider.handoff_token_cap {
+        ryeos_directive_definition::check_handoff_token_cap(
+            cap,
+            continuation_runtime
+                .successor_start_tokens
+                .saturating_mul(2),
+            Some(provider_snapshot.context_window),
+        )
+        .map_err(|e| anyhow!("provider snapshot: {e}"))?;
+    }
+
     // Consumer for the `category` round-trip fields on each typed
     // config — keeps `pub category: Option<String>` from being dead
     // code while making operators see a parity signal between bundle
@@ -106,6 +121,7 @@ pub fn bootstrap(
         provider_id = %provider_snapshot.provider_id,
         model_name = %provider_snapshot.model_name,
         context_window = provider_snapshot.context_window,
+        handoff_token_cap = ?provider_snapshot.provider.handoff_token_cap,
         matched_profile = ?provider_snapshot.matched_profile,
         config_value_digest = %provider_snapshot.config_value_digest,
         config_source_count = provider_snapshot.config_sources.len(),

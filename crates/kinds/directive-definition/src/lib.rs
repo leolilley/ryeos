@@ -155,6 +155,16 @@ pub struct ProviderConfig {
     /// failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_rejections: Option<Vec<RequestRejectionRow>>,
+    /// Absolute cap, in tokens, on the live context a run carries before it
+    /// hands off. The effective hand-off point is the smaller of this and the
+    /// context-window fraction (`hand_off_point` in the directive runtime), so
+    /// a model with a very large window can be held to what its price row
+    /// justifies per turn. A top-level field, not part of `schemas`, for the
+    /// same reason as `image_input`. Absent: the window fraction alone.
+    /// Validated: at least `MIN_HANDOFF_TOKEN_CAP`, and at most the launch's
+    /// context window (refused, never clamped).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_token_cap: Option<u64>,
     #[serde(default)]
     pub profiles: Vec<ProviderProfile>,
 }
@@ -191,6 +201,30 @@ pub struct ProviderProfile {
     /// Replaces the config's `request_rejections` whole.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_rejections: Option<Vec<RequestRejectionRow>>,
+    /// Replaces the config's `handoff_token_cap`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_token_cap: Option<u64>,
+}
+
+/// Smallest accepted `handoff_token_cap`: twice the default successor start
+/// budget (16,000 tokens), so a successor can start and still have room before
+/// its own hand-off. The runtime re-checks the cap against the node's
+/// configured successor start budget when it loads that config.
+pub const MIN_HANDOFF_TOKEN_CAP: u64 = 32_000;
+
+/// Why a `handoff_token_cap` is refused.
+pub fn check_handoff_token_cap(cap: u64, min_cap: u64, context_window: Option<u64>) -> Result<()> {
+    if cap < min_cap {
+        bail!(
+            "handoff_token_cap {cap} is below the minimum {min_cap} (twice the successor start budget)"
+        );
+    }
+    if let Some(window) = context_window
+        && cap > window
+    {
+        bail!("handoff_token_cap {cap} exceeds the model context window {window}");
+    }
+    Ok(())
 }
 
 /// Provider-domain transport selection. The remote and admitted-worker paths
@@ -1470,6 +1504,10 @@ impl ProviderConfig {
         if let Some(rows) = &self.request_rejections {
             validate_request_rejections(rows, context)?;
         }
+        if let Some(cap) = self.handoff_token_cap {
+            check_handoff_token_cap(cap, MIN_HANDOFF_TOKEN_CAP, None)
+                .map_err(|error| anyhow::anyhow!("provider config{context}: {error}"))?;
+        }
         for profile in &self.profiles {
             // A profile can change the route (schemas, spend authority) under
             // an entry-level declaration, or add its own; the cross-field
@@ -1487,6 +1525,11 @@ impl ProviderConfig {
             }
             if let Some(rows) = &profile.request_rejections {
                 validate_request_rejections(rows, &format!("{context} profile {}", profile.name))?;
+            }
+            if let Some(cap) = profile.handoff_token_cap {
+                check_handoff_token_cap(cap, MIN_HANDOFF_TOKEN_CAP, None).map_err(|error| {
+                    anyhow::anyhow!("provider config{context} profile {}: {error}", profile.name)
+                })?;
             }
         }
         if self.body_template.is_none() {
@@ -2032,6 +2075,9 @@ impl ProviderConfig {
         if let Some(rows) = &profile.request_rejections {
             resolved.request_rejections = Some(rows.clone());
         }
+        if let Some(cap) = profile.handoff_token_cap {
+            resolved.handoff_token_cap = Some(cap);
+        }
         resolved.profiles.clear();
         resolved
     }
@@ -2390,6 +2436,19 @@ pub fn prepare_directive_launch(
                 format!("{error:#}"),
             )
         })?;
+    if let Some(cap) = resolved_provider.handoff_token_cap {
+        check_handoff_token_cap(cap, MIN_HANDOFF_TOKEN_CAP, Some(target.context_window)).map_err(
+            |error| {
+                DirectivePreparationError::configuration(
+                    "handoff_token_cap_invalid",
+                    format!(
+                        "model {} (provider {}): {error:#}",
+                        target.model_name, target.provider_id
+                    ),
+                )
+            },
+        )?;
+    }
     validate_reasoning_selection(
         target.reasoning.as_ref(),
         resolved_provider
@@ -3115,6 +3174,7 @@ mod reasoning_tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            handoff_token_cap: None,
             profiles: Vec::new(),
         };
         ResolvedProviderSnapshot {
@@ -3335,6 +3395,57 @@ mod reasoning_tests {
             prepared.runtime_facts.get("reasoning"),
             Some(&serde_json::to_value(expected).expect("reasoning fact"))
         );
+    }
+
+    fn prepare_with_cap(
+        window: u64,
+        cap: Option<u64>,
+    ) -> std::result::Result<DirectiveLaunchPreparation, DirectivePreparationError> {
+        let composed = serde_json::json!({
+            "model": {
+                "provider": "fixture",
+                "name": "fixture-model",
+                "context_window": window
+            }
+        });
+        let config_id = "ryeos-runtime/model-providers/fixture".to_string();
+        let mut provider = launch_provider();
+        provider.handoff_token_cap = cap;
+        let provider_catalog = BTreeMap::from([(
+            config_id.clone(),
+            VerifiedConfigItem {
+                value: serde_json::to_value(provider).expect("provider value"),
+                value_digest: "0".repeat(64),
+                contributors: vec![ProviderConfigSource {
+                    space: SnapshotItemSpace::Bundle,
+                    root_label: "bundle:fixture".to_string(),
+                    canonical_id: config_id,
+                    content_digest: "1".repeat(64),
+                    trust_class: SnapshotTrustClass::TrustedBundle,
+                }],
+            },
+        )]);
+        prepare_directive_launch(DirectiveLaunchPreparationInput {
+            primary_ref: "directive:test/model",
+            primary_composed: &composed,
+            model_ref: "directive:test/model",
+            model_composed: &composed,
+            model_routing: None,
+            provider_catalog: &provider_catalog,
+            execution: None,
+        })
+    }
+
+    #[test]
+    fn a_cap_above_the_launch_window_is_refused_and_a_valid_one_is_sealed() {
+        let error = prepare_with_cap(40_000, Some(50_000)).expect_err("cap above window");
+        assert_eq!(error.code, "handoff_token_cap_invalid");
+        let error = prepare_with_cap(40_000, Some(10_000)).expect_err("cap below minimum");
+        assert_eq!(error.code, "provider_config_invalid");
+        let prepared = prepare_with_cap(40_000, Some(32_000)).expect("valid cap");
+        assert_eq!(prepared.snapshot.provider.handoff_token_cap, Some(32_000));
+        let prepared = prepare_with_cap(40_000, None).expect("no cap");
+        assert_eq!(prepared.snapshot.provider.handoff_token_cap, None);
     }
 }
 
@@ -4226,6 +4337,100 @@ profiles:
             serde_yaml::from_str::<Value>(&format!(
                 "family: chat_completions\ntransport: {{kind: remote_http, base_url: \"https://example.invalid\"}}\n{yaml}"
             ))
+            .unwrap(),
+        );
+        assert!(parsed.is_err());
+    }
+}
+
+#[cfg(test)]
+mod handoff_token_cap_config_tests {
+    use super::*;
+
+    fn load(top: &str, profile: &str) -> ProviderConfig {
+        let yaml = format!(
+            r#"
+family: chat_completions
+transport: {{kind: remote_http, base_url: "https://example.invalid"}}
+schemas:
+  streaming:
+    mode: delta_merge
+  output_limit: {{path: max_tokens, semantics: provider_native_output_tokens}}
+body_template: {{model: "{{model}}", messages: "{{messages}}", stream: "{{stream}}"}}
+{top}
+profiles:
+  - name: special
+    match: ["special-*"]
+{profile}
+"#
+        );
+        serde_json::from_value(serde_yaml::from_str::<Value>(&yaml).expect("yaml"))
+            .expect("provider config")
+    }
+
+    #[test]
+    fn absent_cap_is_the_default_and_serialises_nothing() {
+        let provider = load("", "    extra: {}");
+        provider.validate("").unwrap();
+        assert!(
+            provider
+                .resolve_for_model("other")
+                .handoff_token_cap
+                .is_none()
+        );
+        let value = serde_json::to_value(&provider).unwrap();
+        assert!(value.get("handoff_token_cap").is_none());
+    }
+
+    #[test]
+    fn a_profile_cap_replaces_the_entry_cap_for_its_models() {
+        let provider = load("handoff_token_cap: 100000", "    handoff_token_cap: 250000");
+        provider.validate("").unwrap();
+        assert_eq!(
+            provider.resolve_for_model("other").handoff_token_cap,
+            Some(100_000)
+        );
+        assert_eq!(
+            provider.resolve_for_model("special-1").handoff_token_cap,
+            Some(250_000)
+        );
+    }
+
+    #[test]
+    fn a_cap_below_the_minimum_is_refused_in_the_entry_and_in_a_profile() {
+        assert!(
+            load("handoff_token_cap: 31999", "    extra: {}")
+                .validate("")
+                .is_err()
+        );
+        assert!(
+            load("handoff_token_cap: 0", "    extra: {}")
+                .validate("")
+                .is_err()
+        );
+        assert!(
+            load("", "    handoff_token_cap: 1000")
+                .validate("")
+                .is_err()
+        );
+        load("handoff_token_cap: 32000", "    extra: {}")
+            .validate("")
+            .unwrap();
+    }
+
+    #[test]
+    fn the_cap_is_refused_above_the_window_never_clamped() {
+        assert!(check_handoff_token_cap(200_000, MIN_HANDOFF_TOKEN_CAP, Some(131_072)).is_err());
+        assert!(check_handoff_token_cap(131_072, MIN_HANDOFF_TOKEN_CAP, Some(131_072)).is_ok());
+        assert!(check_handoff_token_cap(250_000, MIN_HANDOFF_TOKEN_CAP, Some(1_000_000)).is_ok());
+    }
+
+    #[test]
+    fn a_non_integer_or_unknown_neighbour_is_refused() {
+        let parsed: Result<ProviderConfig, _> = serde_json::from_value(
+            serde_yaml::from_str::<Value>(
+                "family: chat_completions\ntransport: {kind: remote_http, base_url: \"https://example.invalid\"}\nhandoff_token_cap: -5\n",
+            )
             .unwrap(),
         );
         assert!(parsed.is_err());

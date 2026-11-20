@@ -1443,6 +1443,7 @@ impl Runner {
             budget,
             callback,
             continuation: ContinuationCheck::new(context_window, context_threshold_ratio)
+                .with_handoff_token_cap(provider_config.handoff_token_cap)
                 .with_images(
                     provider_config
                         .image_input
@@ -6411,6 +6412,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            handoff_token_cap: None,
             profiles: vec![],
         };
 
@@ -6493,6 +6495,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            handoff_token_cap: None,
             profiles: vec![],
         };
 
@@ -6551,6 +6554,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            handoff_token_cap: None,
             profiles: vec![],
         };
 
@@ -6608,6 +6612,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            handoff_token_cap: None,
             profiles: vec![],
         };
         let outputs = Some(vec![OutputSpec {
@@ -6680,6 +6685,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            handoff_token_cap: None,
             profiles: vec![],
         };
         let mut budget = BudgetTracker::new(usd("1"));
@@ -6857,6 +6863,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            handoff_token_cap: None,
             profiles: vec![],
         };
 
@@ -6934,6 +6941,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            handoff_token_cap: None,
             profiles: vec![],
         };
 
@@ -7008,6 +7016,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            handoff_token_cap: None,
             profiles: vec![],
         };
 
@@ -7066,6 +7075,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            handoff_token_cap: None,
             profiles: vec![],
         };
 
@@ -8065,6 +8075,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            handoff_token_cap: None,
             profiles: vec![],
         };
         Runner::new(RunnerConfig {

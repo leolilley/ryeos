@@ -1443,6 +1443,15 @@ fn reconstruct_messages(events: &[ReplayedEventRecord]) -> Result<Vec<ProviderMe
 /// The default token budget of the conversation a successor starts from.
 pub const DEFAULT_SUCCESSOR_START_TOKENS: u64 = 16_000;
 
+#[cfg(test)]
+#[test]
+fn the_cap_minimum_is_twice_the_default_start_budget() {
+    assert_eq!(
+        ryeos_directive_definition::MIN_HANDOFF_TOKEN_CAP,
+        2 * DEFAULT_SUCCESSOR_START_TOKENS
+    );
+}
+
 /// How a successor's start is cut from its predecessors' part of the path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CarryPolicy {
@@ -1452,7 +1461,9 @@ pub struct CarryPolicy {
     /// fit. Pinned inputs over this budget are carried alone.
     pub start_tokens: u64,
     /// Estimated tokens above which even the pinned inputs alone are refused:
-    /// the model window times the continuation threshold ratio.
+    /// the effective hand-off point (`continuation::hand_off_point`): the
+    /// model window times the continuation threshold ratio, lowered to the
+    /// model's absolute cap when one is declared.
     pub ceiling_tokens: u64,
 }
 

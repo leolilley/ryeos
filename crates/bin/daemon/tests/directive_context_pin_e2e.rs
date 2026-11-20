@@ -332,6 +332,93 @@ async fn successors_keep_the_pinned_prefix_and_a_well_formed_start() {
     }
 }
 
+/// A `continuation` hook that runs the marker tool only when the event records
+/// the given hand-off point, so the marker count proves what the event carried.
+fn continuation_point_hook(point: u64) -> String {
+    format!(
+        "hooks:\n  - id: on-handoff\n    event: continuation\n    result: observation\n    condition: \"event.threshold_tokens == {point}\"\n    action:\n      primary: execute\n      item_id: \"tool:marker/marker\"\n      ref_bindings: {{}}\n      params: {{}}\n"
+    )
+}
+
+/// The model's hand-off cap, not the window fraction, decides where a run
+/// hands off. The window is 100,000 tokens (a 90,000 ratio point) and the
+/// entry caps the point at 32,000; the script's bulk calls reach only about
+/// 40,000 tokens, so no hand-off here can be the ratio's. The successor starts under the carry budget, and the
+/// continuation event records the effective point.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_capped_model_hands_off_at_the_cap_not_the_ratio() {
+    const CAP: u64 = 32_000;
+    let script = "steps:\n  - repeat: 200\n    tool_calls:\n      - { id: \"call_{n}\", name: bulk_bulk, arguments: {} }\n  - repeat: 5\n    text: done\n";
+    let header = format!(
+        "continuation:\n  carry_turns: 2\n{}",
+        continuation_point_hook(CAP)
+    );
+    let header: &'static str = Box::leak(header.into_boxed_str());
+    let rig = start_rig(
+        script,
+        RigOptions {
+            context_window: 100_000,
+            header_extra: header,
+            limits: Some((600, 600)),
+            provider_top_extra: format!("handoff_token_cap: {CAP}\n"),
+            marker_sleep_seconds: 0,
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    let id = launch_on(&rig).await.expect("launch");
+    let chain = wait_chain_settled(&rig, &id).await;
+    let bodies: Vec<Value> = rig
+        .stub
+        .requests()
+        .await
+        .into_iter()
+        .map(|r| r.body)
+        .collect();
+    let starts = successor_starts(&bodies);
+    assert!(
+        !starts.is_empty(),
+        "the cap should force a hand-off before the script ends; chain={chain:?} requests={}",
+        bodies.len()
+    );
+    // Without the cap the 200 bulk calls reach about 40,000 tokens, well under
+    // the 90,000 ratio point: the first hand-off falling inside them is the cap's.
+    assert!(
+        starts[0] < 200,
+        "the first hand-off came at request {}, after the script's bulk calls",
+        starts[0]
+    );
+    // The request before the hand-off is at the cap, not far past it.
+    let before = messages_of(&bodies[starts[0] - 1]);
+    let carried_tokens = |body: &Value| {
+        messages_of(body)
+            .iter()
+            .map(|m| m.to_string().len())
+            .sum::<usize>()
+            / 4
+    };
+    assert!(
+        carried_tokens(&bodies[starts[0] - 1]) as u64 >= CAP / 2,
+        "{} messages before the hand-off",
+        before.len()
+    );
+    // The successor starts under the carry budget (16,000 tokens), far under the cap.
+    for &start in &starts {
+        assert!(
+            carried_tokens(&bodies[start]) < 20_000,
+            "successor request {start} starts at {} estimated tokens",
+            carried_tokens(&bodies[start])
+        );
+    }
+    // Every continuation event recorded the effective point as the cap.
+    assert_eq!(
+        rig.marker_count(),
+        starts.len(),
+        "each hand-off's event records threshold_tokens = {CAP}"
+    );
+}
+
 /// E5. An operator follow-up is pinned: after it, a chain longer than
 /// `carry_turns` still carries the follow-up text in every later successor.
 #[tokio::test(flavor = "multi_thread")]

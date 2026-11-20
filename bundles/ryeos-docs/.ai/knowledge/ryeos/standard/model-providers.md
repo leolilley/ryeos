@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-19T10:13:35Z:8bcc39ff59b9f7f7d3da169cee24fcb96b01b8169f18c91c721c506c346713be:AVHunrneQbJVdXTbPOTzYRo4/4sem6X+8c0yLJNz/w4i9jlaMupddsPZPPgh0pNwgTC6o/M+K7OCQ7P8whiXBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-20T22:54:35Z:1613c1b00c15c66d0cca11ad00a14cece64052659ff858f97a7afc8b0e5f5836:Bn9ZTXxp+l9vyyDF9mk3WyaKpYBQbVfH4WgDu/SkQG7+ggfsGNlHFWz7MTmnnupmlS3CEymHBY4MjiSbiaCeAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/standard
@@ -393,6 +393,56 @@ gives no code a meaning. A parent graph that follows the directive reads it as
 The runtime reads `request_rejections` with `deny_unknown_fields`, so a runtime
 payload older than a bundle config that declares it refuses the config. Refresh
 the runtime payload and the bundle's provider configs together.
+
+## Hand-off token cap
+
+A run hands off to a successor when its live context reaches the hand-off point.
+By default that point is the model's context window times
+`context_threshold_ratio` (0.9 in `ryeos-runtime/continuation`). A model with a
+very large window then pays for a very large context on every turn, because each
+call re-sends the live context. `handoff_token_cap` bounds that per model: it
+sits at the top level of the provider entry, a profile's value replaces the
+entry's, and absent means the window fraction alone.
+
+```yaml
+profiles:
+  # Opus 5.5: window 1,000,000 tokens. Cap 250,000 holds a worst-case
+  # uncached turn near 250,000 input tokens (about US$1.25 per turn at an
+  # assumed US$5 per million input tokens; the price is an assumption taken
+  # from the probe, not read from the route).
+  - name: claude-opus-5-5
+    match: ["*claude-opus-5-5"]
+    handoff_token_cap: 250000
+```
+
+The effective point is `hand_off_point = min(context_threshold_ratio x
+context_window, handoff_token_cap)`, one definition used by the continuation
+check, by the carry ceiling a successor's pinned inputs are held to
+(`resume_pinned_exceeds_window` is raised against it) and by the stop of a run
+with continuation disabled, which settles at the point instead of at the window
+fraction. The
+`continuation` event keeps `reason: context_window`; its `threshold_tokens`
+field is the effective point, so a hook can see why a run handed off at that
+size. Nothing new is stored on a thread.
+
+Validation is typed and never clamps. The cap must be a positive integer of at
+least 32,000 tokens (twice the default `successor_start_tokens` of 16,000, so a
+successor can start and still have room before its own hand-off); the runtime
+re-checks it against a node's configured `successor_start_tokens` times two. At
+launch the cap must not exceed the context window the directive or tier names;
+a cap above it fails launch preparation with `handoff_token_cap_invalid`. A
+directive cannot set or override the cap.
+
+Choose the cap from the model's price row so a worst-case turn (cold cache, full
+input price) at the cap stays under the per-turn spend the operator will risk.
+Prompt-cache marks lower the typical turn far below that figure but not the
+worst case after the cache expires, so the cap stays useful with caching. A lower
+point reaches `chain_depth_limit` in fewer total tokens: chain capacity is about
+`chain_depth_limit x hand_off_point`.
+
+The runtime reads the provider entry with `deny_unknown_fields`, so a runtime
+payload older than a bundle config that declares `handoff_token_cap` refuses the
+config. Refresh the runtime payload and the bundle's provider configs together.
 
 ## Provider cache usage
 
