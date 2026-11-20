@@ -2727,7 +2727,13 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // signed under a retired schema are set aside as stale and reported by
 // `ryeos node doctor`; retire and compose them again after the reset. A change
 // to the binding schemas or to `RETIRED_BINDING_SCHEMAS` moves with this
-// constant.
+// constant. The same cut also carries the exact process identity: stored
+// `ExecutionProcessIdentity` and `ExactProcessIdentity` JSON (connector peer
+// identities, native capacity debit and recovery records, the lifecycle
+// marker) now require `pid_namespace`, the capturer's pid-namespace inode, so
+// an epoch-141 store holding identities without it no longer decodes; the
+// reset clears the runtime-database ones, and an outstanding capacity debit or
+// recovery record written before the cut is cleared or re-issued with it.
 const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 142;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
