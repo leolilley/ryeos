@@ -5512,7 +5512,11 @@ const ADMITTED_START_DRAIN_MARGIN: Duration = Duration::from_secs(1);
 /// run back to back. Cutting such a wait short would trade the death proof
 /// for speed, so the wait is stretched to cover both plus a margin, never
 /// below the ordinary grace. A node with no process-scope policy has no such
-/// operation and keeps the grace.
+/// operation and keeps the grace. The signed control timeout is capped at
+/// `MAX_PROCESS_SCOPE_CONTROL_TIMEOUT_MS` (8000 ms), so the worst case is
+/// 2 x 8 s + 1 s = 17 s (11 s with the shipped 5 s); the hosted stop window
+/// measured in the P20 drill left the daemon about 25 s after its first
+/// shutdown line, of which the rest of the drain used about 5 s.
 pub fn admitted_start_drain_bound(grace: Duration, control_timeout: Option<Duration>) -> Duration {
     control_timeout.map_or(grace, |control| {
         grace.max(
