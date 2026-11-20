@@ -1,6 +1,7 @@
 {
   "schema_version": "ryeos.ui.asset-manifest.v1",
   "ui_binding_revision": "ryeos.ui.binding.v15",
+  "source_digest": "f7a083da281db679ac970c9587b2d2adfb137f1ed24c3813e96284b16f93a44e",
   "assets": [
     {
       "route": "/ui",
@@ -29,14 +30,16 @@
       "filename": "ryeos_rune.js",
       "mime": "application/javascript; charset=utf-8",
       "cache": "no-cache",
-      "sha256": "0e12d64a070c0950f020806205181e0ce613deca1c049bee70c674f086fa5758",
+      "sha256": "568684847f688f38c1fb509e827319582d06df4047dcae461fa1aceb70016a57",
       "imports": [
         "/ui/assets/rune_bridge.js",
         "/ui/assets/rune_health.js",
         "/ui/assets/rune_pipelines.js",
         "/ui/assets/rune_platform.js",
-        "/ui/assets/rune_platform_text.js",
-        "/ui/assets/rune_segmenter.js",
+        "/ui/assets/rune_spell_web.js",
+        "/ui/assets/rune_text_browser_platform.js",
+        "/ui/assets/rune_text_platform_text.js",
+        "/ui/assets/rune_text_web.js",
         "/ui/assets/ryeos_rune_bg.wasm",
         "/ui/assets/Inter-Regular.ttf",
         "/ui/assets/Inter-Medium.ttf",
@@ -48,7 +51,7 @@
       "filename": "rune_bridge.js",
       "mime": "application/javascript; charset=utf-8",
       "cache": "no-cache",
-      "sha256": "7a8c564d52086b435ef0462dce4c9b4794da67b81b5fca127b77362b06a04dbf",
+      "sha256": "ff6be555f8588ee384aca0822cf33b56fe1671fba955bbd6e9a90f1f56478c08",
       "imports": []
     },
     {
@@ -56,7 +59,7 @@
       "filename": "rune_platform.js",
       "mime": "application/javascript; charset=utf-8",
       "cache": "no-cache",
-      "sha256": "950dd6bad4250596d3a627a7cd4cc35213f2c4d4d4bafe45ae9de78772a32894",
+      "sha256": "acf5dbc11a5f4cd1e7ec6c20de84ae7d460174db250ddc3abc453cf9b66ee41f",
       "imports": []
     },
     {
@@ -64,7 +67,7 @@
       "filename": "rune_health.js",
       "mime": "application/javascript; charset=utf-8",
       "cache": "no-cache",
-      "sha256": "cbdf8d80031a536afa01fcf14453d992ba81e9822d05ae967d29fb82e62d0581",
+      "sha256": "0e06cedda4200a137a5d8d7bb1923d98ef8533897fdd189dfd04adca0e03c40e",
       "imports": []
     },
     {
@@ -72,20 +75,36 @@
       "filename": "rune_pipelines.js",
       "mime": "application/javascript; charset=utf-8",
       "cache": "no-cache",
-      "sha256": "f1eb5a6faa24dc55f5b5db2bff60149c43a6fbd16e192f52a957b88e385d3e91",
+      "sha256": "0f80a483a9917b23e1e0cb0943fbc37b5be9ed1d2c7eb11dfc6e9343d20bec96",
       "imports": []
     },
     {
-      "route": "/ui/assets/rune_platform_text.js",
-      "filename": "rune_platform_text.js",
+      "route": "/ui/assets/rune_text_platform_text.js",
+      "filename": "rune_text_platform_text.js",
       "mime": "application/javascript; charset=utf-8",
       "cache": "no-cache",
       "sha256": "e2d39ad694699c3eb18204fae9509ac1abaaeac7c977059873d4619462d7c3b9",
       "imports": []
     },
     {
-      "route": "/ui/assets/rune_segmenter.js",
-      "filename": "rune_segmenter.js",
+      "route": "/ui/assets/rune_spell_web.js",
+      "filename": "rune_spell_web.js",
+      "mime": "application/javascript; charset=utf-8",
+      "cache": "no-cache",
+      "sha256": "635f08a57a6a25c0d0e63742a3a3e0e92efeea1e95a7309a388422f2156030ca",
+      "imports": []
+    },
+    {
+      "route": "/ui/assets/rune_text_browser_platform.js",
+      "filename": "rune_text_browser_platform.js",
+      "mime": "application/javascript; charset=utf-8",
+      "cache": "no-cache",
+      "sha256": "09ab5fef2338b9446b014934129ec6f5aae40efc9f3d669766b97f15e0a9a6f9",
+      "imports": []
+    },
+    {
+      "route": "/ui/assets/rune_text_web.js",
+      "filename": "rune_text_web.js",
       "mime": "application/javascript; charset=utf-8",
       "cache": "no-cache",
       "sha256": "972800315f80c01e4069f80642e848f31b29b732082e282500b1294179538b99",
@@ -96,7 +115,7 @@
       "filename": "ryeos_rune_bg.wasm.gz",
       "mime": "application/wasm",
       "cache": "no-cache",
-      "sha256": "2248ad7b65377bc1f159291ba68e54e2e9bab1406b1f44963ec010667a9d4b5a",
+      "sha256": "3b2b74754f6b671b9129ac12d4ef8b1f6da08b4991d0e29fd201a05e9d2079d5",
       "imports": [],
       "encoding": "gzip"
     },

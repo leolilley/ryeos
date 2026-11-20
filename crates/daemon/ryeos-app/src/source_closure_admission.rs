@@ -812,7 +812,7 @@ fn capture_source_closure(
                 resolution,
                 &engine.trust_store,
                 kind,
-                matches!(resolution.root.source_space, ItemSpace::Project).then_some(content_root),
+                owner_signer_project_root(roots, resolution.root.source_space, content_root),
             )?
         }
         ryeos_engine::kind_registry::SourceClosureTestimonyDecl::OwnerSignedDigest => {
@@ -1116,6 +1116,22 @@ fn require_current_source_policy(
         }
     }
     Ok(())
+}
+
+/// The project a source file's signer scope is matched against. A pinned
+/// consumer's content root is a temporary checkout, so the logical project the
+/// resolution roots state is the identity; a live project is its own.
+fn owner_signer_project_root<'a>(
+    roots: &'a ryeos_engine::item_resolution::ResolutionRoots,
+    source_space: ItemSpace,
+    content_root: &'a Path,
+) -> Option<&'a Path> {
+    matches!(source_space, ItemSpace::Project).then(|| {
+        roots
+            .logical_project_root
+            .as_deref()
+            .unwrap_or(content_root)
+    })
 }
 
 fn verify_owner_signed_files(
@@ -1706,5 +1722,46 @@ mod retained_current_worker_source_controls {
         );
         // Fixture constructs resolution from signature-verified real document;
         // it does not execute an actual composer handler or native factory.
+    }
+}
+
+#[cfg(test)]
+mod owner_signer_project_root_controls {
+    use std::path::{Path, PathBuf};
+
+    use ryeos_engine::contracts::ItemSpace;
+    use ryeos_engine::item_resolution::ResolutionRoots;
+
+    use super::owner_signer_project_root;
+
+    #[test]
+    fn a_pinned_checkout_is_judged_as_its_logical_project() {
+        let checkout = Path::new("/tmp/generation-7/checkout");
+        let logical = PathBuf::from("/work/registered-project");
+        let pinned = ResolutionRoots::from_flat(None, Vec::new())
+            .with_logical_project_root(Some(logical.clone()));
+        assert_eq!(
+            owner_signer_project_root(&pinned, ItemSpace::Project, checkout),
+            Some(logical.as_path()),
+            "a signer scoped to the logical project must be matched on it, not on the checkout"
+        );
+
+        let live = ResolutionRoots::from_flat(None, Vec::new());
+        assert_eq!(
+            owner_signer_project_root(&live, ItemSpace::Project, checkout),
+            Some(checkout),
+            "a live project is its own logical project"
+        );
+    }
+
+    #[test]
+    fn only_project_space_names_a_signer_project() {
+        let checkout = Path::new("/tmp/generation-7/checkout");
+        let pinned = ResolutionRoots::from_flat(None, Vec::new())
+            .with_logical_project_root(Some(PathBuf::from("/work/registered-project")));
+        assert_eq!(
+            owner_signer_project_root(&pinned, ItemSpace::Bundle, checkout),
+            None
+        );
     }
 }

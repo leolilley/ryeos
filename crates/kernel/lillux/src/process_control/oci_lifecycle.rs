@@ -114,12 +114,22 @@ impl OciLifecycleIntent {
                 return Err("OCI init process is still the intended incarnation".to_owned());
             }
             Ok(_) => {}
-            Err(error)
-                if PathBuf::from(format!("/proc/{}", self.init_process.target_pid)).exists() =>
-            {
-                return Err(format!("cannot prove OCI init death: {error}"));
+            // The same boot/birth classification as `has_ended`: a foreign
+            // occupant that refuses the pidfd probe is still provably not
+            // the recorded init when its boot or birth differs.
+            Err(error) => {
+                #[cfg(target_os = "linux")]
+                if !self
+                    .init_process
+                    .classify_ended_after_capture_error(&error)?
+                {
+                    return Err(format!("cannot prove OCI init death: {error}"));
+                }
+                #[cfg(not(target_os = "linux"))]
+                if PathBuf::from(format!("/proc/{}", self.init_process.target_pid)).exists() {
+                    return Err(format!("cannot prove OCI init death: {error}"));
+                }
             }
-            Err(_) => {}
         }
         Ok(())
     }
@@ -542,12 +552,22 @@ impl OciLifecycleGeneration {
                 return Err("OCI init process is still the admitted incarnation".to_owned());
             }
             Ok(_) => {}
-            Err(error)
-                if PathBuf::from(format!("/proc/{}", self.init_process.target_pid)).exists() =>
-            {
-                return Err(format!("cannot prove OCI init death: {error}"));
+            // The same boot/birth classification as `has_ended`: a foreign
+            // occupant that refuses the pidfd probe is still provably not
+            // the recorded init when its boot or birth differs.
+            Err(error) => {
+                #[cfg(target_os = "linux")]
+                if !self
+                    .init_process
+                    .classify_ended_after_capture_error(&error)?
+                {
+                    return Err(format!("cannot prove OCI init death: {error}"));
+                }
+                #[cfg(not(target_os = "linux"))]
+                if PathBuf::from(format!("/proc/{}", self.init_process.target_pid)).exists() {
+                    return Err(format!("cannot prove OCI init death: {error}"));
+                }
             }
-            Err(_) => {}
         }
         #[cfg(target_os = "linux")]
         super::cgroup::retire_ended_oci_scopes(

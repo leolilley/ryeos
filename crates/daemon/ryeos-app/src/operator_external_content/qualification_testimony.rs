@@ -30,7 +30,7 @@ use ryeos_state::external_content::products::publication::{
     ProductCaptureCoordinate, VerifiedProductWitness,
 };
 use ryeos_state::external_content::products::qualification::{
-    ProductQualificationEvidence, ProductQualificationPolicySource,
+    ProductQualificationEvidence, ProductQualificationPolicySource, QualificationRefused,
 };
 use ryeos_state::external_content::products::qualification_testimony::{
     MAX_REMOTE_QUALIFICATION_ACCEPTANCE_EVIDENCE_BYTES,
@@ -73,6 +73,47 @@ use crate::node_config::sections::external_execution::{
 use crate::state::AppState;
 
 const ACCEPTANCE_POLICY_FIELD: &str = "remote_qualification_acceptance_policy";
+
+/// The selected qualification, acceptance or product disagrees with the
+/// remote testimony the receiver holds. The request is well formed; only a
+/// different selection (or a fresh acceptance) cures it, so it is a conflict
+/// the caller is told about, never an internal failure and never retryable
+/// as is. It travels as an `anyhow` cause and keeps its message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectedQualificationRefused {
+    message: String,
+}
+
+impl SelectedQualificationRefused {
+    pub const CODE: &'static str = "selected_qualification_refused";
+
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    pub fn code(&self) -> &'static str {
+        Self::CODE
+    }
+
+    /// The refusal in `error`'s cause chain, if any.
+    pub fn find(error: &anyhow::Error) -> Option<&Self> {
+        error.chain().find_map(|cause| cause.downcast_ref::<Self>())
+    }
+}
+
+impl std::fmt::Display for SelectedQualificationRefused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for SelectedQualificationRefused {}
+
+fn selection_refused(message: &str) -> anyhow::Error {
+    anyhow::Error::new(SelectedQualificationRefused::new(message))
+}
 
 /// A testimony the origin has derived and the operator has yet to sign. The
 /// daemon holds no operator key: the operator signs
@@ -875,14 +916,17 @@ pub(crate) fn verify_current_remote_selection_testimony(
         relationship.qualification.policy_ref.as_deref(),
         selector.qualification_hash.as_deref(),
     ) else {
-        bail!("a remote product testimony requires a signed qualification policy and its hash");
+        return Err(selection_refused(
+            "a remote product testimony requires a signed qualification policy and its hash",
+        ));
     };
     require_unguarded_resolution("remote product testimony selection check")?;
     let owner_principal = product.evidence.owner_principal.as_str();
-    ensure!(
-        owner_principal == context.fingerprint,
-        "the remote product testimony's attester is not the selecting operator"
-    );
+    if owner_principal != context.fingerprint {
+        return Err(selection_refused(
+            "the remote product testimony's attester is not the selecting operator",
+        ));
+    }
     let grant = current_attester_grant(state, owner_principal)?;
     let acceptance_policy = resolve_acceptance_policy(state, &remote.acceptance_policy_ref)?;
     acceptance_policy.require_lane(QualificationLane::Product)?;
@@ -897,22 +941,25 @@ pub(crate) fn verify_current_remote_selection_testimony(
             &remote.acceptance_hash,
         )
     })?;
-    ensure!(
-        loaded.evidence.acceptance_policy_ref == remote.acceptance_policy_ref,
-        "remote qualification acceptance was made under a different policy"
-    );
-    ensure!(
-        loaded.evidence.lane == QualificationLane::Product,
-        "remote qualification acceptance is not a product acceptance"
-    );
+    if loaded.evidence.acceptance_policy_ref != remote.acceptance_policy_ref {
+        return Err(selection_refused(
+            "remote qualification acceptance was made under a different policy",
+        ));
+    }
+    if loaded.evidence.lane != QualificationLane::Product {
+        return Err(selection_refused(
+            "remote qualification acceptance is not a product acceptance",
+        ));
+    }
     acceptance_policy
         .require_unchanged_since_acceptance(&loaded.evidence.acceptance_policy_digest)?;
     let accepted_product =
         accepted_product.context("remote product acceptance has no received product")?;
-    ensure!(
-        accepted_product.attestation_hash == product.attestation_hash,
-        "remote qualification acceptance names a different received product"
-    );
+    if accepted_product.attestation_hash != product.attestation_hash {
+        return Err(selection_refused(
+            "remote qualification acceptance names a different received product",
+        ));
+    }
     // The live grant keys re-verify the testimony: a rotated or revoked
     // attester or origin node key stops selection here even though the
     // retained keys still verify.
@@ -924,14 +971,16 @@ pub(crate) fn verify_current_remote_selection_testimony(
         &origin_node_key,
     )?;
     let evidence = live.evidence.product()?;
-    ensure!(
-        live.testimony.issuer == context.fingerprint,
-        "the remote product testimony's attester is not the selecting operator"
-    );
-    ensure!(
-        live.body.qualification_attestation_hash == qualification_hash,
-        "remote product testimony differs from the selected qualification"
-    );
+    if live.testimony.issuer != context.fingerprint {
+        return Err(selection_refused(
+            "the remote product testimony's attester is not the selecting operator",
+        ));
+    }
+    if live.body.qualification_attestation_hash != qualification_hash {
+        return Err(selection_refused(
+            "remote product testimony differs from the selected qualification",
+        ));
+    }
     require_selected_source_is_accepted(&selector.witness_source, &loaded.evidence)?;
     require_received_product_join(product, evidence)?;
     require_origin_policy(
@@ -1335,10 +1384,11 @@ fn require_origin_policy(
         RemoteQualificationEvidence::Content(evidence) => {
             evidence.validate()?;
             current.validate()?;
-            ensure!(
-                &evidence.purpose.policy_source == current,
-                "qualification no longer matches the exact current policy"
-            );
+            if &evidence.purpose.policy_source != current {
+                return Err(QualificationRefused::stale(
+                    "qualification no longer matches the exact current policy",
+                ));
+            }
             evidence
                 .result
                 .validate_claims_for(&current.policy, required_claims)
@@ -1352,11 +1402,13 @@ fn require_selected_source_is_accepted(
     selected: &ProductWitnessSource,
     accepted: &RemoteQualificationAcceptanceEvidence,
 ) -> anyhow::Result<()> {
-    ensure!(
-        matches!(selected, ProductWitnessSource::Received { .. })
-            && accepted.product_source.as_ref() == Some(selected),
-        "remote product testimony was accepted for a different product source"
-    );
+    if !(matches!(selected, ProductWitnessSource::Received { .. })
+        && accepted.product_source.as_ref() == Some(selected))
+    {
+        return Err(selection_refused(
+            "remote product testimony was accepted for a different product source",
+        ));
+    }
     Ok(())
 }
 
@@ -1382,7 +1434,9 @@ fn require_received_product_join(
         || ProductCaptureCoordinate::from_evidence(&product.evidence)?
             != evidence.product_coordinate
     {
-        bail!("remote qualification differs from its received product");
+        return Err(selection_refused(
+            "remote qualification differs from its received product",
+        ));
     }
     Ok(())
 }
@@ -2094,6 +2148,21 @@ mod tests {
         // Without a current node-signed grant for the selecting operator,
         // nothing about the testimony is consulted.
         assert!(check(&context, &selector, &relationship).contains("grant was revoked"));
+    }
+
+    #[test]
+    fn selection_disagreement_is_a_typed_refusal_that_keeps_its_message() {
+        let f = fixture();
+        let other = ProductWitnessSource::Received {
+            acceptance_hash: "b".repeat(64),
+        };
+        let error = require_selected_source_is_accepted(&other, &f.evidence).unwrap_err();
+        let typed = SelectedQualificationRefused::find(&error).expect("typed refusal");
+        assert_eq!(typed.code(), "selected_qualification_refused");
+        assert!(error.to_string().contains("different product source"));
+        let wrapped = error.context("admit selection");
+        assert!(SelectedQualificationRefused::find(&wrapped).is_some());
+        assert!(SelectedQualificationRefused::find(&anyhow::anyhow!("other")).is_none());
     }
 
     #[test]

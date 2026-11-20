@@ -1231,6 +1231,65 @@ mod tests {
     }
 
     #[test]
+    fn placed_approvals_candidates_and_failed_runs_count_under_their_project() {
+        let (_dir, _owner, state) = crate::test_support::build_test_state();
+        let mut placed = thread("T-place", "T-place", OWNER);
+        placed.project_root = Some(std::path::PathBuf::from("/p"));
+        placed.project_authority = ExecutionProjectAuthority::pinned(
+            "d".repeat(64),
+            Some(std::path::PathBuf::from("/p")),
+            "b".repeat(64),
+            PinnedProjectRealization::Cow {
+                terminal_publication: PinnedTerminalPublication::RetainResult,
+            },
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        state.state_store.create_thread_for_test(&placed).unwrap();
+        let config = shipped_config();
+        let mut approval = approval_item(&source(&config, "approval"), &approval("pending", true));
+        approval["subject"]["thread_id"] = json!("T-place");
+        let mut candidate = candidate_item(
+            &source(&config, "candidate"),
+            &DedicatedSessionCandidateAttention {
+                chain_root_id: "T-chain".into(),
+                placement_thread_id: "T-place".into(),
+                state: "completed".into(),
+                candidate_snapshot_hash: "a".repeat(64),
+                candidate_validation_hash: None,
+                candidate_evaluation_hash: None,
+                publication_result: "retained_for_review".into(),
+                updated_at_ms: 5_000,
+            },
+        );
+        let failed = failed_run_item(
+            &source(&config, "failed_run"),
+            &FailedRunAttention {
+                chain_root_id: "T-chain-2".into(),
+                thread_id: "T-head".into(),
+                status: "failed".into(),
+                item_ref: "directive:x".into(),
+                project_root: Some("/p".into()),
+                created_at: "2026-11-17T00:00:00Z".into(),
+                updated_at: "2026-11-17T01:00:00Z".into(),
+            },
+        );
+        let mut items = vec![approval];
+        fill_placement_projects(&state, &mut items).unwrap();
+        candidate["subject"]["thread_id"] = json!("T-place");
+        let mut candidates = vec![candidate];
+        fill_placement_projects(&state, &mut candidates).unwrap();
+        items.extend(candidates);
+        items.push(failed);
+        let counts = counts(&config, &items);
+        assert_eq!(
+            counts["by_project"],
+            json!([{"project_root": "/p", "count": 3}])
+        );
+    }
+
+    #[test]
     fn by_project_sums_to_the_total_and_chains_list_distinct_chains() {
         let config = shipped_config();
         let item = |kind: &str, project: Value, chain: &str| json!({"kind": kind, "project_root": project, "subject": {"chain_root_id": chain}});
