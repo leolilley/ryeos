@@ -101,7 +101,7 @@ fn clear_holder() {
     }
     let mut longest = LONGEST_HOLDS.lock().unwrap_or_else(PoisonError::into_inner);
     longest.push((held, name));
-    longest.sort_by(|a, b| b.0.cmp(&a.0));
+    longest.sort_by_key(|(held, _)| std::cmp::Reverse(*held));
     longest.truncate(LONGEST_HOLDS_KEPT);
 }
 
