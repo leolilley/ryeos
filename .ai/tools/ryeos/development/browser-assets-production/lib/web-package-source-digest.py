@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-20T04:17:21Z:1d8fe9fab8e65a237cec621465d2b17b64091c27bd353391bbb6b6169221522a:b13VptyW8yezSNVEkE+ZszglYC7rpwiQ2kLXDyjqmM0MMjQWfDjwG3PTNkZbFxHw0VOmY38bNlGOdxo8nz5pAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-20T09:25:00Z:67c5f91d4efc2d9457cd2d930280cd81ad43b655b618f23b2b949aee293f87fb:otBXhn9D4FTVkKzym7c9ya4YVQxO2+CgK/y1KbSMzJLvNo2k6EFnOL6jg5JIlGV0RczxCs1m4T2vKD7aon+KBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Externally invoked host helper in the development bundle; lib/ is excluded
 # from Tool resolution, so this is signed source, not an admitted Tool. It
 # grants no RyeOS authority. Run it from a checkout of this repository.
@@ -21,6 +21,15 @@ rename cannot silently drop an input from the digest. Directory entries skip
 `tests/` directories, which the wasm build never compiles. The pinned renderer
 source revision is named by the renderer manifest and lock, and the toolchain
 by rust-toolchain.toml; both are inputs.
+
+The renderer lock is hashed with the `version` of its source-less entries (the
+workspace path crates) masked. A release bumps those versions in every lock, but
+a path crate's version reaches the wasm build only through its own Cargo.toml
+(wasm-bindgen's per-crate symbol hash reads CARGO_PKG_VERSION for the crates
+that use it), and the manifests of the crates in the wasm32 closure are digest
+inputs themselves, hashed unmasked. A path crate outside the closure has no
+effect on the package at all. Registry and git entries, checksums and
+dependency edges stay hashed.
 
   --print   write the digest to stdout
   --check   compare it with the digest recorded in web-assets.json
@@ -55,6 +64,8 @@ INPUTS = (
     "rust-toolchain.toml",
 )
 
+RENDERER_LOCK = "crates/clients/rune/Cargo.lock"
+MASKED_VERSION = b'version = "<path crate>"'
 MANIFEST = "crates/daemon/ryeos-ui/web-assets.json"
 REBUILD = ".ai/tools/ryeos/development/browser-assets-production/publish.sh --publish"
 
@@ -74,6 +85,19 @@ def selected(entry: str, names: list[str]) -> list[str]:
     return found
 
 
+def mask_path_crate_versions(lock: bytes) -> bytes:
+    """Blank the `version` line of every lock package that has no `source`."""
+    blocks = lock.split(b"[[package]]")
+    for i, block in enumerate(blocks[1:], start=1):
+        lines = block.split(b"\n")
+        if any(line.startswith(b"source = ") for line in lines):
+            continue
+        blocks[i] = b"\n".join(
+            MASKED_VERSION if line.startswith(b"version = ") else line for line in lines
+        )
+    return b"[[package]]".join(blocks)
+
+
 def digest(root: Path) -> str:
     names = tracked(root)
     paths: set[str] = set()
@@ -84,7 +108,10 @@ def digest(root: Path) -> str:
         paths.update(found)
     outer = hashlib.sha256()
     for name in sorted(paths):
-        inner = hashlib.sha256((root / name).read_bytes()).hexdigest()
+        content = (root / name).read_bytes()
+        if name == RENDERER_LOCK:
+            content = mask_path_crate_versions(content)
+        inner = hashlib.sha256(content).hexdigest()
         outer.update(f"{name}\0{inner}\n".encode())
     return outer.hexdigest()
 

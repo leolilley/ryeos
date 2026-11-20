@@ -165,6 +165,33 @@ class Digest(unittest.TestCase):
         write(root, "crates/clients/base/new.rs", "n")
         self.assertEqual(digest_mod.digest(root), good)
 
+    LOCK = "crates/clients/rune/Cargo.lock"
+
+    def lock_text(self, path_version: str, registry_version: str = "1.0.0", edge: str = "serde") -> str:
+        return (
+            f'[[package]]\nname = "lillux"\nversion = "{path_version}"\ndependencies = [\n "{edge}",\n]\n\n'
+            f'[[package]]\nname = "serde"\nversion = "{registry_version}"\n'
+            'source = "registry+https://github.com/rust-lang/crates.io-index"\nchecksum = "abc"\n'
+        )
+
+    def test_path_crate_lock_version_is_masked_but_the_rest_of_the_lock_counts(self):
+        root = self.repo()
+        write(root, self.LOCK, self.lock_text("0.5.102"))
+        git(root, "add", "-A")
+        good = digest_mod.digest(root)
+        write(root, self.LOCK, self.lock_text("0.6.0-ple.3"))
+        self.assertEqual(digest_mod.digest(root), good)
+        write(root, self.LOCK, self.lock_text("0.5.102", registry_version="1.0.1"))
+        self.assertNotEqual(digest_mod.digest(root), good)
+        write(root, self.LOCK, self.lock_text("0.5.102", edge="other"))
+        self.assertNotEqual(digest_mod.digest(root), good)
+
+    def test_a_path_crate_manifest_version_still_counts(self):
+        root = self.repo()
+        good = digest_mod.digest(root)
+        write(root, "crates/clients/runtime/f.txt", 'version = "0.1.1"')
+        self.assertNotEqual(digest_mod.digest(root), good)
+
     def test_input_matching_nothing_fails(self):
         root = self.repo()
         git(root, "rm", "-q", "rust-toolchain.toml")
