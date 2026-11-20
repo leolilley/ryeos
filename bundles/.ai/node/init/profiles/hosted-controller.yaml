@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-20T07:29:00Z:42a70845d78743d0faced17afcdcb5cfb2af64ad5c91e6187af5488710392a16:3pP+9pr7fMTtuOuatuFnKMrHi504S6aDU3/3EJgHU8dc/DJkDLr4idvvSc9zeWR2wgAjwgGWNHp76LEwvl5uCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-20T07:31:15Z:42a70845d78743d0faced17afcdcb5cfb2af64ad5c91e6187af5488710392a16:3pP+9pr7fMTtuOuatuFnKMrHi504S6aDU3/3EJgHU8dc/DJkDLr4idvvSc9zeWR2wgAjwgGWNHp76LEwvl5uCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1

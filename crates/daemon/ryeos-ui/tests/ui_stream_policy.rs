@@ -81,8 +81,14 @@ fn route(file: &str) -> ryeos_app::route_raw::RawRouteSpec {
 fn seated(
     body: &Value,
     user_principal_id: Option<&str>,
-) -> (tempfile::TempDir, AppState, String, String) {
-    let (tmp, _owner, mut state) = build_test_state();
+) -> (
+    tempfile::TempDir,
+    ryeos_app::test_support::TestStateStore,
+    AppState,
+    String,
+    String,
+) {
+    let (tmp, owner, mut state) = build_test_state();
     set_seat_reads(&mut state, body);
     let (session_id, token) = mint_launch(
         &state,
@@ -103,7 +109,7 @@ fn seated(
         .get_session(&session_id)
         .unwrap()
         .principal_id;
-    (tmp, state, session_id, principal)
+    (tmp, owner, state, session_id, principal)
 }
 
 fn captured_policy() -> ryeos_state::objects::CapturedThreadHistoryPolicy {
@@ -277,7 +283,7 @@ async fn the_chain_stream_is_refused_without_an_entry_for_its_route() {
         // An entry for another class is not an entry for this seat.
         policy(vec![chain_entry(json!({"classes": ["hosted_principal"]}))]),
     ] {
-        let (_tmp, state, session_id, principal) = seated(&body, None);
+        let (_tmp, _owner, state, session_id, principal) = seated(&body, None);
         create_thread(&state, "T-own", "T-own", None, &principal);
         let error = open(&state, &session_id, "chain.yaml", "T-own")
             .await
@@ -293,7 +299,7 @@ async fn the_chain_stream_is_refused_without_an_entry_for_its_route() {
 #[tokio::test]
 async fn a_hosted_seat_needs_an_entry_that_admits_its_class() {
     let body = policy(vec![chain_entry(json!({"classes": ["local_operator"]}))]);
-    let (_tmp, state, session_id, principal) = seated(&body, Some("fp:hosted"));
+    let (_tmp, _owner, state, session_id, principal) = seated(&body, Some("fp:hosted"));
     create_thread(&state, "T-own", "T-own", None, &principal);
     let error = open(&state, &session_id, "chain.yaml", "T-own")
         .await
@@ -304,7 +310,8 @@ async fn a_hosted_seat_needs_an_entry_that_admits_its_class() {
 
 #[tokio::test]
 async fn an_unauthorized_chain_is_not_found_exactly_like_an_absent_one() {
-    let (_tmp, state, session_id, principal) = seated(&policy(vec![chain_entry(json!({}))]), None);
+    let (_tmp, _owner, state, session_id, principal) =
+        seated(&policy(vec![chain_entry(json!({}))]), None);
     create_thread(&state, "T-other", "T-other", None, "fp:somebody-else");
     create_thread(&state, "T-own", "T-own", None, &principal);
     create_thread(&state, "T-child", "T-own", Some("T-own"), &principal);
@@ -326,7 +333,7 @@ async fn an_unauthorized_chain_is_not_found_exactly_like_an_absent_one() {
 #[tokio::test]
 async fn open_applies_when_deny_and_pin_to_the_chain_parameter() {
     // A condition the chain does not meet.
-    let (_tmp, state, session_id, principal) = seated(
+    let (_tmp, _owner, state, session_id, principal) = seated(
         &policy(vec![chain_entry(
             json!({"when": {"chain_root_id": ["T-elsewhere"]}}),
         )]),
@@ -340,7 +347,7 @@ async fn open_applies_when_deny_and_pin_to_the_chain_parameter() {
     assert!(refusal_text(&error).contains("seat_read_no_matching_entry"));
 
     // A parameter the seat may not send.
-    let (_tmp, state, session_id, principal) = seated(
+    let (_tmp, _owner, state, session_id, principal) = seated(
         &policy(vec![chain_entry(json!({"deny_params": ["chain_root_id"]}))]),
         None,
     );
@@ -353,7 +360,7 @@ async fn open_applies_when_deny_and_pin_to_the_chain_parameter() {
 
     // A pin replaces what the client asked for, and the pinned chain is
     // authorized like any other.
-    let (_tmp, state, session_id, principal) = seated(
+    let (_tmp, _owner, state, session_id, principal) = seated(
         &policy(vec![chain_entry(
             json!({"pin": {"chain_root_id": "T-pinned"}}),
         )]),
@@ -387,7 +394,7 @@ async fn open_applies_when_deny_and_pin_to_the_chain_parameter() {
     );
 
     // A pin onto a chain the seat does not own is refused as not found.
-    let (_tmp, state, session_id, principal) = seated(
+    let (_tmp, _owner, state, session_id, principal) = seated(
         &policy(vec![chain_entry(
             json!({"pin": {"chain_root_id": "T-other"}}),
         )]),
@@ -404,7 +411,8 @@ async fn open_applies_when_deny_and_pin_to_the_chain_parameter() {
 
 #[tokio::test]
 async fn each_chain_event_keeps_only_what_the_entry_names() {
-    let (_tmp, state, session_id, principal) = seated(&policy(vec![chain_entry(json!({}))]), None);
+    let (_tmp, _owner, state, session_id, principal) =
+        seated(&policy(vec![chain_entry(json!({}))]), None);
     create_thread(&state, "T-own", "T-own", None, &principal);
     append(
         &state,
@@ -487,7 +495,7 @@ async fn each_chain_event_keeps_only_what_the_entry_names() {
 
 #[tokio::test]
 async fn an_oversize_chain_event_ends_the_stream_with_a_refusal() {
-    let (_tmp, state, session_id, principal) = seated(
+    let (_tmp, _owner, state, session_id, principal) = seated(
         &policy(vec![chain_entry(json!({"max_result_bytes": 400}))]),
         None,
     );
@@ -522,7 +530,8 @@ async fn an_oversize_chain_event_ends_the_stream_with_a_refusal() {
 #[tokio::test]
 async fn the_session_stream_is_gated_and_shaped_like_a_read() {
     // No entry.
-    let (_tmp, state, session_id, _principal) = seated(&policy(vec![chain_entry(json!({}))]), None);
+    let (_tmp, _owner, state, session_id, _principal) =
+        seated(&policy(vec![chain_entry(json!({}))]), None);
     let error = open(&state, &session_id, "session.yaml", &session_id)
         .await
         .err()
@@ -530,7 +539,7 @@ async fn the_session_stream_is_gated_and_shaped_like_a_read() {
     assert!(refusal_text(&error).contains("seat_read_no_entry"));
 
     // A pin cannot send the seat to another session's bus.
-    let (_tmp, state, session_id, _principal) = seated(
+    let (_tmp, _owner, state, session_id, _principal) = seated(
         &policy(vec![session_entry(json!({"pin": {"session_id": "other"}}))]),
         None,
     );
@@ -544,7 +553,7 @@ async fn the_session_stream_is_gated_and_shaped_like_a_read() {
     );
 
     // Admitted: hints keep only what the entry names.
-    let (_tmp, state, session_id, _principal) =
+    let (_tmp, _owner, state, session_id, _principal) =
         seated(&policy(vec![session_entry(json!({}))]), None);
     let bus = get_ui_state(&state).unwrap().session_bus.clone();
     bus.publish(
@@ -587,7 +596,7 @@ async fn the_session_stream_is_gated_and_shaped_like_a_read() {
 
 #[tokio::test]
 async fn an_oversize_session_event_ends_the_session_stream_with_a_refusal() {
-    let (_tmp, state, session_id, _principal) = seated(
+    let (_tmp, _owner, state, session_id, _principal) = seated(
         &policy(vec![session_entry(json!({"max_result_bytes": 128}))]),
         None,
     );
