@@ -957,7 +957,22 @@ fn fixture_app(
         families: ("Inter", "IBM Plex Mono"),
         ..AppSpec::new("RyeOS fixture", (1280.0, 800.0), App::new, view)
     })
-    .init(move || App::fixture(core, dress))
+    .init(move || {
+        let mut app = App::fixture(core, dress);
+        // A headless snapshot is drawn before the first layout reports the
+        // window, so the shell is told the size it was asked for.
+        app.local.viewport = snapshot_size();
+        app
+    })
+}
+
+/// The `--size WxH` Rune's snapshot arguments carry, if given.
+#[cfg(not(target_arch = "wasm32"))]
+fn snapshot_size() -> Option<(f32, f32)> {
+    let args: Vec<String> = std::env::args().collect();
+    let size = args.iter().position(|arg| arg == "--size")?;
+    let (width, height) = args.get(size + 1)?.split_once('x')?;
+    Some((width.parse().ok()?, height.parse().ok()?))
 }
 
 /// Font files the page hands over before `start`.

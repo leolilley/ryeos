@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-19T10:10:12Z:be1724a7de2e024d6c727108ae73dc901f5037df432b9b4f6338939bbadb67c1:sM3ZbDuF+17+vsOHux4Nyri+ukrUpBRdwQTKHdluzG5UtJWXdhEWSI9J3n89oALvwU8bQFm3AI59P6LikCQxBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-19T19:57:14Z:f9c8af7af0dfbc4672f368817d934f8f5c8879f957b09a614f6bbb8294e46ed2:j7ChUZ09birUG+tWvBSuu0kpB/Tjd4uQ1DUGH02Rv7Xn61+jN5EiL7icnEbnjSiz0IiDmWPV7okqLFGhLw6YCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: threads-list
 title: Observed Threads
 version: "1.0.0"
@@ -29,6 +29,13 @@ projections:
       field: kind
       role: kind
       present: words
+      # The wire kind names the run; the table says what ran.
+      labels:
+        directive_run: directive
+        graph_run: graph
+        schedule_run: schedule
+        tool_run: tool
+        worker_run: worker
     # The table carries the readable leaf; the full canonical ref remains in
     # expanded detail.
     - label: item
@@ -46,7 +53,11 @@ projections:
     - label: created
       field: created_at
       role: time
-      present: time_date
+      # Today reads as the time of day, the day before as the word below,
+      # older rows as time and date.
+      present: time_relative
+      labels:
+        yesterday: yesterday
   expand:
     fields: [thread_id, chain_root_id, project.name, project.path, item_ref, requested_by, created_at]
   tone:

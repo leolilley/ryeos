@@ -1,0 +1,22 @@
+# ryeos:signed:2026-11-19T07:00:16Z:cc62a8d537b594db6d06ac3ae31c8232d575608c5b565c1b86adaf9a886f7f91:5M79lKPGlzB4aRnlSPNZPWrXwPTolbag6FjrQLWEEvGVLRpdr5AS+W2KArOJZXpyFQGMCeQcu3PlDFzsvAR5Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+title: "The Well, from \"Carceri d'invenzione\" (Imaginary Prisons)"
+artist: "Giovanni Battista Piranesi"
+date: "ca. 1749–50"
+source_url: https://www.metmuseum.org/art/collection/search/362670
+licence: cc0
+derived_from:
+  - "Met object 362670, The Well, from \"Carceri d'invenzione\" (Imaginary Prisons) (https://www.metmuseum.org/art/collection/search/362670)"
+transform: "greyscale crop of the Met open-access image; re-encoded as WebP"
+renditions:
+  - role: hero
+    sha256: "a835ae41ca4ce288984f18713882ef422a9156e2074cb9cda7d205ac2b242aa5"
+    media_type: image/webp
+    width: 1600
+    height: 1000
+    bytes: 791686
+  - role: card
+    sha256: "a8cbf4863b5eda98fe66d9a6abf443be2458612f23acc091ede1ef2d205789c4"
+    media_type: image/webp
+    width: 480
+    height: 300
+    bytes: 56284

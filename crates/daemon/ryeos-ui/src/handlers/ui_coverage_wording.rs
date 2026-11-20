@@ -100,8 +100,11 @@ mod tests {
             wording
                 .resolve("observed", "projection_locator_not_exhaustive")
                 .label,
-            "This list may not include everything."
+            "The page does not prove exhaustive membership."
         );
+        for slot in ["empty", "empty_project"] {
+            assert!(wording.reasons.contains_key(slot), "{slot}");
+        }
     }
 
     #[test]

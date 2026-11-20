@@ -1,17 +1,17 @@
-<!-- ryeos:signed:2026-11-19T05:58:46Z:eb88a3598acf137a3153890b0b071efc259da1b77ab74d771e5a70758b33b278:OAHSRl++uoQSWgIFvb6EE9ShOLRqZ/LaW3NQup724ifvQSC0YbmkVEaZ4Vq26CfjOm8PK47SU2FaA1SkKhJUDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-19T18:08:31Z:92e1295cbfa40f71966871463625c9613d1eb734467a9edbf6f8f3a25e27a531:kG/pSYWV7AFuezIWXdUXWEVlxVkitU/4jL+lBsp1J9b/E0vPZt1JRdwKlZLfd3vK4/mJdRYwhJ4lNtVjx6IECA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "frame-v2"
 title: "RyeOS UI Frame Contract v2"
 description: "The closed widget-primitive set and view-binding schema renderers implement; content composes against this, never against client source"
 entry_type: reference
-version: "2.2.0"
+version: "2.3.0"
 ```
 
 # RyeOS UI Frame Contract v2
 
-Frame contract version `2.2.0`, implemented with UI binding contract
-`ryeos.ui.binding.v14` and timeline contract `ryeos.timeline.v1` (the
+Frame contract version `2.3.0`, implemented with UI binding contract
+`ryeos.ui.binding.v15` and timeline contract `ryeos.timeline.v1` (the
 `timeline-v1` document). A renderer and the daemon cut over together: the
 frame, the binding contract and the timeline contract each have exactly one
 version in force, and there is no reader for an earlier one.
@@ -261,25 +261,28 @@ composed.
 
 ```yaml
 chip:
-  mark: grid | key | initial        # default initial
+  mark: grid | key | initial | picture   # default initial
+  art: { sha256: <64 hex>, media_type: image/png | image/jpeg | image/webp }  # for mark: picture
 style:
   switcher: left | top | right | hidden     # default left
   status_bar: bottom | top | hidden         # default bottom
   add_tab: true | false                     # default true
 ```
 
-- `chip.mark` picks one of three client drawings: the Home grid, the node's
+- `chip.mark` picks one of four client drawings: the Home grid, the node's
   key (drawn from the node key fingerprint the view model carries on the
-  chip), or the title's first letter. There is no picture or art field.
+  chip), the title's first letter, or the signed picture `chip.art` names. A
+  client that draws no pictures draws the initial for `picture`.
 - `style.switcher` and `style.status_bar` place a bar on an edge or hide it.
   The operator's `alt+t` and `alt+b` toggles can hide a bar for the session;
   they never reveal one the Surface hides. The overlay key and the number keys
   work whatever the Surface declares.
-- A Surface authored in a project is clamped by the daemon: `chip.mark` becomes
-  `initial`, `switcher: hidden` becomes `left`, `status_bar: hidden` becomes
-  `bottom`, `add_tab: false` becomes `true`. Each change is recorded as an
-  attenuated entry (`surface/chip`, `surface/style.switcher`,
-  `surface/style.status_bar`, `surface/style.add_tab`). A project may still
+- A Surface authored in a project is clamped by the daemon: `chip.art` is
+  dropped, `chip.mark` becomes `initial`, `switcher: hidden` becomes `left`,
+  `status_bar: hidden` becomes `bottom`, `add_tab: false` becomes `true`. Each
+  change is recorded as an attenuated entry (`surface/chip.art`,
+  `surface/chip`, `surface/style.switcher`, `surface/style.status_bar`,
+  `surface/style.add_tab`). A project may still
   choose `top` or `right`. Its chip carries `authored_in_project` from the
   daemon's authorship marker, which the item cannot remove.
 
@@ -287,6 +290,31 @@ The view model (`ryeos.ui.vm.v3`) carries the result as the Surface chip on each
 switcher entry (`mark`, `authored_in_project`, `fingerprint`), `chrome.switcher.edge`,
 `status_bar.edge`, and `status_bar.key_hints` (at most seven `{keys, word}` pairs
 for the focused context, replacing the single hint string).
+
+## Pictures (`art`)
+
+A picture is a signed `picture` record in an installed bundle: image bytes
+named by content hash, with title, source URL, licence and renditions. Signed
+content refers to one only by `{sha256, media_type}`: a Surface through
+`chip.art`, a view through its top-level `picture`. The reference carries no
+URL and no path.
+
+- The daemon compiles the references of the node-authored Surface and views
+  into the binding (`art`, keyed by hash). A project-authored Surface or view
+  names no art: the daemon drops the reference and records an attenuated entry
+  (`surface/chip.art`, `<view ref>/picture`). A malformed reference, or one hash
+  named under two media types, is attenuated the same way and never listed.
+- A client fetches a picture with `GET /ui/art/<sha256>` under its session
+  cookie, building the path from a hash the view model gave it. The daemon
+  answers only a hash a binding attached to that session names, or one in the
+  session's grant set (pictures a service run for the session handed it), and
+  only from installed bundle bytes that verify through the bundle's signed
+  picture manifest and signed records. Anything else, including a hash only
+  another session may fetch, is the same 404.
+- The response carries the media type from the signed record, `nosniff`, a
+  `default-src 'none'; sandbox` policy and immutable private caching. PNG,
+  JPEG and WebP only; animated images, SVG and GIF are refused, as are bytes
+  whose magic, hash, size or dimensions differ from the signed record.
 
 ## Attention (`ryeos.ui.attention.v3`)
 

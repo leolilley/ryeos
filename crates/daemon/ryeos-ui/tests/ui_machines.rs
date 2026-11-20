@@ -222,7 +222,7 @@ fn draw(groups: &LocalityGroups) -> Drawn {
     let binding = binding();
     let response = machines_response(groups, &words());
     let columns = table_columns(&binding);
-    let rows = project_table(&binding, &response, &columns);
+    let rows = project_table(&binding, &response, &columns, 0);
     let mut cells = BTreeMap::new();
     let mut tones = BTreeMap::new();
     let mut cell_tones = BTreeMap::new();

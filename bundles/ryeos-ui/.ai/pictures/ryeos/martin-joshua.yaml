@@ -1,0 +1,22 @@
+# ryeos:signed:2026-11-19T07:00:16Z:ec98084bfd234b07205d0de134da58d425a812311860aa15498251ea2712421a:i/340FrNU1D0UBP+ojVfAxHl/mFkP30/+wTipyTToSF2JsO72rsxhPceH+CpA+PyPbaIc+yJ+7jNt9EkvvzEDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+title: "Joshua Commanding the Sun to Stand Still Upon Gibeon (Joshua: 10: 12–14)"
+artist: "John Martin"
+date: "ca. 1822"
+source_url: https://www.metmuseum.org/art/collection/search/355546
+licence: cc0
+derived_from:
+  - "Met object 355546, Joshua Commanding the Sun to Stand Still Upon Gibeon (Joshua: 10: 12–14) (https://www.metmuseum.org/art/collection/search/355546)"
+transform: "greyscale crop of the Met open-access image; re-encoded as WebP"
+renditions:
+  - role: hero
+    sha256: "d8fb386757db836c2f69c5fb0f23611a933393e0e5ef361b0521bfdd3e509a6e"
+    media_type: image/webp
+    width: 1600
+    height: 1000
+    bytes: 326498
+  - role: card
+    sha256: "3d91319a73d083bb62bc3c0c38c7be7069ebf00399b5429e4b0baf5180de0a38"
+    media_type: image/webp
+    width: 480
+    height: 300
+    bytes: 27750

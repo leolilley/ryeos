@@ -120,10 +120,10 @@ fn find_line(dialog: &RyeOsDialogVm, local: &Local, places: bool, listed: usize)
         None => line = line.child(el().grow(1.0)),
     }
     line.child(
-        text(if listed == 1 {
-            "1 view".to_owned()
-        } else {
-            format!("{listed} views")
+        text(match &dialog.note {
+            Some(note) => note.clone(),
+            None if listed == 1 => "1 view".to_owned(),
+            None => format!("{listed} views"),
         })
         .font(theme::TYPE_MICRO)
         .color(t.ink_at(0.40)),
@@ -191,12 +191,14 @@ fn view_row(instance: &RyeOsViewInstanceKey, item: &RyeOsRowVm) -> El {
         .as_ref()
         .and_then(|launch| launch.reason.as_deref());
     let quiet = is_command(item);
+    let staged = item.launch.as_ref().is_some_and(|launch| launch.staged);
+    let marked = item.selected || staged;
     let mut words = col().grow(1.0).min_w(0.0).gap(3.0);
     if let Some(description) = &item.secondary {
         words = words.child(
             text(description.clone())
                 .font(theme::TYPE_CELL)
-                .color(t.ink_at(if item.selected { 0.90 } else { 0.68 }))
+                .color(t.ink_at(if marked { 0.90 } else { 0.68 }))
                 .truncate()
                 .w_full(),
         );
@@ -225,7 +227,7 @@ fn view_row(instance: &RyeOsViewInstanceKey, item: &RyeOsRowVm) -> El {
             col().w(NAME_WIDTH).child(
                 text(item.primary.clone())
                     .font(theme::TYPE_TITLE)
-                    .color(t.ink_at(if item.selected {
+                    .color(t.ink_at(if marked {
                         1.0
                     } else if quiet {
                         COMMAND_NAME_INK
@@ -243,7 +245,7 @@ fn view_row(instance: &RyeOsViewInstanceKey, item: &RyeOsRowVm) -> El {
                 .color(t.ink_at(0.40)),
         );
     }
-    if item.selected {
+    if marked {
         line = line.fill(t.ink_at(0.09));
     }
     if unavailable {
@@ -282,6 +284,7 @@ fn places_block(dialog: &RyeOsDialogVm, places: &[&RyeOsRowVm]) -> El {
                 .border(1.0, t.ink_at(if chosen { 0.40 } else { 0.10 }))
                 .focus_selected(chosen)
                 .hover(t.ink_at(0.05))
+                .child(thumbnail(place.meta.as_deref().unwrap_or_default(), chosen))
                 .child(
                     text(place.primary.clone())
                         .font(if chosen {
@@ -314,6 +317,42 @@ fn places_block(dialog: &RyeOsDialogVm, places: &[&RyeOsRowVm]) -> El {
         )
         .child(choices)
 }
+
+/// A place's thumbnail: the tiling it leaves, drawn as small tiles. A split
+/// to the right shows two side by side, a split down a table over a stack;
+/// every other place lands in one tile.
+fn thumbnail(key: &str, chosen: bool) -> El {
+    let t = Tokens::get();
+    let ink = if chosen { 0.50 } else { 0.28 };
+    let tile = || el().grow(1.0).h_full().radius(2.0).fill(t.ink_at(ink));
+    let stack = || {
+        col()
+            .grow(1.0)
+            .h_full()
+            .gap(2.0)
+            .child(el().w_full().grow(1.0).radius(2.0).fill(t.ink_at(ink)))
+            .child(el().w_full().grow(1.0).radius(2.0).fill(t.ink_at(ink)))
+    };
+    let inner = match key {
+        "L" => row().w_full().h_full().gap(2.0).child(tile()).child(tile()),
+        "J" => row()
+            .w_full()
+            .h_full()
+            .gap(2.0)
+            .child(tile())
+            .child(stack()),
+        _ => row().w_full().h_full().child(tile()),
+    };
+    el().size(THUMB_WIDTH, THUMB_HEIGHT)
+        .padding(3.0)
+        .radius(5.0)
+        .border(1.0, t.ink_at(if chosen { 0.40 } else { 0.14 }))
+        .child(inner)
+}
+
+/// A place's thumbnail frame.
+const THUMB_WIDTH: f32 = 46.0;
+const THUMB_HEIGHT: f32 = 30.0;
 
 /// The footer: the keys, then the view's own note at the right. The Esc cap
 /// closes the sheet.

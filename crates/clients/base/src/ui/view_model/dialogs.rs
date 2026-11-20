@@ -11,6 +11,10 @@ pub struct RyeOsDialogVm {
     /// note.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// The mounted View's authored `supplement.frame_detail`, which a dialog
+    /// may show beside its find line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     /// The View is the launcher's own list, drawn as the launcher sheet.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub launcher: bool,

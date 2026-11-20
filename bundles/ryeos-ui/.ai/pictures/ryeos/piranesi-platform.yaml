@@ -1,0 +1,22 @@
+# ryeos:signed:2026-11-19T07:00:16Z:92e6ef869eb7a7fb01f8fae532fa5e54554b3edd1f173d858cb0eabcf9b401ec:V/lHLM64QLf6AAgpGl4KIai13Yv2vKdn2Vl5G/kDFTN+NfLBFz5Xl3QtbM0ExgRlBidERUb0V+83t8CmOxOGBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+title: "Prisoners on a Projecting Platform, from \"Carceri d'invenzione\" (Imaginary Prisons)"
+artist: "Giovanni Battista Piranesi"
+date: "ca. 1749–50"
+source_url: https://www.metmuseum.org/art/collection/search/362671
+licence: cc0
+derived_from:
+  - "Met object 362671, Prisoners on a Projecting Platform, from \"Carceri d'invenzione\" (Imaginary Prisons) (https://www.metmuseum.org/art/collection/search/362671)"
+transform: "greyscale crop of the Met open-access image; re-encoded as WebP"
+renditions:
+  - role: hero
+    sha256: "32c7305ddfa66fee8f6cfbb1d1e28f86933ef98b48ef14a1c18b2696b4366250"
+    media_type: image/webp
+    width: 1600
+    height: 1000
+    bytes: 741986
+  - role: card
+    sha256: "ebf52fa012db16f1f2e2490af4f3f16d887fa809f3f069b6e94d0dca157c6c26"
+    media_type: image/webp
+    width: 480
+    height: 300
+    bytes: 54166

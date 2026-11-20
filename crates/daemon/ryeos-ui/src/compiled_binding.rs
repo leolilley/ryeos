@@ -117,6 +117,16 @@ pub struct AttenuatedUiBinding {
     pub reason: String,
 }
 
+/// One picture a compiled binding lets its session fetch, by content hash.
+/// The declared media type is the one the signed Surface or View named; the
+/// daemon serves the hash only when the installed signed record declares the
+/// same type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledUiArt {
+    pub media_type: String,
+}
+
 /// Canonical session-bound binding body. `binding_digest` is computed over
 /// this value and stored beside it by [`SessionCompiledUiBinding`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -134,6 +144,13 @@ pub struct CompiledUiBinding {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub surface_route: Option<CompiledUiRoute>,
     pub attenuated: Vec<AttenuatedUiBinding>,
+    /// Pictures the node-authored Surface and Views of this binding name,
+    /// keyed by content hash. The picture route serves a hash to a session
+    /// only when a binding attached to that session lists it here (or the
+    /// session's grant set holds it). Project-authored items never add an
+    /// entry.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub art: BTreeMap<String, CompiledUiArt>,
     /// Digest of the node's project-authoring source list this binding was
     /// compiled under, when its surface or any view it binds has a
     /// project-space member. Empty for a binding of bundle items only, which
@@ -387,9 +404,15 @@ impl SessionCompiledUiBinding {
         let mut sources = BTreeMap::new();
         let mut affordances = BTreeMap::new();
         let mut attenuated = Vec::new();
-        if surface_authority != Authority::Node
-            && let Some(surface_fields) = effective_surface.as_object()
-        {
+        let mut art = BTreeMap::new();
+        if surface_authority == Authority::Node {
+            compile_art(
+                effective_surface.pointer("/chip/art"),
+                "surface/chip.art",
+                &mut art,
+                &mut attenuated,
+            );
+        } else if let Some(surface_fields) = effective_surface.as_object() {
             attenuated.extend(clamp_surface_chrome(&mut surface_fields.clone()));
         }
 
@@ -421,6 +444,19 @@ impl SessionCompiledUiBinding {
             // would break aliases and let two declared aliases collide.
             let coordinate_view_ref = declared_view_ref.clone();
             let view_grant = grant_for(Authority::of(identity).under(surface_authority));
+            if view_grant.authority == Authority::Node {
+                compile_art(
+                    view.get("picture"),
+                    &format!("{coordinate_view_ref}/picture"),
+                    &mut art,
+                    &mut attenuated,
+                );
+            } else if view.contains_key("picture") {
+                attenuated.push(AttenuatedUiBinding {
+                    coordinate: format!("{coordinate_view_ref}/picture"),
+                    reason: "a project-authored view names no art".to_string(),
+                });
+            }
             let dynamic_parameters = view
                 .get("input")
                 .and_then(|input| input.get("feeds"))
@@ -560,6 +596,7 @@ impl SessionCompiledUiBinding {
             affordances,
             surface_route,
             attenuated,
+            art,
         };
         let binding_digest = ryeos_state::objects::canonical_value_digest(
             &serde_json::to_value(&binding).context("serialize compiled UI binding")?,
@@ -603,6 +640,16 @@ impl SessionCompiledUiBinding {
         );
         if Authority::of(&self.binding.surface) != Authority::Node {
             clamp_surface_chrome(surface_fields);
+        } else if let Some(chip) = surface_fields
+            .get_mut("chip")
+            .and_then(Value::as_object_mut)
+        {
+            drop_unlisted_art(chip, "art", &self.binding.art);
+            if !chip.contains_key("art")
+                && chip.get("mark").and_then(Value::as_str) == Some("picture")
+            {
+                chip.insert("mark".to_string(), Value::from("initial"));
+            }
         }
         mark_authorship(
             surface_fields,
@@ -631,6 +678,15 @@ impl SessionCompiledUiBinding {
                     Some(EmbeddedViewIdentity::Resolved { identity }) => Some(identity),
                     Some(EmbeddedViewIdentity::Degraded { .. }) | None => None,
                 };
+                let node_view = identity.is_some_and(|identity| {
+                    Authority::of(identity).under(Authority::of(&self.binding.surface))
+                        == Authority::Node
+                });
+                if node_view {
+                    drop_unlisted_art(fields, "picture", &self.binding.art);
+                } else {
+                    fields.remove("picture");
+                }
                 mark_authorship(fields, identity, self.binding.sources.get(view_ref));
                 sanitize_sources(fields, self.binding.sources.get(view_ref));
                 sanitize_affordances(fields, self.binding.affordances.get(view_ref));
@@ -661,16 +717,23 @@ fn clamp_surface_chrome(fields: &mut serde_json::Map<String, Value>) -> Vec<Atte
             reason: reason.to_string(),
         });
     };
-    if let Some(chip) = fields.get_mut("chip").and_then(Value::as_object_mut)
-        && chip
+    if let Some(chip) = fields.get_mut("chip").and_then(Value::as_object_mut) {
+        if chip.remove("art").is_some() {
+            record(
+                "surface/chip.art",
+                "a project-authored surface names no art",
+            );
+        }
+        if chip
             .get("mark")
             .is_some_and(|mark| mark.as_str() != Some("initial"))
-    {
-        chip.insert("mark".to_string(), Value::from("initial"));
-        record(
-            "surface/chip",
-            "a project-authored surface draws the initial chip mark only",
-        );
+        {
+            chip.insert("mark".to_string(), Value::from("initial"));
+            record(
+                "surface/chip",
+                "a project-authored surface draws the initial chip mark only",
+            );
+        }
     }
     if let Some(style) = fields.get_mut("style").and_then(Value::as_object_mut) {
         if style.get("switcher").and_then(Value::as_str) == Some("hidden") {
@@ -696,6 +759,60 @@ fn clamp_surface_chrome(fields: &mut serde_json::Map<String, Value>) -> Vec<Atte
         }
     }
     records
+}
+
+/// Add one node-authored picture reference to the binding's allowlist. A
+/// malformed reference, or one that names a hash already listed under another
+/// media type, is recorded as attenuated and never listed.
+fn compile_art(
+    declaration: Option<&Value>,
+    coordinate: &str,
+    art: &mut BTreeMap<String, CompiledUiArt>,
+    attenuated: &mut Vec<AttenuatedUiBinding>,
+) {
+    let Some(declaration) = declaration else {
+        return;
+    };
+    let refusal =
+        match serde_json::from_value::<ryeos_client_base::art::ArtRef>(declaration.clone()) {
+            Err(error) => error.to_string(),
+            Ok(reference) => match art.get(&reference.sha256) {
+                Some(listed) if listed.media_type != reference.media_type => {
+                    "the picture is named with two media types".to_string()
+                }
+                _ => {
+                    art.insert(
+                        reference.sha256,
+                        CompiledUiArt {
+                            media_type: reference.media_type,
+                        },
+                    );
+                    return;
+                }
+            },
+        };
+    attenuated.push(AttenuatedUiBinding {
+        coordinate: coordinate.to_string(),
+        reason: refusal,
+    });
+}
+
+/// Remove a picture reference from `owner` unless the binding lists exactly
+/// that hash and media type.
+fn drop_unlisted_art(
+    owner: &mut serde_json::Map<String, Value>,
+    field: &str,
+    listed: &BTreeMap<String, CompiledUiArt>,
+) {
+    let allowed = owner.get(field).is_some_and(|reference| {
+        let hash = reference.get("sha256").and_then(Value::as_str);
+        let media_type = reference.get("media_type").and_then(Value::as_str);
+        hash.and_then(|hash| listed.get(hash))
+            .is_some_and(|entry| Some(entry.media_type.as_str()) == media_type)
+    });
+    if !allowed {
+        owner.remove(field);
+    }
 }
 
 fn sanitize_sources(
@@ -1922,6 +2039,122 @@ mod tests {
                 .iter()
                 .all(|entry| !entry.coordinate.starts_with("surface/"))
         );
+    }
+
+    const ART_HASH: &str = "ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12";
+    const VIEW_ART_HASH: &str = "cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34";
+
+    /// The chrome surface with a picture chip and a picture on its view.
+    fn art_surface() -> Value {
+        let mut surface = chrome_surface();
+        surface["chip"] = serde_json::json!({
+            "mark": "picture",
+            "art": {"sha256": ART_HASH, "media_type": "image/webp"}
+        });
+        surface["views"][VIEW_REF]["picture"] =
+            serde_json::json!({"sha256": VIEW_ART_HASH, "media_type": "image/png"});
+        surface
+    }
+
+    #[test]
+    fn node_authored_art_is_listed_in_the_binding_and_kept_in_the_presentation() {
+        let authored = art_surface();
+        let compiled = compile_chrome(TrustClass::TrustedBundle, &authored);
+        assert_eq!(
+            compiled
+                .binding
+                .art
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            [ART_HASH, VIEW_ART_HASH]
+        );
+        assert_eq!(compiled.binding.art[ART_HASH].media_type, "image/webp");
+        assert_eq!(compiled.binding.art[VIEW_ART_HASH].media_type, "image/png");
+        assert!(compiled.binding.attenuated.iter().all(|entry| {
+            entry.coordinate != "surface/chip.art" && !entry.coordinate.ends_with("/picture")
+        }));
+        let presentation = compiled.sanitize_effective_surface(&authored).unwrap();
+        assert_eq!(presentation["chip"]["mark"], "picture");
+        assert_eq!(presentation["chip"]["art"]["sha256"], ART_HASH);
+        assert_eq!(
+            presentation["views"][VIEW_REF]["picture"]["sha256"],
+            VIEW_ART_HASH
+        );
+    }
+
+    #[test]
+    fn project_authored_surface_and_view_name_no_art() {
+        let authored = art_surface();
+        let compiled = compile_chrome(TrustClass::TrustedProject, &authored);
+        assert!(compiled.binding.art.is_empty());
+        assert_eq!(
+            attenuation(&compiled, "surface/chip.art"),
+            Some("a project-authored surface names no art")
+        );
+        assert_eq!(
+            attenuation(&compiled, &format!("{VIEW_REF}/picture")),
+            Some("a project-authored view names no art")
+        );
+        let presentation = compiled.sanitize_effective_surface(&authored).unwrap();
+        assert_eq!(presentation["chip"]["mark"], "initial");
+        assert!(presentation["chip"].get("art").is_none());
+        assert!(presentation["views"][VIEW_REF].get("picture").is_none());
+    }
+
+    #[test]
+    fn project_authored_view_under_a_node_surface_names_no_art() {
+        let authored = art_surface();
+        let compiled = compile_authored_by(
+            TrustClass::TrustedBundle,
+            TrustClass::TrustedProject,
+            &["cap.read", "cap.write"],
+            &ceiling(&[FIELD_PROJECT]),
+            &authored,
+            bundle_service_target,
+        );
+        // The surface's own picture is listed; the project view's is not.
+        assert_eq!(
+            compiled
+                .binding
+                .art
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            [ART_HASH]
+        );
+        assert_eq!(
+            attenuation(&compiled, &format!("{VIEW_REF}/picture")),
+            Some("a project-authored view names no art")
+        );
+        let presentation = compiled.sanitize_effective_surface(&authored).unwrap();
+        assert_eq!(presentation["chip"]["art"]["sha256"], ART_HASH);
+        assert!(presentation["views"][VIEW_REF].get("picture").is_none());
+    }
+
+    #[test]
+    fn malformed_or_conflicting_art_is_never_listed() {
+        let mut authored = art_surface();
+        authored["chip"]["art"] =
+            serde_json::json!({"sha256": "../../etc/passwd", "media_type": "image/webp"});
+        authored["views"][VIEW_REF]["picture"] =
+            serde_json::json!({"sha256": ART_HASH, "media_type": "image/svg+xml"});
+        let compiled = compile_chrome(TrustClass::TrustedBundle, &authored);
+        assert!(compiled.binding.art.is_empty());
+        assert!(attenuation(&compiled, "surface/chip.art").is_some());
+        assert!(attenuation(&compiled, &format!("{VIEW_REF}/picture")).is_some());
+        let presentation = compiled.sanitize_effective_surface(&authored).unwrap();
+        assert_eq!(presentation["chip"]["mark"], "initial");
+        assert!(presentation["chip"].get("art").is_none());
+        assert!(presentation["views"][VIEW_REF].get("picture").is_none());
+
+        // One hash named under two media types lists once; the second is refused.
+        let mut conflicting = art_surface();
+        conflicting["views"][VIEW_REF]["picture"] =
+            serde_json::json!({"sha256": ART_HASH, "media_type": "image/png"});
+        let compiled = compile_chrome(TrustClass::TrustedBundle, &conflicting);
+        assert_eq!(compiled.binding.art[ART_HASH].media_type, "image/webp");
+        assert!(attenuation(&compiled, &format!("{VIEW_REF}/picture")).is_some());
     }
 
     /// A project-authored view and surface carry an authorship marker in the

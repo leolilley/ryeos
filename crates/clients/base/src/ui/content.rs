@@ -69,6 +69,11 @@ pub struct ViewBinding {
     pub facet: Option<String>,
     #[serde(default)]
     pub projections: Value,
+    /// The signed picture this view draws behind its content. Only a
+    /// node-authored view may name one; the daemon drops it from a
+    /// project-authored view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture: Option<crate::art::ArtRef>,
     /// Row-activation binding for the `rows` and `table` widgets:
     /// `selection.activate: <affordance_id>`. Explicit — there is no
     /// implicit "first affordance" activation. A `timeline` view names the
@@ -718,6 +723,8 @@ pub fn project_record(record: &Value, projection: &Value) -> ProjectedRecord {
     let meta = projection
         .get("meta")
         .and_then(Value::as_str)
+        // A null field is no value: the row shows nothing rather than "null".
+        .filter(|path| !matches!(field_path(record, path), Some(Value::Null)))
         .and_then(|path| field_text(record, path));
     let tone = project_tone(record, projection);
     ProjectedRecord {
@@ -821,11 +828,18 @@ pub struct TableColumn {
     /// narrow cell keeps the segment that names the thing instead of the
     /// namespace boilerplate. `leaf` keeps only that final segment; `words`
     /// turns underscore-delimited wire values into display words; `time_date`
-    /// renders a canonical timestamp as `14:32 · 15 Jul`.
+    /// renders a canonical timestamp as `14:32 · 15 Jul`; `time_relative`
+    /// renders one from today as its time of day (`14:26`), one from the day
+    /// before as the `yesterday` word of `labels`, and any other as
+    /// `time_date` does. Days are counted in UTC.
     pub present: Option<String>,
     /// Authored display value used only when the projected field is absent or
     /// empty. This is presentation fallback, not synthesized record data.
     pub fallback: Option<String>,
+    /// Authored words for raw values: a cell equal to a key here reads as its
+    /// value (`directive_run` as `directive`). Applied before `present`, and
+    /// `time_relative` reads its `yesterday` entry from the same map.
+    pub labels: std::collections::BTreeMap<String, String>,
 }
 
 /// Optional structural projection for a hierarchy-aware table. The source owns
@@ -852,8 +866,19 @@ pub struct TableHierarchyRow {
 /// `tail_first` flips a pathed value so the leaf leads and the namespace
 /// trails — the readable half survives right-truncation. Unknown or
 /// inapplicable presentations pass the cell through untouched.
-fn present_cell(cell: &str, present: Option<&str>) -> String {
+fn present_cell(
+    cell: &str,
+    present: Option<&str>,
+    now_ms: u64,
+    labels: &std::collections::BTreeMap<String, String>,
+) -> String {
+    if let Some(word) = labels.get(cell) {
+        return word.clone();
+    }
     match present {
+        Some("time_relative") => present_time_relative(cell, now_ms, labels)
+            .or_else(|| present_time_date(cell))
+            .unwrap_or_else(|| cell.to_string()),
         Some("tail_first") => match cell.rsplit_once('/') {
             Some((prefix, leaf)) if !leaf.is_empty() => format!("{leaf} ‹ {prefix}"),
             _ => cell.to_string(),
@@ -867,6 +892,46 @@ fn present_cell(cell: &str, present: Option<&str>) -> String {
         Some("words") => cell.replace('_', " "),
         Some("time_date") => present_time_date(cell).unwrap_or_else(|| cell.to_string()),
         _ => cell.to_string(),
+    }
+}
+
+/// The time of day of a timestamp from today, or the `yesterday` word for one
+/// from the day before. `None` for any other day, an unparsable value or no
+/// known clock (`now_ms` of zero), which then read as `time_date`.
+fn present_time_relative(
+    value: &str,
+    now_ms: u64,
+    labels: &std::collections::BTreeMap<String, String>,
+) -> Option<String> {
+    if now_ms == 0 {
+        return None;
+    }
+    let (date, time) = value.split_once('T')?;
+    let mut parts = date.split('-');
+    let year = parts.next()?.parse::<i64>().ok()?;
+    let month = parts.next()?.parse::<i64>().ok()?;
+    let day = parts.next()?.parse::<i64>().ok()?;
+    if parts.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let hour = time.get(..2)?.parse::<u8>().ok()?;
+    let minute = time.get(3..5)?.parse::<u8>().ok()?;
+    if time.as_bytes().get(2) != Some(&b':') || hour > 23 || minute > 59 {
+        return None;
+    }
+    // Days since the epoch for a civil date (proleptic Gregorian).
+    let shifted_year = if month <= 2 { year - 1 } else { year };
+    let era = shifted_year.div_euclid(400);
+    let year_of_era = shifted_year - era * 400;
+    let month_index = (month + 9) % 12;
+    let day_of_year = (153 * month_index + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let then_day = era * 146_097 + day_of_era - 719_468;
+    let now_day = i64::try_from(now_ms / 86_400_000).ok()?;
+    match now_day - then_day {
+        0 => Some(format!("{hour:02}:{minute:02}")),
+        1 => labels.get("yesterday").cloned(),
+        _ => None,
     }
 }
 
@@ -951,6 +1016,18 @@ pub fn table_columns(binding: &ViewBinding) -> Vec<TableColumn> {
                             .get("fallback")
                             .and_then(Value::as_str)
                             .map(str::to_string),
+                        labels: col
+                            .get("labels")
+                            .and_then(Value::as_object)
+                            .map(|words| {
+                                words
+                                    .iter()
+                                    .filter_map(|(raw, word)| {
+                                        Some((raw.clone(), word.as_str()?.to_string()))
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
                     })
                 })
                 .collect()
@@ -1166,10 +1243,11 @@ pub fn project_table(
     binding: &ViewBinding,
     response: &Value,
     columns: &[TableColumn],
+    now_ms: u64,
 ) -> Vec<ProjectedTableRow> {
     source_collection(binding, response)
         .iter()
-        .map(|record| project_table_record(binding, record, columns))
+        .map(|record| project_table_record(binding, record, columns, now_ms))
         .collect()
 }
 
@@ -1177,6 +1255,7 @@ pub fn project_table_record(
     binding: &ViewBinding,
     record: &Value,
     columns: &[TableColumn],
+    now_ms: u64,
 ) -> ProjectedTableRow {
     ProjectedTableRow {
         cells: columns
@@ -1186,7 +1265,7 @@ pub fn project_table_record(
                     .filter(|cell| !cell.is_empty())
                     .or_else(|| col.fallback.clone())
                     .unwrap_or_default();
-                present_cell(&cell, col.present.as_deref())
+                present_cell(&cell, col.present.as_deref(), now_ms, &col.labels)
             })
             .collect(),
         cell_tones: columns
@@ -2230,7 +2309,7 @@ mod tests {
             { "thread_id": "T-cd", "status": "failed" }
         ]});
         let columns = table_columns(&binding);
-        let rows = project_table(&binding, &response, &columns);
+        let rows = project_table(&binding, &response, &columns, 0);
 
         // Follow row: row tone from status (neutral default), follow CELL warn.
         assert_eq!(rows[0].tone.as_deref(), Some("neutral"));
@@ -2264,7 +2343,7 @@ mod tests {
             "created_at": "2026-07-15T14:32:18Z"
         });
         let columns = table_columns(&binding);
-        let rows = project_table(&binding, &json!({ "items": [record.clone()] }), &columns);
+        let rows = project_table(&binding, &json!({ "items": [record.clone()] }), &columns, 0);
 
         assert_eq!(
             rows[0].cells,
@@ -2274,13 +2353,44 @@ mod tests {
     }
 
     #[test]
+    fn a_column_reads_authored_words_and_relative_days() {
+        let words: std::collections::BTreeMap<String, String> = [
+            ("directive_run".to_string(), "directive".to_string()),
+            ("yesterday".to_string(), "yesterday".to_string()),
+        ]
+        .into();
+        // 2026-11-12T14:40:00Z
+        let now = 1_794_494_400_000;
+        assert_eq!(
+            present_cell("directive_run", Some("words"), now, &words),
+            "directive"
+        );
+        assert_eq!(
+            present_cell("tool_run", Some("words"), now, &words),
+            "tool run"
+        );
+        let relative =
+            |value: &str, now: u64| present_cell(value, Some("time_relative"), now, &words);
+        assert_eq!(relative("2026-11-12T09:12:00Z", now), "09:12");
+        assert_eq!(relative("2026-11-11T23:59:00Z", now), "yesterday");
+        assert_eq!(relative("2026-11-10T08:00:00Z", now), "08:00 · 10 Nov");
+        // No known clock: the date form.
+        assert_eq!(relative("2026-11-12T09:12:00Z", 0), "09:12 · 12 Nov");
+    }
+
+    #[test]
     fn invalid_time_date_presentation_keeps_the_authored_value() {
         assert_eq!(
-            present_cell("not-a-timestamp", Some("time_date")),
+            present_cell("not-a-timestamp", Some("time_date"), 0, &Default::default()),
             "not-a-timestamp"
         );
         assert_eq!(
-            present_cell("2026-07-15T29:88:00Z", Some("time_date")),
+            present_cell(
+                "2026-07-15T29:88:00Z",
+                Some("time_date"),
+                0,
+                &Default::default()
+            ),
             "2026-07-15T29:88:00Z"
         );
     }

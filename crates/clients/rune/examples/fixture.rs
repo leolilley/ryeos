@@ -7,7 +7,9 @@
 //! night by default). `RYEOS_FIXTURE_SCENE` picks the presentation (`field`, `launcher`, `launcher-stage` (the second stage), `long`,
 //! `timeline`, `timeline-draft`, `timeline-top` and `timeline-asks` (two pending asks) for one conversation of every entry type with
 //! its lane, dock and composer, `states` for an empty, a loading and an
-//! unavailable table, or the
+//! unavailable table, `project`, `project-review` and `project-launcher` for the
+//! project Surface with sample threads on its Threads tab, its Review tab, or
+//! the launcher, or the
 //! default shell); `RYEOS_FIXTURE_FONTS` adds colon-separated font files
 //! (native Rune has no IBM Plex Mono of its own; without it the data face
 //! falls back).

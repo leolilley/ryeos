@@ -1,0 +1,22 @@
+# ryeos:signed:2026-11-19T07:00:16Z:acb9eca415bccb516fb74cab120492940fa72220f5d38f9d8709401b5e641178:fJ6JfFJVlT5E4lskh2W4CtaeCRDb6Js8fiYZTPyEBBgNiYs/nW4v+f7UwGChm7Shkg/VbR6PtYozE3CGG9VABQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+title: "The Round Tower, from \"Carceri d'invenzione\" (Imaginary Prisons)"
+artist: "Giovanni Battista Piranesi"
+date: "ca. 1749–50"
+source_url: https://www.metmuseum.org/art/collection/search/337725
+licence: cc0
+derived_from:
+  - "Met object 337725, The Round Tower, from \"Carceri d'invenzione\" (Imaginary Prisons) (https://www.metmuseum.org/art/collection/search/337725)"
+transform: "greyscale crop of the Met open-access image; re-encoded as WebP"
+renditions:
+  - role: hero
+    sha256: "95eedae69912bfe8923c4f51d16293e777b6281fdfdfb75fae1fa67fb363a6a1"
+    media_type: image/webp
+    width: 1600
+    height: 1000
+    bytes: 769330
+  - role: card
+    sha256: "d1d60fde9a6641d8eeb141f4201d3e0fcb06d24f1559e4797fb87cdfdd68583a"
+    media_type: image/webp
+    width: 480
+    height: 300
+    bytes: 62268
