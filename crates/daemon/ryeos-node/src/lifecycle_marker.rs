@@ -523,36 +523,98 @@ pub enum PreviousRun {
 /// `running` and the exact process it names is gone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UncleanExit {
-    /// The recorded daemon's pid, for display only; the verdict is the exact
-    /// identity's.
-    pub pid: u32,
+    /// The exact incarnation that ended. Its pid alone names nothing: the
+    /// same number is reused across container restarts.
+    pub identity: lillux::process_control::ExactProcessIdentity,
     pub started_at: String,
     pub launch_route: Option<LaunchRoute>,
 }
 
-/// The unclean exit `previous` shows, if it shows one. A `running` marker
-/// names a run that is over exactly when [`recorded_process`] proves its
-/// recorded incarnation ended: another boot, an absent process, or another
-/// birth at the same pid (a container restart reuses the pid, including this
-/// process's own). A run still running, one that cannot be classified, and a
-/// retired marker of an older schema are never an unclean exit.
+/// A previous run whose end cannot be judged: neither a clean exit nor an
+/// unclean one, so history records the gap rather than a guess.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownExit {
+    /// `indeterminate:<observation error>` or
+    /// `retired_stale_running:<schema found, or absent>`.
+    pub reason: String,
+    /// The incarnation the marker named, when it named one.
+    pub identity: Option<lillux::process_control::ExactProcessIdentity>,
+    pub started_at: Option<String>,
+    pub launch_route: Option<LaunchRoute>,
+}
+
+/// What the previous run's marker shows about an end no handled exit
+/// recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InferredExit {
+    Unclean(UncleanExit),
+    Unknown(UnknownExit),
+}
+
+/// The end of the previous run its marker shows, judged by the recorded exact
+/// identity and never a bare pid:
+///
+/// - proven ended: an unclean exit (another boot, an absent process, or
+///   another birth at the same pid; a container restart reuses the pid,
+///   including this process's own);
+/// - still the occupant: no exit. Another instance may be live; the state
+///   lock the caller holds already refuses a second daemon, so the start only
+///   warns (see [`report_previous_exit`]) and goes on;
+/// - not classifiable, or a retired pre-identity `running` record: unknown,
+///   never unclean;
+/// - a handled `Exited` marker or no marker: nothing to infer.
+pub fn inferred_exit(previous: Option<&PreviousRun>) -> Option<InferredExit> {
+    inferred_exit_with(previous, recorded_process)
+}
+
+fn inferred_exit_with(
+    previous: Option<&PreviousRun>,
+    observe: impl FnOnce(&lillux::process_control::ExactProcessIdentity) -> RecordedProcess,
+) -> Option<InferredExit> {
+    match previous? {
+        PreviousRun::RetiredStaleRunning { found_schema } => {
+            Some(InferredExit::Unknown(UnknownExit {
+                reason: format!(
+                    "retired_stale_running:{}",
+                    found_schema.map_or_else(|| "absent".to_owned(), |schema| schema.to_string())
+                ),
+                identity: None,
+                started_at: None,
+                launch_route: None,
+            }))
+        }
+        PreviousRun::Marker(LifecycleMarker::Exited { .. }) => None,
+        PreviousRun::Marker(LifecycleMarker::Running {
+            identity,
+            started_at,
+            launch_route,
+            schema_version: _,
+            pending_latched_drain: _,
+            carrier_incarnation: _,
+        }) => match observe(identity) {
+            RecordedProcess::Ended => Some(InferredExit::Unclean(UncleanExit {
+                identity: identity.clone(),
+                started_at: started_at.clone(),
+                launch_route: *launch_route,
+            })),
+            RecordedProcess::Running => None,
+            RecordedProcess::Indeterminate(reason) => Some(InferredExit::Unknown(UnknownExit {
+                reason: format!("indeterminate:{reason}"),
+                identity: Some(identity.clone()),
+                started_at: Some(started_at.clone()),
+                launch_route: *launch_route,
+            })),
+        },
+    }
+}
+
+/// The unclean exit `previous` shows, if it shows one: only a proof that the
+/// recorded incarnation ended.
 pub fn inferred_unclean_exit(previous: Option<&PreviousRun>) -> Option<UncleanExit> {
-    let Some(PreviousRun::Marker(LifecycleMarker::Running {
-        identity,
-        started_at,
-        launch_route,
-        schema_version: _,
-        pending_latched_drain: _,
-        carrier_incarnation: _,
-    })) = previous
-    else {
-        return None;
-    };
-    (recorded_process(identity) == RecordedProcess::Ended).then(|| UncleanExit {
-        pid: identity.target_pid,
-        started_at: started_at.clone(),
-        launch_route: *launch_route,
-    })
+    match inferred_exit(previous)? {
+        InferredExit::Unclean(unclean) => Some(unclean),
+        InferredExit::Unknown(_) => None,
+    }
 }
 
 /// The previous run's marker, read before this start overwrites it. `None`
@@ -1316,7 +1378,7 @@ mod tests {
             5,
         ))))
         .expect("another boot ended the recorded run");
-        assert_eq!(exit.pid, u32::MAX - 1);
+        assert_eq!(exit.identity.target_pid, u32::MAX - 1);
         assert_eq!(exit.started_at, "2026-01-01T00:00:00Z");
         assert_eq!(exit.launch_route, Some(LaunchRoute::Direct));
         // Our own pid at another birth (a restarted container): ended.
@@ -1452,7 +1514,7 @@ mod tests {
                 5
             )))),
             Some(UncleanExit {
-                pid: u32::MAX - 1,
+                identity: identity_at("00000000-dead-beef-0000-000000000000", u32::MAX - 1, 5),
                 started_at: "2026-01-01T00:00:00Z".into(),
                 launch_route: Some(LaunchRoute::Supervised),
             })
@@ -1472,6 +1534,45 @@ mod tests {
             None,
         ));
         assert!(inferred_unclean_exit(Some(&exited)).is_none());
+    }
+
+    #[test]
+    fn indeterminate_and_retired_records_are_unknown_never_unclean() {
+        let previous = PreviousRun::Marker(running_with(identity_at(
+            "00000000-dead-beef-0000-000000000000",
+            u32::MAX - 1,
+            5,
+        )));
+        let observe = |outcome: RecordedProcess| {
+            move |_: &lillux::process_control::ExactProcessIdentity| outcome
+        };
+        assert_eq!(
+            inferred_exit_with(Some(&previous), observe(RecordedProcess::Running)),
+            None
+        );
+        let Some(InferredExit::Unknown(unknown)) = inferred_exit_with(
+            Some(&previous),
+            observe(RecordedProcess::Indeterminate("probe refused".into())),
+        ) else {
+            panic!("an indeterminate observation is unknown");
+        };
+        assert_eq!(unknown.reason, "indeterminate:probe refused");
+        assert_eq!(unknown.identity.map(|id| id.target_pid), Some(u32::MAX - 1));
+        assert!(matches!(
+            inferred_exit(Some(&previous)),
+            Some(InferredExit::Unclean(_))
+        ));
+        for (found_schema, expected) in [
+            (None, "retired_stale_running:absent"),
+            (Some(1), "retired_stale_running:1"),
+        ] {
+            let retired = PreviousRun::RetiredStaleRunning { found_schema };
+            let Some(InferredExit::Unknown(unknown)) = inferred_exit(Some(&retired)) else {
+                panic!("a retired running record is unknown");
+            };
+            assert_eq!(unknown.reason, expected);
+            assert_eq!(unknown.identity, None);
+        }
     }
 
     #[test]
