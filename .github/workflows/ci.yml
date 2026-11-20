@@ -17,7 +17,7 @@ on:
         default: true
         type: boolean
       merge_gates:
-        description: "Branch pre-merge mode: run only the five merge gates (lint/policy, static policy, test archive build, crash qualification build, scheduler compositions); skip bundle refresh, test shards and crash phases. Full tests run on next after merge."
+        description: "Branch pre-merge mode: run only the five merge gates (lint/policy, static policy, test archive build, crash qualification build, scheduler compositions); skip bundle refresh, test shards and crash phases. A branch whose changed paths are all UI paths runs the UI-only gate instead (see the classify job). Full tests run on next after merge."
         required: true
         default: false
         type: boolean
@@ -79,6 +79,52 @@ env:
   GATE_TEST_THREADS: 0
 
 jobs:
+  # Decides which merge gate a merge_gates dispatch runs. Every other event, and
+  # any doubt (unknown path, no merge base, script fault), gets the full gate.
+  # The UI-only gate skips the workspace test archive, the crash qualification
+  # build and the scheduler composition checks, and runs the UI crates' tests
+  # (ui-gate job) instead; secret scan, static policy and rust-policy always run.
+  classify:
+    name: Gate classification
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      mode: ${{ steps.classify.outputs.mode || 'full' }}
+      bundles_changed: ${{ steps.classify.outputs.bundles_changed || 'true' }}
+    steps:
+      - name: Check out repository history
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Classify the branch against next
+        id: classify
+        env:
+          EVENT: ${{ github.event_name }}
+          MERGE_GATES: ${{ inputs.merge_gates }}
+        run: |
+          set -uo pipefail
+          if [[ "$EVENT" != workflow_dispatch || "$MERGE_GATES" != true ]]; then
+            {
+              echo "mode=full"
+              echo "bundles_changed=true"
+            } >> "$GITHUB_OUTPUT"
+            echo "### Gate: full (not a merge_gates dispatch)" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # A classifier fault must leave the output unset (the job defaults it to full).
+          if ! python3 -I scripts/ci/classify-merge-gate.py --base-ref origin/next > "$RUNNER_TEMP/classification"; then
+            echo "### Gate: full (classifier failed)" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          grep -E '^(mode|bundles_changed)=' "$RUNNER_TEMP/classification" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Gate: $(sed -n 's/^mode=//p' "$RUNNER_TEMP/classification")"
+            echo '```'
+            sed -n 's/^# //p' "$RUNNER_TEMP/classification"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
   static-policy:
     name: Static repository policy
     runs-on: ubuntu-latest
@@ -289,6 +335,13 @@ jobs:
       - name: Check workspace dependency direction
         run: python3 .ai/tools/ryeos/development/repository-validation/dependency-layers.py --project-path "$PWD" --config-file .ai/config/development/ryeos/repository-validation.yaml
 
+      - name: Check the browser package is not stale
+        # A source change with no package rebuild leaves the package, its manifest and
+        # the generated registry consistent but out of date; nothing else notices.
+        run: |
+          python3 -I -B scripts/ci/test-ci-gate-scripts.py
+          python3 -I -B scripts/ci/web-package-source-digest.py --check
+
       # The browser renderer is its own Cargo workspace; every package its lock shares with the
       # root lock must resolve identically.
       - name: Check the browser renderer lock agrees with the root lock
@@ -471,7 +524,8 @@ jobs:
     name: Workspace test archive
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tests }}
+    needs: [classify]
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.run_tests) && needs.classify.outputs.mode != 'ui-only' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -680,7 +734,8 @@ jobs:
     # Three no-default-features checks at -j 1 take 20-30 minutes on a runner; the
     # job ceiling, not a step, bounds a stuck compilation.
     timeout-minutes: 60
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tests }}
+    needs: [classify]
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.run_tests) && needs.classify.outputs.mode != 'ui-only' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -762,6 +817,65 @@ jobs:
             fi
           done
 
+  # The UI-only merge gate's tests (see the classify job): the client crates and the UI
+  # daemon crate. The Rune workspace tests run in rust-policy and the package freshness
+  # check in static-policy, both of which every merge gate runs.
+  ui-gate:
+    name: UI targeted tests
+    needs: [classify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.merge_gates && needs.classify.outputs.mode == 'ui-only' }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      # Read the crate cache the other jobs save; never save from here.
+      - name: Restore cargo artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: workspace-crates-v1
+          cache-workspace-crates: true
+          save-if: false
+
+      - name: Prepare the runner
+        run: ./scripts/ci/prepare-runner.sh
+
+      # A branch that changes bundle sources tests against its own refresh. Otherwise next's
+      # bundle state is restored (it refuses when it would hide a branch change); if no usable
+      # state exists the branch refresh runs instead.
+      - name: Restore next's bundle state
+        id: restore
+        if: ${{ needs.classify.outputs.bundles_changed != 'true' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/ci/restore-next-bundle-state.sh
+
+      - name: Refresh the bundles from this branch
+        if: ${{ needs.classify.outputs.bundles_changed == 'true' || steps.restore.outcome == 'failure' }}
+        env:
+          GATE_BUNDLE_TARGET_DIR: ${{ runner.temp }}/ryeos-bundle-target
+        run: ./scripts/gate.sh --refresh-bundles --no-tests
+
+      - name: Test the client crates and the UI crate
+        env:
+          RUST_MIN_STACK: 8388608
+        run: cargo test --locked -p ryeos-client-base -p ryeos-client-terminal -p ryeos-ui
+
   test:
     name: Workspace tests
     # Aggregates the build, shards and composition checks so the required
@@ -782,7 +896,8 @@ jobs:
     name: Crash qualification build
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tests }}
+    needs: [classify]
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.run_tests) && needs.classify.outputs.mode != 'ui-only' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
