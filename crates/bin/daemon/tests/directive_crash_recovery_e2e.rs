@@ -1382,3 +1382,220 @@ async fn planned_rollover_midflight_exits_75_and_the_thread_resumes() {
 async fn orderly_stop_midflight_exits_0_and_the_thread_resumes() {
     run_midflight_stop(MidflightStop::OrderlyStop).await;
 }
+
+fn plant_vault_with_zen_key(state_path: &Path) -> anyhow::Result<()> {
+    use std::collections::HashMap;
+    let pub_path = state_path
+        .join(ryeos_engine::AI_DIR)
+        .join("node")
+        .join("vault")
+        .join("public_key.pem");
+    let pub_key = lillux::vault::read_public_key(&pub_path)?;
+    let store_path = ryeos_app::vault::default_sealed_store_path(state_path);
+    let secrets = HashMap::from([(
+        "ZEN_API_KEY".to_string(),
+        "test-zen-api-key-value".to_string(),
+    )]);
+    ryeos_app::vault::write_sealed_secrets(&store_path, &pub_key, &secrets)?;
+    Ok(())
+}
+
+/// A graph that follows the recovery directive: the directive runs as its own
+/// managed thread, detached from the parent, with the marker tool in flight.
+fn plant_follow_parent_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
+    let graphs_dir = project_dir.join(".ai/graphs");
+    std::fs::create_dir_all(&graphs_dir)?;
+    let body = r#"category: test
+version: "1.0.0"
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.directive.test/recovery
+      - ryeos.execute.tool.*
+config:
+  start: fetch
+  nodes:
+    fetch:
+      node_type: action
+      follow: true
+      action:
+        item_id: "directive:test/recovery"
+        ref_bindings:
+          model: "directive:test/recovery"
+        params:
+          name: recovery
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+"#;
+    let signed = lillux::signature::sign_content(body, signer, "#", None);
+    std::fs::write(graphs_dir.join("follow_parent.yaml"), signed)?;
+    Ok(())
+}
+
+/// A planned rollover that begins while a graph's followed directive child is
+/// running. The child's runtime exits during the stop and its launch owner
+/// settles it between the drain's attached-thread list and its row read; the
+/// qualification delay holds the snapshot there so the interleaving always
+/// happens. The daemon must still drain, exit 75 without holding custody, and
+/// the next start must resume the child and the graph run.
+#[tokio::test(flavor = "multi_thread")]
+async fn planned_rollover_with_a_settling_follow_child_exits_75_and_the_run_resumes() {
+    let mock = MockProvider::start(vec![
+        MockResponse::ToolCall {
+            id: "marker-call".to_string(),
+            name: TOOL_NAME.to_string(),
+            arguments: "{}".to_string(),
+        },
+        MockResponse::Text("recovery complete".to_string()),
+    ])
+    .await;
+    let mock_url = mock.base_url.clone();
+    let plant =
+        move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+            register_workflow_bundles(state_path, fixture)?;
+            register_recorded_mock_provider_bundle(state_path, &mock_url, fixture)?;
+            plant_vault_with_zen_key(state_path)?;
+            lengthen_short_service_window(state_path, &fixture.node)
+        };
+    let log_env = |command: &mut tokio::process::Command| {
+        command
+            .env(
+                "RUST_LOG",
+                "info,ryeos_directive_runtime=debug,ryeosd=debug",
+            )
+            .env("RYEOSD_TEST_ATTACHED_SNAPSHOT_READ_DELAY_MS", "3000");
+    };
+    let (mut harness, fixture) = DaemonHarness::start_fast_with(plant, log_env)
+        .await
+        .expect("start daemon");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    let marker_dir = tempfile::tempdir().expect("marker tempdir");
+    let marker_path = marker_dir.path().join("executions.log");
+    plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
+    plant_recovery_directive(project.path(), &fixture.publisher, 2, false)
+        .expect("plant directive");
+    plant_marker_tool(
+        project.path(),
+        &marker_path,
+        Duration::from_secs(400),
+        &fixture.publisher,
+    )
+    .expect("plant marker tool");
+    plant_follow_parent_graph(project.path(), &fixture.publisher).expect("plant parent graph");
+
+    let (status, body) = tokio::time::timeout(
+        Duration::from_secs(120),
+        harness.post_execute(
+            "graph:follow_parent",
+            project.path().to_str().expect("UTF-8 project path"),
+            json!({}),
+        ),
+    )
+    .await
+    .expect("the parent graph suspends at its follow node")
+    .expect("post the parent graph");
+    assert_eq!(status, reqwest::StatusCode::OK, "body={body:#}");
+    assert_eq!(
+        body["result"]["status"], "continued",
+        "the parent suspends at the follow node; body={body:#}"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while marker_execution_count(&marker_path) != 1 {
+        assert!(
+            Instant::now() < deadline,
+            "the followed directive's tool never started\n{}",
+            harness.drain_stderr_nonblocking().await
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let status = tokio::time::timeout(Duration::from_secs(300), harness.child.wait())
+        .await
+        .expect("the service window ends within its bound")
+        .expect("wait for daemon exit");
+    let stderr = harness.stderr_so_far();
+    assert_eq!(
+        status.code(),
+        Some(75),
+        "a planned rollover with a settling follow child exits 75: {status:?}\n--- daemon stderr ---\n{stderr}"
+    );
+    assert!(
+        stderr.contains("attached process was settled by its launch owner during the snapshot"),
+        "the child must settle between the snapshot's list and read\n--- daemon stderr ---\n{stderr}"
+    );
+    for refused in [
+        "unresolved process custody",
+        "daemon remains alive holding",
+        "lost its durable process identity",
+    ] {
+        assert!(
+            !stderr.contains(refused),
+            "the stop must not hold custody ({refused})\n--- daemon stderr ---\n{stderr}"
+        );
+    }
+    assert!(
+        ryeos_node::lifecycle_marker::read_restart_inhibition(&harness.state_path)
+            .expect("read restart inhibition")
+            .is_none(),
+        "an orderly end must not inhibit restart"
+    );
+
+    harness
+        .respawn_with(|command| {
+            command.env(
+                "RUST_LOG",
+                "info,ryeos_directive_runtime=debug,ryeosd=debug",
+            );
+        })
+        .await
+        .expect("restart after the rollover");
+    let child_thread_id = {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let events = harness.principal_events().await;
+            let found = events.iter().find_map(|(thread_id, event_type, payload)| {
+                (event_type == "thread_created"
+                    && payload.get("item_ref").and_then(Value::as_str) == Some(DIRECTIVE_REF))
+                .then(|| thread_id.clone())
+            });
+            if let Some(thread_id) = found {
+                break thread_id;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the followed child thread is gone"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    };
+    await_completed(&mut harness, &child_thread_id).await;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let events = harness.principal_events().await;
+        if events
+            .iter()
+            .any(|(_, event_type, _)| event_type == "graph_completed")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the graph run did not resume to completion; events={events:#?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        marker_execution_count(&marker_path),
+        1,
+        "the resumed child must not run the tool again"
+    );
+    harness
+        .kill_daemon()
+        .await
+        .expect("stop resumed daemon before the test ends");
+}
