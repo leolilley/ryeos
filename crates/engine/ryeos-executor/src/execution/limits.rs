@@ -891,6 +891,147 @@ mod tests {
         assert!(config.is_none(), "missing file should return Ok(None)");
     }
 
+    /// Execution limits are config the daemon loads under the request's trust.
+    /// An authoring-signed limits file is honoured only while an endorsement
+    /// covers it, and the signer list that carries the endorsements is what
+    /// the config's dependency proof and cache key record.
+    #[test]
+    fn an_endorsed_authoring_signed_limits_file_is_honoured_until_revoked() {
+        use lillux::crypto::SigningKey;
+        use ryeos_engine::trust::{
+            EndorsedItem, EndorsementBody, EndorsementIndex, EndorsementLedger, SignedEndorsement,
+            SignerRecord, SignerRole, SignerScope, SignerStatus, TrustStore, record_endorsement,
+            revoke_endorsement, trusted_signers_digest,
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let app_root = tmp.path().join("node");
+        let node = SigningKey::from_bytes(&[1u8; 32]);
+        let operator = SigningKey::from_bytes(&[2u8; 32]);
+        let authoring = SigningKey::from_bytes(&[3u8; 32]);
+        let trust = TrustStore::from_registry(
+            node.verifying_key(),
+            vec![
+                SignerRecord::new(
+                    &operator.verifying_key(),
+                    "operator",
+                    SignerRole::Operator,
+                    SignerScope::operator_default(),
+                    SignerStatus::Active,
+                ),
+                SignerRecord::new(
+                    &authoring.verifying_key(),
+                    "authoring",
+                    SignerRole::Authoring,
+                    SignerScope::authoring_default(),
+                    SignerStatus::Active,
+                ),
+            ],
+        )
+        .unwrap();
+        let config_dir = ryeos_engine::roots::RuntimeRoot::new(project.clone())
+            .config()
+            .join("example-runtime");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let signed = lillux::signature::sign_content(
+            "defaults: {}\n",
+            &authoring,
+            "#",
+            None,
+        );
+        std::fs::write(config_dir.join("limits.yaml"), &signed).unwrap();
+        let digest = ryeos_engine::item_resolution::parse_signature_header(
+            &signed,
+            &ryeos_engine::contracts::SignatureEnvelope {
+                prefix: "#".to_string(),
+                suffix: None,
+                after_shebang: false,
+            },
+        )
+        .unwrap()
+        .content_hash;
+
+        // The signer list a launch of this project carries right now.
+        let launch_entries = || {
+            let ledger = EndorsementLedger::load(&app_root, &node.verifying_key()).unwrap();
+            let frozen = trust
+                .clone()
+                .with_endorsement_index(EndorsementIndex::build(&ledger, &trust).unwrap());
+            trust.launch_signer_entries(&frozen, Some(&project))
+        };
+        let loads = |entries: &[ryeos_engine::trust::TrustedSignerEntry]| {
+            let loader = ryeos_runtime::verified_loader::VerifiedLoader::new(
+                project.clone(),
+                vec![],
+                entries,
+            )
+            .unwrap();
+            load_limits_config_from_loader(&loader, &runtime_declaration())
+                .is_ok_and(|config| config.is_some())
+        };
+
+        let before = launch_entries();
+        assert!(
+            !loads(&before),
+            "unendorsed: a machine draft sets no limits"
+        );
+
+        let ledger = EndorsementLedger::load(&app_root, &node.verifying_key()).unwrap();
+        let body = EndorsementBody::for_items(
+            project.canonicalize().unwrap().to_str().unwrap(),
+            &format!(
+                "fp:{}",
+                lillux::signature::compute_fingerprint(&operator.verifying_key())
+            ),
+            vec![EndorsedItem {
+                item_ref: "config:example-runtime/limits".to_string(),
+                kind: "config".to_string(),
+                digest,
+            }],
+            &lillux::time::iso8601_now(),
+            &"a".repeat(32),
+            &ledger.head(&node.verifying_key()),
+        );
+        let recorded = record_endorsement(
+            &app_root,
+            &node,
+            &trust,
+            SignedEndorsement::sign(body, &operator).unwrap(),
+            lillux::time::unix_secs_now(),
+        )
+        .unwrap();
+
+        let endorsed = launch_entries();
+        assert!(loads(&endorsed), "endorsed: the limits file is honoured");
+        assert_ne!(
+            trusted_signers_digest(&before),
+            trusted_signers_digest(&endorsed),
+            "the digest every proof and cache key records covers the endorsements"
+        );
+
+        revoke_endorsement(
+            &app_root,
+            &node,
+            &trust,
+            &recorded.digest,
+            &lillux::signature::compute_fingerprint(&operator.verifying_key()),
+            "withdrawn",
+            lillux::time::unix_secs_now(),
+        )
+        .unwrap();
+        let revoked = launch_entries();
+        assert!(!loads(&revoked), "revoked: refused again");
+        assert_eq!(
+            trusted_signers_digest(&before),
+            trusted_signers_digest(&revoked),
+            "back to the unendorsed trust identity"
+        );
+        // The launch that froze the endorsed list keeps honouring it, and a
+        // proof it made no longer matches the next launch's trust identity.
+        assert!(loads(&endorsed));
+    }
+
     #[test]
     fn load_limits_config_rejects_invalid_spend_cap() {
         let tmp = tempfile::tempdir().unwrap();

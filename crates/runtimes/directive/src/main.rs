@@ -272,8 +272,7 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
         envelope.roots.project_root.clone(),
         envelope.roots.bundle_roots.clone(),
         &envelope.roots.trusted_signers,
-    )?
-    .with_endorsements(envelope.roots.endorsements.as_ref())?;
+    )?;
 
     let thread_auth_token = std::env::var("RYEOSD_THREAD_AUTH_TOKEN")
         .expect("RYEOSD_THREAD_AUTH_TOKEN must be set by daemon");

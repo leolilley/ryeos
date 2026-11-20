@@ -323,6 +323,7 @@ impl TrustStore {
                 ),
                 label: signer.label.clone().unwrap_or_default(),
                 scope,
+                endorsements: None,
             });
         }
         entries.sort_by(|a, b| a.fingerprint.cmp(&b.fingerprint));
@@ -368,14 +369,58 @@ impl TrustStore {
             );
             entry_scopes.insert(entry.fingerprint.clone(), entry.scope.clone());
         }
-        Ok(Self {
+        let mut store = Self {
             signers,
             records: BTreeMap::new(),
             node_key: None,
             entry_scopes,
             endorsements: endorsement::EndorsementView::default(),
             launch_endorsements: None,
+        };
+        store.apply_entry_endorsements(entries)?;
+        Ok(store)
+    }
+
+    /// A launch's signer list carries, on each authoring-role signer, the
+    /// endorsements the request froze. Every such entry must carry the same
+    /// snapshot; the store then judges those signers' items by it.
+    fn apply_entry_endorsements(
+        &mut self,
+        entries: &[TrustedSignerEntry],
+    ) -> Result<(), TrustError> {
+        let invalid = |reason: String| TrustError::EndorsementRecordInvalid {
+            path: PathBuf::from("launch-endorsements"),
+            reason,
+        };
+        let mut snapshot: Option<&EndorsementSnapshot> = None;
+        let mut authoring_signers = std::collections::BTreeSet::new();
+        for entry in entries {
+            let Some(carried) = &entry.endorsements else {
+                continue;
+            };
+            if snapshot.is_some_and(|first| first != carried) {
+                return Err(invalid(
+                    "the signer list carries different endorsement snapshots".to_string(),
+                ));
+            }
+            snapshot = Some(carried);
+            authoring_signers.insert(entry.fingerprint.clone());
+        }
+        let Some(snapshot) = snapshot else {
+            return Ok(());
+        };
+        let index = EndorsementIndex::from_snapshot(snapshot, |fingerprint| {
+            self.signers
+                .get(fingerprint)
+                .map(|signer| signer.verifying_key)
         })
+        .map_err(invalid)?;
+        self.endorsements = endorsement::EndorsementView::frozen(index);
+        self.launch_endorsements = Some(LaunchEndorsements {
+            project: snapshot.project.clone(),
+            authoring_signers,
+        });
+        Ok(())
     }
 
     /// Build a store from the node key and verified registry records.
@@ -503,41 +548,33 @@ impl TrustStore {
         let root = logical_project?;
         let canonical = std::fs::canonicalize(root).ok();
         let project = canonical.as_deref().unwrap_or(root).to_str()?.to_owned();
-        let authoring: Vec<String> = self
-            .records
-            .values()
-            .filter(|record| {
-                record.role == SignerRole::Authoring && record.status != SignerStatus::Revoked
-            })
-            .map(|record| record.fingerprint.clone())
-            .collect();
-        self.endorsements
-            .current()
-            .snapshot_for(&project, authoring)
+        self.endorsements.current().snapshot_for(&project)
     }
 
-    /// Apply a launch's frozen endorsement snapshot to a store rebuilt from
-    /// its signer list: the snapshot's authoring signers are judged by the
-    /// endorsements, against the snapshot's project identity.
-    pub fn with_launch_endorsements(
-        mut self,
-        snapshot: &EndorsementSnapshot,
-    ) -> Result<Self, TrustError> {
-        let index = EndorsementIndex::from_snapshot(snapshot, |fingerprint| {
-            self.signers
-                .get(fingerprint)
-                .map(|signer| signer.verifying_key)
-        })
-        .map_err(|reason| TrustError::EndorsementRecordInvalid {
-            path: PathBuf::from("launch-endorsements"),
-            reason,
-        })?;
-        self.endorsements = endorsement::EndorsementView::frozen(index);
-        self.launch_endorsements = Some(LaunchEndorsements {
-            project: snapshot.project.clone(),
-            authoring_signers: snapshot.authoring_signers.iter().cloned().collect(),
-        });
-        Ok(self)
+    /// The scoped signer list a launch carries: this store's entries, with the
+    /// endorsements `frozen` holds for `logical_project` attached to each
+    /// authoring-role signer. Config loaders and runtimes built from the list
+    /// judge those signers' items by the endorsements, and the list's digest
+    /// (which every config dependency proof and cache key records) changes
+    /// whenever the endorsements do.
+    pub fn launch_signer_entries(
+        &self,
+        frozen: &TrustStore,
+        logical_project: Option<&Path>,
+    ) -> Vec<TrustedSignerEntry> {
+        let mut entries = self.signer_entries();
+        let Some(snapshot) = frozen.launch_endorsements(logical_project) else {
+            return entries;
+        };
+        for entry in &mut entries {
+            let authoring = self.records.get(&entry.fingerprint).is_some_and(|record| {
+                record.role == SignerRole::Authoring && record.status != SignerStatus::Revoked
+            });
+            if authoring {
+                entry.endorsements = Some(snapshot.clone());
+            }
+        }
+        entries
     }
 
     /// A copy of this store holding exactly `index`, frozen. For stores built

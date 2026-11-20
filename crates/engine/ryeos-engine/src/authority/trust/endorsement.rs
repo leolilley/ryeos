@@ -660,28 +660,17 @@ struct IndexedEndorsement {
 }
 
 /// The endorsements one launch carries to its runtime: the live endorsements
-/// of the launch's project as the request froze them, and which signers they
-/// apply to. The daemon seals it into the launch envelope, so the runtime
-/// judges exactly what the daemon judged for the life of the launch.
+/// of the launch's project as the request froze them. The daemon attaches it to
+/// the authoring-role signers of the launch's signer list, so every config
+/// loader and the runtime judge exactly what the daemon judged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EndorsementSnapshot {
     /// The launch's logical project identity: its canonical root path. The
     /// runtime matches against this, never against its own checkout path.
     pub project: String,
-    /// Fingerprints of the pinned authoring-role signers: their scope does not
-    /// decide trust, the endorsements do.
-    pub authoring_signers: Vec<String>,
     /// The stored endorsements, countersigned by the node, in digest order.
     pub endorsements: Vec<StoredEndorsement>,
-}
-
-impl EndorsementSnapshot {
-    /// Digest the launch envelope seals.
-    pub fn digest(&self) -> String {
-        let value = serde_json::to_value(self).unwrap_or(serde_json::Value::Null);
-        lillux::sha256_hex(value.to_string().as_bytes())
-    }
 }
 
 /// The live endorsements the trust decision consults: verified, signed by a
@@ -747,25 +736,20 @@ impl EndorsementIndex {
             .any(|entry| entry.body.project == project && entry.body.covers(kind, digest, now))
     }
 
-    /// The live endorsements of `project`, with the authoring signers they
-    /// apply to, for a launch envelope. `None` when none apply.
-    pub fn snapshot_for(
-        &self,
-        project: &str,
-        authoring_signers: Vec<String>,
-    ) -> Option<EndorsementSnapshot> {
+    /// The live endorsements of `project`, for a launch's signer list. `None`
+    /// when none apply.
+    pub fn snapshot_for(&self, project: &str) -> Option<EndorsementSnapshot> {
         let endorsements: Vec<StoredEndorsement> = self
             .entries
             .iter()
             .filter(|entry| entry.body.project == project)
             .map(|entry| entry.stored.clone())
             .collect();
-        if endorsements.is_empty() || authoring_signers.is_empty() {
+        if endorsements.is_empty() {
             return None;
         }
         Some(EndorsementSnapshot {
             project: project.to_owned(),
-            authoring_signers,
             endorsements,
         })
     }

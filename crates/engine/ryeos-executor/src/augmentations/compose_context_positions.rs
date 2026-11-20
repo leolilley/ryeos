@@ -1543,8 +1543,10 @@ async fn load_runtime_config_snapshot_cached(
     let engine_roots = engine_roots.clone();
     let node_config_root = engine.node_config_root();
     let key_has_node_config_layer = node_config_root.is_some();
-    let trusted_signers =
-        ryeos_engine::launch_envelope_types::trusted_signer_entries(&state.engine.node_trust_store);
+    let trusted_signers = state.engine.node_trust_store.launch_signer_entries(
+        &request_snapshot.trust_store,
+        engine_roots.signer_project_root(),
+    );
     let generation = engine.registered_bundle_generation_fingerprint();
     let generation_epoch = engine.registered_bundle_generation_epoch();
     let key_subject_authority = subject_authority.clone();
@@ -1907,8 +1909,9 @@ async fn runtime_config_snapshot_is_valid(
         snapshot,
         engine_roots,
         node_config_root,
-        &ryeos_engine::launch_envelope_types::trusted_signer_entries(
-            &state.engine.node_trust_store,
+        &state.engine.node_trust_store.launch_signer_entries(
+            &state.engine.trust_store.snapshot(),
+            engine_roots.signer_project_root(),
         ),
         Some(materialization),
     )

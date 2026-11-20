@@ -546,6 +546,12 @@ pub struct TrustedSignerEntry {
     pub public_key: String,
     pub label: String,
     pub scope: SignerScope,
+    /// For an authoring-role signer in a launch's signer list: the live
+    /// endorsements the request froze for the launch's project. The signer's
+    /// scope does not decide its items; these do. Absent otherwise, so a list
+    /// without endorsements digests exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endorsements: Option<super::EndorsementSnapshot>,
 }
 
 /// Digest of a signer-entry list, order independent. Runtimes compare it to

@@ -2783,6 +2783,7 @@ fn bootstrap_trust_store(
             ),
             label: label.clone(),
             scope: ryeos_engine::trust::SignerScope::publisher_default(),
+            endorsements: None,
         });
     }
     Ok(TrustStore::from_signer_entries(&entries)?)

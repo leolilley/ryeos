@@ -7382,8 +7382,13 @@ async fn run_claimed_thread_row_inner(
     // 2. Compute limits (root execution: depth = 0)
     let root_item_ref = ryeos_engine::canonical_ref::CanonicalRef::parse(&resolved.item_ref)
         .map_err(|e| anyhow::anyhow!("build_and_launch: invalid root item ref: {e}"))?;
-    let trusted_signers =
-        ryeos_engine::launch_envelope_types::trusted_signer_entries(&engine.node_trust_store);
+    // The signer list carries, on the authoring signers, the endorsements this
+    // request froze for the launch's project: execution-limit config loading,
+    // its proofs and cache keys, and the runtime all judge the same view.
+    let trusted_signers = engine.node_trust_store.launch_signer_entries(
+        &effective_request_snapshot.trust_store,
+        engine_roots.signer_project_root(),
+    );
     let node_config_root = engine.node_config_root();
     let execution_controls = load_execution_control_snapshot_cached(
         engine,
@@ -8098,16 +8103,7 @@ async fn run_claimed_thread_row_inner(
     let envelope = LaunchEnvelopeBuilder::new(
         cap.invocation_id.clone(),
         thread_id.clone(),
-        EnvelopeRoots::new(
-            process_project_path.clone(),
-            bundle_roots,
-            trusted_signers,
-            // The endorsements this request froze, for the launch's logical
-            // project: the runtime judges what the daemon judged.
-            effective_request_snapshot
-                .trust_store
-                .launch_endorsements(engine_roots.signer_project_root()),
-        ),
+        EnvelopeRoots::new(process_project_path.clone(), bundle_roots, trusted_signers),
         EnvelopeRequest {
             // Strip runtime-control fields from prompt inputs. Parent
             // budget/depth now travels out-of-band, but rejecting prompt leaks
