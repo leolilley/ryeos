@@ -329,9 +329,15 @@ pub struct ExactExclusiveFileLock {
 /// three acquisitions (each takes the real `flock` before returning), no
 /// `Clone` and no `Default`. A caller therefore cannot hold a witness without a
 /// real, original, still-borrowed lock acquisition.
-#[derive(Debug)]
 pub struct ExclusiveLockWitness<'a> {
     _lock: &'a ExactExclusiveFileLock,
+}
+
+impl std::fmt::Debug for ExclusiveLockWitness<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExclusiveLockWitness")
+            .finish_non_exhaustive()
+    }
 }
 
 /// Refusal of an exact operational lock because another open file
