@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-20T01:58:54Z:30d4f989fb5070e49f5359954e1966da73c26ce75da6d5ec857d9ad1154de4b0:CQU1ym+pM7+5MFTH61Ue/Q5imqDbLiP7yppaq1R7UUr4sq/KEGrWvXiJ1wif8o56ylEZAwvesqFy9QosGDASAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-20T07:29:10Z:27e6034f8f5e74c3ae508f823ea0b5894207684c2519c6b4cea0ab751036e500:SO3adP6U52Rtp067skI/6bYQSg0HqU3umKB2IQLYlcvNzF95+ArYq4hv/WefGNLw1EU2wnmrIKlaZhyfIWRdDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-development"
@@ -286,6 +286,15 @@ over its bound is refused, never cut. The policy only narrows: it grants no
 capability. Adding a new read to a shipped Surface means adding its entry to
 every init profile; nodes that predate the section need
 `ryeos node reset policy-generation`.
+
+The event streams a seat opens (`/ui/events/chain/{chain_root_id}` and
+`/ui/events/session/{session_id}`) pass the same policy under the target
+`route:` plus the route's id (`route:ui/events/chain`). Opening judges the
+request parameters like a read; the chain stream also requires the seat to own
+the chain's signed root subject, and answers an absent or unauthorized chain
+with not found. Every event is then shaped by the admitting entry's `keep`
+list and bounds, and an event that cannot be shaped ends the stream with a
+`stream_error` refusal frame instead of being cut or skipped.
 
 Attachment count is bounded by the signed `ui_browser_sessions` node policy.
 There is no daemon fallback value. Test fixtures must supply that policy too.

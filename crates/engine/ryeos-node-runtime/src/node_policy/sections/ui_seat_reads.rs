@@ -37,6 +37,11 @@ pub const MARKER_PROJECT_ROOT_OR_NULL: &str = "@session:project_root_or_null";
 /// Pin marker replaced by the session principal's id.
 pub const MARKER_PRINCIPAL_ID: &str = "@session:principal_id";
 
+/// Ref kind of a bound read service.
+pub const TARGET_KIND_SERVICE: &str = "service";
+/// Ref kind of an event stream route; the bare id is the route's own id.
+pub const TARGET_KIND_ROUTE: &str = "route";
+
 const SESSION_MARKER_PREFIX: &str = "@session:";
 const MAX_PARAMETER_NAME_BYTES: usize = 64;
 
@@ -140,7 +145,7 @@ impl Serialize for KeepPath {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SeatReadEntry {
-    /// One canonical `service:` ref.
+    /// One canonical `service:` ref, or the `route:` ref of an event stream.
     pub target: String,
     /// Classes this entry admits. A class absent from every entry for the
     /// target is refused.
@@ -169,7 +174,7 @@ pub struct SeatReadEntry {
 impl SeatReadEntry {
     fn validate(&self, index: usize) -> Result<()> {
         let at = format!("ui_seat_reads.reads[{index}]");
-        validate_service_ref(&self.target).with_context(|| format!("{at}.target"))?;
+        validate_target_ref(&self.target).with_context(|| format!("{at}.target"))?;
         if self.classes.is_empty() {
             bail!("{at} names no class");
         }
@@ -313,14 +318,17 @@ impl UiSeatReadsPolicy {
     }
 }
 
-fn validate_service_ref(target: &str) -> Result<()> {
+/// A target is the plain canonical ref of what a seat reads: a `service:` ref
+/// for a bound read, or a `route:` ref (the route's own id) for an event
+/// stream a seat opens.
+fn validate_target_ref(target: &str) -> Result<()> {
     let parsed = ryeos_engine::canonical_ref::CanonicalRef::parse(target)
         .map_err(|error| anyhow::anyhow!("not a canonical ref: {error}"))?;
-    if parsed.kind != "service" {
-        bail!("`{target}` is not a service ref");
+    if parsed.kind != TARGET_KIND_SERVICE && parsed.kind != TARGET_KIND_ROUTE {
+        bail!("`{target}` is neither a service ref nor a route ref");
     }
     if parsed.suffix.is_some() || parsed.to_string() != target {
-        bail!("`{target}` is not a plain canonical service ref");
+        bail!("`{target}` is not a plain canonical ref");
     }
     Ok(())
 }
@@ -442,6 +450,27 @@ mod tests {
             "service:node/status@t:2026",
             "service:node//status",
             "",
+        ] {
+            let mut bad = entry();
+            bad["target"] = json!(target);
+            assert!(parse(body(vec![bad])).is_err(), "target {target}");
+        }
+    }
+
+    #[test]
+    fn a_stream_route_is_a_plain_route_ref_target() {
+        let mut stream = entry();
+        stream["target"] = json!("route:ui/events/chain");
+        let parsed = parse(body(vec![stream])).unwrap();
+        let policy = parsed.as_any().downcast_ref::<UiSeatReadsPolicy>().unwrap();
+        assert_eq!(policy.entries_for("route:ui/events/chain").len(), 1);
+        assert_eq!(policy.entries_for("service:ui/events/chain").len(), 0);
+        for target in [
+            "route:",
+            "route:ui//events",
+            "route:../chain",
+            "route:ui/events/chain@t:2026",
+            "stream:ui/events/chain",
         ] {
             let mut bad = entry();
             bad["target"] = json!(target);

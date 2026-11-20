@@ -169,29 +169,54 @@ impl Shaping<'_> {
     /// Keep only the fields the entry names, then refuse a result that is
     /// larger than its bounds. Nothing is ever cut to fit.
     pub fn apply(&self, result: Value) -> Result<Value, SeatReadRefusal> {
-        let paths: Vec<&[KeepSegment]> =
-            self.entry.keep.iter().map(|path| path.segments()).collect();
-        let Some(kept) = project(&result, &paths) else {
-            return Err(SeatReadRefusal::NothingDisclosable {
-                target: self.target.clone(),
-            });
-        };
-        if longest_array(&kept) > usize::try_from(self.entry.max_items).unwrap_or(usize::MAX) {
-            return Err(SeatReadRefusal::TooManyItems {
-                target: self.target.clone(),
-            });
+        shape(&self.target, self.entry, result)
+    }
+
+    /// The same shaping with its own copy of the entry, for a disclosure that
+    /// outlives the call which admitted it, such as an event stream.
+    pub fn detach(&self) -> DetachedShaping {
+        DetachedShaping {
+            target: self.target.clone(),
+            entry: self.entry.clone(),
         }
-        let fits = serde_json::to_vec(&kept)
-            .ok()
-            .and_then(|bytes| u64::try_from(bytes.len()).ok())
-            .is_some_and(|length| length <= self.entry.max_result_bytes);
-        if fits {
-            Ok(kept)
-        } else {
-            Err(SeatReadRefusal::ResultTooLarge {
-                target: self.target.clone(),
-            })
-        }
+    }
+}
+
+/// A [`Shaping`] that owns its entry. It applies exactly the same rule.
+#[derive(Debug, Clone)]
+pub struct DetachedShaping {
+    target: String,
+    entry: SeatReadEntry,
+}
+
+impl DetachedShaping {
+    pub fn apply(&self, result: Value) -> Result<Value, SeatReadRefusal> {
+        shape(&self.target, &self.entry, result)
+    }
+}
+
+fn shape(target: &str, entry: &SeatReadEntry, result: Value) -> Result<Value, SeatReadRefusal> {
+    let paths: Vec<&[KeepSegment]> = entry.keep.iter().map(|path| path.segments()).collect();
+    let Some(kept) = project(&result, &paths) else {
+        return Err(SeatReadRefusal::NothingDisclosable {
+            target: target.to_owned(),
+        });
+    };
+    if longest_array(&kept) > usize::try_from(entry.max_items).unwrap_or(usize::MAX) {
+        return Err(SeatReadRefusal::TooManyItems {
+            target: target.to_owned(),
+        });
+    }
+    let fits = serde_json::to_vec(&kept)
+        .ok()
+        .and_then(|bytes| u64::try_from(bytes.len()).ok())
+        .is_some_and(|length| length <= entry.max_result_bytes);
+    if fits {
+        Ok(kept)
+    } else {
+        Err(SeatReadRefusal::ResultTooLarge {
+            target: target.to_owned(),
+        })
     }
 }
 

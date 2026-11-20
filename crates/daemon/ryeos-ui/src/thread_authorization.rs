@@ -96,7 +96,18 @@ pub(crate) fn authorize_exact_thread_subjects(
     if ctx.authenticated_origin_site_id.is_some() {
         return Err(HandlerError::NotFound);
     }
+    authorize_exact_thread_subjects_for(state, caller, thread_ids)
+}
 
+/// The subject check of [`authorize_exact_thread_subjects`] for a caller that
+/// has no handler context, such as an event stream opened by a browser
+/// session. The caller names the seat; the answer is the same signed-subject
+/// judgement, with missing and unauthorized subjects both `NotFound`.
+pub(crate) fn authorize_exact_thread_subjects_for(
+    state: &AppState,
+    caller: &SeatCaller,
+    thread_ids: &[&str],
+) -> Result<Vec<AuthoritativeThreadSubject>, HandlerError> {
     let subjects = state
         .state_store
         .authoritative_thread_subjects(thread_ids)

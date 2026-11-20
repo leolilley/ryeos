@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-20T02:24:27Z:d0f8ded8e6751a48b463d4b53c0a096ed7da6d497385c56e94c7417e8224af21:Bbi2k8SpexUuiXZviqemO7kvLqGdL9i+HHf+HZNj4YsGBea5bSvpZ1hcgDe5snNtb1Jz7HrPSzmZ/BWwgDgpCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-20T07:29:00Z:95fbf4d0f8ec4f2600c3d90dd31407aaa4abbc4a6fc99dc0197d5bf8263d29bc:X1B3WskDi3n40XOjBwc/doUCKvHqVbxcSdYHV8xRNHckM9nT2yQhsMXIG/eJBXxi2SDwXQ9JKVp2tBMBHJKbBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core profile: the substrate alone.
 schema: 1
 exact_bundles:
@@ -633,3 +633,34 @@ policies:
           - /invalid_declarations/*/code
         max_result_bytes: 1048576
         max_items: 1024
+      # The event streams a seat opens are named by their route. A frame is the
+      # event name beside the event record, and an entry keeps only the
+      # identifiers and live text a client reads. Ledger hashes, sequence
+      # numbers, stored payloads and error text are left out, and so is any
+      # field a later release adds until an entry names it.
+      - target: route:ui/events/chain
+        classes: [local_operator, hosted_principal]
+        keep:
+          - /event_type
+          - /payload/chain_root_id
+          - /payload/thread_id
+          - /payload/event_type
+          - /payload/payload/delta
+          - /payload/payload/tool_use_partial/delta
+          - /payload/code
+        max_result_bytes: 65536
+        max_items: 16
+      # The session stream carries thread hints. Thread lifecycle hints keep
+      # the thread, its event name, status and time. Activity hints keep only
+      # their kind, so no thread list rides on them.
+      - target: route:ui/events/session
+        classes: [local_operator, hosted_principal]
+        keep:
+          - /event_type
+          - /payload/kind
+          - /payload/thread_id
+          - /payload/event_type
+          - /payload/status
+          - /payload/updated_at
+        max_result_bytes: 4096
+        max_items: 4

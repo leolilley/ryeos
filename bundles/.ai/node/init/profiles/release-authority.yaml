@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-20T02:24:28Z:4bb6b21d42e545ad167de228aca6073c9de922b4cf040022eaf10f3218491920:BwRMs3154e8YYW4ubwZ8cyGZXq1mpTapfZrmngTFZCZCjqPwLB98ofOPXn9bpTNNSmjWnAylmHTlShvzu897Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-20T07:29:00Z:caad2067b20e21de0402f0e049de9edf06f718410647be446bb18f6c4bea4875:4MoD3uy1xWqnPpPp6Yuidt0PhihMUgdbr/iobhC1hKm+rH1//dRqedLvVh/VTSPeVwH5gSsLWvJtvTCZ8fx1Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - bundle-release
@@ -704,3 +704,34 @@ policies:
           - /invalid_declarations/*/code
         max_result_bytes: 1048576
         max_items: 1024
+      # The event streams a seat opens are named by their route. A frame is the
+      # event name beside the event record, and an entry keeps only the
+      # identifiers and live text a client reads. Ledger hashes, sequence
+      # numbers, stored payloads and error text are left out, and so is any
+      # field a later release adds until an entry names it.
+      - target: route:ui/events/chain
+        classes: [local_operator, hosted_principal]
+        keep:
+          - /event_type
+          - /payload/chain_root_id
+          - /payload/thread_id
+          - /payload/event_type
+          - /payload/payload/delta
+          - /payload/payload/tool_use_partial/delta
+          - /payload/code
+        max_result_bytes: 65536
+        max_items: 16
+      # The session stream carries thread hints. Thread lifecycle hints keep
+      # the thread, its event name, status and time. Activity hints keep only
+      # their kind, so no thread list rides on them.
+      - target: route:ui/events/session
+        classes: [local_operator, hosted_principal]
+        keep:
+          - /event_type
+          - /payload/kind
+          - /payload/thread_id
+          - /payload/event_type
+          - /payload/status
+          - /payload/updated_at
+        max_result_bytes: 4096
+        max_items: 4
