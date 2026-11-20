@@ -123,7 +123,7 @@ fn exit_with_the_pipe_still_open_in_a_grandchild_does_not_wait_for_the_pipe() {
 #[test]
 fn dropping_a_running_process_wakes_and_joins_its_drains() {
     let process = lillux::spawn(shell("printf up; sleep 30")).unwrap();
-    let pid = process.pid();
+    let pid = process.pid;
     let started = Instant::now();
     drop(process);
     assert!(started.elapsed() < Duration::from_secs(5));
