@@ -1,0 +1,621 @@
+{
+ "format": 1,
+ "scene": "timeline",
+ "provenance": "synthetic",
+ "clock_ms": 1794494400000,
+ "session": {
+  "session_id": "S-fixture",
+  "project_path": "/home/fixture/ryeos-next",
+  "thread_id": "fixture-seat",
+  "chain_root_id": "fixture-chain"
+ },
+ "viewport": {
+  "width": 0,
+  "height": 0,
+  "device_pixel_ratio": 1.0
+ },
+ "surface": {
+  "root_ref": "surface:ryeos/ui/workbench",
+  "title": "Workbench",
+  "current": "first",
+  "definition": {
+   "name": "workbench",
+   "title": "Workbench",
+   "version": "1.0.0",
+   "tiling": {
+    "mode": "master_stack",
+    "master": {
+     "side": "left",
+     "arrange": "vertical",
+     "ratio": 0.6,
+     "count": 1
+    },
+    "stack": {
+     "arrange": "vertical"
+    },
+    "insert": "end"
+   },
+   "tiles": [
+    "view:ryeos/thread/conversation"
+   ],
+   "views": {
+    "view:ryeos/threads/history": {
+     "from_bundle": "views/ryeos/threads/history.yaml"
+    },
+    "view:ryeos/development/execution": {
+     "from_bundle": "views/ryeos/development/execution.yaml",
+     "patch": [
+      {
+       "path": "/sources/execution/params/thread_id",
+       "value": "T-build-root"
+      }
+     ]
+    },
+    "view:ryeos/chain/timeline": {
+     "from_bundle": "views/ryeos/chain/timeline.yaml"
+    },
+    "view:ryeos/thread/conversation": {
+     "from_bundle": "views/ryeos/thread/transcript.yaml",
+     "patch": [
+      {
+       "path": "/title",
+       "copy_from": {
+        "from_bundle": "views/ryeos/thread/conversation.yaml",
+        "path": "/title"
+       }
+      },
+      {
+       "path": "/input",
+       "copy_from": {
+        "from_bundle": "views/ryeos/thread/conversation.yaml",
+        "path": "/input"
+       }
+      },
+      {
+       "path": "/sources/default/params/chain_root_id",
+       "value": "chain-demo"
+      }
+     ]
+    },
+    "view:ryeos/schedules/list": {
+     "from_bundle": "views/ryeos/schedules/list.yaml"
+    },
+    "view:ryeos/surfaces/list": {
+     "from_bundle": "views/ryeos/surfaces/list.yaml"
+    }
+   }
+  }
+ },
+ "shared": {
+  "binding_attachment_id": "shared-attachment",
+  "binding_generation": 2,
+  "binding_digest": "shared-binding",
+  "root_ref": "config:fixture/presentation",
+  "root_generation": "shared-generation",
+  "project_path": "/home/fixture/ryeos-next",
+  "subject": {
+   "kind": "unregistered_project"
+  },
+  "posture": "observation_only",
+  "binding_request_bounds": {
+   "max_request_bytes": 4096,
+   "max_input_bytes": 1024,
+   "max_seat_append_bytes": 65536
+  },
+  "presentation": {
+   "definition": {
+    "kind": "shared_presentation",
+    "config": {
+     "category": "ui",
+     "shared_presentation": {
+      "schema": 2,
+      "title": "Fixture",
+      "launcher": "launcher",
+      "dialogs": [
+       {
+        "id": "launcher",
+        "title": "Launch",
+        "view": "view:ryeos/ui/launcher"
+       }
+      ],
+      "capabilities": {
+       "sources": [],
+       "affordances": []
+      }
+     }
+    }
+   },
+   "views": {
+    "view:ryeos/ui/launcher": {
+     "from_bundle": "views/ryeos/ui/launcher.yaml"
+    }
+   }
+  }
+ },
+ "steps": [
+  {
+   "do": "toggle_timeline_fold"
+  }
+ ],
+ "sources": [
+  {
+   "view": "view:ryeos/thread/conversation",
+   "channel": "default",
+   "service": "service:ui/ryeos-ui/timeline/thread",
+   "params": {
+    "chain_root_id": "chain-demo",
+    "limit": "200"
+   },
+   "response": {
+    "chain_root_id": "chain-demo",
+    "highest_chain_seq": 40,
+    "items": [
+     {
+      "duration_s": 124,
+      "exchange": "x0",
+      "id": "rc:e0",
+      "item": "recap",
+      "members": [
+       {
+        "counts_as": null,
+        "exchange": "x0",
+        "id": "e0",
+        "item": "entry",
+        "parent": null,
+        "seq": [
+         1,
+         1
+        ],
+        "slots": {
+         "detail": "docs/overview.md",
+         "headline": "Read"
+        },
+        "state": null,
+        "thread": "T-7f3a",
+        "tone": null,
+        "ts": [
+         "t",
+         "t"
+        ],
+        "type": "activity"
+       },
+       {
+        "counts_as": null,
+        "exchange": "x0",
+        "id": "e1",
+        "item": "entry",
+        "parent": null,
+        "seq": [
+         1,
+         1
+        ],
+        "slots": {
+         "detail": "src/lib.rs",
+         "headline": "Read"
+        },
+        "state": null,
+        "thread": "T-7f3a",
+        "tone": null,
+        "ts": [
+         "t",
+         "t"
+        ],
+        "type": "activity"
+       }
+      ],
+      "seq": 12,
+      "work": 7
+     },
+     {
+      "counts_as": null,
+      "exchange": "x1",
+      "id": "mk1",
+      "item": "entry",
+      "parent": null,
+      "seq": [
+       1,
+       1
+      ],
+      "slots": {
+       "headline": "continued in a new thread"
+      },
+      "state": "noted",
+      "thread": "T-7f3a",
+      "tone": null,
+      "ts": [
+       "t",
+       "t"
+      ],
+      "type": "marker"
+     },
+     {
+      "counts_as": null,
+      "exchange": "x1",
+      "id": "m1",
+      "item": "entry",
+      "parent": null,
+      "seq": [
+       1,
+       1
+      ],
+      "slots": {
+       "body": "Check why the fetch of the release notes keeps failing, and fix it if the cause is ours."
+      },
+      "state": null,
+      "thread": "T-7f3a",
+      "tone": null,
+      "ts": [
+       "t",
+       "t"
+      ],
+      "type": "message"
+     },
+     {
+      "counts_as": null,
+      "exchange": "x1",
+      "id": "t1",
+      "item": "entry",
+      "parent": null,
+      "seq": [
+       1,
+       1
+      ],
+      "slots": {
+       "body": "The failure looks like a timeout rather than a missing page. I should read the retry settings before changing anything."
+      },
+      "state": null,
+      "thread": "T-7f3a",
+      "tone": null,
+      "ts": [
+       "t",
+       "t"
+      ],
+      "type": "thought"
+     },
+     {
+      "counts_as": null,
+      "exchange": "x1",
+      "id": "p1",
+      "item": "entry",
+      "parent": null,
+      "seq": [
+       1,
+       1
+      ],
+      "slots": {
+       "body": "I will fetch the page once more to see the failure myself, then read the retry settings.\nIf the cause is the timeout I will say so before I change it."
+      },
+      "state": null,
+      "thread": "T-7f3a",
+      "tone": null,
+      "ts": [
+       "t",
+       "t"
+      ],
+      "type": "prose"
+     },
+     {
+      "counts_as": null,
+      "exchange": "x1",
+      "id": "a1",
+      "item": "entry",
+      "parent": null,
+      "seq": [
+       1,
+       1
+      ],
+      "slots": {
+       "detail": "docs.example.org/releases",
+       "headline": "Fetching the release notes"
+      },
+      "state": "running",
+      "thread": "T-7f3a",
+      "tone": null,
+      "ts": [
+       "t",
+       "t"
+      ],
+      "type": "activity"
+     },
+     {
+      "counts_as": null,
+      "exchange": "x1",
+      "id": "a2",
+      "item": "entry",
+      "parent": null,
+      "seq": [
+       1,
+       1
+      ],
+      "slots": {
+       "detail": "src/net/retry.rs",
+       "headline": "Read"
+      },
+      "state": "done",
+      "thread": "T-7f3a",
+      "tone": "good",
+      "ts": [
+       "t",
+       "t"
+      ],
+      "type": "activity"
+     },
+     {
+      "counts_as": null,
+      "exchange": "x1",
+      "id": "a3",
+      "item": "entry",
+      "parent": null,
+      "seq": [
+       1,
+       1
+      ],
+      "slots": {
+       "detail": "docs.example.org/releases: timed out after 30 s",
+       "headline": "Fetch"
+      },
+      "state": "failed",
+      "thread": "T-7f3a",
+      "tone": "danger",
+      "ts": [
+       "t",
+       "t"
+      ],
+      "type": "activity"
+     },
+     {
+      "counts_as": null,
+      "exchange": "x1",
+      "id": "a4",
+      "item": "entry",
+      "parent": null,
+      "seq": [
+       1,
+       1
+      ],
+      "slots": {
+       "badge": "412 lines",
+       "detail": "crates/net/src/client.rs",
+       "headline": "Read"
+      },
+      "state": "done",
+      "thread": "T-7f3a",
+      "tone": "good",
+      "ts": [
+       "t",
+       "t"
+      ],
+      "type": "activity"
+     },
+     {
+      "counts_as": null,
+      "exchange": "x1",
+      "id": "l1",
+      "item": "entry",
+      "parent": null,
+      "seq": [
+       1,
+       1
+      ],
+      "slots": {
+       "headline": "review",
+       "target": "T-e84f17c6"
+      },
+      "state": "completed",
+      "thread": "T-7f3a",
+      "tone": "good",
+      "ts": [
+       "t",
+       "t"
+      ],
+      "type": "link"
+     },
+     {
+      "counts_as": null,
+      "exchange": "x1",
+      "id": "a5",
+      "item": "entry",
+      "parent": null,
+      "seq": [
+       1,
+       1
+      ],
+      "slots": {
+       "detail": "src/**/*.rs",
+       "headline": "Searched the project for every place that sets a request timeout, including the defaults in the shared client configuration and the per-service overrides that the build script generates"
+      },
+      "state": "done",
+      "thread": "T-7f3a",
+      "tone": "good",
+      "ts": [
+       "t",
+       "t"
+      ],
+      "type": "activity"
+     },
+     {
+      "counts_as": null,
+      "exchange": "x1",
+      "id": "p2",
+      "item": "entry",
+      "parent": null,
+      "seq": [
+       1,
+       1
+      ],
+      "slots": {
+       "body": "The retry loop waits a fixed interval between attempts and gives up after the third one, so a slow response that would have arrived on the fourth is reported as a failure. Raising the limit helps only when the server is merely slow; when it is refusing connections the same change just delays the error. The retry loop waits a fixed interval between attempts and gives up after the third one, so a slow response that would have arrived on the fourth is reported as a failure. Raising the limit helps only when the server is merely slow; when it is refusing connections the same change just delays the error. The retry loop waits a fixed interval between attempts and gives up after the third one, so a slow response that would have arrived on the fourth is reported as a failure. Raising the limit helps only when the server is merely slow; when it is refusing connections the same change just delays the error. "
+      },
+      "state": null,
+      "thread": "T-7f3a",
+      "tone": null,
+      "ts": [
+       "t",
+       "t"
+      ],
+      "type": "prose"
+     },
+     {
+      "counts_as": null,
+      "exchange": "x1",
+      "id": "k0",
+      "item": "entry",
+      "parent": null,
+      "seq": [
+       1,
+       1
+      ],
+      "slots": {
+       "detail": "src/net/retry.rs",
+       "headline": "Write a file in the project"
+      },
+      "state": "approved",
+      "thread": "T-7f3a",
+      "tone": null,
+      "ts": [
+       "t",
+       "t"
+      ],
+      "type": "ask"
+     },
+     {
+      "counts_as": null,
+      "exchange": "x1",
+      "id": "o1",
+      "item": "entry",
+      "parent": null,
+      "seq": [
+       1,
+       1
+      ],
+      "slots": {
+       "headline": "Turn finished",
+       "reason": "Three steps, one failed"
+      },
+      "state": "completed",
+      "thread": "T-7f3a",
+      "tone": "good",
+      "ts": [
+       "t",
+       "t"
+      ],
+      "type": "outcome"
+     },
+     {
+      "counts_as": null,
+      "exchange": "x1",
+      "id": "k1",
+      "item": "entry",
+      "parent": null,
+      "seq": [
+       1,
+       1
+      ],
+      "slots": {
+       "accept_allowed": "true",
+       "approval_id": "approval-k1",
+       "detail": "~/.config/example/settings.yaml",
+       "headline": "Write a file outside the workspace",
+       "request_digest": "digest-k1"
+      },
+      "state": "pending",
+      "thread": "T-7f3a",
+      "tone": "warn",
+      "ts": [
+       "t",
+       "t"
+      ],
+      "type": "ask"
+     },
+     {
+      "headline": "3 reads · 2 searches",
+      "id": "cl:c1",
+      "item": "cluster",
+      "members": [
+       {
+        "counts_as": null,
+        "exchange": "x1",
+        "id": "c1",
+        "parent": null,
+        "seq": [
+         1,
+         1
+        ],
+        "slots": {
+         "detail": "src/config.rs",
+         "headline": "Read"
+        },
+        "state": "done",
+        "thread": "T-7f3a",
+        "tone": "good",
+        "ts": [
+         "t",
+         "t"
+        ],
+        "type": "activity"
+       },
+       {
+        "counts_as": null,
+        "exchange": "x1",
+        "id": "c2",
+        "parent": null,
+        "seq": [
+         1,
+         1
+        ],
+        "slots": {
+         "detail": "src/net/mod.rs",
+         "headline": "Read"
+        },
+        "state": "done",
+        "thread": "T-7f3a",
+        "tone": "good",
+        "ts": [
+         "t",
+         "t"
+        ],
+        "type": "activity"
+       },
+       {
+        "counts_as": null,
+        "exchange": "x1",
+        "id": "c3",
+        "parent": null,
+        "seq": [
+         1,
+         1
+        ],
+        "slots": {
+         "detail": "retry",
+         "headline": "Searched"
+        },
+        "state": "done",
+        "thread": "T-7f3a",
+        "tone": "good",
+        "ts": [
+         "t",
+         "t"
+        ],
+        "type": "activity"
+       }
+      ]
+     }
+    ],
+    "lane": {
+     "entry": "k1",
+     "label": "Waiting for approval"
+    },
+    "next_limit": null,
+    "older": 0,
+    "summary": {
+     "input_tokens": 184220,
+     "output_tokens": 21840,
+     "spend_usd": 1.62,
+     "status": "running",
+     "turns": 7
+    },
+    "timeline_contract": "ryeos.timeline.v1"
+   }
+  }
+ ]
+}
