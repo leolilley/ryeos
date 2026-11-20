@@ -6500,6 +6500,30 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_hinted_runtime_epoch_cut_command_parses_and_validates_without_project_heads() {
+        use clap::Parser as _;
+        let hinted = ryeos_app::execution_history_reset::runtime_epoch_cutover_command(141, 142);
+        let words = hinted
+            .strip_prefix("ryeos node reset execution-history ")
+            .expect("the hint names the reset verb")
+            .split_whitespace();
+        let args = ExecutionHistoryResetArgs::try_parse_from(words).unwrap();
+        args.validate().unwrap();
+        assert!(args.confirm && !args.include_project_heads && !args.confirm_project_heads);
+        assert_eq!(
+            (args.schema_cut_from, args.schema_cut_to),
+            (Some(141), Some(142))
+        );
+        // The epoch-free hint is valid on its own too.
+        let plain = ExecutionHistoryResetArgs::try_parse_from(["--confirm"]).unwrap();
+        plain.validate().unwrap();
+        assert_eq!(
+            ryeos_app::execution_history_reset::EXECUTION_HISTORY_RESET_COMMAND,
+            "ryeos node reset execution-history --confirm"
+        );
+    }
+
     fn policy_generation_reset_args(confirm: bool) -> NodePolicyGenerationResetArgs {
         NodePolicyGenerationResetArgs {
             source: PathBuf::from("/usr/share/ryeos"),

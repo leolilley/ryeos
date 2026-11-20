@@ -2725,7 +2725,8 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // database and which the reset does not touch: installed external_execution,
 // runtime_snapshot_production and runtime_snapshot_qualification documents
 // signed under a retired schema are set aside as stale and reported by
-// `ryeos node doctor`; retire and compose them again after the reset. A change
+// `ryeos node doctor`; run `ryeos node external-execution retire
+// <section>/<id>` for each and compose it again after the reset. A change
 // to the binding schemas or to `RETIRED_BINDING_SCHEMAS` moves with this
 // constant. The same cut also carries the exact process identity: stored
 // `ExecutionProcessIdentity` and `ExactProcessIdentity` JSON (connector peer
@@ -6876,7 +6877,7 @@ fn incompatible_runtime_execution_schema(reason: String, predecessor: bool) -> a
     let guidance = predecessor.then(|| {
         format!(
             "{reason}; stop the daemon and run `{}` before restarting",
-            crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND
+            crate::execution_history_reset::EXECUTION_HISTORY_RESET_COMMAND
         )
     });
     let error = anyhow::Error::new(IncompatibleRuntimeExecutionSchema {
@@ -8386,7 +8387,10 @@ fn incompatible_runtime_operator_schema(stored: u32) -> anyhow::Error {
     let guidance = mismatch.is_predecessor_epoch().then(|| {
         format!(
             "{mismatch}; stop the daemon and run `{}` before restarting",
-            crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND
+            crate::execution_history_reset::runtime_epoch_cutover_command(
+                mismatch.stored,
+                mismatch.current
+            )
         )
     });
     let error = anyhow::Error::new(mismatch);
@@ -29946,7 +29950,7 @@ mod tests {
         let error = crate::runtime_db::test_native::live_open_refusal(&path);
         assert!(
             !format!("{error:#}")
-                .contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
+                .contains(crate::execution_history_reset::EXECUTION_HISTORY_RESET_COMMAND)
         );
         let table_count: i64 = crate::runtime_db::test_native::read_existing(&path, |read_only| {
             Ok(read_only.query_row(
@@ -30020,7 +30024,7 @@ mod tests {
         assert!(message.contains(&format!(
             "current schema_epoch={PROJECT_AUTHORITY_SCHEMA_EPOCH}"
         )));
-        assert!(message.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND));
+        assert!(message.contains(crate::execution_history_reset::EXECUTION_HISTORY_RESET_COMMAND));
         assert!(!message.contains("missing field `base_snapshot_hash`"));
     }
 
@@ -30040,9 +30044,7 @@ mod tests {
             "stored schema_epoch={}",
             PROJECT_AUTHORITY_SCHEMA_EPOCH + 1
         )));
-        assert!(
-            !message.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
-        );
+        assert!(!message.contains(crate::execution_history_reset::EXECUTION_HISTORY_RESET_COMMAND));
         assert!(!requires_execution_schema_cutover(&error));
         assert!(is_newer_execution_schema(&error));
     }
@@ -30064,9 +30066,7 @@ mod tests {
             "stored schema_epoch={}",
             RUNTIME_OPERATOR_SCHEMA_EPOCH + 1
         )));
-        assert!(
-            !message.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
-        );
+        assert!(!message.contains(crate::execution_history_reset::EXECUTION_HISTORY_RESET_COMMAND));
         assert_eq!(
             crate::runtime_db::test_native::read_existing(&path, |conn| {
                 Ok(conn.query_row("PRAGMA application_id", [], |row| row.get::<_, u32>(0))?)
@@ -30086,9 +30086,7 @@ mod tests {
         let error = crate::runtime_db::test_native::live_open_refusal(&path);
         let message = format!("{error:#}");
         assert!(message.contains("refusing to classify or reset unowned store"));
-        assert!(
-            !message.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
-        );
+        assert!(!message.contains(crate::execution_history_reset::EXECUTION_HISTORY_RESET_COMMAND));
         assert_eq!(
             crate::runtime_db::test_native::read_existing(&path, |conn| {
                 Ok(conn.query_row(
@@ -30130,7 +30128,7 @@ mod tests {
         assert!(message.contains(&format!(
             "current schema_version={LAUNCH_METADATA_SCHEMA_VERSION}"
         )));
-        assert!(message.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND));
+        assert!(message.contains(crate::execution_history_reset::EXECUTION_HISTORY_RESET_COMMAND));
         assert!(!message.contains("missing field `confinement`"));
         assert!(!message.contains("unknown field"));
     }
@@ -30150,9 +30148,7 @@ mod tests {
             "stored schema_version={}",
             LAUNCH_METADATA_SCHEMA_VERSION + 1
         )));
-        assert!(
-            !message.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
-        );
+        assert!(!message.contains(crate::execution_history_reset::EXECUTION_HISTORY_RESET_COMMAND));
         assert!(!requires_execution_schema_cutover(&error));
         assert!(is_newer_execution_schema(&error));
     }
@@ -33240,7 +33236,7 @@ mod tests {
         let error = crate::runtime_db::test_native::live_open_refusal(&path);
         assert!(
             !format!("{error:#}")
-                .contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
+                .contains(crate::execution_history_reset::EXECUTION_HISTORY_RESET_COMMAND)
         );
         crate::runtime_db::test_native::read_existing(&path, |conn| {
             let added: i64 = conn
@@ -33256,6 +33252,36 @@ mod tests {
     }
 
     #[test]
+    fn a_predecessor_epoch_refusal_names_the_exact_heads_free_cut() {
+        let stored = RUNTIME_OPERATOR_SCHEMA_EPOCH - 1;
+        let message = format!("{:#}", incompatible_runtime_operator_schema(stored));
+        let expected = format!(
+            "ryeos node reset execution-history --confirm --schema-cut-from {stored} \
+             --schema-cut-to {RUNTIME_OPERATOR_SCHEMA_EPOCH}"
+        );
+        assert!(message.contains(&format!("`{expected}`")), "{message}");
+        assert!(!message.contains("--include-project-heads"), "{message}");
+        assert!(!message.contains("--confirm-project-heads"), "{message}");
+        // A successor store is not a predecessor: no command is named.
+        let successor = format!(
+            "{:#}",
+            incompatible_runtime_operator_schema(RUNTIME_OPERATOR_SCHEMA_EPOCH + 1)
+        );
+        assert!(!successor.contains("execution-history"), "{successor}");
+        // A launch-contract mismatch inside one epoch names the reset
+        // without the epoch pair, which would not cross it.
+        let execution = format!(
+            "{:#}",
+            incompatible_runtime_execution_schema("stored schema_version=1".into(), true)
+        );
+        assert!(
+            execution.contains("`ryeos node reset execution-history --confirm`"),
+            "{execution}"
+        );
+        assert!(!execution.contains("project-heads"), "{execution}");
+    }
+
+    #[test]
     fn open_rejects_predecessor_runtime_shape_without_decoding_rows() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
@@ -33268,7 +33294,7 @@ mod tests {
         // named, and its rows are still never decoded.
         assert!(
             format!("{error:#}")
-                .contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
+                .contains(crate::execution_history_reset::EXECUTION_HISTORY_RESET_COMMAND)
         );
         crate::runtime_db::test_native::read_existing(&path, |conn| {
             let child_links: i64 = conn
@@ -33513,7 +33539,7 @@ mod tests {
             "{refusal}"
         );
         assert!(
-            refusal.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND),
+            refusal.contains(crate::execution_history_reset::EXECUTION_HISTORY_RESET_COMMAND),
             "{refusal}"
         );
     }
@@ -33533,7 +33559,7 @@ mod tests {
             "{refusal}"
         );
         assert!(
-            refusal.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND),
+            refusal.contains(crate::execution_history_reset::EXECUTION_HISTORY_RESET_COMMAND),
             "{refusal}"
         );
     }
@@ -33566,7 +33592,7 @@ mod tests {
             "{refusal}"
         );
         assert!(
-            refusal.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND),
+            refusal.contains(crate::execution_history_reset::EXECUTION_HISTORY_RESET_COMMAND),
             "{refusal}"
         );
     }
@@ -33584,7 +33610,7 @@ mod tests {
         // named, and its rows are still never decoded.
         assert!(
             format!("{error:#}")
-                .contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
+                .contains(crate::execution_history_reset::EXECUTION_HISTORY_RESET_COMMAND)
         );
         crate::runtime_db::test_native::read_existing(&path, |conn| {
             let follows: i64 = conn

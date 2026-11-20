@@ -758,7 +758,26 @@ fn scheduler_settlement_pending(error: anyhow::Error, stage: &str) -> anyhow::Er
     ))
 }
 
-pub const EXECUTION_SCHEMA_CUTOVER_COMMAND: &str =
+/// The reset every refusal of a predecessor runtime store names. It retires
+/// execution history only: project HEADs are untouched, so candidates retained
+/// against them keep their base fences.
+pub const EXECUTION_HISTORY_RESET_COMMAND: &str = "ryeos node reset execution-history --confirm";
+
+/// The reset for a runtime operator-epoch cut, bound to the exact stored and
+/// current epochs. `--schema-cut-from` and `--schema-cut-to` are not required
+/// for the reset to cross the cut; they make the authorization exact (a store
+/// at another epoch is refused) and a repeat idempotent. No epoch cut needs
+/// project HEADs retired.
+pub fn runtime_epoch_cutover_command(stored: u32, current: u32) -> String {
+    format!(
+        "{EXECUTION_HISTORY_RESET_COMMAND} --schema-cut-from {stored} --schema-cut-to {current}"
+    )
+}
+
+/// The reset for a predecessor immutable object schema in authoritative
+/// state, where principal and deployed project HEADs name objects of the
+/// predecessor schema and are retired with the history.
+pub const OBJECT_SCHEMA_CUTOVER_COMMAND: &str =
     "ryeos node reset execution-history --include-project-heads --confirm --confirm-project-heads";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -419,7 +419,7 @@ fn require_no_live_execution(
          discarding provider-call idempotence keys now could repeat a provider call. Stop the daemon and run `{}` instead",
         live_chains.len(),
         unsettled_provider_attempts,
-        crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND
+        crate::execution_history_reset::EXECUTION_HISTORY_RESET_COMMAND
     );
     Ok(())
 }

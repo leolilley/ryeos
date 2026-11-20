@@ -813,7 +813,7 @@ fn immutable_execution_schema_mismatch_gets_the_explicit_cutover_command() {
     .context("decode current snapshot");
     let error = with_execution_schema_cutover_hint(mismatch);
     let rendered = format!("{error:#}");
-    assert!(rendered.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND));
+    assert!(rendered.contains(crate::execution_history_reset::OBJECT_SCHEMA_CUTOVER_COMMAND));
     assert!(
         error
             .chain()
@@ -823,7 +823,7 @@ fn immutable_execution_schema_mismatch_gets_the_explicit_cutover_command() {
     let unrelated = with_execution_schema_cutover_hint(anyhow!("untrusted signed head"));
     assert!(
         !format!("{unrelated:#}")
-            .contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
+            .contains(crate::execution_history_reset::OBJECT_SCHEMA_CUTOVER_COMMAND)
     );
 
     let newer = with_execution_schema_cutover_hint(anyhow::Error::new(
@@ -831,7 +831,7 @@ fn immutable_execution_schema_mismatch_gets_the_explicit_cutover_command() {
     ));
     assert!(
         !format!("{newer:#}")
-            .contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
+            .contains(crate::execution_history_reset::OBJECT_SCHEMA_CUTOVER_COMMAND)
     );
 }
 

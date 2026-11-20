@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-20T05:49:16Z:42b7e53377b858bd548f466a8bc8e17948c6f56d47a97ae291f2a129505f69c9:2YVPFGjGeQxgyiKBugdai5+Y6gMF1jLCjAmymzA6fYUXPmey7jYvBjFDUGNBTkjOblmzqPDmma43U0TXhGyYCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-20T07:30:31Z:dea2f7dbea4bb4bdc95b5083e23ee6e33e0d7af10eea1feec9cb799e82ccdc2d:ThOrwbKo6i+y3p6+o6AJav8DHMqdSjjiJx/5A40mNpdMB1/NngElzEKCQt1PUIBuKDRgVfnnwlLsZ/+fXUBdBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -338,16 +338,22 @@ compose the binding again. Recompose skips and lists each stale id with this
 cure; see [`retire`](#ryeos-node-external-execution-retire).
 
 Operator note for the runtime schema cut to epoch 142: every node must run
-`ryeos node reset execution-history --schema-cut-from 141 --schema-cut-to 142`
+`ryeos node reset execution-history --confirm --schema-cut-from 141 --schema-cut-to 142`
 on its next upgrade, because retained binding generations in the runtime
-database embed the binding document and earlier schemas no longer validate. The
-reset covers the runtime database only. Node-config items live outside it and
-the reset does not touch them: installed `external_execution` bindings,
+database embed the binding document and earlier schemas no longer validate.
+This is the command the daemon's start refusal names, with the stored and
+current epochs filled in. It does not retire project HEADs, so candidates
+retained against them keep their base fences; no epoch cut needs
+`--include-project-heads`. The epoch pair is optional for the reset to cross
+the cut: it makes the authorization exact and a repeat idempotent. The reset
+covers the runtime database only. Node-config items live outside it and the
+reset does not touch them: installed `external_execution` bindings,
 `runtime_snapshot_production` and `runtime_snapshot_qualification` documents
 signed under a retired schema stay on disk and are reported as stale by
-`ryeos node doctor` until you retire them and compose them again (secret
-handles are carried by the compose, so provision again only what compose
-reports missing).
+`ryeos node doctor` until you run `ryeos node external-execution retire
+<section>/<id>` for each and compose them again. Retire reports the secret
+handle each carried; compose names a fresh credential generation, so provision
+what compose reports missing.
 
 The `external_capacity` and `credential_profiles` rows ask the running daemon
 (`service:external-execution/status`, a 10 s deadline) what still holds

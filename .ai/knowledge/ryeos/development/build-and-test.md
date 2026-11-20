@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-19T05:14:40Z:cddab1257bce3d33326ce1259cf74021508691ce3abfa0517c5c3ffd4e6dd615:6JLqKh4xT6r3AcWwfo7CnB0K/8s6MpsIMiFagVyAPkDdh/SBL0G7qKLwhFFCHvEoP05HGZANLnrLShQJj/teBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-20T07:30:31Z:9e35dbcc833087b8fcebc623507450e26c9ca9e7189294438f81d972e3717282:4Zj3VeVRvxnhCMOI6fYDUt+Xw1BRO5WvUJ27zcdIAnjLJJFVoY5qgX6YDVClzKSPW62QM/t5eFEtEuvvOJ30Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "build-and-test"
@@ -264,8 +264,10 @@ the cutover when the new binaries and bundles were already installed.
 
 A node whose runtime store is of an earlier operator epoch refuses to start
 and names the reset: with the daemon stopped, run
-`ryeos node reset execution-history --include-project-heads --confirm
---confirm-project-heads`, then `ryeos node allow-restart` and `ryeos start`.
+`ryeos node reset execution-history --confirm --schema-cut-from <stored>
+--schema-cut-to <current>` (the refusal prints the epochs), then
+`ryeos node allow-restart` and `ryeos start`. It does not retire project
+HEADs; no runtime epoch cut needs them.
 Epoch 140 is such a cut: any node whose store is at epoch 139 needs this
 reset on its next upgrade. The reset never decodes a predecessor
 store's rows. A change to a stored launch contract version without an epoch
