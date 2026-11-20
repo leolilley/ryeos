@@ -857,16 +857,19 @@ impl RetainedExternalExecutionBinding {
 
         let controller_tls_root_certificates_der_base64 =
             vec![STANDARD.encode(b"fixture controller TLS root")];
+        // The fixture declares what binding composition declares, so a change
+        // to which inputs are required reaches the fixture without an edit.
+        let sources = ryeos_external_execution_contract::operator_network_inputs();
         let provider_network_inputs = ExternalNetworkInputPolicy {
             resolver: ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
                 source: "/etc/resolv.conf".into(),
                 max_bytes: 64 * 1024,
-                required: true,
+                required: sources.resolver_required,
             },
             hosts: ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
                 source: "/etc/hosts".into(),
                 max_bytes: 64 * 1024,
-                required: true,
+                required: sources.hosts_required,
             },
         };
         let document = BindingDocument {
