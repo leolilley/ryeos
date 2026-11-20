@@ -603,6 +603,7 @@ fn capture_source_closure(
             "effective program attempted to pre-populate reserved source closure authority"
         );
     }
+    let pinned = project.is_some();
     let kind_schema = engine
         .kinds
         .get(kind)
@@ -815,7 +816,7 @@ fn capture_source_closure(
                 owner_signer_project_root(
                     roots,
                     resolution.root.source_space,
-                    project.is_some(),
+                    pinned,
                     content_root,
                 ),
             )?
