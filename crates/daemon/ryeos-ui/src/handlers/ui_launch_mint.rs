@@ -355,6 +355,12 @@ impl ResolvedComposition {
     }
 }
 
+/// Admission of one resolved `view_set` item body: the single composition
+/// validator the saved personal templates also use.
+fn admit_view_set(body: &Value) -> std::result::Result<(), String> {
+    ryeos_client_base::surface::view_sets::parse_view_set_item(body).map(|_| ())
+}
+
 /// One checked-generation composition boundary selected by the root's kind.
 /// A Surface embeds its View closure into its own body. A shared-presentation
 /// Config has its own validated declaration and an exact View closure and is
@@ -394,11 +400,13 @@ fn resolve_composition(
                     root,
                     content,
                     &mut surface,
+                    &admit_view_set,
                 ),
                 _ => ryeos_api::surface_views::embed_effective_surface_views_in_generation(
                     generation,
                     None,
                     &mut surface,
+                    &admit_view_set,
                 ),
             };
             for (view_ref, reason) in &embedded.failures {
@@ -557,13 +565,16 @@ pub fn revalidate_binding_authority(
         }
         .into());
     }
-    if current.surface != compiled.binding.surface || current.views != compiled.binding.views {
+    if current.surface != compiled.binding.surface
+        || current.views != compiled.binding.views
+        || current.view_sets != compiled.binding.view_sets
+    {
         return Err(HandlerError::Structured {
             code: "ui_binding_stale".to_string(),
             status: 409,
             body: serde_json::json!({
                 "code": "ui_binding_stale",
-                "error": "the effective surface/view authority changed after session mint",
+                "error": "the effective surface, view or view-set authority changed after session mint",
                 "retryable": false,
                 "remediation": "mint a new UI session"
             }),

@@ -1321,6 +1321,7 @@ fn closed_export(fixture: &SessionFixture, source: &Seat) -> serde_json::Value {
                     id: "empty".into(),
                     title: "Empty".into(),
                     root: None,
+                    ..Default::default()
                 },
                 focused_view: None,
                 mounts: vec![],

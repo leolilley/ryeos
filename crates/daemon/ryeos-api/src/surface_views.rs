@@ -10,8 +10,15 @@
 //! A view that fails to resolve embeds `{"degraded": <reason>}` under
 //! its ref — the surface still ships, and the pane renders the reason
 //! instead of the view. Per-view failures never fail the whole surface.
+//!
+//! A surface also names its view sets by `view_set:` ref. The same pass
+//! resolves each one and replaces the ref list with the resolved
+//! compositions, in the authored order, before the views they arrange are
+//! collected. A set that cannot be used (it does not resolve, is not signed
+//! by a trusted signer, fails admission, or repeats an earlier set's id) is
+//! left out with a typed [`ViewSetRefusal`]; the surface still ships.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -37,6 +44,16 @@ pub struct EffectiveUiItemIdentity {
 }
 
 impl EffectiveUiItemIdentity {
+    /// Whether the item's whole extends chain verified under a signer the
+    /// node trusts for it: bundle items and project items signed by a signer
+    /// pinned for the project. Everything else is unsigned or untrusted.
+    pub fn is_trusted(&self) -> bool {
+        matches!(
+            self.effective_trust_class,
+            TrustClass::TrustedBundle | TrustClass::TrustedProject
+        )
+    }
+
     fn from_effective_item(item: &EffectiveItem) -> Self {
         Self {
             canonical_ref: item.canonical_ref.clone(),
@@ -117,6 +134,75 @@ pub struct EmbeddedSurfaceIdentity {
     pub request_engine_generation_identity: String,
     pub surface: EffectiveUiItemIdentity,
     pub views: BTreeMap<String, EmbeddedViewIdentity>,
+    /// One entry per `view_set:` ref the surface names, keyed by the ref. A
+    /// set embedded in the surface is resolved; a set that was refused is a
+    /// degraded entry carrying its typed refusal.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub view_sets: BTreeMap<String, EmbeddedViewIdentity>,
+}
+
+/// Why a view set a surface names is not part of its effective presentation.
+/// Every case leaves the rest of the surface intact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ViewSetRefusal {
+    /// The ref is not a canonical item ref.
+    InvalidRef { reason: String },
+    /// The ref names no `view_set` item the engine can resolve.
+    Unresolved { reason: String },
+    /// The item resolved but is unsigned or signed by an untrusted signer.
+    Untrusted { trust_class: TrustClass },
+    /// The item's body is not a valid view-set composition.
+    Malformed { reason: String },
+    /// Another set earlier in the surface's list already has this id.
+    DuplicateId { id: String },
+}
+
+impl ViewSetRefusal {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidRef { .. } => "view_set_invalid_ref",
+            Self::Unresolved { .. } => "view_set_unresolved",
+            Self::Untrusted { .. } => "view_set_untrusted",
+            Self::Malformed { .. } => "view_set_malformed",
+            Self::DuplicateId { .. } => "view_set_duplicate_id",
+        }
+    }
+}
+
+impl std::fmt::Display for ViewSetRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: ", self.code())?;
+        match self {
+            Self::InvalidRef { reason }
+            | Self::Unresolved { reason }
+            | Self::Malformed { reason } => f.write_str(reason),
+            Self::Untrusted { trust_class } => write!(
+                f,
+                "the view set is not signed by a trusted signer (trust class {trust_class:?})"
+            ),
+            Self::DuplicateId { id } => write!(
+                f,
+                "an earlier view set in this surface already has the id `{id}`"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ViewSetRefusal {}
+
+/// Admission of one resolved view-set body: the check a body must pass to be
+/// embedded. The caller owns the composition grammar; an `Err` refuses that
+/// one set as [`ViewSetRefusal::Malformed`].
+pub type ViewSetAdmission<'a> = &'a dyn Fn(&Value) -> Result<(), String>;
+
+/// Admission that checks only that a body is a mapping, for callers that
+/// report an effective surface and do not compile a binding from it.
+pub fn view_set_body_is_mapping(body: &Value) -> Result<(), String> {
+    if body.is_object() {
+        Ok(())
+    } else {
+        Err("a view set body must be a mapping".to_string())
+    }
 }
 
 /// Result of one generation-coherent surface/view embedding operation.
@@ -264,6 +350,7 @@ fn embed_identity_view_results(
             request_engine_generation_identity,
             surface,
             views,
+            view_sets: BTreeMap::new(),
         },
         failures,
     }
@@ -299,6 +386,115 @@ pub fn embed_surface_views(
     })
 }
 
+/// The `view_sets` entries of a composed surface when every one is a ref
+/// string, in authored order; `None` when the surface names no view sets or
+/// the list holds a non-string (which the composition consumer refuses).
+fn view_set_refs(composed_value: &Value) -> Option<Vec<String>> {
+    let entries = composed_value.get("view_sets")?.as_array()?;
+    entries
+        .iter()
+        .map(|entry| entry.as_str().map(str::to_owned))
+        .collect()
+}
+
+type ResolvedViewSets = Vec<(String, Result<(Value, EffectiveUiItemIdentity), String>)>;
+
+/// Replace a composed surface's `view_sets` ref list with the compositions
+/// the refs resolve to, in the authored order, and return the identity of
+/// every ref with the refusals of those left out. Run before views are
+/// collected so the views a set arranges are embedded with the rest.
+fn embed_view_set_results(
+    composed_value: &mut Value,
+    refs: &[String],
+    resolved: ResolvedViewSets,
+    admit: ViewSetAdmission<'_>,
+) -> (
+    BTreeMap<String, EmbeddedViewIdentity>,
+    Vec<(String, String)>,
+) {
+    let by_ref: BTreeMap<String, Result<(Value, EffectiveUiItemIdentity), String>> =
+        resolved.into_iter().collect();
+    let mut identities = BTreeMap::new();
+    let mut failures = Vec::new();
+    let mut bodies = Vec::new();
+    let mut seen_ids = BTreeSet::new();
+    for view_set_ref in refs {
+        let outcome: Result<Value, ViewSetRefusal> = match by_ref.get(view_set_ref) {
+            None => Err(ViewSetRefusal::Unresolved {
+                reason: "the ref was not resolved".to_string(),
+            }),
+            Some(Err(reason)) if CanonicalRef::parse(view_set_ref).is_err() => {
+                Err(ViewSetRefusal::InvalidRef {
+                    reason: reason.clone(),
+                })
+            }
+            Some(Err(reason)) => Err(ViewSetRefusal::Unresolved {
+                reason: reason.clone(),
+            }),
+            Some(Ok((_, identity))) if !identity.is_trusted() => Err(ViewSetRefusal::Untrusted {
+                trust_class: identity.effective_trust_class,
+            }),
+            Some(Ok((body, _))) => admit(body)
+                .map_err(|reason| ViewSetRefusal::Malformed { reason })
+                .and_then(|()| {
+                    let id = body.get("id").and_then(Value::as_str).unwrap_or_default();
+                    if seen_ids.insert(id.to_owned()) {
+                        Ok(body.clone())
+                    } else {
+                        Err(ViewSetRefusal::DuplicateId { id: id.to_owned() })
+                    }
+                }),
+        };
+        let entry = match (by_ref.get(view_set_ref), &outcome) {
+            (Some(Ok((_, identity))), Ok(_)) => EmbeddedViewIdentity::Resolved {
+                identity: identity.clone(),
+            },
+            (_, Err(refusal)) => EmbeddedViewIdentity::Degraded {
+                reason: refusal.to_string(),
+            },
+            // `outcome` is Ok only for a resolved set.
+            (_, Ok(_)) => continue,
+        };
+        identities.insert(view_set_ref.clone(), entry);
+        match outcome {
+            Ok(body) => bodies.push(body),
+            Err(refusal) => failures.push((view_set_ref.clone(), refusal.to_string())),
+        }
+    }
+    composed_value["view_sets"] = Value::Array(bodies);
+    (identities, failures)
+}
+
+/// Resolve and embed a surface's view sets inside a checked generation.
+fn embed_view_sets_in_generation(
+    generation: &CheckedEngineGeneration<'_>,
+    project_root: Option<&Path>,
+    project_content: Option<&dyn ryeos_engine::project_content::AuthoritativeProjectContent>,
+    composed_value: &mut Value,
+    admit: ViewSetAdmission<'_>,
+) -> (
+    BTreeMap<String, EmbeddedViewIdentity>,
+    Vec<(String, String)>,
+) {
+    let Some(refs) = view_set_refs(composed_value) else {
+        return (BTreeMap::new(), Vec::new());
+    };
+    let unique: Vec<String> = refs
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let resolved = resolve_identity_items_in_generation(
+        generation,
+        project_root,
+        project_content,
+        "view_set",
+        unique,
+    );
+    embed_view_set_results(composed_value, &refs, resolved, admit)
+}
+
 /// Resolve a surface's bound views inside a caller-owned checked generation
 /// batch. This avoids reacquiring and re-verifying the installed bundle
 /// generation for every view while preserving the same resolution semantics.
@@ -306,10 +502,18 @@ pub fn embed_surface_views_in_generation(
     generation: &CheckedEngineGeneration<'_>,
     project_root: Option<&Path>,
     composed_value: &mut Value,
+    admit_view_set: ViewSetAdmission<'_>,
 ) -> Vec<(String, String)> {
     if !composed_value.is_object() {
         return Vec::new();
     }
+    let (_, mut view_set_failures) = embed_view_sets_in_generation(
+        generation,
+        project_root,
+        None,
+        composed_value,
+        admit_view_set,
+    );
     let resolved = resolve_identity_views_in_generation(
         generation,
         project_root,
@@ -319,7 +523,8 @@ pub fn embed_surface_views_in_generation(
     .into_iter()
     .map(|(view_ref, result)| (view_ref, result.map(|(value, _identity)| value)))
     .collect();
-    embed_view_results(composed_value, resolved)
+    view_set_failures.extend(embed_view_results(composed_value, resolved));
+    view_set_failures
 }
 
 /// Embed the views of an already-resolved effective surface while retaining
@@ -335,8 +540,15 @@ pub fn embed_effective_surface_views_in_generation(
     generation: &CheckedEngineGeneration<'_>,
     project_root: Option<&Path>,
     effective_surface: &mut EffectiveItem,
+    admit_view_set: ViewSetAdmission<'_>,
 ) -> EmbeddedSurfaceViews {
-    embed_effective_surface_views(generation, project_root, None, effective_surface)
+    embed_effective_surface_views(
+        generation,
+        project_root,
+        None,
+        effective_surface,
+        admit_view_set,
+    )
 }
 
 /// Descriptor-authority variant of
@@ -347,12 +559,14 @@ pub fn embed_effective_surface_views_in_generation_under_project_authority(
     project_root: &Path,
     project_content: &dyn ryeos_engine::project_content::AuthoritativeProjectContent,
     effective_surface: &mut EffectiveItem,
+    admit_view_set: ViewSetAdmission<'_>,
 ) -> EmbeddedSurfaceViews {
     embed_effective_surface_views(
         generation,
         Some(project_root),
         Some(project_content),
         effective_surface,
+        admit_view_set,
     )
 }
 
@@ -361,6 +575,7 @@ fn embed_effective_surface_views(
     project_root: Option<&Path>,
     project_content: Option<&dyn ryeos_engine::project_content::AuthoritativeProjectContent>,
     effective_surface: &mut EffectiveItem,
+    admit_view_set: ViewSetAdmission<'_>,
 ) -> EmbeddedSurfaceViews {
     let surface = EffectiveUiItemIdentity::from_effective_item(effective_surface);
     stamp_authorship(effective_surface, |fingerprint| {
@@ -374,22 +589,35 @@ fn embed_effective_surface_views(
                     .to_string(),
                 surface,
                 views: BTreeMap::new(),
+                view_sets: BTreeMap::new(),
             },
             failures: Vec::new(),
         };
     }
+    // View sets are embedded first: the views a set arranges are then
+    // collected with every other view the surface names.
+    let (view_sets, view_set_failures) = embed_view_sets_in_generation(
+        generation,
+        project_root,
+        project_content,
+        &mut effective_surface.composed_value,
+        admit_view_set,
+    );
     let resolved = resolve_identity_views_in_generation(
         generation,
         project_root,
         project_content,
         unique_view_refs(&effective_surface.composed_value),
     );
-    embed_identity_view_results(
+    let mut embedded = embed_identity_view_results(
         &mut effective_surface.composed_value,
         generation.request_engine_generation_identity().to_string(),
         surface,
         resolved,
-    )
+    );
+    embedded.identity.view_sets = view_sets;
+    embedded.failures.splice(0..0, view_set_failures);
+    embedded
 }
 
 /// Explicit View closure of a composition root whose own body is not rewritten
@@ -447,6 +675,25 @@ fn resolve_identity_views_in_generation(
     project_content: Option<&dyn ryeos_engine::project_content::AuthoritativeProjectContent>,
     view_refs: Vec<String>,
 ) -> Vec<(String, Result<(Value, EffectiveUiItemIdentity), String>)> {
+    resolve_identity_items_in_generation(
+        generation,
+        project_root,
+        project_content,
+        "view",
+        view_refs,
+    )
+}
+
+/// Resolve a batch of refs that must each name an item of `kind`, with the
+/// effective identity of every one that resolves. Results come back sorted
+/// by ref.
+fn resolve_identity_items_in_generation(
+    generation: &CheckedEngineGeneration<'_>,
+    project_root: Option<&Path>,
+    project_content: Option<&dyn ryeos_engine::project_content::AuthoritativeProjectContent>,
+    kind: &str,
+    view_refs: Vec<String>,
+) -> Vec<(String, Result<(Value, EffectiveUiItemIdentity), String>)> {
     let mut resolved = Vec::new();
     let mut requests = Vec::new();
     let mut valid_refs = Vec::new();
@@ -457,14 +704,14 @@ fn resolve_identity_views_in_generation(
                 requests.push(EffectiveItemRequest {
                     logical_project_root: None,
                     item_ref,
-                    expected_kind: Some("view".to_string()),
+                    expected_kind: Some(kind.to_string()),
                     project_root: project_root.map(Path::to_path_buf),
                     subject_resolution_authority: SubjectResolutionAuthority::for_live_project_root(
                         project_root,
                     ),
                 });
             }
-            Err(error) => resolved.push((view_ref, Err(format!("invalid view ref: {error}")))),
+            Err(error) => resolved.push((view_ref, Err(format!("invalid {kind} ref: {error}")))),
         }
     }
     let effective_items = match project_content {
@@ -503,8 +750,9 @@ mod tests {
     use ryeos_engine::resolution::{EffectiveDefinitionDigest, TrustClass};
 
     use super::{
-        EffectiveUiItemIdentity, EmbeddedSurfaceIdentity, EmbeddedViewIdentity,
-        embed_identity_view_results, embed_views_with,
+        EffectiveUiItemIdentity, EmbeddedSurfaceIdentity, EmbeddedViewIdentity, ViewSetRefusal,
+        embed_identity_view_results, embed_view_set_results, embed_views_with,
+        view_set_body_is_mapping,
     };
 
     fn identity(
@@ -664,6 +912,7 @@ mod tests {
                         identity: view_identity,
                     },
                 )]),
+                view_sets: BTreeMap::new(),
             }
         );
         assert!(
@@ -713,6 +962,137 @@ mod tests {
             EmbeddedViewIdentity::Resolved {
                 identity: good_identity,
             }
+        );
+    }
+
+    fn set_body(id: &str) -> serde_json::Value {
+        json!({"schema": 2, "id": id, "title": id})
+    }
+
+    fn embed_sets(
+        refs: &[&str],
+        resolved: Vec<(
+            &str,
+            Result<(serde_json::Value, EffectiveUiItemIdentity), String>,
+        )>,
+        admit: super::ViewSetAdmission<'_>,
+    ) -> (
+        serde_json::Value,
+        BTreeMap<String, EmbeddedViewIdentity>,
+        Vec<(String, String)>,
+    ) {
+        let mut surface = json!({"view_sets": refs});
+        let refs: Vec<String> = refs.iter().map(|r| r.to_string()).collect();
+        let resolved = resolved
+            .into_iter()
+            .map(|(r, result)| (r.to_string(), result))
+            .collect();
+        let (identities, failures) = embed_view_set_results(&mut surface, &refs, resolved, admit);
+        (surface, identities, failures)
+    }
+
+    #[test]
+    fn view_set_refs_become_their_compositions_in_authored_order() {
+        let (surface, identities, failures) = embed_sets(
+            &["view_set:t/b", "view_set:t/a"],
+            vec![
+                (
+                    "view_set:t/a",
+                    Ok((
+                        set_body("a"),
+                        identity("view_set:t/a", 'a', TrustClass::TrustedBundle),
+                    )),
+                ),
+                (
+                    "view_set:t/b",
+                    Ok((
+                        set_body("b"),
+                        identity("view_set:t/b", 'b', TrustClass::TrustedProject),
+                    )),
+                ),
+            ],
+            &view_set_body_is_mapping,
+        );
+        assert!(failures.is_empty());
+        assert_eq!(surface["view_sets"], json!([set_body("b"), set_body("a")]));
+        assert_eq!(identities.len(), 2);
+        assert!(matches!(
+            identities["view_set:t/b"],
+            EmbeddedViewIdentity::Resolved { .. }
+        ));
+    }
+
+    #[test]
+    fn a_refused_view_set_is_left_out_with_a_typed_reason_and_the_rest_ship() {
+        let (surface, identities, failures) = embed_sets(
+            &[
+                "view_set:t/missing",
+                "view_set:t/unsigned",
+                "view_set:t/bad",
+                "view_set:t/good",
+                "view_set:t/twin",
+                "not a ref",
+            ],
+            vec![
+                ("view_set:t/missing", Err("item not found".to_string())),
+                (
+                    "view_set:t/unsigned",
+                    Ok((
+                        set_body("unsigned"),
+                        identity("view_set:t/unsigned", 'c', TrustClass::UntrustedProject),
+                    )),
+                ),
+                (
+                    "view_set:t/bad",
+                    Ok((
+                        json!("not a mapping"),
+                        identity("view_set:t/bad", 'd', TrustClass::TrustedBundle),
+                    )),
+                ),
+                (
+                    "view_set:t/good",
+                    Ok((
+                        set_body("good"),
+                        identity("view_set:t/good", 'e', TrustClass::TrustedBundle),
+                    )),
+                ),
+                (
+                    "view_set:t/twin",
+                    Ok((
+                        set_body("good"),
+                        identity("view_set:t/twin", 'f', TrustClass::TrustedBundle),
+                    )),
+                ),
+                ("not a ref", Err("invalid view_set ref: x".to_string())),
+            ],
+            &view_set_body_is_mapping,
+        );
+        assert_eq!(surface["view_sets"], json!([set_body("good")]));
+        let reasons: BTreeMap<_, _> = failures.into_iter().collect();
+        assert!(reasons["view_set:t/missing"].starts_with("view_set_unresolved: "));
+        assert!(reasons["view_set:t/unsigned"].starts_with("view_set_untrusted: "));
+        assert!(reasons["view_set:t/bad"].starts_with("view_set_malformed: "));
+        assert!(reasons["view_set:t/twin"].starts_with("view_set_duplicate_id: "));
+        assert!(reasons["not a ref"].starts_with("view_set_invalid_ref: "));
+        assert_eq!(reasons.len(), 5);
+        assert!(matches!(
+            identities["view_set:t/missing"],
+            EmbeddedViewIdentity::Degraded { ref reason } if reason.starts_with("view_set_unresolved")
+        ));
+        assert!(matches!(
+            identities["view_set:t/unsigned"],
+            EmbeddedViewIdentity::Degraded { ref reason } if reason.starts_with("view_set_untrusted")
+        ));
+        assert!(matches!(
+            identities["view_set:t/good"],
+            EmbeddedViewIdentity::Resolved { .. }
+        ));
+        assert_eq!(
+            ViewSetRefusal::Untrusted {
+                trust_class: TrustClass::Unsigned
+            }
+            .code(),
+            "view_set_untrusted"
         );
     }
 }

@@ -464,6 +464,7 @@ fn surface_view_sets_export(
                     id: handle,
                     title: set.title.clone(),
                     root: None,
+                    ..Default::default()
                 },
                 focused_view: None,
                 mounts: vec![],

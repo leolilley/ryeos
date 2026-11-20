@@ -1,5 +1,8 @@
-//! Signed initial view-set composition. This is presentation data inside a
-//! surface, not a second kind, view resolver or execution authority.
+//! View-set composition: the arrangement of views one tab opens with. A
+//! signed `view_set` item carries exactly this body and a Surface names such
+//! items by ref; the daemon resolves them into the Surface's effective
+//! presentation. A view set is arrangement only, never a resolver or an
+//! execution authority.
 
 #[cfg(test)]
 use super::TilingSpec;
@@ -25,7 +28,39 @@ pub const MAX_SAVED_VIEW_SET_LIBRARY_BYTES: usize = 256 * 1024;
 pub const MAX_PARTICULAR_VIEW_SETS: usize = 64;
 pub const MAX_PARTICULAR_VIEW_SET_LIBRARY_BYTES: usize = 256 * 1024;
 pub const MAX_PROJECT_LOCAL_ID_BYTES: usize = 128;
+pub const MAX_VIEW_SET_SEQUENCE_BYTES: usize = 64;
+/// Kind prefix of the item ref a Surface uses to name one view set.
+pub const VIEW_SET_REF_PREFIX: &str = "view_set:";
 pub const MAX_WORK_CHAIN_ROOT_ID_BYTES: usize = 128;
+
+/// How a view set draws its tile tree. The tree itself is the same in both.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewSetPresentation {
+    /// Framed tiles (the default).
+    #[default]
+    Tiled,
+    /// An unframed page: the arrangement is read as page content.
+    Page,
+}
+
+impl ViewSetPresentation {
+    pub(crate) fn is_tiled(&self) -> bool {
+        *self == Self::Tiled
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -35,6 +70,38 @@ pub struct ViewSetSeedSpec {
     pub title: String,
     #[serde(default)]
     pub root: Option<LayoutSeedSpec>,
+    /// Tile drawing mode. Absent means tiled.
+    #[serde(default, skip_serializing_if = "ViewSetPresentation::is_tiled")]
+    pub presentation: ViewSetPresentation,
+    /// Page presentations only: the tile tree is read as rows and the page
+    /// scrolls. Absent means false.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub scroll: bool,
+    /// Opaque step identifier. A view set carrying one is a step of the
+    /// sequence it names; the Surface's list order is the step order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<String>,
+    /// Whether the set is listed where a person adds a tab. Absent means true.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub offered: bool,
+}
+
+impl Default for ViewSetSeedSpec {
+    /// A current-schema tiled set with no identity and no layout, for
+    /// struct-update construction; it is not valid until `id` and `title`
+    /// are set.
+    fn default() -> Self {
+        Self {
+            schema: VIEW_SET_COMPOSITION_SCHEMA,
+            id: String::new(),
+            title: String::new(),
+            root: None,
+            presentation: ViewSetPresentation::Tiled,
+            scroll: false,
+            sequence: None,
+            offered: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -459,6 +526,18 @@ pub fn validate_seeds(seeds: &[ViewSetSeedSpec]) -> Result<(), String> {
         {
             return Err(format!("{location}.title must be a nonempty bounded label"));
         }
+        if seed.scroll && seed.presentation != ViewSetPresentation::Page {
+            return Err(format!("{location}.scroll requires presentation: page"));
+        }
+        if let Some(sequence) = &seed.sequence
+            && (sequence.is_empty()
+                || sequence.len() > MAX_VIEW_SET_SEQUENCE_BYTES
+                || !sequence
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
+        {
+            return Err(format!("{location}.sequence must be a bounded identifier"));
+        }
         let mut pending = seed
             .root
             .as_ref()
@@ -585,12 +664,31 @@ impl ViewSetSeedSpec {
     }
 }
 
-/// Shared daemon/client check. Nested references still resolve through the
-/// ordinary surface view collector, including inactive group tabs.
+/// Decode and bound-check the body of one `view_set` item. This is the single
+/// validator for an item body, the saved personal template and the particular
+/// resume: they all carry the same seed.
+pub fn parse_view_set_item(body: &serde_json::Value) -> Result<ViewSetSeedSpec, String> {
+    let seed: ViewSetSeedSpec =
+        serde_json::from_value(body.clone()).map_err(|error| format!("view set: {error}"))?;
+    validate_seeds(std::slice::from_ref(&seed))?;
+    Ok(seed)
+}
+
+/// Shared daemon/client check of an effective Surface's resolved view sets.
+/// Nested references still resolve through the ordinary surface view
+/// collector, including inactive group tabs. An entry still naming a
+/// `view_set:` item was never resolved by the daemon and is refused here.
 pub fn validate_effective_view_sets(value: &serde_json::Value) -> Result<(), String> {
     let Some(raw) = value.get("view_sets") else {
         return Ok(());
     };
+    if let Some(entries) = raw.as_array()
+        && let Some(index) = entries.iter().position(serde_json::Value::is_string)
+    {
+        return Err(format!(
+            "view_sets[{index}] is an unresolved {VIEW_SET_REF_PREFIX} ref; the daemon embeds each named view set before a Surface reaches a client"
+        ));
+    }
     let seeds: Vec<ViewSetSeedSpec> =
         serde_json::from_value(raw.clone()).map_err(|error| format!("view_sets: {error}"))?;
     validate_seeds(&seeds)?;
@@ -642,6 +740,63 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&current).unwrap()).unwrap();
         assert_eq!(current, roundtrip);
         assert!(validate_seeds(&[roundtrip]).is_ok());
+    }
+
+    #[test]
+    fn arrangement_fields_default_away_and_round_trip() {
+        let plain: ViewSetSeedSpec = serde_json::from_value(seed()).unwrap();
+        assert_eq!(plain.presentation, ViewSetPresentation::Tiled);
+        assert!(!plain.scroll && plain.offered && plain.sequence.is_none());
+        let encoded = serde_json::to_value(&plain).unwrap();
+        for absent in ["presentation", "scroll", "sequence", "offered"] {
+            assert!(
+                encoded.get(absent).is_none(),
+                "{absent} is not written at its default"
+            );
+        }
+        let mut page = seed();
+        page["presentation"] = json!("page");
+        page["scroll"] = json!(true);
+        page["sequence"] = json!("welcome");
+        page["offered"] = json!(false);
+        let parsed = parse_view_set_item(&page).unwrap();
+        assert_eq!(parsed.presentation, ViewSetPresentation::Page);
+        assert!(parsed.scroll && !parsed.offered);
+        assert_eq!(parsed.sequence.as_deref(), Some("welcome"));
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), page);
+    }
+
+    #[test]
+    fn arrangement_fields_are_validated() {
+        let mut scroll_without_page = seed();
+        scroll_without_page["scroll"] = json!(true);
+        assert!(
+            parse_view_set_item(&scroll_without_page)
+                .unwrap_err()
+                .contains("requires presentation: page")
+        );
+        for bad in [json!(""), json!("has space"), json!("x".repeat(65))] {
+            let mut value = seed();
+            value["sequence"] = bad;
+            assert!(
+                parse_view_set_item(&value)
+                    .unwrap_err()
+                    .contains("sequence")
+            );
+        }
+        let mut unknown = seed();
+        unknown["presentation"] = json!("poster");
+        assert!(parse_view_set_item(&unknown).is_err());
+        let mut stray = seed();
+        stray["extends"] = json!("view_set:other");
+        assert!(parse_view_set_item(&stray).is_err());
+    }
+
+    #[test]
+    fn an_unresolved_view_set_ref_is_refused_by_the_shared_check() {
+        let error = validate_effective_view_sets(&json!({"view_sets": ["view_set:test/work"]}))
+            .unwrap_err();
+        assert!(error.contains("view_sets[0]") && error.contains("unresolved"));
     }
 
     #[test]

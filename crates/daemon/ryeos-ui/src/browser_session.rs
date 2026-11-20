@@ -3833,6 +3833,7 @@ pub(crate) mod tests {
             binding_digest: "11".repeat(32),
             posture,
             binding: crate::compiled_binding::CompiledUiBinding {
+                view_sets: Default::default(),
                 contract_revision: crate::UI_BINDING_CONTRACT_REVISION.to_string(),
                 principal_id: "fp:test".to_string(),
                 project_root: project_root.map(str::to_string),

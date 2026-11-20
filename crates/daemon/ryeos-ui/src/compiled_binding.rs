@@ -139,6 +139,11 @@ pub struct CompiledUiBinding {
     pub node_policy_generation_digest: String,
     pub surface: EffectiveUiItemIdentity,
     pub views: BTreeMap<String, EmbeddedViewIdentity>,
+    /// Identity of every view set the surface names, keyed by its
+    /// `view_set:` ref, so a change to a set changes the binding digest. A
+    /// set that was refused is a degraded entry carrying its typed reason.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub view_sets: BTreeMap<String, EmbeddedViewIdentity>,
     pub sources: BTreeMap<String, BTreeMap<String, CompiledUiSource>>,
     pub affordances: BTreeMap<String, BTreeMap<String, CompiledUiAffordance>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -260,12 +265,12 @@ enum Authority {
 impl Authority {
     fn of(identity: &EffectiveUiItemIdentity) -> Self {
         use ryeos_engine::resolution::TrustClass;
+        if !identity.is_trusted() {
+            return Self::Untrusted;
+        }
         match identity.effective_trust_class {
             TrustClass::TrustedBundle => Self::Node,
-            TrustClass::TrustedProject => Self::Project,
-            TrustClass::TrustedNode | TrustClass::UntrustedProject | TrustClass::Unsigned => {
-                Self::Untrusted
-            }
+            _ => Self::Project,
         }
     }
 
@@ -376,6 +381,20 @@ impl SessionCompiledUiBinding {
                 .context("effective surface views mapping is not an object")?,
         };
         let surface_authority = Authority::of(&context.identities.surface);
+        let mut attenuated = Vec::new();
+        // A view set carries arrangement only, so no authority depends on
+        // it; the daemon embeds a set only when it resolved, verified and
+        // passed admission. Each one it left out is recorded here with its
+        // typed reason, so the binding names exactly the sets a Surface lists
+        // but does not show.
+        for (view_set_ref, state) in &context.identities.view_sets {
+            if let EmbeddedViewIdentity::Degraded { reason } = state {
+                attenuated.push(AttenuatedUiBinding {
+                    coordinate: view_set_ref.clone(),
+                    reason: reason.clone(),
+                });
+            }
+        }
         // A node surface must declare both lanes. A surface authored in
         // project space never sets its own ceiling: a lane it declares can
         // only narrow, and one it omits is the node's list for sources and
@@ -403,7 +422,6 @@ impl SessionCompiledUiBinding {
 
         let mut sources = BTreeMap::new();
         let mut affordances = BTreeMap::new();
-        let mut attenuated = Vec::new();
         let mut art = BTreeMap::new();
         if surface_authority == Authority::Node {
             compile_art(
@@ -592,6 +610,7 @@ impl SessionCompiledUiBinding {
             node_policy_generation_digest: context.node_policy_generation_digest.to_string(),
             surface: context.identities.surface,
             views: context.identities.views,
+            view_sets: context.identities.view_sets,
             sources,
             affordances,
             surface_route,
@@ -1405,6 +1424,7 @@ mod tests {
                 node_policy_generation_digest: "policy:test",
                 project_source_ceiling: &[],
                 identities: EmbeddedSurfaceIdentity {
+                    view_sets: Default::default(),
                     request_engine_generation_identity: "engine:test".into(),
                     surface: identity("surface:test/root", 'a'),
                     views: BTreeMap::from([(
@@ -1488,6 +1508,7 @@ mod tests {
             node_policy_generation_digest: "policy:test",
             project_source_ceiling: &[],
             identities: EmbeddedSurfaceIdentity {
+                view_sets: Default::default(),
                 request_engine_generation_identity: "engine:test".into(),
                 surface: identity("surface:test/root", 'a'),
                 views: BTreeMap::from([(
@@ -1599,6 +1620,7 @@ mod tests {
                 node_policy_generation_digest: "policy:test",
                 project_source_ceiling: &[],
                 identities: EmbeddedSurfaceIdentity {
+                    view_sets: Default::default(),
                     request_engine_generation_identity: "engine:test".into(),
                     surface: identity("surface:test/root", 'a'),
                     views: BTreeMap::new(),
@@ -1677,6 +1699,7 @@ mod tests {
                 node_policy_generation_digest: "policy:test",
                 project_source_ceiling: &[],
                 identities: EmbeddedSurfaceIdentity {
+                    view_sets: Default::default(),
                     request_engine_generation_identity: "engine:test".into(),
                     surface: identity("surface:test/root", 'a'),
                     views: BTreeMap::from([(
@@ -1826,6 +1849,7 @@ mod tests {
                 node_policy_generation_digest: "policy:test",
                 project_source_ceiling,
                 identities: EmbeddedSurfaceIdentity {
+                    view_sets: Default::default(),
                     request_engine_generation_identity: "engine:test".into(),
                     surface: identity_of(SURFACE_REF, 'a', surface_trust),
                     views,
@@ -2447,6 +2471,7 @@ mod tests {
                 node_policy_generation_digest: "policy:test",
                 project_source_ceiling: &[],
                 identities: EmbeddedSurfaceIdentity {
+                    view_sets: Default::default(),
                     request_engine_generation_identity: "engine:test".into(),
                     surface: identity(SURFACE_REF, 'a'),
                     views: BTreeMap::new(),
@@ -2675,6 +2700,7 @@ mod tests {
                 node_policy_generation_digest: "policy:test",
                 project_source_ceiling: &[],
                 identities: EmbeddedSurfaceIdentity {
+                    view_sets: Default::default(),
                     request_engine_generation_identity: "engine:test".into(),
                     surface: identity(SURFACE_REF, 'a'),
                     views: BTreeMap::from([(
@@ -2943,5 +2969,101 @@ mod tests {
         );
         assert_eq!(compile_under(TrustClass::UntrustedProject, &one), recorded);
         assert_eq!(compile_under(TrustClass::TrustedBundle, &one), "");
+    }
+
+    fn compile_with_view_sets(
+        view_sets: BTreeMap<String, EmbeddedViewIdentity>,
+        surface: &Value,
+    ) -> SessionCompiledUiBinding {
+        try_compile_with_view_sets(view_sets, surface).unwrap()
+    }
+
+    fn try_compile_with_view_sets(
+        view_sets: BTreeMap<String, EmbeddedViewIdentity>,
+        surface: &Value,
+    ) -> Result<SessionCompiledUiBinding> {
+        SessionCompiledUiBinding::compile(
+            BindingCompileContext {
+                contract_revision: "test.v1",
+                principal_id: "principal:test",
+                caller_scopes: &[],
+                project_root: None,
+                node_policy_generation_digest: "policy:test",
+                project_source_ceiling: &[],
+                identities: EmbeddedSurfaceIdentity {
+                    view_sets,
+                    request_engine_generation_identity: "engine:test".into(),
+                    surface: identity("surface:test/root", 'a'),
+                    views: BTreeMap::new(),
+                },
+            },
+            surface,
+            |item_ref| anyhow::bail!("unexpected target {item_ref}"),
+        )
+    }
+
+    fn embedded_set(id: &str) -> Value {
+        serde_json::json!({"schema": 2, "id": id, "title": id})
+    }
+
+    #[test]
+    fn view_set_identities_are_part_of_the_binding_digest() {
+        let surface = serde_json::json!({"view_sets": [embedded_set("one")]});
+        let resolved = |byte| {
+            BTreeMap::from([(
+                "view_set:test/one".to_string(),
+                EmbeddedViewIdentity::Resolved {
+                    identity: identity("view_set:test/one", byte),
+                },
+            )])
+        };
+        let a = compile_with_view_sets(resolved('1'), &surface);
+        let b = compile_with_view_sets(resolved('2'), &surface);
+        let none = compile_with_view_sets(BTreeMap::new(), &surface);
+        assert_eq!(a.binding.view_sets.len(), 1);
+        assert!(a.binding.attenuated.is_empty());
+        assert_ne!(a.binding_digest, b.binding_digest);
+        assert_ne!(a.binding_digest, none.binding_digest);
+        let encoded = serde_json::to_value(&none.binding).unwrap();
+        assert!(encoded.get("view_sets").is_none());
+    }
+
+    #[test]
+    fn a_refused_view_set_is_named_in_the_binding_and_the_surface_still_compiles() {
+        let surface = serde_json::json!({"view_sets": [embedded_set("kept")]});
+        let compiled = compile_with_view_sets(
+            BTreeMap::from([
+                (
+                    "view_set:test/kept".to_string(),
+                    EmbeddedViewIdentity::Resolved {
+                        identity: identity("view_set:test/kept", 'k'),
+                    },
+                ),
+                (
+                    "view_set:test/missing".to_string(),
+                    EmbeddedViewIdentity::Degraded {
+                        reason: "view_set_unresolved: item not found".into(),
+                    },
+                ),
+            ]),
+            &surface,
+        );
+        assert_eq!(
+            compiled.binding.attenuated,
+            vec![AttenuatedUiBinding {
+                coordinate: "view_set:test/missing".into(),
+                reason: "view_set_unresolved: item not found".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn an_unresolved_view_set_ref_in_the_compile_body_is_refused() {
+        let error = try_compile_with_view_sets(
+            BTreeMap::new(),
+            &serde_json::json!({"view_sets": ["view_set:test/x"]}),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("unresolved"));
     }
 }

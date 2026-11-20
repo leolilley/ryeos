@@ -55,6 +55,7 @@ impl RyeOsCore {
                 id: format!("new_{count}"),
                 title: format!("View set {}", count + 1),
                 root: None,
+                ..Default::default()
             },
             relationships: Vec::new(),
         };

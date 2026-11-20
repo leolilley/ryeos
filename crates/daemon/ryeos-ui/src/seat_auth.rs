@@ -465,6 +465,7 @@ mod tests {
                 binding_digest: "11".repeat(32),
                 posture: crate::compiled_binding::EffectiveUiPosture::ObservationOnly,
                 binding: crate::compiled_binding::CompiledUiBinding {
+                    view_sets: Default::default(),
                     contract_revision: crate::UI_BINDING_CONTRACT_REVISION.into(),
                     principal_id: "fp:test".into(),
                     project_root: None,
