@@ -2,6 +2,28 @@
   "items": [
     {
       "item": "entry",
+      "id": "mrk:4",
+      "type": "marker",
+      "state": null,
+      "tone": null,
+      "thread": "T-0001",
+      "parent": null,
+      "exchange": null,
+      "counts_as": null,
+      "slots": {
+        "headline": "launched with deepseek-v4-flash · via deepseek"
+      },
+      "seq": [
+        4,
+        4
+      ],
+      "ts": [
+        "2026-11-16T03:26:55Z",
+        "2026-11-16T03:26:55Z"
+      ]
+    },
+    {
+      "item": "entry",
       "id": "msg:6/0",
       "type": "message",
       "state": null,
