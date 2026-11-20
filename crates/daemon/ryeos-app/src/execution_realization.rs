@@ -58,16 +58,71 @@ pub(crate) fn verify_persistent_session_selected(
         resource_authority,
         selected_resources.selections(),
     )?;
-    if existing.launch_authority_digest != authority.digest()?
-        || existing.effective_definition_digest != effective_definition_digest
-        || existing.artifact_identity_digest != authority.artifact_identity_digest()?
-        || existing.execution_closure_digest != authority.execution_closure_digest()?
-        || existing.contract_ref != contract_ref
-        || existing.contract_digest != contract_digest
-        || existing.components != execution_components(state, resolution)?
-        || existing.properties != properties
+    // One line per contradicting field, stored then live. Every compared value
+    // is a digest, a contract reference, or a node property derived from the
+    // isolation inspection; none is a secret.
+    let mut contradicted: Vec<String> = Vec::new();
+    let mut compare = |field: &str, stored: String, live: String| {
+        if stored != live {
+            contradicted.push(format!("{field}: stored={stored} live={live}"));
+        }
+    };
+    compare(
+        "launch_authority_digest",
+        existing.launch_authority_digest.clone(),
+        authority.digest()?,
+    );
+    compare(
+        "effective_definition_digest",
+        existing.effective_definition_digest.clone(),
+        effective_definition_digest.to_owned(),
+    );
+    compare(
+        "artifact_identity_digest",
+        existing.artifact_identity_digest.clone(),
+        authority.artifact_identity_digest()?,
+    );
+    compare(
+        "execution_closure_digest",
+        existing.execution_closure_digest.clone(),
+        authority.execution_closure_digest()?,
+    );
+    compare(
+        "contract_ref",
+        existing.contract_ref.clone(),
+        contract_ref.to_owned(),
+    );
+    compare(
+        "contract_digest",
+        existing.contract_digest.clone(),
+        contract_digest.to_owned(),
+    );
+    let live_components = execution_components(state, resolution)?;
+    compare(
+        "components",
+        serde_json::to_string(&existing.components)?,
+        serde_json::to_string(&live_components)?,
+    );
+    for name in existing
+        .properties
+        .keys()
+        .chain(properties.keys())
+        .collect::<std::collections::BTreeSet<_>>()
     {
-        anyhow::bail!("persistent-session execution realization contradicts its admitted capsule");
+        let render = |value: Option<&serde_json::Value>| {
+            value.map_or_else(|| "<absent>".to_owned(), |value| value.to_string())
+        };
+        compare(
+            &format!("properties.{name}"),
+            render(existing.properties.get(name)),
+            render(properties.get(name)),
+        );
+    }
+    if !contradicted.is_empty() {
+        anyhow::bail!(
+            "persistent-session execution realization contradicts its admitted capsule:\n{}",
+            contradicted.join("\n")
+        );
     }
     verify_realization_node_evidence(state, &existing)?;
     verify_realization_components(state, &existing)?;
