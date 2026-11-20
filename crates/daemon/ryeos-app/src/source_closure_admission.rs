@@ -1812,7 +1812,7 @@ execution:
     "@base": "tool:ryeos/base/base"
   source_closure:
     derived: effective_source_closure
-    location: {type: owner_relative_source, path: [source]}
+    location: {type: item_namespace}
     testimony: owner_signed_files
     max_files: 8
     max_total_bytes: 65536
