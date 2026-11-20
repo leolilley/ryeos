@@ -33258,8 +33258,10 @@ mod tests {
         drop(db);
 
         let error = crate::runtime_db::test_native::live_open_refusal(&path);
+        // A recognised predecessor shape is refused with the cut command
+        // named, and its rows are still never decoded.
         assert!(
-            !format!("{error:#}")
+            format!("{error:#}")
                 .contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
         );
         crate::runtime_db::test_native::read_existing(&path, |conn| {
@@ -33572,8 +33574,10 @@ mod tests {
         drop(db);
 
         let error = crate::runtime_db::test_native::live_open_refusal(&path);
+        // A recognised predecessor shape is refused with the cut command
+        // named, and its rows are still never decoded.
         assert!(
-            !format!("{error:#}")
+            format!("{error:#}")
                 .contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
         );
         crate::runtime_db::test_native::read_existing(&path, |conn| {

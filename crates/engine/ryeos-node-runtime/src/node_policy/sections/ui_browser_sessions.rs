@@ -56,6 +56,14 @@ pub struct UiBrowserSessionPolicy {
     pub max_surface_instances_per_presentation: u32,
     pub shared_presentation: SharedPresentationPolicyLimits,
     pub seat: SeatPolicy,
+    /// The origin (`scheme://host[:port]`, no path) a browser reaches this
+    /// node at, when that differs from the address the daemon binds: a node
+    /// served through a TLS-terminating front. Absent means browsers reach
+    /// the bind address over plain http. This is the only input to the launch
+    /// URL's origin and to the session cookie's `Secure` attribute; no
+    /// request header is trusted for either.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_origin: Option<String>,
 }
 
 /// The seat thread kind a browser session binds, and the bounds of one
@@ -190,12 +198,34 @@ impl UiBrowserSessionPolicy {
                 "UI browser-session seat.max_replay_frame_bytes exceeds the client frame budget of {MAX_REPLAY_FRAME_BYTES_CEILING}"
             );
         }
+        if let Some(origin) = &self.public_origin {
+            validate_public_origin(origin)?;
+        }
         if self.shared_presentation.max_initial_surfaces
             > self.max_surface_instances_per_presentation
         {
             bail!("UI browser-session initial Surfaces exceed the presentation Surface limit");
         }
         Ok(())
+    }
+
+    /// The absolute URL of a node-relative launch path: on the configured
+    /// public origin when there is one, else on the daemon's bind address.
+    pub fn launch_url(&self, bind: impl std::fmt::Display, launch_path: &str) -> String {
+        match &self.public_origin {
+            Some(origin) => format!("{origin}{launch_path}"),
+            None => format!("http://{bind}{launch_path}"),
+        }
+    }
+
+    /// Whether the session cookie carries `Secure`: exactly when the
+    /// configured public origin is https. Without a public origin the node is
+    /// reached over plain http (loopback or the native launcher), where a
+    /// `Secure` cookie would never be sent back.
+    pub fn session_cookie_secure(&self) -> bool {
+        self.public_origin
+            .as_deref()
+            .is_some_and(|origin| origin.starts_with("https://"))
     }
 
     /// Refuse a seat kind that no installed kind profile declares fenced. The
@@ -213,6 +243,25 @@ impl UiBrowserSessionPolicy {
         }
         Ok(())
     }
+}
+
+fn validate_public_origin(origin: &str) -> anyhow::Result<()> {
+    let Some(authority) = origin
+        .strip_prefix("https://")
+        .or_else(|| origin.strip_prefix("http://"))
+    else {
+        bail!("UI browser-session public_origin must start with http:// or https://");
+    };
+    if authority.is_empty()
+        || authority.contains(['/', '?', '#', '@', ' '])
+        || authority.starts_with(':')
+    {
+        bail!(
+            "UI browser-session public_origin must be scheme://host[:port] with no path, query, \
+             fragment or userinfo"
+        );
+    }
+    Ok(())
 }
 
 impl TypedNodePolicy for UiBrowserSessionPolicy {
@@ -265,6 +314,63 @@ mod tests {
         assert_eq!(policy.seat.kind, "seat_session");
         assert_eq!(policy.seat.max_replay_frame_events, 64);
         assert_eq!(policy.seat.max_replay_frame_bytes, 4194304);
+    }
+
+    fn policy_with_origin(origin: Option<&str>) -> anyhow::Result<UiBrowserSessionPolicy> {
+        let mut body = current_body();
+        if let Some(origin) = origin {
+            body["public_origin"] = serde_json::json!(origin);
+        }
+        let parsed = UiBrowserSessionPolicySection.parse(&context(), &body)?;
+        Ok(parsed
+            .as_any()
+            .downcast_ref::<UiBrowserSessionPolicy>()
+            .unwrap()
+            .clone())
+    }
+
+    #[test]
+    fn launch_url_uses_public_origin_or_falls_back_to_bind() {
+        let bound = policy_with_origin(None).unwrap();
+        assert_eq!(
+            bound.launch_url("127.0.0.1:8080", "/ui/launch/t"),
+            "http://127.0.0.1:8080/ui/launch/t"
+        );
+        let public = policy_with_origin(Some("https://node.example.org")).unwrap();
+        assert_eq!(
+            public.launch_url("127.0.0.1:8080", "/ui/launch/t"),
+            "https://node.example.org/ui/launch/t"
+        );
+    }
+
+    #[test]
+    fn cookie_is_secure_only_for_an_https_public_origin() {
+        assert!(!policy_with_origin(None).unwrap().session_cookie_secure());
+        assert!(
+            !policy_with_origin(Some("http://localhost:8080"))
+                .unwrap()
+                .session_cookie_secure()
+        );
+        assert!(
+            policy_with_origin(Some("https://node.example.org"))
+                .unwrap()
+                .session_cookie_secure()
+        );
+    }
+
+    #[test]
+    fn public_origin_must_be_a_bare_origin() {
+        for bad in [
+            "node.example.org",
+            "ftp://node.example.org",
+            "https://",
+            "https://node.example.org/",
+            "https://node.example.org/ui",
+            "https://user@node.example.org",
+            "https://node.example.org?x=1",
+        ] {
+            assert!(policy_with_origin(Some(bad)).is_err(), "{bad}");
+        }
     }
 
     fn current_body() -> Value {

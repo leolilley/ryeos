@@ -88,20 +88,53 @@ impl GuestStageIdentity {
     }
 }
 
-fn canonical_stage_name(name: &str) -> bool {
-    let mut parts = name.split('.');
-    let (Some("guest-input"), Some(pid), Some(nonce), None) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
-        return false;
-    };
-    pid.parse::<u32>()
-        .ok()
-        .is_some_and(|value| value != 0 && value.to_string() == pid)
-        && nonce
-            .parse::<u64>()
+/// Name prefix of a private guest package directory (`prepare_private_guest_package`).
+pub const GUEST_PACKAGE_PREFIX: &str = "guest-package";
+/// Name prefix of a staged guest-input generation (`stage_guest_package`).
+pub const GUEST_STAGE_PREFIX: &str = "guest-input";
+
+/// The closed set of children that guest producers create in the shared
+/// external guest package namespace. Recovery matches on this instead of
+/// re-deriving names, so a new producer prefix must be added here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GuestNamespaceEntry {
+    /// `guest-package.<pid>.<nonce>`: a directory holding one `payload` file.
+    Package,
+    /// `guest-input.<pid>.<nonce>`: a locked, staged package tree.
+    Stage,
+}
+
+impl GuestNamespaceEntry {
+    /// Classify a namespace entry name by the exact `<prefix>.<u32>.<u64>`
+    /// shape that `create_unique_child` produces, with canonical decimals.
+    pub fn classify(name: &str) -> Option<Self> {
+        let mut parts = name.split('.');
+        let (Some(prefix), Some(pid), Some(nonce), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return None;
+        };
+        let canonical = pid
+            .parse::<u32>()
             .ok()
-            .is_some_and(|value| value.to_string() == nonce)
+            .is_some_and(|value| value != 0 && value.to_string() == pid)
+            && nonce
+                .parse::<u64>()
+                .ok()
+                .is_some_and(|value| value.to_string() == nonce);
+        if !canonical {
+            return None;
+        }
+        match prefix {
+            GUEST_PACKAGE_PREFIX => Some(Self::Package),
+            GUEST_STAGE_PREFIX => Some(Self::Stage),
+            _ => None,
+        }
+    }
+}
+
+fn canonical_stage_name(name: &str) -> bool {
+    GuestNamespaceEntry::classify(name) == Some(GuestNamespaceEntry::Stage)
 }
 
 pub struct StagedGuestPackage {
@@ -294,7 +327,7 @@ pub fn stage_guest_package<R: Read>(
 ) -> Result<StagedGuestPackage> {
     parent.require_owner_private_directory()?;
     let owner = parent.try_clone()?;
-    let (name, stage) = parent.create_unique_child("guest-input", 0o700)?;
+    let (name, stage) = parent.create_unique_child(GUEST_STAGE_PREFIX, 0o700)?;
     let owner_lock = stage
         .try_lock_exclusive()?
         .context("new guest stage has a live owner; refusing to remove a contested generation")?;
@@ -683,7 +716,8 @@ fn open_staged_parent(
     Ok(directory)
 }
 
-fn staging_budget() -> lillux::DirectoryTraversalBudget {
+/// Traversal budget for removing one staged generation; recovery uses the same.
+pub fn staging_budget() -> lillux::DirectoryTraversalBudget {
     lillux::DirectoryTraversalBudget::new(MAX_GUEST_STAGING_ENTRIES + 1, 32)
 }
 

@@ -633,3 +633,118 @@ async fn activity_bound_project_excludes_foreign_project_and_projectless_subject
         "no invented usage or spend totals"
     );
 }
+
+/// A thread carrying the usage subject a seat launch attributes, with settled
+/// usage inside the window, must reach the activity service's windowed usage
+/// through the real per-subject summary, and only for the acting principal.
+#[tokio::test]
+async fn activity_reports_windowed_usage_for_seat_attributed_launches() {
+    use ryeos_state::objects::{
+        CapturedItemTrustClass, CapturedNodeHistoryPolicyProvenance, CapturedPolicyProvenance,
+        CapturedThreadHistoryPolicy, EnvironmentAuthority, ExecutionProjectAuthority,
+        ThreadHistoryRetention,
+    };
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let settled_at = lillux::time::iso8601_from_unix_secs(now);
+    // (thread, owner, attributed subject)
+    let attributed = ryeos_ui::handlers::ui_usage::ui_usage_subject(None);
+    for (thread_id, principal, subject) in [
+        ("T-seat", "fp:test", Some(attributed.clone())),
+        ("T-unattributed", "fp:test", None),
+        ("T-foreign", "fp:foreign", Some(attributed.clone())),
+    ] {
+        state
+            .state_store
+            .create_thread_for_test(&ryeos_app::state_store::NewThreadRecord {
+                thread_id: thread_id.into(),
+                chain_root_id: thread_id.into(),
+                kind: "tool".into(),
+                item_ref: "tool:test/activity".into(),
+                executor_ref: "test/executor".into(),
+                launch_mode: "wait".into(),
+                current_site_id: "site:testhost".into(),
+                origin_site_id: "site:testhost".into(),
+                upstream_thread_id: None,
+                requested_by: Some(principal.into()),
+                project_root: None,
+                project_authority: ExecutionProjectAuthority::Projectless {
+                    environment: EnvironmentAuthority::None,
+                },
+                base_project_snapshot_hash: None,
+                usage_subject: subject.clone(),
+                usage_subject_asserted_by: subject.map(|_| principal.to_string()),
+                captured_history_policy: Some(CapturedThreadHistoryPolicy {
+                    retention: ThreadHistoryRetention::Durable,
+                    canonical_item_ref: "tool:test/activity".into(),
+                    item_content_hash: "a".repeat(64),
+                    item_signer_fingerprint: Some("a".repeat(64)),
+                    item_trust_class: CapturedItemTrustClass::Trusted,
+                    kind_schema_content_hash: "a".repeat(64),
+                    resolved_from: CapturedPolicyProvenance::NodeDefault {
+                        node_policy: CapturedNodeHistoryPolicyProvenance::test_policy(),
+                    },
+                }),
+            })
+            .unwrap();
+        state
+            .state_store
+            .append_events(
+                thread_id,
+                thread_id,
+                &[ryeos_app::state_store::NewEventRecord {
+                    event_type: "thread_usage".into(),
+                    storage_class: "indexed".into(),
+                    payload: json!({
+                        "completed_turns": 2,
+                        "input_tokens": 100,
+                        "output_tokens": 10,
+                        "spend_usd": ryeos_accounting::UsdNanos::from_nanos(1_500_000_000).unwrap(),
+                        "spawns_used": 0,
+                        "started_at": settled_at,
+                        "settled_at": settled_at,
+                        "last_settled_turn_seq": 2,
+                        "elapsed_ms": 10,
+                    }),
+                }],
+            )
+            .unwrap();
+    }
+    let (context, attachment) = mint_session(&state, None);
+    let result = ryeos_ui::seat_auth::with_compiled_ui_attachment(
+        attachment,
+        (ryeos_ui::handlers::ui_node::ACTIVITY_DESCRIPTOR.handler)(
+            json!({}),
+            context,
+            Arc::new(state),
+        ),
+    )
+    .await
+    .expect("activity with seat-attributed usage");
+    assert_eq!(result["usage_coverage"]["state"], "observed");
+    let rows: Vec<(String, String)> = result["usage"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row["label"].as_str().unwrap().to_string(),
+                row["value"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    // Only the acting principal's attributed thread counts.
+    assert_eq!(rows[0], ("observed input tokens · 1d".into(), "100".into()));
+    assert_eq!(rows[1], ("observed output tokens · 1d".into(), "10".into()));
+    assert_eq!(
+        rows[2],
+        ("observed spend (USD) · 1d".into(), "1.5000".into())
+    );
+    assert_eq!(
+        rows[3],
+        ("observed completed turns · 1d".into(), "2".into())
+    );
+}
