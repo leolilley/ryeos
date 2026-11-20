@@ -6756,6 +6756,16 @@ async fn run_periodic_recovery_pass(
             .context("periodic external candidate cleanup recovery")?,
         "periodic",
     );
+    // A session left quarantined at startup because its external allocation
+    // had no observed provider terminal is settled once the pass above has
+    // recorded that terminal.
+    if reconcile::settle_predecessor_sessions_after_external_settlement(state)
+        .context("periodic settlement of predecessor sessions after external settlement")?
+    {
+        tracing::info!(
+            "periodic recovery settled predecessor sessions whose external allocation settled"
+        );
+    }
     let recovered_activations =
         ryeos_api::handlers::external_content_activate::recover_durable_activations(state)
             .await
@@ -8099,6 +8109,20 @@ async fn drain_persistent_session_workers(
             }
         };
 
+        // The fence re-identifies the session, which the runtime database
+        // refuses while its external allocation is unsettled. A reaped worker
+        // is proved dead; its row is left to the periodic settlement, as for a
+        // latched stop.
+        if cleanup_state == "reaped"
+            && ryeos_app::external_placement::session_has_unsettled_external_allocation(
+                state,
+                &worker.placement_thread_id,
+            )
+            .unwrap_or(true)
+        {
+            deferred.workers.push(worker.worker_instance_id.clone());
+            continue;
+        }
         let fenced = match latch.refresh(mode) {
             DrainMode::Latched => None,
             DrainMode::Normal => Some(state.state_store.fence_abandoned_worker_process(
