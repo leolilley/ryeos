@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-20T23:14:24Z:e5085b0beabd24ce1d04941c4ec701d88fbcb70e69e250a11b9f2662033de5bd:kQ508wrKMIu999tRh+NG0doLNmADAPcMd9zvzxb/1Pzti2uQ5yGsV/wTLQooyXmR5Fbe24wCxmN+rM9I/c40AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-20T23:14:41Z:a9bbf5262beb3bc033833124020e239cdfb1c01b7a0004a7112e9d923df869d6:SevdRXp1iwbbtAhqejV3FgYyxZkprIjT8DoAaMLA3cMkFt0cLcU3gRTcCWOd0VDL5KX3olu31N4wm2DCfdQlBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/standard
@@ -435,9 +435,11 @@ directive cannot set or override the cap.
 
 The point is compared with an estimate of the live context (characters divided
 by four, plus declared image costs; the system prompt and tool definitions are
-not counted), not with the provider's reported prompt tokens. For English prose
-that overcounts (measured about 1.2x on one Opus prefix); code and JSON can
-undercount. Treat the cap as a cost target within roughly 20 percent.
+not counted), not with the provider's reported prompt tokens. The estimate can
+err by tens of percent in either direction: on one measured Opus prefix it
+undercounted by about 1.26x, so the run handed off about 26 percent past the
+point, while other content overcounts. Treat the cap as a cost target, not an
+exact bound.
 
 Choose the cap from the model's price row so a worst-case turn (cold cache, full
 input price) at the cap stays under the per-turn spend the operator will risk.
