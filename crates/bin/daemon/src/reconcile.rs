@@ -2398,6 +2398,32 @@ async fn reconcile_active_threads_inner(
                     &mut reconciled,
                 )?;
             }
+            ResumeDecision::Resume { .. }
+                if state
+                    .state_store
+                    .dedicated_session(&thread.thread_id)?
+                    .is_some_and(|session| session.state == "terminal") =>
+            {
+                // The root of a dedicated session whose session already
+                // settled terminal has nothing to resume: the resume would
+                // only fail in launch preparation and spend the one attempt.
+                tracing::warn!(
+                    thread_id = %thread.thread_id,
+                    "dedicated session already settled terminal — not resuming its root; finalizing failed"
+                );
+                finalize_dead(
+                    state,
+                    mode,
+                    &thread.thread_id,
+                    pgid,
+                    &thread.status,
+                    Some((
+                        "dedicated_session_settled",
+                        json!({"reason": "the dedicated session is already terminal"}),
+                    )),
+                    &mut reconciled,
+                )?;
+            }
             ResumeDecision::Resume { next_attempt, max } => {
                 // Persist the bumped counter BEFORE scheduling the
                 // re-spawn so a crash mid-resume does not grant an
