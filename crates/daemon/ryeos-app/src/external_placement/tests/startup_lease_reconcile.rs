@@ -152,6 +152,41 @@ fn the_trigger_still_refuses_local_settlement_of_a_session_with_an_unsettled_all
 }
 
 #[test]
+fn a_refused_retained_owner_names_the_fact_that_failed() {
+    let restarted = restarted_with_cleared_claim();
+    // The open passed with the claim absent; a replacement claim is refused
+    // and the refusal says which facts held and which did not.
+    restarted
+        .store
+        .with_runtime_sql_for_test(|connection| {
+            Ok(connection.execute(
+                "INSERT INTO thread_launch_claim(thread_id,claim_id,claimed_at_ms,
+                    lease_expires_at_ms,claimed_by,rearm_resume_budget_if_stale)
+                 VALUES(?1,'replacement',0,0,'{\"replacement\":true}',0)",
+                [PLACEMENT],
+            )?)
+        })
+        .unwrap();
+    let refusal = format!(
+        "{:#}",
+        restarted
+            .store
+            .predecessor_external_lease_placements("daemon-next")
+            .unwrap_err()
+    );
+    for expected in [
+        "placement T-one",
+        "live-or-cleared claim standing",
+        "session fields match reservation true",
+        "credential lock held by worker true",
+        "launch claim present true",
+        "claim equals workspace owner false",
+    ] {
+        assert!(refusal.contains(expected), "{expected}: {refusal}");
+    }
+}
+
+#[test]
 fn a_start_that_died_after_the_claim_clear_does_not_wedge_the_next() {
     let restarted = restarted_with_cleared_claim();
     // The reopen above passed validation with no claim. Retained validation
