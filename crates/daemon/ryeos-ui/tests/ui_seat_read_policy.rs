@@ -341,12 +341,12 @@ async fn bounds_refuse_a_result_and_never_truncate_it() {
 }
 
 /// A Surface and View of the fixture bundle that bind the core thread list
-/// with client-supplied `sort` and `limit`, to exercise parameter policy.
+/// with a client-supplied `sort`, to exercise parameter policy.
 fn install_thread_list_fixture(state: &AppState) {
     test_state::write_fixture_bundle_item(
         state,
         "views/test/seat-read-policy.yaml",
-        "name: seat-read-policy\nversion: \"1.0.0\"\ndescription: Fixture view binding the core thread list with client-supplied parameters\n\nwidget: rows\nsources:\n  default:\n    ref: service:threads/list\n    params:\n      sort: \"@facet:selection.sort\"\n      limit: \"@facet:selection.limit\"\n    collection: threads\nprojections:\n  primary: item_ref\n",
+        "name: seat-read-policy\nversion: \"1.0.0\"\ndescription: Fixture view binding the core thread list with client-supplied parameters\n\nwidget: rows\nsources:\n  default:\n    ref: service:threads/list\n    params:\n      sort: \"@facet:selection.sort\"\n    collection: threads\nprojections:\n  primary: item_ref\n",
     );
     test_state::write_fixture_bundle_item(
         state,
@@ -365,15 +365,14 @@ const THREADS_VIEW: &str = "view:test/seat-read-policy";
 
 #[tokio::test]
 #[ignore = "requires populated handler binaries via scripts/populate-bundles.sh"]
-async fn parameters_are_pinned_checked_and_conditioned_before_the_read() {
+async fn a_pin_replaces_the_clients_parameter_before_the_condition_is_judged() {
     let (_tmp, _owner, mut state) = build_test_state_with_live_bundles();
     install_thread_list_fixture(&state);
     set_seat_reads(
         &mut state,
         &policy(vec![thread_list_entry(json!({
             "when": {"sort": ["watch"]},
-            "pin": {"sort": "watch"},
-            "deny_params": ["limit"]
+            "pin": {"sort": "watch"}
         }))]),
     );
     let (id, ctx, producer, coordinate) =
@@ -386,7 +385,7 @@ async fn parameters_are_pinned_checked_and_conditioned_before_the_read() {
     );
     let state = Arc::new(state);
 
-    // The pin replaces the client's sort, so the condition on it holds.
+    // The client asks for `newest`; the pin makes it `watch`, which holds.
     let ok = dispatch_source(
         &state,
         &ctx,
@@ -398,23 +397,37 @@ async fn parameters_are_pinned_checked_and_conditioned_before_the_read() {
     .await
     .unwrap_or_else(|error| panic!("pinned read: {}", refusal_text(&error)));
     assert!(ok["result"]["result"]["threads"].is_array());
+}
 
-    // A parameter the entry denies is refused whatever its value.
-    let error = dispatch_source(
-        &state,
-        &ctx,
-        &producer,
-        &coordinate,
-        THREADS_VIEW,
-        json!({"sort": "watch", "limit": 5}),
-    )
-    .await
-    .expect_err("limit is denied");
-    assert!(
-        refusal_text(&error).contains("seat_read_parameter_denied"),
-        "{}",
-        refusal_text(&error)
+#[tokio::test]
+#[ignore = "requires populated handler binaries via scripts/populate-bundles.sh"]
+async fn a_denied_parameter_is_refused_whatever_its_value() {
+    let (_tmp, _owner, mut state) = build_test_state_with_live_bundles();
+    install_thread_list_fixture(&state);
+    set_seat_reads(
+        &mut state,
+        &policy(vec![thread_list_entry(json!({"deny_params": ["sort"]}))]),
     );
+    let (_id, ctx, producer, coordinate) =
+        live_presentation_with_surface(&state, POLICY_SURFACE).await;
+    let state = Arc::new(state);
+    for sort in ["watch", "newest", "default"] {
+        let error = dispatch_source(
+            &state,
+            &ctx,
+            &producer,
+            &coordinate,
+            THREADS_VIEW,
+            json!({"sort": sort}),
+        )
+        .await
+        .expect_err("sort is denied");
+        assert!(
+            refusal_text(&error).contains("seat_read_parameter_denied"),
+            "{}",
+            refusal_text(&error)
+        );
+    }
 }
 
 #[tokio::test]
