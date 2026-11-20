@@ -1195,7 +1195,9 @@ mod tests {
             &lillux::PinnedDirectory,
         ) -> T,
     ) -> T {
-        let state_lock = StateLock::acquire(&default_lock_path(&node.config.app_root)).unwrap();
+        let state_lock =
+            super::super::tests::acquire_state_lock(&default_lock_path(&node.config.app_root))
+                .unwrap();
         let runtime = lillux::PinnedDirectory::open(&node.runtime())
             .unwrap()
             .unwrap();

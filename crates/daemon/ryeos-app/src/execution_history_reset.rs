@@ -3712,6 +3712,16 @@ mod tests {
         }
     }
 
+    /// Take the operator state lock at `lock_path` in a fixture. A fixture
+    /// often drops one guard and takes the next on the same path at once, but
+    /// a dropped lock's descriptor close is deferred while any thread of this
+    /// test process holds a quiesced fork window (another test spawning a
+    /// child), so the kernel lock outlives the guard briefly. The bounded
+    /// wait is for exactly that deferred close; it never weakens exclusion.
+    pub(super) fn acquire_state_lock(lock_path: &Path) -> anyhow::Result<StateLock> {
+        StateLock::acquire_with_timeout(lock_path, std::time::Duration::from_secs(60))
+    }
+
     pub(super) fn install_offline_policy(
         config: &Config,
         identity: &ryeos_node_runtime::identity::NodeIdentity,
@@ -3740,7 +3750,7 @@ mod tests {
         let trust =
             ryeos_engine::trust::TrustStore::from_registry(*identity.verifying_key(), Vec::new())
                 .unwrap();
-        let lock = StateLock::acquire(&default_lock_path(&config.app_root)).unwrap();
+        let lock = acquire_state_lock(&default_lock_path(&config.app_root)).unwrap();
         publish_policy_update(
             &config.app_root,
             &NodePolicyUpdate::initial(generation),
@@ -3851,7 +3861,7 @@ mod tests {
         let original = std::fs::read(&reserved[0]).unwrap();
         assert!(!config.db_path.exists());
 
-        let state_lock = StateLock::acquire(&default_lock_path(tmp.path())).unwrap();
+        let state_lock = acquire_state_lock(&default_lock_path(tmp.path())).unwrap();
         let runtime = lillux::PinnedDirectory::open(&config.runtime_state_dir())
             .unwrap()
             .unwrap();
@@ -3888,7 +3898,7 @@ mod tests {
                 .unwrap();
         crate::runtime_db::test_native::seed_node(&config, false);
         install_offline_policy(&config, &identity, true);
-        let state_lock = StateLock::acquire(&default_lock_path(tmp.path())).unwrap();
+        let state_lock = acquire_state_lock(&default_lock_path(tmp.path())).unwrap();
         let runtime = lillux::PinnedDirectory::open(&config.runtime_state_dir())
             .unwrap()
             .unwrap();
@@ -4083,7 +4093,7 @@ mod tests {
                 .unwrap();
         std::fs::create_dir_all(config.runtime_state_dir()).unwrap();
         install_offline_policy(&config, &identity, true);
-        let state_lock = StateLock::acquire(&default_lock_path(&config.app_root)).unwrap();
+        let state_lock = acquire_state_lock(&default_lock_path(&config.app_root)).unwrap();
         let runtime = lillux::PinnedDirectory::open(&config.runtime_state_dir())
             .unwrap()
             .unwrap();
@@ -4146,7 +4156,7 @@ mod tests {
             if disabled {
                 install_offline_policy(&config, &identity, false);
             } else {
-                drop(StateLock::acquire(&default_lock_path(tmp.path())).unwrap());
+                drop(acquire_state_lock(&default_lock_path(tmp.path())).unwrap());
             }
             let runtime_names = || {
                 let mut names = std::fs::read_dir(config.runtime_state_dir())
@@ -4415,7 +4425,7 @@ mod tests {
                 .unwrap();
         install_offline_policy(&config, &identity, true);
         crate::runtime_db::test_native::seed_node(&config, true);
-        drop(StateLock::acquire(&default_lock_path(tmp.path())).unwrap());
+        drop(acquire_state_lock(&default_lock_path(tmp.path())).unwrap());
         let _serial = lillux_sqlite::test_host::serial();
         let participant = Participant {
             completed: std::sync::atomic::AtomicBool::new(false),
@@ -4564,7 +4574,7 @@ mod tests {
                 .unwrap();
         install_offline_policy(&config, &identity, true);
         crate::runtime_db::test_native::seed_node(&config, true);
-        drop(StateLock::acquire(&default_lock_path(tmp.path())).unwrap());
+        drop(acquire_state_lock(&default_lock_path(tmp.path())).unwrap());
 
         let child = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
@@ -4873,7 +4883,7 @@ mod tests {
             ryeos_node_runtime::identity::NodeIdentity::create(&config.node_signing_key_path)
                 .unwrap();
         install_offline_policy(&config, &identity, true);
-        let state_lock = StateLock::acquire(&default_lock_path(&config.app_root)).unwrap();
+        let state_lock = acquire_state_lock(&default_lock_path(&config.app_root)).unwrap();
         fixture_operational_source::establish(directory, namespace).unwrap();
         let policy =
             OfflineResetPolicyOwner::load(&config, &identity, &state_lock, directory, namespace)
