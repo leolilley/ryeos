@@ -26,7 +26,9 @@ use std::path::{Path, PathBuf};
 use base64::Engine as _;
 use lillux::crypto::{Signature, Verifier, VerifyingKey};
 
+mod endorsement;
 mod registry;
+pub use endorsement::*;
 pub use registry::*;
 
 use crate::contracts::{
@@ -248,6 +250,9 @@ pub struct TrustStore {
     /// Scopes of signers that arrived without a registry record (the signer
     /// list a runtime receives in its launch envelope).
     entry_scopes: HashMap<String, SignerScope>,
+    /// Endorsements that make authoring-key items trusted. Empty for stores
+    /// built from raw signers or a launch envelope.
+    endorsements: endorsement::EndorsementView,
 }
 
 impl TrustStore {
@@ -258,6 +263,7 @@ impl TrustStore {
             records: BTreeMap::new(),
             node_key: None,
             entry_scopes: HashMap::new(),
+            endorsements: endorsement::EndorsementView::default(),
         }
     }
 
@@ -277,6 +283,7 @@ impl TrustStore {
             records: BTreeMap::new(),
             node_key: None,
             entry_scopes: HashMap::new(),
+            endorsements: endorsement::EndorsementView::default(),
         }
     }
 
@@ -354,6 +361,7 @@ impl TrustStore {
             records: BTreeMap::new(),
             node_key: None,
             entry_scopes,
+            endorsements: endorsement::EndorsementView::default(),
         })
     }
 
@@ -388,6 +396,16 @@ impl TrustStore {
                         path: PathBuf::from(record.file_name()),
                         reason,
                     })?;
+            if record.role == SignerRole::Authoring
+                && record.status != SignerStatus::Revoked
+                && record.scope != SignerScope::authoring_default()
+            {
+                return Err(TrustError::AuthoringScopeRetired {
+                    fingerprint: record.fingerprint.clone(),
+                    label: record.label.clone(),
+                    scope: record.scope.describe(),
+                });
+            }
             if record.status != SignerStatus::Revoked {
                 signers.insert(
                     record.fingerprint.clone(),
@@ -405,6 +423,7 @@ impl TrustStore {
             records: by_fingerprint,
             node_key: Some(node_key),
             entry_scopes: HashMap::new(),
+            endorsements: endorsement::EndorsementView::default(),
         })
     }
 
@@ -417,9 +436,53 @@ impl TrustStore {
     pub fn load_node_registry(app_root: &Path) -> Result<Self, TrustError> {
         let node_key = load_node_verifying_key(app_root)?;
         let records = load_signer_records(&signers_dir(app_root), &node_key)?;
-        let store = Self::from_registry(node_key, records)?;
-        tracing::debug!(records = store.records.len(), "loaded node signer registry");
+        let mut store = Self::from_registry(node_key, records)?;
+        let ledger = EndorsementLedger::load(app_root, &node_key)?;
+        let index = EndorsementIndex::build(&ledger, &store)?;
+        tracing::debug!(
+            records = store.records.len(),
+            endorsements = index.len(),
+            "loaded node signer registry"
+        );
+        store.endorsements = endorsement::EndorsementView::live(index);
         Ok(store)
+    }
+
+    /// The endorsements in force, as of now.
+    pub fn endorsement_index(&self) -> std::sync::Arc<EndorsementIndex> {
+        self.endorsements.current()
+    }
+
+    /// A copy of this store whose endorsement index never changes. A request
+    /// takes one so every verification it makes sees the same endorsements,
+    /// even when one is recorded or revoked while it runs.
+    pub fn snapshot(&self) -> Self {
+        let mut copy = self.clone();
+        copy.endorsements = self.endorsements.snapshot();
+        copy
+    }
+
+    /// Re-read the endorsement store and replace the index under a live store,
+    /// so a running node follows a recorded or revoked endorsement without a
+    /// restart. Returns the new index identity. A store that is not live (a
+    /// snapshot, or one built from raw signers) is not changed.
+    pub fn refresh_endorsements(&self, app_root: &Path) -> Result<String, TrustError> {
+        let node_key = self.node_key.ok_or_else(|| TrustError::Unreadable {
+            path: endorsements_dir(app_root),
+            reason: "the store has no node key, so it holds no endorsements".to_string(),
+        })?;
+        let ledger = EndorsementLedger::load(app_root, &node_key)?;
+        let index = EndorsementIndex::build(&ledger, self)?;
+        let identity = index.identity(lillux::time::unix_secs_now());
+        self.endorsements.replace(index);
+        Ok(identity)
+    }
+
+    /// A copy of this store holding exactly `index`, frozen. For stores built
+    /// in memory and for tests.
+    pub fn with_endorsement_index(mut self, index: EndorsementIndex) -> Self {
+        self.endorsements = endorsement::EndorsementView::frozen(index);
+        self
     }
 
     /// Check whether a fingerprint can verify signatures (active, retired,
@@ -481,6 +544,7 @@ impl TrustStore {
                 .collect(),
             signers,
             node_key,
+            endorsements: endorsement::EndorsementView::default(),
         }
     }
 
@@ -523,6 +587,13 @@ impl TrustStore {
             &mut bytes,
             trusted_signers_digest(&self.signer_entries()).as_bytes(),
         );
+        append_fingerprint_field(
+            &mut bytes,
+            self.endorsements
+                .current()
+                .identity(lillux::time::unix_secs_now())
+                .as_bytes(),
+        );
         lillux::cas::sha256_hex(&bytes)
     }
 
@@ -538,11 +609,28 @@ impl TrustStore {
             + self.records.len() * 512
     }
 
-    fn scope_decision(&self, fingerprint: &str, context: &SignerContext<'_>) -> ScopeDecision {
+    fn scope_decision(
+        &self,
+        fingerprint: &str,
+        context: &SignerContext<'_>,
+        content_digest: &str,
+    ) -> ScopeDecision {
         if let Some(record) = self.records.get(fingerprint) {
             if record.status == SignerStatus::Revoked {
                 return ScopeDecision::Revoked {
                     label: record.label.clone(),
+                };
+            }
+            // The authoring key's registry scope never decides trust. What it
+            // signed is trusted only when a live endorsement covers the item's
+            // exact digest, or its kind within the project.
+            if record.role == SignerRole::Authoring {
+                if self.endorsed(context, content_digest) {
+                    return ScopeDecision::Admitted;
+                }
+                return ScopeDecision::OutOfScope {
+                    label: record.label.clone(),
+                    scope: record.scope.clone(),
                 };
             }
             if record
@@ -581,6 +669,31 @@ impl TrustStore {
         }
         // Unscoped in-memory signer.
         ScopeDecision::Admitted
+    }
+}
+
+impl TrustStore {
+    /// Whether a live endorsement covers an item signed in `context` whose
+    /// signed content has digest `content_digest`. Only project items qualify.
+    fn endorsed(&self, context: &SignerContext<'_>, content_digest: &str) -> bool {
+        if context.space != SignerSpace::Project {
+            return false;
+        }
+        let Some(root) = context.project_root else {
+            return false;
+        };
+        // Endorsements name the project by its canonical root, however the
+        // request spelled the path.
+        let canonical = std::fs::canonicalize(root).ok();
+        let Some(project) = canonical.as_deref().unwrap_or(root).to_str() else {
+            return false;
+        };
+        self.endorsements.current().covers(
+            project,
+            context.kind,
+            content_digest,
+            lillux::time::unix_secs_now(),
+        )
     }
 }
 
@@ -762,7 +875,7 @@ pub fn verify_item_signature_with_hash(
                 })?;
 
             // Step 4: judge scope where the trust class forms.
-            match trust_store.scope_decision(fingerprint, context) {
+            match trust_store.scope_decision(fingerprint, context, actual_hash) {
                 ScopeDecision::Admitted => {
                     tracing::trace!(fingerprint = %fingerprint, trust_class = "trusted", "signature verified");
                     Ok((
@@ -1365,8 +1478,8 @@ mod tests {
     }
 
     #[test]
-    fn authoring_signer_admitted_for_knowledge_is_trusted_for_knowledge_only() {
-        let (sk, vk, fp) = gen_key();
+    fn authoring_record_with_a_widened_scope_is_refused_at_load() {
+        let (_, vk, fp) = gen_key();
         let (_, node_vk, _) = gen_key2();
         let record = record_for(
             &vk,
@@ -1376,16 +1489,27 @@ mod tests {
             &[],
             SignerStatus::Active,
         );
-        let store = TrustStore::from_registry(node_vk, vec![record]).unwrap();
-        let (content, envelope, header) = signed_with_header(&sk, &fp);
-        let knowledge = SignerContext::project("knowledge", None);
-        let (class, _) =
-            verify_item_signature(&content, &header, &envelope, &store, &knowledge).unwrap();
-        assert_eq!(class, TrustClass::Trusted);
-        let graph = SignerContext::project("graph", None);
-        let (class, _) =
-            verify_item_signature(&content, &header, &envelope, &store, &graph).unwrap();
-        assert_eq!(class, TrustClass::Untrusted);
+        let error = TrustStore::from_registry(node_vk, vec![record]).unwrap_err();
+        assert_eq!(error.code(), "trust_authoring_scope_retired");
+        let text = error.to_string();
+        assert!(text.contains(&fp), "{text}");
+        assert!(text.contains("ryeos trust scope"), "{text}");
+        assert!(text.contains("ryeos endorse"), "{text}");
+    }
+
+    #[test]
+    fn a_revoked_authoring_record_with_a_widened_scope_still_loads() {
+        let (_, vk, _) = gen_key();
+        let (_, node_vk, _) = gen_key2();
+        let record = record_for(
+            &vk,
+            SignerRole::Authoring,
+            vec![SignerSpace::Project],
+            &["knowledge"],
+            &[],
+            SignerStatus::Revoked,
+        );
+        TrustStore::from_registry(node_vk, vec![record]).unwrap();
     }
 
     #[test]

@@ -1,11 +1,14 @@
 //! End to end: the authoring key's registry scope and its rotation.
 //!
-//! The authoring key is pinned with no kinds, the operator widens it per kind
-//! with `ryeos trust scope`, and `ryeos node authoring rotate` replaces it.
-//! The verbs are signed offline operations applied to a stopped node, so these
-//! tests apply them in process with the on-volume local operator key, exactly
-//! as the commands do, then load the registry the way every verification site
-//! does and judge real signed content against it.
+//! The authoring key is pinned with no kinds and nothing it signs is trusted
+//! by that scope: an operator endorsement is what trusts an authored item. The
+//! registry scope of an authoring key is not widened (`ryeos trust scope`
+//! refuses, and a node whose record was widened under the old rule refuses to
+//! load until the scope is reset), and `ryeos node authoring rotate` replaces
+//! the key. The verbs are signed offline operations applied to a stopped node,
+//! so these tests apply them in process with the on-volume local operator key,
+//! exactly as the commands do, then load the registry the way every
+//! verification site does and judge real signed content against it.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -72,6 +75,16 @@ impl StoppedNode {
     }
 
     fn apply(&self, operation: &str, arguments: Value, inputs: &[(&str, Vec<u8>)]) -> Value {
+        self.try_apply(operation, arguments, inputs)
+            .unwrap_or_else(|error| panic!("{operation} refused: {error:#}"))
+    }
+
+    fn try_apply(
+        &self,
+        operation: &str,
+        arguments: Value,
+        inputs: &[(&str, Vec<u8>)],
+    ) -> anyhow::Result<Value> {
         apply_local(
             self.path(),
             &BareHost,
@@ -86,8 +99,7 @@ impl StoppedNode {
                 expected_result: BTreeMap::new(),
             },
         )
-        .unwrap_or_else(|error| panic!("{operation} refused: {error:#}"))
-        .result
+        .map(|applied| applied.result)
     }
 
     fn registry(&self) -> TrustStore {
@@ -101,18 +113,47 @@ impl StoppedNode {
         .expect("installed authoring key")
     }
 
-    /// `ryeos trust scope <fp> --kind <kind>`
-    fn admit_kind(&self, fingerprint: &str, kind: &str) {
-        self.apply(
-            "node.trust.scope",
-            json!({
-                "fingerprint": fingerprint,
-                "spaces": ["project"],
-                "kinds": [kind],
-                "projects": [],
-            }),
-            &[],
-        );
+    /// The state of a node whose operator widened the authoring key under the
+    /// rule this build retires: a signed scope-changed event and the record it
+    /// commits to, written the way the registry writer did.
+    fn legacy_widen(&self, fingerprint: &str, kind: &str) {
+        use ryeos_engine::trust::{
+            TRUST_EVENT_SCHEMA, TrustEvent, TrustEventKind, events_dir, signers_dir,
+        };
+        let view = ryeos_node::trust_registry::load_view(self.path()).expect("registry view");
+        let mut record = view
+            .records
+            .iter()
+            .find(|record| record.fingerprint == fingerprint)
+            .expect("authoring record")
+            .clone();
+        record.scope.kinds = vec![kind.to_owned()];
+        let node = NodeIdentity::load(
+            &RuntimeRoot::new(self.path().to_path_buf()).node_signing_key_path(),
+        )
+        .expect("node identity");
+        let event = TrustEvent {
+            schema: TRUST_EVENT_SCHEMA.to_owned(),
+            seq: view.chain.len() as u64 + 1,
+            previous: view.chain.last().map(TrustEvent::digest),
+            kind: TrustEventKind::ScopeChanged,
+            signer: fingerprint.to_owned(),
+            record_digest: record.content_digest(),
+            request_digest: "0".repeat(64),
+            operator: compute_fingerprint(&self.operator.verifying_key()),
+            predecessor: None,
+        };
+        std::fs::write(
+            events_dir(self.path()).join(event.file_name()),
+            event.render_signed(node.signing_key()).expect("event"),
+        )
+        .expect("write event");
+        record.event = event.digest();
+        std::fs::write(
+            signers_dir(self.path()).join(record.file_name()),
+            record.render_signed(node.signing_key()).expect("record"),
+        )
+        .expect("write record");
     }
 
     /// `ryeos node authoring rotate`
@@ -192,25 +233,80 @@ fn the_authoring_key_is_pinned_with_no_kinds_and_signs_nothing_trusted() {
 }
 
 #[test]
-fn widening_the_scope_for_one_kind_trusts_only_that_kind() {
+fn trust_scope_refuses_to_widen_the_authoring_key_and_pin_refuses_a_wide_one() {
     let node = StoppedNode::new();
-    node.admit_kind(&fingerprint(&node.authoring), "knowledge");
+    let fp = fingerprint(&node.authoring);
+    let error = node
+        .try_apply(
+            "node.trust.scope",
+            json!({ "fingerprint": fp, "spaces": ["project"], "kinds": ["knowledge"], "projects": [] }),
+            &[],
+        )
+        .expect_err("widening an authoring key is refused");
+    let text = format!("{error:#}");
+    assert!(text.contains("trust_authoring_scope_retired"), "{text}");
+    assert!(text.contains("ryeos endorse"), "{text}");
+
+    let second = lillux::crypto::SigningKey::from_bytes(&[77; 32]);
+    let error = node
+        .try_apply(
+            "node.trust.pin",
+            json!({ "role": "authoring", "spaces": [], "kinds": ["knowledge"], "projects": [] }),
+            &[("signer", trust_document(&second).into_bytes())],
+        )
+        .expect_err("pinning a wide authoring key is refused");
+    assert!(
+        format!("{error:#}").contains("trust_authoring_scope_retired"),
+        "{error:#}"
+    );
+
+    // Restoring the authoring scope is the one scope change it accepts, and it
+    // is a no-op on a record that already holds it.
+    let result = node.apply(
+        "node.trust.scope",
+        json!({ "fingerprint": fp, "spaces": ["project"], "kinds": [], "projects": [] }),
+        &[],
+    );
+    assert_eq!(result["events_written"], 0, "{result}");
+}
+
+#[test]
+fn a_node_with_a_widened_authoring_scope_refuses_to_load_until_it_is_reset() {
+    let node = StoppedNode::new();
+    let fp = fingerprint(&node.authoring);
+    node.legacy_widen(&fp, "knowledge");
+
+    // Every load of the registry names the retired scope and the cure.
+    let error = TrustStore::load_node_registry(node.path()).expect_err("widened scope refused");
+    assert_eq!(error.code(), "trust_authoring_scope_retired");
+    let text = error.to_string();
+    assert!(text.contains(&fp), "{text}");
+    assert!(text.contains("ryeos trust scope"), "{text}");
+    assert!(text.contains("ryeos endorse"), "{text}");
+
+    // The cure is the scope reset on the stopped node; items it signed are
+    // untrusted until endorsed.
+    let result = node.apply(
+        "node.trust.scope",
+        json!({ "fingerprint": fp, "spaces": ["project"], "kinds": [], "projects": [] }),
+        &[],
+    );
+    assert_eq!(result["events_written"], 1, "{result}");
     let store = node.registry();
     assert_eq!(
-        class_of(&store, &node.authoring, "knowledge"),
-        TrustClass::Trusted
+        store.signer(&fp).expect("record").scope,
+        SignerScope::authoring_default()
     );
     assert_eq!(
-        class_of(&store, &node.authoring, "graph"),
+        class_of(&store, &node.authoring, "knowledge"),
         TrustClass::Untrusted
     );
 }
 
 #[test]
-fn authoring_rotation_retires_the_old_key_and_the_new_one_keeps_the_widened_scope() {
+fn authoring_rotation_retires_the_old_key_and_the_new_one_signs_nothing_trusted() {
     let node = StoppedNode::new();
     let old = node.authoring.clone();
-    node.admit_kind(&fingerprint(&old), "knowledge");
 
     let (result, new_fingerprint) = node.rotate_authoring();
     assert_eq!(result["old_fingerprint"], fingerprint(&old));
@@ -233,27 +329,21 @@ fn authoring_rotation_retires_the_old_key_and_the_new_one_keeps_the_widened_scop
     assert_eq!(old_record.status, SignerStatus::Retired);
     assert_eq!(new_record.status, SignerStatus::Active);
     assert_eq!(new_record.role, SignerRole::Authoring);
-    assert_eq!(new_record.scope, old_record.scope);
+    assert_eq!(new_record.scope, SignerScope::authoring_default());
 
-    // Items the retired key signed still verify, within the scope it kept.
-    assert_eq!(
-        class_of(&store, &old, "knowledge"),
-        TrustClass::Trusted,
-        "a retired key still verifies what it signed"
-    );
-    // The new key signs trusted knowledge and nothing else.
+    // A retired authoring key still verifies what it signed, as untrusted
+    // until an operator endorses it; so does its successor.
+    assert_eq!(class_of(&store, &old, "knowledge"), TrustClass::Untrusted);
     assert_eq!(
         class_of(&store, &installed, "knowledge"),
-        TrustClass::Trusted
+        TrustClass::Untrusted
     );
-    assert_eq!(class_of(&store, &installed, "graph"), TrustClass::Untrusted);
 }
 
 #[test]
 fn a_revoked_authoring_key_verifies_nothing_it_signed() {
     let node = StoppedNode::new();
     let old = node.authoring.clone();
-    node.admit_kind(&fingerprint(&old), "knowledge");
     node.rotate_authoring();
     node.apply(
         "node.trust.revoke",

@@ -159,6 +159,26 @@ pub enum TrustError {
 
     #[error("trust_registry_unreadable: {path} cannot be read securely: {reason}")]
     Unreadable { path: PathBuf, reason: String },
+
+    #[error(
+        "trust_authoring_scope_retired: authoring signer {fingerprint} ({label}) is pinned \
+         with scope {scope}, but an authoring key's registry scope no longer decides trust: \
+         what it signs is trusted only through an endorsement (`ryeos endorse`). Stop the \
+         node and run `ryeos trust scope {fingerprint}` to reset the record to the authoring \
+         scope (project space, no kinds); items it signed stay untrusted until endorsed"
+    )]
+    AuthoringScopeRetired {
+        fingerprint: String,
+        label: String,
+        scope: String,
+    },
+
+    #[error(
+        "endorsement_record_invalid: {path} {reason}. Endorsement documents are node-signed \
+         and named by their digest; remove the file with the node stopped and sign the \
+         endorsement again with `ryeos endorse`"
+    )]
+    EndorsementRecordInvalid { path: PathBuf, reason: String },
 }
 
 impl TrustError {
@@ -175,6 +195,8 @@ impl TrustError {
             TrustError::EventChainBroken { .. } => "trust_event_chain_broken",
             TrustError::NodeIdentityUnavailable { .. } => "trust_node_identity_unavailable",
             TrustError::Unreadable { .. } => "trust_registry_unreadable",
+            TrustError::AuthoringScopeRetired { .. } => "trust_authoring_scope_retired",
+            TrustError::EndorsementRecordInvalid { .. } => "endorsement_record_invalid",
         }
     }
 }
@@ -305,9 +327,9 @@ impl SignerScope {
         }
     }
 
-    /// Default scope of the node's authoring key: project space and no
-    /// kind. Items it signs are machine drafts until the operator widens the
-    /// scope for a kind or re-signs the item.
+    /// The only scope the node's authoring key holds: project space and no
+    /// kind. Items it signs are machine drafts until an operator endorses
+    /// them; the key's registry scope never decides trust.
     pub fn authoring_default() -> Self {
         Self {
             spaces: vec![SignerSpace::Project],

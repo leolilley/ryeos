@@ -1879,7 +1879,7 @@ impl Engine {
             subject_resolution_authority
                 .validate_for_materialized_root(project_root)
                 .map_err(|error| EngineError::Internal(format!("{error:#}")))?;
-            Ok(self.effective_trust_store().clone())
+            Ok(self.effective_trust_store().snapshot())
         })
     }
 
@@ -2195,7 +2195,7 @@ impl Engine {
         subject_resolution_authority
             .validate_for_materialized_root(project_root)
             .map_err(|error| EngineError::Internal(format!("{error:#}")))?;
-        let trust_store = self.effective_trust_store().clone();
+        let trust_store = self.effective_trust_store().snapshot();
         let parser_dispatcher =
             self.effective_parser_dispatcher_with_trust(project_root, &trust_store)?;
         let registry_fingerprint =
@@ -2225,7 +2225,7 @@ impl Engine {
             .validate_for_materialized_root(Some(materialization.path()))
             .map_err(|error| EngineError::Internal(format!("{error:#}")))?;
 
-        let trust_store = self.trust_store.clone();
+        let trust_store = self.trust_store.snapshot();
         let parser_tools = self
             .parser_dispatcher
             .parser_tools
@@ -2254,7 +2254,7 @@ impl Engine {
         subject_resolution_authority
             .validate_for_materialized_root(Some(project_root))
             .map_err(|error| EngineError::Internal(format!("{error:#}")))?;
-        let trust_store = self.trust_store.clone();
+        let trust_store = self.trust_store.snapshot();
         let parser_tools = self
             .parser_dispatcher
             .parser_tools
