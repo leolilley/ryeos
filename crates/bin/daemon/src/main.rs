@@ -4291,7 +4291,7 @@ async fn run(
     // Use `ryeos init` to install bundle registrations before daemon startup.
 
     tracing::info!("State lock acquired");
-    lifecycle_marker::report_previous_exit(previous_exit.as_ref());
+    lifecycle_marker::report_previous_run(previous_exit.as_ref());
     lifecycle_marker::check_disk_space(
         &ryeos_engine::roots::RuntimeRoot::new(config.app_root.clone()).state(),
     );
