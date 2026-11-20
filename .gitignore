@@ -193,3 +193,6 @@ bundles/.*.publish-staging/
 .local/
 
 ## Development publisher private key (local only)
+
+# Written by build-rune-web.sh beside the browser package: which sources it was built from.
+/crates/clients/rune/.pkg-build-stamp

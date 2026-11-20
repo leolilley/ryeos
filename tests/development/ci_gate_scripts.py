@@ -192,6 +192,39 @@ class Digest(unittest.TestCase):
         write(root, "crates/clients/runtime/f.txt", 'version = "0.1.1"')
         self.assertNotEqual(digest_mod.digest(root), good)
 
+    def stamp(self, root: Path, built_from: str) -> None:
+        write(root, "crates/clients/rune/pkg/a.js", "package")
+        pkg = Path(root) / "crates/clients/rune/pkg"
+        digest_mod.write_stamp(Path(root), pkg, built_from)
+
+    def test_stamp_from_the_current_sources_is_accepted(self):
+        root = self.repo()
+        self.stamp(root, digest_mod.digest(root))
+        self.assertEqual(digest_mod.stamped_digest(root), digest_mod.digest(root))
+
+    def test_missing_stamp_is_refused(self):
+        root = self.repo()
+        write(root, "crates/clients/rune/pkg/a.js", "package")
+        with self.assertRaises(SystemExit):
+            digest_mod.stamped_digest(root)
+
+    def test_stamp_from_different_sources_is_refused(self):
+        root = self.repo()
+        self.stamp(root, digest_mod.digest(root))
+        write(root, "crates/clients/base/f.txt", "changed after the build")
+        with self.assertRaises(SystemExit):
+            digest_mod.stamped_digest(root)
+        self.stamp(root, "0" * 64)
+        with self.assertRaises(SystemExit):
+            digest_mod.stamped_digest(root)
+
+    def test_package_changed_after_the_build_is_refused(self):
+        root = self.repo()
+        self.stamp(root, digest_mod.digest(root))
+        write(root, "crates/clients/rune/pkg/a.js", "replaced by hand")
+        with self.assertRaises(SystemExit):
+            digest_mod.stamped_digest(root)
+
     def test_input_matching_nothing_fails(self):
         root = self.repo()
         git(root, "rm", "-q", "rust-toolchain.toml")

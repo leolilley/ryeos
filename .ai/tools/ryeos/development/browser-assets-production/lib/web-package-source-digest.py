@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-20T09:25:00Z:67c5f91d4efc2d9457cd2d930280cd81ad43b655b618f23b2b949aee293f87fb:otBXhn9D4FTVkKzym7c9ya4YVQxO2+CgK/y1KbSMzJLvNo2k6EFnOL6jg5JIlGV0RczxCs1m4T2vKD7aon+KBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-20T10:04:57Z:b070df195eaa1a84eb4aa523cfc68507edecd323f005ae4f7b91fe1fbb9c70d3:ZZaOsVf9sq8s9TfH0Kpwt8xpxrRC/F2OtWN5JRPE6XrGJ1naCFUtM/dsTOQ5DPaecGDuhvvC5/xTtySVcuj4Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Externally invoked host helper in the development bundle; lib/ is excluded
 # from Tool resolution, so this is signed source, not an admitted Tool. It
 # grants no RyeOS authority. Run it from a checkout of this repository.
@@ -33,6 +33,17 @@ dependency edges stay hashed.
 
   --print   write the digest to stdout
   --check   compare it with the digest recorded in web-assets.json
+  --write-stamp DIR DIGEST
+            record that the files in DIR were built from sources with DIGEST
+  --stamped print the digest the package was built from; refuse unless the
+            build stamp exists, its package files are the ones now in pkg/,
+            and its digest is the current sources' digest
+
+The build stamp (an untracked file beside pkg/, written only by a successful
+build, removed when a build starts) is what lets the registry generator record a
+digest: `--refresh-digests` copies the digest from the stamp and nothing else,
+so a package that was not rebuilt from the current sources cannot be certified
+fresh.
 """
 
 from __future__ import annotations
@@ -66,6 +77,8 @@ INPUTS = (
 
 RENDERER_LOCK = "crates/clients/rune/Cargo.lock"
 MASKED_VERSION = b'version = "<path crate>"'
+PACKAGE = "crates/clients/rune/pkg"
+STAMP = "crates/clients/rune/.pkg-build-stamp"
 MANIFEST = "crates/daemon/ryeos-ui/web-assets.json"
 REBUILD = ".ai/tools/ryeos/development/browser-assets-production/publish.sh --publish"
 
@@ -116,14 +129,45 @@ def digest(root: Path) -> str:
     return outer.hexdigest()
 
 
+def package_hash(directory: Path) -> str:
+    outer = hashlib.sha256()
+    for path in sorted(p for p in directory.iterdir() if p.is_file()):
+        outer.update(f"{path.name}\0{hashlib.sha256(path.read_bytes()).hexdigest()}\n".encode())
+    return outer.hexdigest()
+
+
+def write_stamp(root: Path, directory: Path, built_from: str) -> None:
+    (root / STAMP).write_text(f"{built_from}\n{package_hash(directory)}\n")
+
+
+def stamped_digest(root: Path) -> str:
+    stamp = root / STAMP
+    if not stamp.is_file():
+        raise SystemExit(f"no build stamp ({STAMP}): the package was not built here; run the build")
+    built_from, _, built_package = stamp.read_text().strip().partition("\n")
+    if package_hash(root / PACKAGE) != built_package:
+        raise SystemExit(f"{PACKAGE} is not the package the last build produced; run the build")
+    if built_from != digest(root):
+        raise SystemExit("the package was built from different sources than the current ones; run the build")
+    return built_from
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", default=str(Path(__file__).resolve().parents[6]))
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--print", action="store_true")
     mode.add_argument("--check", action="store_true")
+    mode.add_argument("--stamped", action="store_true")
+    mode.add_argument("--write-stamp", nargs=2, metavar=("DIR", "DIGEST"))
     args = parser.parse_args()
     root = Path(args.root)
+    if args.write_stamp:
+        write_stamp(root, Path(args.write_stamp[0]), args.write_stamp[1])
+        return
+    if args.stamped:
+        print(stamped_digest(root))
+        return
     current = digest(root)
     if args.print:
         print(current)
