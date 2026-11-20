@@ -467,6 +467,60 @@ jobs:
           compression-level: 0
           retention-days: 1
 
+  init-profiles:
+    name: Real init of every shipped profile
+    # The release packaging preflight runs the production `ryeos init` on an
+    # app root, and that init refuses storage that is not durable. This job runs
+    # the real binary for every shipped profile and host class on a separate
+    # mount against the dev-signed bundle state the bundles job refreshed, so
+    # that gate cannot stop being exercised until release day.
+    needs: [bundles]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    if: ${{ github.event_name != 'workflow_dispatch' || (inputs.run_tests && !inputs.merge_gates) }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      - name: Prepare the runner
+        # Places TMPDIR on a loop-mounted volume: a mount distinct from the
+        # root disk, which the durable-root gate accepts.
+        run: ./scripts/ci/prepare-runner.sh
+
+      - name: Download the refreshed bundle state
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: bundle-state-${{ github.sha }}
+          path: ${{ runner.temp }}/bundle-state
+
+      - name: Restore the refreshed bundles
+        run: ./scripts/ci/unpack-bundle-state.sh "$RUNNER_TEMP/bundle-state/bundle-state.tar.zst"
+
+      - name: Build the ryeos CLI
+        run: cargo build --locked -p ryeos-cli --bin ryeos
+
+      - name: Initialize every profile under every host class
+        run: |
+          mkdir -p "$TMPDIR/init-profiles-root"
+          ./tests/e2e/init-profiles/check.sh \
+            --ryeos "$PWD/target/debug/ryeos" \
+            --source "$PWD/bundles" \
+            --trust-file "$PWD/bundles/.ai/PUBLISHER_TRUST.toml" \
+            --verify-root "$TMPDIR/init-profiles-root"
+
   workspace-archive:
     name: Workspace test archive
     runs-on: ubuntu-latest
