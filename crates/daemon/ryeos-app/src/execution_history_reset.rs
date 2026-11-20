@@ -4847,9 +4847,10 @@ mod tests {
         Arc<dyn lillux_sqlite::SqliteInspectionCopyWork>,
         lillux_sqlite::test_host::TestHostSerial,
     ) {
-        let serial = lillux_sqlite::test_host::serial();
+        // The fixture's own source seeding installs and releases a host, so
+        // the serial is taken only once the claim is issued.
         let (state_lock, claim, work) = issue_inspection_claim(directory, namespace, db_target);
-        (state_lock, claim, work, serial)
+        (state_lock, claim, work, lillux_sqlite::test_host::serial())
     }
 
     /// The claim's own offline native host, filed in a fresh controller the
