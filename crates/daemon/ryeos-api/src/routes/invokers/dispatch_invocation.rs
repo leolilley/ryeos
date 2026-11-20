@@ -493,8 +493,11 @@ impl CompiledDispatchInvoker {
             launch_timings: None,
             original_root_kind: item_ref.kind(),
             pre_minted_thread_id: None,
-            usage_subject: None,
-            usage_subject_asserted_by: None,
+            usage_subject: Some(ryeos_state::UsageSubject {
+                namespace: "route".to_string(),
+                subject: ctx.route_id.to_string(),
+            }),
+            usage_subject_asserted_by: (!principal_id.is_empty()).then(|| principal_id.clone()),
             previous_thread_id: None,
             root_admission,
             root_dispatch_evidence,
