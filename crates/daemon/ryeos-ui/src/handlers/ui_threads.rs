@@ -576,9 +576,7 @@ pub async fn handle_inspect(
 /// recorded no `isolation_enforced` property, as an external endpoint does,
 /// is `recorded` without that key and says so in `reason`; no default is
 /// invented for a fact that was not recorded.
-fn launch_facts_rows(
-    evidence: anyhow::Result<Option<(String, BTreeMap<String, Value>)>>,
-) -> Value {
+fn launch_facts_rows(evidence: anyhow::Result<Option<(String, BTreeMap<String, Value>)>>) -> Value {
     let row = match evidence {
         Ok(Some((realization_hash, properties))) => {
             let mut row = serde_json::json!({
