@@ -7633,10 +7633,7 @@ fn scripted_provider_pending_stays_pending_even_past_the_lease_end() {
     provider.script(switch_json("pending", true, 10 * GRACE_MS));
     for end in [bounded_in(-3_600_000), LatestLeaseEnd::Unbounded {}] {
         for terminate in [true, false] {
-            assert_eq!(
-                termination_basis(&provider.contact(terminate, end)),
-                None
-            );
+            assert_eq!(termination_basis(&provider.contact(terminate, end)), None);
         }
     }
 }
@@ -7684,7 +7681,11 @@ fn scripted_not_found_past_the_lease_end_and_grace_is_terminal_by_rule_b() {
         );
     }
     // S5, driven by the clock offset: the same future end, time moved on.
-    provider.script(switch_json("not_found", false, 3_600_000 + GRACE_MS + 60_000));
+    provider.script(switch_json(
+        "not_found",
+        false,
+        3_600_000 + GRACE_MS + 60_000,
+    ));
     assert_eq!(
         termination_basis(&provider.contact(false, bounded_in(3_600_000))),
         Some(TerminalBasis::PastLatestLeaseEndNotFound)

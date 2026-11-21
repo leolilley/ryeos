@@ -1460,7 +1460,10 @@ fn read_provider_switch(root: &lillux::PinnedDirectory) -> Result<Option<Provide
     };
     let switch: ProviderSwitch = serde_json::from_slice(&file.read_bounded(MAX_RECORD_BYTES)?)
         .context("synthetic provider switch is not a valid document")?;
-    ensure!(switch.schema == 1, "unsupported synthetic provider switch schema");
+    ensure!(
+        switch.schema == 1,
+        "unsupported synthetic provider switch schema"
+    );
     Ok(Some(switch))
 }
 
@@ -2804,15 +2807,28 @@ mod tests {
 
         #[test]
         fn terminated_is_terminal_and_pending_is_pending_at_any_time() {
-            for end in [LatestLeaseEnd::Bounded { unix_ms: END }, LatestLeaseEnd::Unbounded {}] {
+            for end in [
+                LatestLeaseEnd::Bounded { unix_ms: END },
+                LatestLeaseEnd::Unbounded {},
+            ] {
                 for wall in [0, END, END + 2 * LEASE_END_GRACE_MS] {
                     for contact in [TERMINATE, RECONCILE] {
                         assert_eq!(
-                            verdict(&switch(ProviderAnswer::Terminated, false, 0), contact, &end, wall),
+                            verdict(
+                                &switch(ProviderAnswer::Terminated, false, 0),
+                                contact,
+                                &end,
+                                wall
+                            ),
                             terminal(TerminalBasis::ObservedTerminated)
                         );
                         assert_eq!(
-                            verdict(&switch(ProviderAnswer::Pending, true, 0), contact, &end, wall),
+                            verdict(
+                                &switch(ProviderAnswer::Pending, true, 0),
+                                contact,
+                                &end,
+                                wall
+                            ),
                             PENDING
                         );
                     }
@@ -2861,7 +2877,12 @@ mod tests {
             let not_found = switch(ProviderAnswer::NotFound, false, i64::MAX / 2);
             for contact in [TERMINATE, RECONCILE] {
                 assert_eq!(
-                    verdict(&not_found, contact, &LatestLeaseEnd::Unbounded {}, i64::MAX / 2),
+                    verdict(
+                        &not_found,
+                        contact,
+                        &LatestLeaseEnd::Unbounded {},
+                        i64::MAX / 2
+                    ),
                     PENDING
                 );
             }
@@ -2955,8 +2976,7 @@ mod tests {
                 occurrence: bound.clone(),
                 termination: termination.clone(),
             };
-            let response =
-                reconcile_termination(&root, &request, &bound, &termination).unwrap();
+            let response = reconcile_termination(&root, &request, &bound, &termination).unwrap();
             response.validate_for(&request).unwrap();
             assert!(matches!(
                 response,

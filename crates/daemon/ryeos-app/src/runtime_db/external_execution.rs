@@ -2413,6 +2413,47 @@ impl RuntimeDb {
         self.conn.with_sql(|conn| read(conn, placement))
     }
 
+    /// Every stored terminal observation, as the canonical evidence JSON the
+    /// runtime database holds, for a test that reads back what a settlement
+    /// recorded.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn external_terminal_observation_documents(&self) -> Result<Vec<serde_json::Value>> {
+        self.conn.with_sql(|conn| {
+            let mut statement = conn
+                .prepare("SELECT observation_json FROM external_execution_terminal_observation")?;
+            let texts = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut documents = Vec::with_capacity(texts.len());
+            for text in texts {
+                documents.push(serde_json::from_str(&text)?);
+            }
+            Ok(documents)
+        })
+    }
+
+    /// Rewrite one stored reservation's contact deadline in place, bypassing
+    /// the reservation path's own checks, to learn whether the stored row
+    /// refuses such an edit. Only a Store whose node is not running may be
+    /// edited.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn rewrite_reservation_contact_deadline(
+        &self,
+        placement: &str,
+        contact_deadline_ms: i64,
+    ) -> Result<()> {
+        self.conn.with_sql(|conn| {
+            let changed = conn.execute(
+                "UPDATE external_execution_allocation
+                 SET reservation_json=json_set(reservation_json,'$.contact_deadline_ms',?2)
+                 WHERE placement_thread_id=?1",
+                params![placement, contact_deadline_ms],
+            )?;
+            ensure!(changed == 1, "no stored reservation to rewrite");
+            Ok(())
+        })
+    }
+
     pub(crate) fn unsettled_external_allocation_placements(&self) -> Result<Vec<String>> {
         self.conn.with_sql(|conn| {
             validate_current(conn)?;

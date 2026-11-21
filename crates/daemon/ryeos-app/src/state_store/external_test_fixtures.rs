@@ -560,6 +560,141 @@ impl StateStore {
         )
     }
 
+    /// Leave in this Store what a daemon that died mid-lease leaves behind,
+    /// over a real installed placement binding: the stored capsule of the
+    /// leased-session fixture program, a session holding its credential lock
+    /// for a worker of another generation, and an allocation that contacted
+    /// its provider and bound an occurrence the provider can be asked about.
+    /// Only a Store whose node is not running may be seeded.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn install_leased_session_allocation(
+        &self,
+        app_root: &std::path::Path,
+        binding: &crate::node_config::sections::external_execution::InstalledExternalExecutionBinding,
+        seed: &crate::leased_session_rig::LeasedSessionSeed<'_>,
+    ) -> Result<()> {
+        use crate::runtime_db::external_execution::{
+            EXTERNAL_ALLOCATION_RESERVATION_SCHEMA, ExternalAllocationOccurrence,
+            ExternalAllocationOwner, ExternalAllocationReservation, ExternalDedicatedSessionOwner,
+            ExternalLeaseCharge, ExternalObservationTiming,
+        };
+        use crate::vault::NodeVault as _;
+
+        let capsule = crate::leased_session_rig::leased_session_capsule()?;
+        let capsule_hash = capsule.content_hash()?;
+        {
+            let authority = self.pinned_state_authority()?;
+            let guard = authority.acquire_shared_guard()?;
+            let stored = authority.cas_store()?.store_object(&capsule.to_value()?)?;
+            authority.ensure_guard(&guard)?;
+            anyhow::ensure!(
+                stored == capsule_hash,
+                "the stored leased-session capsule changed its content hash"
+            );
+        }
+        let retained = binding.retained_generation()?;
+        let generation = "3".repeat(64);
+        let access =
+            crate::vault::external_channel::ExternalChannelAuthorityAccess::new(&generation)?;
+        let vault = crate::vault::SealedEnvelopeVault::load(app_root)?;
+        let channel_authority = access.decode(vault.ensure_external_channel_authority(&access)?)?;
+        let now = lillux::time::timestamp_millis();
+        let request_digest = "e".repeat(64);
+        let reservation = ExternalAllocationReservation {
+            schema: EXTERNAL_ALLOCATION_RESERVATION_SCHEMA,
+            placement_thread_id: seed.placement_thread_id.to_owned(),
+            admitted_capsule_hash: capsule_hash,
+            owner: ExternalAllocationOwner::DedicatedSession(ExternalDedicatedSessionOwner {
+                workspace_id: seed.workspace_id.to_owned(),
+                worker_instance_id: seed.worker_instance_id.to_owned(),
+                worker_boot_epoch: 1,
+            }),
+            base_snapshot_hash: "b".repeat(64),
+            binding_hash: retained.digest().into(),
+            capacity_owner: retained.capacity_owner().into(),
+            channel_authority_generation: generation,
+            channel_owner_public_key: channel_authority.owner_public_key(),
+            channel_bootstrap_capability_hash: channel_authority.bootstrap_capability_hash(),
+            admitted_adapter_request_base64: seed
+                .lease_admitted
+                .then(|| {
+                    ExternalAllocationReservation::encode_admitted_adapter_request(
+                        b"leased-session-rig-admitted-request",
+                    )
+                })
+                .transpose()?,
+            request_digest: request_digest.clone(),
+            max_active: 1,
+            timeout_seconds: seed.timeout_seconds,
+            startup_started_at_ms: now,
+            startup_deadline_ms: now + 60_000,
+            contact_deadline_ms: seed.contact_deadline_ms,
+        };
+        self.install_external_placement_test_fixture_with_workspace_inner(
+            &reservation,
+            None,
+            std::path::Path::new(EXTERNAL_PLACEMENT_TEST_PROJECT_ROOT),
+            "fp:operator",
+            false,
+            false,
+            None,
+            |_| external_placement_test_workspace_binding(&reservation),
+        )?;
+        if seed.lease_admitted {
+            self.reserve_external_lease_allocation(
+                &reservation,
+                &retained,
+                &ExternalLeaseCharge {
+                    lifetime_seconds: seed.timeout_seconds,
+                    budget_weight: 1,
+                    max_concurrent_leases: 2,
+                    daily_lease_seconds: 8 * 60 * 60,
+                },
+            )?;
+        } else {
+            self.reserve_external_allocation(&reservation, &retained)?;
+        }
+        self.claim_external_allocation_contact(seed.placement_thread_id, &request_digest)?;
+        self.bind_external_allocation(
+            seed.placement_thread_id,
+            &ExternalAllocationOccurrence {
+                schema: 1,
+                binding_hash: reservation.binding_hash.clone(),
+                request_digest: request_digest.clone(),
+                occurrence_id: format!("occ-{}", &request_digest[..48]),
+                provider_observation_digest: "f".repeat(64),
+            },
+            ExternalObservationTiming::Startup {
+                deadline_exceeded: false,
+                live_deadline: lillux::time::MonotonicDeadline::after(
+                    lillux::time::Duration::from_secs(60),
+                ),
+            },
+        )
+    }
+
+    /// The terminal observations the runtime database stored, as evidence JSON.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn external_terminal_observation_documents(&self) -> Result<Vec<serde_json::Value>> {
+        self.lock()?
+            .runtime_db
+            .external_terminal_observation_documents()
+    }
+
+    /// Rewrite a stored reservation's contact deadline in place; see
+    /// `RuntimeDb::rewrite_reservation_contact_deadline`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn rewrite_reservation_contact_deadline(
+        &self,
+        placement: &str,
+        contact_deadline_ms: i64,
+    ) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .rewrite_reservation_contact_deadline(placement, contact_deadline_ms)
+    }
+
     #[cfg(test)]
     pub(crate) fn external_candidate_test_authority(&self) -> &ryeos_state::PinnedStateAuthority {
         &self.state_authority
