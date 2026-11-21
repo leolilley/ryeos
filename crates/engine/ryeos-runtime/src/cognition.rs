@@ -135,12 +135,12 @@ impl CognitionInput {
 /// recorded before it lacks the field and is refused by the readers that parse
 /// markers (`resume_marker_without_purpose`); there is no reader for the old
 /// shape. The runtime operator schema epoch cut that carries this change is
-/// epoch 142 (the cut that follows epoch 141, which retired bindings of an
-/// earlier transport contract): an epoch-141 store holds markers without
-/// `purpose`, is a predecessor, and is reset without decoding with
-/// `ryeos node reset execution-history --schema-cut-from 141 --schema-cut-to 142`.
-/// That epoch cut also needs its constant bumped in the runtime database
-/// module, which this change does not do.
+/// epoch 143 (the cut after epoch 142), shared with another change: an
+/// epoch-142 store holds markers without `purpose`, is a predecessor, and is
+/// reset without decoding with
+/// `ryeos node reset execution-history --schema-cut-from 142 --schema-cut-to 143`.
+/// The constant in the runtime database module is bumped by that cut's own
+/// commit, not by this change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnPurpose {
