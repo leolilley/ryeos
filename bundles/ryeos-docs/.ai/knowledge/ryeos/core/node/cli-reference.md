@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-21T13:21:05Z:e005e267a8c7acd4a488f01840d4b39d7e923313cc04e2f3ce504bc2b01ed4aa:1AenSRB7ra9XySFiPSBIikDQtX7vKGhBF4OytXpg/+Jt/5g0+ZcXQSEbxOnQGE+wsDOscK2IEaej8citCFENDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-21T13:49:12Z:7760b3cff07c6e8279132ddecb24ebda13fc8492ec627e1b579577274f3f0e30:nE5ZiK61AOo1OxI8mSVrIGw//qcNKcuy7cTlEQZrhQJ+GvBC4goWbPANDYkRA8zLtwoj/OUSYF7AFZc4u62AAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -343,7 +343,8 @@ on its next upgrade; no project heads are involved, so it is the heads-free form
 The cut carries the stored external terminal observation's required `basis`
 field (how the lifecycle adapter settled a termination: it states the basis it
 relied on), which a store written at epoch 142 lacks. The same epoch also
-carries the turn marker's required `purpose` field. The cut ships together with
+carries the turn marker's required `purpose` field (a stored-shape change: a
+marker without it is refused on resume with `resume_marker_without_purpose`). The cut ships together with
 lifecycle adapter protocol v4, so the order on a node is: drain (settle or
 terminate every lease, qualification occurrence and termination in flight),
 stop the daemon gracefully, install the re-signed bundles, run the reset above,
