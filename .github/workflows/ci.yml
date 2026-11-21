@@ -400,6 +400,12 @@ jobs:
       - name: Check test-support features stay out of shipped builds
         run: ./scripts/ci/check-test-support-feature-leak.sh
 
+      - name: A production build of lillux has no test-only controller spawn
+        # The `compile_fail` doctest under `cfg(not(feature = "test-support"))`
+        # runs only with default features; the all-features doctest runs below
+        # turn the feature on and skip it.
+        run: cargo test -p lillux --doc --locked
+
       - name: Check Clippy policy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
@@ -1451,6 +1457,13 @@ jobs:
             [[ " $controllers " == *" $controller "* ]] || { echo "FAIL: root cgroup has no $controller controller" >&2; exit 1; }
           done
           sudo -n id
+          # Evidence that a subtree delegated from the root keeps both
+          # controllers: print what a child of the root would be offered.
+          sudo -n mkdir /sys/fs/cgroup/ryeos-controller-evidence
+          echo '+memory +pids' | sudo -n tee /sys/fs/cgroup/cgroup.subtree_control >/dev/null
+          echo "root cgroup.subtree_control: $(cat /sys/fs/cgroup/cgroup.subtree_control)"
+          echo "delegated child cgroup.controllers: $(cat /sys/fs/cgroup/ryeos-controller-evidence/cgroup.controllers)"
+          sudo -n rmdir /sys/fs/cgroup/ryeos-controller-evidence
 
       - name: Download the refreshed bundle state
         if: ${{ needs.bundles.result == 'success' }}
@@ -1543,7 +1556,7 @@ jobs:
       - name: Build the e2e test binaries
         run: |
           set -euo pipefail
-          for suite in session_secret_delivery_e2e handoff_crash_recovery_e2e; do
+          for suite in session_secret_delivery_e2e handoff_crash_recovery_e2e claude_code_worker_follow_e2e; do
             exe="$(cargo test -p ryeosd --locked --features "$E2E_FEATURES" --test "$suite" --no-run --message-format=json \
               | jq -r --arg suite "$suite" 'select(.profile.test == true and .target.name == $suite and .executable != null) | .executable')"
             [[ "$(printf '%s\n' "$exe" | wc -l)" == 1 && -x "$exe" ]] || { echo "FAIL: expected exactly one $suite executable, got: $exe" >&2; exit 1; }
@@ -1592,12 +1605,23 @@ jobs:
 
       - name: Session secret delivery (real isolation)
         run: |
-          "$RUNNER_TEMP/run-suite" session_secret_delivery_e2e 6 0
+          "$RUNNER_TEMP/run-suite" session_secret_delivery_e2e 7 0
 
       - name: Handoff crash recovery (real isolation)
         if: ${{ !cancelled() }}
         run: |
           "$RUNNER_TEMP/run-suite" handoff_crash_recovery_e2e 17 0
+
+      - name: Claude Code worker follow (real isolation)
+        if: ${{ !cancelled() }}
+        run: |
+          "$RUNNER_TEMP/run-suite" claude_code_worker_follow_e2e 6 0
+
+      - name: No suite skips on its own
+        run: |
+          # A skip must come only from the shared helper, which fails under
+          # the real process-scope mode; no test prints its own skip.
+          ! grep -rn "suite skipped" crates/bin/daemon/tests
 
       - name: Show the node capability evidence
         if: ${{ always() }}

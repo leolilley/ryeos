@@ -5648,7 +5648,10 @@ async fn explicit_handoff_acceptance_matrix_emits_retained_report() -> Result<()
                 .downcast_ref::<HostCannotQualifyProcessScopes>()
                 .is_some() =>
         {
-            eprintln!("handoff crash suite skipped: {error}");
+            // Fails the test when the real process-scope mode is selected; on
+            // any other host it names the reason, and the report below keeps
+            // what this host proved.
+            common::process_scopes::skip_or_fail_unqualified(&error.to_string());
             retain_unqualified_host_report(error.to_string())
         }
         other => other,
