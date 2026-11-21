@@ -1674,6 +1674,16 @@ impl DaemonHarness {
         self.state_path.join(".ai/state/audit/standalone.ndjson")
     }
 
+    /// A replacement daemon needs the node's state lock, its endpoint and (in
+    /// the real process-scope mode) its controller leaf, each of which the
+    /// running daemon still holds. Replace means the old one is gone first.
+    async fn stop_live_daemon_before_respawn(&mut self) -> anyhow::Result<()> {
+        if matches!(self.child.try_wait(), Ok(None)) {
+            self.kill_daemon().await?;
+        }
+        Ok(())
+    }
+
     /// SIGKILL the daemon child and wait for it to exit and for the
     /// UDS socket to disappear. Does **not** re-spawn — call
     /// [`respawn_with`] afterward.
@@ -1799,6 +1809,7 @@ impl DaemonHarness {
     ///
     /// **No ``** is passed — state is already initialized.
     pub async fn respawn_with<F: FnOnce(&mut Command)>(&mut self, tweak: F) -> anyhow::Result<()> {
+        self.stop_live_daemon_before_respawn().await?;
         // A restarted node keeps the same configured endpoint. Cross-node
         // recovery peers must not need an out-of-band route rewrite merely
         // because this test process replaced the daemon generation.
@@ -1854,6 +1865,7 @@ impl DaemonHarness {
         boundary: ryeos_app::worker_handoff::test_support::HandoffCrashBoundary,
         tweak: impl FnOnce(&mut Command),
     ) -> anyhow::Result<HandoffCrashGate> {
+        self.stop_live_daemon_before_respawn().await?;
         let bind = self.bind;
         let harness_id = next_harness_id();
         let stderr_log_path = daemon_stderr_log_path(self._state_dir_outer.path(), harness_id);

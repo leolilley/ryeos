@@ -6316,11 +6316,20 @@ async fn projected_target_attachment_survives_worker_reap_before_receipt_recover
         &worker.process_identity,
         ryeos_app::process::ShutdownAction::Hard,
     );
-    anyhow::ensure!(
-        killed.success,
-        "could not prove worker terminalization at attachment cut: {}",
-        killed.method
-    );
+    if !killed.success {
+        // The kill result names only the method; ask the retained scope again
+        // for the reason its termination could not be proved.
+        let reason = worker
+            .process_identity
+            .process_scope
+            .as_ref()
+            .map(|scope| format!("{:?}", scope.terminate_and_wait(scope.control_timeout())))
+            .unwrap_or_else(|| "the identity retains no scope".to_owned());
+        anyhow::bail!(
+            "could not prove worker terminalization at attachment cut: {}; scope termination retried: {reason}",
+            killed.method
+        );
+    }
     target_store.fence_abandoned_worker_process(
         &worker.worker_instance_id,
         &successor_id,
