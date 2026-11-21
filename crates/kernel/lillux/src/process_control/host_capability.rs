@@ -608,6 +608,13 @@ pub fn host_kernel_is_gvisor() -> bool {
 /// noexec memfd policy forbids executable memfds.
 pub const EXEC_SEALED_MEMFD: &str = "exec:sealed_memfd";
 
+/// The kernel authenticates a Unix socket peer with a pidfd (`SO_PEERPIDFD`,
+/// Linux 6.5), which runtime attachment and `ryeos stop` rely on.
+pub const IDENTITY_PEER_PIDFD: &str = "identity:peer_pidfd";
+/// `pidfd_send_signal` accepts `PIDFD_SIGNAL_PROCESS_GROUP` (Linux 6.9), which
+/// exact process-group cancellation, recovery and shutdown rely on.
+pub const SIGNAL_PIDFD_PROCESS_GROUP: &str = "signal:pidfd_process_group";
+
 /// Jobs die with the node because the node is pid 1 of its pid namespace.
 pub const TERMINATION_ENCLOSURE: &str = "termination:enclosure";
 /// Jobs die with the node because the node is pid 1, or because its parent
@@ -705,6 +712,22 @@ fn decide_enclosure_exit(
              matched against trusted inits"
                 .to_owned(),
         ),
+    }
+}
+
+/// Read the answer of `pidfd_send_signal(pidfd, 0, PIDFD_SIGNAL_PROCESS_GROUP)`
+/// against this process's own group. Success, or ESRCH (the flag was
+/// understood but this process leads no group), proves the flag is known; a
+/// kernel older than 6.9 answers EINVAL, and any other errno is a refusal too.
+#[cfg(target_os = "linux")]
+fn classify_group_signal(result: Result<(), i32>) -> ProbeOutcome {
+    match result {
+        Ok(()) => ProbeOutcome::Allowed,
+        Err(errno) if errno == libc::ESRCH => ProbeOutcome::Allowed,
+        Err(errno) => ProbeOutcome::Refused {
+            errno,
+            reason: std::io::Error::from_raw_os_error(errno).to_string(),
+        },
     }
 }
 
@@ -1674,6 +1697,11 @@ pub struct HostFacts {
     pub unshare_user: ProbeOutcome,
     pub unshare_user_pid_mount: ProbeOutcome,
     pub pidfd: ProbeOutcome,
+    /// `getsockopt(SO_PEERPIDFD)` on a connected socket pair of this process.
+    pub peer_pidfd: ProbeOutcome,
+    /// Signal zero to this process's own group through a pidfd with
+    /// `PIDFD_SIGNAL_PROCESS_GROUP`; nothing is delivered.
+    pub pidfd_signal_process_group: ProbeOutcome,
     /// Whether the host permits this node to become a child subreaper,
     /// probed in a disposable child. The node does not set it: no reaper of
     /// adopted orphans exists, so this records only what the host allows.
@@ -1866,6 +1894,8 @@ impl HostFacts {
                 unshare_user: unobservable(),
                 unshare_user_pid_mount: unobservable(),
                 pidfd: unobservable(),
+                peer_pidfd: unobservable(),
+                pidfd_signal_process_group: unobservable(),
                 subreaper: unobservable(),
                 memfd_exec: unobservable(),
                 resident_bytes,
@@ -1999,7 +2029,33 @@ impl HostFacts {
         } else {
             ProofSource::Trusted
         };
-        if self.pidfd.allowed() {
+        match &self.peer_pidfd {
+            ProbeOutcome::Allowed => view.provide(
+                IDENTITY_PEER_PIDFD,
+                observed.clone(),
+                HOST_PROVIDER,
+                emulated("getsockopt(SO_PEERPIDFD) returned a pidfd".to_owned()),
+            ),
+            other => view.refuse(
+                IDENTITY_PEER_PIDFD,
+                format!("SO_PEERPIDFD {}", other.describe()),
+            ),
+        }
+        match &self.pidfd_signal_process_group {
+            ProbeOutcome::Allowed => view.provide(
+                SIGNAL_PIDFD_PROCESS_GROUP,
+                observed.clone(),
+                HOST_PROVIDER,
+                emulated("pidfd_send_signal accepted PIDFD_SIGNAL_PROCESS_GROUP".to_owned()),
+            ),
+            other => view.refuse(
+                SIGNAL_PIDFD_PROCESS_GROUP,
+                format!("PIDFD_SIGNAL_PROCESS_GROUP {}", other.describe()),
+            ),
+        }
+        // Process-group termination is exact only when the group is signaled
+        // through a pidfd, so it needs both the pidfd and the group flag.
+        if self.pidfd.allowed() && self.pidfd_signal_process_group.allowed() {
             view.provide(
                 "termination:process_group",
                 trusted.clone(),
@@ -2010,10 +2066,15 @@ impl HostFacts {
                 ),
             );
         } else {
-            view.refuse(
-                "termination:process_group",
-                format!("pidfd_open {}", self.pidfd.describe()),
-            );
+            let reason = if !self.pidfd.allowed() {
+                format!("pidfd_open {}", self.pidfd.describe())
+            } else {
+                format!(
+                    "PIDFD_SIGNAL_PROCESS_GROUP {}",
+                    self.pidfd_signal_process_group.describe()
+                )
+            };
+            view.refuse("termination:process_group", reason);
         }
         #[cfg(target_os = "linux")]
         match crate::exec::memfd_exec_flag_from_probe(&self.memfd_exec) {
@@ -2736,6 +2797,82 @@ mod linux {
         ProbeOutcome::Allowed
     }
 
+    /// One `SO_PEERPIDFD` read on a connected socket pair of this process.
+    fn probe_peer_pidfd() -> ProbeOutcome {
+        let mut fds = [0 as libc::c_int; 2];
+        let paired = unsafe {
+            libc::socketpair(
+                libc::AF_UNIX,
+                libc::SOCK_STREAM | libc::SOCK_CLOEXEC,
+                0,
+                fds.as_mut_ptr(),
+            )
+        };
+        if paired != 0 {
+            return ProbeOutcome::Unobservable {
+                reason: format!("socketpair for probe: {}", std::io::Error::last_os_error()),
+            };
+        }
+        let mut pidfd: libc::c_int = -1;
+        let mut length = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        let result = unsafe {
+            libc::getsockopt(
+                fds[0],
+                libc::SOL_SOCKET,
+                libc::SO_PEERPIDFD,
+                (&mut pidfd as *mut libc::c_int).cast(),
+                &mut length,
+            )
+        };
+        let error = std::io::Error::last_os_error();
+        if result == 0 && pidfd >= 0 {
+            unsafe { libc::close(pidfd) };
+        }
+        unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+        if result == 0 && pidfd >= 0 {
+            ProbeOutcome::Allowed
+        } else if result == 0 {
+            ProbeOutcome::Unobservable {
+                reason: "SO_PEERPIDFD returned an invalid descriptor".to_owned(),
+            }
+        } else {
+            ProbeOutcome::Refused {
+                errno: error.raw_os_error().unwrap_or(0),
+                reason: error.to_string(),
+            }
+        }
+    }
+
+    /// Signal zero to this process's own group through a pidfd. A kernel that
+    /// does not know the flag answers EINVAL; nothing is delivered.
+    fn probe_pidfd_signal_process_group() -> ProbeOutcome {
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, libc::getpid(), 0) };
+        if fd < 0 {
+            return ProbeOutcome::Unobservable {
+                reason: format!("pidfd_open for probe: {}", std::io::Error::last_os_error()),
+            };
+        }
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                fd as libc::c_int,
+                0,
+                std::ptr::null::<libc::siginfo_t>(),
+                libc::PIDFD_SIGNAL_PROCESS_GROUP,
+            )
+        };
+        let error = std::io::Error::last_os_error();
+        unsafe { libc::close(fd as libc::c_int) };
+        super::classify_group_signal(if result == 0 {
+            Ok(())
+        } else {
+            Err(error.raw_os_error().unwrap_or(0))
+        })
+    }
+
     fn kernel_kind(version: &str) -> &'static str {
         if super::kernel_version_is_gvisor(version) {
             "gvisor"
@@ -2823,6 +2960,8 @@ mod linux {
                 libc::CLONE_NEWUSER | libc::CLONE_NEWPID | libc::CLONE_NEWNS,
             )),
             pidfd: probe_pidfd(),
+            peer_pidfd: probe_peer_pidfd(),
+            pidfd_signal_process_group: probe_pidfd_signal_process_group(),
             subreaper: probe_in_child(ChildProbe::Subreaper),
             memfd_exec: crate::exec::memfd_exec_flag_probe(),
             resident_bytes,
@@ -3482,6 +3621,8 @@ mod tests {
             unshare_user: unobservable(),
             unshare_user_pid_mount: unobservable(),
             pidfd: unobservable(),
+            peer_pidfd: unobservable(),
+            pidfd_signal_process_group: unobservable(),
             subreaper: unobservable(),
             memfd_exec: unobservable(),
             resident_bytes: 0,
@@ -4416,6 +4557,69 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn group_signal_answers_map_to_probe_outcomes() {
+        assert_eq!(classify_group_signal(Ok(())), ProbeOutcome::Allowed);
+        assert_eq!(
+            classify_group_signal(Err(libc::ESRCH)),
+            ProbeOutcome::Allowed
+        );
+        assert!(matches!(
+            classify_group_signal(Err(libc::EINVAL)),
+            ProbeOutcome::Refused { errno, .. } if errno == libc::EINVAL
+        ));
+        assert!(!classify_group_signal(Err(libc::EPERM)).allowed());
+    }
+
+    #[test]
+    fn pidfd_capabilities_follow_their_probes() {
+        let mut host = facts(
+            decide_enclosure_exit(Some(true), 7, 1, Some("tini"), &inits()),
+            Some(42),
+        );
+        let refused = |reason: &str| ProbeOutcome::Refused {
+            errno: 22,
+            reason: reason.to_owned(),
+        };
+        host.pidfd = ProbeOutcome::Allowed;
+        host.peer_pidfd = ProbeOutcome::Allowed;
+        host.pidfd_signal_process_group = ProbeOutcome::Allowed;
+        let view = host.capabilities();
+        assert_eq!(
+            view.provided[IDENTITY_PEER_PIDFD].source,
+            ProofSource::Measured
+        );
+        assert_eq!(
+            view.provided[SIGNAL_PIDFD_PROCESS_GROUP].source,
+            ProofSource::Measured
+        );
+        assert!(view.provided.contains_key("termination:process_group"));
+
+        host.pidfd_signal_process_group = refused("no group flag");
+        let view = host.capabilities();
+        assert!(!view.provided.contains_key(SIGNAL_PIDFD_PROCESS_GROUP));
+        assert!(view.missing[SIGNAL_PIDFD_PROCESS_GROUP].contains("no group flag"));
+        // pidfd_open alone no longer proves exact process-group termination.
+        assert!(!view.provided.contains_key("termination:process_group"));
+        assert!(view.missing["termination:process_group"].contains("PIDFD_SIGNAL_PROCESS_GROUP"));
+
+        host.pidfd_signal_process_group = ProbeOutcome::Allowed;
+        host.peer_pidfd = refused("no peer pidfd");
+        let view = host.capabilities();
+        assert!(!view.provided.contains_key(IDENTITY_PEER_PIDFD));
+        assert!(view.missing[IDENTITY_PEER_PIDFD].contains("no peer pidfd"));
+        assert!(view.provided.contains_key("termination:process_group"));
+
+        host.kernel_kind = "gvisor".to_owned();
+        host.peer_pidfd = ProbeOutcome::Allowed;
+        let view = host.capabilities();
+        assert_eq!(
+            view.provided[IDENTITY_PEER_PIDFD].source,
+            ProofSource::ProviderAttested
+        );
+    }
+
     #[test]
     fn trusted_grades_fall_to_provider_attested_under_gvisor() {
         let mut under_tini = facts(
@@ -4424,6 +4628,7 @@ mod tests {
         );
         under_tini.kernel_kind = "gvisor".to_owned();
         under_tini.pidfd = ProbeOutcome::Allowed;
+        under_tini.pidfd_signal_process_group = ProbeOutcome::Allowed;
         let view = under_tini.capabilities();
         for name in [
             TERMINATION_ENCLOSURE_TRUSTED_INIT,
