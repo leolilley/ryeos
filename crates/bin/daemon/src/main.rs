@@ -29,6 +29,7 @@ use ryeosd::{bootstrap, reconcile, uds};
 mod composition_native;
 #[cfg(feature = "scheduling")]
 mod maintenance_schedule;
+mod kernel_floor;
 mod offline_host;
 #[cfg(feature = "scheduling")]
 mod standalone_scheduler;
@@ -4197,6 +4198,9 @@ async fn run(
     // controller already established this before exec, so this is a no-op
     // there. It precedes every exact current-process identity capture.
     lillux::process_control::establish_own_process_session().map_err(anyhow::Error::msg)?;
+    // Prove the kernel features process control needs before any state is
+    // touched; a kernel below the floor refuses here, not on first use.
+    kernel_floor::require_kernel_floor()?;
     if let Some(service) = &host_service {
         // An association is not placement: only a process the host supervisor
         // put in the controller leaf may take the supervised node route. The

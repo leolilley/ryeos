@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-05T00:45:30Z:bcf699c1cb11497554beef26e67e2e49bf63e6ab12a4dc0d02ad193f4ed43964:lbz4hg1+JlqCMI90XIxdYPGrBbAzYE2y9uhYLUYL9kmyxFPn77l8pcMuqawGxi+9FITlwLUhFUYbjd/26wJsDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-21T02:34:15Z:f2ecbcc229654c571cac3419e02aa88e4ac74e5670b9558426ae595c0e2398dc:hSnzISJGhSAJN7daEiheVQjzHH9oBxAPuhN2WTp5gbvVqvHLa3YHSZJQlb6X1MCqgQWsMkT45g3+ZLQIELOFBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [platform, linux, containers, compatibility, portability, support]
@@ -27,9 +27,11 @@ not mean every distribution currently runs on every operating system or CPU.
 | Windows | Not distributed | Not supported | Process isolation and several filesystem guarantees do not have a production backend. |
 
 The supported Linux node requires kernel 6.9 or newer, including
-`PIDFD_SIGNAL_PROCESS_GROUP` and `SO_PEERPIDFD`. Daemon startup probes both and
-fails before launching work when either is unavailable; there is no reusable
-numeric-PID signal fallback. It also requires atomic bundle replacement through
+`PIDFD_SIGNAL_PROCESS_GROUP` (Linux 6.9) and `SO_PEERPIDFD` (Linux 6.5). Node
+startup probes both and refuses to start with the typed error
+`kernel_feature_missing`, naming the feature (`so_peerpidfd` or
+`pidfd_signal_process_group`) and its kernel floor, when either is unavailable;
+there is no reusable numeric-PID signal fallback. It also requires atomic bundle replacement through
 `renameat2(RENAME_EXCHANGE)`. When isolation policy is `mode: enforce`, the
 selected registered bundle must provide a trusted adapter and artifacts for the
 host triple. RyeOS does not ship one by default. The host must permit every
