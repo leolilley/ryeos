@@ -1309,7 +1309,6 @@ impl DaemonHarness {
             .kill_on_drop(true);
 
         tweak(&mut cmd);
-        if scoped {}
 
         let startup_deadline = daemon_startup_deadline()?;
         let mut child = cmd.spawn()?;

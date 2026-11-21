@@ -1284,12 +1284,12 @@ jobs:
           # controller leaf beside the execution leaves, then drops to the
           # runner user. This is the same shape the qualification itself
           # builds when it is started under sudo.
-          {
-            echo '#!/bin/sh'
-            echo 'set -eu'
-            echo 'echo $$ > "$RYEOS_SCOPE_PARENT/ctl/cgroup.procs"'
-            echo 'exec setpriv --reuid="$RYEOS_SCOPE_UID" --regid="$RYEOS_SCOPE_GID" --init-groups "$@"'
-          } > "$RUNNER_TEMP/in-delegation"
+          cat > "$RUNNER_TEMP/in-delegation" <<'DELEGATION'
+          #!/bin/sh
+          set -eu
+          echo $$ > "$RYEOS_SCOPE_PARENT/ctl/cgroup.procs"
+          exec setpriv --reuid="$RYEOS_SCOPE_UID" --regid="$RYEOS_SCOPE_GID" --init-groups "$@"
+          DELEGATION
           chmod 755 "$RUNNER_TEMP/in-delegation"
           {
             echo "RYEOS_SCOPE_UID=$uid"
