@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-18T08:58:07Z:47911b71ac794d295df172d0a24db84066f9b4f5749ce86cf33707b4cee943a8:Bzhzylk2PBs6g9Dullbeu4+4hJbajsMHV6pXXIcYR4fFucsa0cULm9WW8TSssRR+hCPi07+p2pKC+KCrFZy+Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-21T23:54:42Z:6d076bf70b49c1bbdfe6238482b1c62a356387c8cd57181f043ebd527f86a699:Xy3CVCtOaF9qisKNjkGF0jDT/eD2U7yWXrcwI+kxKHjxDF0gv0Eois9Cb7BYvzuhl/euopo95mPletgYnPA1Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/runtimes
 tags: [runtime, directive, llm, callbacks]
@@ -47,6 +47,20 @@ since that turn's start or the previous `provider_retry`. The fragments are
 ephemeral and the retry resends the same messages, so nothing durable records
 the abandoned text; only the turn-complete `cognition_out` counts, and resume
 folds only that one.
+
+A restart that cuts a provider call is retried the same way. On resume of an
+unfinished provider turn the runtime offers the daemon, with every prepare of
+that turn, the retry its policy would authorize for that attempt as a
+`mid_stream` failure, carrying the live fragments the record kept since the
+turn's start or its last `provider_retry`. The daemon stores it only when that
+exact attempt was cut by the restart (issued with no recorded answer) and the
+sealed launch authority admits another contact: a `provider_contact:
+repeatable` directive, a remote transport, and an attempt number within the
+sealed `unknown_outcome_retry` ceiling. The resumed run then follows the
+ordinary advancement path (one `provider_retry` event, the stored backoff, the
+next attempt). Otherwise the resume fails with `provider_attempt_outcome_unknown`
+and the provider is not contacted again. A route with no accounting ledger has
+no attempt record to prove the cut, so it fails the same way.
 
 ## Malformed tool calls
 

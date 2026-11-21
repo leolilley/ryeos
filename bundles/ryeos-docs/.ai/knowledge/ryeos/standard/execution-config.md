@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-21T21:46:02Z:e7cb05b486972e86ab0845bdcc6f3dffcbc25dd96be5a03704027f5bd3eddfaa:Px8rx3pNBn21hrwaZdevRKF2BJzhLI1yREwNs0i+PUr+GxtUZW6plGvBtSMzX7yOfg3XcJgQTtPdwQ4pdzRTDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-21T23:54:42Z:b67b648ec43717cefd2ea2fbeb253a077711ae13c49a31520874eebfa81d5faf:YK5MlibvjHAv44gwvCAHefUoQOxNwtO0UOHj4l5ACKE/8AuIr76IiVEo0Mm2S0G7OFNGksmtpRWIS/OY59maCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 tags: [reference, execution, retry, timeout, config]
@@ -73,10 +73,27 @@ removed `retry_on_timeout` and `retry_mid_stream` keys are refused.
 
 These retries cover a failure the running process observed. If the node stops
 while a model call is in flight (a kill, a crash, a planned rollover that cuts
-the run), the call's outcome is never recorded. The attempt is charged its
-reserved maximum, the turn cannot be resumed, and the thread fails with
-`provider_attempt_outcome_unknown`. Resuming after a restart is not supported
-for any directive yet; no header declaration changes this.
+the run), nothing observed the failure and the call's outcome is never
+recorded. The attempt is charged its reserved maximum. On the next start the
+resumed run treats the cut as a mid-stream failure of that attempt and retries
+it, using one of the `unknown_outcome_retry` slots, when all of these hold:
+
+1. The directive declares `provider_contact: repeatable`.
+2. The provider route is remote, not an admitted local worker, and is on the
+   accounting ledger (priced, or declared explicitly free).
+3. `unknown_outcome_retry.on` names `mid_stream`.
+4. The cut attempt's number is at most `max_retries`, counting every retry of
+   the turn before it, in process or after an earlier restart, and at most
+   `retries`.
+
+The retry resends the same request, so a restart can cost the provider's
+charge for the cut call as well as the reserved maximum node-side; the
+resumed attempt is charged like any other. `max_retries` bounds the total
+number of contacts for a turn across restarts. In every other case (the
+directive is not repeatable, the route is a local worker or has no ledger, the
+policy does not name `mid_stream`, or the ceiling is spent) the turn is not
+resumed and the thread fails with the typed code
+`provider_attempt_outcome_unknown`; no second contact is made.
 
 ### Output limit
 

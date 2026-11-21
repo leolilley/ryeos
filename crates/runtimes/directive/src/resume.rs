@@ -37,6 +37,11 @@ pub struct ResumeState {
     /// thread. It is process-recovery evidence only: provider-attempt contact
     /// authority still comes exclusively from the daemon ledger.
     pub active_provider_turn: Option<u32>,
+    /// Live stream fragments the active turn's latest attempt published and
+    /// the record kept: those after the turn's start or its last
+    /// `provider_retry`. Zero when there is no active turn. A restart that cut
+    /// the attempt leaves exactly these, and a retry must void exactly these.
+    pub active_turn_live_fragments: u64,
     pub turns_completed: u32,
     /// Exact non-lifecycle starts, in braid order. The runner combines this
     /// evidence with the signed tool-call ceiling to deterministically recover
@@ -257,6 +262,9 @@ pub async fn load_resume_state(
     let turn_progress = recover_turn_progress(&events)?;
     let active_provider_turn =
         recover_active_provider_turn(&events, &source_thread_ids, previous_thread_id, mode)?;
+    let active_turn_live_fragments = active_provider_turn.map_or(0, |turn| {
+        recover_active_turn_live_fragments(&events, &source_thread_ids, previous_thread_id, turn)
+    });
     let provider_retry_testimony_digests =
         recover_provider_retry_testimonies(&events, &source_thread_ids, previous_thread_id, mode)?;
     let thread_usage = recover_thread_usage(&events, turn_progress)?;
@@ -313,6 +321,7 @@ pub async fn load_resume_state(
         disposition,
         last_turn_coordinate: turn_progress.last_coordinate,
         active_provider_turn,
+        active_turn_live_fragments,
         turns_completed: turn_progress.completed,
         started_tool_occurrences: recovered_tools.started,
         thread_usage,
@@ -1028,6 +1037,32 @@ fn recover_active_provider_turn(
     Ok((mode == ResumeMode::NativeSameThread)
         .then_some(current_active)
         .flatten())
+}
+
+/// Stream fragments of `active_turn` that the current thread recorded since
+/// the turn's start or its latest `provider_retry` testimony. A retry voids the
+/// fragments of the attempt it abandons, so only these still stand.
+fn recover_active_turn_live_fragments(
+    events: &[ReplayedEventRecord],
+    source_thread_ids: &[String],
+    current_thread_id: &str,
+    active_turn: u32,
+) -> u64 {
+    let of_active_turn = |event: &ReplayedEventRecord| {
+        event.payload.get("turn").and_then(Value::as_u64) == Some(u64::from(active_turn))
+    };
+    let mut fragments = 0u64;
+    for (event, source_thread_id) in events.iter().zip(source_thread_ids) {
+        if source_thread_id != current_thread_id || !of_active_turn(event) {
+            continue;
+        }
+        if event.event_type == "provider_retry" {
+            fragments = 0;
+        } else if is_stream_fragment(event) {
+            fragments = fragments.saturating_add(1);
+        }
+    }
+    fragments
 }
 
 fn recover_provider_retry_testimonies(
@@ -3591,6 +3626,51 @@ mod tests {
         // A clean turn after the cuts ends the run of them.
         assert_eq!(
             trailing_length_turns(&[length(1), harness_input, stop(2)]).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn a_restart_cut_attempt_carries_exactly_the_fragments_recorded_since_the_last_retry() {
+        let event = |event_type: &str, payload: Value| ReplayedEventRecord {
+            event_type: event_type.to_string(),
+            payload,
+        };
+        let delta = |turn: u32| event("cognition_out", json!({"turn": turn, "delta": "x"}));
+        let tool_use = event(
+            "cognition_out",
+            json!({"turn": 2, "tool_use": {"id": "c1", "name": "noop"}}),
+        );
+        let advance = retry_advance(2, 1, "first");
+        let events = vec![
+            event("cognition_in", json!({"turn": 2})),
+            delta(2),
+            delta(2),
+            tool_use,
+            retry_event(&advance),
+            delta(2),
+            delta(2),
+        ];
+        let current = |count: usize| vec!["T-current".to_string(); count];
+        // Only the fragments after the retry testimony still stand.
+        assert_eq!(
+            recover_active_turn_live_fragments(&events, &current(events.len()), "T-current", 2),
+            2
+        );
+        // Before any retry, every fragment of the turn counts.
+        assert_eq!(
+            recover_active_turn_live_fragments(&events[..4], &current(4), "T-current", 2),
+            3
+        );
+        // Another thread's or another turn's fragments never count.
+        let mut sources = current(events.len());
+        sources[5] = "T-predecessor".to_string();
+        assert_eq!(
+            recover_active_turn_live_fragments(&events, &sources, "T-current", 2),
+            1
+        );
+        assert_eq!(
+            recover_active_turn_live_fragments(&events, &current(events.len()), "T-current", 3),
             0
         );
     }
