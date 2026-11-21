@@ -47,6 +47,11 @@ const ACTIVATION_FILE: &str = "activation.json";
 const READY_FILE: &str = "ready.json";
 const TERMINATE_FILE: &str = "terminate.json";
 const TERMINAL_FILE: &str = "terminal.json";
+/// A provider answer the test scripts into the state root. Its presence makes
+/// every termination operation answer from the file, as a real provider's
+/// lookup would, instead of deriving the answer from this adapter's own
+/// occurrence records.
+const PROVIDER_SWITCH_FILE: &str = "provider-switch.json";
 const FAILURE_FILE: &str = "failure.json";
 const OWNER_LAUNCH_FILE: &str = "guest-owner.json";
 const OWNER_IMPORT_FILE: &str = "signed-import.json";
@@ -1259,6 +1264,16 @@ fn terminate(
     occurrence: &BoundOccurrence,
     termination: &ryeos_external_execution_contract::TerminationIntent,
 ) -> Result<LifecycleAdapterResponse> {
+    if let Some(switch) = read_provider_switch(root)? {
+        return answer_termination_from_switch(
+            &switch,
+            ProviderTerminationContact::Terminate,
+            request,
+            occurrence,
+            termination,
+            lillux::time::timestamp_millis(),
+        );
+    }
     let occurrence_root = require_occurrence(root, request, occurrence)?;
     let intent = TerminateRecord {
         schema: 1,
@@ -1293,6 +1308,16 @@ fn reconcile_termination(
     occurrence: &BoundOccurrence,
     termination: &ryeos_external_execution_contract::TerminationIntent,
 ) -> Result<LifecycleAdapterResponse> {
+    if let Some(switch) = read_provider_switch(root)? {
+        return answer_termination_from_switch(
+            &switch,
+            ProviderTerminationContact::Reconcile,
+            request,
+            occurrence,
+            termination,
+            lillux::time::timestamp_millis(),
+        );
+    }
     let occurrence_root = require_occurrence(root, request, occurrence)?;
     let Some(phase_lock) = occurrence_root.try_lock_exclusive()? else {
         return Ok(LifecycleAdapterResponse::TerminationPending {
@@ -1384,6 +1409,136 @@ fn reconcile_termination(
         )?,
         basis: ryeos_external_execution_contract::TerminalBasis::ObservedTerminated,
     })
+}
+
+/// What the scripted provider answers to a termination lookup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ProviderAnswer {
+    /// The provider reports the occurrence terminated.
+    Terminated,
+    /// The provider cannot say yet.
+    Pending,
+    /// The provider answers that it has no such occurrence.
+    NotFound,
+}
+
+/// The scripted provider, read from [`PROVIDER_SWITCH_FILE`] on every
+/// termination operation so a test can change the answer between contacts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderSwitch {
+    schema: u32,
+    answer: ProviderAnswer,
+    /// Whether the provider accepts a terminate request. Only a terminate
+    /// contact can be accepted; a reconcile contact never carries one.
+    #[serde(default)]
+    terminate_accepted: bool,
+    /// Milliseconds added to this adapter's wall clock when it judges whether
+    /// the lease end has passed, so a test moves time without waiting.
+    #[serde(default)]
+    clock_offset_ms: i64,
+}
+
+/// Which termination operation reached the provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderTerminationContact {
+    Terminate,
+    Reconcile,
+}
+
+/// The provider's decision before it is dressed as a wire response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderTerminationVerdict {
+    Terminal(ryeos_external_execution_contract::TerminalBasis),
+    Pending,
+}
+
+fn read_provider_switch(root: &lillux::PinnedDirectory) -> Result<Option<ProviderSwitch>> {
+    let Some(file) = root.open_pinned_regular(OsStr::new(PROVIDER_SWITCH_FILE), false)? else {
+        return Ok(None);
+    };
+    let switch: ProviderSwitch = serde_json::from_slice(&file.read_bounded(MAX_RECORD_BYTES)?)
+        .context("synthetic provider switch is not a valid document")?;
+    ensure!(switch.schema == 1, "unsupported synthetic provider switch schema");
+    Ok(Some(switch))
+}
+
+/// The protocol v4 rules for a definitive not-found, as the real adapters
+/// apply them. Rule (a): this contact's own terminate request was accepted and
+/// the provider then answered not-found. Rule (b): the lease's stated latest
+/// end plus the grace has passed on the adapter's clock. Any other not-found,
+/// and every pending answer, leaves the termination pending. An unbounded
+/// lease never passes its end.
+fn provider_termination_verdict(
+    switch: &ProviderSwitch,
+    contact: ProviderTerminationContact,
+    latest_lease_end: &ryeos_external_execution_contract::LatestLeaseEnd,
+    wall_clock_ms: i64,
+) -> ProviderTerminationVerdict {
+    use ryeos_external_execution_contract::TerminalBasis;
+    match switch.answer {
+        ProviderAnswer::Terminated => {
+            ProviderTerminationVerdict::Terminal(TerminalBasis::ObservedTerminated)
+        }
+        ProviderAnswer::Pending => ProviderTerminationVerdict::Pending,
+        ProviderAnswer::NotFound => {
+            let accepted =
+                contact == ProviderTerminationContact::Terminate && switch.terminate_accepted;
+            if accepted {
+                ProviderTerminationVerdict::Terminal(TerminalBasis::AcceptedTerminateThenNotFound)
+            } else if ryeos_remote_lease_core::lease_end_passed_at(
+                latest_lease_end,
+                wall_clock_ms.saturating_add(switch.clock_offset_ms),
+            ) {
+                ProviderTerminationVerdict::Terminal(TerminalBasis::PastLatestLeaseEndNotFound)
+            } else {
+                ProviderTerminationVerdict::Pending
+            }
+        }
+    }
+}
+
+fn answer_termination_from_switch(
+    switch: &ProviderSwitch,
+    contact: ProviderTerminationContact,
+    request: &LifecycleAdapterRequest,
+    occurrence: &BoundOccurrence,
+    termination: &ryeos_external_execution_contract::TerminationIntent,
+    wall_clock_ms: i64,
+) -> Result<LifecycleAdapterResponse> {
+    ensure!(
+        occurrence.occurrence_id == occurrence_id(&occurrence.request_digest),
+        "synthetic occurrence identity changed"
+    );
+    Ok(
+        match provider_termination_verdict(
+            switch,
+            contact,
+            &termination.latest_lease_end,
+            wall_clock_ms,
+        ) {
+            ProviderTerminationVerdict::Pending => LifecycleAdapterResponse::TerminationPending {
+                operation_id: request.common().operation_id.clone(),
+                termination_request_digest: termination.termination_request_digest.clone(),
+            },
+            ProviderTerminationVerdict::Terminal(basis) => {
+                LifecycleAdapterResponse::OccurrenceTerminal {
+                    operation_id: request.common().operation_id.clone(),
+                    termination_request_digest: termination.termination_request_digest.clone(),
+                    provider_observation_digest: evidence_digest(
+                        "provider_switch_terminal",
+                        &serde_json::json!({
+                            "basis": basis,
+                            "occurrence_id": occurrence.occurrence_id,
+                            "termination_request_digest": termination.termination_request_digest,
+                        }),
+                    )?,
+                    basis,
+                }
+            }
+        },
+    )
 }
 
 fn serve_occurrence(
@@ -2612,5 +2767,207 @@ mod tests {
     fn occurrence_identity_is_stable_and_bounded() {
         let request = "b".repeat(64);
         assert_eq!(occurrence_id(&request), format!("occ-{}", "b".repeat(48)));
+    }
+
+    mod provider_switch {
+        use super::*;
+        use ryeos_external_execution_contract::{LatestLeaseEnd, TerminalBasis};
+        use ryeos_remote_lease_core::LEASE_END_GRACE_MS;
+
+        const END: i64 = 5_000_000_000_000;
+
+        fn switch(answer: ProviderAnswer, accepted: bool, offset: i64) -> ProviderSwitch {
+            ProviderSwitch {
+                schema: 1,
+                answer,
+                terminate_accepted: accepted,
+                clock_offset_ms: offset,
+            }
+        }
+
+        fn verdict(
+            switch: &ProviderSwitch,
+            contact: ProviderTerminationContact,
+            end: &LatestLeaseEnd,
+            wall: i64,
+        ) -> ProviderTerminationVerdict {
+            provider_termination_verdict(switch, contact, end, wall)
+        }
+
+        const PENDING: ProviderTerminationVerdict = ProviderTerminationVerdict::Pending;
+        const TERMINATE: ProviderTerminationContact = ProviderTerminationContact::Terminate;
+        const RECONCILE: ProviderTerminationContact = ProviderTerminationContact::Reconcile;
+
+        fn terminal(basis: TerminalBasis) -> ProviderTerminationVerdict {
+            ProviderTerminationVerdict::Terminal(basis)
+        }
+
+        #[test]
+        fn terminated_is_terminal_and_pending_is_pending_at_any_time() {
+            for end in [LatestLeaseEnd::Bounded { unix_ms: END }, LatestLeaseEnd::Unbounded {}] {
+                for wall in [0, END, END + 2 * LEASE_END_GRACE_MS] {
+                    for contact in [TERMINATE, RECONCILE] {
+                        assert_eq!(
+                            verdict(&switch(ProviderAnswer::Terminated, false, 0), contact, &end, wall),
+                            terminal(TerminalBasis::ObservedTerminated)
+                        );
+                        assert_eq!(
+                            verdict(&switch(ProviderAnswer::Pending, true, 0), contact, &end, wall),
+                            PENDING
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn rule_a_needs_this_contacts_accepted_terminate() {
+            let end = LatestLeaseEnd::Bounded { unix_ms: END };
+            let accepted = switch(ProviderAnswer::NotFound, true, 0);
+            assert_eq!(
+                verdict(&accepted, TERMINATE, &end, END - 1),
+                terminal(TerminalBasis::AcceptedTerminateThenNotFound)
+            );
+            // A reconcile contact carries no terminate request of its own.
+            assert_eq!(verdict(&accepted, RECONCILE, &end, END - 1), PENDING);
+            // A terminate the provider did not accept proves nothing.
+            let refused = switch(ProviderAnswer::NotFound, false, 0);
+            assert_eq!(verdict(&refused, TERMINATE, &end, END - 1), PENDING);
+            // Rule (a) holds for an unbounded lease too.
+            assert_eq!(
+                verdict(&accepted, TERMINATE, &LatestLeaseEnd::Unbounded {}, 0),
+                terminal(TerminalBasis::AcceptedTerminateThenNotFound)
+            );
+        }
+
+        #[test]
+        fn rule_b_is_terminal_only_strictly_after_the_end_plus_grace() {
+            let end = LatestLeaseEnd::Bounded { unix_ms: END };
+            let not_found = switch(ProviderAnswer::NotFound, false, 0);
+            let limit = END + LEASE_END_GRACE_MS;
+            for contact in [TERMINATE, RECONCILE] {
+                assert_eq!(verdict(&not_found, contact, &end, END - 1), PENDING);
+                assert_eq!(verdict(&not_found, contact, &end, END + 1), PENDING);
+                assert_eq!(verdict(&not_found, contact, &end, limit), PENDING);
+                assert_eq!(
+                    verdict(&not_found, contact, &end, limit + 1),
+                    terminal(TerminalBasis::PastLatestLeaseEndNotFound)
+                );
+            }
+        }
+
+        #[test]
+        fn an_unbounded_lease_never_passes_its_end() {
+            let not_found = switch(ProviderAnswer::NotFound, false, i64::MAX / 2);
+            for contact in [TERMINATE, RECONCILE] {
+                assert_eq!(
+                    verdict(&not_found, contact, &LatestLeaseEnd::Unbounded {}, i64::MAX / 2),
+                    PENDING
+                );
+            }
+        }
+
+        #[test]
+        fn the_clock_offset_moves_time_without_waiting() {
+            let end = LatestLeaseEnd::Bounded { unix_ms: END };
+            let wall = END - 1_000;
+            let before = switch(ProviderAnswer::NotFound, false, 0);
+            assert_eq!(verdict(&before, RECONCILE, &end, wall), PENDING);
+            let after = switch(ProviderAnswer::NotFound, false, LEASE_END_GRACE_MS + 2_000);
+            assert_eq!(
+                verdict(&after, RECONCILE, &end, wall),
+                terminal(TerminalBasis::PastLatestLeaseEndNotFound)
+            );
+            let between = switch(ProviderAnswer::NotFound, false, 2_000);
+            assert_eq!(verdict(&between, RECONCILE, &end, wall), PENDING);
+        }
+
+        #[test]
+        fn rule_a_wins_over_rule_b_when_both_hold() {
+            let end = LatestLeaseEnd::Bounded { unix_ms: END };
+            let both = switch(ProviderAnswer::NotFound, true, 0);
+            assert_eq!(
+                verdict(&both, TERMINATE, &end, END + 2 * LEASE_END_GRACE_MS),
+                terminal(TerminalBasis::AcceptedTerminateThenNotFound)
+            );
+        }
+
+        #[test]
+        fn a_switch_file_is_read_strictly_and_its_absence_means_no_switch() {
+            let temp = tempfile::tempdir().unwrap();
+            let root = lillux::PinnedDirectory::open(temp.path()).unwrap().unwrap();
+            assert!(read_provider_switch(&root).unwrap().is_none());
+            std::fs::write(
+                temp.path().join(PROVIDER_SWITCH_FILE),
+                br#"{"schema":1,"answer":"not_found","terminate_accepted":true,"clock_offset_ms":-5}"#,
+            )
+            .unwrap();
+            assert_eq!(
+                read_provider_switch(&root).unwrap(),
+                Some(switch(ProviderAnswer::NotFound, true, -5))
+            );
+            // Absent optional fields default to a provider that accepted
+            // nothing and a clock with no offset.
+            std::fs::write(
+                temp.path().join(PROVIDER_SWITCH_FILE),
+                br#"{"schema":1,"answer":"pending"}"#,
+            )
+            .unwrap();
+            assert_eq!(
+                read_provider_switch(&root).unwrap(),
+                Some(switch(ProviderAnswer::Pending, false, 0))
+            );
+            for bad in [
+                &br#"{"schema":2,"answer":"pending"}"#[..],
+                br#"{"schema":1,"answer":"gone"}"#,
+                br#"{"schema":1,"answer":"pending","extra":1}"#,
+            ] {
+                std::fs::write(temp.path().join(PROVIDER_SWITCH_FILE), bad).unwrap();
+                assert!(read_provider_switch(&root).is_err());
+            }
+        }
+
+        #[test]
+        fn a_switch_answer_needs_no_local_occurrence_but_checks_its_identity() {
+            let temp = tempfile::tempdir().unwrap();
+            let root = lillux::PinnedDirectory::open(temp.path()).unwrap().unwrap();
+            std::fs::write(
+                temp.path().join(PROVIDER_SWITCH_FILE),
+                br#"{"schema":1,"answer":"terminated"}"#,
+            )
+            .unwrap();
+            let bound = BoundOccurrence {
+                request_digest: "a".repeat(64),
+                occurrence_id: occurrence_id(&"a".repeat(64)),
+            };
+            let termination = ryeos_external_execution_contract::TerminationIntent {
+                termination_request_digest: "d".repeat(64),
+                latest_lease_end: LatestLeaseEnd::Unbounded {},
+            };
+            let request = LifecycleAdapterRequest::ReconcileTermination {
+                common: ryeos_external_execution_contract::LifecycleOperationCommon {
+                    schema: 1,
+                    protocol: LIFECYCLE_ADAPTER_PROTOCOL.into(),
+                    operation_id: "switch-termination".into(),
+                    binding_hash: "b".repeat(64),
+                    settings_digest: "c".repeat(64),
+                },
+                occurrence: bound.clone(),
+                termination: termination.clone(),
+            };
+            let response =
+                reconcile_termination(&root, &request, &bound, &termination).unwrap();
+            response.validate_for(&request).unwrap();
+            assert!(matches!(
+                response,
+                LifecycleAdapterResponse::OccurrenceTerminal {
+                    basis: TerminalBasis::ObservedTerminated,
+                    ..
+                }
+            ));
+            let mut foreign = bound;
+            foreign.occurrence_id = "occ-someone-else".into();
+            assert!(reconcile_termination(&root, &request, &foreign, &termination).is_err());
+        }
     }
 }
