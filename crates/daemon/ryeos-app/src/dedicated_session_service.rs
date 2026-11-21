@@ -3707,7 +3707,7 @@ fn admitted_session_capsule(
             if predecessor {
                 error.context(format!(
                     "admitted session capsule {capsule_hash} predates the current schema; stop the daemon and run `{}` before restarting",
-                    crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND
+                    crate::execution_history_reset::OBJECT_SCHEMA_CUTOVER_COMMAND
                 ))
             } else {
                 error

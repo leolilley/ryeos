@@ -251,7 +251,13 @@ fn bootstrap_source_checked(
         .runtime_snapshot_production
         .iter()
         .find(|binding| binding.id() == request.binding_id)
-        .context("current signed snapshot producer binding is absent")?;
+        .ok_or_else(|| {
+            state.node_config.absent_binding_error(
+                crate::node_config::sections::runtime_snapshot_production::SECTION_NAME,
+                Some(request.binding_id.as_str()),
+                "current signed snapshot producer binding is absent",
+            )
+        })?;
     ensure!(
         (1..=binding.maximum_bootstrap_lifetime_seconds())
             .contains(&request.maximum_lifetime_seconds),
@@ -732,7 +738,13 @@ pub fn staging_source_ceiling(
         .runtime_snapshot_production
         .iter()
         .find(|binding| binding.id() == binding_id)
-        .context("current signed snapshot producer binding is absent")?;
+        .ok_or_else(|| {
+            state.node_config.absent_binding_error(
+                crate::node_config::sections::runtime_snapshot_production::SECTION_NAME,
+                Some(binding_id),
+                "current signed snapshot producer binding is absent",
+            )
+        })?;
     binding
         .maximum_upload_bytes()
         .checked_sub(16 * 1024)
@@ -852,7 +864,13 @@ fn create_qualification_occurrence_checked(
         .runtime_snapshot_qualification
         .iter()
         .find(|binding| binding.id() == qualification_binding_id)
-        .context("current signed snapshot qualification binding is absent")?;
+        .ok_or_else(|| {
+            state.node_config.absent_binding_error(
+                crate::node_config::sections::runtime_snapshot_qualification::SECTION_NAME,
+                Some(qualification_binding_id),
+                "current signed snapshot qualification binding is absent",
+            )
+        })?;
     let producer = state
         .node_config
         .runtime_snapshot_production
@@ -2733,7 +2751,13 @@ fn produce_checked(
         .runtime_snapshot_production
         .iter()
         .find(|binding| binding.id() == request.binding_id)
-        .context("current signed snapshot producer binding is absent")?;
+        .ok_or_else(|| {
+            state.node_config.absent_binding_error(
+                crate::node_config::sections::runtime_snapshot_production::SECTION_NAME,
+                Some(request.binding_id.as_str()),
+                "current signed snapshot producer binding is absent",
+            )
+        })?;
     let source_ceiling = staging_source_ceiling(state, context, &request.binding_id)?;
 
     let authority = state.state_store.pinned_state_authority()?;

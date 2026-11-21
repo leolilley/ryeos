@@ -55,6 +55,13 @@ pub const BINDING_CREDENTIAL_ABSENT: &str = "binding_credential_absent";
 pub const BINDING_CREDENTIAL_UNVERIFIED: &str = "binding_credential_unverified";
 /// A binding file has a schema or protocol this node no longer admits.
 pub const BINDING_SCHEMA_UNSUPPORTED: &str = "binding_schema_unsupported";
+/// A binding file is signed under a schema number this node has retired: its
+/// signature verifies, but its document is not decoded or admitted.
+pub const BINDING_RETIRED_SCHEMA: &str = "binding_retired_schema";
+/// `retire` was asked to remove a binding signed under a schema this node
+/// still admits. Removing a live binding is a different operation that the
+/// retire verb never performs.
+pub const BINDING_NOT_RETIRED_SCHEMA: &str = "binding_not_retired_schema";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -894,6 +901,164 @@ pub fn check_bundle_replacement(
     admit_stranded_bindings(stranded, invalidate).map_err(Into::into)
 }
 
+/// The closed list of schema numbers this node has retired, by section. A
+/// shape change that a previously signed document cannot satisfy bumps the
+/// section's admitted schema and moves the old number here. This is the only
+/// key the loader uses to set an item aside undecoded; every other failure to
+/// parse a verified item is fatal.
+pub(crate) const RETIRED_BINDING_SCHEMAS: &[(&str, &[u64])] = &[
+    (external_execution::SECTION_NAME, &[17, 18, 19]),
+    (runtime_snapshot_production::SECTION_NAME, &[1]),
+    (runtime_snapshot_qualification::SECTION_NAME, &[5]),
+];
+
+/// The retired schema number a verified body is signed under, if its section
+/// retired it. Reads only the signed `schema` number.
+pub(crate) fn retired_binding_schema(section: &str, body: &Value) -> Option<u64> {
+    let schema = body.get("schema").and_then(Value::as_u64)?;
+    RETIRED_BINDING_SCHEMAS
+        .iter()
+        .any(|(name, retired)| *name == section && retired.contains(&schema))
+        .then_some(schema)
+}
+
+/// An installed binding file set aside because it is signed under a retired
+/// schema. It is not part of the snapshot's bindings and authorizes nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StaleBinding {
+    pub section: String,
+    pub id: String,
+    pub schema: u64,
+    pub file: String,
+    pub reason: String,
+}
+
+impl StaleBinding {
+    /// The reason text of an item set aside for its retired schema number.
+    pub fn retired_reason(schema: u64) -> String {
+        format!(
+            "signed under retired schema {schema}; its document is not decoded and it \
+             authorizes nothing"
+        )
+    }
+
+    pub fn code(&self) -> &'static str {
+        BINDING_RETIRED_SCHEMA
+    }
+
+    pub fn fix(&self) -> String {
+        format!(
+            "retire the stale binding on the stopped node with `ryeos node external-execution \
+             retire {}/{}`, then compose it again",
+            self.section, self.id
+        )
+    }
+}
+
+/// The retired bindings of a snapshot as report rows: what was seen and the
+/// typed code and fix for each. Used by `doctor` and `status`.
+pub fn stale_binding_report(snapshot: &NodeConfigSnapshot) -> Vec<Value> {
+    snapshot
+        .stale_bindings
+        .iter()
+        .map(|binding| {
+            serde_json::json!({
+                "code": binding.code(),
+                "section": binding.section,
+                "id": binding.id,
+                "schema": binding.schema,
+                "file": binding.file,
+                "reason": binding.reason,
+                "fix": binding.fix(),
+            })
+        })
+        .collect()
+}
+
+/// A fresh operation reached a binding this node set aside as retired, or
+/// found nothing admitting it while retired bindings of that section are
+/// installed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaleBindingRefusal {
+    pub section: &'static str,
+    pub stale: Vec<StaleBinding>,
+}
+
+impl StaleBindingRefusal {
+    pub fn code(&self) -> &'static str {
+        BINDING_RETIRED_SCHEMA
+    }
+}
+
+impl std::fmt::Display for StaleBindingRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let named = self
+            .stale
+            .iter()
+            .map(|binding| {
+                format!(
+                    "`{}/{}` (schema {})",
+                    binding.section, binding.id, binding.schema
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let verbs = self
+            .stale
+            .iter()
+            .map(|binding| {
+                format!(
+                    "`ryeos node external-execution retire {}/{}`",
+                    binding.section, binding.id
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        write!(
+            f,
+            "{BINDING_RETIRED_SCHEMA}: no current {} binding admits this operation, and the \
+             installed binding(s) {named} are signed under a retired schema; retire and \
+             compose again (on the stopped node run {verbs}, then compose the binding again)",
+            self.section
+        )
+    }
+}
+
+impl std::error::Error for StaleBindingRefusal {}
+
+impl NodeConfigSnapshot {
+    /// Retired bindings installed in one section.
+    pub fn stale_in(&self, section: &'static str) -> Vec<StaleBinding> {
+        self.stale_bindings
+            .iter()
+            .filter(|binding| binding.section == section)
+            .cloned()
+            .collect()
+    }
+
+    /// The error for a binding that is not in the current set: typed when the
+    /// section holds retired bindings (and, for a named id, when that id is
+    /// one of them), otherwise the caller's plain absence message.
+    pub fn absent_binding_error(
+        &self,
+        section: &'static str,
+        id: Option<&str>,
+        absent: &str,
+    ) -> anyhow::Error {
+        let stale = self
+            .stale_in(section)
+            .into_iter()
+            .filter(|binding| id.is_none_or(|id| binding.id == id))
+            .collect::<Vec<_>>();
+        if stale.is_empty() {
+            anyhow::anyhow!("{absent}")
+        } else {
+            StaleBindingRefusal { section, stale }.into()
+        }
+    }
+}
+
 /// A binding file whose schema or protocol this node does not admit. The
 /// loader names the file; this names what was seen and what is admitted.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1079,6 +1244,7 @@ mod tests {
         external_execution: Vec<InstalledExternalExecutionBinding>,
     ) -> NodeConfigSnapshot {
         NodeConfigSnapshot {
+            stale_bindings: Vec::new(),
             external_execution,
             runtime_snapshot_production: production,
             guest_runtime_materialization: Vec::new(),
@@ -1576,5 +1742,71 @@ mod tests {
         let decoded: BindingRef =
             serde_json::from_value(serde_json::json!("runtime_snapshot_production/p")).unwrap();
         assert_eq!(decoded, binding("runtime_snapshot_production/p"));
+    }
+
+    #[test]
+    fn retired_schema_list_is_closed_and_disjoint_from_admitted_schemas() {
+        let body = |schema: u64| serde_json::json!({"schema": schema});
+        for schema in [17, 18, 19] {
+            assert_eq!(
+                retired_binding_schema(external_execution::SECTION_NAME, &body(schema)),
+                Some(schema)
+            );
+        }
+        for schema in [16, 20, 21, 22] {
+            assert_eq!(
+                retired_binding_schema(external_execution::SECTION_NAME, &body(schema)),
+                None
+            );
+        }
+        assert_eq!(
+            retired_binding_schema(runtime_snapshot_production::SECTION_NAME, &body(1)),
+            Some(1)
+        );
+        assert_eq!(
+            retired_binding_schema(runtime_snapshot_production::SECTION_NAME, &body(2)),
+            None
+        );
+        assert_eq!(
+            retired_binding_schema(runtime_snapshot_qualification::SECTION_NAME, &body(5)),
+            Some(5)
+        );
+        assert_eq!(
+            retired_binding_schema(runtime_snapshot_qualification::SECTION_NAME, &body(6)),
+            None
+        );
+        // The schema number alone keys the skip, and only within its section.
+        assert_eq!(retired_binding_schema("routes", &body(19)), None);
+        assert_eq!(
+            retired_binding_schema(external_execution::SECTION_NAME, &serde_json::json!({})),
+            None
+        );
+    }
+
+    #[test]
+    fn stale_report_rows_carry_code_and_fix() {
+        let mut snapshot = full_snapshot();
+        snapshot.stale_bindings.push(StaleBinding {
+            section: runtime_snapshot_production::SECTION_NAME.into(),
+            id: "old".into(),
+            schema: 1,
+            file: "f".into(),
+            reason: "r".into(),
+        });
+        let rows = stale_binding_report(&snapshot);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["code"], BINDING_RETIRED_SCHEMA);
+        assert!(
+            rows[0]["fix"]
+                .as_str()
+                .unwrap()
+                .contains("retire runtime_snapshot_production/old")
+        );
+        let refusal = snapshot.absent_binding_error(
+            runtime_snapshot_production::SECTION_NAME,
+            None,
+            "absent",
+        );
+        assert!(refusal.downcast_ref::<StaleBindingRefusal>().is_some());
     }
 }

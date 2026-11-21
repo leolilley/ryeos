@@ -239,7 +239,13 @@ pub fn run_provider_inventory(
                     .external_execution
                     .iter()
                     .find(|binding| binding.id() == id)
-                    .with_context(|| format!("no installed external_execution binding `{id}`"))?;
+                    .ok_or_else(|| {
+                        config.absent_binding_error(
+                            crate::node_config::sections::external_execution::SECTION_NAME,
+                            Some(id),
+                            &format!("no installed external_execution binding `{id}`"),
+                        )
+                    })?;
                 let contract = binding.backend_contract();
                 (
                     InventoryBinding {
@@ -262,8 +268,12 @@ pub fn run_provider_inventory(
                     .runtime_snapshot_production
                     .iter()
                     .find(|binding| binding.id() == id)
-                    .with_context(|| {
-                        format!("no installed runtime_snapshot_production binding `{id}`")
+                    .ok_or_else(|| {
+                        config.absent_binding_error(
+                            crate::node_config::sections::runtime_snapshot_production::SECTION_NAME,
+                            Some(id),
+                            &format!("no installed runtime_snapshot_production binding `{id}`"),
+                        )
                     })?;
                 (
                     InventoryBinding {

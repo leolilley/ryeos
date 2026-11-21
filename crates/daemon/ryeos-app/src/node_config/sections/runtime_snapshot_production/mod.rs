@@ -43,7 +43,7 @@ impl ProductionDocument {
     fn validate(&self) -> Result<()> {
         ensure!(
             self.kind == "node"
-                && self.schema == 1
+                && self.schema == 2
                 && self.protocol == "ryeos.runtime-snapshot-production.v2",
             "unsupported runtime snapshot production binding"
         );
@@ -234,7 +234,7 @@ impl InstalledRuntimeSnapshotProductionBinding {
         });
         let document = ProductionDocument {
             kind: "node".into(),
-            schema: 1,
+            schema: 2,
             protocol: "ryeos.runtime-snapshot-production.v2".into(),
             backend: "test-backend".into(),
             account: "test-account".into(),
@@ -418,7 +418,7 @@ impl NodeConfigSection for RuntimeSnapshotProductionSection {
         crate::node_config::coherence::require_admitted_binding_schema(
             SECTION_NAME,
             body,
-            &[1],
+            &[2],
             "ryeos.runtime-snapshot-production.v2",
         )?;
         let document: ProductionDocument = serde_json::from_value(body.clone())
@@ -440,7 +440,7 @@ mod tests {
         let settings = serde_json::json!({"schema":1,"owner_id":"usr-test"});
         let document = ProductionDocument {
             kind: "node".into(),
-            schema: 1,
+            schema: 2,
             protocol: "ryeos.runtime-snapshot-production.v2".into(),
             backend: "test-backend".into(),
             account: "test-account".into(),

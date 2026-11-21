@@ -33,6 +33,7 @@
 //!   - `ryeos node external-execution snapshot-compose` — compose and install a node-signed runtime snapshot production binding on a stopped node
 //!   - `ryeos node external-execution snapshot-qualification-compose` — compose and install a node-signed snapshot qualification binding on a stopped node
 //!   - `ryeos node external-execution recompose` — re-pin installed bindings to the installed bundles after a payload change on a stopped node
+//!   - `ryeos node external-execution retire` — remove one installed binding signed under a retired schema from a stopped node
 //!
 //! One client composite is listed here for help but dispatched after the
 //! verified node config loads, because it sequences daemon commands:
@@ -181,6 +182,11 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
     LocalCommandDescriptor {
         tokens: &["node", "external-execution", "recompose"],
         summary: "Re-pin a stopped node's bindings to its installed bundles after a payload change",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "external-execution", "retire"],
+        summary: "Remove a stopped node's binding that is signed under a retired schema",
         category: "lifecycle",
     },
     LocalCommandDescriptor {
@@ -465,6 +471,13 @@ pub async fn try_dispatch(
             if argv.get(2).map(String::as_str) == Some("recompose") =>
         {
             crate::lifecycle_external_recompose::run_recompose(&argv[3..], console)
+                .map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("external-execution"))
+            if argv.get(2).map(String::as_str) == Some("retire") =>
+        {
+            crate::lifecycle_external_retire::run_retire(&argv[3..], console)
                 .map_err(map_local_err)?;
             Ok(true)
         }
@@ -3418,9 +3431,11 @@ fn external_bindings_check(
     snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
 ) -> ryeos_core_tools::actions::doctor::CheckResult {
     use ryeos_core_tools::actions::doctor::{FAIL, NA, OK, WARN};
+    let stale = ryeos_app::node_config::coherence::stale_binding_report(snapshot);
     if snapshot.external_execution.is_empty()
         && snapshot.runtime_snapshot_production.is_empty()
         && snapshot.runtime_snapshot_qualification.is_empty()
+        && stale.is_empty()
     {
         return check(
             "external_bindings",
@@ -3434,14 +3449,17 @@ fn external_bindings_check(
         return check(
             "external_bindings",
             FAIL,
-            serde_json::json!({ "error": "the locked isolation runtime retains no node trust" }),
+            serde_json::json!({
+                "error": "the locked isolation runtime retains no node trust",
+                "stale_bindings": stale,
+            }),
         );
     };
     match ryeos_app::node_config::coherence::inspect_installed_binding_coherence(
         app_root, trust, snapshot,
     ) {
         Ok(report) => {
-            let status = if report.has_failures() {
+            let status = if report.has_failures() || !stale.is_empty() {
                 FAIL
             } else if report.has_warnings() {
                 WARN
@@ -3455,6 +3473,7 @@ fn external_bindings_check(
                     "bindings": report.bindings,
                     "findings": report.findings,
                     "not_checked": report.not_checked,
+                    "stale_bindings": stale,
                 }),
             )
         }
@@ -3464,6 +3483,7 @@ fn external_bindings_check(
             serde_json::json!({
                 "error": format!("{error:#}"),
                 "note": "the installed bundles' artifacts could not be inventoried",
+                "stale_bindings": stale,
             }),
         ),
     }
@@ -5745,6 +5765,34 @@ fn policy_carry_choices(
 mod tests {
     use super::*;
 
+    #[test]
+    fn doctor_reports_retired_bindings_as_failing_with_their_fix() {
+        let snapshot = ryeos_app::node_config::NodeConfigSnapshot {
+            external_execution: Vec::new(),
+            runtime_snapshot_production: Vec::new(),
+            guest_runtime_materialization: Vec::new(),
+            runtime_snapshot_qualification: Vec::new(),
+            bundles: Vec::new(),
+            routes: Vec::new(),
+            commands: Vec::new(),
+            stale_bindings: vec![ryeos_app::node_config::coherence::StaleBinding {
+                section: "external_execution".into(),
+                id: "w9".into(),
+                schema: 19,
+                file: "/node/.ai/node/external_execution/w9.yaml".into(),
+                reason: "signed under retired schema 19".into(),
+            }],
+        };
+        let result = external_bindings_check(std::path::Path::new("/nonexistent"), None, &snapshot);
+        assert_eq!(result.status, ryeos_core_tools::actions::doctor::FAIL);
+        let stale = &result.detail["stale_bindings"][0];
+        assert_eq!(stale["code"], "binding_retired_schema");
+        assert_eq!(stale["id"], "w9");
+        let fix = stale["fix"].as_str().unwrap();
+        assert!(fix.contains("compose it again"));
+        assert!(fix.contains("ryeos node external-execution retire external_execution/w9"));
+    }
+
     mod sync_apply_quarantine_doctor {
         use super::*;
         use ryeos_app::sync_apply_quarantine_report::{SyncApplyQuarantineEntry, write_report};
@@ -6450,6 +6498,30 @@ mod tests {
             schema_cut_to: None,
             discard_unreadable_lifetime_fence_after_reboot: false,
         }
+    }
+
+    #[test]
+    fn the_hinted_runtime_epoch_cut_command_parses_and_validates_without_project_heads() {
+        use clap::Parser as _;
+        let hinted = ryeos_app::execution_history_reset::runtime_epoch_cutover_command(141, 142);
+        let words = hinted
+            .strip_prefix("ryeos node reset execution-history ")
+            .expect("the hint names the reset verb")
+            .split_whitespace();
+        let args = ExecutionHistoryResetArgs::try_parse_from(words).unwrap();
+        args.validate().unwrap();
+        assert!(args.confirm && !args.include_project_heads && !args.confirm_project_heads);
+        assert_eq!(
+            (args.schema_cut_from, args.schema_cut_to),
+            (Some(141), Some(142))
+        );
+        // The epoch-free hint is valid on its own too.
+        let plain = ExecutionHistoryResetArgs::try_parse_from(["--confirm"]).unwrap();
+        plain.validate().unwrap();
+        assert_eq!(
+            ryeos_app::execution_history_reset::EXECUTION_HISTORY_RESET_COMMAND,
+            "ryeos node reset execution-history --confirm"
+        );
     }
 
     fn policy_generation_reset_args(confirm: bool) -> NodePolicyGenerationResetArgs {

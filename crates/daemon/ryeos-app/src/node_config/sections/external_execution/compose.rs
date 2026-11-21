@@ -237,14 +237,14 @@ pub(super) fn compose_binding_document(inputs: ComposeInputs<'_>) -> Result<Bind
                     == http.tls_root_bundle_digest,
                 "composed TLS roots changed their transport identity"
             );
-            (17, HTTP_NETWORK_POLICY)
+            (20, HTTP_NETWORK_POLICY)
         }
         ExternalControllerTransportSelection::ControllerFileRelay(_) => {
             ensure!(
                 tls_roots_der_base64.is_empty(),
                 "a file-relay transport carries no TLS roots"
             );
-            (19, RELAY_NETWORK_POLICY)
+            (22, RELAY_NETWORK_POLICY)
         }
     };
     let document = BindingDocument {
@@ -1558,13 +1558,13 @@ pub(crate) mod tests {
         let http = compose(&program, &https(), serde_json::json!({"region": "r"})).unwrap();
         assert_eq!(
             (http.schema, http.network_policy.as_str()),
-            (17, HTTP_NETWORK_POLICY)
+            (20, HTTP_NETWORK_POLICY)
         );
         assert_eq!(http.controller_tls_root_certificates_der_base64.len(), 2);
         let file = compose(&program, &relay(), relay_settings()).unwrap();
         assert_eq!(
             (file.schema, file.network_policy.as_str()),
-            (19, RELAY_NETWORK_POLICY)
+            (22, RELAY_NETWORK_POLICY)
         );
         assert!(file.controller_tls_root_certificates_der_base64.is_empty());
     }

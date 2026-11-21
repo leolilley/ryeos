@@ -148,6 +148,7 @@ mod tests {
             "qualification_local_starts": [],
             "credential_profiles": [],
             "retained_generations": [],
+            "stale_bindings": [],
         })
     }
 

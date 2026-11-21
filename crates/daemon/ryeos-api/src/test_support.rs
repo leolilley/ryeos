@@ -232,6 +232,7 @@ fn build_app_state(
     controller_lifetime: Arc<ryeos_node_runtime::state_lock::StateLockLease>,
 ) -> AppState {
     let snapshot = ryeos_app::node_config::NodeConfigSnapshot {
+        stale_bindings: Vec::new(),
         external_execution: Vec::new(),
         guest_runtime_materialization: Vec::new(),
         runtime_snapshot_production: Vec::new(),
