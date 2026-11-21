@@ -6037,6 +6037,75 @@ mod tests {
     }
 
     #[test]
+    fn capacity_repair_account_refuses_while_the_state_lock_is_held_and_writes_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let lock_path = ryeos_node_runtime::state_lock::default_lock_path(root.path());
+        let held = ryeos_node_runtime::state_lock::StateLock::acquire(&lock_path).unwrap();
+        lillux::crypto::create_signing_key(
+            &ryeos_engine::roots::RuntimeRoot::new(root.path().to_path_buf())
+                .operator_signing_key_path(),
+        )
+        .unwrap();
+        let console = crate::tty::Console::new(crate::tty::TerminalCapabilities::plain(80));
+        let argv: Vec<String> = [
+            "--app-root",
+            root.path().to_str().unwrap(),
+            "--reason",
+            "unit",
+            "--json",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        // A running daemon holds this lock; the command refuses before it
+        // opens the account.
+        let error = run_node_capacity_repair_account_command(&argv, &console).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("state lock is held"),
+            "{error:#}"
+        );
+        drop(held);
+        let error = run_node_capacity_repair_account_command(&argv, &console).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("not initialized"),
+            "{error:#}"
+        );
+        assert!(!root.path().join(".ai/state").exists());
+    }
+
+    #[test]
+    fn capacity_repair_banner_reports_the_overwritten_bytes_or_that_nothing_was_written() {
+        let report = ryeos_node::native_capacity::RepairReport {
+            epoch: 2,
+            sequence: 7,
+            repaired: true,
+            torn_account_digest: Some("a".repeat(64)),
+            account_digest: "b".repeat(64),
+        };
+        let banner = capacity_repair_banner(std::path::Path::new("/srv/node"), &report);
+        assert!(banner.heading.starts_with("CAPACITY ACCOUNT REPAIRED"));
+        let value = |banner: &crate::tty::StatusBanner, key: &str| {
+            banner
+                .rows
+                .iter()
+                .find(|row| row.key.as_deref() == Some(key))
+                .map(|row| row.value.clone())
+        };
+        assert_eq!(value(&banner, "replaced bytes"), Some("a".repeat(64)));
+        assert_eq!(value(&banner, "account image"), Some("b".repeat(64)));
+        let current = capacity_repair_banner(
+            std::path::Path::new("/srv/node"),
+            &ryeos_node::native_capacity::RepairReport {
+                repaired: false,
+                torn_account_digest: None,
+                ..report
+            },
+        );
+        assert!(current.heading.starts_with("ACCOUNT ALREADY CURRENT"));
+        assert_eq!(value(&current, "replaced bytes"), None);
+    }
+
+    #[test]
     fn capacity_reissue_banner_names_the_epochs_and_keeps_allow_restart_separate() {
         let report = ryeos_node::native_capacity::ReissueReport {
             from_epoch: 3,
