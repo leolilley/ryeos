@@ -14,6 +14,7 @@ sync_include:
   - kind: parser
   - kind: handler
   - kind: protocol
+  - kind: revision
   - root: .ai/manifest.source.yaml
     shape: file
   - root: .ai/manifest.yaml
