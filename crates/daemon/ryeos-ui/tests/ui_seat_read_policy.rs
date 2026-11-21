@@ -661,7 +661,10 @@ mod revisions {
         )?;
         Ok((
             admitted.params.expect("a call returns its parameters"),
-            admitted.shaping.expect("a policy read has shaping").detach(),
+            admitted
+                .shaping
+                .expect("a policy read has shaping")
+                .detach(),
         ))
     }
 
@@ -743,7 +746,11 @@ mod revisions {
                 assert_eq!(entries.len(), 1, "{} {target}", path.display());
                 let entry = entries[0];
                 for class in [SeatClass::LocalOperator, SeatClass::HostedPrincipal] {
-                    assert!(entry.classes.contains(&class), "{} {target}", path.display());
+                    assert!(
+                        entry.classes.contains(&class),
+                        "{} {target}",
+                        path.display()
+                    );
                 }
                 assert_eq!(
                     entry.pin.get("project_path"),
@@ -792,11 +799,17 @@ mod revisions {
         assert_eq!(row["before_digest"], DIGEST_A);
         assert_eq!(row["after_digest"], DIGEST_B);
         assert_eq!(row["recorded_at"], "2026-11-22T00:00:00Z");
-        assert_eq!(row["actor"], json!({"fingerprint": "fp:abc", "role": "authoring"}));
+        assert_eq!(
+            row["actor"],
+            json!({"fingerprint": "fp:abc", "role": "authoring"})
+        );
         assert_eq!(row["verify"]["status"], "verified");
         assert_eq!(row["verify"]["signer"], "fp:abc");
         assert_eq!(row["provenance"]["thread_id"], "T-1");
-        assert_eq!(row["provenance"]["authoring_capability"], "ryeos.author.view");
+        assert_eq!(
+            row["provenance"]["authoring_capability"],
+            "ryeos.author.view"
+        );
     }
 
     #[test]
@@ -858,14 +871,24 @@ mod revisions {
     #[test]
     fn dropped_fields_are_absent() {
         let policy = standard();
-        let (_, list_shaping) =
-            call(&policy, LIST, json!({"item_ref": "view:a"}), Some(OWN_PROJECT)).unwrap();
+        let (_, list_shaping) = call(
+            &policy,
+            LIST,
+            json!({"item_ref": "view:a"}),
+            Some(OWN_PROJECT),
+        )
+        .unwrap();
         let mut answer = list_answer(1);
         answer["a_later_field"] = json!("x");
         answer["records"][0]["a_later_field"] = json!("x");
         let shown = list_shaping.apply(answer).unwrap();
         let text = shown.to_string();
-        for forbidden in ["/home/operator", "/var/lib", "acting_principal", "a_later_field"] {
+        for forbidden in [
+            "/home/operator",
+            "/var/lib",
+            "acting_principal",
+            "a_later_field",
+        ] {
             assert!(!text.contains(forbidden), "{forbidden} leaked: {text}");
         }
         assert!(shown["head"].get("reason").is_none());
@@ -890,8 +913,13 @@ mod revisions {
     #[test]
     fn an_oversized_result_is_refused_not_cut() {
         let policy = standard();
-        let (_, list_shaping) =
-            call(&policy, LIST, json!({"item_ref": "view:a"}), Some(OWN_PROJECT)).unwrap();
+        let (_, list_shaping) = call(
+            &policy,
+            LIST,
+            json!({"item_ref": "view:a"}),
+            Some(OWN_PROJECT),
+        )
+        .unwrap();
         // A page over the service's own largest page holds more rows than
         // the entry allows.
         let refusal = list_shaping
