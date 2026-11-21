@@ -708,7 +708,12 @@ async fn a_restart_mid_run_keeps_the_deadline_and_the_single_wrap_up() {
                     && payload.get("kind").and_then(Value::as_str) == Some("deadline_wrap_up"))
             })
             .map(|(_, kind, _)| kind.as_str())
-            .filter(|kind| matches!(*kind, "tool_call_start" | "tool_call_result" | "cognition_in"))
+            .filter(|kind| {
+                matches!(
+                    *kind,
+                    "tool_call_start" | "tool_call_result" | "cognition_in"
+                )
+            })
             .collect();
         if after_notice.last() == Some(&"tool_call_start") {
             break;
