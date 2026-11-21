@@ -27,9 +27,9 @@ use ryeosd::scheduler;
 use ryeosd::{bootstrap, reconcile, uds};
 
 mod composition_native;
+mod kernel_floor;
 #[cfg(feature = "scheduling")]
 mod maintenance_schedule;
-mod kernel_floor;
 mod offline_host;
 #[cfg(feature = "scheduling")]
 mod standalone_scheduler;
