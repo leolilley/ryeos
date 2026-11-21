@@ -3409,11 +3409,7 @@ mod tests {
             .add_event(graph_event(1, "graph_completed", Some("ok")))
             .unwrap();
         assembler
-            .add_event(event(
-                2,
-                ryeos_state::event_types::THREAD_FAILED,
-                json!({}),
-            ))
+            .add_event(event(2, ryeos_state::event_types::THREAD_FAILED, json!({})))
             .unwrap();
         assembler
             .record_hook_occurrence("T-root", &graph_completed_hook(), &event_ref, None)
