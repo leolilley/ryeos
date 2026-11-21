@@ -1243,6 +1243,9 @@ mod controls {
                     assert_eq!(bytes, encode(interrupted.target()).unwrap());
                     assert!(f.evidence().is_empty());
                 }
+                Step::RepairEvidence | Step::RepairAccount => {
+                    unreachable!("repair steps are not injected into a re-issuance")
+                }
             }
             let report = f.run(None).unwrap();
             assert_eq!((report.from_epoch, report.to_epoch), (1, 2), "{step:?}");
