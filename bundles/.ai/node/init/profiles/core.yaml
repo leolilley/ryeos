@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-21T16:57:42Z:e86588fe3efc6f1d73f0ad0e3a6c3074f2698b76e657c31325abc7ec308157b1:AKRRAkhth9Eai2oNKcib/BsWBaNdxplgSMJtSg1d/OzeQ/uk4HoKiP6ljABB/ic01EVbUbJZMywrcrn/jQ4BDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-21T19:47:34Z:d3b7ae31deafe188ce7769091f26d3b3fabda2ba22a7f93f57aa3916a3725c27:5d7Ai0/cb5XPTMGv0Hrci9Ubo2DGCDzHF/WvptFmQSFIuG73m6wSWU+WP64gfXHkxGfLq9vKOUv5oZUk7rpfBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core profile: the substrate alone.
 schema: 1
 exact_bundles:
@@ -725,8 +725,6 @@ policies:
           - /records/*/before_digest
           - /records/*/after_digest
           - /records/*/file_ext
-          - /records/*/change_set
-          - /records/*/endorsement
           - /records/*/provenance/authored_by
           - /records/*/provenance/action
           - /records/*/provenance/thread_id
@@ -765,8 +763,6 @@ policies:
           - /record/before_digest
           - /record/after_digest
           - /record/file_ext
-          - /record/change_set
-          - /record/endorsement
           - /record/provenance/authored_by
           - /record/provenance/action
           - /record/provenance/thread_id

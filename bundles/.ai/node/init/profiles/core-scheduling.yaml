@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-21T16:57:42Z:b4830a4b02ce6139b6e7d566372c8ca0faa943c9bfac57f3ee129d99cb7f23b8:+F2T1eXYNZ5bJvBuGMix/oKVPoUhi4YMkPtXuEq9oMg64qFPbfoA6V7ic4VThBirgjASO9UPzZUc7maUW55pBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-21T19:47:34Z:ace79b26208c38ca022affbea2eadb8e7b9669ae579ad90e45018315c700a1e5:khgxvg024uiTNdabcPszyW/X8spuji6hReaLdSwAJUs4YLAi9R4X4QeqrkdKIWsXX9GjpG74VchbrIj+4d4MBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus scheduling.
 schema: 1
 exact_bundles:
@@ -728,8 +728,6 @@ policies:
           - /records/*/before_digest
           - /records/*/after_digest
           - /records/*/file_ext
-          - /records/*/change_set
-          - /records/*/endorsement
           - /records/*/provenance/authored_by
           - /records/*/provenance/action
           - /records/*/provenance/thread_id
@@ -768,8 +766,6 @@ policies:
           - /record/before_digest
           - /record/after_digest
           - /record/file_ext
-          - /record/change_set
-          - /record/endorsement
           - /record/provenance/authored_by
           - /record/provenance/action
           - /record/provenance/thread_id

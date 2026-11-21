@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-21T16:57:42Z:0ca597b554c24f5526821218df30c26c25f58548d05912f9b02f6b5bfdad9448:LXXDRLVrl7ZB8ffxlmUO+vfmEFGTr91ThpLLdViyadNZp8VhuapRF8nLNLxuJOJ3liYn/GRZB5qnPpAXDM5KCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-21T19:47:34Z:7692e1e52b406462238dad54f235992236b0dd62b6e103d9a40e97703e2aad62:NTPCoCOhalSpyC+jdJJdub8CJG18gH/+L1culL4peNitdWsGG/jriSmB+0+BbUkx+/+D+zcH/7qMsANuc/gbDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Optional application authentication above the standard set.
 schema: 1
 exact_bundles:
@@ -748,8 +748,6 @@ policies:
           - /records/*/before_digest
           - /records/*/after_digest
           - /records/*/file_ext
-          - /records/*/change_set
-          - /records/*/endorsement
           - /records/*/provenance/authored_by
           - /records/*/provenance/action
           - /records/*/provenance/thread_id
@@ -788,8 +786,6 @@ policies:
           - /record/before_digest
           - /record/after_digest
           - /record/file_ext
-          - /record/change_set
-          - /record/endorsement
           - /record/provenance/authored_by
           - /record/provenance/action
           - /record/provenance/thread_id

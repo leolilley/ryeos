@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-21T16:57:41Z:fd92e7ddc1af4f04edcad7c5c7bc20a1dd972ae5e298150cce776d22504a37db:aOuwdusXrPK/lgo/7ApTu/zAp4j/uClIVychLVKec7C2ZT+1Uzlfp9f7X45PVD2RDisCpaeDgjXoLLMS1FJ0BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-21T19:47:34Z:598e6cc0eeaea577b9b48cccbb435f383c66ec50053197ad7b007c660966e9f3:tiNSa/3WufpP6R4VMFQL5E/hhWdf36puvXRADYRWUD+AtfJsFS0Ytw9+LbV+95BVt6+RsPytgPEcnBIt6wvMCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus the knowledge bundle.
 schema: 1
 exact_bundles:
@@ -727,8 +727,6 @@ policies:
           - /records/*/before_digest
           - /records/*/after_digest
           - /records/*/file_ext
-          - /records/*/change_set
-          - /records/*/endorsement
           - /records/*/provenance/authored_by
           - /records/*/provenance/action
           - /records/*/provenance/thread_id
@@ -767,8 +765,6 @@ policies:
           - /record/before_digest
           - /record/after_digest
           - /record/file_ext
-          - /record/change_set
-          - /record/endorsement
           - /record/provenance/authored_by
           - /record/provenance/action
           - /record/provenance/thread_id

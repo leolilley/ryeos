@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-21T16:57:42Z:33861d76540b729b4d3374d1df573878075b74de182f67506b1b4240b2c5dfd2:78acKpDVu1wGkredUEZvICMhR3vV0KyQRO6lzEAb1nV4S/K5pZGeIQP2wTgdDZmjo9gfKhY9MRTK2obwuyY7BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-21T19:47:34Z:eb5bd309654a84021285d8ec115262fb9ff67774f1981b8e67eb02740f3cf6b1:DrRFuWVR5nz9DNCZU6cCL3m8zkKquR14JvuwVQXKzftLU5qUup12kFwJyQX4e3SFm2YN24dh3rbo8GDueysfDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus the graph workflow bundles.
 schema: 1
 exact_bundles:
@@ -728,8 +728,6 @@ policies:
           - /records/*/before_digest
           - /records/*/after_digest
           - /records/*/file_ext
-          - /records/*/change_set
-          - /records/*/endorsement
           - /records/*/provenance/authored_by
           - /records/*/provenance/action
           - /records/*/provenance/thread_id
@@ -768,8 +766,6 @@ policies:
           - /record/before_digest
           - /record/after_digest
           - /record/file_ext
-          - /record/change_set
-          - /record/endorsement
           - /record/provenance/authored_by
           - /record/provenance/action
           - /record/provenance/thread_id

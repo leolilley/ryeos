@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-21T16:57:42Z:45a8c5479fafff73f63061197a950173af2323aa399b6ac8c9b4545c49b1d6c2:PM2nMi82FvvICkvhM8RzM3DR6XscrguRiNotFE4dkk8LEiqyivp93yK8Qtn6+pk3njJMW+qjHoN3wbx85H3TDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-21T19:47:34Z:85c0f38ca8f5237d1e694b865d80f4956ad30660c4acab53dd70082b3de3d1a3:3N3r7a0OW1Z+t4xeUQCvyc42Cv5tjxpHbpWXdomgwxJIIDLp8DD1Ujhm73VKgjrBZodbKfs+MVNZD9zVgK2/Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -817,8 +817,6 @@ policies:
           - /records/*/before_digest
           - /records/*/after_digest
           - /records/*/file_ext
-          - /records/*/change_set
-          - /records/*/endorsement
           - /records/*/provenance/authored_by
           - /records/*/provenance/action
           - /records/*/provenance/thread_id
@@ -857,8 +855,6 @@ policies:
           - /record/before_digest
           - /record/after_digest
           - /record/file_ext
-          - /record/change_set
-          - /record/endorsement
           - /record/provenance/authored_by
           - /record/provenance/action
           - /record/provenance/thread_id

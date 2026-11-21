@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-21T16:57:41Z:ac1fc54bfb6db0d548db1b642b9e41f3cc409fbf3f0e5ca421f69c123634943b:hZwaLm1BeKBB7UuMRw6C1w7YY75qkwZHvOG0+DuNvvF1G9cszfE30Cn7tkeyOgTKyj9cmGDqn+qylaEHiJAgBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-21T19:47:34Z:96c49bdd5f0d051bdf1a47b40fea0766a03b623058669007c9bc9cb3e8e77609:TUBcTiPPZNYiA+/wbgwOJm2gXsrXW62cvcyqwF53dAzcHxnBvZxg95ZamosoIv8IBiHRq/suYQycoPB7oxbJBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - bundle-source
@@ -737,8 +737,6 @@ policies:
           - /records/*/before_digest
           - /records/*/after_digest
           - /records/*/file_ext
-          - /records/*/change_set
-          - /records/*/endorsement
           - /records/*/provenance/authored_by
           - /records/*/provenance/action
           - /records/*/provenance/thread_id
@@ -777,8 +775,6 @@ policies:
           - /record/before_digest
           - /record/after_digest
           - /record/file_ext
-          - /record/change_set
-          - /record/endorsement
           - /record/provenance/authored_by
           - /record/provenance/action
           - /record/provenance/thread_id
