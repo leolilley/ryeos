@@ -37,8 +37,6 @@ mod persistence_controls;
 pub(super) mod reanchor;
 mod redo;
 pub(super) mod reissue;
-pub(super) mod repair;
-pub(super) mod torn;
 
 // The account keeps its issued inode. The anchor is an atomically replaced
 // bounded redo role in the issued private directory. Only its exact committed
@@ -976,18 +974,6 @@ impl std::fmt::Display for CapacityRecordRefusal {
     }
 }
 impl std::error::Error for CapacityRecordRefusal {}
-
-/// The torn-file defect a record refusal names. A record whose marker or
-/// checksum fails is a tear; any other refusal has a valid checksum.
-fn refusal_defect(refusal: &CapacityRecordRefusal) -> torn::TornDefect {
-    match refusal {
-        CapacityRecordRefusal::Format | CapacityRecordRefusal::Schema => {
-            torn::TornDefect::ForeignFormat
-        }
-        CapacityRecordRefusal::Checksum => torn::TornDefect::ChecksumMismatch,
-        _ => torn::TornDefect::Malformed,
-    }
-}
 impl From<NativeCapacityUnitsRefusal> for CapacityRecordRefusal {
     fn from(error: NativeCapacityUnitsRefusal) -> Self {
         Self::Units(error)
@@ -1434,9 +1420,10 @@ impl RetainedStore {
             self.pinned.identity()? == self.identity,
             "capacity account differs from issued inode"
         );
-        if self.pinned.observation()?.size() != RECORD_BYTES as u64 {
-            return Err(torn::account_wrong_size());
-        }
+        ensure!(
+            self.pinned.observation()?.size() == RECORD_BYTES as u64,
+            "capacity account size changed"
+        );
         Ok(())
     }
 
