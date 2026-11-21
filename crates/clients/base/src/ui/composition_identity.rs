@@ -312,6 +312,9 @@ impl UiSurfaceMountManifest {
                 tiles,
                 focused_tile,
                 maximized_tile: None,
+                presentation: tab.seed.presentation,
+                scroll: tab.seed.scroll,
+                sequence: tab.seed.sequence.clone(),
             };
             if set.root.is_some() {
                 set.focus_tile(focused_tile);

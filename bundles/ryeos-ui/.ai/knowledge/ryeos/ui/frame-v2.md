@@ -1,17 +1,17 @@
-<!-- ryeos:signed:2026-11-19T18:08:31Z:92e1295cbfa40f71966871463625c9613d1eb734467a9edbf6f8f3a25e27a531:kG/pSYWV7AFuezIWXdUXWEVlxVkitU/4jL+lBsp1J9b/E0vPZt1JRdwKlZLfd3vK4/mJdRYwhJ4lNtVjx6IECA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-20T23:17:59Z:0c6e5db774a876924b4231e9621612385f13ef720a815a016b54f4ebd1b9df65:zNFLO5Hn2ABKgFg1miAT9if75WW8sJEMXE0/fb1v4v63m5iSEQwc9rLlAevkUCmH9F/vIvlJx1Bg0pgTaufiAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "frame-v2"
 title: "RyeOS UI Frame Contract v2"
 description: "The closed widget-primitive set and view-binding schema renderers implement; content composes against this, never against client source"
 entry_type: reference
-version: "2.3.0"
+version: "2.4.0"
 ```
 
 # RyeOS UI Frame Contract v2
 
-Frame contract version `2.3.0`, implemented with UI binding contract
-`ryeos.ui.binding.v15` and timeline contract `ryeos.timeline.v1` (the
+Frame contract version `2.4.0`, implemented with UI binding contract
+`ryeos.ui.binding.v16` and timeline contract `ryeos.timeline.v1` (the
 `timeline-v1` document). A renderer and the daemon cut over together: the
 frame, the binding contract and the timeline contract each have exactly one
 version in force, and there is no reader for an earlier one.
@@ -252,6 +252,66 @@ The renderer receives a `Timeline` view model, not the response. Besides
   `request_digest` and `accept_allowed`; an ask without `approval_id` and
   `request_digest` has no actions, and a surface that admits no affordance
   shows the ask without buttons.
+
+## View sets (`view_set:` items)
+
+A view set is the arrangement of views one tab opens with, and it is its own
+signed item of the `view_set` kind (version `1.0.0`, directory `view_sets`,
+`project_shadowing: refuse`). A Surface (kind version `3.0.0`) lists the sets
+it opens by ref, in tab order; it never carries one inline, and a Surface
+that does is refused when it is composed. Name the set as an item and list its
+ref instead.
+
+```yaml
+# surface
+view_sets:
+  - view_set:ryeos/ui/development
+  - view_set:ryeos/ui/work
+```
+
+```yaml
+# view_set:ryeos/ui/work
+schema: 2                  # composition schema, required
+id: work                   # tab identity within the Surface, unique per Surface
+title: Work
+presentation: tiled        # tiled (default) | page
+scroll: false              # page only: the tree is read as rows and the page scrolls
+sequence: welcome          # opaque step identifier; list order is the step order
+offered: true              # listed where a person adds a tab (default true)
+root:                      # group / split tree of `view:` refs; absent = empty set
+  type: split
+  axis: horizontal
+  ratio: 0.22
+  first: { type: group, label: Work, views: ["view:ryeos/work/list"], active: 0 }
+  second: { type: group, views: ["view:ryeos/work/overview"], active: 0 }
+```
+
+- The body is the composition the daemon validates for the operator's saved
+  personal templates too: one validator, bounded depth, tile count, labels and
+  ratios. A set has no `extends`; an arrangement is replaced whole.
+- A set is arrangement only. It names no sources, affordances or capabilities,
+  so it holds no authority; the views it arranges compile under their own
+  authority and the Surface's ceiling, unchanged.
+- The daemon resolves each ref when it composes the Surface and embeds the
+  composition in the effective presentation in the authored order, so a client
+  sees the same `view_sets` list of compositions as before. The binding's
+  `view_sets` map holds the identity of every set the Surface names, so a
+  changed set changes the binding digest and a dispatch against the old
+  binding is stale.
+- A set that is not embedded does not stop the Surface opening. The binding
+  records an attenuated entry (coordinate: the `view_set:` ref) with a typed
+  reason: `view_set_invalid_ref`, `view_set_unresolved` (no such item, or a
+  project file shadowing a bundle set), `view_set_untrusted` (unsigned, or
+  signed by a signer the node does not trust), `view_set_malformed` (the body
+  fails the composition validator) or `view_set_duplicate_id` (an earlier set
+  in the list has the id).
+- A project may author view sets. They are subject to the same trust gate as a
+  project Surface and the same bounds as every set; a trusted project set that
+  names project views takes the project-view rules for those views.
+- `presentation`, `scroll` and `sequence` reach the view model (`presentation`,
+  `scroll`, `sequence` on the view-set VM, absent at their defaults). A
+  renderer that implements page presentation reads them there; the others draw
+  the tiled form.
 
 ## Surface chrome (`chip` and `style`)
 

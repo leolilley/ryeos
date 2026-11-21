@@ -32,6 +32,9 @@ pub(super) fn maximum_publication_work() -> Result<u64> {
         .context("capacity anchor publication work quote overflow")
 }
 
+/// The most a torn anchor of the wrong size may weigh to be read and replaced.
+const TORN_READ_BOUND: u64 = 64 * 1024;
+
 struct CurrentAnchor {
     pin: PinnedRegularFile,
     identity: PinnedRegularFileIdentity,
@@ -130,13 +133,16 @@ impl RetainedAnchor {
             .require_pinned_regular_entry_fixed(&pin)
             .map_err(anyhow::Error::msg)?;
         let identity = pin.identity()?;
+        if pin.observation()?.size() != ANCHOR_BYTES as u64 {
+            return Err(super::torn::anchor_wrong_size());
+        }
         let mut bytes = [0; ANCHOR_BYTES];
         pin.read_exact_stable_into(&mut bytes, deadline)?;
         let redo = AccountRedo::decode(&bytes, policy, issuance).map_err(|error| {
             if super::cut_retirement::is_pre_cut_anchor(&bytes) {
                 error.context(super::cut_retirement::PRE_CUT_CURE)
             } else {
-                error
+                super::torn::classify_anchor_decode(error)
             }
         })?;
         self.parent
@@ -169,6 +175,106 @@ impl RetainedAnchor {
         self.recover_namespace(pay)?;
         self.current = Some(self.read_current(policy, issuance, deadline, pay)?);
         Ok(())
+    }
+
+    /// Replace an anchor that does not verify with `next`, in one atomic
+    /// replacement, for the stopped-node operator re-issuance that renews from
+    /// the account record. Refuses unless the file at the anchor's name is
+    /// exactly a torn one (wrong size, foreign marker or failed checksum):
+    /// a verifiable anchor is never replaced here, and neither is one of
+    /// another issuance. The replacement is conditional on the very bytes
+    /// proved torn, so an interrupted call leaves the torn file or the new
+    /// anchor and a rerun resolves either.
+    pub(super) fn replace_torn(
+        &mut self,
+        next: AccountRedo,
+        policy: &NodeNativeCapacityPolicy,
+        issuance: &[u8; 32],
+        deadline: MonotonicDeadline,
+        pay: &dyn Fn(u64) -> Result<()>,
+    ) -> Result<()> {
+        ensure!(
+            self.pending.is_none() && self.current.is_none(),
+            "capacity redo is already retained; only an unread torn anchor is replaced"
+        );
+        self.recover_namespace(pay)?;
+        pay(READ_WORK)?;
+        self.require_directory()?;
+        let pin = self
+            .parent
+            .open_pinned_regular(OsStr::new("anchor"), false)?
+            .context("capacity redo is absent after exact namespace recovery")?;
+        pin.require_effective_user_owned()?;
+        self.parent
+            .require_pinned_regular_entry_fixed(&pin)
+            .map_err(anyhow::Error::msg)?;
+        let identity = pin.identity()?;
+        let observation = pin.observation()?;
+        ensure!(
+            observation.size() <= TORN_READ_BOUND,
+            "capacity redo is too large to be a torn anchor"
+        );
+        let torn = pin.read_stable_bounded(&observation, TORN_READ_BOUND)?;
+        Self::require_torn(&torn, policy, issuance)?;
+        let target = next.encode(policy)?;
+        self.steady_namespace(pay)?;
+        pay(PUBLICATION_WORK)?;
+        self.require_directory()?;
+        self.parent.replace_pinned_bytes_if_matches_atomic(
+            OsStr::new("anchor"),
+            Some(&pin),
+            |incumbent| {
+                pay(READ_WORK)?;
+                incumbent.require_effective_user_owned()?;
+                ensure!(
+                    incumbent.identity()? == identity,
+                    "capacity redo incumbent replaced"
+                );
+                let observation = incumbent.observation()?;
+                ensure!(
+                    observation.size() <= TORN_READ_BOUND
+                        && incumbent.read_stable_bounded(&observation, TORN_READ_BOUND)? == torn,
+                    "capacity redo incumbent bytes changed"
+                );
+                Ok(())
+            },
+            &target,
+            0o600,
+        )?;
+        self.steady_namespace(pay)?;
+        let observed = self.read_current(policy, issuance, deadline, pay)?;
+        ensure!(
+            observed.bytes == target,
+            "capacity redo target readback changed"
+        );
+        self.finish_publication(observed, deadline, pay)
+    }
+
+    /// Whether `bytes` are exactly a torn anchor: not a whole file of the
+    /// fixed size, or one whose marker or checksum fails.
+    fn require_torn(
+        bytes: &[u8],
+        policy: &NodeNativeCapacityPolicy,
+        issuance: &[u8; 32],
+    ) -> Result<()> {
+        let Ok(whole) = <&[u8; ANCHOR_BYTES]>::try_from(bytes) else {
+            return Ok(());
+        };
+        match AccountRedo::decode(whole, policy, issuance) {
+            Ok(_) => {
+                anyhow::bail!("capacity redo anchor verifies; it is not torn and is not replaced")
+            }
+            Err(error) => {
+                let error = super::torn::classify_anchor_decode(error);
+                ensure!(
+                    error
+                        .downcast_ref::<super::torn::CapacityRecordTorn>()
+                        .is_some(),
+                    "capacity redo does not verify but is not a torn anchor: {error:#}"
+                );
+                Ok(())
+            }
+        }
     }
 
     pub(super) fn current(&self) -> Result<&AccountRedo> {

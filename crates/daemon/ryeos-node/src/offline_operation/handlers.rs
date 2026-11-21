@@ -1274,6 +1274,20 @@ pub(super) fn capacity_reissue(ctx: &HandlerContext<'_>) -> Result<Value> {
     Ok(serde_json::to_value(report)?)
 }
 
+pub(super) fn capacity_repair_account(ctx: &HandlerContext<'_>) -> Result<Value> {
+    let arguments: CapacityArguments = ctx.arguments()?;
+    let command = ctx.command_label();
+    let report =
+        crate::native_capacity::repair_capacity_account(crate::native_capacity::RepairRequest {
+            app_root: ctx.app_root,
+            state_lock: ctx.state_lock,
+            signer: ctx.operator_authorized()?,
+            reason: &arguments.reason,
+            command: &command,
+        })?;
+    Ok(serde_json::to_value(report)?)
+}
+
 pub(super) fn capacity_reanchor(ctx: &HandlerContext<'_>) -> Result<Value> {
     let arguments: CapacityArguments = ctx.arguments()?;
     let command = ctx.command_label();

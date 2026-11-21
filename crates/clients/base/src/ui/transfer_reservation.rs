@@ -1359,6 +1359,7 @@ mod tests {
                     active: 0,
                 }),
             }),
+            ..Default::default()
         };
         let manifest = UiSurfaceMountManifest::allocate(
             destination,
