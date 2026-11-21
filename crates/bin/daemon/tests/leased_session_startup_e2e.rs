@@ -522,6 +522,19 @@ mod real_adapter {
             store.external_terminal_observation_documents()
         }
 
+        /// Take the seeded session's credential for a new worker of the same
+        /// owner, on the stopped node's Store. Succeeds only when no earlier
+        /// session still holds the credential lock.
+        pub fn acquire_credential(&self, new_worker: &str) -> Result<()> {
+            let store = common::open_stopped_node_store(&self.harness.state_path)?;
+            store.acquire_credential_profile(
+                &format!("P-{PLACEMENT}"),
+                "fp:operator",
+                new_worker,
+            )?;
+            Ok(())
+        }
+
         pub fn log(&self) -> String {
             strip_ansi_escapes(&self.harness.stderr_so_far())
         }
@@ -600,6 +613,22 @@ fn require_unsettled(held: &Held, log: &str) {
     );
 }
 
+/// After a provider terminal the predecessor's session is settled as an
+/// interrupted, recoverable session: it holds no worker, its credential lock
+/// is released, and a new session may take the credential.
+fn require_session_settled(rig: &Rig, held: &Held, log: &str) -> Result<()> {
+    assert_eq!(
+        held.session_state, "recovering",
+        "the session did not settle after the provider terminal:\n{log}"
+    );
+    assert_eq!(
+        held.lock_owner, None,
+        "the credential lock outlived the terminal allocation:\n{log}"
+    );
+    rig.acquire_credential("worker-next-session")
+        .context("a new session could not take the released credential")
+}
+
 fn require_basis(observations: &[serde_json::Value], basis: &str) {
     assert_eq!(
         observations.len(),
@@ -614,7 +643,7 @@ fn require_basis(observations: &[serde_json::Value], basis: &str) {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs the built synthetic adapter binaries; see the module doc"]
 async fn a_terminated_provider_settles_the_allocation_at_startup() -> Result<()> {
-    let (_rig, log, held, observations) =
+    let (rig, log, held, observations) =
         restarted_over(true, scripted("terminated", false, 0)).await?;
     let counts = real_adapter::counts_line(&log)?;
     assert!(
@@ -623,11 +652,7 @@ async fn a_terminated_provider_settles_the_allocation_at_startup() -> Result<()>
     );
     assert_eq!(held.phase, ExternalAllocationPhase::Terminated, "{log}");
     require_basis(&observations, "observed_terminated");
-    eprintln!(
-        "S1 session after settlement: state={} lock={:?}",
-        held.session_state, held.lock_owner
-    );
-    Ok(())
+    require_session_settled(&rig, &held, &log)
 }
 
 /// S2: a provider that cannot say keeps the allocation quarantined and the
@@ -635,7 +660,7 @@ async fn a_terminated_provider_settles_the_allocation_at_startup() -> Result<()>
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs the built synthetic adapter binaries; see the module doc"]
 async fn a_pending_provider_keeps_the_session_unsettled_and_the_node_ready() -> Result<()> {
-    let (_rig, log, held, observations) =
+    let (rig, log, held, observations) =
         restarted_over(true, scripted("pending", true, 20 * GRACE_MS)).await?;
     let counts = real_adapter::counts_line(&log)?;
     assert!(
@@ -644,6 +669,10 @@ async fn a_pending_provider_keeps_the_session_unsettled_and_the_node_ready() -> 
     );
     require_unsettled(&held, &log);
     assert!(observations.is_empty(), "{observations:?}");
+    assert!(
+        rig.acquire_credential("worker-next-session").is_err(),
+        "a new session took a credential an unsettled lease still holds"
+    );
     Ok(())
 }
 
@@ -652,11 +681,11 @@ async fn a_pending_provider_keeps_the_session_unsettled_and_the_node_ready() -> 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs the built synthetic adapter binaries; see the module doc"]
 async fn not_found_after_an_accepted_terminate_settles_by_rule_a() -> Result<()> {
-    let (_rig, log, held, observations) =
+    let (rig, log, held, observations) =
         restarted_over(true, scripted("not_found", true, 0)).await?;
     assert_eq!(held.phase, ExternalAllocationPhase::Terminated, "{log}");
     require_basis(&observations, "accepted_terminate_then_not_found");
-    Ok(())
+    require_session_settled(&rig, &held, &log)
 }
 
 /// S4: not found with no accepted terminate, before the lease end, is only the
@@ -682,11 +711,11 @@ async fn not_found_before_the_lease_end_holds_the_session() -> Result<()> {
 async fn not_found_past_the_lease_end_and_grace_settles_by_rule_b() -> Result<()> {
     // The lease ends within two minutes of seeding; twenty minutes on is past
     // the end and its ten-minute grace.
-    let (_rig, log, held, observations) =
+    let (rig, log, held, observations) =
         restarted_over(true, scripted("not_found", false, 20 * 60 * 1000)).await?;
     assert_eq!(held.phase, ExternalAllocationPhase::Terminated, "{log}");
     require_basis(&observations, "past_latest_lease_end_not_found");
-    Ok(())
+    require_session_settled(&rig, &held, &log)
 }
 
 /// S6: past the lease end but inside the grace the answer is still pending.
@@ -742,11 +771,7 @@ async fn pending_at_startup_is_settled_by_the_periodic_pass() -> Result<()> {
     let held = rig.held()?;
     assert_eq!(held.phase, ExternalAllocationPhase::Terminated);
     require_basis(&rig.stored_observations()?, "observed_terminated");
-    eprintln!(
-        "S8 session after the periodic settle: state={} lock={:?}",
-        held.session_state, held.lock_owner
-    );
-    Ok(())
+    require_session_settled(&rig, &held, &rig.log())
 }
 
 /// Open question 1: is a stored reservation's contact deadline editable in

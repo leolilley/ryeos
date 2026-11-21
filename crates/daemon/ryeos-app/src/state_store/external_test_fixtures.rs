@@ -670,7 +670,59 @@ impl StateStore {
                     lillux::time::Duration::from_secs(60),
                 ),
             },
-        )
+        )?;
+        self.attach_predecessor_worker(seed)
+    }
+
+    /// Attach the session's worker as an earlier daemon generation left it: a
+    /// process row whose exact identity no longer exists, bound to the
+    /// session. A real leased session always has this row; without it the
+    /// startup pass treats the session as an unattached attempt instead of a
+    /// worker to fence once the lease terminal is observed.
+    #[cfg(any(test, feature = "test-support"))]
+    fn attach_predecessor_worker(
+        &self,
+        seed: &crate::leased_session_rig::LeasedSessionSeed<'_>,
+    ) -> Result<()> {
+        use crate::process::{ExecutionProcessIdentity, PROCESS_IDENTITY_SCHEMA_VERSION};
+        use crate::runtime_db::{WorkerProcessRecord, WorkerProcessState};
+
+        let session = self
+            .dedicated_session(seed.placement_thread_id)?
+            .context("the seeded dedicated session is absent")?;
+        let now = lillux::time::timestamp_millis();
+        self.attach_worker_process(&WorkerProcessRecord {
+            worker_instance_id: seed.worker_instance_id.into(),
+            boot_identity_hash: "8".repeat(64),
+            session_capsule_hash: session.admitted_capsule_hash.clone(),
+            boot_epoch: 1,
+            lifecycle_generation: 1,
+            process_identity: ExecutionProcessIdentity {
+                schema_version: PROCESS_IDENTITY_SCHEMA_VERSION,
+                process_scope: None,
+                boot_id: "predecessor-generation-boot".into(),
+                target_pid: 41,
+                target_start_time_ticks: 100,
+                group_leader_pid: 41,
+                group_leader_start_time_ticks: 100,
+                pid_namespace: lillux::current_pid_namespace()?,
+                resource_selections: Vec::new(),
+                resource_settlement_authority: None,
+                resource_operations: Vec::new(),
+                resource_allocation_limit: None,
+                resource_occupancy_start: None,
+                resource_occupancy_limit: None,
+                resource_cleanup_allowance_ms: None,
+            },
+            control_channel_identity: "fd:predecessor-worker".into(),
+            state: WorkerProcessState::Attached,
+            daemon_generation_id: "predecessor-generation".into(),
+            placement_thread_id: seed.placement_thread_id.into(),
+            cleanup_state: "owned".into(),
+            created_at_ms: now,
+            updated_at_ms: now,
+        })?;
+        self.complete_worker_binding(seed.worker_instance_id, seed.placement_thread_id, 1)
     }
 
     /// The terminal observations the runtime database stored, as evidence JSON.
