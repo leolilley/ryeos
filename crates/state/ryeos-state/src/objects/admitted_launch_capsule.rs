@@ -2841,7 +2841,10 @@ mod tests {
 
     fn signed_descriptor(body: &str, seed: u8) -> (String, String, String) {
         let key = lillux::crypto::SigningKey::from_bytes(&[seed; 32]);
-        let document = lillux::signature::sign_content(body, &key, "#", None);
+        // A fixed signing time keeps two fixtures built in different seconds
+        // byte-identical, so comparisons of their descriptors are stable.
+        let document =
+            lillux::signature::sign_content_at(body, &key, "#", None, "2026-01-01T00:00:00Z");
         let header =
             lillux::signature::parse_signature_line(document.lines().next().unwrap(), "#", None)
                 .unwrap();

@@ -11067,7 +11067,13 @@ where
         let mut overflow_reported = false;
         let mut post_stop_reads = None;
         loop {
-            if stop.is_raised() {
+            // Sample the stop BEFORE the read. Everything the child wrote
+            // precedes the stop being raised, so a read that follows an
+            // observed stop and finds the pipe empty proves the writer's
+            // output is fully consumed. A stop sampled after an empty read
+            // proves nothing: bytes can land between that read and the check.
+            let stopped = stop.is_raised();
+            if stopped {
                 let remaining = post_stop_reads.get_or_insert(POST_STOP_DRAIN_READS);
                 if *remaining == 0 {
                     let mut probe = [0u8; 1];
@@ -11119,10 +11125,12 @@ where
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    if stop.is_raised() {
+                    if stopped {
                         break;
                     }
                     // Sleep in the kernel until bytes, hang-up or the stop.
+                    // A stop raised meanwhile returns here, and the next
+                    // iteration reads once more after observing it.
                     stop.wait_readable(&reader);
                 }
                 Err(error) => {
@@ -16619,5 +16627,89 @@ mod executable_memfd_flag_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod capture_drain_stop_race_tests {
+    use super::*;
+
+    /// Reader whose first read reports an empty pipe and, in that same
+    /// instant, lets the child write its output and the stop be raised. That
+    /// is the interleaving of a drain that read just before the child wrote
+    /// and exited and was then descheduled until the cleanup stop was raised.
+    struct EmptyThenLanded {
+        inner: std::io::PipeReader,
+        landing: Option<Box<dyn FnOnce() + Send>>,
+    }
+
+    impl Read for EmptyThenLanded {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if let Some(landing) = self.landing.take() {
+                landing();
+                return Err(std::io::ErrorKind::WouldBlock.into());
+            }
+            self.inner.read(buf)
+        }
+    }
+
+    impl std::os::fd::AsRawFd for EmptyThenLanded {
+        fn as_raw_fd(&self) -> std::os::fd::RawFd {
+            self.inner.as_raw_fd()
+        }
+    }
+
+    fn run_drain(reader: impl DrainSource, stop: &Arc<DrainStop>) -> BoundedCapture {
+        let capture: SharedCapture = Arc::new(OutputCapture {
+            state: Mutex::new(BoundedCapture::default()),
+            changed: Condvar::new(),
+        });
+        let (tx, _rx) = std::sync::mpsc::channel();
+        spawn_bounded_drain(
+            reader,
+            Some(DEFAULT_MAX_CAPTURE_BYTES),
+            CapturedStream::Stdout,
+            Arc::clone(&capture),
+            Arc::clone(stop),
+            tx,
+        )
+        .join()
+        .unwrap();
+        let state = capture.state.lock().unwrap();
+        state.clone()
+    }
+
+    #[test]
+    fn bytes_landing_after_an_empty_read_and_before_the_stop_check_are_kept() {
+        let (reader, writer) = std::io::pipe().unwrap();
+        configure_nonblocking_fd(&reader).unwrap();
+        let stop = Arc::new(DrainStop::new().unwrap());
+        let landing_stop = Arc::clone(&stop);
+        let mut landing_writer = writer.try_clone().unwrap();
+        let reader = EmptyThenLanded {
+            inner: reader,
+            landing: Some(Box::new(move || {
+                landing_writer.write_all(b"hello").unwrap();
+                landing_stop.raise();
+            })),
+        };
+        // `writer` stays open, so only the stop can end the drain: the bytes
+        // must be consumed before it does.
+        let state = run_drain(reader, &stop);
+        drop(writer);
+        assert_eq!(state.bytes, b"hello");
+        assert!(state.closed);
+    }
+
+    #[test]
+    fn stop_raised_before_the_first_read_still_consumes_buffered_bytes() {
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        configure_nonblocking_fd(&reader).unwrap();
+        writer.write_all(b"buffered").unwrap();
+        let stop = Arc::new(DrainStop::new().unwrap());
+        stop.raise();
+        let state = run_drain(reader, &stop);
+        drop(writer);
+        assert_eq!(state.bytes, b"buffered");
     }
 }
