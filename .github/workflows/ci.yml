@@ -876,9 +876,6 @@ jobs:
             fi
           done
 
-  # The UI-only merge gate's tests (see the classify job): the client crates and the UI
-  # daemon crate. The Rune workspace tests run in rust-policy and the package freshness
-  # check in static-policy, both of which every merge gate runs.
   # Every merge_gates dispatch, in both gate modes, builds ryeos-ui and runs its embedded-asset
   # tests: the full gate skips the test shards and the ui-only gate is the only other place
   # that runs this crate, so without this job a manifest/code disagreement passed the gate.
@@ -916,8 +913,11 @@ jobs:
         run: python3 -I -B crates/daemon/ryeos-ui/generate_asset_registry.py --check
 
       - name: Test the embedded browser assets
-        run: cargo test --locked -p ryeos-ui --lib assets::
+        run: 'cargo test --locked -p ryeos-ui --lib assets::'
 
+  # The UI-only merge gate's tests (see the classify job): the client crates and the UI
+  # daemon crate. The Rune workspace tests run in rust-policy and the package freshness
+  # check in static-policy, both of which every merge gate runs.
   ui-gate:
     name: UI targeted tests
     needs: [classify]
