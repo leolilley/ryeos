@@ -4634,7 +4634,15 @@ pub fn start_exclusive_capsule(
             scope_allocation.as_ref(),
             scope,
             Some(&identity.placement_thread_id),
-            &|stage| reservation.note_stage(stage),
+            &|stage| {
+                tracing::info!(
+                    thread_id = %identity.placement_thread_id,
+                    worker_instance_id = %identity.worker_instance_id,
+                    stage = ?stage,
+                    "dedicated worker start reached a stage"
+                );
+                reservation.note_stage(stage)
+            },
             None,
         )
         .map_err(|error| {
