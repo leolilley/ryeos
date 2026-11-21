@@ -15236,27 +15236,86 @@ mod native_terminal_existing_wait_tests {
         }
     }
 
-    fn selected_live_child_with_testimony(
-        delay: &str,
-    ) -> (RunningProcess, InheritedDescriptorAuthority, Vec<u8>) {
-        let (running, writer, frame, sender, applied) = selected_child_with_receipt_sender(delay);
-        sender.send(Ok(applied)).unwrap();
-        (running, writer, frame)
+    /// Holds the fixture child alive until the test releases it. The child
+    /// blocks opening a FIFO for reading and exits 0 only once the test opens
+    /// the write end, so identity capture and every assertion before
+    /// `release` never race the child's exit, whatever the runner load.
+    /// Dropping an unreleased handle is fine: the owner's drop kills the child.
+    struct ChildRelease {
+        _dir: tempfile::TempDir,
+        fifo: std::path::PathBuf,
     }
 
-    fn selected_child_with_receipt_sender(
-        delay: &str,
+    impl ChildRelease {
+        fn release(self) {
+            // Blocks until the child has opened the read end, then closing
+            // the write end gives it EOF and it exits 0.
+            drop(
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&self.fifo)
+                    .unwrap(),
+            );
+        }
+    }
+
+    fn selected_live_child_with_testimony() -> (
+        RunningProcess,
+        InheritedDescriptorAuthority,
+        Vec<u8>,
+        ChildRelease,
+    ) {
+        selected_live_child_with_testimony_within(Duration::from_secs(4))
+    }
+
+    fn selected_live_child_with_testimony_within(
+        original_window: Duration,
+    ) -> (
+        RunningProcess,
+        InheritedDescriptorAuthority,
+        Vec<u8>,
+        ChildRelease,
+    ) {
+        let (running, writer, frame, sender, applied, release) =
+            selected_child_with_receipt_sender_within(original_window);
+        sender.send(Ok(applied)).unwrap();
+        (running, writer, frame, release)
+    }
+
+    fn selected_child_with_receipt_sender() -> (
+        RunningProcess,
+        InheritedDescriptorAuthority,
+        Vec<u8>,
+        std::sync::mpsc::Sender<Result<crate::LinuxSandboxAppliedLaunchReceipt, String>>,
+        crate::LinuxSandboxAppliedLaunchReceipt,
+        ChildRelease,
+    ) {
+        selected_child_with_receipt_sender_within(Duration::from_secs(4))
+    }
+
+    fn selected_child_with_receipt_sender_within(
+        original_window: Duration,
     ) -> (
         RunningProcess,
         InheritedDescriptorAuthority,
         Vec<u8>,
         std::sync::mpsc::Sender<Result<crate::LinuxSandboxAppliedLaunchReceipt, String>>,
         crate::LinuxSandboxAppliedLaunchReceipt,
+        ChildRelease,
     ) {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("release");
+        let fifo_c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
         let mut running = lib_spawn(SubprocessRequest {
-            cmd: "/bin/sleep".into(),
+            cmd: "/bin/sh".into(),
             argv0: None,
-            args: vec![delay.into()],
+            args: vec![
+                "-c".into(),
+                "read _released < \"$1\"; exit 0".into(),
+                "sh".into(),
+                fifo.to_str().unwrap().into(),
+            ],
             cwd: None,
             envs: Vec::new(),
             stdin_data: None,
@@ -15285,7 +15344,7 @@ mod native_terminal_existing_wait_tests {
             .unwrap();
         let writer = held
             .prepare_native_settlement_channel(crate::time::MonotonicDeadline::after(
-                Duration::from_secs(4),
+                original_window,
             ))
             .unwrap();
         running.native_settlement = held.reader.native_settlement.take();
@@ -15326,7 +15385,14 @@ mod native_terminal_existing_wait_tests {
         };
         let mut frame = serde_json::to_vec(&record).unwrap();
         frame.push(b'\n');
-        (running, writer, frame, receipt_sender, applied)
+        (
+            running,
+            writer,
+            frame,
+            receipt_sender,
+            applied,
+            ChildRelease { _dir: dir, fifo },
+        )
     }
 
     fn thread_cpu_time() -> Duration {
@@ -15351,7 +15417,8 @@ mod native_terminal_existing_wait_tests {
         }
         // The target exits at once; the testimony write end stays open (as if
         // a descendant held it) and no record is ever written.
-        let (mut running, writer, _frame) = selected_live_child_with_testimony("0.05");
+        let (mut running, writer, _frame, release) = selected_live_child_with_testimony();
+        release.release();
         running
             .native_settlement
             .as_mut()
@@ -15543,8 +15610,8 @@ mod native_terminal_existing_wait_tests {
     // protected startup, native or device admission.
     #[test]
     fn live_launch_pending_preserves_receiver_owner_and_terminal_bytes() {
-        let (mut running, writer, _frame, _sender, _applied) =
-            selected_child_with_receipt_sender("1");
+        let (mut running, writer, _frame, _sender, _applied, _release) =
+            selected_child_with_receipt_sender();
         let channel = running.native_settlement.as_ref().unwrap();
         let original = channel.original_deadline;
         let held = ProcessLocalHeldOccurrence {
@@ -15584,8 +15651,8 @@ mod native_terminal_existing_wait_tests {
 
     #[test]
     fn live_launch_upstream_refusal_stays_sticky_without_terminal_collection() {
-        let (mut running, writer, _frame, sender, applied) =
-            selected_child_with_receipt_sender("1");
+        let (mut running, writer, _frame, sender, applied, _release) =
+            selected_child_with_receipt_sender();
         let held = ProcessLocalHeldOccurrence {
             pin: Arc::clone(running.attachment_target_lifetime.as_ref().unwrap()),
             held_identity: running
@@ -15625,8 +15692,8 @@ mod native_terminal_existing_wait_tests {
 
     #[test]
     fn live_launch_foreign_pin_then_correct_pin_preserves_first_refusal() {
-        let (mut running, writer, _frame, sender, applied) =
-            selected_child_with_receipt_sender("1");
+        let (mut running, writer, _frame, sender, applied, _release) =
+            selected_child_with_receipt_sender();
         let channel = running.native_settlement.as_ref().unwrap();
         let original = channel.original_deadline;
         let correct = ProcessLocalHeldOccurrence {
@@ -15694,7 +15761,8 @@ mod native_terminal_existing_wait_tests {
 
     #[test]
     fn empty_receipt_then_real_delivery_reaches_full_terminal_same_owner() {
-        let (running, writer, frame, sender, applied) = selected_child_with_receipt_sender("0.05");
+        let (running, writer, frame, sender, applied, release) =
+            selected_child_with_receipt_sender();
         let pid = running.pid;
         let running = match selected_wait(running, Duration::ZERO) {
             SelectedNativeTerminalWaitOutcome::Incomplete(owner) => owner,
@@ -15704,6 +15772,7 @@ mod native_terminal_existing_wait_tests {
         sender.send(Ok(applied.clone())).unwrap();
         writer.file().write_all(&frame).unwrap();
         drop(writer);
+        release.release();
         let running = match selected_wait(running, Duration::from_secs(2)) {
             SelectedNativeTerminalWaitOutcome::Collected(owner) => owner,
             _ => panic!("actual receipt and EOF must reach full terminal collection"),
@@ -15718,9 +15787,18 @@ mod native_terminal_existing_wait_tests {
 
     #[test]
     fn timely_collected_reentry_after_original_expiry_preserves_historical_result() {
-        let (running, writer, frame) = selected_live_child_with_testimony("0.01");
+        // The one test that lets the real original expiry elapse end to end.
+        // The deadline is copied into the settlement writer and reader as
+        // well as the channel, so overwriting the channel's copy would leave
+        // those untouched and prove nothing about a genuinely expired
+        // original. The window is short to keep CI fast; the child is held
+        // alive by its release handle, so identity capture cannot race its
+        // exit however long the runner stalls.
+        let (running, writer, frame, release) =
+            selected_live_child_with_testimony_within(Duration::from_secs(2));
         writer.file().write_all(&frame).unwrap();
         drop(writer);
+        release.release();
         let running = match selected_wait(running, Duration::from_secs(2)) {
             SelectedNativeTerminalWaitOutcome::Collected(owner) => owner,
             _ => panic!("fixture must collect before original expiry"),
@@ -15746,8 +15824,8 @@ mod native_terminal_existing_wait_tests {
 
     #[test]
     fn selected_core_pid_refusal_retains_actual_consumed_receipt_and_writer_owner() {
-        let (running, writer, _frame, sender, mut applied) =
-            selected_child_with_receipt_sender("0.1");
+        let (running, writer, _frame, sender, mut applied, _release) =
+            selected_child_with_receipt_sender();
         applied.owned_child_pid += 1;
         sender.send(Ok(applied.clone())).unwrap();
         let running = match selected_wait(running, Duration::ZERO) {
@@ -15770,7 +15848,8 @@ mod native_terminal_existing_wait_tests {
 
     #[test]
     fn pending_receipt_original_expiry_fails_same_owner_without_consuming_late_item() {
-        let (running, writer, _frame, sender, applied) = selected_child_with_receipt_sender("0.01");
+        let (running, writer, _frame, sender, applied, _release) =
+            selected_child_with_receipt_sender();
         let running = match selected_wait(running, Duration::ZERO) {
             SelectedNativeTerminalWaitOutcome::Incomplete(owner) => owner,
             _ => panic!("empty receipt must remain Pending"),
@@ -15801,7 +15880,7 @@ mod native_terminal_existing_wait_tests {
 
     #[test]
     fn selected_incomplete_resumes_same_owner_and_caches_collected_result() {
-        let (running, writer, frame) = selected_live_child_with_testimony("0.15");
+        let (running, writer, frame, release) = selected_live_child_with_testimony();
         let split = frame.len() / 2;
         let mut writer_file = writer.file();
         writer_file.write_all(&frame[..split]).unwrap();
@@ -15840,6 +15919,7 @@ mod native_terminal_existing_wait_tests {
 
         writer_file.write_all(&frame[split..]).unwrap();
         drop(writer);
+        release.release();
         running = match selected_wait(running, Duration::from_secs(3)) {
             SelectedNativeTerminalWaitOutcome::Collected(owner) => owner,
             SelectedNativeTerminalWaitOutcome::Incomplete(owner) => {
@@ -15887,9 +15967,10 @@ mod native_terminal_existing_wait_tests {
 
     #[test]
     fn legacy_natural_wait_takes_cached_selected_result_without_recollection() {
-        let (running, writer, frame) = selected_live_child_with_testimony("0.05");
+        let (running, writer, frame, release) = selected_live_child_with_testimony();
         writer.file().write_all(&frame).unwrap();
         drop(writer);
+        release.release();
         let running = match selected_wait(running, Duration::from_secs(3)) {
             SelectedNativeTerminalWaitOutcome::Collected(owner) => owner,
             SelectedNativeTerminalWaitOutcome::Incomplete(owner) => {
@@ -15948,8 +16029,8 @@ mod native_terminal_existing_wait_tests {
 
     #[test]
     fn timely_cached_pin_stays_raw_but_original_expiry_fails_pending_collection() {
-        let (mut running, writer, frame) = selected_live_child_with_testimony("0.01");
-        thread::sleep(Duration::from_millis(50));
+        let (mut running, writer, frame, release) = selected_live_child_with_testimony();
+        release.release();
         writer.file().write_all(&frame).unwrap();
         drop(writer);
         let original_deadline = running
@@ -16002,7 +16083,7 @@ mod native_terminal_existing_wait_tests {
 
     #[test]
     fn ordinary_short_wait_returns_resumable_owner_without_sticky_failure() {
-        let (running, writer, frame) = selected_live_child_with_testimony("0.15");
+        let (running, writer, frame, release) = selected_live_child_with_testimony();
         let split = frame.len() / 2;
         writer.file().write_all(&frame[..split]).unwrap();
         let running = match running.wait_for_natural_exit(Duration::ZERO) {
@@ -16020,6 +16101,7 @@ mod native_terminal_existing_wait_tests {
         }
         writer.file().write_all(&frame[split..]).unwrap();
         drop(writer);
+        release.release();
         let result = match running.wait_for_natural_exit(Duration::from_secs(3)) {
             Ok(result) => result,
             Err(owner) => {
