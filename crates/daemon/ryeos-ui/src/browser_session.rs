@@ -3859,6 +3859,7 @@ pub(crate) mod tests {
                 request_engine_generation_identity: "generation:test".to_string(),
                 node_policy_generation_digest: "22".repeat(32),
                 surface: EffectiveUiItemIdentity {
+                    chain: Vec::new(),
                     canonical_ref: surface_ref.to_string(),
                     effective_definition_digest: EffectiveDefinitionDigest::parse("33".repeat(32))
                         .expect("valid fixture digest"),

@@ -2065,6 +2065,7 @@ mod tests {
 
         CompiledUiTarget {
             identity: EffectiveUiItemIdentity {
+                chain: Vec::new(),
                 canonical_ref: "service:test/result".to_string(),
                 effective_definition_digest: EffectiveDefinitionDigest::parse("44".repeat(32))
                     .expect("fixture digest"),

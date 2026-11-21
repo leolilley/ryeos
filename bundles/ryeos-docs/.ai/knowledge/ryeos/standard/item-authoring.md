@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-21T02:47:00Z:c7a189a3acb7e0643a0a8766f1c68beb91e3c53690929dc7f90373679fdc8be5:iJcbV3sRrnJJgLeHfOWFJZV5H4LkJdS8RsgnjbXBVlZA+iNXLivuTVM3Si8OCEELe7CVkmpo+78cGDX5FlapBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-21T22:16:20Z:a7d8748dc3cee6a21666b6fc15c60c5ee190a1c80ac2993a7c7558c2982dcdb0:/ZQwXEAMeydotaXkZ6h/jRLOf3L0Pl/EMvep3DMBMC9cLkZwrQSyVmFwDTIJWGxJY/k1nhm2qbZsShYM+BojAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [item-authoring, runtime-authority, manifest, capabilities, author_item]
@@ -176,6 +176,43 @@ or different from its head is reported as `truncated` or `diverged`, and
 `service:revisions/get`, which return each record with its verification.
 
 v1 supports live-filesystem project provenance only.
+
+### Announcing a change
+
+Once a change is recorded, the node announces it. The announcement is the
+`item_revised` event: `{ project, item_ref, digest, revision, change_set }`,
+where `project` is the canonical root path of the project, `digest` is the
+digest of the item file as of that revision (absent when the item was
+removed), and `revision` is the item's position in its chain. The event names
+no consumer and no kind. Its durable form is the revision record, which is
+written first; the live form is a broadcast hub beside the thread event hub,
+with the same capacity and the same lag rule. A subscriber that falls behind
+loses broadcasts and recovers by re-reading the chain heads, so a lost
+announcement is harmless: it only tells a reader to look again.
+
+What announces a change:
+
+- `author_item`, after the file and the record are durable (not when the run
+  writes into a candidate integration workspace, which is not a live project).
+- `ryeos sign`, `ryeos item remove` and `ryeos endorse`. These run in the
+  operator's process with the operator's key, so after the change the CLI calls
+  the node service `items/revised` with a request the operator signs like any
+  other service call. The node does not take the caller's word: for a recorded
+  change it verifies the item's revision chain (every signature, signer and
+  link it has not already attested) and announces the newest record; for an
+  endorsement it finds the endorsement in force in the ledger and announces the
+  items it covers. A request the node cannot verify announces nothing. The
+  call needs the exact capability `ryeos.execute.service.items/revised`, which
+  no seat holds. When no node runs on this machine the CLI skips the call and
+  says so in its output; the change itself is already made.
+- Node startup. The node keeps, per project, the newest revision it has
+  announced for each item. At startup it compares every chain head with that
+  record and announces whatever is newer, so a change made while the node was
+  stopped is announced once.
+
+A change to the policy generation is not an item revision and is not announced
+this way. Editing an item file by hand announces nothing: an unsigned edit is
+not a change of record, and no file watcher exists.
 
 ### The capability ceiling
 

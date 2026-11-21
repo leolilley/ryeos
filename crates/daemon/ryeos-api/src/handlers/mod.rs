@@ -38,6 +38,7 @@ pub mod commands_wait;
 pub mod credential_profiles;
 pub mod dedicated_sessions;
 pub mod endorsements;
+pub mod items_revised;
 pub mod events_chain_replay;
 pub mod events_replay;
 pub mod external_content_accept_qualification_testimony;
@@ -355,6 +356,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     endorsements::RECORD,
     endorsements::REVOKE,
     endorsements::LIST,
+    items_revised::DESCRIPTOR,
     remote_delegation::DELEGATE,
     remote_delegation::LIST,
     remote_delegation::REVOKE,

@@ -1895,12 +1895,18 @@ fn handle_runtime_author_item(
         &state.config.app_root,
         &state.identity,
     );
+    let revisions = state.event_streams.item_revisions().clone();
+    let cursor = ryeos_app::item_revised::PublishedHeads::open(&state.config.app_root);
+    let announce = move |event: ryeos_app::item_revised::ItemRevised| {
+        ryeos_app::item_revised::announce(&revisions, &cursor, event);
+    };
     serde_json::to_value(RuntimeItemAuthorService::author(
         &authoring,
         &state.authorizer,
         cap,
         thread_auth,
         &heads,
+        &announce,
         params,
     )?)
     .context("failed to encode runtime.author_item result")

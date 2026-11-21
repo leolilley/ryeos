@@ -780,6 +780,7 @@ pub(crate) fn compile_target(
         .unwrap_or_default();
     Ok(CompiledUiTarget {
         identity: ryeos_api::surface_views::EffectiveUiItemIdentity {
+            chain: Vec::new(),
             canonical_ref: effective.canonical_ref,
             effective_definition_digest: effective.effective_definition_digest,
             effective_trust_class: effective.trust_class,

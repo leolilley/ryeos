@@ -10,6 +10,7 @@ pub mod assets;
 pub mod browser_session;
 pub mod compiled_binding;
 pub mod handlers;
+pub mod item_hints;
 pub mod invokers;
 mod phase_timing;
 pub mod seat_auth;
@@ -29,6 +30,7 @@ pub use browser_session::{
 };
 pub use session_bus::SessionBus;
 pub use state::UiState;
+pub use item_hints::ItemHintFanout;
 pub use thread_hints::ThreadHintFanout;
 
 /// Exact signed UI binding contract served by this daemon build.
