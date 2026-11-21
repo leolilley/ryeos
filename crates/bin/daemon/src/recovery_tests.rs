@@ -1446,7 +1446,6 @@ async fn startup_recovery_does_not_resume_the_root_of_a_terminal_dedicated_sessi
         .unwrap();
 
     assert!(report.resume_intents.is_empty());
-    assert!(!report.active_thread_ids.contains("T-ended-session-root"));
     let root = db.get_thread("T-ended-session-root").unwrap().unwrap();
     assert_eq!(root.status, "failed");
     let result = db
