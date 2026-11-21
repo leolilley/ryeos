@@ -710,9 +710,11 @@ impl MemfdExecFlag {
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MemfdExecRefusal {
-    /// `memfd_create(MFD_EXEC)` returned `EACCES`: `vm.memfd_noexec=2`
-    /// forces every memfd noexec, so no executable memfd can be made and
-    /// there is nothing to fall back to.
+    /// `vm.memfd_noexec=2` forces every memfd noexec, so no executable memfd
+    /// can be made and there is nothing to fall back to. Linux mm/memfd.c
+    /// `check_sysctl_memfd_noexec` (v6.9): `vm.memfd_noexec>=2` returns
+    /// EACCES for any `memfd_create` without `MFD_NOEXEC_SEAL`, `MFD_EXEC`
+    /// included.
     NoexecEnforced,
     /// The probe failed for a reason that says nothing about the flag.
     ProbeFailed { errno: i32, reason: String },
@@ -731,8 +733,8 @@ impl MemfdExecRefusal {
     fn message(&self) -> String {
         match self {
             Self::NoexecEnforced => format!(
-                "{}: memfd_create(MFD_EXEC) is refused with EACCES (vm.memfd_noexec=2 makes every \
-                 memfd non-executable), so this host cannot hold sealed executables",
+                "{}: vm.memfd_noexec enforcement refuses executable memfds (EACCES), so this host \
+                 cannot hold sealed executables",
                 self.code()
             ),
             Self::ProbeFailed { errno, reason } => format!(
@@ -784,8 +786,8 @@ fn executable_memfd_flags(
     }
 }
 
-/// One `memfd_create` with `MFD_EXEC`, run once per process: the observed
-/// outcome of asking this kernel for an executable memfd.
+/// The memfd probe, run once per process: one `memfd_create` with `MFD_EXEC`
+/// and one without it, combined by `combine_memfd_probes`.
 #[cfg(target_os = "linux")]
 pub fn memfd_exec_flag_probe() -> crate::process_control::ProbeOutcome {
     static PROBE: OnceLock<crate::process_control::ProbeOutcome> = OnceLock::new();
@@ -794,8 +796,16 @@ pub fn memfd_exec_flag_probe() -> crate::process_control::ProbeOutcome {
 
 #[cfg(target_os = "linux")]
 fn probe_memfd_exec_flag() -> crate::process_control::ProbeOutcome {
+    combine_memfd_probes(
+        probe_memfd_create(libc::MFD_CLOEXEC | MFD_EXEC),
+        probe_memfd_create(libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn probe_memfd_create(flags: libc::c_uint) -> crate::process_control::ProbeOutcome {
     use crate::process_control::ProbeOutcome;
-    let fd = memfd_create_call(c"lillux-memfd-exec-probe", libc::MFD_CLOEXEC | MFD_EXEC);
+    let fd = memfd_create_call(c"lillux-memfd-exec-probe", flags);
     if fd < 0 {
         let error = std::io::Error::last_os_error();
         return ProbeOutcome::Refused {
@@ -807,6 +817,40 @@ fn probe_memfd_exec_flag() -> crate::process_control::ProbeOutcome {
         libc::close(fd);
     }
     ProbeOutcome::Allowed
+}
+
+/// Fold the `MFD_EXEC` probe and a flagless-memfd probe into one outcome.
+///
+/// Linux mm/memfd.c `check_sysctl_memfd_noexec` (v6.9): with
+/// `vm.memfd_noexec>=2`, `memfd_create` without `MFD_NOEXEC_SEAL` returns
+/// EACCES, which covers `MFD_EXEC` and every flagless memfd. In v6.3 the same
+/// enforcement returns EINVAL for a flagless memfd while an explicit
+/// `MFD_EXEC` passes untouched. So a flagless failure that is EACCES, or is
+/// EINVAL on a kernel that accepted `MFD_EXEC`, is noexec enforcement and is
+/// reported as EACCES. Any other flagless failure is a real failure and is
+/// kept as it is.
+#[cfg(target_os = "linux")]
+fn combine_memfd_probes(
+    exec: crate::process_control::ProbeOutcome,
+    flagless: crate::process_control::ProbeOutcome,
+) -> crate::process_control::ProbeOutcome {
+    use crate::process_control::ProbeOutcome;
+    let enforced = |flagless_error: &str| ProbeOutcome::Refused {
+        errno: libc::EACCES,
+        reason: format!(
+            "vm.memfd_noexec enforcement: memfd_create without MFD_EXEC failed ({flagless_error})"
+        ),
+    };
+    match (&exec, flagless) {
+        (_, ProbeOutcome::Allowed) => exec,
+        (_, ProbeOutcome::Refused { errno, reason }) if errno == libc::EACCES => enforced(&reason),
+        (ProbeOutcome::Allowed, ProbeOutcome::Refused { errno, reason })
+            if errno == libc::EINVAL =>
+        {
+            enforced(&reason)
+        }
+        (_, failed) => failed,
+    }
 }
 
 /// The single `memfd_create` call site. Tests may intercept it per thread to
@@ -16303,6 +16347,71 @@ mod executable_memfd_flag_tests {
         );
     }
 
+    #[test]
+    fn flagless_failure_is_noexec_enforcement() {
+        let is_enforced = |outcome: ProbeOutcome| {
+            matches!(
+                memfd_exec_flag_from_probe(&outcome),
+                Err(MemfdExecRefusal::NoexecEnforced)
+            )
+        };
+        // v6.9 and later: EACCES for every memfd without MFD_NOEXEC_SEAL.
+        let combined = combine_memfd_probes(refused(libc::EACCES), refused(libc::EACCES));
+        assert!(is_enforced(combined));
+        // v6.3: MFD_EXEC passes, a flagless memfd gets EINVAL under enforcement.
+        let combined = combine_memfd_probes(ProbeOutcome::Allowed, refused(libc::EINVAL));
+        match &combined {
+            ProbeOutcome::Refused { reason, .. } => {
+                assert!(reason.contains("vm.memfd_noexec"), "{reason}")
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(is_enforced(combined));
+        // A pre-6.3 kernel accepts the flagless memfd and rejects the flag.
+        let older = combine_memfd_probes(refused(libc::EINVAL), ProbeOutcome::Allowed);
+        assert_eq!(
+            memfd_exec_flag_from_probe(&older),
+            Ok(MemfdExecFlag::UnsupportedExecutableByDefault)
+        );
+        assert_eq!(
+            memfd_exec_flag_from_probe(&combine_memfd_probes(
+                ProbeOutcome::Allowed,
+                ProbeOutcome::Allowed
+            )),
+            Ok(MemfdExecFlag::Supported)
+        );
+        // Another flagless failure is a real failure, not enforcement.
+        let combined = combine_memfd_probes(ProbeOutcome::Allowed, refused(libc::ENOMEM));
+        assert!(matches!(
+            memfd_exec_flag_from_probe(&combined),
+            Err(MemfdExecRefusal::ProbeFailed { .. })
+        ));
+    }
+
+    #[test]
+    fn probe_sees_enforcement_through_the_shim() {
+        // v6.3 style: only the flagless create fails, with EINVAL.
+        memfd_shim::with(
+            |flags| (flags & MFD_EXEC == 0).then_some(libc::EINVAL),
+            || {
+                assert_eq!(
+                    memfd_exec_flag_from_probe(&probe_memfd_exec_flag()),
+                    Err(MemfdExecRefusal::NoexecEnforced)
+                );
+            },
+        );
+        // v6.9 style: every create fails with EACCES.
+        memfd_shim::with(
+            |_| Some(libc::EACCES),
+            || {
+                assert_eq!(
+                    memfd_exec_flag_from_probe(&probe_memfd_exec_flag()),
+                    Err(MemfdExecRefusal::NoexecEnforced)
+                );
+            },
+        );
+    }
+
     fn seen_flags() -> Rc<RefCell<Vec<libc::c_uint>>> {
         Rc::new(RefCell::new(Vec::new()))
     }
@@ -16359,8 +16468,9 @@ mod executable_memfd_flag_tests {
             },
         );
         let seen = seen.borrow();
-        // Probe asked for the flag once; both creators then omitted it.
-        assert_eq!(seen.len(), 3, "{seen:?}");
+        // The probe asked with the flag and without it; both creators then
+        // omitted it.
+        assert_eq!(seen.len(), 4, "{seen:?}");
         assert_ne!(seen[0] & MFD_EXEC, 0);
         assert!(seen[1..].iter().all(|flags| flags & MFD_EXEC == 0));
     }
