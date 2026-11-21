@@ -567,3 +567,382 @@ fn every_shipped_source_has_an_entry_in_every_profile() {
         }
     }
 }
+
+// ── signed revision history ──────────────────────────────────────────────
+
+mod revisions {
+    use std::collections::BTreeMap;
+
+    use serde_json::{Value, json};
+
+    use ryeos_node_runtime::node_policy::NodePolicyContext;
+    use ryeos_node_runtime::node_policy::NodePolicySection as _;
+    use ryeos_node_runtime::node_policy::sections::ui_seat_reads::{
+        SECTION_NAME, SeatClass, UiSeatReadsPolicy, UiSeatReadsPolicySection,
+    };
+    use ryeos_ui::seat_read_policy::{RequestFacts, SeatReadRefusal, SessionFacts, decide};
+
+    const LIST: &str = "service:revisions/list";
+    const GET: &str = "service:revisions/get";
+    const OWN_PROJECT: &str = "/srv/projects/own";
+    const OTHER_PROJECT: &str = "/srv/projects/other";
+
+    fn profile_paths() -> Vec<std::path::PathBuf> {
+        let root = ryeos_engine::test_support::workspace_root();
+        let dir = root.join("bundles/.ai/node/init/profiles");
+        let mut paths: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "yaml"))
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    fn policy_of(path: &std::path::Path) -> UiSeatReadsPolicy {
+        let profile: Value = serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let record = UiSeatReadsPolicySection
+            .parse(
+                &NodePolicyContext {
+                    section: SECTION_NAME.to_owned(),
+                    source_file: path.to_owned(),
+                    signer_fingerprint: "test".to_owned(),
+                },
+                &profile["policies"][SECTION_NAME],
+            )
+            .unwrap_or_else(|error| panic!("{}: {error:#}", path.display()));
+        record
+            .as_any()
+            .downcast_ref::<UiSeatReadsPolicy>()
+            .unwrap()
+            .clone()
+    }
+
+    fn standard() -> UiSeatReadsPolicy {
+        policy_of(
+            &ryeos_engine::test_support::workspace_root()
+                .join("bundles/.ai/node/init/profiles/standard.yaml"),
+        )
+    }
+
+    /// The parameters the service's own descriptor declares, as a bound
+    /// target reports them.
+    fn declared(name: &str) -> BTreeMap<String, String> {
+        let root = ryeos_engine::test_support::workspace_root();
+        let path = root.join(format!("bundles/core/.ai/services/revisions/{name}.yaml"));
+        let service: Value = serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        service["schema"]
+            .as_object()
+            .expect("the service declares its parameters")
+            .iter()
+            .map(|(key, value)| (key.clone(), value.as_str().unwrap().to_owned()))
+            .collect()
+    }
+
+    fn call(
+        policy: &UiSeatReadsPolicy,
+        target: &str,
+        params: Value,
+        project_root: Option<&str>,
+    ) -> Result<(Value, ryeos_ui::seat_read_policy::DetachedShaping), SeatReadRefusal> {
+        let name = target.rsplit('/').next().unwrap();
+        let admitted = decide(
+            policy,
+            SeatClass::HostedPrincipal,
+            target,
+            &declared(name),
+            Some(RequestFacts {
+                params,
+                session: SessionFacts {
+                    principal_id: "fp:test",
+                    project_root,
+                },
+            }),
+        )?;
+        Ok((
+            admitted.params.expect("a call returns its parameters"),
+            admitted
+                .shaping
+                .expect("a policy read has shaping")
+                .detach(),
+        ))
+    }
+
+    const DIGEST_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const DIGEST_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    /// One list row as the service writes it, with the fields a seat must
+    /// not see: failure detail and a provenance entry that names a path.
+    fn list_row(seq: u64) -> Value {
+        json!({
+            "seq": seq,
+            "hash": DIGEST_B,
+            "verify": {
+                "status": "verified",
+                "scheme": "signed_revision_record",
+                "signer": "fp:abc",
+                "reason": null,
+                "detail": "/home/operator/project/.ai/revisions/view/a/00000001.yaml"
+            },
+            "unrecorded_change_before": false,
+            "tombstone": false,
+            "recorded_at": "2026-11-22T00:00:00Z",
+            "actor": {"fingerprint": "fp:abc", "role": "authoring"},
+            "before_digest": DIGEST_A,
+            "after_digest": DIGEST_B,
+            "file_ext": ".yaml",
+            "provenance": {
+                "authored_by": "runtime",
+                "thread_id": "T-1",
+                "path": "/home/operator/project/.ai/views/a.yaml",
+                "acting_principal": "fp:someone",
+                "authoring_capability": "ryeos.author.view"
+            }
+        })
+    }
+
+    fn list_answer(rows: usize) -> Value {
+        json!({
+            "item_ref": "view:a",
+            "total": rows,
+            "sound": true,
+            "head": {"status": "head_invalid", "reason": "/var/lib/node/heads.json is not readable"},
+            "file": "matches",
+            "records": (1..=rows as u64).map(list_row).collect::<Vec<_>>(),
+            "next_cursor": null
+        })
+    }
+
+    fn get_answer(content: &str) -> Value {
+        let mut answer = list_answer(1);
+        let mut record = list_row(1);
+        record["body"] = json!({
+            "schema": "ryeos.revision.v1",
+            "item_ref": "view:a",
+            "seq": 1,
+            "previous": "genesis:view:a",
+            "before_digest": DIGEST_A,
+            "after_digest": DIGEST_B,
+            "file_ext": ".yaml",
+            "content": content,
+            "recorded_at": "2026-11-22T00:00:00Z",
+            "actor": {"fingerprint": "fp:abc", "role": "authoring"},
+            "provenance": {"path": "/home/operator/project/.ai/views/a.yaml"}
+        });
+        answer["record"] = record;
+        answer.as_object_mut().unwrap().remove("records");
+        answer.as_object_mut().unwrap().remove("next_cursor");
+        answer
+    }
+
+    #[test]
+    fn every_profile_admits_both_reads_for_both_classes_and_pins_the_project() {
+        let paths = profile_paths();
+        assert_eq!(paths.len(), 15);
+        for path in paths {
+            let policy = policy_of(&path);
+            for target in [LIST, GET] {
+                let entries = policy.entries_for(target);
+                assert_eq!(entries.len(), 1, "{} {target}", path.display());
+                let entry = entries[0];
+                for class in [SeatClass::LocalOperator, SeatClass::HostedPrincipal] {
+                    assert!(
+                        entry.classes.contains(&class),
+                        "{} {target}",
+                        path.display()
+                    );
+                }
+                assert_eq!(
+                    entry.pin.get("project_path"),
+                    Some(&json!("@session:project_root")),
+                    "{} {target}",
+                    path.display()
+                );
+                // Every parameter the entry names is one the service declares.
+                for class in [SeatClass::LocalOperator, SeatClass::HostedPrincipal] {
+                    decide(
+                        &policy,
+                        class,
+                        target,
+                        &declared(target.rsplit('/').next().unwrap()),
+                        None,
+                    )
+                    .unwrap_or_else(|error| panic!("{} {target}: {error}", path.display()));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_seat_reads_the_revisions_of_its_own_project_and_the_kept_fields_arrive() {
+        let policy = standard();
+        let (params, shaping) = call(
+            &policy,
+            LIST,
+            json!({"item_ref": "view:a", "limit": 50}),
+            Some(OWN_PROJECT),
+        )
+        .expect("a project-bound seat reads its own history");
+        assert_eq!(params["project_path"], OWN_PROJECT);
+        assert_eq!(params["item_ref"], "view:a");
+        assert_eq!(params["limit"], 50);
+
+        let shown = shaping.apply(list_answer(2)).expect("within bounds");
+        assert_eq!(shown["item_ref"], "view:a");
+        assert_eq!(shown["total"], 2);
+        assert_eq!(shown["sound"], true);
+        assert_eq!(shown["file"], "matches");
+        assert_eq!(shown["head"]["status"], "head_invalid");
+        let row = &shown["records"][1];
+        assert_eq!(row["seq"], 2);
+        assert_eq!(row["hash"], DIGEST_B);
+        assert_eq!(row["before_digest"], DIGEST_A);
+        assert_eq!(row["after_digest"], DIGEST_B);
+        assert_eq!(row["recorded_at"], "2026-11-22T00:00:00Z");
+        assert_eq!(
+            row["actor"],
+            json!({"fingerprint": "fp:abc", "role": "authoring"})
+        );
+        assert_eq!(row["verify"]["status"], "verified");
+        assert_eq!(row["verify"]["signer"], "fp:abc");
+        assert_eq!(row["provenance"]["thread_id"], "T-1");
+        assert_eq!(
+            row["provenance"]["authoring_capability"],
+            "ryeos.author.view"
+        );
+    }
+
+    #[test]
+    fn the_record_read_keeps_the_signed_item_bytes() {
+        let policy = standard();
+        let (_, shaping) = call(
+            &policy,
+            GET,
+            json!({"item_ref": "view:a", "seq": 1}),
+            Some(OWN_PROJECT),
+        )
+        .unwrap();
+        let shown = shaping.apply(get_answer("name: a\n")).unwrap();
+        assert_eq!(shown["record"]["body"]["content"], "name: a\n");
+        assert_eq!(shown["record"]["body"]["previous"], "genesis:view:a");
+        assert_eq!(shown["record"]["seq"], 1);
+        assert_eq!(shown["record"]["after_digest"], DIGEST_B);
+    }
+
+    #[test]
+    fn a_seat_cannot_read_another_projects_revisions() {
+        let policy = standard();
+        for target in [LIST, GET] {
+            // Whatever path the client names, the call carries the session's.
+            let (params, _) = call(
+                &policy,
+                target,
+                json!({"item_ref": "view:a", "seq": 1, "project_path": OTHER_PROJECT}),
+                Some(OWN_PROJECT),
+            )
+            .unwrap();
+            assert_eq!(params["project_path"], OWN_PROJECT, "{target}");
+            assert!(!params.to_string().contains(OTHER_PROJECT), "{target}");
+
+            // A session with no project has nothing to read.
+            let refusal = call(
+                &policy,
+                target,
+                json!({"item_ref": "view:a", "seq": 1, "project_path": OTHER_PROJECT}),
+                None,
+            )
+            .expect_err("no bound project, no read");
+            assert_eq!(refusal.code(), "seat_read_marker_unavailable", "{target}");
+        }
+    }
+
+    #[test]
+    fn a_seat_cannot_ask_for_unverified_records() {
+        let refusal = call(
+            &standard(),
+            GET,
+            json!({"item_ref": "view:a", "seq": 1, "include_unverified": false}),
+            Some(OWN_PROJECT),
+        )
+        .expect_err("the parameter is denied whatever its value");
+        assert_eq!(refusal.code(), "seat_read_parameter_denied");
+    }
+
+    #[test]
+    fn dropped_fields_are_absent() {
+        let policy = standard();
+        let (_, list_shaping) = call(
+            &policy,
+            LIST,
+            json!({"item_ref": "view:a"}),
+            Some(OWN_PROJECT),
+        )
+        .unwrap();
+        let mut answer = list_answer(1);
+        answer["a_later_field"] = json!("x");
+        answer["records"][0]["a_later_field"] = json!("x");
+        let shown = list_shaping.apply(answer).unwrap();
+        let text = shown.to_string();
+        for forbidden in [
+            "/home/operator",
+            "/var/lib",
+            "acting_principal",
+            "a_later_field",
+        ] {
+            assert!(!text.contains(forbidden), "{forbidden} leaked: {text}");
+        }
+        assert!(shown["head"].get("reason").is_none());
+        assert!(shown["records"][0]["verify"].get("detail").is_none());
+        assert!(shown["records"][0].get("body").is_none());
+        assert!(shown["records"][0]["provenance"].get("path").is_none());
+
+        let (_, get_shaping) = call(
+            &policy,
+            GET,
+            json!({"item_ref": "view:a", "seq": 1}),
+            Some(OWN_PROJECT),
+        )
+        .unwrap();
+        let shown = get_shaping.apply(get_answer("name: a\n")).unwrap();
+        let body = &shown["record"]["body"];
+        assert!(body.get("provenance").is_none());
+        assert!(body.get("schema").is_none());
+        assert!(!shown.to_string().contains("/home/operator"));
+    }
+
+    #[test]
+    fn an_oversized_result_is_refused_not_cut() {
+        let policy = standard();
+        let (_, list_shaping) = call(
+            &policy,
+            LIST,
+            json!({"item_ref": "view:a"}),
+            Some(OWN_PROJECT),
+        )
+        .unwrap();
+        // A page over the service's own largest page holds more rows than
+        // the entry allows.
+        let refusal = list_shaping
+            .apply(list_answer(201))
+            .expect_err("more rows than max_items");
+        assert_eq!(refusal.code(), "seat_read_too_many_items");
+        list_shaping
+            .apply(list_answer(200))
+            .expect("the service's largest page fits");
+
+        let (_, get_shaping) = call(
+            &policy,
+            GET,
+            json!({"item_ref": "view:a", "seq": 1}),
+            Some(OWN_PROJECT),
+        )
+        .unwrap();
+        get_shaping
+            .apply(get_answer(&"x".repeat(512 * 1024)))
+            .expect("a large authored item fits");
+        let refusal = get_shaping
+            .apply(get_answer(&"x".repeat(2 * 1024 * 1024)))
+            .expect_err("signed bytes over the bound");
+        assert_eq!(refusal.code(), "seat_read_result_too_large");
+    }
+}
