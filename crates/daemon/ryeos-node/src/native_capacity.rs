@@ -52,8 +52,13 @@ pub use account::reissue::{
     CapacityReissueEvidence, ReissueReport, ReissueRequest, read_capacity_reissuances,
     reissue_capacity,
 };
+pub use account::repair::{
+    CapacityRepairEvidence, REPAIR_EVIDENCE_LOG, RepairReport, RepairRequest,
+    read_capacity_repairs, repair_capacity_account,
+};
 #[cfg(test)]
 pub(crate) use account::startup_seams;
+pub use account::torn::{CapacityCure, CapacityFile, CapacityRecordTorn, TornDefect};
 pub use account::{CapacityAccountSummary, inspect_capacity_account};
 pub(crate) use account::{OperatorLineage, load_existing_capacity_binding};
 pub use factory::{
