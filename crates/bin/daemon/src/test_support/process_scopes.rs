@@ -116,10 +116,14 @@ fn installed_daemon() -> Result<PathBuf> {
         .modified()?
         .duration_since(std::time::UNIX_EPOCH)?
         .as_nanos();
-    let directory = Path::new(ADMIN_ROOT).join("bin");
+    // One directory per source image, the file keeping the daemon's own name:
+    // the harness authenticates a running node by its executable's file name.
+    let directory = Path::new(ADMIN_ROOT)
+        .join("bin")
+        .join(format!("ryeosd-{}-{modified}", metadata.len()));
     std::fs::create_dir_all(&directory)
         .with_context(|| format!("create {}", directory.display()))?;
-    let installed = directory.join(format!("ryeosd-{}-{modified}", metadata.len()));
+    let installed = directory.join("ryeosd");
     if !installed.exists() {
         let staging = directory.join(format!(".ryeosd-{}", std::process::id()));
         std::fs::copy(&source, &staging)
@@ -225,7 +229,12 @@ pub fn launch_command(state_path: &Path) -> Result<Option<tokio::process::Comman
         let occupants = controller_leaf_occupants(&registration.binding);
         error.context(format!("controller leaf occupants: {occupants}"))
     })?;
-    let command = tokio::process::Command::from(command);
+    let mut command = tokio::process::Command::from(command);
+    // The controller launch clears the environment; a diagnostic log filter
+    // the test run asks for reaches the node explicitly.
+    if let Some(filter) = std::env::var_os("RYEOSD_TEST_RUST_LOG") {
+        command.env("RUST_LOG", filter);
+    }
     Ok(Some(command))
 }
 

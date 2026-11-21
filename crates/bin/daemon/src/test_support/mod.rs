@@ -1914,6 +1914,7 @@ impl DaemonHarness {
         &mut self,
         boundary: ryeos_app::worker_handoff::test_support::HandoffCrashBoundary,
     ) -> anyhow::Result<ryeos_app::worker_handoff::test_support::HandoffPhaseCutEvidence> {
+        self.stop_live_daemon_before_respawn().await?;
         let bind = self.bind;
         let harness_id = next_harness_id();
         let stderr_log_path = daemon_stderr_log_path(self._state_dir_outer.path(), harness_id);

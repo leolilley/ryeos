@@ -2436,7 +2436,11 @@ fn assert_retry_disposition(
     let final_source = after_retry
         .source_job
         .as_ref()
-        .context("handoff retry retained no source operation")?;
+        .with_context(|| {
+            format!(
+                "handoff retry retained no source operation (retry returned {status}: {response}; at cut: {at_cut:#?}; after retry: {after_retry:#?})"
+            )
+        })?;
     let final_target = after_retry
         .target_job
         .as_ref()
@@ -5280,16 +5284,28 @@ async fn real_portable_worker_completes_cross_site_handoff_on_qualified_host() -
         &handoff,
         &PORTABLE_OPERATOR_HANDOFF_SCOPES[..PORTABLE_OPERATOR_HANDOFF_SCOPES.len() - 1],
     )?;
-    handoff
-        .target
-        .respawn_with(|command| {
-            command.env("HOSTNAME", "handoff-target");
-        })
-        .await?;
-    handoff.target.kill_daemon().await?;
-    wait_for_state_lock_release(&handoff.target.state_path).await?;
-    let private_projection_before_replay =
-        revoked_terminal_replay_private_projection(&handoff.target.state_path, &successor_id)?;
+    // Each node run resumes a non-terminal session root once and the next run
+    // settles it terminal (a real worker is not re-attached by these
+    // restarts). Restart until that has happened, so the projection compared
+    // around the replay differs only by what the replay itself writes.
+    let mut private_projection_before_replay = serde_json::Value::Null;
+    for _ in 0..4 {
+        handoff
+            .target
+            .respawn_with(|command| {
+                command.env("HOSTNAME", "handoff-target");
+            })
+            .await?;
+        handoff.target.kill_daemon().await?;
+        wait_for_state_lock_release(&handoff.target.state_path).await?;
+        private_projection_before_replay =
+            revoked_terminal_replay_private_projection(&handoff.target.state_path, &successor_id)?;
+        if private_projection_before_replay.pointer("/session/state")
+            == Some(&serde_json::json!("terminal"))
+        {
+            break;
+        }
+    }
     handoff
         .target
         .respawn_with(|command| {
