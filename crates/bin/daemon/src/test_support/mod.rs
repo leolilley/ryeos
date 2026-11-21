@@ -1527,21 +1527,16 @@ impl DaemonHarness {
         thread_id: &str,
         timeout: std::time::Duration,
     ) -> bool {
-        const TERMINAL: &[&str] = &[
-            "thread_completed",
-            "thread_failed",
-            "thread_cancelled",
-            "thread_killed",
-            "thread_timed_out",
-            "thread_continued",
-        ];
         let deadline = std::time::Instant::now() + timeout;
         loop {
             if self
                 .principal_events()
                 .await
                 .iter()
-                .any(|(thread, event, _)| thread == thread_id && TERMINAL.contains(&event.as_str()))
+                .any(|(thread, event, _)| {
+                    thread == thread_id
+                        && ryeos_api::routes::invokers::stream_helpers::is_terminal(event)
+                })
             {
                 return true;
             }
