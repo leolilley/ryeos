@@ -196,7 +196,7 @@ async fn a_crash_after_the_compaction_record_is_recovered_without_a_second_recor
         RigOptions {
             context_window: 2000,
             continuation_yaml: Some(continuation_yaml(
-                "  trigger_ratio: 0.4\n  keep_turns: 2\n  min_turns_between: 100\n  summary:\n    mode: none\n",
+                "  trigger_ratio: 0.4\n  keep_turns: 2\n  min_turns_between: 3\n  summary:\n    mode: none\n",
             )),
             limits: Some((300, 300)),
             phase_cut: Some("compaction_recorded"),
@@ -228,7 +228,22 @@ async fn a_crash_after_the_compaction_record_is_recovered_without_a_second_recor
         panic!("recovered to completion: {chain:?}\nthread: {record}\nstderr: {tail}");
     }
     let records = chain_payloads(&rig.h, &id, "cognition_compaction").await;
-    assert_eq!(records.len(), 1, "one compaction, once: {records:?}");
+    // Later compactions follow as the conversation grows again, but the one
+    // recorded before the crash is not recorded twice: the running count of
+    // compactions on the records is strictly 1, 2, 3, and so on.
+    let counts: Vec<u64> = records
+        .iter()
+        .filter_map(|record| record["compactions"].as_u64())
+        .collect();
+    let expected: Vec<u64> = (1..=records.len() as u64).collect();
+    assert_eq!(counts, expected, "{records:?}");
+    let kept: Vec<u64> = records
+        .iter()
+        .filter_map(|record| record["kept_from_turn"].as_u64())
+        .collect();
+    let mut distinct = kept.clone();
+    distinct.dedup();
+    assert_eq!(kept, distinct, "no compaction twice: {records:?}");
     // The first request after recovery is the compacted conversation.
     let bodies = request_bodies(&rig).await;
     let after = messages_of(&bodies[before]);
