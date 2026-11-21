@@ -2748,7 +2748,16 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // thread launch metadata in this database; that row is compared with the live
 // admission class, so pre-cut rows would stop matching and the reset clears them.
 // Nothing outside this database stores it; scoped-child grants only carry it live.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 142;
+// Epoch 143 (one cut, several stored-shape changes; each appends its own
+// sentence here): the stored external terminal observation
+// (`ExternalTerminalObservation`) carries a required `basis` naming how the
+// adapter settled the termination, and its canonical form is checked with
+// `deny_unknown_fields`, so an epoch-142 store holding observations without it
+// no longer decodes. An epoch-142 store is a predecessor and is reset without
+// decoding; every node needs `ryeos node reset execution-history`
+// (`--schema-cut-from 142 --schema-cut-to 143`) on its next upgrade, heads-free.
+// The turn marker's required `purpose` field also moves in this epoch.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 143;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
