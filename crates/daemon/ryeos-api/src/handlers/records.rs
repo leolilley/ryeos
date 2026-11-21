@@ -31,7 +31,7 @@ use ryeos_node::capability_report::{ReportReadFailure, SignedNodeCapabilityRepor
 const KIND_ID_PREFIX: &str = "ryeos/core/records/";
 /// Capability that lets a caller ask for the body of a record whose
 /// verification failed.
-const INCLUDE_UNVERIFIED_CAP: &str = "ryeos.read.records.unverified";
+pub(crate) const INCLUDE_UNVERIFIED_CAP: &str = "ryeos.read.records.unverified";
 /// The key of a singleton record.
 const SINGLETON_KEY: &str = "singleton";
 const DEFAULT_LIST_LIMIT: usize = 50;

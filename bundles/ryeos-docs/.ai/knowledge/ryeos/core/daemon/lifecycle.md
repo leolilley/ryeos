@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-05T06:58:46Z:ab8b8448c9dbca3bf481a19314305d590e225bfbb592aa7008fe9aa4c9835557:tWsjbxrRrz2hrf/q0FMdYbfdQfClInv2sWwRzVxTNj+t7YA4WwlwYdLxmRfKPnF7C+gjSJsNrBQbtKLniOOkBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-21T02:34:15Z:a72109a9b8d3f7a5c0b039c834a651854ee6e42d11fc1f0d996bc11fd38b3a37:mFD3LkjbZZgG7Ed42K3ds3esRlzbMOK4hWV2smXf/9/a++eGz+M7NhTkEzzGaS6CBW5+d1GC6QR0pM89oVOgAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/daemon
 tags: [daemon, startup, shutdown, lifecycle, state-lock, uds]
@@ -21,8 +21,11 @@ Daemon startup is fail-closed and side-effect-minimal until operator
 initialization has been verified:
 
 1. `Cli::parse` and `Config::load` — side-effect-free config.
-2. Prove Linux pidfd process-group signalling and `SO_PEERPIDFD` support;
-   unsupported hosts fail before initialization repair or executable work.
+2. Prove Linux pidfd process-group signalling (6.9) and `SO_PEERPIDFD` (6.5)
+   support on the node route, right after the node leads its own session;
+   an unsupported host fails with `kernel_feature_missing` naming the feature
+   and its kernel floor, before initialization repair or executable work. The
+   standalone subcommands do not run this probe.
 3. `bootstrap::verify_initialized` — requires signed bundle
    registrations and bails with `Run: ryeos init` guidance if absent.
 4. Subcommand dispatch — `run-service` standalone takes its own state

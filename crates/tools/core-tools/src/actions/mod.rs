@@ -20,6 +20,7 @@ pub mod node_logs;
 pub mod profile_sign;
 pub mod publish;
 mod publisher_transaction;
+pub mod revision;
 pub mod runtime_owned;
 pub mod sign;
 pub mod sign_bundle;

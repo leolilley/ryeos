@@ -1995,11 +1995,10 @@ isolation_backends:
         assert_eq!(manifest.sync_include, decls);
     }
 
-    /// The core bundle's signed manifest declares exactly the rows the former
-    /// `PROJECT_AI_SURFACES` constant held, and the source manifest and the
-    /// generated one agree.
+    /// The core bundle's signed manifest composes to exactly the test table,
+    /// and the source manifest and the generated one agree.
     #[test]
-    fn core_manifest_declares_exactly_the_former_const_rows() {
+    fn core_manifest_declares_exactly_the_core_rows() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../bundles/core/.ai");
         let source: BundleManifestSource =
             serde_yaml::from_str(&fs::read_to_string(root.join("manifest.source.yaml")).unwrap())
@@ -2035,8 +2034,8 @@ isolation_backends:
         assert_eq!(
             composed,
             ryeos_state::project_sync::SyncInclude::for_tests(),
-            "the composed table must equal the former PROJECT_AI_SURFACES rows"
+            "the composed table must equal SyncInclude::for_tests"
         );
-        assert_eq!(composed.entries().len(), 17);
+        assert_eq!(composed.entries().len(), 18);
     }
 }

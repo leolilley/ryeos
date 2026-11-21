@@ -236,9 +236,9 @@ pub use pid_namespace::{
 mod scope;
 pub use host_capability::{
     ACCOUNTING, CapabilityEvidence, CapabilityRequirement, CapabilityRequirementSpec, CgroupFacts,
-    CgroupLimit, DirectoryStepFacts, FileClassFacts, HOST_FACTS_VERSION, HOST_PROVIDER,
-    HostCapabilities, HostFacts, HostLifetimeBound, ISOLATION_NAMESPACES, ImmutableRootFacts,
-    LocalityObservation, MAX_CAPABILITY_ENTRIES, MAX_CAPABILITY_NAME_BYTES,
+    CgroupLimit, DirectoryStepFacts, EXEC_SEALED_MEMFD, FileClassFacts, HOST_FACTS_VERSION,
+    HOST_PROVIDER, HostCapabilities, HostFacts, HostLifetimeBound, ISOLATION_NAMESPACES,
+    ImmutableRootFacts, LocalityObservation, MAX_CAPABILITY_ENTRIES, MAX_CAPABILITY_NAME_BYTES,
     MAX_CAPABILITY_TEXT_BYTES, MAX_IMMUTABLE_ROOT_DEPTH, MAX_IMMUTABLE_ROOT_FILES, MemlockFacts,
     PERSISTENCE_DURABLE_STATE, PID_NAMESPACE_PROVIDER, PrivateDirectoryFacts, ProbeOutcome,
     ProcessCredentialFacts, ProofSource, QUIESCENCE_PID_NAMESPACE, RECOVERY_ENCLOSURE,
