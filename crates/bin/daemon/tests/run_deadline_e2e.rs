@@ -16,12 +16,19 @@ use std::time::{Duration, Instant};
 use common::DaemonHarness;
 use serde_json::{Value, json};
 
-/// A reserve of 5 s and a wrap-up window of 20 s for the probe directive.
+/// The reserve every probe directive here declares, in milliseconds. The
+/// runtime must notice its hard stop and settle itself over the callback inside
+/// this window, before the daemon's kill at the deadline. On a saturated shared
+/// runner a 5 s window is sometimes missed: the daemon's kill then records a
+/// plain timed-out thread with no deadline phase or stop time. The window is
+/// sized for the worst case under load, not the idle one.
+const RESERVE_MS: i64 = 20_000;
+/// A reserve of 20 s and a wrap-up window of 20 s for the probe directive.
 const WRAP_UP_HEADER: &str =
-    "limits:\n  wrap_up_seconds: 20\n  deadline:\n    reserve_seconds: 5\n";
-/// A reserve of 5 s and no wrap-up notice.
+    "limits:\n  wrap_up_seconds: 20\n  deadline:\n    reserve_seconds: 20\n";
+/// A reserve of 20 s and no wrap-up notice.
 const NO_WRAP_UP_HEADER: &str =
-    "limits:\n  wrap_up_seconds: 0\n  deadline:\n    reserve_seconds: 5\n";
+    "limits:\n  wrap_up_seconds: 0\n  deadline:\n    reserve_seconds: 20\n";
 
 async fn thread_ids_of_chain(h: &DaemonHarness, root: &str) -> Vec<(String, String)> {
     h.list_threads(2000)
@@ -164,10 +171,10 @@ async fn wrap_up_notice_then_hard_stop() {
     let result = deadline_result(&rig.h, &id)
         .await
         .unwrap_or_else(|| panic!("no structured deadline result: {detail}{dump}"));
-    // The hard stop is at deadline - 5 s; the daemon kill is at the deadline.
+    // The hard stop is at deadline - 20 s; the daemon kill is at the deadline.
     let deadlines = accounting_deadlines(&rig.h);
     assert_eq!(deadlines.len(), 1, "{deadlines:?}");
-    assert_runtime_deadline_stop(&result, deadlines[0], 5_000);
+    assert_runtime_deadline_stop(&result, deadlines[0], RESERVE_MS);
     assert_eq!(
         terminal_event_kinds(&rig.h, &id).await,
         vec!["thread_timed_out".to_string()],
@@ -175,7 +182,7 @@ async fn wrap_up_notice_then_hard_stop() {
     );
 
     let notices = wrap_up_inputs(&rig, &id).await;
-    assert_eq!(notices.len(), 1, "exactly one durable wrap-up input");
+    assert_eq!(notices.len(), 1, "exactly one durable wrap-up input{dump}");
     assert_eq!(notices[0]["origin"], "harness");
 
     let requests = rig.stub.requests().await;
@@ -222,7 +229,7 @@ async fn hard_stop_cuts_a_stalled_model_call() {
     )
     .await
     .expect("start rig");
-    let id = launch_on_with(&rig, json!({"run_timeout": 30}))
+    let id = launch_on_with(&rig, json!({"run_timeout": 45}))
         .await
         .expect("launch");
     let (status, _) = wait_terminal(&rig.h, &id, Duration::from_secs(100)).await;
@@ -236,7 +243,7 @@ async fn hard_stop_cuts_a_stalled_model_call() {
         .unwrap_or_else(|| panic!("no structured deadline result: {detail}{dump}"));
     let deadlines = accounting_deadlines(&rig.h);
     assert_eq!(deadlines.len(), 1, "{deadlines:?}");
-    assert_runtime_deadline_stop(&result, deadlines[0], 5_000);
+    assert_runtime_deadline_stop(&result, deadlines[0], RESERVE_MS);
     assert!(wrap_up_inputs(&rig, &id).await.is_empty());
 }
 
@@ -258,7 +265,7 @@ async fn a_long_tool_does_not_outlive_the_run() {
     )
     .await
     .expect("start rig");
-    let id = launch_on_with(&rig, json!({"run_timeout": 30}))
+    let id = launch_on_with(&rig, json!({"run_timeout": 45}))
         .await
         .expect("launch");
     let (status, _) = wait_terminal(&rig.h, &id, Duration::from_secs(100)).await;
@@ -273,7 +280,7 @@ async fn a_long_tool_does_not_outlive_the_run() {
         .unwrap_or_else(|| panic!("no structured deadline result: {detail}{dump}"));
     let deadlines = accounting_deadlines(&rig.h);
     assert_eq!(deadlines.len(), 1, "{deadlines:?}");
-    assert_runtime_deadline_stop(&result, deadlines[0], 5_000);
+    assert_runtime_deadline_stop(&result, deadlines[0], RESERVE_MS);
     assert!(
         !detail.contains("runtime_exited_without_callback_finalization"),
         "{detail}{dump}"
@@ -485,7 +492,7 @@ requires:
       - "ryeos.execute.tool.*"
 limits:
   deadline:
-    reserve_seconds: 20
+    reserve_seconds: 30
 config:
   start: work
   nodes:
@@ -540,9 +547,10 @@ config:
     // The graph completing (not timing out) is the proof that its fallback ran
     // inside the run deadline; no upper bound on elapsed time is asserted.
     // The child stopped at the graph's reserve window less its own reserve:
-    // 90 - 20 - 5 = 65 s, well before the 90 s deadline.
+    // 90 - 30 - 20 = 40 s, well before the 90 s deadline, leaving the graph
+    // the rest of its own 30 s reserve to run the fallback.
     assert!(
-        elapsed > Duration::from_secs(55),
+        elapsed > Duration::from_secs(35),
         "the child was stopped by the deadline, not early: {elapsed:?}"
     );
     let mut result_text = String::new();
@@ -678,7 +686,7 @@ async fn a_restart_mid_run_keeps_the_deadline_and_the_single_wrap_up() {
     let id = launch_on_with(&rig, json!({"run_timeout": 90}))
         .await
         .expect("launch");
-    // The wrap-up window opens at 90 - 5 - 20 = 65 s.
+    // The wrap-up window opens at 90 - 20 - 20 = 50 s.
     let wait_until = Instant::now() + Duration::from_secs(100);
     while wrap_up_inputs(&rig, &id).await.is_empty() {
         assert!(Instant::now() < wait_until, "no wrap-up notice arrived");
@@ -701,7 +709,7 @@ async fn a_restart_mid_run_keeps_the_deadline_and_the_single_wrap_up() {
         .await
         .unwrap_or_else(|| panic!("no structured deadline result: {detail}{dump}"));
     if result["phase"] == "hard_stop" {
-        assert_runtime_deadline_stop(&result, before[0], 5_000);
+        assert_runtime_deadline_stop(&result, before[0], RESERVE_MS);
     } else {
         // The deadline passed while the node was down, or while the resumed
         // launch waited for its spawn; both settle as the same typed stop.
@@ -723,7 +731,7 @@ async fn a_restart_mid_run_keeps_the_deadline_and_the_single_wrap_up() {
     assert_eq!(
         wrap_up_inputs(&rig, &id).await.len(),
         1,
-        "the wrap-up was not repeated after the restart"
+        "the wrap-up was not repeated after the restart{dump}"
     );
     rig.h.kill_daemon().await.expect("stop the node");
     assert_eq!(
@@ -762,16 +770,17 @@ async fn a_restart_after_the_deadline_settles_without_spawning() {
     rig.h.respawn_with(|_| {}).await.expect("restart the node");
     let (status, _) = wait_terminal(&rig.h, &id, Duration::from_secs(60)).await;
     let detail = thread_detail(&rig.h, &id, 4000).await;
-    assert_eq!(status, "timed_out", "detail: {detail}");
+    let dump = failure_dump(&rig, &id).await;
+    assert_eq!(status, "timed_out", "detail: {detail}{dump}");
     assert!(
         detail.contains("deadline_elapsed_while_down"),
-        "settled by recovery as an elapsed deadline: {detail}"
+        "settled by recovery as an elapsed deadline: {detail}{dump}"
     );
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert_eq!(
         rig.stub.requests().await.len(),
         requests_while_down,
-        "no model call after the restart"
+        "no model call after the restart{dump}"
     );
 }
 
@@ -794,7 +803,7 @@ async fn a_successor_in_the_wrap_up_window_is_told_once() {
         &script,
         RigOptions {
             context_window: 2000,
-            header_extra: "limits:\n  wrap_up_seconds: 80\n  deadline:\n    reserve_seconds: 5\ncontinuation:\n  carry_turns: 0\n",
+            header_extra: "limits:\n  wrap_up_seconds: 80\n  deadline:\n    reserve_seconds: 20\ncontinuation:\n  carry_turns: 0\n",
             limits: None,
             ..RigOptions::default()
         },
@@ -840,7 +849,7 @@ async fn a_successor_in_the_wrap_up_window_is_told_once() {
                 .matches("Deadline notice")
                 .count()
                 <= 1,
-            "a request holds two notices"
+            "a request holds two notices{dump}"
         );
     }
 }
