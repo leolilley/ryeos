@@ -500,3 +500,52 @@ fn an_unknown_exit_is_recorded_once_and_is_never_unclean() {
     assert!(!records[3].body.detail.contains_key("pid"));
     assert_eq!(JournalType::NodeExitUnknown.as_str(), "node.exit_unknown");
 }
+
+#[test]
+fn endorsement_events_are_journaled_with_their_digest_endorser_and_head() {
+    let fx = Fixture::new();
+    let digest = "a".repeat(64);
+    let endorser = format!("fp:{}", "b".repeat(64));
+    let facts = EndorsementFacts {
+        digest: &digest,
+        actor: &endorser,
+        project: "/srv/projects/alpha",
+        target: "items",
+        count: 3,
+        ledger_head: &"c".repeat(64),
+        delegation: None,
+        reason: None,
+    };
+    let accepted = fx.journal().record_endorsement_accepted(&facts).unwrap();
+    let revoked = fx
+        .journal()
+        .record_endorsement_revoked(&EndorsementFacts {
+            reason: Some("withdrawn"),
+            ..facts
+        })
+        .unwrap();
+
+    assert_eq!(accepted.body.record_type, JournalType::EndorsementAccepted);
+    assert_eq!(revoked.body.record_type, JournalType::EndorsementRevoked);
+    for record in [&accepted, &revoked] {
+        assert_eq!(record.body.subject_ref.as_deref(), Some(digest.as_str()));
+        assert_eq!(record.body.actor.as_deref(), Some(endorser.as_str()));
+        assert_eq!(record.body.attested_by, None);
+        assert_eq!(record.body.detail["count"], 3);
+        assert_eq!(record.body.detail["target"], "items");
+        assert_eq!(record.body.detail["project"], "/srv/projects/alpha");
+    }
+    assert_eq!(revoked.body.detail["reason"], "withdrawn");
+    assert!(!accepted.body.detail.contains_key("reason"));
+
+    let read = fx.journal().read().unwrap();
+    assert_eq!(read.records.len(), 2);
+    assert_eq!(
+        JournalType::EndorsementAccepted.as_str(),
+        "endorsement.accepted"
+    );
+    assert_eq!(
+        serde_json::to_value(JournalType::EndorsementRevoked).unwrap(),
+        "endorsement.revoked"
+    );
+}

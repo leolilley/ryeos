@@ -1455,6 +1455,7 @@ mod tests {
             ),
             label: "test".to_string(),
             scope,
+            endorsements: None,
         }
     }
 
@@ -2127,5 +2128,326 @@ mod tests {
             msg.contains("unknown signer") || msg.contains("REJECTED"),
             "error must explain unknown-signer rejection: {msg}"
         );
+    }
+
+    /// A node with an operator and an authoring key, an authoring-signed
+    /// project config, and the means to endorse and revoke it.
+    struct Endorsed {
+        _tmp: tempfile::TempDir,
+        /// The logical project.
+        project: PathBuf,
+        /// A checkout of it, the runtime's process path.
+        checkout: PathBuf,
+        node: SigningKey,
+        operator: SigningKey,
+        trust: ryeos_engine::trust::TrustStore,
+        app_root: PathBuf,
+        digest: String,
+    }
+
+    const CONFIG_ID: &str = "ryeos-runtime/authored";
+
+    impl Endorsed {
+        fn new() -> Self {
+            use ryeos_engine::trust::{
+                SignerRecord, SignerRole, SignerScope as Scope, SignerStatus,
+            };
+            let tmp = tempfile::tempdir().unwrap();
+            let project = tmp.path().join("project");
+            let checkout = tmp.path().join("checkout");
+            fs::create_dir_all(&project).unwrap();
+            let node = SigningKey::from_bytes(&[1u8; 32]);
+            let operator = SigningKey::from_bytes(&[2u8; 32]);
+            let authoring = SigningKey::from_bytes(&[3u8; 32]);
+            let trust = ryeos_engine::trust::TrustStore::from_registry(
+                node.verifying_key(),
+                vec![
+                    SignerRecord::new(
+                        &operator.verifying_key(),
+                        "operator",
+                        SignerRole::Operator,
+                        Scope::operator_default(),
+                        SignerStatus::Active,
+                    ),
+                    SignerRecord::new(
+                        &authoring.verifying_key(),
+                        "authoring",
+                        SignerRole::Authoring,
+                        Scope::authoring_default(),
+                        SignerStatus::Active,
+                    ),
+                ],
+            )
+            .unwrap();
+            let content =
+                lillux::signature::sign_content("name: authored\n", &authoring, "#", None);
+            create_file(&checkout, &format!(".ai/config/{CONFIG_ID}.yaml"), &content);
+            let envelope = ryeos_engine::contracts::SignatureEnvelope {
+                prefix: "#".to_string(),
+                suffix: None,
+                after_shebang: false,
+            };
+            let digest = ryeos_engine::item_resolution::parse_signature_header(&content, &envelope)
+                .unwrap()
+                .content_hash;
+            let app_root = tmp.path().join("node");
+            Self {
+                _tmp: tmp,
+                project,
+                checkout,
+                node,
+                operator,
+                trust,
+                app_root,
+                digest,
+            }
+        }
+
+        fn endorse(&self, project: &Path, items: bool) -> String {
+            use ryeos_engine::trust::{
+                EndorsedItem, EndorsementBody, EndorsementLedger, SignedEndorsement,
+                record_endorsement,
+            };
+            let node_vk = self.node.verifying_key();
+            let head = EndorsementLedger::load(&self.app_root, &node_vk)
+                .unwrap()
+                .head(&node_vk);
+            let endorser = format!(
+                "fp:{}",
+                lillux::signature::compute_fingerprint(&self.operator.verifying_key())
+            );
+            let at = lillux::time::iso8601_now();
+            static NEXT_NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+            let nonce = format!(
+                "{:032x}",
+                NEXT_NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            );
+            let project = project.to_str().unwrap();
+            let body = if items {
+                EndorsementBody::for_items(
+                    project,
+                    &endorser,
+                    vec![EndorsedItem {
+                        item_ref: format!("config:{CONFIG_ID}"),
+                        kind: "config".to_string(),
+                        digest: self.digest.clone(),
+                    }],
+                    &at,
+                    &nonce,
+                    &head,
+                )
+            } else {
+                EndorsementBody::standing(
+                    project,
+                    &endorser,
+                    vec!["config".to_string()],
+                    None,
+                    &at,
+                    &nonce,
+                    &head,
+                )
+            };
+            let recorded = record_endorsement(
+                &self.app_root,
+                &self.node,
+                &self.trust,
+                SignedEndorsement::sign(body, &self.operator).unwrap(),
+                lillux::time::unix_secs_now(),
+            )
+            .unwrap();
+            recorded.digest
+        }
+
+        fn revoke(&self, digest: &str) {
+            ryeos_engine::trust::revoke_endorsement(
+                &self.app_root,
+                &self.node,
+                &self.trust,
+                digest,
+                &lillux::signature::compute_fingerprint(&self.operator.verifying_key()),
+                "withdrawn",
+                lillux::time::unix_secs_now(),
+            )
+            .unwrap();
+        }
+
+        /// The signer list a launch of `logical_project` would carry right
+        /// now: the node's entries with the request's frozen endorsements
+        /// attached to the authoring signers.
+        fn entries(&self, logical_project: Option<&Path>) -> Vec<TrustedSignerEntry> {
+            let ledger = ryeos_engine::trust::EndorsementLedger::load(
+                &self.app_root,
+                &self.node.verifying_key(),
+            )
+            .unwrap();
+            let index = ryeos_engine::trust::EndorsementIndex::build(&ledger, &self.trust).unwrap();
+            let frozen = self.trust.clone().with_endorsement_index(index);
+            self.trust.launch_signer_entries(&frozen, logical_project)
+        }
+
+        fn snapshot(
+            &self,
+            entries: &[TrustedSignerEntry],
+        ) -> Option<ryeos_engine::trust::EndorsementSnapshot> {
+            entries.iter().find_map(|entry| entry.endorsements.clone())
+        }
+
+        /// The loader a launch carrying `entries` builds, for a runtime whose
+        /// process path is a checkout of the project.
+        fn runtime(&self, entries: &[TrustedSignerEntry]) -> Result<VerifiedLoader> {
+            Ok(VerifiedLoader::new(self.checkout.clone(), vec![], entries)?
+                .with_logical_project_root(Some(self.project.clone())))
+        }
+
+        fn loads(&self, loader: &VerifiedLoader) -> bool {
+            loader
+                .load_config_strict_signed::<serde_yaml::Value>(CONFIG_ID)
+                .is_ok()
+        }
+    }
+
+    #[test]
+    fn an_endorsed_authoring_item_is_trusted_in_the_runtime_and_not_before() {
+        let node = Endorsed::new();
+        assert!(
+            !node.loads(&node.runtime(&node.entries(Some(&node.project))).unwrap()),
+            "unendorsed"
+        );
+
+        let project = node.project.canonicalize().unwrap();
+        node.endorse(&project, true);
+        let entries = node.entries(Some(&node.project));
+        let snapshot = node.snapshot(&entries).expect("snapshot");
+        assert_eq!(snapshot.project, project.to_str().unwrap());
+        // The runtime process path is a checkout of the project, yet the
+        // launch's own project identity decides.
+        assert!(node.loads(&node.runtime(&entries).unwrap()));
+    }
+
+    #[test]
+    fn a_revocation_mid_launch_leaves_that_launch_unchanged_and_the_next_sees_it() {
+        let node = Endorsed::new();
+        let project = node.project.canonicalize().unwrap();
+        let endorsement = node.endorse(&project, true);
+        let frozen = node.entries(Some(&node.project));
+        let running = node.runtime(&frozen).unwrap();
+        assert!(node.loads(&running));
+
+        node.revoke(&endorsement);
+        assert!(
+            node.loads(&running),
+            "the launch that already froze its endorsements keeps its view"
+        );
+        let next = node.entries(Some(&node.project));
+        assert_eq!(
+            node.snapshot(&next),
+            None,
+            "the next launch freezes nothing"
+        );
+        assert!(!node.loads(&node.runtime(&next).unwrap()));
+    }
+
+    #[test]
+    fn a_config_proof_made_under_an_endorsement_no_longer_matches_after_revocation() {
+        let node = Endorsed::new();
+        let project = node.project.canonicalize().unwrap();
+        let endorsement = node.endorse(&project, true);
+        let entries = node.entries(Some(&node.project));
+        let loader = node.runtime(&entries).unwrap();
+        let snapshot = loader
+            .load_config_strict_signed_with_proof::<serde_yaml::Value>(CONFIG_ID)
+            .unwrap()
+            .expect("the endorsed config loads");
+        let proof = snapshot.dependency_proof;
+        assert!(proof.trusted_signers_match(&trusted_signers_digest(&entries)));
+        assert_ne!(
+            trusted_signers_digest(&entries),
+            trusted_signers_digest(&node.trust.signer_entries()),
+            "the endorsements are part of the trust the proof records"
+        );
+
+        node.revoke(&endorsement);
+        let after = node.entries(Some(&node.project));
+        assert!(
+            !proof.trusted_signers_match(&trusted_signers_digest(&after)),
+            "the proof is frozen to the trust it was made under"
+        );
+        assert_ne!(
+            proof.identity_digest().unwrap(),
+            node.runtime(&after)
+                .unwrap()
+                .load_config_strict_signed_with_proof::<serde_yaml::Value>(CONFIG_ID)
+                .map(|snapshot| snapshot.map(|s| s.dependency_proof.identity_digest().unwrap()))
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+        );
+    }
+
+    #[test]
+    fn a_standing_endorsement_covers_the_kind_and_changed_bytes_are_refused_per_change() {
+        let node = Endorsed::new();
+        let project = node.project.canonicalize().unwrap();
+        node.endorse(&project, false);
+        let entries = node.entries(Some(&node.project));
+        assert!(node.loads(&node.runtime(&entries).unwrap()));
+
+        let other = Endorsed::new();
+        let project = other.project.canonicalize().unwrap();
+        other.endorse(&project, true);
+        let entries = other.entries(Some(&other.project));
+        create_file(
+            &other.checkout,
+            &format!(".ai/config/{CONFIG_ID}.yaml"),
+            &lillux::signature::sign_content(
+                "name: changed\n",
+                &SigningKey::from_bytes(&[3u8; 32]),
+                "#",
+                None,
+            ),
+        );
+        assert!(!other.loads(&other.runtime(&entries).unwrap()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_project_identity_is_canonical_however_the_path_is_spelled() {
+        let node = Endorsed::new();
+        let link = node._tmp.path().join("link");
+        std::os::unix::fs::symlink(&node.project, &link).unwrap();
+        let canonical = node.project.canonicalize().unwrap();
+        node.endorse(&canonical, true);
+        // A launch that names the project through a symlink freezes the same
+        // identity the endorsement was signed for.
+        let entries = node.entries(Some(&link));
+        let snapshot = node.snapshot(&entries).expect("snapshot through a link");
+        assert_eq!(snapshot.project, canonical.to_str().unwrap());
+        assert!(node.loads(&node.runtime(&entries).unwrap()));
+        // An unknown logical project freezes nothing.
+        assert_eq!(node.snapshot(&node.entries(None)), None);
+    }
+
+    #[test]
+    fn a_snapshot_for_another_project_or_with_a_forged_signature_is_refused() {
+        let node = Endorsed::new();
+        let project = node.project.canonicalize().unwrap();
+        node.endorse(&project, true);
+        let entries = node.entries(Some(&node.project));
+
+        let mut moved = entries.clone();
+        for entry in &mut moved {
+            if let Some(snapshot) = &mut entry.endorsements {
+                snapshot.project = "/srv/projects/other".to_string();
+            }
+        }
+        assert!(node.runtime(&moved).is_err());
+
+        let mut forged = entries;
+        for entry in &mut forged {
+            if let Some(snapshot) = &mut entry.endorsements {
+                snapshot.endorsements[0].endorsement.signature = "AAAA".to_string();
+            }
+        }
+        assert!(node.runtime(&forged).is_err());
     }
 }

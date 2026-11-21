@@ -219,6 +219,7 @@ pub(super) fn sign_bundle_items_with_trust_in_place(
             ),
             label: "author".to_string(),
             scope: SignerScope::everywhere(),
+            endorsements: None,
         });
     }
     let trust_store =

@@ -132,6 +132,12 @@ pub fn genesis_previous(item_ref: &str) -> String {
 }
 
 /// Digest of an item file's bytes, as `before_digest` and `after_digest` name.
+///
+/// This hashes the whole file, signature line included. An endorsement names
+/// a different digest: the one in the signature header's `content_hash`, taken
+/// over the bytes after the signature line. The two are not interchangeable;
+/// a revision record carries the signed bytes inline (`content`), so the
+/// endorsed digest of a revision's item is recomputed from that content.
 pub fn file_digest(bytes: &[u8]) -> String {
     lillux::sha256_hex(bytes)
 }

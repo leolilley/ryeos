@@ -59,7 +59,7 @@ struct PinArgs {
 #[command(
     name = "ryeos trust scope",
     about = "Narrow or widen the scope of a pinned signer",
-    long_about = "Replaces the spaces, kinds and projects a pinned signer may sign for. Flags left out keep the record's current values; give --project to replace the project list, or --any-project to clear it so the signer may sign for every project.",
+    long_about = "Replaces the spaces, kinds and projects a pinned signer may sign for. Flags left out keep the record's current values; give --project to replace the project list, or --any-project to clear it so the signer may sign for every project. An authoring key's scope does not decide trust (endorsements do), so for it the verb takes no scope flags and restores the authoring scope: project space, no kinds.",
     no_binary_name = true
 )]
 struct ScopeArgs {
@@ -246,6 +246,43 @@ fn run_scope(argv: &[String], console: &crate::tty::Console) -> Result<()> {
                 args.fingerprint
             )
         })?;
+    if current.role == ryeos_engine::trust::SignerRole::Authoring {
+        if !(args.spaces.is_empty()
+            && args.kinds.is_empty()
+            && args.projects.is_empty()
+            && !args.any_project)
+        {
+            bail!(
+                "trust_authoring_scope_retired: signer {} is an authoring key; its registry \
+                 scope does not decide trust, so it takes no scope flags. What it signs is \
+                 trusted through `ryeos endorse`. Run `ryeos trust scope {}` with no flags to \
+                 restore its authoring scope",
+                args.fingerprint,
+                args.fingerprint
+            );
+        }
+        let default = ryeos_engine::trust::SignerScope::authoring_default();
+        let arguments = ryeos_node::offline_operation::handlers::TrustScopeArguments {
+            fingerprint: args.fingerprint.clone(),
+            spaces: default
+                .spaces
+                .iter()
+                .map(|space| space.as_str().to_owned())
+                .collect(),
+            kinds: default.kinds,
+            projects: default.projects,
+        };
+        arguments.validate()?;
+        let host = crate::offline_apply::CliHost::new();
+        let applied = host.apply(
+            &app_root,
+            "node.trust.scope",
+            serde_json::to_value(arguments)?,
+            BTreeMap::new(),
+            BTreeMap::new(),
+        )?;
+        return report(console, args.json, "scope", &applied.result);
+    }
     let spaces = if args.spaces.is_empty() {
         current
             .scope

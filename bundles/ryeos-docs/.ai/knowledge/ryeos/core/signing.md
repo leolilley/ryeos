@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-17T22:15:27Z:9757a13ce7a14a1fca6fe0406a17f3f5d5efae7eba7fff7095d8ee4e487f2043:FZn2qWw8mM8vFKweRo8O6r/K/BTcCvRlRRK/HpI+DOm/U+5eYwOOycUVV6mdOVGkPmpd8ji681MGKVsnx7OqDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-20T23:48:14Z:cbf092fd4f1ee82e3d07e2c71170c7bc478fc14fed8eb35300089c6c32dc1faa:3XrYDHZc0gRQVnL8TDVbRKjqTweJQML6aVHzR6+w6tuSMEgXrWvOPbgVbJyLfmv0CH1AjOxOHmA/x+o8P05nBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -202,8 +202,9 @@ A record carries the signer's fingerprint and public key, a label, and:
 Defaults: a publisher is scoped to the bundle space for every kind; the
 operator key is scoped to the project and node spaces for every kind; the
 authoring key is scoped to the project space with **no kinds** (`kinds: []`
-admits nothing), so items it signs are untrusted until the operator widens the
-scope with `ryeos trust scope <fp> --kind <kind>`.
+admits nothing), and that scope is the only one it may hold: its registry scope
+never decides trust, so items it signs are untrusted until an operator endorses
+them (see [Endorsements](#endorsements)).
 
 `scope.projects` names projects by their logical project path: the absolute
 project path as the node knows it. A run against a live project matches by that
@@ -367,3 +368,74 @@ sense. It cannot tell you "this tool will always terminate" or "this
 directive will never call an API you don't have scope for." Runtime
 capability enforcement handles behavioral correctness. The signing
 pipeline is about integrity, provenance, and structural validity.
+
+## Endorsements
+
+An endorsement is a signed statement, separate from the item, by which a pinned
+operator key makes items the node's authoring key signed trusted. It leaves the
+item untouched, so who authored it and the digest that was reviewed stay as they
+were.
+
+| Form | Names | Covers |
+|---|---|---|
+| per-change | the exact items: ref, kind and the digest of the signed bytes after the signature line | those bytes only; one changed byte returns the item to `untrusted_project` |
+| standing | kinds within one project, optionally until a time | whatever the authoring key signs of those kinds in that project |
+
+```bash
+ryeos --project . endorse --item view:acme/home --item surface:acme/main
+ryeos --project . endorse --standing --kind knowledge --lifetime-secs 604800
+ryeos endorse list
+ryeos endorse revoke --endorsement <digest> --reason "no longer wanted"
+```
+
+`ryeos endorse` signs the endorsement with the operator key inside the CLI; the
+daemon never holds that key. It reads the node's endorsement ledger head, signs
+a body that carries the project, the endorser, the exact targets, the time, a
+nonce and that head, and submits it to the running node. The node checks the
+signature against its signer registry (the endorser must be an active
+`operator`), countersigns the document with a receipt time and stores it under
+`<state>/endorsements/`. Two endorsements signed against the same head cannot
+both apply: the second is refused with `endorsement_ledger_moved`, sign again.
+The body names its own time, and a time more than two minutes from the node's
+clock is refused.
+
+The engine's trust decision consults the endorsements: an authoring-key item in
+project space is trusted (still clamped like every project item) only when a
+live endorsement covers its exact digest, or a live standing endorsement covers
+its kind in its project. Everything else from the authoring key is untrusted.
+Endorsement is narrow-only: it chooses `trusted_project` over `untrusted_project`
+and nothing else. It never applies to another role's key, cannot make an
+unpinned or revoked key trusted, and cannot lift a revocation. A running node
+follows a new or revoked endorsement without a restart.
+
+A launch carries the endorsements its request froze in its signer list: each
+authoring-role signer's entry holds a snapshot of the live endorsements of the
+launch's project. Every config loader the daemon builds for the launch
+(execution limits, method runtime config) and the runtime (launch envelope
+schema version 6) judge authoring-key items by that snapshot against the
+launch's own project identity, its canonical root, not a checkout path. The
+signer list's digest, which every config dependency proof and cache key records,
+covers the snapshot, so a proof made under an endorsement stops matching when the
+endorsement is revoked or replaced. A launch keeps the view it froze; the next
+launch freezes the new one. One request builds every signer list from the single
+trust view it froze at admission, so a revocation between its method-config load
+and its limits load never gives two parts of it two trusts. Offline commands
+read the node's recorded endorsements when they load the registry; the only
+signer list built outside a launch is the one for a bundle release source
+generation, which holds publisher-signed configs and so carries none. An envelope of another schema version is refused;
+runtime binaries ship in bundles, so repopulate bundles after this change.
+
+Revoking writes a node-signed tombstone named by the endorsement digest. The
+items it covered are untrusted again, and the tombstone stays in force if the
+endorsement file is put back. Every acceptance and revocation is a node-journal
+record (`endorsement.accepted`, `endorsement.revoked`). An endorsement that
+names a delegation is refused (`endorsement_delegation_unsupported`).
+
+### A node pinned under the old authoring scope
+
+`ryeos trust scope` no longer widens an authoring key: it refuses with
+`trust_authoring_scope_retired`. A node whose authoring record was widened
+earlier refuses to load its registry, with the same code, naming the key. Stop
+the node and run `ryeos trust scope <authoring-fingerprint>` with no flags to
+restore the authoring scope; items the key signed are then untrusted until
+endorsed.

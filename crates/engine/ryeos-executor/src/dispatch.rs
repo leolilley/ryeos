@@ -1752,8 +1752,21 @@ async fn method_runtime_config_snapshot_off_thread(
     let requirements = requirements.clone();
     let engine_roots = engine_roots.clone();
     let node_config_root = engine.node_config_root();
-    let trusted_signers =
-        ryeos_engine::launch_envelope_types::trusted_signer_entries(&engine.node_trust_store);
+    // The signer list carries the endorsements in force for the launch's
+    // project, so an endorsed authoring-signed config loads and its proof and
+    // cache key record the endorsements it was trusted under.
+    let trusted_signers = match admitted_root {
+        Some(admission) => engine.node_trust_store.launch_signer_entries(
+            admission.request_trust(),
+            engine_roots.signer_project_root(),
+        ),
+        // No admitted request: nothing froze a view, so the engine's current
+        // one is the request's.
+        None => engine.node_trust_store.launch_signer_entries(
+            &engine.trust_store.snapshot(),
+            engine_roots.signer_project_root(),
+        ),
+    };
     let materialization = admitted_root
         .map(|admission| admission.resolution_materialization_binding())
         .transpose()
