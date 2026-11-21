@@ -340,20 +340,16 @@ const CAPPED_HEADER: &str = "continuation:\n  carry_turns: 2\nhooks:\n  - id: on
 /// The model's hand-off cap, not the window fraction, decides where a run
 /// hands off. The window is 100,000 tokens (a 90,000 ratio point) and the
 /// entry caps the point at 32,000; the script's bulk calls reach only about
-/// 78,000 tokens, so no hand-off here can be the ratio's. The successor starts under the carry budget, and the
+/// 80,000 tokens, so no hand-off here can be the ratio's. The successor starts under the carry budget, and the
 /// continuation event records the effective point.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_capped_model_hands_off_at_the_cap_not_the_ratio() {
     const CAP: u64 = 32_000;
-    // Ten bulk calls per turn, about 2,000 estimated tokens a turn: the 40
-    // turns total about 78,000 tokens, under the 90,000 ratio point.
-    let calls = (0..10)
-        .map(|k| format!("      - {{ id: \"c{k}_{{n}}\", name: bulk_bulk, arguments: {{}} }}\n"))
-        .collect::<String>();
-    let script =
-        format!("steps:\n  - repeat: 40\n    tool_calls:\n{calls}  - repeat: 5\n    text: done\n");
+    // One 8,000-character result a turn is about 2,000 estimated tokens: the
+    // 40 turns total about 80,000 tokens, under the 90,000 ratio point.
+    let script = "steps:\n  - repeat: 40\n    tool_calls:\n      - { id: \"call_{n}\", name: bigbulk_bigbulk, arguments: {} }\n  - repeat: 5\n    text: done\n";
     let rig = start_rig(
-        &script,
+        script,
         RigOptions {
             context_window: 100_000,
             header_extra: CAPPED_HEADER,

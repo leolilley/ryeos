@@ -4,7 +4,7 @@
 //! Include with `#[path = "common/stub_rig.rs"] mod stub_rig;`. `start_rig`
 //! boots a fast-fixture node whose `stub` model provider points at a loopback
 //! stub running the given script, plants a project (routing, an optional
-//! execution config, `noop`/`bulk`/`nap`/`marker` python tools and the
+//! execution config, `noop`/`bulk`/`bigbulk`/`nap`/`marker` python tools and the
 //! `directive:probe/run` directive) and returns a `Rig`. `launch_on` launches
 //! the directive live, `wait_terminal` waits on the thread, and
 //! `event_histogram`/`chain_events` read its events. Individual tests use a
@@ -512,6 +512,12 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
         root,
         "bulk",
         "print(json.dumps({'ok': True, 'data': 'x' * 600}))",
+        &fixture.publisher,
+    )?;
+    plant_python_tool(
+        root,
+        "bigbulk",
+        "print(json.dumps({'ok': True, 'data': 'x' * 8000}))",
         &fixture.publisher,
     )?;
     plant_python_tool(
