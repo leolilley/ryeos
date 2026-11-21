@@ -5346,7 +5346,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
         let loader = loader_for_bundle();
         let config_id = format!("ryeos-runtime/model-providers/{provider}");
         let base = loader
-            .load_config_strict::<ProviderConfig>(&config_id)
+            .load_config_strict_signed::<ProviderConfig>(&config_id)
             .unwrap_or_else(|e| panic!("provider load failed for {provider}/{model}: {e:#}"))
             .unwrap_or_else(|| panic!("provider config missing for {provider}"));
         let matched_profile = base
