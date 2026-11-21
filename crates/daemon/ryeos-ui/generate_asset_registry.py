@@ -81,8 +81,8 @@ def validate(manifest: dict) -> None:
 
     # Rune's flattened snippet modules are exactly the declared list.
     declared = {
-        f"rune_{Path(path).stem}.js"
-        for path in tomllib.loads(SNIPPETS.read_text())["snippets"]
+        f"{entry['crate'].replace('-', '_')}_{Path(entry['path']).stem}.js"
+        for entry in tomllib.loads(SNIPPETS.read_text())["snippets"]
     }
     registered = {name for name in filenames if re.fullmatch(r"rune_.+\.js", name)}
     if registered != declared:
@@ -96,8 +96,8 @@ def validate(manifest: dict) -> None:
     bindings = next(
         asset for asset in manifest["assets"] if asset["filename"] == "ryeos_rune.js"
     )
-    for path in tomllib.loads(SNIPPETS.read_text())["fetched"]:
-        name = Path(path).name
+    for entry in tomllib.loads(SNIPPETS.read_text())["fetched"]:
+        name = Path(entry["path"]).name
         if f"{name}.gz" not in filenames:
             raise SystemExit(f"a file Rune fetches at runtime is not registered: {name}")
         if f"/ui/assets/{name}" not in bindings["imports"]:
@@ -167,18 +167,22 @@ def main() -> None:
         raise SystemExit("--check and --refresh-digests are mutually exclusive")
     manifest = load_manifest()
     if args.refresh_digests:
+        stamped = subprocess.run(
+            [sys.executable, "-I", str(DIGEST_SCRIPT), "--stamped"],
+            capture_output=True,
+            text=True,
+        )
+        if stamped.returncode != 0:
+            raise SystemExit(f"refusing to refresh digests: {stamped.stderr.strip()}")
         for asset in manifest["assets"]:
             asset["sha256"] = hashlib.sha256(
                 (PACKAGE / asset["filename"]).read_bytes()
             ).hexdigest()
         # Record which sources this package was built from; CI recomputes the
         # digest and fails when they differ (a source changed, package not rebuilt).
-        digest = subprocess.run(
-            [sys.executable, "-I", str(DIGEST_SCRIPT), "--print"],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
+        # The digest comes from the build stamp, which the script refuses unless
+        # the package in pkg/ was built from the current sources.
+        digest = stamped.stdout.strip()
         manifest.pop("source_digest", None)
         ordered = {}
         for key, value in manifest.items():

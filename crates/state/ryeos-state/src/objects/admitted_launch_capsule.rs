@@ -2641,6 +2641,36 @@ fn cross_site_execution_closure_matches(
     })
 }
 
+/// Replace a prepared dependency's `product_selections` by their semantic
+/// identity. A selection's full serialization binds the receiving node's own
+/// redemption proof, which differs between the two sites by design; the
+/// comparison uses the same identity the root invocation's selections are
+/// compared by. The projection is only compared, never stored.
+fn project_dependency_product_selections(
+    name: &str,
+    dependency: &mut serde_json::Map<String, serde_json::Value>,
+) -> anyhow::Result<()> {
+    let selections: Vec<crate::external_content::products::composition::ProductSelection> =
+        serde_json::from_value(
+            dependency
+                .get("product_selections")
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("prepared dependency has no product selections"))?,
+        )
+        .with_context(|| format!("decode product selections of prepared dependency `{name}`"))?;
+    crate::external_content::products::composition::validate_product_selections(&selections)?;
+    dependency.insert(
+        "product_selections".to_owned(),
+        serde_json::Value::Array(
+            selections
+                .iter()
+                .map(|selection| selection.semantic_identity_value())
+                .collect::<anyhow::Result<Vec<_>>>()?,
+        ),
+    );
+    Ok(())
+}
+
 fn cross_site_prepared_runtime_launch_projection(
     prepared: &serde_json::Value,
 ) -> anyhow::Result<serde_json::Value> {
@@ -2658,12 +2688,18 @@ fn cross_site_prepared_runtime_launch_projection(
     for (name, dependency) in dependencies {
         require_exact_keys(
             dependency,
-            &["canonical_ref", "resolution", "subject"],
+            &[
+                "canonical_ref",
+                "product_selections",
+                "resolution",
+                "subject",
+            ],
             &format!("prepared execution dependency `{name}`"),
         )?;
         let dependency = dependency
             .as_object_mut()
             .expect("exact keys require object");
+        project_dependency_product_selections(name, dependency)?;
         let resolution = retained_resolution_projection(
             dependency
                 .get("resolution")
@@ -2702,6 +2738,103 @@ fn cross_site_prepared_runtime_launch_projection(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dependency_with_selections(
+        selections: serde_json::Value,
+    ) -> serde_json::Map<String, serde_json::Value> {
+        let mut dependency = serde_json::Map::new();
+        dependency.insert("product_selections".to_owned(), selections);
+        dependency
+    }
+
+    fn local_selection(declaration: &str, witness: char) -> serde_json::Value {
+        serde_json::json!({
+            "declaration_id": declaration,
+            "witness_hash": witness.to_string().repeat(64),
+            "witness_source": {"kind": "local_capture"},
+            "qualification_hash": null,
+            "remote_testimony": null,
+        })
+    }
+
+    #[test]
+    fn dependency_product_selections_project_to_their_semantic_identity() {
+        let mut empty = dependency_with_selections(serde_json::json!([]));
+        project_dependency_product_selections("dep", &mut empty).unwrap();
+        assert_eq!(empty["product_selections"], serde_json::json!([]));
+
+        let mut selected = dependency_with_selections(serde_json::json!([
+            local_selection("alpha", 'a'),
+            local_selection("beta", 'b'),
+        ]));
+        project_dependency_product_selections("dep", &mut selected).unwrap();
+        let projected = selected["product_selections"].as_array().unwrap();
+        assert_eq!(projected.len(), 2);
+        // Identity keeps the declaration, witness and qualification only.
+        assert_eq!(
+            projected[0],
+            serde_json::json!({
+                "declaration_id": "alpha",
+                "witness_hash": "a".repeat(64),
+                "qualification_hash": null,
+            })
+        );
+    }
+
+    #[test]
+    fn different_dependency_product_selections_have_different_identities() {
+        let project = |selections: serde_json::Value| {
+            let mut dependency = dependency_with_selections(selections);
+            project_dependency_product_selections("dep", &mut dependency).unwrap();
+            dependency
+        };
+        let first = project(serde_json::json!([local_selection("alpha", 'a')]));
+        let same = project(serde_json::json!([local_selection("alpha", 'a')]));
+        let other_witness = project(serde_json::json!([local_selection("alpha", 'b')]));
+        let none = project(serde_json::json!([]));
+        assert_eq!(first, same);
+        assert_ne!(first, other_witness);
+        assert_ne!(first, none);
+    }
+
+    #[test]
+    fn the_receiving_nodes_redemption_proof_does_not_change_the_identity() {
+        let project = |source: serde_json::Value| {
+            let mut selection = local_selection("alpha", 'a');
+            selection["witness_source"] = source;
+            let mut dependency = dependency_with_selections(serde_json::json!([selection]));
+            project_dependency_product_selections("dep", &mut dependency).unwrap();
+            dependency
+        };
+        assert_eq!(
+            project(serde_json::json!({"kind": "local_capture"})),
+            project(serde_json::json!({"kind": "received", "acceptance_hash": "c".repeat(64)})),
+        );
+    }
+
+    #[test]
+    fn malformed_dependency_product_selections_are_refused() {
+        let refuse = |value: Option<serde_json::Value>| {
+            let mut dependency = serde_json::Map::new();
+            if let Some(value) = value {
+                dependency.insert("product_selections".to_owned(), value);
+            }
+            project_dependency_product_selections("dep", &mut dependency).is_err()
+        };
+        assert!(refuse(None), "a dependency without the field is refused");
+        assert!(refuse(Some(serde_json::json!("x"))));
+        assert!(
+            refuse(Some(serde_json::json!([
+                local_selection("beta", 'b'),
+                local_selection("alpha", 'a'),
+            ]))),
+            "selections must be in canonical order"
+        );
+        assert!(refuse(Some(serde_json::json!([
+            local_selection("alpha", 'a'),
+            local_selection("alpha", 'a'),
+        ]))));
+    }
     use crate::objects::{
         ExecutionOwnershipAuthority, ExecutionProjectAuthority, ExecutionRecoveryAuthority,
     };

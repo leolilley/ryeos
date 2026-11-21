@@ -1084,15 +1084,22 @@ mod tests {
     };
     use super::*;
     use ryeos_node_runtime::config::{Config, ConfigSources};
-    use ryeos_node_runtime::state_lock::{StateLock, default_lock_path};
+    use ryeos_node_runtime::state_lock::default_lock_path;
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
+    /// One reset-shaped node under the process-wide native test serial.
+    /// Every recovery here reads guarded SQLite evidence, and such a read is
+    /// refused (contended, without latching) while another test's host holds
+    /// projection leases the reading thread is not a scope of. The node
+    /// therefore owns the serial for its whole life, so no test can omit it.
     struct Node {
         _tmp: tempfile::TempDir,
         config: Config,
         identity: NodeIdentity,
+        /// Declared last so it outlives the directory teardown.
+        _serial: lillux_sqlite::test_host::TestHostSerial,
     }
 
     impl Node {
@@ -1158,10 +1165,12 @@ mod tests {
             std::fs::create_dir_all(&path).unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
+        // After the policy install, which holds the serial itself.
         Node {
             _tmp: tmp,
             config,
             identity,
+            _serial: lillux_sqlite::test_host::serial(),
         }
     }
 
@@ -1176,7 +1185,9 @@ mod tests {
             &lillux::PinnedDirectory,
         ) -> T,
     ) -> T {
-        let state_lock = StateLock::acquire(&default_lock_path(&node.config.app_root)).unwrap();
+        let state_lock =
+            super::super::tests::acquire_state_lock(&default_lock_path(&node.config.app_root))
+                .unwrap();
         let runtime = lillux::PinnedDirectory::open(&node.runtime())
             .unwrap()
             .unwrap();

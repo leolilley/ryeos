@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-18T07:43:25Z:22c5d9e1e66072c811730a32d7805d4c6b14331f13fc4a4b898c806b17e8eab8:auOhmU7zGAGf4KvsqC0jIc5Q89j7LKcmBAvREMuUpvkTbiIS82DurikhDUCy2U5XbwL8jOqTHMa2gUdMKvSLDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-20T10:04:57Z:371bf1802bb37b7ff8992f55b8340ee21c235d193891cfcd6239c9e3e6c139ca:th2Q6BtsF2zStS7yDnJP/apEp0ZOcXJrIsz5oe68kPXPE1TChwSPXq+g5oOeypfQAFOJ6a2k2cFaDBJxL3KqBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Externally invoked host helper in the development bundle; lib/ is excluded
 # from Tool resolution, so this is signed source, not an admitted Tool. It
 # grants no RyeOS authority. Run it from a checkout of this repository.
 # Build the Rune browser renderer into the daemon's closed asset set:
 #   crates/clients/rune/pkg/{index.html, ryeos_boot.js, ryeos_rune.js, ryeos_rune_bg.wasm.gz,
-#                             ryeos-cjk.ttf.gz, ryeos-emoji.ttf.gz, rune_<snippet>.js ...,
+#                             ryeos-cjk.ttf.gz, ryeos-emoji.ttf.gz, <crate>_<snippet>.js ...,
 #                             <fetched file>.gz ...}
 # where the snippets and the files Rune fetches at runtime are the ones listed in
 # rune-snippets.toml; the fetched files come from the pinned Rune source.
@@ -53,6 +53,12 @@ if [[ $# -gt 0 ]]; then
 fi
 
 snippet_list=$(dirname "$0")/rune-snippets.toml
+digest_tool=$(dirname "$0")/web-package-source-digest.py
+# The build stamp says which sources the package files were built from. A build that does
+# not finish leaves none, and the registry generator refuses to record digests without one.
+stamp=$renderer/.pkg-build-stamp
+rm -f "$stamp"
+built_from=$(python3 -I "$digest_tool" --root "$root" --print)
 
 locked=$(python3 -I -c 'import sys, tomllib; print(next(p["version"] for p in tomllib.load(open(sys.argv[1], "rb"))["package"] if p["name"] == "wasm-bindgen"))' "$renderer/Cargo.lock")
 if [[ $("$bindgen" --version) != "wasm-bindgen $locked" ]]; then
@@ -86,25 +92,35 @@ trap 'rm -rf "$stage"' EXIT
 "$bindgen" --target web --out-dir "$stage/out" --out-name ryeos_rune "$artifact"
 
 # Flatten the snippet modules Rune's web platform ships (exactly those in rune-snippets.toml)
-# to rune_<file stem>.js and point the bindings at them.
+# to <crate with - as _>_<file stem>.js and point the bindings at them.
 python3 -I - "$stage/out" "$snippet_list" <<'PY'
 import pathlib, re, sys, tomllib
 out = pathlib.Path(sys.argv[1])
-listed = set(tomllib.loads(pathlib.Path(sys.argv[2]).read_text())["snippets"])
+listed = {(e["crate"], e["path"]) for e in tomllib.loads(pathlib.Path(sys.argv[2]).read_text())["snippets"]}
 bindings = out / "ryeos_rune.js"
 source = bindings.read_text()
 specifiers = sorted(set(re.findall(r"""['"](\./snippets/[^'"]+)['"]""", source)))
 # A specifier is ./snippets/<crate>-<hash>/<path relative to the crate>.
-emitted = {re.sub(r"^\./snippets/[^/]+/", "", s) for s in specifiers}
-if emitted != listed or len(emitted) != len(specifiers):
+emitted = {}
+for specifier in specifiers:
+    match = re.fullmatch(r"\./snippets/(.+)-[0-9a-f]+/(.+)", specifier)
+    if not match:
+        raise SystemExit(f"unrecognised snippet specifier {specifier}")
+    emitted[specifier] = (match.group(1), match.group(2))
+if set(emitted.values()) != listed or len(emitted) != len(set(emitted.values())):
     raise SystemExit(
         "Rune's snippets differ from rune-snippets.toml: "
-        f"unexpected={sorted(emitted - listed)} missing={sorted(listed - emitted)} found={specifiers}"
+        f"unexpected={sorted(set(emitted.values()) - listed)} missing={sorted(listed - set(emitted.values()))} found={specifiers}"
     )
+def flat_name(crate, path):
+    return f"{crate.replace('-', '_')}_{pathlib.PurePosixPath(path).stem}.js"
+names = [flat_name(*key) for key in sorted(listed)]
+if len(set(names)) != len(names):
+    raise SystemExit(f"two snippets flatten to one file name: {sorted(names)}")
 # Only the module specifiers move: the same path string is also the key the wasm module imports
 # under, and that key must stay as wasm-bindgen wrote it.
-for specifier in specifiers:
-    flat = f"rune_{pathlib.PurePosixPath(specifier).stem}.js"
+for specifier, key in emitted.items():
+    flat = flat_name(*key)
     (out / flat).write_bytes((out / specifier).read_bytes())
     source, count = re.subn(r"""(\bfrom\s*)(['"])""" + re.escape(specifier) + r"\2", rf"\1\2./{flat}\2", source)
     if count == 0:
@@ -120,8 +136,8 @@ mkdir -p "$dest"
 cp "$stage/out/ryeos_rune.js" "$dest/"
 python3 -I - "$snippet_list" <<'PY' | while read -r flat; do cp "$stage/out/$flat" "$dest/"; done
 import pathlib, sys, tomllib
-for path in tomllib.loads(pathlib.Path(sys.argv[1]).read_text())["snippets"]:
-    print(f"rune_{pathlib.PurePosixPath(path).stem}.js")
+for entry in tomllib.loads(pathlib.Path(sys.argv[1]).read_text())["snippets"]:
+    print(f"{entry['crate'].replace('-', '_')}_{pathlib.PurePosixPath(entry['path']).stem}.js")
 PY
 cp "$root/crates/clients/rune/web/index.html" "$root/crates/clients/rune/web/ryeos_boot.js" "$dest/"
 # The files Rune fetches at runtime (rune-snippets.toml `fetched`), from the pinned Rune source.
@@ -138,6 +154,8 @@ for source in map(pathlib.Path, sys.argv[2:]):
     (dest / f"{source.name}.gz").write_bytes(packed)
     print(f"{source.name}: {len(data):,} bytes, {len(packed):,} gzip")
 PY
+
+python3 -I "$digest_tool" --root "$root" --write-stamp "$dest" "$built_from"
 
 if [[ -z $out ]]; then
     python3 -I "$root/crates/daemon/ryeos-ui/generate_asset_registry.py" --refresh-digests

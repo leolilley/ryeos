@@ -1230,7 +1230,7 @@ mod tests {
         )
         .unwrap();
         let live = core.acknowledged_composition_replay().unwrap();
-        // ViewSet tiles use HashMap storage. Compare structured values rather
+        // ViewSet tiles are keyed storage. Compare structured values rather
         // than Debug iteration order from independently reconstructed maps.
         assert_eq!(cold.composition.id(), live.composition.id());
         assert_eq!(

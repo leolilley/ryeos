@@ -228,14 +228,14 @@ impl UiSurfaceMountManifest {
         self.validate()?;
         let mut result = Vec::new();
         for tab in &self.tabs {
-            let mut tiles = std::collections::HashMap::new();
+            let mut tiles = std::collections::BTreeMap::new();
             let mut ids = tab.tile_ids.iter();
             let mut groups = tab.group_ids.iter();
             fn build(
                 node: &LayoutSeedSpec,
                 ids: &mut std::slice::Iter<'_, TileId>,
                 groups: &mut std::slice::Iter<'_, ViewGroupId>,
-                tiles: &mut std::collections::HashMap<TileId, TileState>,
+                tiles: &mut std::collections::BTreeMap<TileId, TileState>,
                 presentation: &PresentationId,
                 surface: &SurfaceInstanceId,
             ) -> LayoutTree {

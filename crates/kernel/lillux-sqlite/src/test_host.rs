@@ -6,7 +6,9 @@
 //! mutex. The host holds that mutex guard and is therefore not `Send`: use it
 //! from the acquiring thread only, with current-thread runtimes. Test binaries
 //! that use it need nextest or `--test-threads=1`. Acquire the host before any
-//! fork lease and never wait for it while holding one.
+//! fork lease and never wait for it while holding one. The serial is
+//! reentrant per thread: a fixture or test that already holds it may take a
+//! host or a nested [`serial`] without waiting on itself.
 use crate::offline_host::{
     OfflineNativeAuthority, OfflineNativeHost, OfflineNativeHostFailure,
     offline_native_required_cleanup_steps,
@@ -19,8 +21,10 @@ use crate::{
 };
 use anyhow::Result;
 use lillux::PinnedDirectory;
+use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::marker::PhantomData;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -47,7 +51,20 @@ impl Default for TestNativeEnvelope {
 }
 
 static SERIAL: Mutex<()> = Mutex::new(());
-static HOLDER: Mutex<Option<String>> = Mutex::new(None);
+static HOLDER: Mutex<Option<(String, Instant)>> = Mutex::new(None);
+/// Arrival order of waiters for [`SERIAL`]. The mutex alone is not fair: a
+/// polling waiter can lose every hand-off to later arrivals, so one long
+/// full-suite run could starve a test past [`ACQUIRE_DEADLINE`] while the
+/// mutex was never held for long by any single test. Waiters are admitted in
+/// ticket order; an abandoned ticket is skipped.
+static QUEUE: Mutex<VecDeque<u64>> = Mutex::new(VecDeque::new());
+static NEXT_TICKET: AtomicU64 = AtomicU64::new(0);
+/// The longest holds of the serial seen so far, longest first, named in the
+/// acquire-deadline refusal so a starved test says who held the host.
+static LONGEST_HOLDS: Mutex<Vec<(Duration, String)>> = Mutex::new(Vec::new());
+const LONGEST_HOLDS_KEPT: usize = 5;
+/// A hold shorter than this is never worth naming.
+const NOTABLE_HOLD: Duration = Duration::from_secs(5);
 static LEAKED: Mutex<Option<String>> = Mutex::new(None);
 /// Hosts whose teardown refused, kept owned for the life of the process.
 static RETAINED: Mutex<Vec<OfflineNativeHost>> = Mutex::new(Vec::new());
@@ -74,6 +91,20 @@ fn retain_leaked(retained: crate::offline_host::OfflineNativeRetained) -> String
         .unwrap_or_else(PoisonError::into_inner)
         .push(retained.host);
     census
+}
+
+/// End the current hold, remembering it if it was among the longest.
+fn clear_holder() {
+    let ended = HOLDER.lock().unwrap_or_else(PoisonError::into_inner).take();
+    let Some((name, since)) = ended else { return };
+    let held = since.elapsed();
+    if held < NOTABLE_HOLD {
+        return;
+    }
+    let mut longest = LONGEST_HOLDS.lock().unwrap_or_else(PoisonError::into_inner);
+    longest.push((held, name));
+    longest.sort_by_key(|(held, _)| std::cmp::Reverse(*held));
+    longest.truncate(LONGEST_HOLDS_KEPT);
 }
 
 fn current_holder() -> String {
@@ -109,7 +140,7 @@ pub struct TestNativeHost {
     /// Retirements to run against the finished backend terminal before the
     /// host releases, such as closed generation leases.
     after_backend: std::cell::RefCell<Vec<AfterBackend>>,
-    _serial: MutexGuard<'static, ()>,
+    _serial: SerialHold,
     _thread: PhantomData<*const ()>,
 }
 
@@ -182,31 +213,95 @@ fn install_with(
     })
 }
 
+thread_local! {
+    /// How many serial holds this thread has open. The serial is reentrant
+    /// per thread: a fixture that already holds it may take a host or a
+    /// nested serial without waiting on itself.
+    static DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// One hold of the process-wide serial. Only the outermost hold of a thread
+/// owns the mutex guard; nested holds just count, and the longest-hold record
+/// is closed when the outermost one ends.
+struct SerialHold {
+    guard: Option<MutexGuard<'static, ()>>,
+}
+impl Drop for SerialHold {
+    fn drop(&mut self) {
+        DEPTH.with(|depth| depth.set(depth.get() - 1));
+        if self.guard.is_some() {
+            clear_holder();
+        }
+    }
+}
+
 /// Take the process-wide serial guard for one host, panicking naming the
 /// current holder past the acquire deadline, or with the leaked census if a
 /// previous host could not release its arena.
-fn acquire_serial() -> MutexGuard<'static, ()> {
+fn acquire_serial() -> SerialHold {
+    let nested = DEPTH.with(|depth| {
+        let held = depth.get();
+        depth.set(held + 1);
+        held > 0
+    });
+    if nested {
+        return SerialHold { guard: None };
+    }
+    SerialHold {
+        guard: Some(lock_serial_or_panic()),
+    }
+}
+
+fn lock_serial_or_panic() -> MutexGuard<'static, ()> {
     let started = Instant::now();
+    let ticket = NEXT_TICKET.fetch_add(1, Ordering::Relaxed);
+    QUEUE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push_back(ticket);
+    let leave_queue = || {
+        QUEUE
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|queued| *queued != ticket);
+    };
     let serial = loop {
-        match SERIAL.try_lock() {
-            Ok(guard) => break guard,
-            Err(std::sync::TryLockError::Poisoned(poisoned)) => break poisoned.into_inner(),
-            Err(std::sync::TryLockError::WouldBlock) => {
-                if started.elapsed() >= ACQUIRE_DEADLINE {
-                    let holder = HOLDER
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .clone();
-                    panic!(
-                        "TestNativeHost acquire deadline elapsed after {:?}; held by {}",
-                        ACQUIRE_DEADLINE,
-                        holder.as_deref().unwrap_or("<unknown>")
-                    );
-                }
-                std::thread::sleep(Duration::from_millis(5));
+        let at_head = QUEUE
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .front()
+            .is_some_and(|front| *front == ticket);
+        if at_head {
+            match SERIAL.try_lock() {
+                Ok(guard) => break guard,
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => break poisoned.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => {}
             }
         }
+        if started.elapsed() >= ACQUIRE_DEADLINE {
+            leave_queue();
+            let holder = HOLDER
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+                .map(|(name, since)| format!("{name} for {:?}", since.elapsed()));
+            let longest = LONGEST_HOLDS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .iter()
+                .map(|(held, name)| format!("{name} {held:?}"))
+                .collect::<Vec<_>>();
+            panic!(
+                "TestNativeHost acquire deadline elapsed after {:?}; held by {}; longest holds \
+                 so far: [{}]",
+                ACQUIRE_DEADLINE,
+                holder.as_deref().unwrap_or("<unknown>"),
+                longest.join(", ")
+            );
+        }
+        std::thread::sleep(Duration::from_millis(5));
     };
+    leave_queue();
     if let Some(census) = LEAKED
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -214,20 +309,16 @@ fn acquire_serial() -> MutexGuard<'static, ()> {
     {
         panic!("previous TestNativeHost leaked its arena: {census}");
     }
-    *HOLDER.lock().unwrap_or_else(PoisonError::into_inner) = Some(current_holder());
+    *HOLDER.lock().unwrap_or_else(PoisonError::into_inner) =
+        Some((current_holder(), Instant::now()));
     serial
 }
 
 /// The serial guard of a production host whose teardown a consumer's own
 /// controller performs. Keep it until that host is released.
 pub struct TestHostSerial {
-    _serial: MutexGuard<'static, ()>,
+    _serial: SerialHold,
     _thread: PhantomData<*const ()>,
-}
-impl Drop for TestHostSerial {
-    fn drop(&mut self) {
-        *HOLDER.lock().unwrap_or_else(PoisonError::into_inner) = None;
-    }
 }
 
 /// The serial guard alone, for a test whose code under test issues its own
@@ -676,7 +767,6 @@ impl TestNativeHost {
     pub fn release(mut self) -> crate::offline_host::OfflineNativeReleased {
         let live = self.live.take().expect("live test host present");
         let finished = finish_with(live, self.after_backend.take());
-        *HOLDER.lock().unwrap_or_else(PoisonError::into_inner) = None;
         match finished {
             Ok(released) => released,
             Err(retained) => {
@@ -701,7 +791,6 @@ impl TestNativeHost {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(live);
-        *HOLDER.lock().unwrap_or_else(PoisonError::into_inner) = None;
     }
 
     /// Tear down this arena and install a fresh one under the same serial
@@ -726,7 +815,6 @@ impl Drop for TestNativeHost {
     fn drop(&mut self) {
         let Some(live) = self.live.take() else { return };
         let finished = finish_with(live, self.after_backend.take());
-        *HOLDER.lock().unwrap_or_else(PoisonError::into_inner) = None;
         if let Err(retained) = finished {
             let census = retain_leaked(retained);
             if !std::thread::panicking() {

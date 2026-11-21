@@ -2932,6 +2932,18 @@ async fn thread_inspection_facets_cross_a_fixed_anchor_page_boundary() {
     assert_eq!(inspected["facets"]["phase"], "new");
     assert_eq!(inspected["facets"]["filler.0"], "present");
     assert_eq!(inspected["facets"]["filler.63"], "present");
+    // The launch facts are always an explicit row; a thread that recorded no
+    // realization says so instead of defaulting a containment answer.
+    let launch_facts = inspected["launch_facts"].as_array().unwrap();
+    assert_eq!(launch_facts.len(), 1);
+    match launch_facts[0]["state"].as_str().unwrap() {
+        "recorded" => assert!(launch_facts[0]["properties"].is_object()),
+        "absent" | "unavailable" => {
+            assert!(launch_facts[0].get("properties").is_none());
+            assert!(launch_facts[0]["reason"].is_string());
+        }
+        other => panic!("unexpected launch facts state {other}"),
+    }
     assert!(
         inspected["evidence_coverage"]
             .as_array()
