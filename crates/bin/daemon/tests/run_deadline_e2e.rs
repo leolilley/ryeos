@@ -310,6 +310,12 @@ async fn continuations_share_one_deadline() {
     // crosses the 2,000-token window's continuation threshold within a few
     // turns even when load stretches each turn.
     // (Tool results are de-duplicated by the result guard and would not grow.)
+    // The reserve is generous (20 s of the 60 s run) because the last segment
+    // must start, notice its hard stop and settle itself over the callback
+    // before the daemon's kill at the deadline; on a loaded shared machine a
+    // 5 s window is sometimes missed, and the daemon's kill then records a
+    // timed-out thread with no structured result. The proof is unchanged: one
+    // recorded deadline, one runtime-settled deadline stop, no restarted clock.
     let padding = "padding ".repeat(250);
     let script = format!(
         "steps:\n  - repeat: 200\n    delay_ms: 2000\n    text: \"{padding}\"\n    tool_calls:\n      - {{ id: \"call_{{n}}\", name: noop_noop, arguments: {{}} }}\n"
@@ -319,7 +325,7 @@ async fn continuations_share_one_deadline() {
         RigOptions {
             context_window: 2000,
             header_extra:
-                "continuation:\n  carry_turns: 2\nlimits:\n  wrap_up_seconds: 0\n  deadline:\n    reserve_seconds: 5\n",
+                "continuation:\n  carry_turns: 2\nlimits:\n  wrap_up_seconds: 0\n  deadline:\n    reserve_seconds: 20\n",
             ..RigOptions::default()
         },
     )
