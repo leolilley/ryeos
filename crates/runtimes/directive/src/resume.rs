@@ -5489,15 +5489,20 @@ mod tests {
             }),
         )
         .unwrap();
-        let mut policy = crate::directive::CompactionConfig::default();
-        policy.keep_turns = 2;
-        policy.summary.mode = crate::directive::SummaryMode::None;
-        policy.clip = crate::directive::ClipConfig {
-            tool_results: crate::directive::ClipMode::Clip,
-            over_bytes: 100,
-            head_bytes: 10,
-            tail_bytes: 10,
-            keep_recent: 1,
+        let policy = crate::directive::CompactionConfig {
+            keep_turns: 2,
+            summary: crate::directive::SummaryConfig {
+                mode: crate::directive::SummaryMode::None,
+                ..Default::default()
+            },
+            clip: crate::directive::ClipConfig {
+                tool_results: crate::directive::ClipMode::Clip,
+                over_bytes: 100,
+                head_bytes: 10,
+                tail_bytes: 10,
+                keep_recent: 1,
+            },
+            ..Default::default()
         };
         let plan = crate::compaction::plan(&basis.folded, policy.keep_turns).expect("a cut");
         assert_eq!(plan.kept_from_turn, 7);
@@ -5558,7 +5563,10 @@ mod tests {
     #[tokio::test]
     async fn a_predecessor_that_recorded_a_refusal_reports_its_code_to_the_successor() {
         let mut events = vec![event_at("cognition_in", 1, input_with_origin("task"))];
-        events.extend(refusal_events());
+        let mut refusal = refusal_events();
+        // The completed turn 1 has its usage settlement before its final.
+        refusal.insert(1, usage_event(1, 1));
+        events.extend(refusal);
         let callback = make_callback(events);
         let loaded = load_resume_state(
             &callback,

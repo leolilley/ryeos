@@ -207,10 +207,26 @@ async fn a_crash_after_the_compaction_record_is_recovered_without_a_second_recor
     .expect("start rig");
     let (id, before) = crash_at_stage(&mut rig).await;
     let (chain, _) = wait_chain_settled(&mut rig, &id, 600).await;
-    assert!(
-        chain.iter().any(|(_, s)| s == "completed"),
-        "recovered to completion: {chain:?}"
-    );
+    if !chain.iter().any(|(_, s)| s == "completed") {
+        let record = rig
+            .h
+            .get_thread(&id)
+            .await
+            .ok()
+            .flatten()
+            .map(|r| r.to_string())
+            .unwrap_or_default();
+        let stderr = rig.h.drain_stderr_nonblocking().await;
+        let tail: String = stderr
+            .chars()
+            .rev()
+            .take(4000)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        panic!("recovered to completion: {chain:?}\nthread: {record}\nstderr: {tail}");
+    }
     let records = chain_payloads(&rig.h, &id, "cognition_compaction").await;
     assert_eq!(records.len(), 1, "one compaction, once: {records:?}");
     // The first request after recovery is the compacted conversation.

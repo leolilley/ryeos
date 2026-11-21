@@ -374,6 +374,64 @@ Call the tools as the model directs, then report completion.
 
 pub const DIRECTIVE_REF: &str = "directive:probe/run";
 
+/// The runtime phase-cut gate, in a daemon built with
+/// `crash-qualification-test-support`. Without the feature a rig has none and
+/// asking for a stage is refused.
+#[cfg(all(unix, feature = "crash-qualification-test-support"))]
+pub type PhaseGate = common::runtime_phase_cut::RuntimePhaseCutGate;
+#[cfg(all(unix, feature = "crash-qualification-test-support"))]
+type PhaseChild = common::runtime_phase_cut::RuntimePhaseCutChild;
+#[cfg(not(all(unix, feature = "crash-qualification-test-support")))]
+pub type PhaseGate = ();
+#[cfg(not(all(unix, feature = "crash-qualification-test-support")))]
+type PhaseChild = ();
+
+#[cfg(all(unix, feature = "crash-qualification-test-support"))]
+fn make_phase_gate(
+    stage: Option<&'static str>,
+) -> anyhow::Result<(Option<PhaseGate>, Option<PhaseChild>)> {
+    Ok(match stage {
+        Some(stage) => {
+            let (gate, child) = common::runtime_phase_cut::RuntimePhaseCutGate::pair(stage)?;
+            (Some(gate), Some(child))
+        }
+        None => (None, None),
+    })
+}
+
+#[cfg(not(all(unix, feature = "crash-qualification-test-support")))]
+fn make_phase_gate(
+    stage: Option<&'static str>,
+) -> anyhow::Result<(Option<PhaseGate>, Option<PhaseChild>)> {
+    anyhow::ensure!(
+        stage.is_none(),
+        "a phase cut needs a daemon built with crash-qualification-test-support"
+    );
+    Ok((None, None))
+}
+
+#[cfg(all(unix, feature = "crash-qualification-test-support"))]
+fn configure_phase_child(
+    child: Option<&mut PhaseChild>,
+    stage: Option<&'static str>,
+    cmd: &mut tokio::process::Command,
+) {
+    if let (Some(child), Some(stage)) = (child, stage) {
+        child
+            .configure_command(cmd, stage)
+            .expect("configure the runtime phase-cut channel");
+        cmd.env("RYEOS_DIRECTIVE_TEST_BLOCK_AT", stage);
+    }
+}
+
+#[cfg(not(all(unix, feature = "crash-qualification-test-support")))]
+fn configure_phase_child(
+    _child: Option<&mut PhaseChild>,
+    _stage: Option<&'static str>,
+    _cmd: &mut tokio::process::Command,
+) {
+}
+
 pub struct RigOptions {
     pub exec_yaml: Option<String>,
     /// The continuation runtime config, including the compaction policy.
@@ -447,7 +505,7 @@ pub struct Rig {
     pub spawn_at: Instant,
     pub started_at: Instant,
     /// Observes the runtime stage named by `RigOptions::phase_cut`.
-    pub phase_gate: Option<common::runtime_phase_cut::RuntimePhaseCutGate>,
+    pub phase_gate: Option<PhaseGate>,
 }
 
 impl Rig {
@@ -479,13 +537,7 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
     let top_extra = opts.provider_top_extra.clone();
     let usage_extra = opts.provider_usage_extra.clone();
     let cache_tariff = opts.provider_cache_tariff;
-    let (phase_gate, mut phase_child) = match opts.phase_cut {
-        Some(stage) => {
-            let (gate, child) = common::runtime_phase_cut::RuntimePhaseCutGate::pair(stage)?;
-            (Some(gate), Some(child))
-        }
-        None => (None, None),
-    };
+    let (phase_gate, mut phase_child) = make_phase_gate(opts.phase_cut)?;
     let phase_stage = opts.phase_cut;
     let spawn_cell: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
     let spawn_cell_tweak = spawn_cell.clone();
@@ -518,12 +570,7 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
         if let Ok(filter) = std::env::var("PROBE_RUST_LOG") {
             cmd.env("RUST_LOG", filter);
         }
-        if let (Some(child), Some(stage)) = (phase_child.as_mut(), phase_stage) {
-            child
-                .configure_command(cmd, stage)
-                .expect("configure the runtime phase-cut channel");
-            cmd.env("RYEOS_DIRECTIVE_TEST_BLOCK_AT", stage);
-        }
+        configure_phase_child(phase_child.as_mut(), phase_stage, cmd);
         *spawn_cell_tweak.lock().expect("spawn cell") = Some(Instant::now());
     })
     .await?;
