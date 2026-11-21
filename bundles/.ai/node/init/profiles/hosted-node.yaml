@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-20T12:21:41Z:60a84e26b3352b3d9cab09284ecfe3707516179c0aa0ac761af81c4256d476d8:2/et+eAMVCzrm//IaVjSOok5D5Q5jj9ZO1pHYBGQcVb1MCtMI/hhp6UzKl5bJWUBJUmWmlqj2HkL/66SgHvpCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-21T16:57:42Z:1d1d9d1791f6c4924d8f28bda5c1ad09e52f969143a9531275bbd58a854ce319:f30kY2NjJoGGUvwHQ2h1ZlLsycrpb0oqwyu2sJGOjPHD0m1iRJ/UvhDSlruDvw+kjZzeA0YAPKJqacY4gXu3BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - core
@@ -398,6 +398,8 @@ policies:
       - ryeos.execute.service.commands/dispatch
       - ryeos.execute.service.commands/submit
       - ryeos.execute.service.worker-executions/approvals
+      - ryeos.execute.service.revisions/list
+      - ryeos.execute.service.revisions/get
       - ryeos.execute.service.worker-executions/resolve-approval
       - ryeos.execute.directive.*
       - ryeos.execute.graph.*
@@ -649,3 +651,96 @@ policies:
           - /approvals/*/created_at_ms
         max_result_bytes: 262144
         max_items: 256
+      # The signed revision history of one item of the seat's own project. The
+      # project is pinned to the session's bound project, so a seat never names
+      # a path of its own, and a session with no project reads nothing. A record
+      # keeps its identifiers, digests, time, signer, verification status and
+      # the provenance keys that name no filesystem path. Failure detail text,
+      # the head failure reason and the provenance path are left out, and so is
+      # any field a later release adds until an entry names it. The list carries
+      # no item bytes. The record read keeps the signed item bytes inline for
+      # diff and revert preview; authored UI items are far below the bound, and a
+      # record that exceeds it is refused whole, never cut. Unverified records
+      # stay withheld: a seat may not ask for them.
+      - target: service:revisions/list
+        classes: [local_operator, hosted_principal]
+        pin:
+          project_path: "@session:project_root"
+        keep:
+          - /item_ref
+          - /total
+          - /sound
+          - /file
+          - /head/status
+          - /head/seq
+          - /head/head_seq
+          - /head/tip_seq
+          - /next_cursor
+          - /records/*/seq
+          - /records/*/hash
+          - /records/*/verify/status
+          - /records/*/verify/scheme
+          - /records/*/verify/signer
+          - /records/*/verify/reason
+          - /records/*/unrecorded_change_before
+          - /records/*/tombstone
+          - /records/*/recorded_at
+          - /records/*/actor/fingerprint
+          - /records/*/actor/role
+          - /records/*/before_digest
+          - /records/*/after_digest
+          - /records/*/file_ext
+          - /records/*/change_set
+          - /records/*/endorsement
+          - /records/*/provenance/authored_by
+          - /records/*/provenance/action
+          - /records/*/provenance/thread_id
+          - /records/*/provenance/invocation_id
+          - /records/*/provenance/parent_item_ref
+          - /records/*/provenance/authoring_capability
+          - /records/*/provenance/target_ref
+          - /records/*/provenance/content_digest
+        max_result_bytes: 524288
+        max_items: 200
+      - target: service:revisions/get
+        classes: [local_operator, hosted_principal]
+        pin:
+          project_path: "@session:project_root"
+        deny_params: [include_unverified]
+        keep:
+          - /item_ref
+          - /total
+          - /sound
+          - /file
+          - /head/status
+          - /head/seq
+          - /head/head_seq
+          - /head/tip_seq
+          - /record/seq
+          - /record/hash
+          - /record/verify/status
+          - /record/verify/scheme
+          - /record/verify/signer
+          - /record/verify/reason
+          - /record/unrecorded_change_before
+          - /record/tombstone
+          - /record/recorded_at
+          - /record/actor/fingerprint
+          - /record/actor/role
+          - /record/before_digest
+          - /record/after_digest
+          - /record/file_ext
+          - /record/change_set
+          - /record/endorsement
+          - /record/provenance/authored_by
+          - /record/provenance/action
+          - /record/provenance/thread_id
+          - /record/provenance/invocation_id
+          - /record/provenance/parent_item_ref
+          - /record/provenance/authoring_capability
+          - /record/provenance/target_ref
+          - /record/provenance/content_digest
+          - /record/body/previous
+          - /record/body/content
+        max_result_bytes: 1048576
+        max_items: 16

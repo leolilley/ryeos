@@ -252,3 +252,60 @@ pub const GET_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
         })
     },
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn descriptor(name: &str) -> Value {
+        let text = match name {
+            "list" => include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../../bundles/core/.ai/services/revisions/list.yaml"
+            )),
+            _ => include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../../bundles/core/.ai/services/revisions/get.yaml"
+            )),
+        };
+        serde_yaml::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn authored_list_schema_matches_the_typed_request() {
+        let service = descriptor("list");
+        assert_eq!(service["endpoint"], LIST_DESCRIPTOR.endpoint);
+        assert_eq!(
+            service["schema"],
+            json!({
+                "project_path": "string",
+                "item_ref": "string",
+                "limit": "integer?",
+                "cursor": "string?"
+            })
+        );
+        let ok = json!({"project_path": "/p", "item_ref": "view:a/b", "limit": 5, "cursor": "5"});
+        assert!(serde_json::from_value::<ListRequest>(ok).is_ok());
+        let unknown = json!({"project_path": "/p", "item_ref": "view:a/b", "other": 1});
+        assert!(serde_json::from_value::<ListRequest>(unknown).is_err());
+    }
+
+    #[test]
+    fn authored_get_schema_matches_the_typed_request() {
+        let service = descriptor("get");
+        assert_eq!(service["endpoint"], GET_DESCRIPTOR.endpoint);
+        assert_eq!(
+            service["schema"],
+            json!({
+                "project_path": "string",
+                "item_ref": "string",
+                "seq": "integer",
+                "include_unverified": "boolean?"
+            })
+        );
+        let ok = json!({"project_path": "/p", "item_ref": "view:a/b", "seq": 1});
+        assert!(serde_json::from_value::<GetRequest>(ok).is_ok());
+        let missing = json!({"project_path": "/p", "item_ref": "view:a/b"});
+        assert!(serde_json::from_value::<GetRequest>(missing).is_err());
+    }
+}
