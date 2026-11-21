@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-21T02:18:05Z:e1f945db353359eb7aeb1eb4d86eb183c37f3cb090c5e1949256f6ce7c2691a0:NwfwJXetzTtaUTilV7hbQJuFN973zAIEcqd3j9stlR+EfzfyeltBYhfxSnPxHYWF7QGtYU9/hzObcrcNI2E0CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-21T02:18:18Z:abd1cbe16aa2a8f560604cf35ece2656c130682ce7a33bb0f00ef98c07dae5aa:bQsKGryDZK7mlOTtIEWU00MjMiqLe/T1d0fjcxukZOCSZ/pfTeBHAfbpCCM7eow3eiuLUz1qAhOhOseL6xUrAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -347,11 +347,12 @@ isolation policy's own section, so a recovered session now survives edits to
 other policy sections; a session retained before the cut would contradict its
 realization on recovery, and the reset clears it.
 The same value is the `policy_digest` of the isolation launch provenance stored
-in each thread's runtime launch metadata and in the retained scoped-child grants
-(runtime database rows); the live node compares them with its current
-admission class when it prepares a machine successor or starts a scoped
-producer. Rows written before the cut carry the generation digest and would no
+in each thread's runtime launch metadata (a runtime database row); the live
+node compares it with its current admission class when it prepares a machine
+successor. Rows written before the cut carry the generation digest and would no
 longer match, and the reset clears them with the rest of the runtime database.
+Scoped-child grants carry the class too, but only in live callback capabilities,
+which are compared when issued and never stored.
 The digest is not stored in the init completion, the bundle-root admission
 (`admit_node_bundle_roots` returns a validation-only runtime), a registered
 definition record or any signed document: those compositions only compare live
