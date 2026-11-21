@@ -253,6 +253,29 @@
     },
     {
       "item": "entry",
+      "id": "mrk:35",
+      "type": "marker",
+      "state": null,
+      "tone": "good",
+      "thread": "T-0001",
+      "parent": null,
+      "exchange": "mrk:6",
+      "counts_as": null,
+      "slots": {
+        "detail": "status: completed · steps: 5",
+        "headline": "graph run ended: test/anchor_chain"
+      },
+      "seq": [
+        35,
+        35
+      ],
+      "ts": [
+        "2026-11-16T03:55:34Z",
+        "2026-11-16T03:55:34Z"
+      ]
+    },
+    {
+      "item": "entry",
       "id": "out:T-0001",
       "type": "outcome",
       "state": "completed",
@@ -262,11 +285,10 @@
       "exchange": "mrk:6",
       "counts_as": null,
       "slots": {
-        "detail": "steps: 5",
         "headline": "success"
       },
       "seq": [
-        35,
+        36,
         36
       ],
       "ts": [

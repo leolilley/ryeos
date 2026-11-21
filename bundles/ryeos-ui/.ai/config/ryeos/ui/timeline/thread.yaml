@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-20T01:32:52Z:3a9fa9b4a415015009db1fe0ec4bbed7fd5fe8109b9dd7c3f9b4c2e216a2cf68:GAieS44j/ar//Ctd0MabIXi18GWgGkZTvIx5ZA42/2rTcg7sjrQvVi75unMDoiWdw5wVCWEKeZVWZzctaeeIDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-21T10:24:10Z:273838e9528ccefc21dea5f401817f79ac7a47e717c8db670339ba0137ccbf53:dbskC0F4boCwZhAneLmFyuljbbPUZyFy81kp6x52+vxPvQNRW7mmbptMxwbfg68AU9iE5NdCtvQvLw/jlDB4Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Thread timeline definition: how a chain's events fold into timeline items.
 # Declarative data read by the timeline service; the fold engine names no event type itself.
 category: ryeos/ui/timeline
@@ -413,13 +413,21 @@ events:
         - type: marker
           project: {headline: {join: [{path: payload.artifact_type, prefix: "artifact "}]}}
 
+  # The graph runtime's report that its walk ended. Its status is a candidate:
+  # the daemon may still settle the thread differently, so this is a run-level
+  # marker and never the thread's outcome (the thread_* events own that).
   graph_completed:
     - emit:
-        - type: outcome
-          key: [thread_id]
-          state: completed
-          tone: [{default: good}]
-          project: {detail: {join: [{path: payload.steps, prefix: "steps: "}]}}
+        - type: marker
+          tone:
+            - {field: payload.status, map: {ok: good, completed: good}}
+            - {default: danger}
+          project:
+            headline: {join: [{path: payload.graph_id, prefix: "graph run ended: "}]}
+            detail:
+              join:
+                - {path: payload.status, prefix: "status: "}
+                - {path: payload.steps, prefix: "steps: "}
 
   # Provider and accounting notices.
   # A retry after a mid-stream cut voids the live fragments of that turn
