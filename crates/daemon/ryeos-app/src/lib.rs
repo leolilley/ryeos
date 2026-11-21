@@ -30,7 +30,6 @@ pub mod engine_cache;
 pub mod env_contract;
 pub mod event_store_service;
 pub mod event_stream;
-pub mod item_revised;
 pub mod execution_comparison;
 pub mod execution_history_reset;
 pub mod execution_identity_probe;
@@ -62,6 +61,7 @@ pub mod hosted_operation;
 pub mod ignore;
 #[path = "io/mod.rs"]
 pub mod io;
+pub mod item_revised;
 pub mod kind_profiles;
 pub mod launch_metadata;
 pub mod launch_stage_timings;
