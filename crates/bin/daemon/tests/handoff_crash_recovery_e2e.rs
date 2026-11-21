@@ -4614,6 +4614,32 @@ fn stderr_tail(stderr: &str, max_lines: usize) -> String {
     lines[lines.len().saturating_sub(max_lines)..].join("\n")
 }
 
+/// A crash gate that was never reached says nothing about why. Name what the
+/// driving request returned (a refusal there means the boundary could not be
+/// reached, not that the daemon was slow) and the gated daemon's log tail.
+async fn gate_miss_evidence(
+    error: anyhow::Error,
+    request: Option<tokio::task::JoinHandle<Result<(reqwest::StatusCode, serde_json::Value)>>>,
+    gated: &mut DaemonHarness,
+) -> anyhow::Error {
+    let request = match request {
+        Some(task) => match tokio::time::timeout(Duration::from_secs(2), task).await {
+            Ok(Ok(Ok((status, body)))) => format!("driving request returned {status}: {body}"),
+            Ok(Ok(Err(error))) => format!("driving request failed: {error:#}"),
+            Ok(Err(error)) => format!("driving request task failed: {error}"),
+            Err(_) => "driving request still pending".to_owned(),
+        },
+        None => "no driving request".to_owned(),
+    };
+    let stderr = gated.drain_stderr_nonblocking().await;
+    let tail: Vec<&str> = stderr
+        .lines()
+        .filter(|line| !line.contains("cache metric") && !line.contains("resolved project"))
+        .collect();
+    let tail = tail[tail.len().saturating_sub(40)..].join("\n");
+    error.context(format!("{request}\ngated daemon log tail:\n{tail}"))
+}
+
 async fn post_handoff_request(
     bind: std::net::SocketAddr,
     user_key: &SigningKey,
@@ -4978,7 +5004,12 @@ async fn crash_real_source_handoff_at(
     let request_task = tokio::spawn(async move {
         post_handoff_request(source_bind, &source_user_key, &source_node_key, request).await
     });
-    let cut_evidence = gate.wait_reached().await?;
+    let cut_evidence = match gate.wait_reached().await {
+        Ok(evidence) => evidence,
+        Err(error) => {
+            return Err(gate_miss_evidence(error, Some(request_task), &mut handoff.source).await);
+        }
+    };
     handoff.source.kill_daemon().await?;
     let _ = tokio::time::timeout(Duration::from_secs(5), request_task).await;
     Ok((
@@ -5767,7 +5798,12 @@ async fn crash_real_target_adoption_at(
     let request_task = tokio::spawn(async move {
         post_handoff_request(source_bind, &source_user_key, &source_node_key, request).await
     });
-    let cut_evidence = gate.wait_reached().await?;
+    let cut_evidence = match gate.wait_reached().await {
+        Ok(evidence) => evidence,
+        Err(error) => {
+            return Err(gate_miss_evidence(error, Some(request_task), &mut handoff.target).await);
+        }
+    };
     // The source is synchronously waiting on this exact target request. Start
     // both kills in the same poll turn so waiting for target process/UDS
     // cleanup cannot let the broken connection settle the source attempt.
@@ -6105,7 +6141,10 @@ async fn qualify_target_recovery_case(
         })
         .await?;
     handoff.refresh_routes()?;
-    let recovery_cut_evidence = gate.wait_reached().await?;
+    let recovery_cut_evidence = match gate.wait_reached().await {
+        Ok(evidence) => evidence,
+        Err(error) => return Err(gate_miss_evidence(error, None, &mut handoff.target).await),
+    };
     anyhow::ensure!(
         recovery_cut_evidence.operation_id == cut_evidence.operation_id,
         "target recovery crash gate changed the live operation identity"
