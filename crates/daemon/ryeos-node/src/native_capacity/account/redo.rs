@@ -154,6 +154,30 @@ impl AccountRedo {
         Ok(redo)
     }
 
+    /// Open the next epoch from an account record alone, when the anchor that
+    /// would normally be the predecessor cannot be read. `before` must be a
+    /// verified record of this issuance; the resulting redo is checked exactly
+    /// as [`Self::renew`]'s. Only the operator re-issuance may be built this
+    /// way: the epoch it opens starts its recovery counter at zero, so nothing
+    /// the lost anchor carried is needed.
+    pub(super) fn renew_from_account(
+        before: CapacityRecord,
+        target: CapacityRecord,
+        authorization: [u8; 32],
+        policy: &NodeNativeCapacityPolicy,
+    ) -> Result<Self> {
+        let next = Self {
+            operation: Operation::OperatorReissue,
+            before,
+            target,
+            recovery_attempts: 0,
+            recovery_process: None,
+            authorization,
+        };
+        next.validate(policy)?;
+        Ok(next)
+    }
+
     /// Prepare the successor only after the real account reached this target.
     /// This copies recovery consumption unchanged; no operation refunds it.
     /// Opening an epoch is never a successor transition: `renew` is the only
@@ -461,19 +485,17 @@ impl AccountRedo {
         policy: &NodeNativeCapacityPolicy,
         issuance: &[u8; 32],
     ) -> Result<Self> {
-        ensure!(
-            &bytes[..8] == MAGIC && bytes[8..12] == SCHEMA.to_le_bytes(),
-            "unsupported capacity redo format"
-        );
+        use super::torn::AnchorDecodeRefusal;
+        if &bytes[..8] != MAGIC || bytes[8..12] != SCHEMA.to_le_bytes() {
+            return Err(AnchorDecodeRefusal::Format.into());
+        }
         let checksum: [u8; 32] = sha2::Sha256::digest(&bytes[..ANCHOR_PAYLOAD_BYTES]).into();
-        ensure!(
-            bytes[ANCHOR_PAYLOAD_BYTES..] == checksum,
-            "capacity redo checksum mismatch"
-        );
-        ensure!(
-            &bytes[13..45] == issuance,
-            "capacity redo belongs to another issuance"
-        );
+        if bytes[ANCHOR_PAYLOAD_BYTES..] != checksum {
+            return Err(AnchorDecodeRefusal::Checksum.into());
+        }
+        if &bytes[13..45] != issuance {
+            return Err(AnchorDecodeRefusal::OtherIssuance.into());
+        }
         ensure!(
             bytes[AUTHORIZATION_END..BEFORE_START]
                 .iter()

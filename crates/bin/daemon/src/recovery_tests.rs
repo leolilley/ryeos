@@ -1395,6 +1395,66 @@ async fn periodic_recovery_waits_only_the_thread_with_a_missing_live_root() {
         .expect("unrelated project remains usable during the authority wait");
 }
 
+/// The root of a dedicated session whose lease ended while the node was down:
+/// the session settled terminal, the root is a running row with a dead process
+/// and a native-resume declaration. Startup recovery must finalize it failed
+/// with the typed `dedicated_session_settled` outcome, collect no resume
+/// intent, and leave the session terminal.
+#[tokio::test]
+async fn startup_recovery_does_not_resume_the_root_of_a_terminal_dedicated_session() {
+    let (_tmpdir, _state_owner, state) = build_test_state();
+    let projects = tempfile::tempdir().unwrap();
+    let project = projects.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    std::fs::create_dir(project.join(ryeos_engine::AI_DIR)).unwrap();
+    seed_live_recovery(&state, "T-ended-session-root", &project);
+    let db = &state.state_store;
+    db.create_credential_profile(NewCredentialProfile {
+        activation: ryeos_app::runtime_db::CredentialActivation::Ceremony,
+        profile_id: "profile-ended-session",
+        owner_principal: "fp:test",
+        home_id: "home-ended-session",
+    })
+    .unwrap();
+    let generation = db
+        .acquire_credential_profile("profile-ended-session", "fp:test", "worker-ended")
+        .unwrap();
+    db.admit_dedicated_session(NewDedicatedSession {
+        placement_thread_id: "T-ended-session-root",
+        chain_root_id: "T-ended-session-root",
+        owner_principal: "fp:test",
+        admitted_capsule_hash: &"a".repeat(64),
+        workspace_id: "W-ended-session",
+        candidate_required: false,
+        candidate_disposition: DedicatedCandidateDisposition::OwnerDecision,
+        credential_profile_id: "profile-ended-session",
+        credential_generation: generation,
+        credential_lock_owner: "worker-ended",
+    })
+    .unwrap();
+    db.fail_dedicated_session_start("T-ended-session-root", "worker-ended", 1, "lease ended", true)
+        .unwrap();
+
+    let report = super::reconcile::reconcile_active_threads(&state)
+        .await
+        .unwrap();
+
+    assert!(report.resume_intents.is_empty());
+    assert!(!report.active_thread_ids.contains("T-ended-session-root"));
+    let root = db.get_thread("T-ended-session-root").unwrap().unwrap();
+    assert_eq!(root.status, "failed");
+    let result = db
+        .get_thread_result("T-ended-session-root")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        result.outcome_code.as_deref(),
+        Some("dedicated_session_settled")
+    );
+    let session = db.dedicated_session("T-ended-session-root").unwrap().unwrap();
+    assert_eq!(session.state, "terminal");
+}
+
 #[tokio::test]
 async fn periodic_recovery_permanently_refuses_only_the_structurally_invalid_root() {
     let (_tmpdir, _state_owner, state) = build_test_state();
