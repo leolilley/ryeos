@@ -705,7 +705,7 @@ impl StateStore {
                 target_start_time_ticks: 100,
                 group_leader_pid: 41,
                 group_leader_start_time_ticks: 100,
-                pid_namespace: lillux::current_pid_namespace()?,
+                pid_namespace: lillux::current_pid_namespace().map_err(anyhow::Error::msg)?,
                 resource_selections: Vec::new(),
                 resource_settlement_authority: None,
                 resource_operations: Vec::new(),
