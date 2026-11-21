@@ -249,7 +249,7 @@ fn admit_prospective_remove(
         &prospective_roots,
         node_trust_store,
         policy_snapshot.require::<ryeos_engine::isolation::IsolationPolicy>()?,
-        policy_snapshot.generation_digest(),
+        policy_snapshot.section_digest::<ryeos_engine::isolation::IsolationPolicy>()?,
     )
     .context("prospective removal failed node definition admission")?;
     Ok(())

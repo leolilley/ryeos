@@ -1232,7 +1232,7 @@ fn run_init_under_lock_on_storage(
         &prospective_roots,
         &seed_trust_store,
         isolation_policy,
-        prospective_policy.generation_digest(),
+        prospective_policy.section_digest::<ryeos_engine::isolation::IsolationPolicy>()?,
     )
     .map_err(|error| {
         // Admission needs the node key and trust registry, which exist only
@@ -2473,7 +2473,7 @@ fn validate_prospective_staging(
         &roots,
         node_trust_store,
         isolation_policy,
-        policy_snapshot.generation_digest(),
+        policy_snapshot.section_digest::<ryeos_engine::isolation::IsolationPolicy>()?,
     )
     .with_context(|| {
         format!("completed `{bundle_name}` staging tree failed definition admission")

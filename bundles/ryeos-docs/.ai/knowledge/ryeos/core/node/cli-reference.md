@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-20T07:30:31Z:dea2f7dbea4bb4bdc95b5083e23ee6e33e0d7af10eea1feec9cb799e82ccdc2d:ThOrwbKo6i+y3p6+o6AJav8DHMqdSjjiJx/5A40mNpdMB1/NngElzEKCQt1PUIBuKDRgVfnnwlLsZ/+fXUBdBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-21T02:18:18Z:abd1cbe16aa2a8f560604cf35ece2656c130682ce7a33bb0f00ef98c07dae5aa:bQsKGryDZK7mlOTtIEWU00MjMiqLe/T1d0fjcxukZOCSZ/pfTeBHAfbpCCM7eow3eiuLUz1qAhOhOseL6xUrAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -341,6 +341,22 @@ Operator note for the runtime schema cut to epoch 142: every node must run
 `ryeos node reset execution-history --confirm --schema-cut-from 141 --schema-cut-to 142`
 on its next upgrade, because retained binding generations in the runtime
 database embed the binding document and earlier schemas no longer validate.
+The same cut changes the retained execution realization's `isolation_policy_digest`
+property from the digest of the whole node-policy generation to the digest of the
+isolation policy's own section, so a recovered session now survives edits to
+other policy sections; a session retained before the cut would contradict its
+realization on recovery, and the reset clears it.
+The same value is the `policy_digest` of the isolation launch provenance stored
+in each thread's runtime launch metadata (a runtime database row); the live
+node compares it with its current admission class when it prepares a machine
+successor. Rows written before the cut carry the generation digest and would no
+longer match, and the reset clears them with the rest of the runtime database.
+Scoped-child grants carry the class too, but only in live callback capabilities,
+which are compared when issued and never stored.
+The digest is not stored in the init completion, the bundle-root admission
+(`admit_node_bundle_roots` returns a validation-only runtime), a registered
+definition record or any signed document: those compositions only compare live
+values, so nothing outside the runtime database holds the old meaning.
 This is the command the daemon's start refusal names, with the stored and
 current epochs filled in. It does not retire project HEADs, so candidates
 retained against them keep their base fences; no epoch cut needs
