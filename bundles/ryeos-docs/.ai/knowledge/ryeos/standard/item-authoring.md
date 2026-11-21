@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T20:02:48Z:884d233b65a4d5d89fa4eb3476884e45c62da9e5674e9abc4fbc9f3589a1bbdb:n3nsuTwgojGYNPfr70r7LDXUC2cJVYI2sAk2vN3LVluyJvFDwVEXziu/eM8AELUwFuvv0M/BszVgyj7n6iiRDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-21T02:47:00Z:c7a189a3acb7e0643a0a8766f1c68beb91e3c53690929dc7f90373679fdc8be5:iJcbV3sRrnJJgLeHfOWFJZV5H4LkJdS8RsgnjbXBVlZA+iNXLivuTVM3Si8OCEELe7CVkmpo+78cGDX5FlapBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [item-authoring, runtime-authority, manifest, capabilities, author_item]
@@ -118,18 +118,21 @@ Request params:
 - `item_ref` — the canonical target `kind:bare_id` (no ref suffix).
 - `content` — the **unsigned** item body. It must not contain a signature line or
   a `ryeos:authored:` provenance marker; both are daemon-owned.
-- `mode` — `create` (default; fails if the item already exists) or `upsert`
-  (replaces the existing file, or creates it when there is none).
+- `mode` — `create` (default; fails if the item already exists), `upsert`
+  (replaces the existing file, or creates it when there is none) or `remove`
+  (removes a runtime-authored item; takes no `content`).
 - `format_ext` — the file extension (e.g. `.md`); required when creating a new
   item.
-- `expected_digest` — compare-and-swap guard for `upsert`. **Required when the
-  item already exists**: the upsert commits only if the incumbent's authored
+- `expected_digest` — compare-and-swap guard for `upsert` and `remove`.
+  **Required when the item already exists**: the write commits only if the incumbent's authored
   `content_digest` (from its provenance, and from the response that wrote it)
   equals this value, and fails with an `author_item conflict` otherwise. An
   upsert without it over an existing item is refused with code
   `author_item_expected_digest_required`, naming the incumbent's
   `content_digest` to resend with. An item with no runtime provenance (one the
-  operator signed) cannot be replaced through `author_item` at all.
+  operator signed) cannot be replaced or removed through `author_item` at all;
+  an operator-authored item is removed only with `ryeos item remove`, which the
+  operator runs in their own process.
 
 On success the daemon:
 
@@ -144,7 +147,33 @@ On success the daemon:
 - signs with the daemon identity and writes atomically.
 
 Response: `{ item_ref, path, mode, signer_fingerprint, content_digest,
-required_capability }`.
+required_capability, revision, revision_digest, previous_digest }`.
+
+A kind whose signed schema declares `runtime_authoring: refused` (the `revision`
+kind) cannot be written through the callback by any run, whatever it holds
+(`author_item_kind_not_authorable`).
+
+### Revision history
+
+Every write and removal is also recorded as a **revision**: a signed record of
+the core `revision` kind in the project, at
+`.ai/revisions/<kind>/<bare-id>/<seq>.yaml`. The chain of one item is numbered
+from 1; each record is signed by the key that made the change (the node's
+authoring key for a runtime-authored change, the operator's key for one made
+with `ryeos sign` or `ryeos item remove`), and carries the signed item bytes,
+the digest of the previous record, the item file's digest before and after, and
+the provenance (thread, run, acting principal, capability) and `recorded_at`,
+all inside the signed body. A removal is a tombstone record with no
+`after_digest`. The history travels with the project.
+
+The chain is provenance and undo, never authority: the loader reads the file on
+disk. A file whose digest is not the last record's `after_digest` is reported
+as an `unrecorded_change`. The node also keeps a node-signed head per project
+naming the newest record it has attested for each chain; a chain shorter than
+or different from its head is reported as `truncated` or `diverged`, and
+`author_item` refuses to extend it (`revision_chain_truncated`,
+`revision_chain_diverged`). Read a chain with `service:revisions/list` and
+`service:revisions/get`, which return each record with its verification.
 
 v1 supports live-filesystem project provenance only.
 
@@ -195,23 +224,32 @@ node, which creates and pins it. Nothing creates the key for an existing node
 except re-running `ryeos init`.
 
 Because the pinned scope admits no kind, an authored item is out of scope for
-every kind until the operator widens it. In project space an out-of-scope item
-resolves as `untrusted_project` and is refused at launch; it is a machine draft
-to read, not to run. Widening the scope per kind is the deliberate exception:
+every kind, and that scope is the only one the key may hold. In project space an
+out-of-scope item resolves as `untrusted_project` and is refused at launch; it
+is a machine draft to read, not to run. An operator makes a draft trusted by
+endorsing it, which leaves the item and its authoring signature untouched:
 
 ```bash
 ryeos trust show <authoring-fingerprint>           # the record and its events
-ryeos trust scope <authoring-fingerprint> --kind knowledge
+ryeos --project . endorse --item knowledge:notes/draft      # these exact bytes
+ryeos --project . endorse --standing --kind knowledge       # the kind, in this project
+ryeos endorse list
+ryeos endorse revoke --endorsement <digest>
 ```
 
-After that, authored `knowledge` items resolve as `trusted_project` and
-authored items of every other kind are still refused. The node key does not
+After a per-change endorsement the item resolves as `trusted_project` for those
+exact bytes; one changed byte returns it to `untrusted_project`. A standing
+endorsement covers the named kinds in that project and nothing else. Revoking
+returns the covered items to `untrusted_project`. `ryeos trust scope` refuses to
+widen the authoring key (`trust_authoring_scope_retired`). The node key does not
 sign project items: its own scope is the node space only. The operator's
-signature (`ryeos sign`) stays the trusted path for everything else.
+signature (`ryeos sign`) stays the trusted path for everything else. See
+[Signing and Trust](../core/signing.md) for what an endorsement carries.
 
 The authoring key rotates with `ryeos node authoring rotate` (stopped node):
-the new key inherits the old key's scope, the old key is retired and the items
-it signed keep verifying. See [Identity Model](../core/identity-model.md).
+the new key takes the authoring scope, the old key is retired and the items
+it signed keep verifying; endorsements name digests and kinds, not keys, so they
+keep covering them. See [Identity Model](../core/identity-model.md).
 
 ### How authored items resolve and show up
 

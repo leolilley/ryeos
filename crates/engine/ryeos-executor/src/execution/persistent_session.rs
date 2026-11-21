@@ -3046,6 +3046,7 @@ fn start_capsule_process(
         None,
         None,
         None,
+        &|stage| original_start.note_stage(stage),
         Some((original_start, Arc::clone(&workspace_lifeline), cancelled)),
     )?;
     let pooled_owner_coordinate = workspace_name;
@@ -3656,6 +3657,15 @@ fn await_external_candidate_ready_inner(
     let mut transport = None;
     let mut relay = None;
     loop {
+        // A stop abandons the wait between provider steps. The failure takes
+        // the ordinary fence path below: cleanup is requested and its proof is
+        // read, so the allocation is left for the next start's reconcile and
+        // an unproved one keeps the pool fenced. A step already inside a
+        // provider call runs to that call's own deadline.
+        ensure!(
+            !state.persistent_sessions.is_shutting_down(),
+            "external candidate start abandoned for daemon shutdown"
+        );
         ensure!(
             !deadline.has_elapsed(),
             "external candidate did not reach authenticated readiness before its signed timeout"
@@ -3967,6 +3977,8 @@ fn spawn_capsule_process_held(
     process_scope_allocation: Option<&lillux::ProcessScopeAllocation>,
     process_scope: Option<lillux::ProcessScope>,
     placement_thread_id: Option<&str>,
+    // Records the admitted-start stage this launch has reached.
+    admitted_stage: &dyn Fn(ryeos_app::persistent_session::AdmittedStartStage),
     pooled_start: Option<(
         &ryeos_app::persistent_session::PersistentSessionPooledStart,
         Arc<ryeos_app::temp_dir_guard::TempDirGuard>,
@@ -4192,6 +4204,7 @@ fn spawn_capsule_process_held(
             workspace_view,
             &workspace_record.base_snapshot,
         )?;
+        admitted_stage(ryeos_app::persistent_session::AdmittedStartStage::ProviderLease);
         let relay_pump = await_external_candidate_ready(state, placement, guest_inputs)?;
         let state_root = match state_root {
             Some(state_root) => state_root,
@@ -4621,6 +4634,7 @@ pub fn start_exclusive_capsule(
             scope_allocation.as_ref(),
             scope,
             Some(&identity.placement_thread_id),
+            &|stage| reservation.note_stage(stage),
             None,
         )
         .map_err(|error| {

@@ -49,6 +49,7 @@ pub async fn run_augmentations(
     admitted_request_snapshot: Option<
         &std::sync::Arc<ryeos_engine::engine::AdmittedRequestAuthoritySnapshot>,
     >,
+    request_trust: Option<&ryeos_engine::trust::TrustStore>,
 ) -> Result<Vec<LaunchAugmentationAudit>, LaunchAugmentationError> {
     let mut audits = Vec::new();
     for decl in &exec.launch_augmentations {
@@ -68,6 +69,7 @@ pub async fn run_augmentations(
                         state,
                         launch_timings,
                         admitted_request_snapshot,
+                        request_trust,
                     )
                     .await?,
                 );

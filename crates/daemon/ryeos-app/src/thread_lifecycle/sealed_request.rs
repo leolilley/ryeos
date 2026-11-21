@@ -1866,6 +1866,7 @@ impl SealedRootExecutionRequest {
             authenticated_content_qualification_digest: content_attachment,
             admitted_request_snapshot: None,
             selected_executor_route: None,
+            request_trust: engine.trust_store.snapshot(),
         };
         if self.executor_route.executor_ref() != self.executor_ref {
             bail!(

@@ -6,6 +6,8 @@ use base64::Engine as _;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
+use ryeos_engine::trust::{EndorsedItem, EndorsementBody, SignedEndorsement};
+
 use crate::error::CliError;
 
 const ARTIFACT_EXPORT_CHUNK_BYTES: usize = 512 * 1024;
@@ -261,6 +263,156 @@ pub(crate) async fn remote_delegate(
     .await
 }
 
+/// A flag that may be given once or repeated, as a list of text.
+fn text_list(value: Option<&Value>, flag: &str) -> Result<Vec<String>, CliError> {
+    match value {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::String(text)) => Ok(vec![text.clone()]),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| local(format!("--{flag} entries must be strings")))
+            })
+            .collect(),
+        Some(_) => Err(local(format!("--{flag} must be text"))),
+    }
+}
+
+/// Sign an endorsement with the operator key, in this process, and hand it to
+/// the node. Per-change: `--item` names the exact items (refs, globs or `.ai`
+/// paths) in the project; their digests are read from the signed bytes on disk.
+/// Standing: `--standing --kind <kind>` covers a kind in the project, until
+/// `--lifetime-secs` pass when given. The node verifies the signature against
+/// its signer registry, countersigns and stores it; the key never leaves this
+/// process.
+pub(crate) async fn endorse_items(app_root: &Path, parameters: &Value) -> Result<Value, CliError> {
+    let project_path = parameters
+        .get("project_path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| local("endorse requires a project (--project <dir>)"))?;
+    let project = std::fs::canonicalize(project_path)
+        .map_err(|error| local(format!("project `{project_path}` is not readable: {error}")))?;
+    let project_text = project
+        .to_str()
+        .ok_or_else(|| local("the project path is not UTF-8"))?
+        .to_owned();
+    let items = text_list(parameters.get("item"), "item")?;
+    let kinds = text_list(parameters.get("kind"), "kind")?;
+    let standing = parameters
+        .get("standing")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let lifetime_secs = match parameters.get("lifetime_secs") {
+        None | Some(Value::Null) => None,
+        Some(Value::Number(number)) => Some(
+            number
+                .as_u64()
+                .filter(|secs| *secs > 0)
+                .ok_or_else(|| local("--lifetime-secs must be a positive whole number"))?,
+        ),
+        Some(Value::String(text)) => Some(
+            text.parse::<u64>()
+                .ok()
+                .filter(|secs| *secs > 0)
+                .ok_or_else(|| local("--lifetime-secs must be a positive whole number"))?,
+        ),
+        Some(_) => return Err(local("--lifetime-secs must be a positive whole number")),
+    };
+    if standing != items.is_empty() {
+        return Err(local(
+            "endorse takes either --item <ref>... (these exact items) or --standing --kind <kind>... \
+             (every item of those kinds the authoring key signs in the project), not both",
+        ));
+    }
+    if standing && kinds.is_empty() {
+        return Err(local("--standing needs at least one --kind <kind>"));
+    }
+    if !standing && (!kinds.is_empty() || lifetime_secs.is_some()) {
+        return Err(local("--kind and --lifetime-secs belong to --standing"));
+    }
+
+    let described = if standing {
+        Vec::new()
+    } else {
+        let app_root = app_root.to_path_buf();
+        let project = project.clone();
+        tokio::task::spawn_blocking(move || {
+            ryeos_core_tools::actions::endorse::describe_project_items(&app_root, &items, &project)
+        })
+        .await
+        .map_err(|error| local(format!("endorse worker stopped: {error}")))?
+        .map_err(|error| local(format!("{error:#}")))?
+    };
+
+    crate::daemon_preflight::lifecycle_preflight(app_root).await?;
+    let signer = crate::transport::signing::Signer::resolve(app_root)?;
+    let facts = execute_service(
+        app_root,
+        &signer,
+        json!({
+            "item_ref": "service:endorsements/record",
+            "ref_bindings": {},
+            "product_selections": [],
+            "parameters": {},
+        }),
+    )
+    .await?;
+    let ledger_head = facts
+        .get("ledger_head")
+        .and_then(Value::as_str)
+        .ok_or_else(|| local("the node did not return its endorsement ledger head"))?
+        .to_owned();
+    let endorser = format!("fp:{}", signer.fingerprint);
+    let nonce: [u8; 16] = rand::random();
+    let nonce: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
+    let now = lillux::time::unix_secs_now();
+    let endorsed_at = lillux::time::iso8601_from_unix_secs(now);
+    let body = if standing {
+        EndorsementBody::standing(
+            &project_text,
+            &endorser,
+            kinds,
+            lifetime_secs
+                .map(|secs| lillux::time::iso8601_from_unix_secs(now.saturating_add(secs))),
+            &endorsed_at,
+            &nonce,
+            &ledger_head,
+        )
+    } else {
+        EndorsementBody::for_items(
+            &project_text,
+            &endorser,
+            described
+                .iter()
+                .map(|item| EndorsedItem {
+                    item_ref: item.item_ref.clone(),
+                    kind: item.kind.clone(),
+                    digest: item.digest.clone(),
+                })
+                .collect(),
+            &endorsed_at,
+            &nonce,
+            &ledger_head,
+        )
+    };
+    body.validate_shape().map_err(local_error)?;
+    let signature = signer.sign_bytes_base64(&body.signing_bytes().map_err(local_error)?);
+    let signed = SignedEndorsement::with_signature(body, signature);
+    execute_service(
+        app_root,
+        &signer,
+        json!({
+            "item_ref": "service:endorsements/record",
+            "ref_bindings": {},
+            "product_selections": [],
+            "parameters": { "endorsement": signed },
+        }),
+    )
+    .await
+}
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SignParameters {
@@ -309,6 +461,33 @@ pub(crate) async fn sign_items(app_root: &Path, parameters: &Value) -> Result<Va
             report.total()
         )));
     }
+    serde_json::to_value(report).map_err(local_error)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ItemRemoveParameters {
+    item_ref: String,
+    project_path: String,
+}
+
+/// Remove a project item with the operator key, in this process, and record
+/// the removal as a tombstone revision signed by that key. The node never
+/// holds the key; the node need not be running.
+pub(crate) async fn item_remove(app_root: &Path, parameters: &Value) -> Result<Value, CliError> {
+    let params: ItemRemoveParameters = serde_json::from_value(parameters.clone())
+        .map_err(|error| local(format!("item remove parameters are invalid: {error}")))?;
+    let app_root = app_root.to_path_buf();
+    let report = tokio::task::spawn_blocking(move || {
+        ryeos_core_tools::actions::revision::run_item_remove(
+            &app_root,
+            &params.item_ref,
+            Path::new(&params.project_path),
+        )
+    })
+    .await
+    .map_err(|error| local(format!("item remove worker stopped: {error}")))?
+    .map_err(|error| local(format!("{error:#}")))?;
     serde_json::to_value(report).map_err(local_error)
 }
 
@@ -771,6 +950,42 @@ fn local_error(error: impl std::fmt::Display) -> CliError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn endorse_flags_accept_one_value_or_a_list() {
+        assert!(text_list(None, "item").unwrap().is_empty());
+        assert_eq!(
+            text_list(Some(&json!("view:a")), "item").unwrap(),
+            vec!["view:a".to_owned()]
+        );
+        assert_eq!(
+            text_list(Some(&json!(["view:a", "view:b"])), "item").unwrap(),
+            vec!["view:a".to_owned(), "view:b".to_owned()]
+        );
+        assert!(text_list(Some(&json!([1])), "item").is_err());
+        assert!(text_list(Some(&json!(true)), "item").is_err());
+    }
+
+    #[tokio::test]
+    async fn endorse_refuses_a_mix_of_items_and_standing_before_touching_the_node() {
+        let project = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let path = project.path().to_str().unwrap();
+        for parameters in [
+            json!({ "project_path": path }),
+            json!({ "project_path": path, "standing": true, "item": ["view:a"], "kind": ["view"] }),
+            json!({ "project_path": path, "standing": true }),
+            json!({ "project_path": path, "item": ["view:a"], "kind": ["view"] }),
+            json!({ "project_path": path, "item": ["view:a"], "lifetime_secs": 5 }),
+            json!({ "project_path": path, "standing": true, "kind": ["view"], "lifetime_secs": 0 }),
+        ] {
+            let error = endorse_items(root.path(), &parameters).await.unwrap_err();
+            assert!(
+                matches!(error, CliError::Local { .. }),
+                "{parameters}: {error:?}"
+            );
+        }
+    }
 
     #[test]
     fn artifact_hash_requires_lowercase_sha256() {

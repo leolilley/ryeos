@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-19T16:51:25Z:199acfdc5858524da3d29c5cfe4c4d6fa0b5346597c089fe909bda4a9a9986f6:IsOVQtnn6bl1B49YQ2kGtS3tb85XH43lhy9xSwVij5N6lbI+jCeT1kyg1TmlF71GPZpOfBYrDflWcjPzjstpAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-20T23:21:17Z:f1d65ca1d065c860dbe7d75ae5f738d2da79c2a9ca8d9ab03e11f8205634ccd6:8CkUm3mMI8BGBkTKzRBP+RtkyvFttFBsJWonH49hX43+1V4tHVCJhy5I7JTPYL4RSGGG9QvkgH52bFdEu9qMDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -775,6 +775,19 @@ until the external snapshot driver is retired.
 - `ryeos admission-token --class <local_client|remote_node|remote_principal> --scopes <scope,...> [--origin-site-id <site:id>] [--label <label>] [--ttl-secs <seconds>] [--grant-lifetime-secs <seconds>]` — mint a one-time local admission token file that admits one grant class. `--origin-site-id` is required for `remote_principal` and refused otherwise.
 - `ryeos publish <bundle-dir> --key <private-key.pem> --owner <label>` — sign/publish bundle contents.
 
+## Endorsement verbs
+
+Endorsements make items the authoring key signed trusted. They are signed with
+the operator key inside the CLI and submitted to the running node; see
+[Signing and Trust](../signing.md#endorsements).
+
+| Verb | Effect |
+|---|---|
+| `ryeos --project <dir> endorse --item <ref\|path>...` | Endorse these exact items, by the digest of their signed bytes |
+| `ryeos --project <dir> endorse --standing --kind <kind>... [--lifetime-secs <n>]` | Endorse every item of those kinds the authoring key signs in the project, until the lifetime passes when given |
+| `ryeos endorse list` | List recorded endorsements, whether each is in force or revoked, and the ledger head |
+| `ryeos endorse revoke --endorsement <digest> [--reason <text>]` | Withdraw one endorsement with a node-signed tombstone |
+
 ## Trust verbs
 
 The signer registry lives in `<app_root>/.ai/node/trust/`. See
@@ -783,7 +796,7 @@ The signer registry lives in `<app_root>/.ai/node/trust/`. See
 | Verb | Effect |
 |---|---|
 | `ryeos trust pin --from <PUBLISHER_TRUST.toml> --role publisher\|project_author\|authoring [--project <root>]... [--space <space>] [--kind <kind>]` | Pin a signer with the given role and scope |
-| `ryeos trust scope <fp> [--space <space>] [--kind <kind>] [--project <root>]...` | Replace a signer's scope |
+| `ryeos trust scope <fp> [--space <space>] [--kind <kind>] [--project <root>]...` | Replace a signer's scope. For an authoring key it takes no flags and restores the authoring scope; endorsements, not scope, trust what it signs |
 | `ryeos trust retire <fp>` | Retire a signer; it still verifies existing items |
 | `ryeos trust revoke <fp>` | Revoke a signer; it verifies nothing and cannot be pinned again |
 | `ryeos trust succeed --from <succession.toml>` | Apply a signed succession statement |

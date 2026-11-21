@@ -1,0 +1,13 @@
+# ryeos:signed:2026-11-20T23:16:17Z:ed1464ac3a975afadfb6118544e61ef3450216594d9a53c4fdeabc381b5c2ef2:U2GSuNBXutRHiqKhhArVa6s7wgFx7S3svXVr+ILPETx+aEKnk8kKffRjbRl3tIPxuivgE4+ROAQzlVk0A5fGBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- endorse
+- list
+description: List the endorsements recorded on this node
+help:
+  usage: "ryeos endorse list"
+parameter_binding:
+  mode: tail_object
+  flag_key_normalization: hyphen_to_underscore
+dispatch:
+  kind: execute_ref
+  execute: service:endorsements/list

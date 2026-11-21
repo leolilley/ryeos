@@ -37,6 +37,7 @@ pub mod commands_submit;
 pub mod commands_wait;
 pub mod credential_profiles;
 pub mod dedicated_sessions;
+pub mod endorsements;
 pub mod events_chain_replay;
 pub mod events_replay;
 pub mod external_content_accept_qualification_testimony;
@@ -126,6 +127,7 @@ pub mod remote_vault_list;
 pub mod remote_vault_set;
 pub mod remote_worker_workflows;
 pub mod renew_key;
+pub mod revisions;
 pub mod revoke_key;
 #[cfg(feature = "scheduling")]
 pub mod scheduler_deregister;
@@ -305,6 +307,8 @@ pub const ALL: &[ServiceDescriptor] = &[
     records::GET_DESCRIPTOR,
     records::LIST_DESCRIPTOR,
     records::KINDS_DESCRIPTOR,
+    revisions::LIST_DESCRIPTOR,
+    revisions::GET_DESCRIPTOR,
     trust_list::SHOW_DESCRIPTOR,
     bundle_remove::DESCRIPTOR,
     bundle_catalog_publish::DESCRIPTOR,
@@ -348,6 +352,9 @@ pub const ALL: &[ServiceDescriptor] = &[
     authorize_key::DESCRIPTOR,
     renew_key::DESCRIPTOR,
     revoke_key::DESCRIPTOR,
+    endorsements::RECORD,
+    endorsements::REVOKE,
+    endorsements::LIST,
     remote_delegation::DELEGATE,
     remote_delegation::LIST,
     remote_delegation::REVOKE,

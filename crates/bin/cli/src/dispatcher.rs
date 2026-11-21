@@ -597,10 +597,24 @@ async fn try_dispatch_client_handler(
                 .await
                 .map(ClientHandlerOutcome::json)
         }
+        "endorse_items" => {
+            authorize_exact_core_client_handler(&matched.command, snapshot, "endorse.yaml")?;
+            apply_project_policy(&matched.command, &mut parameters, default_project)?;
+            crate::client_handlers::endorse_items(app_root, &parameters)
+                .await
+                .map(ClientHandlerOutcome::json)
+        }
         "sign_items" => {
             authorize_exact_core_client_handler(&matched.command, snapshot, "sign.yaml")?;
             apply_project_policy(&matched.command, &mut parameters, default_project)?;
             crate::client_handlers::sign_items(app_root, &parameters)
+                .await
+                .map(ClientHandlerOutcome::json)
+        }
+        "item_remove" => {
+            authorize_exact_core_client_handler(&matched.command, snapshot, "item-remove.yaml")?;
+            apply_project_policy(&matched.command, &mut parameters, default_project)?;
+            crate::client_handlers::item_remove(app_root, &parameters)
                 .await
                 .map(ClientHandlerOutcome::json)
         }

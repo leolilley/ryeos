@@ -663,6 +663,7 @@ mod tests {
                 ),
                 label: "bootstrap-test".to_string(),
                 scope: ryeos_engine::trust::SignerScope::everywhere(),
+                endorsements: None,
             }]
         }
 

@@ -57,6 +57,7 @@ pub async fn run(
     state: &ryeos_app::state::AppState,
     launch_timings: Option<&ryeos_app::launch_stage_timings::LaunchStageTimings>,
     admitted_request_snapshot: Option<&Arc<ryeos_engine::engine::AdmittedRequestAuthoritySnapshot>>,
+    request_trust: Option<&ryeos_engine::trust::TrustStore>,
 ) -> Result<Vec<super::LaunchAugmentationAudit>, LaunchAugmentationError> {
     let (
         target_kind,
@@ -208,6 +209,7 @@ pub async fn run(
                 &engine_roots,
                 engine,
                 &request_snapshot,
+                request_trust.unwrap_or(&request_snapshot.trust_store),
                 &subject_authority,
                 &resolution_materialization,
                 state,
@@ -255,6 +257,7 @@ pub async fn run(
                                 &engine_roots,
                                 node_config_root.as_deref(),
                                 &resolution_materialization,
+                                request_trust.unwrap_or(&request_snapshot.trust_store),
                                 state,
                             )
                             .await?
@@ -335,6 +338,7 @@ pub async fn run(
                                     &engine_roots,
                                     node_config_root.as_deref(),
                                     &resolution_materialization,
+                                    request_trust.unwrap_or(&request_snapshot.trust_store),
                                     state,
                                 )
                                 .await?
@@ -410,6 +414,7 @@ pub async fn run(
                                 &engine_roots,
                                 node_config_root.as_deref(),
                                 &resolution_materialization,
+                                request_trust.unwrap_or(&request_snapshot.trust_store),
                                 state,
                             )
                             .await?
@@ -992,6 +997,7 @@ pub async fn run(
                 &engine_roots,
                 node_config_root.as_deref(),
                 &resolution_materialization,
+                request_trust.unwrap_or(&request_snapshot.trust_store),
                 state,
             )
             .await?
@@ -1082,6 +1088,7 @@ pub async fn run(
                 &engine_roots,
                 node_config_root.as_deref(),
                 &resolution_materialization,
+                request_trust.unwrap_or(&request_snapshot.trust_store),
                 state,
             )
             .await?
@@ -1533,6 +1540,7 @@ async fn load_runtime_config_snapshot_cached(
     engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
     engine: &ryeos_engine::engine::Engine,
     request_snapshot: &ryeos_engine::engine::EffectiveRequestAuthoritySnapshot,
+    request_trust: &ryeos_engine::trust::TrustStore,
     subject_authority: &ryeos_engine::contracts::SubjectResolutionAuthority,
     materialization: &ryeos_app::resolution_cache::ResolutionMaterializationBinding,
     state: &ryeos_app::state::AppState,
@@ -1543,8 +1551,10 @@ async fn load_runtime_config_snapshot_cached(
     let engine_roots = engine_roots.clone();
     let node_config_root = engine.node_config_root();
     let key_has_node_config_layer = node_config_root.is_some();
-    let trusted_signers =
-        ryeos_engine::launch_envelope_types::trusted_signer_entries(&state.engine.node_trust_store);
+    let trusted_signers = state
+        .engine
+        .node_trust_store
+        .launch_signer_entries(request_trust, engine_roots.signer_project_root());
     let generation = engine.registered_bundle_generation_fingerprint();
     let generation_epoch = engine.registered_bundle_generation_epoch();
     let key_subject_authority = subject_authority.clone();
@@ -1901,15 +1911,17 @@ async fn runtime_config_snapshot_is_valid(
     engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
     node_config_root: Option<&Path>,
     materialization: &ryeos_app::resolution_cache::ResolutionMaterializationBinding,
+    request_trust: &ryeos_engine::trust::TrustStore,
     state: &ryeos_app::state::AppState,
 ) -> Result<bool, LaunchAugmentationError> {
     cached_method_config_is_valid(
         snapshot,
         engine_roots,
         node_config_root,
-        &ryeos_engine::launch_envelope_types::trusted_signer_entries(
-            &state.engine.node_trust_store,
-        ),
+        &state
+            .engine
+            .node_trust_store
+            .launch_signer_entries(request_trust, engine_roots.signer_project_root()),
         Some(materialization),
     )
     .await

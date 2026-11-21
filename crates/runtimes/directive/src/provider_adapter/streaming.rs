@@ -5323,6 +5323,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             public_key: "ed25519:sDKyQ9rFxIduNjGtXq6aTrLlAg39177NzCT1+YYqpRk=".to_string(),
             label: "RyeOS Development".to_string(),
             scope: ryeos_engine::trust::SignerScope::publisher_default(),
+            endorsements: None,
         }]
     }
 

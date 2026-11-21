@@ -99,6 +99,12 @@ impl RuntimeRoot {
         self.state().join("cache")
     }
 
+    /// Node-signed heads of the project item revision chains, one document
+    /// per project.
+    pub fn revision_heads_dir(&self) -> PathBuf {
+        self.state().join("revision-heads")
+    }
+
     /// Node-private implementation root for declarative external-content
     /// activation. Callers must still open and mutate it through Lillux
     /// descriptor-relative primitives; this method owns only canonical layout.

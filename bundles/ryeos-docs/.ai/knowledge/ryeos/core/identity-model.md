@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-16T01:11:15Z:25e9895f0b5787d1853f7ee69ed6f4317793c32f58c5cd83636e5b38363352fd:OXJps8az9Sc8nYJWtNkoBEbJcXvKMIYcQ8uuPMGhjiBbe0X+SoB/FO3YEKLhyBTD+vX/Y0BDgiiTn/1d7RJ9Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-20T23:21:17Z:fa45bcd532a598d71d441d53a1ce04dd3885b7181d7ca5857e3d7668155800a6:U93XJnkiXxw5FFXSDN08JoZ2sWNLRdQXPBFqZvZ94DUmufOA91saRIOfA+GNfyfKMvANJVDWOn0k8aO6EV6ZDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [identity, trust, keys, security, fundamentals]
@@ -65,10 +65,11 @@ to the node key.
 The authoring key signs the items a runtime authors through the daemon. It is
 neither the node key nor the operator key, so authored items can be admitted or
 refused as a class without touching either. `ryeos init` creates it and pins it
-in the signer registry with role `authoring`, spaces `[project]` and no kinds:
-authored items are machine drafts until the operator widens the scope for a kind
-(`ryeos trust scope <fp> --kind <kind>`) or reviews and re-signs them. The key
-home `.ai/node/authoring` is in the live-execution floor.
+in the signer registry with role `authoring`, spaces `[project]` and no kinds.
+The key's registry scope never decides trust: authored items are machine drafts
+until the operator endorses them (`ryeos endorse`) or reviews and re-signs them
+(`ryeos sign`). See [Signing and Trust](signing.md). The key home
+`.ai/node/authoring` is in the live-execution floor.
 
 ## Key lifecycle
 

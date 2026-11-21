@@ -724,6 +724,7 @@ pub(crate) fn start_external_qualification_local_worker_for_signed_request(
                     &session.lifecycle,
                     &session.wire,
                 )?;
+                reservation.note_stage(ryeos_app::persistent_session::AdmittedStartStage::Spawn);
                 {
                     let workspace_directory =
                         owner.borrow_workspace_directory(&workspace_ready, &workspace)?;
@@ -835,7 +836,18 @@ pub(crate) fn start_external_qualification_local_worker_for_signed_request(
                     ) = connector.into_parts();
                     mounts.extend(connector_mounts);
                     lifelines.extend(connector_lifelines);
-                    if let Err(error) = owner.authorize_spawn() {
+                    // A stop that arrives while the start is still preparing must
+                    // not launch a worker only to kill it: refuse here, through
+                    // the same fence as a lost spawn authority, so the start
+                    // settles inside the drain.
+                    let spawn_gate = if state.persistent_sessions.is_shutting_down() {
+                        Err(anyhow::anyhow!(
+                            "Q local Worker start abandoned for daemon shutdown"
+                        ))
+                    } else {
+                        owner.authorize_spawn()
+                    };
+                    if let Err(error) = spawn_gate {
                         return Ok(LaunchOutcome::Failed {
                             error: fence_start_failure(
                                 owner,
