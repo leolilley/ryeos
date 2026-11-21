@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-21T09:22:10Z:9cbe5ad0393936093f14a84029cb67076c7fc32689a70de17848b3b72da1e66e:4lw4BuwQj2SDbJL4sckjSg7N1pAvIzeB9PYXSPl0FTtqMk+Z48rlPUG9gkSU8Y6iPmzJh7nolDwso1+Dz9zGAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-21T10:24:10Z:273838e9528ccefc21dea5f401817f79ac7a47e717c8db670339ba0137ccbf53:dbskC0F4boCwZhAneLmFyuljbbPUZyFy81kp6x52+vxPvQNRW7mmbptMxwbfg68AU9iE5NdCtvQvLw/jlDB4Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Thread timeline definition: how a chain's events fold into timeline items.
 # Declarative data read by the timeline service; the fold engine names no event type itself.
 category: ryeos/ui/timeline
@@ -423,7 +423,7 @@ events:
             - {field: payload.status, map: {ok: good, completed: good}}
             - {default: danger}
           project:
-            headline: graph run ended
+            headline: {join: [{path: payload.graph_id, prefix: "graph run ended: "}]}
             detail:
               join:
                 - {path: payload.status, prefix: "status: "}
