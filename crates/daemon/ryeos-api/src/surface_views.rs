@@ -485,13 +485,27 @@ fn embed_view_sets_in_generation(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
+    // The shared resolver stamps the engine's authorship fact into every
+    // project-space item. A view set carries arrangement only, so the fact is
+    // dropped from the body; the item's trust class is already in its identity.
     let resolved = resolve_identity_items_in_generation(
         generation,
         project_root,
         project_content,
         "view_set",
         unique,
-    );
+    )
+    .into_iter()
+    .map(|(set_ref, result)| {
+        let result = result.map(|(mut body, identity)| {
+            if let Some(fields) = body.as_object_mut() {
+                fields.remove(AUTHORSHIP_KEY);
+            }
+            (body, identity)
+        });
+        (set_ref, result)
+    })
+    .collect();
     embed_view_set_results(composed_value, &refs, resolved, admit)
 }
 
