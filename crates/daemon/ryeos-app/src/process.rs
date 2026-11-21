@@ -125,6 +125,9 @@ pub struct ExecutionProcessIdentity {
     /// The process-group leader PID, equal to the signalable PGID.
     pub group_leader_pid: i64,
     pub group_leader_start_time_ticks: i64,
+    /// The pid namespace (`pid:[<inode>]`) in which the numeric coordinates
+    /// above were observed; see [`lillux::ExactProcessIdentity`]. Required.
+    pub pid_namespace: String,
     /// Exact whole-execution authority when one was reserved at admission.
     /// Absence explicitly denotes the enforced no-group-escape contract, not
     /// permission to downgrade a failed scoped launch or recovery.
@@ -229,6 +232,7 @@ pub fn execution_process_identity_from_lillux(
         group_leader_pid: i64::from(identity.group_leader_pid),
         group_leader_start_time_ticks: i64::try_from(identity.group_leader_start_time_ticks)
             .context("Lillux group birth is outside RyeOS durable range")?,
+        pid_namespace: identity.pid_namespace,
         process_scope,
         resource_selections: Vec::new(),
         resource_settlement_authority: None,
@@ -748,6 +752,10 @@ fn capture_execution_process_identity_from_pin(
     let boot_id = read_boot_id()
         .context("read kernel boot identity")
         .map_err(ExecutionProcessIdentityCaptureError::CaptureFailed)?;
+    let pid_namespace = lillux::process_control::current_pid_namespace()
+        .map_err(anyhow::Error::msg)
+        .context("read pid namespace")
+        .map_err(ExecutionProcessIdentityCaptureError::CaptureFailed)?;
 
     // Re-probe both pidfds after collecting every numeric/procfs field. If a
     // process exited and its numeric ID was recycled during capture, the old
@@ -764,6 +772,7 @@ fn capture_execution_process_identity_from_pin(
         target_start_time_ticks: target_stat.start_time_ticks,
         group_leader_pid: pgid,
         group_leader_start_time_ticks: group_stat.start_time_ticks,
+        pid_namespace,
         resource_selections: Vec::new(),
         resource_settlement_authority: None,
         resource_operations: Vec::new(),
@@ -1180,6 +1189,7 @@ fn lillux_process_identity(
         group_leader_pid,
         group_leader_start_time_ticks,
         group_basis: lillux::GroupBasis::ProcessGroup,
+        pid_namespace: identity.pid_namespace.clone(),
     })
 }
 
@@ -1852,7 +1862,7 @@ mod tests {
             "schema_version": PROCESS_IDENTITY_SCHEMA_VERSION,
             "boot_id": boot, "target_pid": gone,
             "target_start_time_ticks": 200, "group_leader_pid": gone,
-            "group_leader_start_time_ticks": 190,
+            "group_leader_start_time_ticks": 190, "pid_namespace": "pid:[4026531836]",
             "process_scope": {
                 "version": 5, "control_timeout": {"secs": 5, "nanos": 0},
                 "configuration": {"version": 3, "backend": {"implementation": "pid_namespace_init"}},
@@ -1953,6 +1963,7 @@ mod tests {
             target_start_time_ticks: 5,
             group_leader_pid: 77,
             group_leader_start_time_ticks: 5,
+            pid_namespace: "pid:[4026531836]".into(),
             group_basis: lillux::GroupBasis::Contained,
         };
         let error = execution_process_identity_from_lillux(contained.clone(), None)
@@ -2020,7 +2031,7 @@ mod tests {
             "schema_version": PROCESS_IDENTITY_SCHEMA_VERSION,
             "boot_id": "fixture-boot", "target_pid": 40,
             "target_start_time_ticks": 200, "group_leader_pid": 39,
-            "group_leader_start_time_ticks": 190, "process_scope": null,
+            "group_leader_start_time_ticks": 190, "pid_namespace": "pid:[4026531836]", "process_scope": null,
             "resource_selections": [], "resource_operations": [],
             "resource_settlement_authority": null,
             "resource_allocation_limit": null,
@@ -2177,7 +2188,7 @@ mod tests {
             "schema_version": PROCESS_IDENTITY_SCHEMA_VERSION,
             "boot_id": "fixture-boot", "target_pid": 40,
             "target_start_time_ticks": 200, "group_leader_pid": 39,
-            "group_leader_start_time_ticks": 190, "process_scope": null,
+            "group_leader_start_time_ticks": 190, "pid_namespace": "pid:[4026531836]", "process_scope": null,
             "resource_selections": [], "resource_operations": [],
             "resource_settlement_authority": null,
             "resource_allocation_limit": null,

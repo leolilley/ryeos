@@ -322,6 +322,24 @@ pub struct ExactExclusiveFileLock {
     target_name: CString,
 }
 
+/// Witness that an [`ExactExclusiveFileLock`] is held, by this process, right
+/// now. It borrows the lock and its only constructor is
+/// [`ExactExclusiveFileLock::witness`], which refuses a lock copied into
+/// another process; the lock itself has no public constructor except its
+/// three acquisitions (each takes the real `flock` before returning), no
+/// `Clone` and no `Default`. A caller therefore cannot hold a witness without a
+/// real, original, still-borrowed lock acquisition.
+pub struct ExclusiveLockWitness<'a> {
+    _lock: &'a ExactExclusiveFileLock,
+}
+
+impl std::fmt::Debug for ExclusiveLockWitness<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExclusiveLockWitness")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Refusal of an exact operational lock because another open file
 /// description holds it, as distinct from every other acquisition failure
 /// (an absent lock file, a wrong file type, an I/O error).
@@ -366,6 +384,13 @@ impl ExactExclusiveFileLockObservation {
 impl ExactExclusiveFileLock {
     /// Reject copied process-local custody before touching retained descriptor
     /// coordinates or the fork-child registration. This issues no lock grant.
+    /// Obtain the witness that this original process holds the lock. The
+    /// process check is part of obtaining it, not a check at each use.
+    pub fn witness(&self) -> Result<ExclusiveLockWitness<'_>> {
+        self.require_original_process()?;
+        Ok(ExclusiveLockWitness { _lock: self })
+    }
+
     pub fn require_original_process(&self) -> Result<()> {
         anyhow::ensure!(
             self.process == std::process::id(),

@@ -2302,6 +2302,7 @@ fn owned_completed_terminal_signs_only_its_exact_cleared_process_attempt() {
         target_start_time_ticks: 11,
         group_leader_pid: 12347,
         group_leader_start_time_ticks: 11,
+        pid_namespace: "pid:[4026531836]".into(),
         resource_selections: Vec::new(),
         resource_settlement_authority: None,
         resource_operations: Vec::new(),

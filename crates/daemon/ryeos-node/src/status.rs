@@ -282,10 +282,13 @@ pub async fn status(env: &LocalLifecycleEnv) -> Result<LifecycleStatus> {
         let state_dir = config.app_root.join(ryeos_engine::AI_DIR).join("state");
         let marker = crate::lifecycle_marker::read(&state_dir);
         if let Some(crate::lifecycle_marker::LifecycleMarker::Running {
-            pid, started_at, ..
+            identity,
+            started_at,
+            ..
         }) = marker.clone()
-            && crate::lifecycle_marker::process_alive_as_ryeosd(pid)
+            && crate::lifecycle_marker::running_marker_not_provably_gone(&identity)
         {
+            let pid = identity.target_pid;
             let marker_age = crate::lifecycle_marker::age(&state_dir).unwrap_or_default();
             let mut startup = StartupSnapshot::bootstrapping(started_at.clone());
             startup.elapsed_ms = marker_age.as_millis().try_into().unwrap_or(u64::MAX);
@@ -485,6 +488,18 @@ mod tests {
     use crate::lifecycle_wire::StartupPhase;
     use std::net::SocketAddr;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn running_marker_json(identity: lillux::process_control::ExactProcessIdentity) -> String {
+        serde_json::to_string(&crate::lifecycle_marker::LifecycleMarker::Running {
+            schema_version: crate::lifecycle_marker::RUNNING_MARKER_SCHEMA_VERSION,
+            identity,
+            started_at: "2026-01-01T00:00:00Z".to_owned(),
+            launch_route: None,
+            pending_latched_drain: None,
+            carrier_incarnation: None,
+        })
+        .unwrap()
+    }
 
     fn test_config(root: &std::path::Path) -> NodeConfig {
         NodeConfig {
@@ -710,9 +725,8 @@ mod tests {
         let state_dir = config.app_root.join(ryeos_engine::AI_DIR).join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
 
-        // Stand in for the booting daemon with a process whose comm really
-        // is "ryeosd" (the classifier verifies the name, not just liveness):
-        // a copy of /bin/sh idling under that name.
+        // Stand in for the booting daemon with a live child whose exact
+        // identity the marker records.
         let fake_ryeosd = tmp.path().join("ryeosd");
         std::fs::copy("/bin/sh", &fake_ryeosd).unwrap();
         // Two commands, so the shell cannot exec-optimize into `sleep`
@@ -723,9 +737,8 @@ mod tests {
             .unwrap();
         std::fs::write(
             state_dir.join("lifecycle.json"),
-            format!(
-                r#"{{"state":"running","pid":{},"started_at":"2026-01-01T00:00:00Z"}}"#,
-                daemon.id()
+            running_marker_json(
+                lillux::process_control::capture_exact_process_identity(daemon.id(), None).unwrap(),
             ),
         )
         .unwrap();
@@ -758,9 +771,8 @@ mod tests {
         let marker = state_dir.join("lifecycle.json");
         std::fs::write(
             &marker,
-            format!(
-                r#"{{"state":"running","pid":{},"started_at":"2026-01-01T00:00:00Z"}}"#,
-                daemon.id()
+            running_marker_json(
+                lillux::process_control::capture_exact_process_identity(daemon.id(), None).unwrap(),
             ),
         )
         .unwrap();
@@ -788,27 +800,27 @@ mod tests {
         assert!(diagnostics.message.contains("has not published"));
     }
 
-    // The recycled-pid discrimination needs /proc to inspect the comm.
+    // The recycled-pid discrimination needs /proc to read birth ticks.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn boot_marker_pid_recycled_by_another_process_is_not_starting() {
         // A crash leaves a `running` marker; if the OS recycles that pid onto
         // an unrelated process, classifying it as a live daemon would block
-        // `ryeos start` indefinitely. This test's own pid is alive but is not
-        // a ryeosd.
+        // `ryeos start` indefinitely. This test's own pid is alive but its
+        // birth differs from the recorded incarnation.
         let tmp = tempfile::tempdir().unwrap();
         let env = test_env(tmp.path());
         let config = env.config();
         mark_initialized(&config.app_root);
         let state_dir = config.app_root.join(ryeos_engine::AI_DIR).join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
-        std::fs::write(
-            state_dir.join("lifecycle.json"),
-            format!(
-                r#"{{"state":"running","pid":{},"started_at":"2026-01-01T00:00:00Z"}}"#,
-                std::process::id()
-            ),
-        )
+        std::fs::write(state_dir.join("lifecycle.json"), {
+            // Same boot and pid as this live process, different birth:
+            // exactly what a recycled pid looks like.
+            let mut recycled = lillux::process_control::capture_current_process_identity().unwrap();
+            recycled.target_start_time_ticks += 1;
+            running_marker_json(recycled)
+        })
         .unwrap();
 
         let status = status(&env).await.unwrap();
@@ -865,10 +877,15 @@ mod tests {
         std::fs::create_dir_all(&state_dir).unwrap();
         std::fs::write(
             state_dir.join("lifecycle.json"),
-            format!(
-                r#"{{"state":"running","pid":{},"started_at":"2026-01-01T00:00:00Z"}}"#,
-                u32::MAX - 1
-            ),
+            running_marker_json(lillux::process_control::ExactProcessIdentity {
+                boot_id: "00000000-dead-beef-0000-000000000000".to_owned(),
+                target_pid: u32::MAX - 1,
+                target_start_time_ticks: 5,
+                group_leader_pid: u32::MAX - 1,
+                group_leader_start_time_ticks: 5,
+                pid_namespace: "pid:[4026531836]".into(),
+                group_basis: Default::default(),
+            }),
         )
         .unwrap();
 
