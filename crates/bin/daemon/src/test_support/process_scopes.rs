@@ -220,9 +220,47 @@ pub fn launch_command(state_path: &Path) -> Result<Option<tokio::process::Comman
     let command = ryeos_node::host_runtime::spawn_external_controller_command(
         &registration.binding,
         &registration.daemon,
-    )?;
+    )
+    .map_err(|error| {
+        let occupants = controller_leaf_occupants(&registration.binding);
+        error.context(format!("controller leaf occupants: {occupants}"))
+    })?;
     let command = tokio::process::Command::from(command);
     Ok(Some(command))
+}
+
+/// The processes still in the node's controller leaf, for a start refused
+/// because that leaf is occupied: which process outlived the node that
+/// occupied it decides whether the harness or the product leaves it behind.
+fn controller_leaf_occupants(binding: &Path) -> String {
+    let parent = std::fs::read(binding)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|value| {
+            value
+                .pointer("/process_scopes/backend/parent")
+                .and_then(serde_json::Value::as_str)
+                .map(PathBuf::from)
+        });
+    let Some(parent) = parent else {
+        return "the binding names no delegation parent".to_owned();
+    };
+    let leaf = parent.join("controller");
+    let procs = std::fs::read_to_string(leaf.join("cgroup.procs")).unwrap_or_default();
+    let events = std::fs::read_to_string(leaf.join("cgroup.events")).unwrap_or_default();
+    let mut text = format!("{} events [{}]", leaf.display(), events.replace('\n', " "));
+    for pid in procs.lines() {
+        let command = std::fs::read(format!("/proc/{pid}/cmdline"))
+            .map(|bytes| String::from_utf8_lossy(&bytes).replace('\0', " "))
+            .unwrap_or_default();
+        let state = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        let state = state.rsplit(')').next().unwrap_or("").trim();
+        text.push_str(&format!(
+            "; pid {pid} state {} cmd {command}",
+            state.chars().next().unwrap_or('?')
+        ));
+    }
+    text
 }
 
 /// Take the node's trees back for the test process, which in the real mode is
