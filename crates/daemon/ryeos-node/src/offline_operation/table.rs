@@ -465,6 +465,28 @@ static OPERATIONS: &[OperationSpec] = &[
         },
     },
     OperationSpec {
+        id: "node.capacity.repair-account",
+        // Local operator only, like re-issuance: the table requires a
+        // local-signer-only operation to be authority-bearing. The repair
+        // grants nothing new (the sound anchor already admitted the image it
+        // writes), but it overwrites the node's capacity record, so only the
+        // node's own operator may request it and no delegation can cover it.
+        authority_bearing: true,
+        local_signer_only: true,
+        alone: false,
+        inputs: NO_INPUTS,
+        preconditions: &[FACT_CAPACITY_ACCOUNT],
+        expected_result: &[],
+        required_expected_result: &[],
+        validate_request: arguments_of::<handlers::CapacityArguments>,
+        handler: Handler::EffectThenReceipt(handlers::capacity_repair_account),
+        recovery: Recovery {
+            record: "the capacity repair evidence log, keyed by the anchor digest and the torn account digest it mended; the command field names the request",
+            rerun: Rerun::ConvergesOverEffect,
+            why: "the evidence line is appended before the account is written and recognised by the torn bytes it names, and an account already holding the anchor's image is left alone",
+        },
+    },
+    OperationSpec {
         id: "node.capacity.reanchor",
         authority_bearing: true,
         local_signer_only: true,
@@ -1008,6 +1030,7 @@ mod tests {
             "node.external-execution.recompose",
             "node.external-execution.retire",
             "node.capacity.reissue",
+            "node.capacity.repair-account",
             "node.capacity.reanchor",
             "node.allow-restart",
             "node.reset.execution-history",
@@ -1033,7 +1056,7 @@ mod tests {
         ] {
             assert!(lookup(id).is_some(), "{id}");
         }
-        assert_eq!(operations().len(), 31);
+        assert_eq!(operations().len(), 32);
     }
 
     #[test]
@@ -1071,6 +1094,7 @@ mod tests {
                 "node.external-execution.recompose",
                 "node.external-execution.retire",
                 "node.capacity.reissue",
+                "node.capacity.repair-account",
                 "node.capacity.reanchor",
                 "node.authorize-client",
                 "node.remote.pin",
@@ -1127,7 +1151,7 @@ mod tests {
     fn the_authorization_reset_is_local_only_and_alone() {
         let spec = lookup("node.reset.authorization").unwrap();
         assert!(spec.local_signer_only && spec.alone && spec.authority_bearing);
-        assert!(operations().iter().filter(|s| s.local_signer_only).count() == 14);
+        assert!(operations().iter().filter(|s| s.local_signer_only).count() == 15);
     }
 
     #[test]

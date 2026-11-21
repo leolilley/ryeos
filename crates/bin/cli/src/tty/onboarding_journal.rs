@@ -163,6 +163,9 @@ impl Journal {
         self.completed.insert(phase);
     }
 
+    /// Only the provider-setup flow retracts a phase, so the method exists only
+    /// where that flow is compiled.
+    #[cfg(feature = "model-provider-setup")]
     pub(crate) fn unmark(&mut self, phase: Phase) {
         self.completed.remove(&phase);
     }
