@@ -1,6 +1,6 @@
 [package]
 name = "ryeos-external-guest-occurrence-owner"
-version = "0.5.102"
+version = "0.6.0-ple.6"
 edition = "2024"
 description = "One-shot protected RyeOS external guest occurrence owner"
 license.workspace = true
