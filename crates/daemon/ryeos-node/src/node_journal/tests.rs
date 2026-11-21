@@ -56,7 +56,7 @@ fn identity_at(pid: u32, ticks: u64) -> lillux::process_control::ExactProcessIde
         target_start_time_ticks: ticks,
         group_leader_pid: pid,
         group_leader_start_time_ticks: ticks,
-        pid_namespace: "pid:[4026531836]".into(),
+        pid_namespace: lillux::current_pid_namespace().expect("pid namespace"),
         group_basis: Default::default(),
     }
 }
@@ -383,7 +383,10 @@ fn an_inferred_unclean_exit_is_written_once_before_the_start() {
     let inferred = &journal.read().unwrap().records[0].body;
     assert_eq!(inferred.detail["pid"], 77);
     assert_eq!(inferred.detail["start_time_ticks"], 5);
-    assert_eq!(inferred.detail["pid_namespace"], "pid:[4026531836]");
+    assert_eq!(
+        inferred.detail["pid_namespace"],
+        lillux::current_pid_namespace().expect("pid namespace")
+    );
     assert_eq!(inferred.detail["started_at"], "2026-11-19T00:00:00Z");
     // A different lost run is a different record.
     journal
