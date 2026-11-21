@@ -4340,7 +4340,7 @@ async fn run(
     // Use `ryeos init` to install bundle registrations before daemon startup.
 
     tracing::info!("State lock acquired");
-    lifecycle_marker::report_previous_exit(previous_exit.as_ref());
+    lifecycle_marker::report_previous_run(previous_exit.as_ref());
     lifecycle_marker::check_disk_space(
         &ryeos_engine::roots::RuntimeRoot::new(config.app_root.clone()).state(),
     );
@@ -4482,7 +4482,7 @@ async fn run(
                     .lifecycle_exit
                     .as_mut()
                     .context("daemon lifecycle owner is absent")?;
-                let unclean = lifecycle_marker::inferred_unclean_exit(previous_exit.as_ref());
+                let inferred = lifecycle_marker::inferred_exit(previous_exit.as_ref());
                 let version = build.version.to_string();
                 let revision = build.revision.to_string();
                 let profile = build.profile.to_string();
@@ -4494,7 +4494,7 @@ async fn run(
                     started_at: &guard.started_at,
                     launch_route: guard.launch_route,
                 };
-                match journal.record_start(unclean.as_ref(), &started) {
+                match journal.record_start(inferred.as_ref(), &started) {
                     Ok(()) => {}
                     Err(JournalError::Integrity(error)) => {
                         return Err(error).context(
@@ -7061,13 +7061,19 @@ fn log_bootstrap_source_cleanup_recovery(
     }
 }
 
-async fn run_ui_hint_loop(hub: Arc<ThreadEventHub>, ui: Arc<ryeos_ui::UiState>) -> Result<()> {
+async fn run_ui_hint_loop(
+    hub: Arc<ThreadEventHub>,
+    ui: Arc<ryeos_ui::UiState>,
+    state: ryeos_app::state::AppState,
+) -> Result<()> {
+    let fanout = ryeos_ui::ThreadHintFanout::new();
     let mut rx = hub.subscribe_all();
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
     let mut activity_tick = tokio::time::interval(Duration::from_millis(750));
     activity_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut pending_activity: HashMap<String, u64> = HashMap::new();
+    // Thread id to its chain root and the events seen this interval.
+    let mut pending_activity: HashMap<String, (String, u64)> = HashMap::new();
 
     loop {
         tokio::select! {
@@ -7089,11 +7095,20 @@ async fn run_ui_hint_loop(hub: Arc<ThreadEventHub>, ui: Arc<ryeos_ui::UiState>) 
                                 "status": status,
                                 "updated_at": &event.ts,
                             });
-                            for session_id in ui.browser_sessions.session_ids() {
-                                ui.session_bus.publish(&session_id, "thread.hint", payload.clone());
-                            }
+                            fanout
+                                .publish_lifecycle(
+                                    &state,
+                                    &ui,
+                                    &event.thread_id,
+                                    &event.chain_root_id,
+                                    payload,
+                                )
+                                .await;
                         } else if !event.event_type.starts_with("seat.") {
-                            *pending_activity.entry(event.thread_id).or_insert(0) += 1;
+                            pending_activity
+                                .entry(event.thread_id)
+                                .or_insert((event.chain_root_id, 0))
+                                .1 += 1;
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -7106,17 +7121,8 @@ async fn run_ui_hint_loop(hub: Arc<ThreadEventHub>, ui: Arc<ryeos_ui::UiState>) 
                 if pending_activity.is_empty() {
                     continue;
                 }
-                let thread_ids = pending_activity.keys().cloned().collect::<Vec<_>>();
-                let event_count = pending_activity.values().sum::<u64>();
-                pending_activity.clear();
-                let payload = serde_json::json!({
-                    "kind": "activity",
-                    "thread_ids": thread_ids,
-                    "event_count": event_count,
-                });
-                for session_id in ui.browser_sessions.session_ids() {
-                    ui.session_bus.publish(&session_id, "thread.hint", payload.clone());
-                }
+                let interval = std::mem::take(&mut pending_activity);
+                fanout.publish_activity(&state, &ui, &interval).await;
             }
         }
     }
@@ -7268,7 +7274,13 @@ async fn supervise_background_tasks(
     tasks.spawn(async move { ("cache metric flush", run_cache_metric_flush_loop().await) });
 
     let hint_hub = state.event_streams.clone();
-    tasks.spawn(async move { ("UI hint fanout", run_ui_hint_loop(hint_hub, ui).await) });
+    let hint_state = state.clone();
+    tasks.spawn(async move {
+        (
+            "UI hint fanout",
+            run_ui_hint_loop(hint_hub, ui, hint_state).await,
+        )
+    });
 
     let first_result = tokio::select! {
         _ = shutdown_signal() => Ok(()),
@@ -10349,6 +10361,7 @@ mod shutdown_custody_tests {
             "target_start_time_ticks": 1,
             "group_leader_pid": 4242,
             "group_leader_start_time_ticks": 1,
+            "pid_namespace": lillux::current_pid_namespace().unwrap(),
             "process_scope": null,
             "resource_selections": [],
             "resource_settlement_authority": null,

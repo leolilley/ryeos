@@ -342,6 +342,7 @@ impl<'a> Fixture<'a> {
                 target_start_time_ticks: 100,
                 group_leader_pid: 40,
                 group_leader_start_time_ticks: 100,
+                pid_namespace: lillux::current_pid_namespace().unwrap(),
                 group_basis: lillux::GroupBasis::ProcessGroup,
             },
             None,

@@ -6,8 +6,8 @@
 //!
 //! Section directories (routes, commands) support recursive subfolders:
 //!
-//!   .ai/node/routes/ui/ryeos-ui/dimension-get.yaml
-//!   .ai/node/routes/ui/ryeos-ui/items/list.yaml
+//!   .ai/node/routes/ui/session/current.yaml
+//!   .ai/node/routes/ui/session/seat/open.yaml
 //!   .ai/node/commands/web.yaml
 //!
 //! The `bundles` section remains flat (no subdirectories).
@@ -24,6 +24,7 @@
 pub mod coherence;
 pub mod loader;
 pub mod recompose;
+pub mod retire;
 pub mod sections;
 
 use ryeos_node_runtime::node_config_source::{BundleRecord, NodeItemContext};
@@ -100,6 +101,9 @@ pub struct NodeConfigSnapshot {
     pub routes: Vec<RawRouteSpec>,
     /// All loaded command definitions.
     pub commands: Vec<CommandRecord>,
+    /// Installed binding files set aside undecoded because they are signed
+    /// under a retired schema (signature verified, nothing admitted).
+    pub stale_bindings: Vec<coherence::StaleBinding>,
 }
 
 impl NodeConfigSnapshot {}

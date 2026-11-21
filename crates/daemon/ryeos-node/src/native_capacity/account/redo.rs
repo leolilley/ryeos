@@ -81,14 +81,14 @@ impl StoredProcess {
 }
 
 pub(super) const ANCHOR_BYTES: usize = 12 * 1024;
-const ANCHOR_PAYLOAD_BYTES: usize = ANCHOR_BYTES - 32;
-const MAGIC: &[u8; 8] = b"RYERED02";
-const SCHEMA: u32 = 2;
-const BEFORE_START: usize = 1024;
-const TARGET_START: usize = BEFORE_START + RECORD_BYTES;
+pub(super) const ANCHOR_PAYLOAD_BYTES: usize = ANCHOR_BYTES - 32;
+pub(super) const MAGIC: &[u8; 8] = b"RYERED02";
+pub(super) const SCHEMA: u32 = 2;
+pub(super) const BEFORE_START: usize = 1024;
+pub(super) const TARGET_START: usize = BEFORE_START + RECORD_BYTES;
 const RECORDS_END: usize = TARGET_START + RECORD_BYTES;
-const RECOVERY_PROCESS_START: usize = 54;
-const RECOVERY_PROCESS_END: usize = RECOVERY_PROCESS_START + PROCESS_STORAGE_BYTES;
+pub(super) const RECOVERY_PROCESS_START: usize = 54;
+pub(super) const RECOVERY_PROCESS_END: usize = RECOVERY_PROCESS_START + PROCESS_STORAGE_BYTES;
 const AUTHORIZATION_START: usize = RECOVERY_PROCESS_END;
 const AUTHORIZATION_END: usize = AUTHORIZATION_START + 32;
 
@@ -539,6 +539,7 @@ pub(super) mod controls {
             target_start_time_ticks: 71,
             group_leader_pid: pid,
             group_leader_start_time_ticks: 71,
+            pid_namespace: lillux::current_pid_namespace().unwrap(),
             group_basis: lillux::GroupBasis::ProcessGroup,
         }
     }

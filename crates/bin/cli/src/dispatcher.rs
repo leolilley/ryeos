@@ -597,6 +597,13 @@ async fn try_dispatch_client_handler(
                 .await
                 .map(ClientHandlerOutcome::json)
         }
+        "endorse_items" => {
+            authorize_exact_core_client_handler(&matched.command, snapshot, "endorse.yaml")?;
+            apply_project_policy(&matched.command, &mut parameters, default_project)?;
+            crate::client_handlers::endorse_items(app_root, &parameters)
+                .await
+                .map(ClientHandlerOutcome::json)
+        }
         "sign_items" => {
             authorize_exact_core_client_handler(&matched.command, snapshot, "sign.yaml")?;
             apply_project_policy(&matched.command, &mut parameters, default_project)?;
@@ -2436,6 +2443,7 @@ mod tests {
         let core = root.path().join("core");
         let expected = core.join(".ai/node/commands/artifact-export.yaml");
         let snapshot = ryeos_app::node_config::NodeConfigSnapshot {
+            stale_bindings: Vec::new(),
             external_execution: Vec::new(),
             runtime_snapshot_production: Vec::new(),
             guest_runtime_materialization: Vec::new(),

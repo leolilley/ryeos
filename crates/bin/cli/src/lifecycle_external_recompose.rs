@@ -119,7 +119,17 @@ fn banner(app_root: &std::path::Path, report: &RecomposeReport) -> crate::tty::S
         (true, false) => format!("WOULD RECOMPOSE {} BINDING(S)", report.recomposed.len()),
         (false, false) => format!("RECOMPOSED {} BINDING(S)", report.recomposed.len()),
     };
-    let mut banner = crate::tty::StatusBanner::new(crate::tty::Tone::Success, title);
+    let tone = if report.stale_skipped.is_empty() {
+        crate::tty::Tone::Success
+    } else {
+        crate::tty::Tone::Warning
+    };
+    let title = if report.stale_skipped.is_empty() {
+        title
+    } else {
+        format!("{title}; {} STALE SKIPPED", report.stale_skipped.len())
+    };
+    let mut banner = crate::tty::StatusBanner::new(tone, title);
     banner.rows.push(crate::tty::Row::key_value(
         "app root",
         app_root.display().to_string(),
@@ -149,6 +159,12 @@ fn banner(app_root: &std::path::Path, report: &RecomposeReport) -> crate::tty::S
         banner.rows.push(crate::tty::Row::text(format!(
             "{binding}: the vault holds no credential for its generation; provision it with \
              `ryeos node external-execution provision-credential`"
+        )));
+    }
+    for skipped in &report.stale_skipped {
+        banner.rows.push(crate::tty::Row::text(format!(
+            "{}: SKIPPED, signed under retired schema {} and not recomposed; {}",
+            skipped.binding, skipped.schema, skipped.fix
         )));
     }
     if !report.dry_run && !report.recomposed.is_empty() {

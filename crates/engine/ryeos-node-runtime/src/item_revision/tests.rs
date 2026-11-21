@@ -46,7 +46,10 @@ fn trust_with(node: &NodeIdentity, keys: &[(&SigningKey, SignerRole)]) -> TrustS
                 &key.verifying_key(),
                 "test",
                 *role,
-                SignerScope::everywhere(),
+                match role {
+                    SignerRole::Authoring => SignerScope::authoring_default(),
+                    _ => SignerScope::everywhere(),
+                },
                 SignerStatus::Active,
             )
         })

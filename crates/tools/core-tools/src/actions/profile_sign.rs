@@ -96,6 +96,7 @@ mod tests {
             ),
             label: "test".into(),
             scope: SignerScope::publisher_default(),
+            endorsements: None,
         }])
         .unwrap()
     }

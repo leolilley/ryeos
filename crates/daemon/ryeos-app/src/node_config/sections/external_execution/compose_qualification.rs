@@ -52,7 +52,7 @@ use ryeos_state::external_execution::admission::{
 };
 
 /// Schema of a qualification-only binding over the controller file relay.
-const QUALIFICATION_BINDING_SCHEMA: u32 = 18;
+const QUALIFICATION_BINDING_SCHEMA: u32 = 21;
 /// Schema of the settings the installed adapter accepts.
 const QUALIFICATION_SETTINGS_SCHEMA: u64 = 2;
 /// Most trust roots the adapter settings carry.
@@ -790,7 +790,7 @@ mod tests {
         assert_eq!(loaded.digest, report.binding_digest);
         assert_eq!(loaded.capacity_owner, report.capacity_owner);
         let document = &loaded.document;
-        assert_eq!(document.schema, 18);
+        assert_eq!(document.schema, 21);
         assert_eq!(document.max_export_bytes, 0);
         assert!(document.runtime_qualification.is_none());
         assert!(document.runtime_content_qualification.is_none());

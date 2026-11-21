@@ -1,0 +1,20 @@
+# ryeos:signed:2026-11-20T23:16:10Z:2a95715fdf7c4a9d5ebfcbaf12af032c0e6ca9cd3c87c5feafd7b9797e051a22:gydsNIC6jE0rbOkEwC0BrhsW34tJZFNfl124rS63CpQ+eqyqPDkcT2EWEGPX2vwvImTEJn3IlFBsGidXdV46Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- endorse
+description: Endorse items the node's authoring key signed so the node trusts them, signing with your operator key in this CLI
+help:
+  usage: "ryeos --project <path> endorse --item <ref|path>... | --standing --kind <kind>... [--lifetime-secs <seconds>]"
+  examples:
+    - "ryeos --project . endorse --item view:acme/home --item surface:acme/main"
+    - "ryeos --project . endorse --standing --kind knowledge --lifetime-secs 604800"
+project:
+  resolution: required
+  default: discover_upward_ai
+  bind_parameter: project_path
+parameter_binding:
+  mode: tail_object
+  flag_key_normalization: hyphen_to_underscore
+dispatch:
+  kind: local_handler
+  handler: endorse_items
+  bootstrap: false

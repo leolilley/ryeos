@@ -1232,7 +1232,7 @@ fn run_init_under_lock_on_storage(
         &prospective_roots,
         &seed_trust_store,
         isolation_policy,
-        prospective_policy.generation_digest(),
+        prospective_policy.section_digest::<ryeos_engine::isolation::IsolationPolicy>()?,
     )
     .map_err(|error| {
         // Admission needs the node key and trust registry, which exist only
@@ -2473,7 +2473,7 @@ fn validate_prospective_staging(
         &roots,
         node_trust_store,
         isolation_policy,
-        policy_snapshot.generation_digest(),
+        policy_snapshot.section_digest::<ryeos_engine::isolation::IsolationPolicy>()?,
     )
     .with_context(|| {
         format!("completed `{bundle_name}` staging tree failed definition admission")
@@ -2783,6 +2783,7 @@ fn bootstrap_trust_store(
             ),
             label: label.clone(),
             scope: ryeos_engine::trust::SignerScope::publisher_default(),
+            endorsements: None,
         });
     }
     Ok(TrustStore::from_signer_entries(&entries)?)
@@ -4999,8 +5000,440 @@ mod tests {
             &as_capacity_policy(&operator_body),
         )
         .expect("the binding in force");
-        crate::native_capacity::leave_outstanding_debit(state, &in_force, process).unwrap();
+        crate::native_capacity::leave_outstanding_debit(state, &in_force, process, lock).unwrap();
         issued
+    }
+
+    // ---- Foreign-namespace predecessors at the real native-capacity startup.
+    //
+    // A foreign-namespace identity is a real identity of this process with
+    // `pid_namespace` rewritten to another inode. That is the adversarial
+    // case for the rule: its pid, birth ticks, boot and group all match a LIVE
+    // process here, so any decision from the numbers would call it live; only
+    // the namespace says the numbers are not comparable. The recorded
+    // incarnation of a previous container is the same shape with other numbers.
+
+    const HOLD_LOCK_ENV: &str = "RYEOS_TEST_HOLD_STATE_LOCK";
+
+    /// Not a test when run normally. The parent tests re-execute this binary
+    /// with `HOLD_LOCK_ENV` set, which makes this the second process: it takes
+    /// the state lock, announces it on stdout and holds it until its stdin
+    /// closes.
+    #[test]
+    fn hold_state_lock_helper_process() {
+        use std::io::{Read as _, Write as _};
+        let Ok(path) = std::env::var(HOLD_LOCK_ENV) else {
+            return;
+        };
+        // A helper that outlives its parent exits by itself.
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_secs(240));
+            eprintln!("state-lock helper process: 240 s cap reached; exiting");
+            std::process::exit(3);
+        });
+        // The parent released its own handle on this lock just before
+        // spawning us, but a registered descriptor's close is deferred while
+        // any other test thread has a process-creation window open, so the
+        // kernel may still see it held for a moment. Wait it out boundedly.
+        let _lock = ryeos_node_runtime::state_lock::StateLock::acquire_with_timeout(
+            std::path::Path::new(&path),
+            std::time::Duration::from_secs(120),
+        )
+        .expect("helper takes the state lock");
+        println!("STATE_LOCK_HELD");
+        std::io::stdout().flush().unwrap();
+        let mut sink = Vec::new();
+        let _ = std::io::stdin().read_to_end(&mut sink);
+    }
+
+    /// A real second process holding the node's state lock. Dropping it closes
+    /// its stdin, which ends the helper and releases the lock.
+    struct OtherProcessHoldsStateLock {
+        child: std::process::Child,
+    }
+
+    impl OtherProcessHoldsStateLock {
+        fn start(lock_path: &Path) -> Self {
+            use std::io::BufRead as _;
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "init::tests::hold_state_lock_helper_process",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(HOLD_LOCK_ENV, lock_path)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            // Readiness is the helper's own announcement, read on a thread.
+            // There is no wall-clock deadline here: a loaded runner can take
+            // minutes just to start a second copy of this test binary, and
+            // that delay says nothing about the lock. The wait ends when the
+            // helper announces, or when its stdout closes (it exited or hit
+            // its own cap), and the test's watchdog bounds the whole test.
+            // libtest prints `test <name> ... ` without a newline before the
+            // helper announces itself on the same line.
+            let stdout = child.stdout.take().unwrap();
+            let (ready, announced) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                for line in std::io::BufReader::new(stdout).lines() {
+                    let Ok(line) = line else { break };
+                    if line.contains("STATE_LOCK_HELD") {
+                        let _ = ready.send(());
+                        return;
+                    }
+                }
+            });
+            if announced.recv().is_err() {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("the helper process exited without taking the state lock");
+            }
+            Self { child }
+        }
+    }
+
+    impl Drop for OtherProcessHoldsStateLock {
+        fn drop(&mut self) {
+            // Closing stdin would end it, but another process can hold the
+            // pipe's write end open; killing releases the lock regardless.
+            drop(self.child.stdin.take());
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    /// Aborts the whole test process, naming the test, if it is still running
+    /// after `seconds`: a hang becomes a named failure, not a job timeout.
+    struct Watchdog(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    fn watchdog(test: &'static str, seconds: u64) -> Watchdog {
+        let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = std::sync::Arc::clone(&finished);
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+            while std::time::Instant::now() < deadline {
+                if seen.load(std::sync::atomic::Ordering::SeqCst) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            eprintln!("WATCHDOG: test `{test}` still running after {seconds} s; aborting");
+            std::process::abort();
+        });
+        Watchdog(finished)
+    }
+
+    impl Drop for Watchdog {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn foreign_namespace_identity() -> lillux::process_control::ExactProcessIdentity {
+        let mut foreign = lillux::process_control::capture_current_process_identity().unwrap();
+        let other = if foreign.pid_namespace == "pid:[1]" {
+            "pid:[2]"
+        } else {
+            "pid:[1]"
+        };
+        foreign.pid_namespace = other.to_owned();
+        // Matching boot, pid and birth, yet neither alive nor ended.
+        assert!(matches!(
+            foreign.observe_end(),
+            Err(lillux::ProcessEndError::ForeignPidNamespace { .. })
+        ));
+        foreign
+    }
+
+    fn ended_process_identity() -> lillux::process_control::ExactProcessIdentity {
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("read x")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let dead =
+            lillux::process_control::capture_exact_process_identity(child.id(), None).unwrap();
+        drop(child.stdin.take());
+        child.wait().unwrap();
+        assert!(dead.has_ended().unwrap());
+        dead
+    }
+
+    /// With a second process holding the lock the node cannot even take it,
+    /// so no start can obtain the witness and nothing is classified; once it
+    /// is free the very same start proceeds.
+    fn assert_startup_refused_while_held_and_proceeds_when_free(state: &Path) {
+        use ryeos_node_runtime::state_lock::{StateLock, default_lock_path};
+        let lock_path = default_lock_path(state);
+        let holder = OtherProcessHoldsStateLock::start(&lock_path);
+        // A start under a held lock refuses promptly; it never waits it out.
+        let started = std::time::Instant::now();
+        assert!(
+            StateLock::acquire_with_timeout(&lock_path, std::time::Duration::from_millis(300))
+                .is_err(),
+            "the state lock is held by another process"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "refusing a held lock took {:?}",
+            started.elapsed()
+        );
+        assert!(
+            StateLock::acquire(&lock_path).is_err(),
+            "the state lock is still held by another process"
+        );
+        drop(holder);
+        let lock = StateLock::acquire(&lock_path).expect("lock is free once the holder exits");
+        // A lock that does not protect this app root is no proof either.
+        let other_directory = tempfile::tempdir().unwrap();
+        let other = StateLock::acquire(&other_directory.path().join("other.lock")).unwrap();
+        let wrong = crate::native_capacity::startup_seams::open_and_debit(state, &other)
+            .expect_err("a lock of another root must not admit this start");
+        assert!(!format!("{wrong:#}").is_empty());
+        crate::native_capacity::startup_seams::open_and_debit(state, &lock)
+            .expect("under the state lock the foreign-namespace predecessor counts as ended");
+    }
+
+    /// Site: the outstanding debit of the previous incarnation
+    /// (`prepare_open`, before redo; the check after redo re-classifies the
+    /// same identity and is reached only after this one passed).
+    #[test]
+    fn foreign_namespace_debit_is_refused_while_another_process_holds_the_state_lock_and_settled_when_free()
+     {
+        let _watchdog = watchdog(
+            "foreign_namespace_debit_is_refused_while_another_process_holds_the_state_lock_and_settled_when_free",
+            300,
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        run_init(&make_opts(&state, &user)).expect("initial generation");
+        let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+            &ryeos_node_runtime::state_lock::default_lock_path(&state),
+        )
+        .unwrap();
+        node_owing_a_debit(&state, &lock, &foreign_namespace_identity());
+        drop(lock);
+        assert_startup_refused_while_held_and_proceeds_when_free(&state);
+    }
+
+    /// Site: the previous recovery process (`ensure_recovery_attempt`). The
+    /// debit's own incarnation is plainly dead; the earlier start that
+    /// charged a recovery attempt was in another pid namespace.
+    #[test]
+    fn foreign_namespace_recovery_process_is_refused_while_another_process_holds_the_state_lock_and_settled_when_free()
+     {
+        let _watchdog = watchdog(
+            "foreign_namespace_recovery_process_is_refused_while_another_process_holds_the_state_lock_and_settled_when_free",
+            300,
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        run_init(&make_opts(&state, &user)).expect("initial generation");
+        let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+            &ryeos_node_runtime::state_lock::default_lock_path(&state),
+        )
+        .unwrap();
+        node_owing_a_debit(&state, &lock, &ended_process_identity());
+        crate::native_capacity::startup_seams::charge_recovery_for(
+            &state,
+            &lock,
+            &foreign_namespace_identity(),
+        )
+        .expect("a crashed start's recovery charge");
+        drop(lock);
+        assert_startup_refused_while_held_and_proceeds_when_free(&state);
+    }
+
+    // ---- Pre-cut capacity records of a killed daemon.
+
+    /// A node whose capacity files hold what a killed daemon of the previous
+    /// schema left: an outstanding debit and a charged recovery attempt, both
+    /// naming dead incarnations, stored with identities that lack
+    /// `pid_namespace`. `mutate` may damage the stored identity further.
+    fn node_with_pre_cut_capacity_records(
+        state: &Path,
+        user: &Path,
+        mutate: &dyn Fn(String) -> String,
+    ) -> (
+        ryeos_node_runtime::state_lock::StateLock,
+        crate::native_capacity::CapacityAccountSummary,
+    ) {
+        run_init(&make_opts(state, user)).expect("initial generation");
+        let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+            &ryeos_node_runtime::state_lock::default_lock_path(state),
+        )
+        .unwrap();
+        node_owing_a_debit(state, &lock, &ended_process_identity());
+        crate::native_capacity::startup_seams::charge_recovery_for(
+            state,
+            &lock,
+            &ended_process_identity(),
+        )
+        .expect("a killed start's recovery charge");
+        let summary = crate::native_capacity::inspect_capacity_account(state)
+            .unwrap()
+            .expect("capacity account");
+        assert!(summary.outstanding_incarnation && summary.recovery_attempts_used == 1);
+        crate::native_capacity::downgrade_to_pre_cut_for_test(state, mutate).unwrap();
+        (lock, summary)
+    }
+
+    /// The documented cut, run as the offline operation runs it, retires the
+    /// pre-cut records and the node then starts, settles the dead incarnation
+    /// and debits normally.
+    #[test]
+    fn the_execution_history_cut_re_records_pre_cut_capacity_records_and_the_node_starts() {
+        let _watchdog = watchdog(
+            "the_execution_history_cut_re_records_pre_cut_capacity_records_and_the_node_starts",
+            300,
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        let (lock, before) = node_with_pre_cut_capacity_records(&state, &user, &|json| json);
+        // The pre-cut files do not decode, and the refusal names the cure.
+        let refused = crate::native_capacity::startup_seams::open_and_debit(&state, &lock)
+            .expect_err("a pre-cut record cannot start");
+        let refused = format!("{refused:#}");
+        assert!(
+            refused.contains("predates recorded pid namespaces")
+                && refused.contains("ryeos node reset execution-history --confirm"),
+            "{refused}"
+        );
+        assert!(crate::native_capacity::inspect_capacity_account(&state).is_err());
+
+        // A node that has run has a State store and a Runtime store; a freshly
+        // initialised one has neither, so establish them the way a first live
+        // boot does. The reset issues its own native host, hence the serial.
+        let config =
+            ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+                app_root: Some(state.clone()),
+                ..Default::default()
+            })
+            .unwrap();
+        ryeos_app::runtime_db::test_native::seed_node(&config, true);
+        let _serial = lillux_sqlite::test_host::serial();
+        let epoch = ryeos_app::runtime_db::RuntimeDb::current_operator_schema_epoch();
+        let report = crate::offline_operation::handlers::reset_execution_history_for_test(
+            &state,
+            &lock,
+            epoch - 1,
+            epoch,
+        )
+        .expect("the documented cut");
+        assert_eq!(
+            report["native_capacity_cut"],
+            serde_json::json!({"anchor_rewritten": true, "account_rewritten": true})
+        );
+        // Idempotent: a rerun finds nothing left to re-record.
+        let again = crate::offline_operation::handlers::reset_execution_history_for_test(
+            &state,
+            &lock,
+            epoch - 1,
+            epoch,
+        )
+        .expect("the cut reruns");
+        assert_eq!(
+            again["native_capacity_cut"],
+            serde_json::json!({"anchor_rewritten": false, "account_rewritten": false})
+        );
+
+        crate::native_capacity::startup_seams::open_and_debit(&state, &lock)
+            .expect("the node starts, settles the dead incarnation and debits");
+        let after = crate::native_capacity::inspect_capacity_account(&state)
+            .unwrap()
+            .expect("capacity account");
+        // Same epoch; the settlement spent one more recovery attempt and
+        // refunded nothing; the new incarnation took the next sequence.
+        assert_eq!(after.epoch, before.epoch);
+        assert_eq!(after.sequence, before.sequence + 1);
+        assert_eq!(
+            after.recovery_attempts_used,
+            before.recovery_attempts_used + 1
+        );
+        assert!(after.outstanding_incarnation);
+        assert!(after.incarnations_remaining <= before.incarnations_remaining);
+    }
+
+    /// A cut that dies between its two writes leaves the anchor re-recorded and
+    /// the account not yet: a start refuses it naming the cure rather than as
+    /// corruption, and rerunning the cut lets the node start.
+    #[test]
+    fn a_cut_interrupted_between_its_writes_refuses_a_start_with_the_cure_and_the_rerun_starts_the_node()
+     {
+        let _watchdog = watchdog(
+            "a_cut_interrupted_between_its_writes_refuses_a_start_with_the_cure_and_the_rerun_starts_the_node",
+            300,
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        let (lock, _) = node_with_pre_cut_capacity_records(&state, &user, &|json| json);
+        let interrupted =
+            crate::native_capacity::retire_with_fault_for_test(&state, &lock, &mut |step| {
+                if step == crate::native_capacity::CutStep::AnchorReplaced {
+                    anyhow::bail!("injected interruption");
+                }
+                Ok(())
+            })
+            .expect_err("the cut is interrupted");
+        assert!(format!("{interrupted:#}").contains("injected interruption"));
+        let refused = crate::native_capacity::startup_seams::open_and_debit(&state, &lock)
+            .expect_err("a half-cut account cannot start");
+        let refused = format!("{refused:#}");
+        assert!(
+            refused.contains("predates recorded pid namespaces")
+                && refused.contains("ryeos node reset execution-history --confirm"),
+            "{refused}"
+        );
+        let rerun = crate::native_capacity::retire_pre_cut_identity_records(&state, &lock)
+            .expect("the cut reruns");
+        assert!(!rerun.anchor_rewritten && rerun.account_rewritten);
+        crate::native_capacity::startup_seams::open_and_debit(&state, &lock)
+            .expect("the node starts once the cut has finished");
+    }
+
+    /// The step keys on the exact pre-cut shape: a record that fails to
+    /// decode for any other reason is refused and left as it was.
+    #[test]
+    fn the_cut_refuses_a_capacity_record_that_is_not_the_pre_cut_shape() {
+        let _watchdog = watchdog(
+            "the_cut_refuses_a_capacity_record_that_is_not_the_pre_cut_shape",
+            300,
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        // An identity of the old shape that is also damaged: a renamed key.
+        let (lock, _) = node_with_pre_cut_capacity_records(&state, &user, &|json| {
+            json.replace("\"target_pid\"", "\"target_pidx\"")
+        });
+        let files =
+            |name: &str| std::fs::read(state.join(".ai/node/native-capacity").join(name)).unwrap();
+        let (account, anchor) = (files("account"), files("anchor"));
+        let epoch = ryeos_app::runtime_db::RuntimeDb::current_operator_schema_epoch();
+        let error = crate::offline_operation::handlers::reset_execution_history_for_test(
+            &state,
+            &lock,
+            epoch - 1,
+            epoch,
+        )
+        .expect_err("a damaged record is not the pre-cut shape");
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("not the pre-cut shape") || rendered.contains("pre-cut"),
+            "{rendered}"
+        );
+        assert_eq!((files("account"), files("anchor")), (account, anchor));
     }
 
     #[test]

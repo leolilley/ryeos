@@ -1084,6 +1084,58 @@ mod tests {
     }
 
     #[test]
+    fn the_isolation_section_digest_ignores_other_sections_and_follows_its_own() {
+        use crate::node_policy::compile_generation;
+
+        let table = NodePolicyTable::new();
+        let app_root = tempfile::tempdir().unwrap();
+        let path = std::path::Path::new("standard.yaml");
+        let compile = |edit: &dyn Fn(&mut NodeInitProfile)| {
+            let mut profile = authored_profile("standard")
+                .for_host_class("local_unconfined")
+                .unwrap();
+            edit(&mut profile);
+            let generation = profile.validated_generation(&table, path).unwrap();
+            let snapshot =
+                compile_generation(app_root.path(), &table, &generation, &"a".repeat(64)).unwrap();
+            let isolation = snapshot
+                .section_digest::<ryeos_engine::isolation::IsolationPolicy>()
+                .unwrap()
+                .to_owned();
+            (snapshot.generation_digest().to_owned(), isolation)
+        };
+        let (base_generation, base_isolation) = compile(&|_| {});
+        let (same_generation, same_isolation) = compile(&|_| {});
+        assert_eq!(
+            (base_generation.as_str(), base_isolation.as_str()),
+            (same_generation.as_str(), same_isolation.as_str()),
+            "an unchanged policy has stable digests"
+        );
+
+        // Another section changes: the generation digest moves, the isolation
+        // section's own digest does not.
+        let (other_generation, other_isolation) = compile(&|profile| {
+            let authorization = profile.policies.get_mut("authorization").unwrap();
+            let warn = authorization["warn_before_secs"].as_u64().unwrap();
+            authorization["warn_before_secs"] = (warn + 1).into();
+        });
+        assert_ne!(other_generation, base_generation);
+        assert_eq!(other_isolation, base_isolation);
+
+        // The isolation policy changes: its own digest moves.
+        let (_, changed_isolation) = compile(&|profile| {
+            let isolation = profile.policies.get_mut("isolation").unwrap();
+            let open = isolation
+                .pointer("/policy/limits/open_files")
+                .unwrap()
+                .as_u64()
+                .unwrap();
+            *isolation.pointer_mut("/policy/limits/open_files").unwrap() = (open + 1).into();
+        });
+        assert_ne!(changed_isolation, base_isolation);
+    }
+
+    #[test]
     fn declared_import_roots_are_admitted_into_the_generation() {
         let table = NodePolicyTable::new();
         let app_root = tempfile::tempdir().unwrap();
