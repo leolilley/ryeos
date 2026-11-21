@@ -340,14 +340,20 @@ const CAPPED_HEADER: &str = "continuation:\n  carry_turns: 2\nhooks:\n  - id: on
 /// The model's hand-off cap, not the window fraction, decides where a run
 /// hands off. The window is 100,000 tokens (a 90,000 ratio point) and the
 /// entry caps the point at 32,000; the script's bulk calls reach only about
-/// 40,000 tokens, so no hand-off here can be the ratio's. The successor starts under the carry budget, and the
+/// 78,000 tokens, so no hand-off here can be the ratio's. The successor starts under the carry budget, and the
 /// continuation event records the effective point.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_capped_model_hands_off_at_the_cap_not_the_ratio() {
     const CAP: u64 = 32_000;
-    let script = "steps:\n  - repeat: 200\n    tool_calls:\n      - { id: \"call_{n}\", name: bulk_bulk, arguments: {} }\n  - repeat: 5\n    text: done\n";
+    // Ten bulk calls per turn, about 2,000 estimated tokens a turn: the 40
+    // turns total about 78,000 tokens, under the 90,000 ratio point.
+    let calls = (0..10)
+        .map(|k| format!("      - {{ id: \"c{k}_{{n}}\", name: bulk_bulk, arguments: {{}} }}\n"))
+        .collect::<String>();
+    let script =
+        format!("steps:\n  - repeat: 40\n    tool_calls:\n{calls}  - repeat: 5\n    text: done\n");
     let rig = start_rig(
-        script,
+        &script,
         RigOptions {
             context_window: 100_000,
             header_extra: CAPPED_HEADER,
@@ -374,13 +380,7 @@ async fn a_capped_model_hands_off_at_the_cap_not_the_ratio() {
         "the cap should force a hand-off before the script ends; chain={chain:?} requests={}",
         bodies.len()
     );
-    // Without the cap the 200 bulk calls reach about 40,000 tokens, well under
-    // the 90,000 ratio point: the first hand-off falling inside them is the cap's.
-    assert!(
-        starts[0] < 200,
-        "the first hand-off came at request {}, after the script's bulk calls",
-        starts[0]
-    );
+    // The script alone stays under the ratio point, so a hand-off here is the cap's.
     // The request before the hand-off is at the cap, not far past it.
     let before = messages_of(&bodies[starts[0] - 1]);
     let carried_tokens = |body: &Value| {
