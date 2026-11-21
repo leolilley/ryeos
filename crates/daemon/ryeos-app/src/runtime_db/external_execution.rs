@@ -1500,6 +1500,9 @@ pub(crate) struct ExternalTerminalObservation {
     pub termination_request_digest: String,
     pub terminal_state: String,
     pub provider_observation_digest: String,
+    /// What the adapter's verdict rested on (observed terminated, or one of the
+    /// not-found rules). Required: a stored observation without it is refused.
+    pub basis: ryeos_external_execution_contract::TerminalBasis,
 }
 
 impl ExternalTerminalObservation {
@@ -4878,6 +4881,7 @@ pub(crate) mod tests {
             termination_request_digest: intent.termination_request_digest.clone(),
             terminal_state: "terminated".into(),
             provider_observation_digest: "2".repeat(64),
+            basis: ryeos_external_execution_contract::TerminalBasis::ObservedTerminated,
         };
         assert!(db.settle_external_terminal("T-one", &observation).is_err());
         assert!(db.begin_external_termination("T-one", &intent).unwrap());
@@ -5007,6 +5011,7 @@ pub(crate) mod tests {
             termination_request_digest: termination.termination_request_digest.clone(),
             terminal_state: "terminated".into(),
             provider_observation_digest: "2".repeat(64),
+            basis: ryeos_external_execution_contract::TerminalBasis::ObservedTerminated,
         };
         db.settle_external_terminal(&reservation.placement_thread_id, &terminal)
             .unwrap();
@@ -5028,6 +5033,144 @@ pub(crate) mod tests {
                 .observation
                 .is_none()
         );
+    }
+
+    fn basis_fixture_observation(
+        basis: ryeos_external_execution_contract::TerminalBasis,
+    ) -> ExternalTerminalObservation {
+        ExternalTerminalObservation {
+            schema: 1,
+            binding_hash: "a".repeat(64),
+            request_digest: "b".repeat(64),
+            occurrence_id: "fixture-occurrence".into(),
+            termination_request_digest: "1".repeat(64),
+            terminal_state: "terminated".into(),
+            provider_observation_digest: "2".repeat(64),
+            basis,
+        }
+    }
+
+    #[test]
+    fn terminal_observation_stores_its_basis_in_canonical_form() {
+        use ryeos_external_execution_contract::TerminalBasis;
+        let observation = basis_fixture_observation(TerminalBasis::PastLatestLeaseEndNotFound);
+        let canonical =
+            lillux::canonical_json(&serde_json::to_value(&observation).unwrap()).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&canonical).unwrap();
+        assert_eq!(value["basis"], "past_latest_lease_end_not_found");
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE obs (placement_thread_id TEXT PRIMARY KEY, observation_json TEXT NOT NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO obs VALUES('T-one',?1)", [&canonical])
+            .unwrap();
+        let read: Option<ExternalTerminalObservation> =
+            read_canonical_evidence(&conn, "obs", "observation_json", "T-one").unwrap();
+        assert_eq!(read, Some(observation));
+
+        // A stored row whose JSON is not the canonical form of the record is
+        // refused even though it decodes.
+        let spaced = canonical.replacen(',', ", ", 1);
+        conn.execute("INSERT INTO obs VALUES('T-two',?1)", [&spaced])
+            .unwrap();
+        let refused: Result<Option<ExternalTerminalObservation>> =
+            read_canonical_evidence(&conn, "obs", "observation_json", "T-two");
+        assert!(refused.is_err());
+    }
+
+    #[test]
+    fn terminal_observation_without_basis_is_refused_on_read() {
+        use ryeos_external_execution_contract::TerminalBasis;
+        let mut value =
+            serde_json::to_value(basis_fixture_observation(TerminalBasis::ObservedTerminated))
+                .unwrap();
+        value.as_object_mut().unwrap().remove("basis");
+        let predecessor = lillux::canonical_json(&value).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE obs (placement_thread_id TEXT PRIMARY KEY, observation_json TEXT NOT NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO obs VALUES('T-one',?1)", [&predecessor])
+            .unwrap();
+        let refused: Result<Option<ExternalTerminalObservation>> =
+            read_canonical_evidence(&conn, "obs", "observation_json", "T-one");
+        assert!(refused.is_err(), "a pre-cut observation must not decode");
+        // An unknown basis is refused too.
+        let mut value = value;
+        value["basis"] = "guessed".into();
+        let unknown = lillux::canonical_json(&value).unwrap();
+        conn.execute("INSERT INTO obs VALUES('T-two',?1)", [&unknown])
+            .unwrap();
+        let refused: Result<Option<ExternalTerminalObservation>> =
+            read_canonical_evidence(&conn, "obs", "observation_json", "T-two");
+        assert!(refused.is_err());
+    }
+
+    #[test]
+    fn settled_terminal_records_basis_and_refuses_a_different_one() {
+        use ryeos_external_execution_contract::TerminalBasis;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runtime.sqlite3");
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
+        let reservation = reservation(&db, "one");
+        reserve(&db, &reservation).unwrap();
+        db.claim_external_allocation_contact("T-one", &reservation.request_digest)
+            .unwrap();
+        let occurrence = ExternalAllocationOccurrence {
+            schema: 1,
+            binding_hash: reservation.binding_hash.clone(),
+            request_digest: reservation.request_digest.clone(),
+            occurrence_id: "fixture-occurrence".into(),
+            provider_observation_digest: "f".repeat(64),
+        };
+        db.bind_external_allocation("T-one", &occurrence, test_observation_timing())
+            .unwrap();
+        let intent = ExternalTerminationIntent {
+            schema: 1,
+            binding_hash: reservation.binding_hash.clone(),
+            request_digest: reservation.request_digest.clone(),
+            occurrence_id: occurrence.occurrence_id.clone(),
+            termination_request_digest: "1".repeat(64),
+        };
+        assert!(db.begin_external_termination("T-one", &intent).unwrap());
+        let observation = ExternalTerminalObservation {
+            schema: 1,
+            binding_hash: reservation.binding_hash.clone(),
+            request_digest: reservation.request_digest.clone(),
+            occurrence_id: occurrence.occurrence_id.clone(),
+            termination_request_digest: intent.termination_request_digest.clone(),
+            terminal_state: "terminated".into(),
+            provider_observation_digest: "2".repeat(64),
+            basis: TerminalBasis::AcceptedTerminateThenNotFound,
+        };
+        db.settle_external_terminal("T-one", &observation).unwrap();
+        let stored: String = db
+            .conn
+            .with_sql(|connection| {
+                Ok(connection.query_row(
+                    "SELECT observation_json FROM external_execution_terminal_observation",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        let stored: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(stored["basis"], "accepted_terminate_then_not_found");
+        // Reading the allocation back re-decodes the evidence, canonical check included.
+        assert_eq!(
+            db.external_allocation("T-one").unwrap().unwrap().phase,
+            ExternalAllocationPhase::Terminated
+        );
+        // The same observation is idempotent; a different basis is a changed observation.
+        db.settle_external_terminal("T-one", &observation).unwrap();
+        let mut other = observation.clone();
+        other.basis = TerminalBasis::PastLatestLeaseEndNotFound;
+        assert!(db.settle_external_terminal("T-one", &other).is_err());
     }
 
     #[test]
