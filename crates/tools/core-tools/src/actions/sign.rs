@@ -327,6 +327,7 @@ fn sign_target_descriptors(
     let kind_schema = kinds
         .get(&target.kind)
         .ok_or_else(|| anyhow!("unknown kind `{}` — no kind schema registered", target.kind))?;
+    crate::actions::revision::refuse_revision_kind(&target.kind)?;
 
     let kind_dir = source_kind_dir(kind_schema, source, project_path)?;
     let ai_root = source_ai_root(source, project_path)?;
@@ -422,6 +423,7 @@ fn sign_target_descriptors(
                 warnings,
                 executor_id,
                 resulting_content_digest,
+                content_before,
             }) => {
                 if let Some(executor_id) = executor_id {
                     pending_source_units.push(PendingProjectSourceUnit {
@@ -433,6 +435,24 @@ fn sign_target_descriptors(
                     });
                 }
                 let item_was_signed = matches!(outcome, SignOutcome::Signed { .. });
+                if item_was_signed
+                    && let Err(error) = record_signed_revision(
+                        project_path,
+                        signing_key,
+                        &display_ref,
+                        &file_path,
+                        &content_before,
+                    )
+                {
+                    report.failed.push(ItemOutcome {
+                        item_ref: display_ref,
+                        signature: None,
+                        error: Some(format!("{error:#}")),
+                        warnings,
+                        source_unit_files_signed: 0,
+                    });
+                    continue;
+                }
                 let signature = match outcome {
                     SignOutcome::Signed { report, .. } => report,
                     SignOutcome::Unchanged {
@@ -577,6 +597,7 @@ fn sign_one(
         warnings,
         executor_id: metadata.executor_id,
         resulting_content_digest,
+        content_before: content,
     })
 }
 
@@ -1376,6 +1397,36 @@ struct SignOneResult {
     warnings: Vec<String>,
     executor_id: Option<String>,
     resulting_content_digest: String,
+    /// The item file as it stood before it was signed.
+    content_before: String,
+}
+
+/// Record the signature just written as a revision of the item, signed by the
+/// operator's key.
+fn record_signed_revision(
+    project_path: Option<&Path>,
+    signing_key: &SigningKey,
+    item_ref: &str,
+    file_path: &Path,
+    content_before: &str,
+) -> Result<()> {
+    let project_root =
+        project_path.ok_or_else(|| anyhow!("project source has no authoritative root"))?;
+    let after = lillux::read_regular_file_bounded_no_follow(
+        file_path,
+        ryeos_engine::item_resolution::MAX_ITEM_SOURCE_BYTES,
+    )
+    .with_context(|| format!("read signed {}", file_path.display()))?;
+    crate::actions::revision::record_operator_change(
+        project_root,
+        signing_key,
+        item_ref,
+        file_path,
+        Some(content_before.as_bytes()),
+        Some(after.as_slice()),
+        "sign",
+    )
+    .map(|_| ())
 }
 
 pub(super) enum SignOutcome {
@@ -1515,6 +1566,125 @@ mod tests {
             .with_node_trust_store(trust_store)
             .with_composers(composers)
             .with_registered_bundle_roots(registered_roots)
+    }
+
+    fn revision_bodies(
+        project: &Path,
+        kind: &str,
+        bare_id: &str,
+    ) -> Vec<ryeos_node_runtime::item_revision::RevisionBody> {
+        let directory = project.join(".ai/revisions").join(kind).join(bare_id);
+        let mut names: Vec<_> = std::fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+            .iter()
+            .map(|name| {
+                let text = std::fs::read_to_string(directory.join(name)).unwrap();
+                let (_, body) = text.split_once('\n').unwrap();
+                serde_yaml::from_str(body).unwrap()
+            })
+            .collect()
+    }
+
+    fn no_ignore() -> ryeos_state::ignore::IgnoreMatcher {
+        ryeos_state::ignore::IgnoreMatcher::from_config(&ryeos_state::ignore::IgnoreConfig {
+            patterns: Vec::new(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn operator_sign_and_remove_are_recorded_as_operator_signed_revisions() {
+        let project_dir = tempfile::tempdir().unwrap();
+        let project = project_dir.path();
+        let item = project.join(".ai/knowledge/notes/a.yaml");
+        std::fs::create_dir_all(item.parent().unwrap()).unwrap();
+        std::fs::write(&item, "title: first\n").unwrap();
+        let key = SigningKey::generate(&mut OsRng);
+        let engine = live_bundle_engine(&key);
+        let ignore = no_ignore();
+        let sign = || {
+            let report =
+                run_sign_online("knowledge:notes/a", project, &engine, &ignore, &key).unwrap();
+            assert!(report.is_total_success(), "{report:?}");
+        };
+
+        sign();
+        let signed_once = std::fs::read(&item).unwrap();
+        std::fs::write(&item, "title: second\n").unwrap();
+        sign();
+        let signed_twice = std::fs::read(&item).unwrap();
+        // Signing an already-signed item changes nothing and records nothing.
+        sign();
+
+        let removed = crate::actions::revision::remove_item(
+            &engine.kinds,
+            &key,
+            "knowledge:notes/a",
+            project,
+        )
+        .unwrap();
+        assert_eq!(removed.revision, 3);
+        assert!(!item.exists());
+
+        let bodies = revision_bodies(project, "knowledge", "notes/a");
+        assert_eq!(bodies.len(), 3);
+        let fingerprint = format!(
+            "fp:{}",
+            lillux::signature::compute_fingerprint(&key.verifying_key())
+        );
+        assert!(bodies.iter().all(|body| {
+            body.actor.fingerprint == fingerprint
+                && body.actor.role == ryeos_node_runtime::item_revision::ActorRole::Operator
+        }));
+        assert_eq!(
+            bodies[0].before_digest,
+            Some(lillux::sha256_hex(b"title: first\n"))
+        );
+        assert_eq!(
+            bodies[0].after_digest,
+            Some(lillux::sha256_hex(&signed_once))
+        );
+        assert_eq!(
+            bodies[1].before_digest,
+            Some(lillux::sha256_hex(b"title: second\n"))
+        );
+        assert_eq!(
+            bodies[1].after_digest,
+            Some(lillux::sha256_hex(&signed_twice))
+        );
+        assert_eq!(bodies[2].before_digest, bodies[1].after_digest);
+        assert!(bodies[2].is_tombstone());
+        assert_eq!(bodies[2].provenance["action"], "remove");
+        assert_eq!(bodies[0].provenance["action"], "sign");
+    }
+
+    #[test]
+    fn revision_records_cannot_be_signed_or_removed_by_hand() {
+        let project_dir = tempfile::tempdir().unwrap();
+        let key = SigningKey::generate(&mut OsRng);
+        let engine = live_bundle_engine(&key);
+        let ignore = no_ignore();
+        let error = run_sign_online(
+            "revision:knowledge/notes/a/00000001",
+            project_dir.path(),
+            &engine,
+            &ignore,
+            &key,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("revision records"), "{error:#}");
+        let error = crate::actions::revision::remove_item(
+            &engine.kinds,
+            &key,
+            "revision:knowledge/notes/a/00000001",
+            project_dir.path(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("revision records"), "{error:#}");
     }
 
     #[test]
@@ -1853,6 +2023,7 @@ printf '%s\n' fixture
             inventory_policy: Default::default(),
             launch_trust: None,
             project_shadowing: Default::default(),
+            runtime_authoring: Default::default(),
         };
 
         assert!(matches!(

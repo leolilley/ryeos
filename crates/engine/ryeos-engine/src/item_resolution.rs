@@ -1196,6 +1196,7 @@ mod tests {
             inventory_policy: Default::default(),
             launch_trust: None,
             project_shadowing: Default::default(),
+            runtime_authoring: Default::default(),
         }
     }
 

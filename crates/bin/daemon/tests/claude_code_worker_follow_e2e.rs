@@ -468,17 +468,33 @@ async fn run_graph(
         tokio::time::sleep(Duration::from_millis(200)).await;
     };
 
-    let (status, thread) = daemon
-        .post_execute(
-            "service:threads/get",
-            project.to_str().context("project path is not UTF-8")?,
-            json!({ "thread_id": successor }),
-        )
-        .await?;
-    anyhow::ensure!(
-        status.is_success(),
-        "threads/get failed: {status} {thread:#}"
-    );
+    // `graph_completed` is the runtime's last event; the daemon records the
+    // thread's terminal status and result only after the runtime process is
+    // reaped and its output drained, which on a loaded runner lands seconds
+    // later. Reading the record on the event alone saw a still-`running`
+    // thread with no result, so wait for the record to settle.
+    let settle_deadline = Instant::now() + Duration::from_secs(60);
+    let thread = loop {
+        let (status, thread) = daemon
+            .post_execute(
+                "service:threads/get",
+                project.to_str().context("project path is not UTF-8")?,
+                json!({ "thread_id": successor }),
+            )
+            .await?;
+        anyhow::ensure!(
+            status.is_success(),
+            "threads/get failed: {status} {thread:#}"
+        );
+        let running = thread
+            .pointer("/result/thread/status")
+            .and_then(Value::as_str)
+            == Some("running");
+        if !running || Instant::now() >= settle_deadline {
+            break thread;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
     // Shown by the test runner only when the test fails: the settled child
     // threads' own records and the daemon's log, which carry the reason a
     // worker turn failed when the graph only reports the redirect.

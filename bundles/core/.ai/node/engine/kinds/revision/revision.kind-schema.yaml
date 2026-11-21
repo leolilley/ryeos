@@ -1,0 +1,29 @@
+# ryeos:signed:2026-11-20T23:17:05Z:d3124a52430ab6bbae77e4d80b7359f35cd7dd31bcb9bdf73fe1c4e1a9442f61:TkwLhvJ+l1/hqoYYh2g/zGvBeR+OsqafzkIxspqAAU2bq3imBuccByIDxh71xCfu4ZrjlnItWi02YHxwDVN7Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "engine/kinds/revision"
+version: "1.0.0"
+# One signed record in the revision chain of a project item. The chain of an
+# item `<kind>:<bare_id>` lives at `.ai/revisions/<kind>/<bare_id>/<seq>.yaml`
+# and each record is signed by the key that made the change. Records are
+# written only by the mechanisms that make changes (the runtime authoring
+# callback, the operator's own signing and removal commands); a run can never
+# author or alter one, and the loader never reads a record as authority.
+location:
+  directory: revisions
+runtime_authoring: refused
+effective_trust:
+  include_references: false
+resolution: []
+formats:
+  - extensions: [".yaml"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: "#"
+composer: handler:ryeos/core/identity
+composed_value_contract:
+  root_type: mapping
+  required: {}
+metadata:
+  rules:
+    name:
+      from: filename
+      required: true
