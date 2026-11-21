@@ -54,7 +54,7 @@ use ryeos_state::{
 };
 use tokio::net::TcpListener;
 
-use common::DaemonHarness;
+use common::{DaemonHarness, HandoffCrashGate};
 
 const DAEMON_SOURCE_SITE_ID: &str = "site:testhost";
 const REMOTE_TARGET_SITE_ID: &str = "site:handoff-target";
@@ -4171,6 +4171,21 @@ impl RealPortableHandoff {
 }
 
 async fn start_real_portable_handoff() -> Result<RealPortableHandoff> {
+    Ok(start_real_portable_handoff_with(None, &[]).await?.0)
+}
+
+/// Start the real portable-worker pair. The source is restarted exactly once
+/// here (its remote routes are installed while it is down), and that is the
+/// only restart a source can take before its handoff: a dedicated-session root
+/// is native-resumed once per node run budget, so a second restart settles it
+/// failed and a restart after the preflight moves the chain head the
+/// preflight is bound to. A test that needs the source to carry a crash gate
+/// or an environment variable therefore asks for it here, not by restarting
+/// the source later.
+async fn start_real_portable_handoff_with(
+    gate: Option<HandoffCrashBoundary>,
+    source_environment: &[(&str, &str)],
+) -> Result<(RealPortableHandoff, Option<HandoffCrashGate>)> {
     let project = common::process_scopes::tempdir()?;
     std::fs::create_dir_all(project.path().join(".ai"))?;
     std::fs::write(
@@ -4278,11 +4293,29 @@ async fn start_real_portable_handoff() -> Result<RealPortableHandoff> {
         &format!("fp:{}", source_fixture.user_fp()),
         &candidate_snapshot_hash,
     )?;
-    source
-        .respawn_with(|command| {
-            command.env("HOSTNAME", "handoff-source");
-        })
-        .await?;
+    let source_gate = match gate {
+        Some(boundary) => Some(
+            source
+                .respawn_with_handoff_crash_gate(boundary, |command| {
+                    command.env("HOSTNAME", "handoff-source");
+                    for (name, value) in source_environment {
+                        command.env(name, value);
+                    }
+                })
+                .await?,
+        ),
+        None => {
+            source
+                .respawn_with(|command| {
+                    command.env("HOSTNAME", "handoff-source");
+                    for (name, value) in source_environment {
+                        command.env(name, value);
+                    }
+                })
+                .await?;
+            None
+        }
+    };
     install_single_remote(
         &target.state_path,
         remote_config(
@@ -4309,7 +4342,7 @@ async fn start_real_portable_handoff() -> Result<RealPortableHandoff> {
         )?,
     )?;
 
-    Ok(RealPortableHandoff {
+    let mut handoff = RealPortableHandoff {
         _project: project,
         source,
         source_fixture,
@@ -4318,7 +4351,34 @@ async fn start_real_portable_handoff() -> Result<RealPortableHandoff> {
         source_site_id,
         target_site_id,
         checkpoint,
-    })
+    };
+    // The restart's native resume appends to the session chain; a preflight
+    // taken before it settles would be bound to a head that has already moved.
+    wait_for_source_chain_quiescence(&mut handoff).await?;
+    Ok((handoff, source_gate))
+}
+
+/// Wait until the source node's view of the session thread stops changing
+/// (the same response on consecutive polls) after a restart's resume.
+async fn wait_for_source_chain_quiescence(handoff: &mut RealPortableHandoff) -> Result<()> {
+    let chain_root_id = handoff.checkpoint.chain_root_id.clone();
+    let mut previous: Option<serde_json::Value> = None;
+    let mut stable = 0;
+    for _ in 0..60 {
+        let current = handoff.source.get_thread(&chain_root_id).await?;
+        let current = serde_json::to_value(&current)?;
+        if previous.as_ref() == Some(&current) {
+            stable += 1;
+            if stable >= 3 {
+                return Ok(());
+            }
+        } else {
+            stable = 0;
+            previous = Some(current);
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    anyhow::bail!("the restarted source session thread never settled: {previous:?}")
 }
 
 async fn assert_real_handoff_completed(
@@ -4962,7 +5022,8 @@ async fn crash_real_source_handoff_at(
     CasEntrySnapshot,
     HandoffPhaseCutEvidence,
 )> {
-    let mut handoff = start_real_portable_handoff().await?;
+    let (mut handoff, gate) = start_real_portable_handoff_with(Some(boundary), &[]).await?;
+    let mut gate = gate.context("the gated source start returned no crash gate")?;
     let (preflight_id, successor_id) = handoff.preflight().await?;
     handoff.target.kill_daemon().await?;
     let target_before_transfer = snapshot_cas_entries(&handoff.target.state_path)?;
@@ -4970,14 +5031,6 @@ async fn crash_real_source_handoff_at(
         .target
         .respawn_with(|command| {
             command.env("HOSTNAME", "handoff-target");
-        })
-        .await?;
-    handoff.refresh_routes()?;
-    handoff.source.kill_daemon().await?;
-    let mut gate = handoff
-        .source
-        .respawn_with_handoff_crash_gate(boundary, |command| {
-            command.env("HOSTNAME", "handoff-source");
         })
         .await?;
     handoff.refresh_routes()?;
@@ -5037,12 +5090,6 @@ async fn real_portable_worker_completes_cross_site_handoff_on_qualified_host() -
         .target
         .respawn_with(|command| {
             command.env("HOSTNAME", "handoff-target");
-        })
-        .await?;
-    handoff
-        .source
-        .respawn_with(|command| {
-            command.env("HOSTNAME", "handoff-source");
         })
         .await?;
     handoff.refresh_routes()?;
@@ -5537,17 +5584,12 @@ async fn failed_terminal_fetch_retries_in_the_same_source_process() -> Result<()
 
 async fn failed_terminal_fetch_retries_in_the_same_source_process_on_qualified_host() -> Result<()>
 {
-    let mut handoff = start_real_portable_handoff().await?;
+    let (mut handoff, _) = start_real_portable_handoff_with(
+        None,
+        &[("RYEOS_TEST_HANDOFF_FAIL_TERMINAL_FETCH_ONCE", "1")],
+    )
+    .await?;
     let (preflight_id, successor_id) = handoff.preflight().await?;
-    handoff.source.kill_daemon().await?;
-    handoff
-        .source
-        .respawn_with(|command| {
-            command
-                .env("HOSTNAME", "handoff-source")
-                .env("RYEOS_TEST_HANDOFF_FAIL_TERMINAL_FETCH_ONCE", "1");
-        })
-        .await?;
     handoff.refresh_routes()?;
     let source_pid = handoff.source.child.id();
 
@@ -6317,18 +6359,27 @@ async fn projected_target_attachment_survives_worker_reap_before_receipt_recover
         ryeos_app::process::ShutdownAction::Hard,
     );
     if !killed.success {
-        // The kill result names only the method; ask the retained scope again
-        // for the reason its termination could not be proved.
-        let reason = worker
-            .process_identity
-            .process_scope
-            .as_ref()
-            .map(|scope| format!("{:?}", scope.terminate_and_wait(scope.control_timeout())))
-            .unwrap_or_else(|| "the identity retains no scope".to_owned());
-        anyhow::bail!(
-            "could not prove worker terminalization at attachment cut: {}; scope termination retried: {reason}",
-            killed.method
+        // A scope settles only for the account that owns its delegation, which
+        // is the node account; in the real process-scope mode this test
+        // process is the administrator and is refused. The worker is what
+        // must be gone before recovery, so end its process group and wait for
+        // its exact process to exit; the node's own recovery settles the
+        // scope as its owner.
+        let identity = &worker.process_identity;
+        lillux::child_group::signal_group(
+            u32::try_from(identity.group_leader_pid)?,
+            lillux::child_group::GroupSignal::Kill,
         );
+        let target = u32::try_from(identity.target_pid)?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while lillux::is_alive(target) {
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "worker did not exit at attachment cut after its group was killed (first attempt: {})",
+                killed.method
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
     target_store.fence_abandoned_worker_process(
         &worker.worker_instance_id,
