@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-06T07:38:25Z:2ce4281435fae73a602f00d8fb39eed25d1e85ad51ae5770c9346b7e86f35d43:B1B62rZLjO4szRdfqi3pSdIctrkEM35YxcYilpixGFRQBIl6mQK+NQMsAAacT/blBUvF2kwft/r7o7xrcywlCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-21T09:20:32Z:f5672bf0dabd15849161c4f5b20a325b086b8e695f28f3b7abc826a119469da4:DGQFzC646ldoEEmfyJzfk1FNEjXDCi+ksYA0EjGKLoyoDmC6G08HhVoKE7hXL71Zqaq10nEgZuCORDZk6PCYAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [fundamentals, threads, execution, lifecycle]
 version: "1.0.0"
@@ -44,6 +44,18 @@ Each thread maintains an append-only event log. Events include:
 - `tool_result` — tool return value
 - `llm_request` / `llm_response` — model interaction
 - `completed` / `failed` / `cancelled` — terminal events
+
+### Which event means "done"
+
+Runtime-authored events such as `graph_completed` mean the run ended; the
+thread record may not have settled yet, because the runtime appends them
+before it calls the daemon's finalize callback. The daemon's own terminal
+events (`thread_completed`, `thread_failed`, `thread_cancelled`,
+`thread_killed`, `thread_timed_out`, `thread_continued`) are committed in the
+same transaction as the thread's terminal snapshot and published only after
+it. Once one is visible, `threads/get` returns the terminal status and the
+result. Clients that need the result key on the daemon's `thread_*` event (or
+on `threads/get` leaving `running`), never on a runtime event.
 
 Events can be replayed:
 - `ryeos events replay <thread_id>` — replay a single thread

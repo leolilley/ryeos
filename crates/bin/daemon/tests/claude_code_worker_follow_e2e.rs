@@ -468,11 +468,16 @@ async fn run_graph(
         tokio::time::sleep(Duration::from_millis(200)).await;
     };
 
-    // `graph_completed` is the runtime's last event; the daemon records the
-    // thread's terminal status and result only after the runtime process is
-    // reaped and its output drained, which on a loaded runner lands seconds
-    // later. Reading the record on the event alone saw a still-`running`
-    // thread with no result, so wait for the record to settle.
+    // `graph_completed` is authored by the graph runtime just before it calls
+    // the daemon's finalize callback (accounting fence, sealing the retained
+    // project generation, state-store writer lock), which on a loaded runner
+    // lands seconds later. Reading the record on that event alone saw a
+    // still-`running` thread with no result. The daemon's own `thread_*`
+    // terminal event is committed with the terminal snapshot, so wait for it,
+    // then keep a bounded poll for the record leaving `running` as the fallback.
+    daemon
+        .wait_for_thread_terminal_event(&successor, Duration::from_secs(60))
+        .await;
     let settle_deadline = Instant::now() + Duration::from_secs(60);
     let thread = loop {
         let (status, thread) = daemon
