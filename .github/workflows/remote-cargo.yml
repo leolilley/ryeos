@@ -65,6 +65,11 @@ on:
         options:
           - root
           - rune
+      prebuild:
+        description: "Optional arguments for a `cargo build` run first in the same checkout, for tests that need a built binary beside the test target, e.g. -p ryeos-cli --features scheduling,model-provider-setup"
+        required: false
+        default: ""
+        type: string
       label:
         description: "Optional short label shown in the run name"
         required: false
@@ -226,8 +231,14 @@ jobs:
           CARGO_SUBCOMMAND: ${{ inputs.command }}
           CARGO_ARGS: ${{ inputs.args }}
           CARGO_WORKSPACE: ${{ inputs.workspace }}
+          CARGO_PREBUILD: ${{ inputs.prebuild }}
         run: |
           set -euo pipefail
+          if [[ -n "$CARGO_PREBUILD" ]]; then
+            read -r -a prebuild <<<"$CARGO_PREBUILD"
+            echo "cargo build ${prebuild[*]}"
+            cargo build "${prebuild[@]}"
+          fi
           read -r -a extra <<<"$CARGO_ARGS"
           manifest=()
           if [[ "$CARGO_WORKSPACE" == rune ]]; then
