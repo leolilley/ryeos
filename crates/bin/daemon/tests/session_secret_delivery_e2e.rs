@@ -1191,6 +1191,14 @@ async fn a_session_whose_lease_ended_is_not_resumed_and_its_root_ends_typed_term
             .context("the launched session has no worker epoch")?;
         store.settle_worker_process(&worker, &chain_root_id, epoch, "reaped", "lease ended")?;
         store.fail_dedicated_session_start(&chain_root_id, &worker, epoch, "lease ended", true)?;
+        // A real worker's binding outlives the failed start; its reaped
+        // settlement is what releases the session from it.
+        if store
+            .dedicated_session(&chain_root_id)?
+            .is_some_and(|session| session.worker_instance_id.is_some())
+        {
+            store.fence_abandoned_worker_process(&worker, &chain_root_id, epoch, "reaped")?;
+        }
     }
     daemon.respawn_with(|_| {}).await?;
 
