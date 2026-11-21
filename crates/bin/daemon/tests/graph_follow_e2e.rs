@@ -1274,6 +1274,15 @@ async fn graph_follow_child_cost_flows_into_resumed_parent() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
 
+    // `graph_completed` is runtime-authored and precedes the daemon's
+    // finalization; the daemon's `thread_*` terminal event is committed with
+    // the terminal record, so wait for it before reading the result.
+    assert!(
+        h.wait_for_thread_terminal_event(&successor_tid, Duration::from_secs(60))
+            .await,
+        "successor {successor_tid} never reached a daemon terminal event"
+    );
+
     // The child's 10 input tokens must appear in the resumed parent successor's
     // persisted result (the follow node accounts the child's cost on resume).
     let (get_status, get_body) = h

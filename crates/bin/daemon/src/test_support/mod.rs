@@ -1513,6 +1513,45 @@ impl DaemonHarness {
         events
     }
 
+    /// Wait until the daemon's own terminal event for `thread_id`
+    /// (`thread_completed`, `thread_failed`, `thread_cancelled`,
+    /// `thread_killed`, `thread_timed_out` or `thread_continued`) is
+    /// persisted. The daemon commits that event in the same transaction as the
+    /// thread's terminal snapshot, so once it is visible `threads/get` returns
+    /// the terminal status and result. Runtime-authored events such as
+    /// `graph_completed` precede the daemon's finalization and do not carry
+    /// this guarantee. Returns whether the event appeared before `timeout`;
+    /// callers keep their own bounded record poll as the fallback.
+    pub async fn wait_for_thread_terminal_event(
+        &self,
+        thread_id: &str,
+        timeout: std::time::Duration,
+    ) -> bool {
+        const TERMINAL: &[&str] = &[
+            "thread_completed",
+            "thread_failed",
+            "thread_cancelled",
+            "thread_killed",
+            "thread_timed_out",
+            "thread_continued",
+        ];
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if self
+                .principal_events()
+                .await
+                .iter()
+                .any(|(thread, event, _)| thread == thread_id && TERMINAL.contains(&event.as_str()))
+            {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
     /// Page through one replay service until its cursor is exhausted.
     async fn replay_events(
         &self,
