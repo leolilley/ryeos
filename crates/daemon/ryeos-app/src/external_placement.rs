@@ -9247,6 +9247,7 @@ impl ExternalPlacementReconciliation {
                     termination_request_digest: intent.termination_request_digest,
                     terminal_state: "terminated".into(),
                     provider_observation_digest,
+                    basis,
                 },
             )?;
         }
@@ -11250,6 +11251,7 @@ pub mod test_support {
                 termination_request_digest,
                 terminal_state: "terminated".into(),
                 provider_observation_digest: provider_observation_digest.to_owned(),
+                basis: ryeos_external_execution_contract::TerminalBasis::ObservedTerminated,
             },
         )?;
         state.state_store.settle_worker_process(
@@ -15089,6 +15091,7 @@ mod tests {
                 termination_request_digest: intent.termination_request_digest,
                 terminal_state: "terminated".into(),
                 provider_observation_digest,
+                basis: ryeos_external_execution_contract::TerminalBasis::ObservedTerminated,
             },
         )
         .unwrap();
