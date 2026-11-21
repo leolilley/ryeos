@@ -604,6 +604,13 @@ async fn try_dispatch_client_handler(
                 .await
                 .map(ClientHandlerOutcome::json)
         }
+        "item_remove" => {
+            authorize_exact_core_client_handler(&matched.command, snapshot, "item-remove.yaml")?;
+            apply_project_policy(&matched.command, &mut parameters, default_project)?;
+            crate::client_handlers::item_remove(app_root, &parameters)
+                .await
+                .map(ClientHandlerOutcome::json)
+        }
         "content_pin" => {
             authorize_exact_core_client_handler(&matched.command, snapshot, "content-pin.yaml")?;
             apply_project_policy(&matched.command, &mut parameters, default_project)?;

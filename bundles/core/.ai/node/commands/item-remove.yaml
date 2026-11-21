@@ -1,0 +1,22 @@
+# ryeos:signed:2026-11-20T23:17:05Z:de7966f33e42812b20979f586e1ddb8c5316f52a2661419207beaec9a16c3b66:wFQW1LG5F/Sf0O/3TXWaQD5argmUh+7t3bMiseqGF7ZE8kGZSfRQOlI299whL6cXm6M5cA1oyJFMPAJpubcODA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [item, remove]
+description: Remove a project item with your operator key, in this CLI, and record the removal as a signed tombstone revision
+help:
+  usage: "ryeos [--project <path>] item remove <canonical-ref>"
+  examples:
+    - "ryeos --project . item remove directive:agent/drafts/old-plan"
+forms:
+  - slots:
+      - field: item_ref
+        matcher: canonical_ref
+project:
+  resolution: required
+  default: discover_upward_ai
+  bind_parameter: project_path
+parameter_binding:
+  mode: tail_object
+  flag_key_normalization: hyphen_to_underscore
+dispatch:
+  kind: local_handler
+  handler: item_remove
+  bootstrap: false

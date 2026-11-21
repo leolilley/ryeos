@@ -2047,6 +2047,22 @@ pub struct KindSchema {
     /// installed bundle supplies. Absent means it may: the project item wins
     /// and the bundle item is recorded as shadowed.
     pub project_shadowing: ProjectShadowing,
+    /// Whether a runtime may author or remove items of this kind through the
+    /// daemon-mediated authoring callback. Absent means it may.
+    pub runtime_authoring: RuntimeAuthoring,
+}
+
+/// The signed, kind-owned answer to whether a runtime callback may write items
+/// of the kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeAuthoring {
+    /// A run holding the authoring capability may write the kind.
+    #[default]
+    Allowed,
+    /// No run may write the kind through the callback, whatever it holds. The
+    /// kind's items are written only by the mechanism that owns them.
+    Refused,
 }
 
 /// The signed, kind-owned answer to a project item and an installed bundle
@@ -2803,6 +2819,16 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
         }
         _ => ProjectShadowing::default(),
     };
+    let runtime_authoring = match data.get("runtime_authoring") {
+        Some(value) if !value.is_null() => {
+            serde_yaml::from_value::<RuntimeAuthoring>(value.clone()).map_err(|error| {
+                EngineError::SchemaLoaderError {
+                    reason: format!("{display}: invalid `runtime_authoring`: {error}"),
+                }
+            })?
+        }
+        _ => RuntimeAuthoring::default(),
+    };
     let root_executable = execution
         .as_ref()
         .and_then(|execution| execution.thread_profile.as_ref())
@@ -2847,6 +2873,7 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
         inventory_policy,
         launch_trust,
         project_shadowing,
+        runtime_authoring,
     })
 }
 
@@ -2915,6 +2942,7 @@ const KIND_SCHEMA_KEYS: &[&str] = &[
     "inventory_policy",
     "launch_trust",
     "project_shadowing",
+    "runtime_authoring",
     "thread_profile",
 ];
 
@@ -5335,6 +5363,36 @@ formats:
             error.to_string().contains("must declare `launch_trust`"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn runtime_authoring_defaults_to_allowed_and_a_kind_can_refuse_it() {
+        let tmp = tempdir();
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        sign_and_write_schema(&tmp, "directive", SCHEMA_WITH_RESOLUTION, &sk);
+        let refusing = "location:\n  directory: ledgers\nformats:\n  - extensions: [\".yaml\"]\n    parser: parser:ryeos/core/yaml/yaml\n    signature:\n      prefix: \"#\"\nruntime_authoring: refused\n";
+        sign_and_write_schema(&tmp, "ledger", refusing, &sk);
+        let registry = KindRegistry::load_base(&[tmp], &ts).unwrap();
+        assert_eq!(
+            registry.get("directive").unwrap().runtime_authoring,
+            RuntimeAuthoring::Allowed
+        );
+        assert_eq!(
+            registry.get("ledger").unwrap().runtime_authoring,
+            RuntimeAuthoring::Refused
+        );
+    }
+
+    #[test]
+    fn runtime_authoring_with_an_unknown_value_is_refused() {
+        let tmp = tempdir();
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        let bad = "location:\n  directory: ledgers\nformats:\n  - extensions: [\".yaml\"]\n    parser: parser:ryeos/core/yaml/yaml\n    signature:\n      prefix: \"#\"\nruntime_authoring: sometimes\n";
+        sign_and_write_schema(&tmp, "ledger", bad, &sk);
+        let error = KindRegistry::load_base(&[tmp], &ts).unwrap_err();
+        assert!(error.to_string().contains("runtime_authoring"), "{error}");
     }
 
     #[test]
