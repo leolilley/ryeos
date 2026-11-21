@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-20T23:17:05Z:fa247b08ce2430341c4b0e6f84635300f823f3c4cec07265b1780b80f37bf676:VxBZQ6Kik3z/0uV1MuGVapEHJyHE1nQeEx5LDPThNr19PHKqoAasSXak4I5ktc1FUazdHmeF9wBVRZs7blaDBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-21T16:57:42Z:cf622b0af6cf0dcdddd5851952b18bc6668a86062426b909cd2797f7d97cda1a:njacYovyyyXsP+tvgQdT69Ct9NXJE2G8XXuo+cs7AV5SYFMqtprPC6I6CguDkrzF/el5BRfmj6yy+5JKcoV6AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: revisions.list
 availability: both
@@ -6,4 +6,9 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 required_caps: ["ryeos.execute.service.revisions/list"]
+schema:
+  project_path: string
+  item_ref: string
+  limit: integer?
+  cursor: string?
 description: "List the signed revision records of one project item, oldest first, each with what was checked (signature, signer, links), the chain's standing against the node's signed head, and whether the live file is what the last record wrote"
