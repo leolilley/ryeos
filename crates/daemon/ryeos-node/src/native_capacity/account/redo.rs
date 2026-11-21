@@ -80,6 +80,9 @@ impl StoredProcess {
     }
 }
 
+/// How far an operator re-issuance from the account record alone advances the
+/// debit sequence: past the one debit a lost anchor may have published.
+pub(super) const ACCOUNT_RENEWAL_SKIP: u64 = 2;
 pub(super) const ANCHOR_BYTES: usize = 12 * 1024;
 pub(super) const ANCHOR_PAYLOAD_BYTES: usize = ANCHOR_BYTES - 32;
 pub(super) const MAGIC: &[u8; 8] = b"RYERED02";
@@ -162,10 +165,17 @@ impl AccountRedo {
     /// the lost anchor carried is needed.
     pub(super) fn renew_from_account(
         before: CapacityRecord,
-        target: CapacityRecord,
+        mut target: CapacityRecord,
         authorization: [u8; 32],
         policy: &NodeNativeCapacityPolicy,
     ) -> Result<Self> {
+        // The lost anchor may have led this account by one debit, whose
+        // sequence (the resident generation of its incarnation) is unknown
+        // here. Skipping past it guarantees no sequence is ever reused.
+        target.sequence = before
+            .sequence
+            .checked_add(ACCOUNT_RENEWAL_SKIP)
+            .context("capacity debit sequence exhausted")?;
         let next = Self {
             operation: Operation::OperatorReissue,
             before,
@@ -401,8 +411,22 @@ impl AccountRedo {
                     self.target.outstanding.is_none(),
                     "capacity renewal opens with an outstanding incarnation"
                 );
+                // A renewal keeps the debit sequence. The one exception is an
+                // operator re-issuance from the account record alone (the anchor
+                // was torn): the lost anchor may have led the account by one
+                // debit (the anchor leads the account by at most one transition,
+                // and only a debit moves the sequence), so that renewal skips
+                // two numbers and never reuses the lost one. The stored images
+                // say nothing of which route was taken, so an operator
+                // re-issuance may carry either value.
+                let skip = if self.operation == Operation::OperatorReissue {
+                    ACCOUNT_RENEWAL_SKIP
+                } else {
+                    0
+                };
                 ensure!(
-                    self.target.sequence == self.before.sequence,
+                    self.target.sequence == self.before.sequence
+                        || self.before.sequence.checked_add(skip) == Some(self.target.sequence),
                     "capacity renewal changes sequence"
                 );
                 ensure!(

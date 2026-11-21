@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-21T13:29:46Z:4a2fcd13e64a73878647b8813ba676e4bf302d2e9b6a720bffe32f53e03e722f:fuMhjQKv4hTl0YxFW4wYJymJJvK2+lymiUpn6oG5dsy3CImDmllIbHwWm99GASSrOb0ENE4I42EDp9yZdGiaDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-21T16:24:56Z:29359a57a62d1a60352ef5fea6685963cb1d771ff12b2d43eb5cce5abe965820:MVNvq23Ri+gJzMFjANN7xUR9xdtYs1zKtrkY7BN++5velWyMjTmDRmTkqY/G+6gE+gc1RUebzxtYKNqtG6rBCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -483,7 +483,9 @@ reissue --reason "..."` opens the next epoch from the account record instead
 of from the anchor, under the same signed document, epoch bound, liveness
 proof and evidence as an ordinary re-issuance. The torn epoch is never
 rebuilt: its recovery counter and authorisation are not in the account, so
-the rest of its allowance is forgiven. The report says `from_account_record`.
+the rest of its allowance is forgiven. The torn anchor may have led the
+account by one debit, so the new epoch's debit sequence skips two numbers and
+never reuses one. The report says `from_account_record`.
 When both files are torn, or the policy forbids re-issuance, nothing renews
 the node and the refusal says to hold it stopped.
 

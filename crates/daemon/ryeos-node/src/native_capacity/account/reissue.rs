@@ -2326,7 +2326,12 @@ mod controls {
             assert_eq!(current.operation(), Operation::OperatorReissue);
             assert_eq!(current.epoch(), 2);
             assert_eq!(current.recovery_attempts(), 0);
-            assert_eq!(current.target().sequence, debit.target().sequence);
+            // The lost anchor may have led the account by one debit, so the
+            // renewal skips past it and never reuses its sequence.
+            assert_eq!(
+                current.target().sequence,
+                debit.target().sequence + super::super::redo::ACCOUNT_RENEWAL_SKIP
+            );
             assert_eq!(current.target().consumed, genesis_consumed());
             assert!(current.target().outstanding.is_none());
             assert_eq!(bytes, encode(current.target()).unwrap());
@@ -2351,6 +2356,55 @@ mod controls {
             assert!(again.already_applied && !again.from_account_record);
             assert_eq!(f.evidence().len(), 1);
         }
+    }
+
+    #[test]
+    fn a_debit_the_lost_anchor_published_never_has_its_sequence_reused() {
+        let f = Fixture::new();
+        // The anchor leads the account by one debit: published, account not written.
+        let (genesis, _) = f.current();
+        let before = *genesis.target();
+        let (sequence, consumed) = before
+            .prepare_debit(f.policy.allowance, f.policy.incarnation.units)
+            .unwrap();
+        let lost = genesis
+            .successor(
+                Operation::Debit,
+                CapacityRecord {
+                    sequence,
+                    consumed,
+                    outstanding: Some(f.dead),
+                    ..before
+                },
+                &f.policy,
+            )
+            .unwrap();
+        let mut owner = f.owner();
+        owner.load_anchor(&f.policy).unwrap();
+        owner
+            .anchor
+            .publish(
+                lost,
+                &f.policy,
+                &f.issuance,
+                owner.budget.deadline,
+                &|steps| owner.budget.pay(steps),
+            )
+            .unwrap();
+        drop(owner);
+        Fixture::mutate(&f.anchor_path(), |bytes| bytes[2000] ^= 0xff);
+        assert_eq!(
+            decode(&std::fs::read(f.account_path()).unwrap().try_into().unwrap())
+                .unwrap()
+                .sequence,
+            before.sequence
+        );
+        f.run(None).unwrap();
+        let (current, _) = f.current();
+        assert!(
+            current.target().sequence > lost.target().sequence,
+            "the new epoch starts past the lost debit's sequence"
+        );
     }
 
     #[test]
