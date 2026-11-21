@@ -2260,8 +2260,9 @@ mod controls {
         let (genesis, debited) = f.debited_images();
         let mut sectors = genesis;
         sectors[2048..].copy_from_slice(&debited[2048..]);
-        // The repair's own overwrite stopped after a prefix of the target.
-        for cut in [1usize, 700, 4000] {
+        // The repair's own overwrite stopped after a prefix of the target,
+        // over the torn bytes it was replacing.
+        for cut in [1usize, 700, 1500] {
             let mut midway = sectors;
             midway[..cut].copy_from_slice(&debited[..cut]);
             std::fs::write(f.account_path(), midway).unwrap();
