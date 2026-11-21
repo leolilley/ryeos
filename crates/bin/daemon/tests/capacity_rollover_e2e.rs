@@ -19,8 +19,9 @@ use common::DaemonHarness;
 use common::fast_fixture::{self, FastFixtureProfile};
 use lillux::crypto::SigningKey;
 use ryeos_node::native_capacity::{
-    ReanchorRequest, ReissueRequest, inspect_capacity_account, read_capacity_reanchors,
-    read_capacity_reissuances, reanchor_capacity, reissue_capacity,
+    CapacityCure, CapacityFile, CapacityRecordTorn, ReanchorRequest, ReissueRequest, RepairRequest,
+    inspect_capacity_account, read_capacity_reanchors, read_capacity_reissuances,
+    read_capacity_repairs, reanchor_capacity, reissue_capacity, repair_capacity_account,
 };
 use ryeos_node_runtime::state_lock::{StateLock, default_lock_path};
 
@@ -74,6 +75,76 @@ fn reissue(
         reason,
         command: COMMAND,
     })
+}
+
+#[test]
+fn a_torn_account_is_repaired_and_a_torn_anchor_is_renewed_from_the_account_record() {
+    let (_node_dir, app_root, _user_dir, _fixture) = sealed_core_root();
+    let operator = operator_key(&app_root);
+    let lock = StateLock::acquire(&default_lock_path(&app_root)).expect("stopped node lock");
+    let directory = app_root.join(".ai/node/native-capacity");
+    let original = std::fs::read(directory.join("account")).expect("read account");
+
+    // A flipped byte: no write the redo model produces leaves this account.
+    let mut torn = original.clone();
+    torn[40] ^= 0xff;
+    std::fs::write(directory.join("account"), &torn).expect("tear the account");
+    let refusal = reissue(&app_root, &lock, &operator, "e2e torn account")
+        .expect_err("a torn account is not renewed from");
+    let typed = refusal
+        .downcast_ref::<CapacityRecordTorn>()
+        .expect("typed torn refusal");
+    assert_eq!(
+        (typed.file, typed.cure),
+        (CapacityFile::Account, CapacityCure::RepairAccount)
+    );
+    assert_eq!(std::fs::read(directory.join("account")).unwrap(), torn);
+
+    let repair = |reason: &str| {
+        repair_capacity_account(RepairRequest {
+            app_root: &app_root,
+            state_lock: &lock,
+            signer: ryeos_node::apply_authority::DocumentSigner::Operator(&operator),
+            reason,
+            command: COMMAND,
+        })
+    };
+    let report = repair("e2e repair").expect("repair the torn account");
+    assert!(report.repaired);
+    assert_eq!(std::fs::read(directory.join("account")).unwrap(), original);
+    assert_eq!(
+        read_capacity_repairs(&app_root.join(".ai/state"))
+            .expect("read repair evidence")
+            .len(),
+        1
+    );
+    assert!(!repair("e2e rerun").expect("idempotent rerun").repaired);
+
+    // A torn anchor over a sound account: the next epoch opens from the account.
+    let mut anchor = std::fs::read(directory.join("anchor")).expect("read anchor");
+    anchor[2000] ^= 0xff;
+    std::fs::write(directory.join("anchor"), &anchor).expect("tear the anchor");
+    let refusal = inspect_capacity_account(&app_root).expect_err("a torn anchor is reported");
+    let typed = refusal
+        .downcast_ref::<CapacityRecordTorn>()
+        .expect("typed torn refusal");
+    assert_eq!(
+        (typed.file, typed.cure),
+        (CapacityFile::Anchor, CapacityCure::ReissueFromAccount)
+    );
+    let refusal = repair("e2e anchor torn").expect_err("repair never touches a torn anchor");
+    assert_eq!(
+        refusal.downcast_ref::<CapacityRecordTorn>().map(|t| t.file),
+        Some(CapacityFile::Anchor)
+    );
+    let renewed = reissue(&app_root, &lock, &operator, "e2e torn anchor").expect("renew");
+    assert!(renewed.from_account_record);
+    assert_eq!((renewed.from_epoch, renewed.to_epoch), (1, 2));
+    let summary = inspect_capacity_account(&app_root)
+        .expect("inspect renewed")
+        .expect("issued");
+    assert_eq!(summary.epoch, 2);
+    assert_eq!(summary.last_operation, "operator_reissue");
 }
 
 #[test]

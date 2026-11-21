@@ -80,6 +80,9 @@ impl StoredProcess {
     }
 }
 
+/// How far an operator re-issuance from the account record alone advances the
+/// debit sequence: past the one debit a lost anchor may have published.
+pub(super) const ACCOUNT_RENEWAL_SKIP: u64 = 2;
 pub(super) const ANCHOR_BYTES: usize = 12 * 1024;
 pub(super) const ANCHOR_PAYLOAD_BYTES: usize = ANCHOR_BYTES - 32;
 pub(super) const MAGIC: &[u8; 8] = b"RYERED02";
@@ -152,6 +155,37 @@ impl AccountRedo {
         };
         redo.validate(policy)?;
         Ok(redo)
+    }
+
+    /// Open the next epoch from an account record alone, when the anchor that
+    /// would normally be the predecessor cannot be read. `before` must be a
+    /// verified record of this issuance; the resulting redo is checked exactly
+    /// as [`Self::renew`]'s. Only the operator re-issuance may be built this
+    /// way: the epoch it opens starts its recovery counter at zero, so nothing
+    /// the lost anchor carried is needed.
+    pub(super) fn renew_from_account(
+        before: CapacityRecord,
+        mut target: CapacityRecord,
+        authorization: [u8; 32],
+        policy: &NodeNativeCapacityPolicy,
+    ) -> Result<Self> {
+        // The lost anchor may have led this account by one debit, whose
+        // sequence (the resident generation of its incarnation) is unknown
+        // here. Skipping past it guarantees no sequence is ever reused.
+        target.sequence = before
+            .sequence
+            .checked_add(ACCOUNT_RENEWAL_SKIP)
+            .context("capacity debit sequence exhausted")?;
+        let next = Self {
+            operation: Operation::OperatorReissue,
+            before,
+            target,
+            recovery_attempts: 0,
+            recovery_process: None,
+            authorization,
+        };
+        next.validate(policy)?;
+        Ok(next)
     }
 
     /// Prepare the successor only after the real account reached this target.
@@ -377,8 +411,22 @@ impl AccountRedo {
                     self.target.outstanding.is_none(),
                     "capacity renewal opens with an outstanding incarnation"
                 );
+                // A renewal keeps the debit sequence. The one exception is an
+                // operator re-issuance from the account record alone (the anchor
+                // was torn): the lost anchor may have led the account by one
+                // debit (the anchor leads the account by at most one transition,
+                // and only a debit moves the sequence), so that renewal skips
+                // two numbers and never reuses the lost one. The stored images
+                // say nothing of which route was taken, so an operator
+                // re-issuance may carry either value.
+                let skip = if self.operation == Operation::OperatorReissue {
+                    ACCOUNT_RENEWAL_SKIP
+                } else {
+                    0
+                };
                 ensure!(
-                    self.target.sequence == self.before.sequence,
+                    self.target.sequence == self.before.sequence
+                        || self.before.sequence.checked_add(skip) == Some(self.target.sequence),
                     "capacity renewal changes sequence"
                 );
                 ensure!(
@@ -461,19 +509,17 @@ impl AccountRedo {
         policy: &NodeNativeCapacityPolicy,
         issuance: &[u8; 32],
     ) -> Result<Self> {
-        ensure!(
-            &bytes[..8] == MAGIC && bytes[8..12] == SCHEMA.to_le_bytes(),
-            "unsupported capacity redo format"
-        );
+        use super::torn::AnchorDecodeRefusal;
+        if &bytes[..8] != MAGIC || bytes[8..12] != SCHEMA.to_le_bytes() {
+            return Err(AnchorDecodeRefusal::Format.into());
+        }
         let checksum: [u8; 32] = sha2::Sha256::digest(&bytes[..ANCHOR_PAYLOAD_BYTES]).into();
-        ensure!(
-            bytes[ANCHOR_PAYLOAD_BYTES..] == checksum,
-            "capacity redo checksum mismatch"
-        );
-        ensure!(
-            &bytes[13..45] == issuance,
-            "capacity redo belongs to another issuance"
-        );
+        if bytes[ANCHOR_PAYLOAD_BYTES..] != checksum {
+            return Err(AnchorDecodeRefusal::Checksum.into());
+        }
+        if &bytes[13..45] != issuance {
+            return Err(AnchorDecodeRefusal::OtherIssuance.into());
+        }
         ensure!(
             bytes[AUTHORIZATION_END..BEFORE_START]
                 .iter()

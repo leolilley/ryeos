@@ -1236,7 +1236,11 @@ pub fn read_capacity_policy_amendments(
 /// running the command and writable by no group or other. A log another
 /// account owns or can write is refused, never read as evidence and never
 /// extended.
-fn require_owned_log(log: &lillux::PinnedRegularFile, name: &str, what: &str) -> Result<()> {
+pub(super) fn require_owned_log(
+    log: &lillux::PinnedRegularFile,
+    name: &str,
+    what: &str,
+) -> Result<()> {
     log.require_effective_user_owned().with_context(|| {
         format!(
             "{what} evidence log {name} is refused: it must be owned by the account running this command and not group/other writable"
@@ -1244,7 +1248,7 @@ fn require_owned_log(log: &lillux::PinnedRegularFile, name: &str, what: &str) ->
     })
 }
 
-fn read_log<T: DeserializeOwned>(
+pub(super) fn read_log<T: DeserializeOwned>(
     directory: &PinnedDirectory,
     name: &str,
     what: &str,
@@ -1266,7 +1270,7 @@ fn read_log<T: DeserializeOwned>(
 
 /// Append one line by pinned compare-and-write, dropping the oldest whole
 /// lines only when the log would exceed its bound.
-fn append_log<T: Serialize>(
+pub(super) fn append_log<T: Serialize>(
     directory: &PinnedDirectory,
     name: &str,
     what: &str,
