@@ -679,22 +679,201 @@ pub fn sealed_normalized_data_memfd(
     Err("sealed data memfd is supported only on Linux".to_owned())
 }
 
-/// Create a sealed anonymous file that the supported Linux kernel may execute.
-/// This is separate from protocol-data memfds so hardened `memfd_noexec`
-/// policies cannot silently turn an exact executable capture into a noexec fd.
+/// `memfd_create` flag that requests an executable memfd (Linux 6.3).
+#[cfg(target_os = "linux")]
+const MFD_EXEC: libc::c_uint = 0x0010;
+
+/// Whether this host's `memfd_create` accepts `MFD_EXEC`.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemfdExecFlag {
+    /// The kernel accepts `MFD_EXEC`; executable memfds ask for it.
+    Supported,
+    /// The kernel does not know `MFD_EXEC` (before Linux 6.3, or an
+    /// emulated kernel). It also has no noexec-memfd policy, so a memfd made
+    /// without the flag is executable by construction.
+    UnsupportedExecutableByDefault,
+}
+
+#[cfg(target_os = "linux")]
+impl MemfdExecFlag {
+    /// Fixed-vocabulary value name carried in the capability report.
+    pub fn value(self) -> &'static str {
+        match self {
+            Self::Supported => "supported",
+            Self::UnsupportedExecutableByDefault => "unsupported_executable_by_default",
+        }
+    }
+}
+
+/// Why this host cannot make executable memfds at all.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemfdExecRefusal {
+    /// `memfd_create(MFD_EXEC)` returned `EACCES`: `vm.memfd_noexec=2`
+    /// forces every memfd noexec, so no executable memfd can be made and
+    /// there is nothing to fall back to.
+    NoexecEnforced,
+    /// The probe failed for a reason that says nothing about the flag.
+    ProbeFailed { errno: i32, reason: String },
+}
+
+#[cfg(target_os = "linux")]
+impl MemfdExecRefusal {
+    /// Fixed-vocabulary error code.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NoexecEnforced => "memfd_exec_forbidden",
+            Self::ProbeFailed { .. } => "memfd_exec_probe_failed",
+        }
+    }
+
+    fn message(&self) -> String {
+        match self {
+            Self::NoexecEnforced => format!(
+                "{}: memfd_create(MFD_EXEC) is refused with EACCES (vm.memfd_noexec=2 makes every \
+                 memfd non-executable), so this host cannot hold sealed executables",
+                self.code()
+            ),
+            Self::ProbeFailed { errno, reason } => format!(
+                "{}: memfd_create(MFD_EXEC) probe failed with errno {errno}: {reason}",
+                self.code()
+            ),
+        }
+    }
+}
+
+/// Interpret one `MFD_EXEC` probe outcome. `EINVAL` alone means the flag is
+/// unknown; `EACCES` means a noexec policy; any other error is a real
+/// failure and is never read as "unsupported".
+#[cfg(target_os = "linux")]
+pub fn memfd_exec_flag_from_probe(
+    probe: &crate::process_control::ProbeOutcome,
+) -> Result<MemfdExecFlag, MemfdExecRefusal> {
+    use crate::process_control::ProbeOutcome;
+    match probe {
+        ProbeOutcome::Allowed => Ok(MemfdExecFlag::Supported),
+        ProbeOutcome::Refused { errno, .. } if *errno == libc::EINVAL => {
+            Ok(MemfdExecFlag::UnsupportedExecutableByDefault)
+        }
+        ProbeOutcome::Refused { errno, .. } if *errno == libc::EACCES => {
+            Err(MemfdExecRefusal::NoexecEnforced)
+        }
+        ProbeOutcome::Refused { errno, reason } => Err(MemfdExecRefusal::ProbeFailed {
+            errno: *errno,
+            reason: reason.clone(),
+        }),
+        ProbeOutcome::Unobservable { reason } => Err(MemfdExecRefusal::ProbeFailed {
+            errno: 0,
+            reason: reason.clone(),
+        }),
+    }
+}
+
+/// The flags an executable memfd is created with, decided only by the
+/// probe: `MFD_EXEC` when the kernel accepts it, none when it does not.
+#[cfg(target_os = "linux")]
+fn executable_memfd_flags(
+    probe: &crate::process_control::ProbeOutcome,
+) -> Result<libc::c_uint, String> {
+    let base = libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING;
+    match memfd_exec_flag_from_probe(probe) {
+        Ok(MemfdExecFlag::Supported) => Ok(base | MFD_EXEC),
+        Ok(MemfdExecFlag::UnsupportedExecutableByDefault) => Ok(base),
+        Err(refusal) => Err(refusal.message()),
+    }
+}
+
+/// One `memfd_create` with `MFD_EXEC`, run once per process: the observed
+/// outcome of asking this kernel for an executable memfd.
+#[cfg(target_os = "linux")]
+pub fn memfd_exec_flag_probe() -> crate::process_control::ProbeOutcome {
+    static PROBE: OnceLock<crate::process_control::ProbeOutcome> = OnceLock::new();
+    PROBE.get_or_init(probe_memfd_exec_flag).clone()
+}
+
+#[cfg(target_os = "linux")]
+fn probe_memfd_exec_flag() -> crate::process_control::ProbeOutcome {
+    use crate::process_control::ProbeOutcome;
+    let fd = memfd_create_call(c"lillux-memfd-exec-probe", libc::MFD_CLOEXEC | MFD_EXEC);
+    if fd < 0 {
+        let error = std::io::Error::last_os_error();
+        return ProbeOutcome::Refused {
+            errno: error.raw_os_error().unwrap_or(0),
+            reason: error.to_string(),
+        };
+    }
+    unsafe {
+        libc::close(fd);
+    }
+    ProbeOutcome::Allowed
+}
+
+/// The single `memfd_create` call site. Tests may intercept it per thread to
+/// simulate a kernel that rejects a flag.
+#[cfg(target_os = "linux")]
+fn memfd_create_call(name: &std::ffi::CStr, flags: libc::c_uint) -> libc::c_int {
+    #[cfg(test)]
+    if let Some(result) = memfd_shim::intercept(flags) {
+        return result;
+    }
+    unsafe { libc::memfd_create(name.as_ptr(), flags) }
+}
+
+#[cfg(all(target_os = "linux", test))]
+mod memfd_shim {
+    use std::cell::RefCell;
+
+    type Shim = Box<dyn FnMut(libc::c_uint) -> Option<i32>>;
+
+    thread_local! {
+        static SHIM: RefCell<Option<Shim>> = const { RefCell::new(None) };
+    }
+
+    /// Run `body` with `shim` deciding each `memfd_create`: `Some(errno)`
+    /// fails the call with that errno, `None` lets the real call run.
+    pub(super) fn with(
+        shim: impl FnMut(libc::c_uint) -> Option<i32> + 'static,
+        body: impl FnOnce(),
+    ) {
+        SHIM.with(|slot| *slot.borrow_mut() = Some(Box::new(shim)));
+        body();
+        SHIM.with(|slot| *slot.borrow_mut() = None);
+    }
+
+    pub(super) fn intercept(flags: libc::c_uint) -> Option<libc::c_int> {
+        SHIM.with(|slot| {
+            let errno = slot.borrow_mut().as_mut().and_then(|shim| shim(flags))?;
+            // SAFETY: the thread's errno location is always valid.
+            unsafe { *libc::__errno_location() = errno };
+            Some(-1)
+        })
+    }
+}
+
+/// Create a sealed anonymous file that this kernel may execute.
+///
+/// `MFD_EXEC` is requested when the host probe says the kernel accepts it, so
+/// a hardened `memfd_noexec` policy cannot silently turn an exact executable
+/// capture into a noexec fd. Where the kernel does not know the flag the
+/// probe reports `unsupported_executable_by_default` and the memfd is made
+/// without it; where `vm.memfd_noexec=2` refuses the flag the call fails with
+/// a typed error. The create call itself is never retried.
 #[cfg(target_os = "linux")]
 pub fn sealed_executable_memfd(
     name: &std::ffi::CStr,
     bytes: &[u8],
 ) -> Result<InheritedDescriptorAuthority, String> {
-    // MFD_EXEC was added in Linux 6.3; RyeOS requires Linux 6.9 or newer.
-    const MFD_EXEC: libc::c_uint = 0x0010;
-    sealed_memfd_with_flags(
-        name,
-        bytes,
-        libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING | MFD_EXEC,
-        Some(0o500),
-    )
+    sealed_executable_memfd_with_probe(&memfd_exec_flag_probe(), name, bytes)
+}
+
+#[cfg(target_os = "linux")]
+fn sealed_executable_memfd_with_probe(
+    probe: &crate::process_control::ProbeOutcome,
+    name: &std::ffi::CStr,
+    bytes: &[u8],
+) -> Result<InheritedDescriptorAuthority, String> {
+    sealed_memfd_with_flags(name, bytes, executable_memfd_flags(probe)?, Some(0o500))
 }
 
 /// Stream an exact content-addressed executable into an immutable executable
@@ -709,48 +888,61 @@ pub fn sealed_executable_memfd_from_reader(
     expected_sha256: &str,
     maximum_bytes: u64,
 ) -> Result<InheritedDescriptorAuthority, String> {
+    sealed_executable_memfd_from_reader_with_probe(
+        &memfd_exec_flag_probe(),
+        name,
+        reader,
+        expected_bytes,
+        expected_sha256,
+        maximum_bytes,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn sealed_executable_memfd_from_reader_with_probe(
+    probe: &crate::process_control::ProbeOutcome,
+    name: &std::ffi::CStr,
+    reader: &mut impl std::io::Read,
+    expected_bytes: u64,
+    expected_sha256: &str,
+    maximum_bytes: u64,
+) -> Result<InheritedDescriptorAuthority, String> {
     use sha2::Digest as _;
     if expected_bytes == 0 || expected_bytes > maximum_bytes || !crate::valid_hash(expected_sha256)
     {
         return Err("sealed executable stream has an invalid size or digest".to_owned());
     }
-    const MFD_EXEC: libc::c_uint = 0x0010;
-    sealed_memfd_with_flags_and_write(
-        name,
-        libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING | MFD_EXEC,
-        Some(0o500),
-        |file| {
-            let mut digest = sha2::Sha256::new();
-            let mut remaining = expected_bytes;
-            let mut buffer = [0_u8; 128 * 1024];
-            while remaining != 0 {
-                let take = usize::try_from(remaining.min(buffer.len() as u64))
-                    .map_err(|error| error.to_string())?;
-                let read = reader
-                    .read(&mut buffer[..take])
-                    .map_err(|error| format!("read sealed executable source: {error}"))?;
-                if read == 0 {
-                    return Err("sealed executable source ended before exact byte count".to_owned());
-                }
-                file.write_all(&buffer[..read])
-                    .map_err(|error| format!("write sealed executable: {error}"))?;
-                digest.update(&buffer[..read]);
-                remaining -= read as u64;
+    sealed_memfd_with_flags_and_write(name, executable_memfd_flags(probe)?, Some(0o500), |file| {
+        let mut digest = sha2::Sha256::new();
+        let mut remaining = expected_bytes;
+        let mut buffer = [0_u8; 128 * 1024];
+        while remaining != 0 {
+            let take = usize::try_from(remaining.min(buffer.len() as u64))
+                .map_err(|error| error.to_string())?;
+            let read = reader
+                .read(&mut buffer[..take])
+                .map_err(|error| format!("read sealed executable source: {error}"))?;
+            if read == 0 {
+                return Err("sealed executable source ended before exact byte count".to_owned());
             }
-            let mut extra = [0_u8; 1];
-            if reader
-                .read(&mut extra)
-                .map_err(|error| format!("check sealed executable source end: {error}"))?
-                != 0
-            {
-                return Err("sealed executable source exceeds exact byte count".to_owned());
-            }
-            if format!("{:x}", digest.finalize()) != expected_sha256 {
-                return Err("sealed executable source differs from content address".to_owned());
-            }
-            Ok(())
-        },
-    )
+            file.write_all(&buffer[..read])
+                .map_err(|error| format!("write sealed executable: {error}"))?;
+            digest.update(&buffer[..read]);
+            remaining -= read as u64;
+        }
+        let mut extra = [0_u8; 1];
+        if reader
+            .read(&mut extra)
+            .map_err(|error| format!("check sealed executable source end: {error}"))?
+            != 0
+        {
+            return Err("sealed executable source exceeds exact byte count".to_owned());
+        }
+        if format!("{:x}", digest.finalize()) != expected_sha256 {
+            return Err("sealed executable source differs from content address".to_owned());
+        }
+        Ok(())
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -777,7 +969,7 @@ fn sealed_memfd_with_flags_and_write(
     use std::os::fd::{AsRawFd as _, FromRawFd as _};
 
     let lease = try_retain_fork_sensitive_descriptors()?;
-    let mut fd = unsafe { libc::memfd_create(name.as_ptr(), flags) };
+    let mut fd = memfd_create_call(name, flags);
     if fd < 0 {
         return Err(format!(
             "create sealed memfd: {}",
@@ -16055,5 +16247,185 @@ mod running_image_descriptor_tests {
         );
         // A second call finds nothing left to protect.
         assert_eq!(protect_running_image_descriptors().unwrap(), 0);
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod executable_memfd_flag_tests {
+    use super::*;
+    use crate::process_control::ProbeOutcome;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    fn refused(errno: i32) -> ProbeOutcome {
+        ProbeOutcome::Refused {
+            errno,
+            reason: std::io::Error::from_raw_os_error(errno).to_string(),
+        }
+    }
+
+    const BASE: libc::c_uint = libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING;
+
+    #[test]
+    fn flags_follow_the_probe_only() {
+        assert_eq!(
+            executable_memfd_flags(&ProbeOutcome::Allowed),
+            Ok(BASE | MFD_EXEC)
+        );
+        assert_eq!(executable_memfd_flags(&refused(libc::EINVAL)), Ok(BASE));
+        let forbidden = executable_memfd_flags(&refused(libc::EACCES)).unwrap_err();
+        assert!(
+            forbidden.starts_with("memfd_exec_forbidden:"),
+            "{forbidden}"
+        );
+        let other = executable_memfd_flags(&refused(libc::ENOMEM)).unwrap_err();
+        assert!(other.starts_with("memfd_exec_probe_failed:"), "{other}");
+        let unobserved = executable_memfd_flags(&ProbeOutcome::Unobservable {
+            reason: "x".to_owned(),
+        })
+        .unwrap_err();
+        assert!(unobserved.starts_with("memfd_exec_probe_failed:"));
+    }
+
+    #[test]
+    fn probe_interpretation_names_the_value() {
+        assert_eq!(
+            memfd_exec_flag_from_probe(&ProbeOutcome::Allowed)
+                .unwrap()
+                .value(),
+            "supported"
+        );
+        assert_eq!(
+            memfd_exec_flag_from_probe(&refused(libc::EINVAL))
+                .unwrap()
+                .value(),
+            "unsupported_executable_by_default"
+        );
+    }
+
+    fn seen_flags() -> Rc<RefCell<Vec<libc::c_uint>>> {
+        Rc::new(RefCell::new(Vec::new()))
+    }
+
+    #[test]
+    fn probe_maps_kernel_errors_through_the_shim() {
+        for (errno, expected) in [
+            (
+                libc::EINVAL,
+                Ok(MemfdExecFlag::UnsupportedExecutableByDefault),
+            ),
+            (libc::EACCES, Err(MemfdExecRefusal::NoexecEnforced)),
+        ] {
+            memfd_shim::with(
+                move |flags| (flags & MFD_EXEC != 0).then_some(errno),
+                || {
+                    assert_eq!(
+                        memfd_exec_flag_from_probe(&probe_memfd_exec_flag()),
+                        expected
+                    );
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn whole_create_path_without_exec_flag_when_kernel_rejects_it() {
+        let seen = seen_flags();
+        let recorded = Rc::clone(&seen);
+        memfd_shim::with(
+            move |flags| {
+                recorded.borrow_mut().push(flags);
+                (flags & MFD_EXEC != 0).then_some(libc::EINVAL)
+            },
+            || {
+                let probe = probe_memfd_exec_flag();
+                let memfd = sealed_executable_memfd_with_probe(&probe, c"shim-exec", b"#!x")
+                    .expect("flag-less executable memfd");
+                drop(memfd);
+                let mut reader = std::io::Cursor::new(b"abc".to_vec());
+                let digest = {
+                    use sha2::Digest as _;
+                    format!("{:x}", sha2::Sha256::digest(b"abc"))
+                };
+                sealed_executable_memfd_from_reader_with_probe(
+                    &probe,
+                    c"shim-exec-reader",
+                    &mut reader,
+                    3,
+                    &digest,
+                    1024,
+                )
+                .expect("flag-less streamed executable memfd");
+            },
+        );
+        let seen = seen.borrow();
+        // Probe asked for the flag once; both creators then omitted it.
+        assert_eq!(seen.len(), 3, "{seen:?}");
+        assert_ne!(seen[0] & MFD_EXEC, 0);
+        assert!(seen[1..].iter().all(|flags| flags & MFD_EXEC == 0));
+    }
+
+    #[test]
+    fn genuine_einval_at_create_is_not_retried_or_masked() {
+        let seen = seen_flags();
+        let recorded = Rc::clone(&seen);
+        memfd_shim::with(
+            move |flags| {
+                recorded.borrow_mut().push(flags);
+                Some(libc::EINVAL)
+            },
+            || {
+                let error = sealed_executable_memfd_with_probe(
+                    &ProbeOutcome::Allowed,
+                    c"shim-supported",
+                    b"x",
+                )
+                .map(|_| ())
+                .unwrap_err();
+                assert!(error.contains("create sealed memfd"), "{error}");
+            },
+        );
+        assert_eq!(seen.borrow().as_slice(), &[BASE | MFD_EXEC]);
+    }
+
+    #[test]
+    fn noexec_enforced_refuses_without_creating() {
+        let seen = seen_flags();
+        let recorded = Rc::clone(&seen);
+        memfd_shim::with(
+            move |flags| {
+                recorded.borrow_mut().push(flags);
+                None
+            },
+            || {
+                let error = sealed_executable_memfd_with_probe(
+                    &refused(libc::EACCES),
+                    c"shim-noexec",
+                    b"x",
+                )
+                .map(|_| ())
+                .unwrap_err();
+                assert!(error.starts_with("memfd_exec_forbidden:"), "{error}");
+            },
+        );
+        assert!(seen.borrow().is_empty());
+    }
+
+    #[test]
+    fn real_kernel_creates_a_sealed_executable_memfd() {
+        // Proves the path this host actually takes: the real probe, whatever
+        // it reports, yields a sealed executable memfd or a typed refusal.
+        match memfd_exec_flag_from_probe(&memfd_exec_flag_probe()) {
+            Ok(_) => {
+                sealed_executable_memfd(c"real-exec", b"\x7fELF").expect("sealed executable memfd");
+            }
+            Err(refusal) => {
+                assert!(
+                    sealed_executable_memfd(c"real-exec", b"x")
+                        .unwrap_err()
+                        .starts_with(refusal.code())
+                );
+            }
+        }
     }
 }

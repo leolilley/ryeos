@@ -17,7 +17,7 @@ use std::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
 
-pub const HOST_FACTS_VERSION: u32 = 6;
+pub const HOST_FACTS_VERSION: u32 = 7;
 
 /// Provider id of every capability these host facts prove: the kernel as
 /// this process observes it, with no service or controller in between.
@@ -600,6 +600,13 @@ pub fn host_kernel_is_gvisor() -> bool {
         .map(|version| kernel_version_is_gvisor(&version))
         .unwrap_or(false)
 }
+
+/// The host makes sealed executable memfds: its kernel accepts `MFD_EXEC`, or
+/// does not know the flag and so makes every memfd executable. The basis
+/// carries `memfd_exec_flag=supported` or
+/// `memfd_exec_flag=unsupported_executable_by_default`. Missing when a
+/// noexec memfd policy forbids executable memfds.
+pub const EXEC_SEALED_MEMFD: &str = "exec:sealed_memfd";
 
 /// Jobs die with the node because the node is pid 1 of its pid namespace.
 pub const TERMINATION_ENCLOSURE: &str = "termination:enclosure";
@@ -1671,6 +1678,10 @@ pub struct HostFacts {
     /// probed in a disposable child. The node does not set it: no reaper of
     /// adopted orphans exists, so this records only what the host allows.
     pub subreaper: ProbeOutcome,
+    /// One `memfd_create(MFD_EXEC)`: `Allowed` when the kernel accepts the
+    /// flag, `EINVAL` when it does not know it, `EACCES` under
+    /// `vm.memfd_noexec=2`.
+    pub memfd_exec: ProbeOutcome,
     pub resident_bytes: u64,
     pub residency: Option<ResidencyProof>,
     pub residency_refusal: Option<String>,
@@ -1856,6 +1867,7 @@ impl HostFacts {
                 unshare_user_pid_mount: unobservable(),
                 pidfd: unobservable(),
                 subreaper: unobservable(),
+                memfd_exec: unobservable(),
                 resident_bytes,
                 residency: None,
                 residency_refusal: Some(
@@ -2003,6 +2015,21 @@ impl HostFacts {
                 format!("pidfd_open {}", self.pidfd.describe()),
             );
         }
+        #[cfg(target_os = "linux")]
+        match crate::exec::memfd_exec_flag_from_probe(&self.memfd_exec) {
+            Ok(flag) => view.provide(
+                EXEC_SEALED_MEMFD,
+                observed.clone(),
+                HOST_PROVIDER,
+                emulated(format!(
+                    "memfd_exec_flag={}; executable memfds are sealed and executable",
+                    flag.value()
+                )),
+            ),
+            Err(refusal) => view.refuse(EXEC_SEALED_MEMFD, refusal.code()),
+        }
+        #[cfg(not(target_os = "linux"))]
+        view.refuse(EXEC_SEALED_MEMFD, "executable memfds exist only on Linux");
         // The grade each enclosure name may carry, or why it cannot.
         let unproven = || {
             self.enclosure_exit_refusal.clone().unwrap_or_else(|| {
@@ -2797,6 +2824,7 @@ mod linux {
             )),
             pidfd: probe_pidfd(),
             subreaper: probe_in_child(ChildProbe::Subreaper),
+            memfd_exec: crate::exec::memfd_exec_flag_probe(),
             resident_bytes,
             residency_refusal: residency.as_ref().err().cloned(),
             residency: residency.ok(),
@@ -3455,6 +3483,7 @@ mod tests {
             unshare_user_pid_mount: unobservable(),
             pidfd: unobservable(),
             subreaper: unobservable(),
+            memfd_exec: unobservable(),
             resident_bytes: 0,
             residency: None,
             residency_refusal: Some("fixture".to_owned()),
@@ -4344,6 +4373,47 @@ mod tests {
         let host = decide_enclosure_exit(Some(false), 1, 0, Some("init"), &inits()).unwrap_err();
         assert!(host.contains("initial pid namespace"), "{host}");
         assert!(decide_enclosure_exit(None, 1, 0, None, &inits()).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sealed_memfd_capability_reports_the_memfd_exec_flag_value() {
+        let mut host = facts(
+            decide_enclosure_exit(Some(true), 7, 1, Some("tini"), &inits()),
+            Some(42),
+        );
+        let errno = |errno: i32| ProbeOutcome::Refused {
+            errno,
+            reason: format!("errno {errno}"),
+        };
+        host.memfd_exec = ProbeOutcome::Allowed;
+        let view = host.capabilities();
+        assert!(
+            view.provided[EXEC_SEALED_MEMFD]
+                .basis
+                .contains("memfd_exec_flag=supported")
+        );
+        host.memfd_exec = errno(libc::EINVAL);
+        let view = host.capabilities();
+        assert!(
+            view.provided[EXEC_SEALED_MEMFD]
+                .basis
+                .contains("memfd_exec_flag=unsupported_executable_by_default")
+        );
+        host.kernel_kind = "gvisor".to_owned();
+        assert_eq!(
+            host.capabilities().provided[EXEC_SEALED_MEMFD].source,
+            ProofSource::ProviderAttested
+        );
+        host.memfd_exec = errno(libc::EACCES);
+        let view = host.capabilities();
+        assert!(!view.provided.contains_key(EXEC_SEALED_MEMFD));
+        assert_eq!(view.missing[EXEC_SEALED_MEMFD], "memfd_exec_forbidden");
+        host.memfd_exec = errno(libc::ENOMEM);
+        assert_eq!(
+            host.capabilities().missing[EXEC_SEALED_MEMFD],
+            "memfd_exec_probe_failed"
+        );
     }
 
     #[test]

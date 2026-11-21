@@ -203,6 +203,7 @@ fn facts(storage: RootStorageFacts) -> HostFacts {
         },
         pidfd: ProbeOutcome::Allowed,
         subreaper: ProbeOutcome::Allowed,
+        memfd_exec: ProbeOutcome::Allowed,
         resident_bytes: 64 << 20,
         residency: Some(ResidencyProof::SwapAbsent {
             basis: "no swap device is active".to_owned(),
