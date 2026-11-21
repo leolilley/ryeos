@@ -1,7 +1,7 @@
-# ryeos:signed:2026-11-18T22:21:29Z:888ef0a49e19fb52f79cd4d5a116a57c5bdbbf141b16ca49c7c421dda51a675d:F5eW+wX+rG2rqnZ3TA/MX0TiKhDJIrAHYSe29eu8lSaIbCcgXoyXVQhKZOqfDbgGiNf1neY+XPwQaim0HRgrDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-20T23:17:59Z:69f9c3b1bd6d52612f87b7eafc65f68a7208783fb83efd2080b4f83a46377b0a:g6VX/CH4fSnR6yDjhLifWFtymkiGzGhXyGrqYHqNkeLHqgzNueOrbsUSjTYrI0ADHI91W3SRDbHIbzMc0+CqCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-base-observe
 title: Home
-version: "2.1.0"
+version: "3.0.0"
 description: Observation-only browser Home over the Assistant's view sets; it reads the node and changes nothing.
 
 extends: surface:ryeos/ui/assistant
@@ -21,90 +21,8 @@ capabilities:
   affordances: []
 
 view_sets:
-  # Overview is the landing set: projects and sites at the left, the home
-  # overview above recent threads and work. The rest are the Assistant's own.
-  - schema: 2
-    id: overview
-    title: Overview
-    root:
-      type: split
-      axis: horizontal
-      ratio: 0.22
-      first:
-        type: group
-        label: Projects
-        views: ["view:ryeos/projects/list", "view:ryeos/sites/list"]
-        active: 0
-      second:
-        type: split
-        axis: vertical
-        ratio: 0.6
-        first:
-          type: group
-          views: ["view:ryeos/home/overview"]
-          active: 0
-        second:
-          type: group
-          label: Recent
-          views: ["view:ryeos/threads/history", "view:ryeos/work/list"]
-          active: 0
-  - schema: 2
-    id: development
-    title: Development
-    root:
-      type: split
-      axis: horizontal
-      ratio: 0.13
-      first:
-        type: group
-        label: Explorer
-        views: ["view:ryeos/development/explorer", "view:ryeos/projects/list", "view:ryeos/project/files", "view:ryeos/sites/list"]
-        active: 0
-      second:
-        type: split
-        axis: horizontal
-        ratio: 0.7
-        first:
-          type: group
-          label: Worker
-          views: ["view:ryeos/thread/conversation", "view:ryeos/thread/transcript", "view:ryeos/work/evidence", "view:ryeos/project/document"]
-          active: 0
-        second:
-          type: split
-          axis: vertical
-          ratio: 0.55
-          first:
-            type: group
-            label: Changes
-            views: ["view:ryeos/development/changes", "view:ryeos/work/candidate", "view:ryeos/work/approvals"]
-            active: 0
-          second:
-            type: group
-            label: Execution
-            views: ["view:ryeos/development/execution", "view:ryeos/development/occurrence", "view:ryeos/work/children", "view:ryeos/thread/tree"]
-            active: 0
-  - schema: 2
-    id: work
-    title: Work
-    root:
-      type: split
-      axis: horizontal
-      ratio: 0.22
-      first:
-        type: group
-        label: Work
-        views: ["view:ryeos/work/list"]
-        active: 0
-      second:
-        type: group
-        label: Detail
-        views: ["view:ryeos/work/overview", "view:ryeos/work/children", "view:ryeos/work/evidence", "view:ryeos/work/candidate", "view:ryeos/work/approvals"]
-        active: 0
-  - schema: 2
-    id: review
-    title: Review
-    root:
-      type: group
-      views: ["view:ryeos/review/pending", "view:ryeos/review/history"]
-      active: 0
-
+  # Overview is the landing set. The rest are the Assistant's own.
+  - view_set:ryeos/ui/home-overview
+  - view_set:ryeos/ui/development
+  - view_set:ryeos/ui/work
+  - view_set:ryeos/ui/review

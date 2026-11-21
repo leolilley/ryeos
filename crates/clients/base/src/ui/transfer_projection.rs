@@ -398,6 +398,7 @@ mod tests {
                         id: "empty".into(),
                         title: "Empty".into(),
                         root: None,
+                        ..Default::default()
                     },
                     mounts: vec![],
                 }],

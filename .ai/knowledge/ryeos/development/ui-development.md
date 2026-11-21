@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-20T07:29:10Z:27e6034f8f5e74c3ae508f823ea0b5894207684c2519c6b4cea0ab751036e500:SO3adP6U52Rtp067skI/6bYQSg0HqU3umKB2IQLYlcvNzF95+ArYq4hv/WefGNLw1EU2wnmrIKlaZhyfIWRdDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-21T16:53:50Z:313f1de5b5e7aa0875d9b0ed626bc8a282f97c3e80084f0d92d3d12c9be74542:BvHRf3ZrpaOZpdifPQFAxZ0GO45++fnZgQ2trlKc9q9oWyrl2sji5GWTVwbVroJi+I4D+eWBmyrOcuKL1tiQAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-development"
@@ -151,8 +151,9 @@ Canonical source owners:
   shared mounts and independent `SurfaceComposition` instances; each Surface
   owns its ordered view sets and selected tab. Do not duplicate that mutable
   layout in another vector or browser store.
-- Authored shared Config selects initial Surfaces. `SurfaceSpec.view_sets`
-  supplies each Surface's ordered tab seeds. Selection is not admission:
+- Authored shared Config selects initial Surfaces. A Surface names its view
+  sets as `view_set:` items; the daemon embeds the resolved compositions, and
+  `SurfaceSpec.view_sets` supplies each Surface's ordered tab seeds. Selection is not admission:
   resolve and compile every Surface's own closure and publish membership only
   after validating the complete operation.
 - `SavedViewSetTemplate` is reusable composition with fresh required subjects.
