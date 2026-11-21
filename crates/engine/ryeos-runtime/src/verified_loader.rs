@@ -2140,7 +2140,6 @@ mod tests {
         checkout: PathBuf,
         node: SigningKey,
         operator: SigningKey,
-        entries: Vec<TrustedSignerEntry>,
         trust: ryeos_engine::trust::TrustStore,
         app_root: PathBuf,
         digest: String,
@@ -2191,7 +2190,6 @@ mod tests {
             let digest = ryeos_engine::item_resolution::parse_signature_header(&content, &envelope)
                 .unwrap()
                 .content_hash;
-            let entries = trust.signer_entries();
             let app_root = tmp.path().join("node");
             Self {
                 _tmp: tmp,
@@ -2199,7 +2197,6 @@ mod tests {
                 checkout,
                 node,
                 operator,
-                entries,
                 trust,
                 app_root,
                 digest,

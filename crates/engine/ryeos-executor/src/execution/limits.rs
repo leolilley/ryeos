@@ -934,12 +934,7 @@ mod tests {
             .config()
             .join("example-runtime");
         std::fs::create_dir_all(&config_dir).unwrap();
-        let signed = lillux::signature::sign_content(
-            "defaults: {}\n",
-            &authoring,
-            "#",
-            None,
-        );
+        let signed = lillux::signature::sign_content("defaults: {}\n", &authoring, "#", None);
         std::fs::write(config_dir.join("limits.yaml"), &signed).unwrap();
         let digest = ryeos_engine::item_resolution::parse_signature_header(
             &signed,
