@@ -5030,8 +5030,15 @@ mod tests {
             eprintln!("state-lock helper process: 240 s cap reached; exiting");
             std::process::exit(3);
         });
-        let _lock = ryeos_node_runtime::state_lock::StateLock::acquire(std::path::Path::new(&path))
-            .expect("helper takes the state lock");
+        // The parent released its own handle on this lock just before
+        // spawning us, but a registered descriptor's close is deferred while
+        // any other test thread has a process-creation window open, so the
+        // kernel may still see it held for a moment. Wait it out boundedly.
+        let _lock = ryeos_node_runtime::state_lock::StateLock::acquire_with_timeout(
+            std::path::Path::new(&path),
+            std::time::Duration::from_secs(120),
+        )
+        .expect("helper takes the state lock");
         println!("STATE_LOCK_HELD");
         std::io::stdout().flush().unwrap();
         let mut sink = Vec::new();
