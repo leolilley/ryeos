@@ -459,6 +459,7 @@ fn service_descriptors() -> &'static [ryeos_app::service_registry::ServiceDescri
 /// browser-session policy's configured public origin.
 fn test_node_policy(
     public_origin: Option<String>,
+    seat_reads: Arc<dyn ryeos_node_runtime::node_policy::ErasedNodePolicy>,
 ) -> Arc<ryeos_node_runtime::node_policy::NodePolicySnapshot> {
     Arc::new(
             ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
@@ -494,6 +495,7 @@ fn test_node_policy(
                         public_origin,
                     },
                 ),
+                seat_reads,
                 Arc::new(
                     ryeos_node_runtime::node_policy::sections::ui_inspection::UiInspectionPolicy {
                         schema: 1,
@@ -508,12 +510,64 @@ fn test_node_policy(
         )
 }
 
+/// The `ui_seat_reads` policy exactly as the shipped standard profile carries
+/// it, so tests that mint and dispatch against the shipped Surfaces run under
+/// the policy the node ships.
+pub fn shipped_seat_reads_record() -> Arc<dyn ryeos_node_runtime::node_policy::ErasedNodePolicy> {
+    use ryeos_node_runtime::node_policy::NodePolicyContext;
+    use ryeos_node_runtime::node_policy::NodePolicySection as _;
+    use ryeos_node_runtime::node_policy::sections::ui_seat_reads::{
+        SECTION_NAME, UiSeatReadsPolicySection,
+    };
+
+    let path = ryeos_engine::test_support::workspace_root()
+        .join("bundles/.ai/node/init/profiles/standard.yaml");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    let profile: serde_json::Value = serde_yaml::from_str(&text).expect("parse standard profile");
+    let body = profile["policies"][SECTION_NAME].clone();
+    UiSeatReadsPolicySection
+        .parse(
+            &NodePolicyContext {
+                section: SECTION_NAME.to_owned(),
+                source_file: path,
+                signer_fingerprint: "test".to_owned(),
+            },
+            &body,
+        )
+        .expect("shipped ui_seat_reads policy parses")
+}
+
+/// Replace the state's `ui_seat_reads` policy with `body`, parsed and
+/// validated as the node loads it. Call before minting: a binding records
+/// what the policy then admitted.
+pub fn set_seat_reads(state: &mut AppState, body: &serde_json::Value) {
+    use ryeos_node_runtime::node_policy::NodePolicyContext;
+    use ryeos_node_runtime::node_policy::NodePolicySection as _;
+    use ryeos_node_runtime::node_policy::sections::ui_seat_reads::{
+        SECTION_NAME, UiSeatReadsPolicySection,
+    };
+
+    let record = UiSeatReadsPolicySection
+        .parse(
+            &NodePolicyContext {
+                section: SECTION_NAME.to_owned(),
+                source_file: "/test/ui_seat_reads.yaml".into(),
+                signer_fingerprint: "test".to_owned(),
+            },
+            body,
+        )
+        .expect("test ui_seat_reads policy parses");
+    state.node_policy = test_node_policy(None, record);
+}
+
 /// The default test state with the browser-session policy's public origin set.
 pub fn build_test_state_with_public_origin(
     public_origin: &str,
 ) -> (tempfile::TempDir, TestStateStore, AppState) {
     let (tmp, store, mut state) = build_test_state();
-    state.node_policy = test_node_policy(Some(public_origin.to_owned()));
+    state.node_policy =
+        test_node_policy(Some(public_origin.to_owned()), shipped_seat_reads_record());
     (tmp, store, state)
 }
 
@@ -789,7 +843,7 @@ fn build_app_state(
         external_candidate_connectors: Arc::new(Default::default()),
         external_provider_configurations: Arc::new(Default::default()),
         external_candidate_imports: Arc::new(Default::default()),
-        node_policy: test_node_policy(None),
+        node_policy: test_node_policy(None, shipped_seat_reads_record()),
         vault: Arc::new(ryeos_app::vault::EmptyVault),
         provider_env: std::sync::Arc::new(ryeos_app::vault::ProviderEnvironment::none()),
         vault_ceilings: std::sync::Arc::new(ryeos_app::vault::VaultCeilings::operator_only(

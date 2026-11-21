@@ -21,3 +21,4 @@ pub mod thread_attachments;
 pub mod thread_history;
 pub mod ui_browser_sessions;
 pub mod ui_inspection;
+pub mod ui_seat_reads;
