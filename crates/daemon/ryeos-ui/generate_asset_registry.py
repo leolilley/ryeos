@@ -21,10 +21,25 @@ DIGEST_SCRIPT = (
     ROOT
     / "../../../.ai/tools/ryeos/development/browser-assets-production/lib/web-package-source-digest.py"
 )
+BINDING_SOURCE = ROOT / "../../clients/base/src/lib.rs"
+BINDING_CONSTANT = re.compile(
+    r'^pub const UI_BINDING_CONTRACT_REVISION: &str = "([^"]+)";$', re.MULTILINE
+)
 SNIPPETS = (
     ROOT
     / "../../../.ai/tools/ryeos/development/browser-assets-production/lib/rune-snippets.toml"
 )
+
+
+def code_binding_revision() -> str:
+    """The binding revision the client code declares; the manifest only mirrors it."""
+    matches = BINDING_CONSTANT.findall(BINDING_SOURCE.read_text())
+    if len(matches) != 1:
+        raise SystemExit(
+            f"expected exactly one UI_BINDING_CONTRACT_REVISION constant in {BINDING_SOURCE.resolve()}, "
+            f"found {len(matches)}"
+        )
+    return matches[0]
 
 
 def load_manifest() -> dict:
@@ -166,6 +181,19 @@ def main() -> None:
     if args.check and args.refresh_digests:
         raise SystemExit("--check and --refresh-digests are mutually exclusive")
     manifest = load_manifest()
+    code_revision = code_binding_revision()
+    if args.check:
+        if manifest["ui_binding_revision"] != code_revision:
+            raise SystemExit(
+                "web-assets.json ui_binding_revision is stale: "
+                f"manifest={manifest['ui_binding_revision']} code={code_revision} "
+                "(UI_BINDING_CONTRACT_REVISION in crates/clients/base/src/lib.rs); "
+                "rerun generate_asset_registry.py without --check"
+            )
+    else:
+        # The manifest field is derived from the code constant, never hand-edited.
+        manifest["ui_binding_revision"] = code_revision
+        MANIFEST.write_text(json.dumps(manifest, indent=2) + "\n")
     if args.refresh_digests:
         stamped = subprocess.run(
             [sys.executable, "-I", str(DIGEST_SCRIPT), "--stamped"],
