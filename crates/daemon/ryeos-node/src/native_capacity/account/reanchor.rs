@@ -596,6 +596,7 @@ pub fn reanchor_capacity(request: ReanchorRequest<'_>) -> Result<ReanchorReport>
         state.try_clone()?,
         issuance,
         &policy,
+        state_lock.witness()?,
     )?;
     let position = owner.require_no_outstanding_debit(&policy)?;
     state_lock.ensure_protects_app_root(app_root)?;
@@ -815,6 +816,7 @@ pub fn amend_capacity_policy(
         actor,
         reason,
         command,
+        state_lock,
     )
 }
 
@@ -843,7 +845,7 @@ pub fn check_capacity_policy_amendment(
 ) -> Result<CapacityPolicyAmendmentCheck> {
     state_lock.ensure_protects_app_root(app_root)?;
     let AmendmentInputs { prior, places, .. } = amendment_inputs(app_root, operator_fingerprint)?;
-    let check = check_policy_amendment_at(&places, &prior, policy)?;
+    let check = check_policy_amendment_at(&places, &prior, policy, state_lock)?;
     state_lock.ensure_protects_app_root(app_root)?;
     Ok(check)
 }
@@ -900,13 +902,14 @@ pub(super) fn check_policy_amendment_at(
     places: &AmendmentPlaces,
     prior: &NativeCapacityAccountBinding,
     policy: &NodeNativeCapacityPolicy,
+    state_lock: &StateLock,
 ) -> Result<CapacityPolicyAmendmentCheck> {
     policy.validate()?;
     if prior.policy == *policy {
         return Ok(CapacityPolicyAmendmentCheck::AlreadyApplied);
     }
     require_policy_amendment_log(&places.state)?;
-    admit_policy_amendment(places, prior, policy)?;
+    admit_policy_amendment(places, prior, policy, state_lock)?;
     Ok(CapacityPolicyAmendmentCheck::Needed)
 }
 
@@ -934,6 +937,7 @@ fn admit_policy_amendment(
     places: &AmendmentPlaces,
     prior: &NativeCapacityAccountBinding,
     policy: &NodeNativeCapacityPolicy,
+    state_lock: &StateLock,
 ) -> Result<Option<AccountPosition>> {
     let issuance = prior.issuance_digest()?;
     ensure!(
@@ -947,6 +951,7 @@ fn admit_policy_amendment(
         places.state.try_clone()?,
         issuance,
         &prior.policy,
+        state_lock.witness()?,
     )?;
     // Every later start validates the account's current image under the
     // generation's policy, so the image must already fit the new one.
@@ -957,6 +962,7 @@ fn admit_policy_amendment(
         places.state.try_clone()?,
         issuance,
         policy,
+        state_lock.witness()?,
     )?;
     if owner.owes_cold_settlement(&prior.policy)? {
         fit.owes_cold_settlement(policy).context(
@@ -984,6 +990,7 @@ pub(super) fn amend_policy_at(
     actor: lillux::process_control::ControllerAccount,
     reason: &str,
     command: &str,
+    state_lock: &StateLock,
 ) -> Result<CapacityPolicyAmendmentReport> {
     policy.validate()?;
     ensure!(
@@ -1034,7 +1041,7 @@ pub(super) fn amend_policy_at(
     // A dead incarnation's debit is settled first, exactly as the next start
     // would; the document then names the settled anchor. A run interrupted
     // anywhere in the settlement converges on rerun.
-    let settled_incarnation = match admit_policy_amendment(&places, prior, policy)? {
+    let settled_incarnation = match admit_policy_amendment(&places, prior, policy, state_lock)? {
         Some(_) => None,
         None => StoppedCapacityAccount::open(
             places.directory.try_clone()?,
@@ -1043,10 +1050,11 @@ pub(super) fn amend_policy_at(
             places.state.try_clone()?,
             issuance,
             &prior.policy,
+            state_lock.witness()?,
         )?
         .settle_cold(&prior.policy)?,
     };
-    let position = admit_policy_amendment(&places, prior, policy)?
+    let position = admit_policy_amendment(&places, prior, policy, state_lock)?
         .context("the capacity account still owes a settlement after its cold settlement")?;
     let prior_binding_digest = prior.binding_digest()?;
     let body = ReanchorBody {
@@ -1757,6 +1765,8 @@ mod controls {
     /// amendment reads and fits them the way the command does.
     struct AccountFixture {
         _temporary: tempfile::TempDir,
+        /// The stopped node's state lock, held for the fixture's lifetime.
+        lock: StateLock,
         places: AmendmentPlaces,
         onboarding: PinnedDirectory,
         state: PinnedDirectory,
@@ -1844,6 +1854,7 @@ mod controls {
                 .unwrap()
                 .unwrap();
             let operator = SigningKey::from_bytes(&[7; 32]);
+            let lock = StateLock::acquire(&temporary.path().join("operator.lock")).unwrap();
             Self {
                 places: AmendmentPlaces {
                     directory,
@@ -1851,6 +1862,7 @@ mod controls {
                     state: state.try_clone().unwrap(),
                 },
                 _temporary: temporary,
+                lock,
                 onboarding,
                 state,
                 operator_fingerprint: ryeos_engine::trust::compute_fingerprint(
@@ -1887,7 +1899,32 @@ mod controls {
                 lillux::process_control::ControllerAccount::current().unwrap(),
                 "controls",
                 "ryeos node policy-apply native_capacity",
+                &self.lock,
             )
+        }
+
+        fn owner(&self, policy: &NodeNativeCapacityPolicy) -> StoppedCapacityAccount<'_> {
+            StoppedCapacityAccount::open(
+                self.places.directory.try_clone().unwrap(),
+                self.binding.account_identity,
+                self.onboarding.try_clone().unwrap(),
+                self.state.try_clone().unwrap(),
+                self.binding.issuance_digest().unwrap(),
+                policy,
+                self.lock.witness().unwrap(),
+            )
+            .unwrap()
+        }
+
+        /// Leave an outstanding debit of `process` in the account.
+        fn debit(&self, process: &lillux::process_control::ExactProcessIdentity) {
+            super::super::reissue::leave_debit(
+                &mut self.owner(&self.binding.policy),
+                &self.binding.policy,
+                self.binding.issuance_digest().unwrap(),
+                process,
+            )
+            .unwrap();
         }
 
         fn in_force(&self) -> NativeCapacityAccountBinding {
@@ -1943,15 +1980,7 @@ mod controls {
         assert_eq!(f.evidence()[0].policy_digest, report.policy_digest);
         // The records are untouched: the anchor still loads under the old
         // policy at epoch 1, sequence 0.
-        let mut owner = StoppedCapacityAccount::open(
-            f.places.directory.try_clone().unwrap(),
-            f.binding.account_identity,
-            f.onboarding.try_clone().unwrap(),
-            f.state.try_clone().unwrap(),
-            f.binding.issuance_digest().unwrap(),
-            &f.binding.policy,
-        )
-        .unwrap();
+        let mut owner = f.owner(&f.binding.policy);
         let position = owner
             .require_no_outstanding_debit(&f.binding.policy)
             .unwrap();
@@ -2000,7 +2029,7 @@ mod controls {
     fn the_amendment_check_writes_nothing() {
         let f = AccountFixture::new();
         assert_eq!(
-            check_policy_amendment_at(&f.places, &f.binding, &f.binding.policy).unwrap(),
+            check_policy_amendment_at(&f.places, &f.binding, &f.binding.policy, &f.lock).unwrap(),
             CapacityPolicyAmendmentCheck::AlreadyApplied
         );
         let mut amended = f.binding.policy.clone();
@@ -2009,14 +2038,15 @@ mod controls {
             .rollover_work_margin_steps
             .map(|margin| margin + 1);
         assert_eq!(
-            check_policy_amendment_at(&f.places, &f.binding, &amended).unwrap(),
+            check_policy_amendment_at(&f.places, &f.binding, &amended, &f.lock).unwrap(),
             CapacityPolicyAmendmentCheck::Needed
         );
         let mut too_small = f.binding.policy.clone();
         too_small.allowance.storage_bytes = 70_000;
         too_small.incarnation.units.storage_bytes = 70_000;
         too_small.validate().unwrap();
-        let error = check_policy_amendment_at(&f.places, &f.binding, &too_small).unwrap_err();
+        let error =
+            check_policy_amendment_at(&f.places, &f.binding, &too_small, &f.lock).unwrap_err();
         assert!(
             format!("{error:#}").contains("does not fit the new policy"),
             "{error:#}"
@@ -2029,8 +2059,85 @@ mod controls {
         // check finds it in force.
         assert!(!f.amend(&f.binding, &amended).unwrap().already_applied);
         assert_eq!(
-            check_policy_amendment_at(&f.places, &f.in_force(), &amended).unwrap(),
+            check_policy_amendment_at(&f.places, &f.in_force(), &amended, &f.lock).unwrap(),
             CapacityPolicyAmendmentCheck::AlreadyApplied
+        );
+    }
+    /// A previous daemon recorded in another pid namespace: a real identity
+    /// of this process with its namespace rewritten, so its pid, birth and
+    /// boot all match a LIVE process here and only the namespace says it is
+    /// not this observer's.
+    fn foreign_process() -> lillux::process_control::ExactProcessIdentity {
+        let mut process = lillux::process_control::capture_current_process_identity().unwrap();
+        process.pid_namespace = "pid:[1]".to_owned();
+        process
+    }
+
+    fn amended_policy(f: &AccountFixture) -> NodeNativeCapacityPolicy {
+        let mut amended = f.binding.policy.clone();
+        amended.incarnation.rollover_work_margin_steps = amended
+            .incarnation
+            .rollover_work_margin_steps
+            .map(|margin| margin + 1);
+        amended
+    }
+
+    #[test]
+    fn amend_settles_a_foreign_namespace_debit_through_the_lock_witness_as_a_dead_one() {
+        let f = AccountFixture::new();
+        let foreign = foreign_process();
+        // Without a proof the only classification fails closed.
+        let error = foreign.has_ended().unwrap_err();
+        assert!(error.contains("pid:[1]"), "{error}");
+        f.debit(&foreign);
+        let amended = amended_policy(&f);
+        assert_eq!(
+            check_policy_amendment_at(&f.places, &f.binding, &amended, &f.lock).unwrap(),
+            CapacityPolicyAmendmentCheck::Needed
+        );
+        let report = f.amend(&f.binding, &amended).unwrap();
+        assert!(!report.already_applied);
+        assert!(
+            report.settled_incarnation.is_some(),
+            "the foreign incarnation's debit is settled exactly as a dead one's"
+        );
+        assert_eq!(f.in_force().policy, amended);
+    }
+
+    #[test]
+    fn amend_still_refuses_a_live_incarnation_of_this_namespace_under_the_witness() {
+        let f = AccountFixture::new();
+        f.debit(&lillux::process_control::capture_current_process_identity().unwrap());
+        let amended = amended_policy(&f);
+        let error =
+            check_policy_amendment_at(&f.places, &f.binding, &amended, &f.lock).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("remains live or unproved"),
+            "{error:#}"
+        );
+        let error = f.amend(&f.binding, &amended).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("remains live or unproved"),
+            "{error:#}"
+        );
+        assert!(published_digests(&f.onboarding).unwrap().is_empty());
+        assert!(f.evidence().is_empty());
+    }
+
+    /// Re-anchoring never classifies a process: any outstanding debit blocks
+    /// a move, so a foreign-namespace debit is refused exactly as a dead
+    /// one, with or without the witness open on the account.
+    #[test]
+    fn reanchor_precondition_refuses_a_foreign_namespace_debit_like_a_dead_one() {
+        let f = AccountFixture::new();
+        f.debit(&foreign_process());
+        let error = f
+            .owner(&f.binding.policy)
+            .require_no_outstanding_debit(&f.binding.policy)
+            .expect_err("an outstanding debit blocks a move");
+        assert!(
+            format!("{error:#}").contains("incarnation debit is outstanding"),
+            "{error:#}"
         );
     }
 }

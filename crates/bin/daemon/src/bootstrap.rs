@@ -548,7 +548,12 @@ fn load_node_config_two_phase_with_socket(
                     .clone(),
                 ryeos_node_runtime::node_policy::generation::policy_directory(app_root)
                     .join("isolation.yaml"),
-                format!("sha256:{}", node_policy.generation_digest()),
+                // The isolation policy's own digest: a retained realization
+                // stays valid across edits to other policy sections.
+                format!(
+                    "sha256:{}",
+                    node_policy.section_digest::<ryeos_engine::isolation::IsolationPolicy>()?
+                ),
                 isolation_backend,
                 process_scope_provider,
                 process_scope_authority_digest,
@@ -564,7 +569,10 @@ fn load_node_config_two_phase_with_socket(
                 .require::<ryeos_engine::isolation::IsolationPolicy>()?
                 .clone(),
             ryeos_node_runtime::node_policy::generation::policy_directory(app_root).join("isolation.yaml"),
-            format!("sha256:{}", node_policy.generation_digest()),
+            format!(
+                "sha256:{}",
+                node_policy.section_digest::<ryeos_engine::isolation::IsolationPolicy>()?
+            ),
             isolation_backend,
         ),
     }

@@ -225,6 +225,8 @@ pub(super) fn recover_init(
         group_leader_pid: init_pid,
         group_leader_start_time_ticks: init_start_time_ticks,
         group_basis: crate::GroupBasis::ProcessGroup,
+        // A transient comparator used only in this observer's own namespace.
+        pid_namespace: linux::read_self_pid_namespace()?,
     };
     // Never classify from the /proc state letter: a thread-group leader that
     // exits while other threads run is `Z` with namespace members alive. The
@@ -815,6 +817,7 @@ mod tests {
             group_leader_pid: stat.process_group as u32,
             group_leader_start_time_ticks: leader.start_time_ticks,
             group_basis: crate::GroupBasis::ProcessGroup,
+            pid_namespace: linux::read_self_pid_namespace().unwrap(),
         }
     }
 

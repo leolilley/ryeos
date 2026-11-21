@@ -56,10 +56,7 @@ pub fn bootstrap(
         "directive runtime: typed header surface"
     );
 
-    let mut execution = loader
-        .load_config_strict::<ExecutionConfig>("ryeos-runtime/execution")
-        .map_err(|e| anyhow!("loading config `ryeos-runtime/execution`: {e}"))?
-        .unwrap_or_default();
+    let mut execution = load_execution_config(loader)?;
     execution
         .validate()
         .context("invalid config `ryeos-runtime/execution`")?;
@@ -84,12 +81,7 @@ pub fn bootstrap(
     // Continuation behavior config (context-threshold ratio, carry bounds) —
     // loaded the same way as execution config, defaults if absent. Directive-
     // runtime config, not executor limit resolution: no envelope threading.
-    let continuation_runtime = loader
-        .load_config_strict::<crate::directive::ContinuationRuntimeConfig>(
-            "ryeos-runtime/continuation",
-        )
-        .map_err(|e| anyhow!("loading config `ryeos-runtime/continuation`: {e}"))?
-        .unwrap_or_default();
+    let continuation_runtime = load_continuation_config(loader)?;
 
     // Consumer for the `category` round-trip fields on each typed
     // config — keeps `pub category: Option<String>` from being dead
@@ -387,11 +379,34 @@ pub(super) fn compile_directive_hook_sources(
     .context("compile directive hooks")
 }
 
+/// Execution config (retries, backoff, unknown-outcome policy). Absent means
+/// defaults; a present file must be signed by a signer trusted for its space.
+fn load_execution_config(loader: &VerifiedLoader) -> Result<ExecutionConfig> {
+    Ok(loader
+        .load_config_strict_signed::<ExecutionConfig>("ryeos-runtime/execution")
+        .map_err(|e| anyhow!("loading config `ryeos-runtime/execution`: {e}"))?
+        .unwrap_or_default())
+}
+
+/// Continuation config (context-threshold ratio, carry bounds). Absent means
+/// defaults; a present file must be signed by a signer trusted for its space.
+fn load_continuation_config(
+    loader: &VerifiedLoader,
+) -> Result<crate::directive::ContinuationRuntimeConfig> {
+    Ok(loader
+        .load_config_strict_signed::<crate::directive::ContinuationRuntimeConfig>(
+            "ryeos-runtime/continuation",
+        )
+        .map_err(|e| anyhow!("loading config `ryeos-runtime/continuation`: {e}"))?
+        .unwrap_or_default())
+}
+
 fn load_risk_policy(loader: &VerifiedLoader) -> Result<Option<crate::harness::RiskPolicy>> {
     // Absence of ryeos-runtime/capability_risk.yaml is fine (optional config).
-    // But if it exists and is broken, we fail loud with file path.
+    // If it exists it must be signed by a trusted signer and well formed; any
+    // other state fails loud with the file path.
     let Some(config) = loader
-        .load_config_strict::<serde_yaml::Value>("ryeos-runtime/capability_risk")
+        .load_config_strict_signed::<serde_yaml::Value>("ryeos-runtime/capability_risk")
         .map_err(|e| anyhow!("loading config `ryeos-runtime/capability_risk`: {e}"))?
     else {
         return Ok(None);
@@ -626,5 +641,155 @@ mod tests {
             format!("{error:#}").contains("references undeclared root `state`"),
             "expected the after_step schema to reject state, got: {error:#}"
         );
+    }
+
+    mod signed_config_loads {
+        use super::*;
+        use ryeos_runtime::verified_loader::ConfigLoadError;
+
+        fn key(seed: u8) -> lillux::crypto::SigningKey {
+            lillux::crypto::SigningKey::from_bytes(&[seed; 32])
+        }
+
+        fn trusting(
+            key: &lillux::crypto::SigningKey,
+        ) -> Vec<ryeos_engine::trust::TrustedSignerEntry> {
+            use base64::Engine as _;
+            let verifying_key = key.verifying_key();
+            vec![ryeos_engine::trust::TrustedSignerEntry {
+                fingerprint: lillux::signature::compute_fingerprint(&verifying_key),
+                public_key: format!(
+                    "ed25519:{}",
+                    base64::engine::general_purpose::STANDARD.encode(verifying_key.to_bytes())
+                ),
+                label: "bootstrap-test".to_string(),
+                scope: ryeos_engine::trust::SignerScope::everywhere(),
+                endorsements: None,
+            }]
+        }
+
+        fn write(project: &std::path::Path, config_id: &str, document: &str) {
+            let path = project.join(format!(".ai/config/{config_id}.yaml"));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, document).unwrap();
+        }
+
+        fn loader(
+            project: &std::path::Path,
+            trusted: &lillux::crypto::SigningKey,
+        ) -> VerifiedLoader {
+            VerifiedLoader::new(project.to_path_buf(), vec![], &trusting(trusted)).unwrap()
+        }
+
+        fn sign(body: &str, key: &lillux::crypto::SigningKey) -> String {
+            lillux::signature::sign_content(body, key, "#", None)
+        }
+
+        const EXECUTION: &str = "ryeos-runtime/execution";
+        const CONTINUATION: &str = "ryeos-runtime/continuation";
+        const RISK: &str = "ryeos-runtime/capability_risk";
+        const RISK_BODY: &str =
+            "policies:\n  - pattern: \"x.*\"\n    level: high\n    requires_ack: true\n";
+
+        /// The chain root of an error: the typed loader error inside the
+        /// bootstrap's `anyhow!` rendering is checked by message, since the
+        /// bootstrap wraps it in context text.
+        fn assert_refused(message: &str, needle: &str, file: &str) {
+            assert!(message.contains(needle), "got {message}");
+            assert!(message.contains(file), "must name the file: {message}");
+            assert!(message.contains("Cure:"), "must name the cure: {message}");
+        }
+
+        #[test]
+        fn absent_optional_configs_are_absent_not_errors() {
+            let tmp = tempfile::tempdir().unwrap();
+            let loader = loader(tmp.path(), &key(1));
+            load_execution_config(&loader).unwrap();
+            load_continuation_config(&loader).unwrap();
+            assert!(load_risk_policy(&loader).unwrap().is_none());
+        }
+
+        #[test]
+        fn trusted_signed_configs_load() {
+            let tmp = tempfile::tempdir().unwrap();
+            let k = key(1);
+            write(tmp.path(), EXECUTION, &sign("retries: 7\n", &k));
+            write(tmp.path(), CONTINUATION, &sign("{}\n", &k));
+            write(tmp.path(), RISK, &sign(RISK_BODY, &k));
+            let loader = loader(tmp.path(), &k);
+            assert_eq!(load_execution_config(&loader).unwrap().retries, 7);
+            load_continuation_config(&loader).unwrap();
+            assert_eq!(
+                load_risk_policy(&loader).unwrap().unwrap().patterns.len(),
+                1
+            );
+        }
+
+        #[test]
+        fn unsigned_configs_are_refused() {
+            let tmp = tempfile::tempdir().unwrap();
+            write(tmp.path(), EXECUTION, "retries: 7\n");
+            write(tmp.path(), CONTINUATION, "{}\n");
+            write(tmp.path(), RISK, RISK_BODY);
+            let loader = loader(tmp.path(), &key(1));
+            for (err, file) in [
+                (
+                    load_execution_config(&loader).unwrap_err(),
+                    "execution.yaml",
+                ),
+                (
+                    load_continuation_config(&loader).unwrap_err(),
+                    "continuation.yaml",
+                ),
+                (
+                    load_risk_policy(&loader).unwrap_err(),
+                    "capability_risk.yaml",
+                ),
+            ] {
+                assert_refused(&format!("{err:#}"), "is unsigned", file);
+            }
+        }
+
+        #[test]
+        fn untrusted_signer_configs_are_refused() {
+            let tmp = tempfile::tempdir().unwrap();
+            let stranger = key(2);
+            write(tmp.path(), EXECUTION, &sign("retries: 7\n", &stranger));
+            write(tmp.path(), CONTINUATION, &sign("{}\n", &stranger));
+            write(tmp.path(), RISK, &sign(RISK_BODY, &stranger));
+            let fingerprint = lillux::signature::compute_fingerprint(&stranger.verifying_key());
+            let loader = loader(tmp.path(), &key(1));
+            for (err, file) in [
+                (
+                    load_execution_config(&loader).unwrap_err(),
+                    "execution.yaml",
+                ),
+                (
+                    load_continuation_config(&loader).unwrap_err(),
+                    "continuation.yaml",
+                ),
+                (
+                    load_risk_policy(&loader).unwrap_err(),
+                    "capability_risk.yaml",
+                ),
+            ] {
+                let message = format!("{err:#}");
+                assert_refused(&message, "not trusted", file);
+                assert!(
+                    message.contains(&fingerprint),
+                    "must name the signer: {message}"
+                );
+            }
+        }
+
+        #[test]
+        fn typed_error_is_the_loader_variant() {
+            let tmp = tempfile::tempdir().unwrap();
+            write(tmp.path(), EXECUTION, "retries: 7\n");
+            let error = loader(tmp.path(), &key(1))
+                .load_config_strict_signed::<ExecutionConfig>(EXECUTION)
+                .unwrap_err();
+            assert!(matches!(error, ConfigLoadError::Unsigned { .. }));
+        }
     }
 }

@@ -321,6 +321,7 @@ impl Guest {
                 target_start_time_ticks: 300,
                 group_leader_pid: 200,
                 group_leader_start_time_ticks: 300,
+                pid_namespace: lillux::current_pid_namespace().unwrap(),
                 group_basis: lillux::GroupBasis::ProcessGroup,
             },
             &"1".repeat(64),

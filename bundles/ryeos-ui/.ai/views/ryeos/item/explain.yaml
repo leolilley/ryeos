@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-04T10:21:25Z:f46167abb1ca6d9c522d21be85583c5b5fd27afa24fde07e55c851dfb54db32c:hU6criXyqHyt297qx7D/VuzOQfa1L+IVxLfj0oMWx6qXBIyE6dzc1plugy3TG8VnsqGChwI4y9+4GuxBncoYDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-20T01:53:56Z:cf698fb14f03fb7b1670d5dcfbe5d722290a9b7393201529146cee4947d779b7:Rl1EgoQzRMVw1XmPKOCjgpCqpFalrF2/Yzl6g7IQo53h5k0DREYm7b272cG+P2W3cyADPffsh1+8ihQBV03VAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: item-explain
 version: "1.0.0"
 description: >-
@@ -26,15 +26,16 @@ sources:
 
 sections:
   # Resolution: the whole effective-item response as one detail row. Primary is
-  # the resolved canonical ref, meta is the on-disk source path it was read and
-  # verified from, toned by the effective (weakest-link) trust class. The
+  # the resolved canonical ref, meta is the item's kind, toned by the effective
+  # (weakest-link) trust class. The on-disk source path is not part of what a
+  # seat may read. The
   # requested ref equals the canonical ref except under alias expansion — that
   # drift shows in the Extends chain rows' alias hops.
   - title: Resolution
     source_channel: current
     projection:
       primary: canonical_ref
-      meta: source.path
+      meta: kind
       tone:
         field: trust_class
         map:

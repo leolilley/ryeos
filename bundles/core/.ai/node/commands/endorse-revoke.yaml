@@ -1,0 +1,13 @@
+# ryeos:signed:2026-11-20T23:16:10Z:7ca6522dda018ab693e2b7d552da0e124e0a72796a7988437a306d5869be681d:DY8IrLpm3Dgm3ypBa06Ik4B2fJnm84NuAjFStGbDIiPmgVkYzsKEkIpiG5A4xWobyNfNemXILC8bAjBIBDluCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- endorse
+- revoke
+description: Withdraw one recorded endorsement by digest
+help:
+  usage: "ryeos endorse revoke --endorsement <digest> [--reason <text>]"
+parameter_binding:
+  mode: tail_object
+  flag_key_normalization: hyphen_to_underscore
+dispatch:
+  kind: execute_ref
+  execute: service:endorsements/revoke

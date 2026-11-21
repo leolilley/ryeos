@@ -5147,6 +5147,11 @@ async fn prepare_managed_launch_authority_in_mode(
                         .root_admission
                         .as_ref()
                         .and_then(|admission| admission.admitted_request_snapshot()),
+                    params
+                        .resolved
+                        .root_admission
+                        .as_ref()
+                        .map(|admission| admission.request_trust()),
                 ))
                 .await
                 .map_err(|error| match error {
@@ -7382,8 +7387,13 @@ async fn run_claimed_thread_row_inner(
     // 2. Compute limits (root execution: depth = 0)
     let root_item_ref = ryeos_engine::canonical_ref::CanonicalRef::parse(&resolved.item_ref)
         .map_err(|e| anyhow::anyhow!("build_and_launch: invalid root item ref: {e}"))?;
-    let trusted_signers =
-        ryeos_engine::launch_envelope_types::trusted_signer_entries(&engine.node_trust_store);
+    // The signer list carries, on the authoring signers, the endorsements this
+    // request froze for the launch's project: execution-limit config loading,
+    // its proofs and cache keys, and the runtime all judge the same view.
+    let trusted_signers = engine.node_trust_store.launch_signer_entries(
+        root_admission.request_trust(),
+        engine_roots.signer_project_root(),
+    );
     let node_config_root = engine.node_config_root();
     let execution_controls = load_execution_control_snapshot_cached(
         engine,

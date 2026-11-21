@@ -1063,6 +1063,27 @@ struct DedicatedSessionTerminateParams {
     bounded_outcome: Option<DedicatedSessionBoundedOutcome>,
 }
 
+/// Admit the pinned terminal publication a worker launches under. Both
+/// worker modes retain their result; only an interactive session carries a
+/// HEAD destination, because a bounded candidate is never published directly
+/// (integration mints its own destination).
+fn validate_worker_terminal_publication(
+    bounded_turn: bool,
+    publication: &ryeos_state::objects::PinnedTerminalPublication,
+) -> Result<()> {
+    use ryeos_state::objects::PinnedTerminalPublication as Pinned;
+    match publication {
+        Pinned::RetainResult => Ok(()),
+        Pinned::RetainCurrentHead { .. } if bounded_turn => bail!(
+            "a bounded turn retains its result and carries no HEAD destination; \
+             launch it with terminal publication retain_result \
+             (execution policy terminal_publication kind `retain_result`), not retain_current_head"
+        ),
+        Pinned::RetainCurrentHead { .. } => Ok(()),
+        _ => bail!("worker execution requires a retain-result pinned CoW realization"),
+    }
+}
+
 fn validate_runtime_termination(request: &DedicatedSessionTerminateParams) -> Result<()> {
     match (
         request.reason.as_str(),
@@ -1172,13 +1193,12 @@ pub(super) async fn start(
     if request.credential_home_env == request.workspace_env {
         bail!("credential-home and workspace environment slots must be distinct");
     }
+    let mut pinned_terminal_publication = None;
     if request.require_pinned_cow {
         if request.required_terminal_publication != "retain_result" {
             bail!("pinned CoW worker execution requires retain_result terminal publication");
         }
-        use ryeos_state::objects::{
-            ExecutionProjectAuthority, PinnedProjectRealization, PinnedTerminalPublication,
-        };
+        use ryeos_state::objects::{ExecutionProjectAuthority, PinnedProjectRealization};
         let ExecutionProjectAuthority::PinnedGeneration { realization, .. } =
             cap.provenance.project_authority()
         else {
@@ -1190,13 +1210,7 @@ pub(super) async fn start(
         else {
             bail!("dedicated-session launch requires a private CoW realization");
         };
-        if !matches!(
-            terminal_publication,
-            PinnedTerminalPublication::RetainResult
-                | PinnedTerminalPublication::RetainCurrentHead { .. }
-        ) {
-            bail!("worker execution requires a retain-result pinned CoW realization");
-        }
+        pinned_terminal_publication = Some(terminal_publication);
     } else if request.required_terminal_publication != "any" {
         bail!("projectless worker execution requires any terminal publication");
     }
@@ -1235,6 +1249,9 @@ pub(super) async fn start(
     }
     if bounded_turn != (candidate_disposition == DedicatedCandidateDisposition::RetainedForReview) {
         bail!("dedicated-session candidate disposition contradicts its admitted worker mode");
+    }
+    if let Some(publication) = pinned_terminal_publication {
+        validate_worker_terminal_publication(bounded_turn, publication)?;
     }
     if aggregate_budget
         .as_ref()
@@ -1802,7 +1819,7 @@ mod tests {
         bounded_worker_failure_reason, classify_continuation_admission_error,
         judge_continuation_predecessor, require_callback_root,
         require_subject_contract_matches_activation, validate_runtime_termination,
-        validate_structured_session_route_effect_contract,
+        validate_structured_session_route_effect_contract, validate_worker_terminal_publication,
     };
     use ryeos_app::runtime_db::{
         CredentialActivation, DedicatedCandidateDisposition, DedicatedSessionRecord,
@@ -2147,5 +2164,36 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("enables upstream recovery"));
+    }
+
+    #[test]
+    fn worker_terminal_publication_admission_pairs_with_the_worker_mode() {
+        use ryeos_state::objects::PinnedTerminalPublication as Pinned;
+        let head = || Pinned::RetainCurrentHead {
+            principal_key: "principal".to_owned(),
+            project_hash: "p".repeat(64),
+            expected_hash: "e".repeat(64),
+        };
+        assert!(validate_worker_terminal_publication(true, &Pinned::RetainResult).is_ok());
+        assert!(validate_worker_terminal_publication(false, &Pinned::RetainResult).is_ok());
+        assert!(validate_worker_terminal_publication(false, &head()).is_ok());
+        let refused = validate_worker_terminal_publication(true, &head())
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("carries no HEAD destination"), "{refused}");
+        assert!(refused.contains("retain_result"), "{refused}");
+        for bounded in [true, false] {
+            assert!(validate_worker_terminal_publication(bounded, &Pinned::Discard).is_err());
+            assert!(
+                validate_worker_terminal_publication(
+                    bounded,
+                    &Pinned::AdvanceHead {
+                        head_ref: "refs/heads/main".to_owned(),
+                        expected_hash: "e".repeat(64),
+                    },
+                )
+                .is_err()
+            );
+        }
     }
 }

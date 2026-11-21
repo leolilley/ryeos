@@ -106,30 +106,17 @@ impl OciLifecycleIntent {
 
     fn require_ended(&self) -> Result<(), String> {
         self.validate()?;
-        match super::capture_exact_process_identity(
-            self.init_process.target_pid,
-            Some(self.init_process.group_leader_pid),
-        ) {
-            Ok(current) if current == self.init_process => {
+        // The same boot, pid-namespace and birth classification as
+        // `has_ended`: a foreign occupant that refuses the pidfd probe is
+        // still provably not the recorded init when its boot or birth
+        // differs, and a recorded init from another pid namespace is never
+        // decided from its numeric coordinates.
+        match self.init_process.has_ended() {
+            Ok(true) => {}
+            Ok(false) => {
                 return Err("OCI init process is still the intended incarnation".to_owned());
             }
-            Ok(_) => {}
-            // The same boot/birth classification as `has_ended`: a foreign
-            // occupant that refuses the pidfd probe is still provably not
-            // the recorded init when its boot or birth differs.
-            Err(error) => {
-                #[cfg(target_os = "linux")]
-                if !self
-                    .init_process
-                    .classify_ended_after_capture_error(&error)?
-                {
-                    return Err(format!("cannot prove OCI init death: {error}"));
-                }
-                #[cfg(not(target_os = "linux"))]
-                if PathBuf::from(format!("/proc/{}", self.init_process.target_pid)).exists() {
-                    return Err(format!("cannot prove OCI init death: {error}"));
-                }
-            }
+            Err(error) => return Err(format!("cannot prove OCI init death: {error}")),
         }
         Ok(())
     }
@@ -544,30 +531,17 @@ impl OciLifecycleGeneration {
             // Do not inspect or remove a coincidentally reused path/inode.
             return Ok(());
         }
-        match super::capture_exact_process_identity(
-            self.init_process.target_pid,
-            Some(self.init_process.group_leader_pid),
-        ) {
-            Ok(current) if current == self.init_process => {
+        // The same boot, pid-namespace and birth classification as
+        // `has_ended`: a foreign occupant that refuses the pidfd probe is
+        // still provably not the recorded init when its boot or birth
+        // differs, and a recorded init from another pid namespace is never
+        // decided from its numeric coordinates.
+        match self.init_process.has_ended() {
+            Ok(true) => {}
+            Ok(false) => {
                 return Err("OCI init process is still the admitted incarnation".to_owned());
             }
-            Ok(_) => {}
-            // The same boot/birth classification as `has_ended`: a foreign
-            // occupant that refuses the pidfd probe is still provably not
-            // the recorded init when its boot or birth differs.
-            Err(error) => {
-                #[cfg(target_os = "linux")]
-                if !self
-                    .init_process
-                    .classify_ended_after_capture_error(&error)?
-                {
-                    return Err(format!("cannot prove OCI init death: {error}"));
-                }
-                #[cfg(not(target_os = "linux"))]
-                if PathBuf::from(format!("/proc/{}", self.init_process.target_pid)).exists() {
-                    return Err(format!("cannot prove OCI init death: {error}"));
-                }
-            }
+            Err(error) => return Err(format!("cannot prove OCI init death: {error}")),
         }
         #[cfg(target_os = "linux")]
         super::cgroup::retire_ended_oci_scopes(

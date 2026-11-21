@@ -5,7 +5,7 @@
 //! Two consumers:
 //!
 //! - The lifecycle status probe reads it to tell a *booting* daemon (live
-//!   pid, no socket yet) apart from a stopped one.
+//!   process, no socket yet) apart from a stopped one.
 //! - A `SIGKILL` or hard crash cannot write an exit marker — so on the next
 //!   startup, a marker still in the `running` state whose pid is no longer
 //!   alive is reported as an unclean exit (inferred crash). This turns "the
@@ -18,6 +18,12 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 const MARKER_FILE: &str = "lifecycle.json";
+
+/// Shape version of the `running` record. Version 2 names the daemon by its
+/// exact process identity instead of a bare pid, so a recycled pid (a new
+/// container's first processes reuse the previous container's numbers) can
+/// never read as the recorded daemon.
+pub const RUNNING_MARKER_SCHEMA_VERSION: u32 = 2;
 
 /// Provisional exit reason staged before native finalization retires the
 /// operator target. It never proves a clean exit: only a completed finalizer
@@ -69,10 +75,15 @@ pub fn incarnation_digest_hex(digest: &[u8; 32]) -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum LifecycleMarker {
-    /// The daemon is (or was) up. If the pid is dead and no `Exited` marker
-    /// followed, the run ended uncleanly.
+    /// The daemon is (or was) up. If its exact process incarnation has ended
+    /// and no `Exited` marker followed, the run ended uncleanly.
     Running {
-        pid: u32,
+        /// Always [`RUNNING_MARKER_SCHEMA_VERSION`]; see [`decode_marker`].
+        schema_version: u32,
+        /// The daemon's own exact process identity, captured when the marker
+        /// was written. The only record of which process this is: the pid is
+        /// `identity.target_pid`, never stored separately.
+        identity: lillux::process_control::ExactProcessIdentity,
         started_at: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         launch_route: Option<LaunchRoute>,
@@ -109,7 +120,8 @@ impl LifecycleMarker {
         // skipped here without a compile error.
         match self {
             Self::Running {
-                pid: _,
+                schema_version: _,
+                identity: _,
                 started_at: _,
                 launch_route: _,
                 pending_latched_drain,
@@ -129,6 +141,53 @@ impl LifecycleMarker {
     }
 }
 
+/// Why raw marker bytes did not decode to a marker.
+#[derive(Debug)]
+pub enum MarkerDecodeError {
+    /// A `running` record written by a daemon from before the exact-identity
+    /// marker (no `schema_version`, or a version other than
+    /// [`RUNNING_MARKER_SCHEMA_VERSION`]). It names its daemon by a bare pid,
+    /// so its liveness cannot be judged and no legacy reader exists.
+    StaleRunningSchema { found: Option<u64> },
+    /// Not a lifecycle marker at all.
+    Unreadable(String),
+}
+
+impl std::fmt::Display for MarkerDecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StaleRunningSchema { found } => write!(
+                f,
+                "lifecycle marker is a `running` record of schema {} written by a daemon from \
+                 before the exact-process-identity marker (current schema {RUNNING_MARKER_SCHEMA_VERSION}); \
+                 it is a leftover of that daemon and is retired by the next start, or remove \
+                 `{MARKER_FILE}` from the node state directory once no ryeosd is running",
+                found.map_or_else(|| "1 (unversioned)".to_owned(), |v| v.to_string()),
+            ),
+            Self::Unreadable(error) => write!(f, "lifecycle marker is unreadable: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for MarkerDecodeError {}
+
+/// Decode marker bytes. A `running` record that is not the current schema is
+/// refused with [`MarkerDecodeError::StaleRunningSchema`] before any field is
+/// interpreted; there is no reader for the old shape.
+pub fn decode_marker(raw: &[u8]) -> Result<LifecycleMarker, MarkerDecodeError> {
+    let value: serde_json::Value = serde_json::from_slice(raw)
+        .map_err(|error| MarkerDecodeError::Unreadable(error.to_string()))?;
+    if value.get("state").and_then(serde_json::Value::as_str) == Some("running") {
+        let found = value
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64);
+        if found != Some(u64::from(RUNNING_MARKER_SCHEMA_VERSION)) {
+            return Err(MarkerDecodeError::StaleRunningSchema { found });
+        }
+    }
+    serde_json::from_value(value).map_err(|error| MarkerDecodeError::Unreadable(error.to_string()))
+}
+
 pub fn read(state_dir: &Path) -> Option<LifecycleMarker> {
     let directory = lillux::PinnedDirectory::open(state_dir).ok()??;
     let marker = directory
@@ -138,7 +197,7 @@ pub fn read(state_dir: &Path) -> Option<LifecycleMarker> {
     let raw = marker
         .read_stable_bounded(&observation, MAX_MARKER_BYTES)
         .ok()?;
-    serde_json::from_slice(&raw).ok()
+    decode_marker(&raw).ok()
 }
 
 /// Retire exactly the retained startup-failure marker an operator has
@@ -155,7 +214,7 @@ pub fn acknowledge_startup_failure(state_dir: &Path) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("startup-failure marker is absent"))?;
     let observation = marker.observation()?;
     let raw = marker.read_stable_bounded(&observation, MAX_MARKER_BYTES)?;
-    let decoded: LifecycleMarker = serde_json::from_slice(&raw)?;
+    let decoded = decode_marker(&raw)?;
     if !matches!(
         decoded,
         LifecycleMarker::Exited { ref reason, .. } if reason == "startup_failed"
@@ -421,11 +480,15 @@ fn write_strict(
         Some(file) => {
             let observation = file.observation()?;
             let raw = file.read_stable_bounded(&observation, MAX_MARKER_BYTES)?;
-            Some(
-                serde_json::from_slice::<LifecycleMarker>(&raw).map_err(|error| {
-                    anyhow::anyhow!("current lifecycle marker is unreadable: {error}")
-                })?,
-            )
+            match decode_marker(&raw) {
+                Ok(marker) => Some(marker),
+                // Advisory liveness state of a daemon from before this
+                // schema: replaced, as `take_previous_exit` already reported.
+                Err(MarkerDecodeError::StaleRunningSchema { .. }) => None,
+                Err(error) => {
+                    return Err(anyhow::anyhow!("current {error}"));
+                }
+            }
         }
         None => None,
     };
@@ -446,42 +509,129 @@ fn write_strict(
     Ok(())
 }
 
+/// What the previous run left in the marker file.
+#[derive(Debug, Clone)]
+pub enum PreviousRun {
+    Marker(LifecycleMarker),
+    /// A `running` record of a pre-identity schema: retired, not judged.
+    RetiredStaleRunning {
+        found_schema: Option<u64>,
+    },
+}
+
 /// A previous run that ended without a handled exit: its marker still says
-/// `running` and its process is gone.
+/// `running` and the exact process it names is gone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UncleanExit {
-    pub pid: u32,
+    /// The exact incarnation that ended. Its pid alone names nothing: the
+    /// same number is reused across container restarts.
+    pub identity: lillux::process_control::ExactProcessIdentity,
     pub started_at: String,
     pub launch_route: Option<LaunchRoute>,
 }
 
-/// The unclean exit `previous` shows, if it shows one. A `running` marker
-/// names a run that is over when its pid is dead, and also when the pid is
-/// this process's own: the caller holds the state lock, so no other run is
-/// live, and a container restart reuses the pid.
-pub fn inferred_unclean_exit(previous: Option<&LifecycleMarker>) -> Option<UncleanExit> {
-    let Some(LifecycleMarker::Running {
-        pid,
-        started_at,
-        launch_route,
-        pending_latched_drain: _,
-        carrier_incarnation: _,
-    }) = previous
-    else {
-        return None;
-    };
-    (*pid == std::process::id() || !process_alive(*pid)).then(|| UncleanExit {
-        pid: *pid,
-        started_at: started_at.clone(),
-        launch_route: *launch_route,
-    })
+/// A previous run whose end cannot be judged: neither a clean exit nor an
+/// unclean one, so history records the gap rather than a guess.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownExit {
+    /// `indeterminate:<observation error>` or
+    /// `retired_stale_running:<schema found, or absent>`.
+    pub reason: String,
+    /// The incarnation the marker named, when it named one.
+    pub identity: Option<lillux::process_control::ExactProcessIdentity>,
+    pub started_at: Option<String>,
+    pub launch_route: Option<LaunchRoute>,
+}
+
+/// What the previous run's marker shows about an end no handled exit
+/// recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InferredExit {
+    Unclean(UncleanExit),
+    Unknown(UnknownExit),
+}
+
+/// The end of the previous run its marker shows, judged by the recorded exact
+/// identity and never a bare pid:
+///
+/// - proven ended: an unclean exit (another boot, an absent process, or
+///   another birth at the same pid; a container restart reuses the pid,
+///   including this process's own);
+/// - still the occupant: no exit. Another instance may be live; the state
+///   lock the caller holds already refuses a second daemon, so the start only
+///   warns (see [`report_previous_exit`]) and goes on;
+/// - not classifiable, or a retired pre-identity `running` record: unknown,
+///   never unclean;
+/// - a handled `Exited` marker or no marker: nothing to infer.
+pub fn inferred_exit(previous: Option<&PreviousRun>) -> Option<InferredExit> {
+    inferred_exit_with(previous, recorded_process)
+}
+
+fn inferred_exit_with(
+    previous: Option<&PreviousRun>,
+    observe: impl FnOnce(&lillux::process_control::ExactProcessIdentity) -> RecordedProcess,
+) -> Option<InferredExit> {
+    match previous? {
+        PreviousRun::RetiredStaleRunning { found_schema } => {
+            Some(InferredExit::Unknown(UnknownExit {
+                reason: format!(
+                    "retired_stale_running:{}",
+                    found_schema.map_or_else(|| "absent".to_owned(), |schema| schema.to_string())
+                ),
+                identity: None,
+                started_at: None,
+                launch_route: None,
+            }))
+        }
+        PreviousRun::Marker(LifecycleMarker::Exited { .. }) => None,
+        PreviousRun::Marker(LifecycleMarker::Running {
+            identity,
+            started_at,
+            launch_route,
+            schema_version: _,
+            pending_latched_drain: _,
+            carrier_incarnation: _,
+        }) => match observe(identity) {
+            RecordedProcess::Ended => Some(InferredExit::Unclean(UncleanExit {
+                identity: identity.clone(),
+                started_at: started_at.clone(),
+                launch_route: *launch_route,
+            })),
+            RecordedProcess::Running => None,
+            RecordedProcess::Indeterminate(reason) => Some(InferredExit::Unknown(UnknownExit {
+                reason: format!("indeterminate:{reason}"),
+                identity: Some(identity.clone()),
+                started_at: Some(started_at.clone()),
+                launch_route: *launch_route,
+            })),
+        },
+    }
+}
+
+/// The unclean exit `previous` shows, if it shows one: only a proof that the
+/// recorded incarnation ended.
+pub fn inferred_unclean_exit(previous: Option<&PreviousRun>) -> Option<UncleanExit> {
+    match inferred_exit(previous)? {
+        InferredExit::Unclean(unclean) => Some(unclean),
+        InferredExit::Unknown(_) => None,
+    }
 }
 
 /// The previous run's marker, read before this start overwrites it. `None`
 /// means no marker exists. An unreadable marker (bad bytes, over its bound,
 /// a refused pinned open) is an error: the start must fail closed and leave
 /// it in place, since it may carry facts recovery has not applied.
-pub fn take_previous_exit(state_dir: &Path) -> anyhow::Result<Option<LifecycleMarker>> {
+///
+/// A `running` record of an older schema is the one exception: it is retired
+/// (reported by [`report_previous_exit`], replaced by this start's record)
+/// rather than refused. The marker is advisory process-liveness state, and
+/// the caller holds the state lock, so no daemon of that older shape can be
+/// running. The only durable content such a record can carry is unapplied
+/// latched-drain facts; losing them degrades to the same crash treatment a
+/// stale-predecessor drop already gets in [`bind_pending_latched_drain`].
+/// Refusing instead would wedge every first start after the upgrade until an
+/// operator hand-deleted the file.
+pub fn take_previous_exit(state_dir: &Path) -> anyhow::Result<Option<PreviousRun>> {
     let Some(directory) = lillux::PinnedDirectory::open(state_dir)? else {
         return Ok(None);
     };
@@ -491,9 +641,15 @@ pub fn take_previous_exit(state_dir: &Path) -> anyhow::Result<Option<LifecycleMa
     };
     let observation = marker.observation()?;
     let raw = marker.read_stable_bounded(&observation, MAX_MARKER_BYTES)?;
-    let decoded = serde_json::from_slice(&raw)
-        .map_err(|error| anyhow::anyhow!("previous lifecycle marker is unreadable: {error}"))?;
-    Ok(Some(decoded))
+    match decode_marker(&raw) {
+        Ok(decoded) => Ok(Some(PreviousRun::Marker(decoded))),
+        Err(MarkerDecodeError::StaleRunningSchema { found }) => {
+            Ok(Some(PreviousRun::RetiredStaleRunning {
+                found_schema: found,
+            }))
+        }
+        Err(error) => Err(anyhow::anyhow!("previous {error}")),
+    }
 }
 
 /// Record this exact daemon startup attempt. Call after the state lock is held
@@ -505,12 +661,16 @@ pub fn take_previous_exit(state_dir: &Path) -> anyhow::Result<Option<LifecycleMa
 /// since the facts could not then be bound to it.
 pub fn record_running(state_dir: &Path, launch_route: LaunchRoute) -> anyhow::Result<String> {
     let started_at = lillux::time::iso8601_now();
+    // The same capture the native capacity incarnation uses for this process.
+    let identity = lillux::process_control::capture_current_process_identity()
+        .map_err(|error| anyhow::anyhow!("capture the daemon's own process identity: {error}"))?;
     write_strict(state_dir, |current| {
         let (pending_latched_drain, carrier_incarnation) = current
             .map(LifecycleMarker::carried_latched_drain)
             .unwrap_or((None, None));
         Ok(LifecycleMarker::Running {
-            pid: std::process::id(),
+            schema_version: RUNNING_MARKER_SCHEMA_VERSION,
+            identity: identity.clone(),
             started_at: started_at.clone(),
             launch_route: Some(launch_route),
             pending_latched_drain,
@@ -522,9 +682,13 @@ pub fn record_running(state_dir: &Path, launch_route: LaunchRoute) -> anyhow::Re
 }
 
 /// This run's own running record: the same process and the same start.
-fn require_own_running(pid: u32, started_at: &str, own_started_at: &str) -> anyhow::Result<()> {
+fn require_own_running(
+    identity: &lillux::process_control::ExactProcessIdentity,
+    started_at: &str,
+    own_started_at: &str,
+) -> anyhow::Result<()> {
     anyhow::ensure!(
-        pid == std::process::id() && started_at == own_started_at,
+        identity.target_pid == std::process::id() && started_at == own_started_at,
         "lifecycle marker belongs to another run"
     );
     Ok(())
@@ -545,7 +709,8 @@ pub fn bind_pending_latched_drain(
     let mut accepted = None;
     write_strict(state_dir, |current| {
         let Some(LifecycleMarker::Running {
-            pid,
+            schema_version,
+            identity,
             started_at,
             launch_route,
             pending_latched_drain,
@@ -554,7 +719,7 @@ pub fn bind_pending_latched_drain(
         else {
             anyhow::bail!("lifecycle marker is not this run's running record");
         };
-        require_own_running(pid, &started_at, own_started_at)?;
+        require_own_running(&identity, &started_at, own_started_at)?;
         let pending_latched_drain = match pending_latched_drain {
             Some(facts) => {
                 let expected = carrier_incarnation
@@ -577,7 +742,8 @@ pub fn bind_pending_latched_drain(
             .as_ref()
             .map(|_| incarnation_digest_hex(own));
         Ok(LifecycleMarker::Running {
-            pid,
+            schema_version,
+            identity,
             started_at,
             launch_route,
             pending_latched_drain,
@@ -592,7 +758,8 @@ pub fn bind_pending_latched_drain(
 pub fn clear_pending_latched_drain(state_dir: &Path, own_started_at: &str) -> anyhow::Result<()> {
     write_strict(state_dir, |current| {
         let Some(LifecycleMarker::Running {
-            pid,
+            schema_version,
+            identity,
             started_at,
             launch_route,
             pending_latched_drain: _,
@@ -601,9 +768,10 @@ pub fn clear_pending_latched_drain(state_dir: &Path, own_started_at: &str) -> an
         else {
             anyhow::bail!("lifecycle marker is not this run's running record");
         };
-        require_own_running(pid, &started_at, own_started_at)?;
+        require_own_running(&identity, &started_at, own_started_at)?;
         Ok(LifecycleMarker::Running {
-            pid,
+            schema_version,
+            identity,
             started_at,
             launch_route,
             pending_latched_drain: None,
@@ -796,6 +964,56 @@ pub fn complete_finalizing_exit(
 /// taken by the caller before its own running record is written; this only
 /// narrates it, so it runs once the tracing subscriber exists, otherwise the
 /// crash and unclean-exit warnings are emitted into nothing.
+pub fn report_previous_run(previous: Option<&PreviousRun>) {
+    match previous {
+        Some(PreviousRun::Marker(marker)) => report_previous_exit(Some(marker)),
+        Some(PreviousRun::RetiredStaleRunning { found_schema }) => {
+            tracing::warn!(
+                found_schema = ?found_schema,
+                current_schema = RUNNING_MARKER_SCHEMA_VERSION,
+                "previous lifecycle marker was retired: it is a `running` record written by a daemon from before the exact-process-identity marker, so its liveness cannot be judged; any unapplied latched-drain facts it carried are dropped and recovery treats that stop as a crash"
+            );
+        }
+        None => {}
+    }
+}
+
+/// Verdict on whether the daemon a `running` marker names is still the live
+/// process, from its exact identity. Only proof of absence is "ended";
+/// an indeterminate observation is never read as gone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordedProcess {
+    /// Boot, birth or presence proves the recorded incarnation is gone.
+    Ended,
+    /// The recorded incarnation is still the occupant of its coordinate.
+    Running,
+    /// Observation failed with a live occupant: not provably gone.
+    Indeterminate(String),
+}
+
+impl RecordedProcess {
+    pub fn from_has_ended(observed: Result<bool, String>) -> Self {
+        match observed {
+            Ok(true) => Self::Ended,
+            Ok(false) => Self::Running,
+            Err(error) => Self::Indeterminate(error),
+        }
+    }
+
+    /// Fail-closed reading: anything but proof of absence keeps the recorded
+    /// daemon possibly alive.
+    pub fn not_provably_gone(&self) -> bool {
+        !matches!(self, Self::Ended)
+    }
+}
+
+/// Classify the daemon a `running` marker names by its exact identity.
+pub fn recorded_process(
+    identity: &lillux::process_control::ExactProcessIdentity,
+) -> RecordedProcess {
+    RecordedProcess::from_has_ended(identity.has_ended())
+}
+
 pub fn report_previous_exit(previous: Option<&LifecycleMarker>) {
     match previous {
         Some(LifecycleMarker::Exited {
@@ -834,31 +1052,38 @@ pub fn report_previous_exit(previous: Option<&LifecycleMarker>) {
             );
         }
         Some(LifecycleMarker::Running {
-            pid,
+            schema_version: _,
+            identity,
             started_at,
             launch_route,
             pending_latched_drain,
             carrier_incarnation: _,
         }) => {
+            let pid = identity.target_pid;
             if pending_latched_drain.is_some() {
                 tracing::info!(
                     pid,
                     "previous ryeosd run carried unapplied latched-drain facts"
                 );
             }
-            if process_alive(*pid) {
-                tracing::warn!(
+            match recorded_process(identity) {
+                RecordedProcess::Running => tracing::warn!(
                     pid,
                     ?launch_route,
-                    "lifecycle marker shows a running ryeosd (pid {pid}) — another instance may be active"
-                );
-            } else {
-                tracing::warn!(
+                    "lifecycle marker shows a running ryeosd (pid {pid}, same incarnation) — another instance may be active"
+                ),
+                RecordedProcess::Indeterminate(error) => tracing::warn!(
+                    pid,
+                    ?launch_route,
+                    error = %error,
+                    "lifecycle marker names a ryeosd (pid {pid}) whose liveness could not be determined — treated as not provably gone; another instance may be active"
+                ),
+                RecordedProcess::Ended => tracing::warn!(
                     pid,
                     started_at = %started_at,
                     ?launch_route,
-                    "previous ryeosd run did not shut down cleanly (no exit marker; pid {pid} is gone) — a crash, SIGKILL, or failed startup"
-                );
+                    "previous ryeosd run did not shut down cleanly (no exit marker; that incarnation of pid {pid} has ended) — a crash, SIGKILL, container replacement, or failed startup"
+                ),
             }
         }
         None => {}
@@ -880,18 +1105,19 @@ pub fn check_disk_space(state_dir: &Path) {
     }
 }
 
-pub fn process_alive(pid: u32) -> bool {
-    lillux::diagnostic_process_is_live(pid)
-}
-
-/// Whether the marker's pid is alive AND still a `ryeosd`. A crash leaves a
-/// `running` marker behind, and the OS may recycle its pid onto an unrelated
-/// process — classifying that as a live daemon would block `ryeos start`
-/// indefinitely. Where the process name can't be inspected (no `/proc`),
-/// liveness alone decides. (`stop` has its own fail-closed variant of this
-/// check with per-reason errors; this one only classifies.)
-pub fn process_alive_as_ryeosd(pid: u32) -> bool {
-    lillux::diagnostic_process_matches_executable_name(pid, std::ffi::OsStr::new("ryeosd"))
+/// Whether the daemon a `running` marker names may still be alive. A crash
+/// leaves a `running` marker behind, and the OS may recycle its pid onto an
+/// unrelated process, even the new daemon itself in a fresh container, so
+/// classifying by pid would block `ryeos start` indefinitely. The recorded
+/// exact identity (boot id, birth ticks, group) rules recycling out, which
+/// subsumes the former executable-name filter: only the recorded incarnation
+/// can match, and the marker is written only by `ryeosd`. An indeterminate
+/// observation counts as alive, never as gone. (`stop` has its own
+/// fail-closed variant with per-reason errors; this one only classifies.)
+pub fn running_marker_not_provably_gone(
+    identity: &lillux::process_control::ExactProcessIdentity,
+) -> bool {
+    recorded_process(identity).not_provably_gone()
 }
 
 fn available_bytes(path: &Path) -> Option<u64> {
@@ -1053,52 +1279,300 @@ mod tests {
         assert!(read(tmp.path()).is_none());
     }
 
-    #[test]
-    fn running_marker_with_dead_pid_is_detectable() {
-        // A pid that is essentially never alive in the test isolation.
-        let tmp = tempfile::tempdir().unwrap();
-        let marker = LifecycleMarker::Running {
-            pid: u32::MAX - 1,
+    fn identity_at(
+        boot: &str,
+        pid: u32,
+        ticks: u64,
+    ) -> lillux::process_control::ExactProcessIdentity {
+        lillux::process_control::ExactProcessIdentity {
+            boot_id: boot.to_owned(),
+            target_pid: pid,
+            target_start_time_ticks: ticks,
+            group_leader_pid: pid,
+            group_leader_start_time_ticks: ticks,
+            pid_namespace: lillux::current_pid_namespace().unwrap(),
+            group_basis: Default::default(),
+        }
+    }
+
+    fn running_with(identity: lillux::process_control::ExactProcessIdentity) -> LifecycleMarker {
+        LifecycleMarker::Running {
+            schema_version: RUNNING_MARKER_SCHEMA_VERSION,
+            identity,
             started_at: "2026-01-01T00:00:00Z".into(),
             launch_route: Some(LaunchRoute::Direct),
             pending_latched_drain: None,
             carrier_incarnation: None,
-        };
+        }
+    }
+
+    #[test]
+    fn running_marker_of_another_boot_is_ended_even_at_our_own_pid() {
+        // A new container's first processes reuse the previous container's
+        // pids, including this one. A different boot id proves it ended.
+        let tmp = tempfile::tempdir().unwrap();
+        let own = std::process::id();
+        let marker = running_with(identity_at("00000000-dead-beef-0000-000000000000", own, 5));
         write_strict(tmp.path(), |_| Ok(marker.clone())).unwrap();
-        // The reporter must not panic and must classify it as not-alive.
-        assert!(!process_alive(u32::MAX - 1));
-        report_previous_exit(read(tmp.path()).as_ref()); // smoke: logs the inferred-crash path
+        let Some(LifecycleMarker::Running { identity, .. }) = read(tmp.path()) else {
+            panic!("marker round-trips");
+        };
+        assert_eq!(recorded_process(&identity), RecordedProcess::Ended);
+        assert!(!running_marker_not_provably_gone(&identity));
+        report_previous_exit(read(tmp.path()).as_ref());
+    }
+
+    #[test]
+    fn running_marker_carries_the_pid_namespace_and_requires_it() {
+        let live = lillux::process_control::capture_current_process_identity().unwrap();
+        let marker = serde_json::to_value(running_with(live.clone())).unwrap();
+        assert_eq!(
+            marker["identity"]["pid_namespace"],
+            lillux::process_control::current_pid_namespace().unwrap()
+        );
+        let raw = serde_json::to_vec(&marker).unwrap();
+        assert!(matches!(
+            decode_marker(&raw),
+            Ok(LifecycleMarker::Running { identity, .. }) if identity == live
+        ));
+        // No legacy reader: a schema-2 marker written before the namespace
+        // field existed does not decode.
+        let mut without = marker;
+        without["identity"]
+            .as_object_mut()
+            .unwrap()
+            .remove("pid_namespace");
+        let error = decode_marker(&serde_json::to_vec(&without).unwrap()).unwrap_err();
+        assert!(
+            matches!(&error, MarkerDecodeError::Unreadable(text) if text.contains("pid_namespace")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn marker_from_another_pid_namespace_is_not_provably_gone() {
+        // Same boot, our own pid and birth, but recorded in another
+        // namespace: the numbers prove nothing, so it is neither running nor
+        // ended, and a caller holding no state lock must keep it as possibly
+        // alive.
+        let mut foreign = lillux::process_control::capture_current_process_identity().unwrap();
+        foreign.pid_namespace = "pid:[1]".to_owned();
+        let verdict = recorded_process(&foreign);
+        assert!(
+            matches!(&verdict, RecordedProcess::Indeterminate(text) if text.contains("pid namespace")),
+            "{verdict:?}"
+        );
+        assert!(running_marker_not_provably_gone(&foreign));
+    }
+
+    #[test]
+    fn the_journal_infers_an_unclean_exit_only_from_an_ended_exact_identity() {
+        let running = |identity| PreviousRun::Marker(running_with(identity));
+        let live = lillux::process_control::capture_current_process_identity().unwrap();
+        // Still the running incarnation: not an exit.
+        assert!(inferred_unclean_exit(Some(&running(live.clone()))).is_none());
+        // Another boot: ended; the pid is only displayed.
+        let exit = inferred_unclean_exit(Some(&running(identity_at(
+            "00000000-dead-beef-0000-000000000000",
+            u32::MAX - 1,
+            5,
+        ))))
+        .expect("another boot ended the recorded run");
+        assert_eq!(exit.identity.target_pid, u32::MAX - 1);
+        assert_eq!(exit.started_at, "2026-01-01T00:00:00Z");
+        assert_eq!(exit.launch_route, Some(LaunchRoute::Direct));
+        // Our own pid at another birth (a restarted container): ended.
+        let mut recycled = live.clone();
+        recycled.target_start_time_ticks += 1;
+        assert!(inferred_unclean_exit(Some(&running(recycled))).is_some());
+        // A foreign pid namespace cannot be classified: never an exit.
+        let mut foreign = live;
+        foreign.pid_namespace = "pid:[1]".to_owned();
+        assert!(inferred_unclean_exit(Some(&running(foreign))).is_none());
+        // A retired older-schema marker, no marker, and a handled exit.
+        assert!(
+            inferred_unclean_exit(Some(&PreviousRun::RetiredStaleRunning {
+                found_schema: None
+            }))
+            .is_none()
+        );
+        assert!(inferred_unclean_exit(None).is_none());
+    }
+
+    #[test]
+    fn same_boot_different_birth_at_our_own_pid_is_ended() {
+        let live = lillux::process_control::capture_current_process_identity().unwrap();
+        let mut recycled = live.clone();
+        recycled.target_start_time_ticks += 1;
+        assert_eq!(recorded_process(&recycled), RecordedProcess::Ended);
+        assert!(!running_marker_not_provably_gone(&recycled));
+    }
+
+    #[test]
+    fn exact_match_is_running_and_not_gone() {
+        let live = lillux::process_control::capture_current_process_identity().unwrap();
+        assert_eq!(recorded_process(&live), RecordedProcess::Running);
+        assert!(running_marker_not_provably_gone(&live));
+    }
+
+    #[test]
+    fn indeterminate_observation_is_not_provably_gone() {
+        let verdict = RecordedProcess::from_has_ended(Err("probe denied".to_owned()));
+        assert_eq!(
+            verdict,
+            RecordedProcess::Indeterminate("probe denied".into())
+        );
+        assert!(verdict.not_provably_gone());
+        assert!(!RecordedProcess::from_has_ended(Ok(true)).not_provably_gone());
+        assert!(RecordedProcess::from_has_ended(Ok(false)).not_provably_gone());
+    }
+
+    #[test]
+    fn running_marker_round_trips_with_its_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let started_at = record_running(tmp.path(), LaunchRoute::Supervised).unwrap();
+        let Some(LifecycleMarker::Running {
+            schema_version,
+            identity,
+            started_at: recorded,
+            ..
+        }) = read(tmp.path())
+        else {
+            panic!("running marker");
+        };
+        assert_eq!(schema_version, RUNNING_MARKER_SCHEMA_VERSION);
+        assert_eq!(recorded, started_at);
+        assert_eq!(
+            identity,
+            lillux::process_control::capture_current_process_identity().unwrap()
+        );
+        assert_eq!(identity.target_pid, std::process::id());
+    }
+
+    #[test]
+    fn schema_one_running_marker_is_retired_not_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let legacy = br#"{"state":"running","pid":7,"started_at":"2026-01-01T00:00:00Z"}"#;
+        std::fs::write(tmp.path().join(MARKER_FILE), legacy).unwrap();
+        assert!(matches!(
+            decode_marker(legacy),
+            Err(MarkerDecodeError::StaleRunningSchema { found: None })
+        ));
+        let message = decode_marker(legacy).unwrap_err().to_string();
+        assert!(message.contains(MARKER_FILE), "{message}");
+        assert!(read(tmp.path()).is_none());
+        assert!(matches!(
+            take_previous_exit(tmp.path()).unwrap(),
+            Some(PreviousRun::RetiredStaleRunning { found_schema: None })
+        ));
+        // The start replaces it with a current record.
+        record_running(tmp.path(), LaunchRoute::Direct).unwrap();
+        assert!(matches!(
+            read(tmp.path()),
+            Some(LifecycleMarker::Running { .. })
+        ));
+        // A running record of any other schema is stale too.
+        let other = br#"{"state":"running","schema_version":1,"pid":7}"#;
+        assert!(matches!(
+            decode_marker(other),
+            Err(MarkerDecodeError::StaleRunningSchema { found: Some(1) })
+        ));
+    }
+
+    #[test]
+    fn running_marker_with_dead_pid_is_detectable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = running_with(identity_at(
+            "00000000-dead-beef-0000-000000000000",
+            u32::MAX - 1,
+            5,
+        ));
+        write_strict(tmp.path(), |_| Ok(marker.clone())).unwrap();
+        let Some(LifecycleMarker::Running { identity, .. }) = read(tmp.path()) else {
+            panic!("marker round-trips");
+        };
+        assert_eq!(recorded_process(&identity), RecordedProcess::Ended);
+        report_previous_exit(read(tmp.path()).as_ref());
     }
 
     #[test]
     fn unclean_exit_is_inferred_only_from_a_running_marker_of_a_gone_process() {
-        let running = |pid| LifecycleMarker::Running {
-            pid,
-            started_at: "2026-01-01T00:00:00Z".into(),
-            launch_route: Some(LaunchRoute::Supervised),
-            pending_latched_drain: None,
-            carrier_incarnation: None,
+        let running = |identity| {
+            PreviousRun::Marker(LifecycleMarker::Running {
+                schema_version: RUNNING_MARKER_SCHEMA_VERSION,
+                identity,
+                started_at: "2026-01-01T00:00:00Z".into(),
+                launch_route: Some(LaunchRoute::Supervised),
+                pending_latched_drain: None,
+                carrier_incarnation: None,
+            })
         };
         assert_eq!(
-            inferred_unclean_exit(Some(&running(u32::MAX - 1))),
+            inferred_unclean_exit(Some(&running(identity_at(
+                "00000000-dead-beef-0000-000000000000",
+                u32::MAX - 1,
+                5
+            )))),
             Some(UncleanExit {
-                pid: u32::MAX - 1,
+                identity: identity_at("00000000-dead-beef-0000-000000000000", u32::MAX - 1, 5),
                 started_at: "2026-01-01T00:00:00Z".into(),
                 launch_route: Some(LaunchRoute::Supervised),
             })
         );
-        // A previous run that reused this process's pid is still a previous run.
-        assert!(inferred_unclean_exit(Some(&running(std::process::id()))).is_some());
+        // A previous run that reused this process's pid is still a previous
+        // run: the same pid at another birth is a different incarnation.
+        let mut reused = lillux::process_control::capture_current_process_identity().unwrap();
+        reused.target_start_time_ticks += 1;
+        assert!(inferred_unclean_exit(Some(&running(reused))).is_some());
         assert!(inferred_unclean_exit(None).is_none());
-        let exited = exited_marker(
+        let exited = PreviousRun::Marker(exited_marker(
             "signal",
             "2026-01-01T00:00:00Z",
             None,
             LaunchRoute::Direct,
             None,
             None,
-        );
+        ));
         assert!(inferred_unclean_exit(Some(&exited)).is_none());
+    }
+
+    #[test]
+    fn indeterminate_and_retired_records_are_unknown_never_unclean() {
+        let previous = PreviousRun::Marker(running_with(identity_at(
+            "00000000-dead-beef-0000-000000000000",
+            u32::MAX - 1,
+            5,
+        )));
+        let observe = |outcome: RecordedProcess| {
+            move |_: &lillux::process_control::ExactProcessIdentity| outcome
+        };
+        assert_eq!(
+            inferred_exit_with(Some(&previous), observe(RecordedProcess::Running)),
+            None
+        );
+        let Some(InferredExit::Unknown(unknown)) = inferred_exit_with(
+            Some(&previous),
+            observe(RecordedProcess::Indeterminate("probe refused".into())),
+        ) else {
+            panic!("an indeterminate observation is unknown");
+        };
+        assert_eq!(unknown.reason, "indeterminate:probe refused");
+        assert_eq!(unknown.identity.map(|id| id.target_pid), Some(u32::MAX - 1));
+        assert!(matches!(
+            inferred_exit(Some(&previous)),
+            Some(InferredExit::Unclean(_))
+        ));
+        for (found_schema, expected) in [
+            (None, "retired_stale_running:absent"),
+            (Some(1), "retired_stale_running:1"),
+        ] {
+            let retired = PreviousRun::RetiredStaleRunning { found_schema };
+            let Some(InferredExit::Unknown(unknown)) = inferred_exit(Some(&retired)) else {
+                panic!("a retired running record is unknown");
+            };
+            assert_eq!(unknown.reason, expected);
+            assert_eq!(unknown.identity, None);
+        }
     }
 
     #[test]
@@ -1251,6 +1725,7 @@ mod tests {
             target_start_time_ticks: 1,
             group_leader_pid: i64::from(pid),
             group_leader_start_time_ticks: 1,
+            pid_namespace: lillux::current_pid_namespace().unwrap(),
             process_scope: None,
             resource_selections: Vec::new(),
             resource_settlement_authority: None,

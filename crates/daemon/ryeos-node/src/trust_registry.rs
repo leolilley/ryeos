@@ -33,6 +33,7 @@ pub enum TrustChangeError {
     NodeKey { fingerprint: String },
     ScopeInvalid { reason: String },
     SuccessionInvalid { reason: String },
+    AuthoringScopeRetired { fingerprint: String },
 }
 
 impl std::fmt::Display for TrustChangeError {
@@ -71,6 +72,14 @@ impl std::fmt::Display for TrustChangeError {
             TrustChangeError::SuccessionInvalid { reason } => {
                 write!(f, "trust_succession_invalid: {reason}")
             }
+            TrustChangeError::AuthoringScopeRetired { fingerprint } => write!(
+                f,
+                "trust_authoring_scope_retired: an authoring key holds only the authoring \
+                 scope (project space, no kinds) and its registry scope never decides trust. \
+                 What signer {fingerprint} signs is trusted through `ryeos endorse`. Run \
+                 `ryeos trust scope {fingerprint}` with no scope flags to restore the \
+                 authoring scope"
+            ),
         }
     }
 }
@@ -87,6 +96,7 @@ impl TrustChangeError {
             TrustChangeError::NodeKey { .. } => "trust_key_is_node_key",
             TrustChangeError::ScopeInvalid { .. } => "trust_scope_invalid",
             TrustChangeError::SuccessionInvalid { .. } => "trust_succession_invalid",
+            TrustChangeError::AuthoringScopeRetired { .. } => "trust_authoring_scope_retired",
         }
     }
 }
@@ -244,6 +254,26 @@ fn require_valid_scope(scope: &SignerScope) -> Result<(), TrustChangeError> {
         .map_err(|reason| TrustChangeError::ScopeInvalid { reason })
 }
 
+fn candidate_fingerprint(key: &VerifyingKey) -> String {
+    ryeos_engine::trust::compute_fingerprint(key)
+}
+
+/// An authoring key holds exactly the authoring scope. Its registry scope
+/// does not decide trust (endorsements do), so no other scope may be pinned
+/// or set for it.
+fn require_authoring_scope(
+    role: SignerRole,
+    scope: &SignerScope,
+    fingerprint: &str,
+) -> Result<(), TrustChangeError> {
+    if role == SignerRole::Authoring && *scope != SignerScope::authoring_default() {
+        return Err(TrustChangeError::AuthoringScopeRetired {
+            fingerprint: fingerprint.to_owned(),
+        });
+    }
+    Ok(())
+}
+
 /// Derive the steps a change needs from the current records. An empty list is
 /// an idempotent no-op.
 fn plan(
@@ -265,6 +295,7 @@ fn plan(
             scope,
         } => {
             require_valid_scope(scope)?;
+            require_authoring_scope(*role, scope, &candidate_fingerprint(key))?;
             let candidate =
                 SignerRecord::new(key, label, *role, scope.clone(), SignerStatus::Active);
             if candidate.fingerprint == node_fingerprint {
@@ -303,6 +334,7 @@ fn plan(
             if existing.status == SignerStatus::Revoked {
                 return Err(revoked(existing));
             }
+            require_authoring_scope(existing.role, scope, &existing.fingerprint)?;
             if existing.scope == *scope {
                 return Ok(vec![]);
             }
@@ -358,7 +390,11 @@ fn plan(
                 &new_key,
                 &old.label,
                 old.role,
-                old.scope.clone(),
+                if old.role == SignerRole::Authoring {
+                    SignerScope::authoring_default()
+                } else {
+                    old.scope.clone()
+                },
                 SignerStatus::Active,
             );
             if new_record.fingerprint == node_fingerprint {
@@ -591,6 +627,71 @@ mod tests {
         assert_eq!(out.events_written, 1);
         let store = TrustStore::load_node_registry(root.path()).unwrap();
         assert!(store.is_trusted(&ryeos_engine::trust::compute_fingerprint(&vk)));
+    }
+
+    #[test]
+    fn an_authoring_key_holds_only_the_authoring_scope() {
+        let (root, node) = node_setup();
+        let l = lock(root.path());
+        let vk = SigningKey::from_bytes(&[9u8; 32]).verifying_key();
+        let fp = ryeos_engine::trust::compute_fingerprint(&vk);
+        let pin_authoring = |scope: SignerScope| Change::Pin {
+            key: vk,
+            label: "authoring".into(),
+            role: SignerRole::Authoring,
+            scope,
+        };
+
+        let wide = SignerScope {
+            spaces: vec![ryeos_engine::trust::SignerSpace::Project],
+            kinds: vec!["knowledge".into()],
+            projects: Vec::new(),
+        };
+        let error = apply_change(
+            root.path(),
+            &l,
+            &actor(&node, "r1"),
+            &pin_authoring(wide.clone()),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("trust_authoring_scope_retired"),
+            "{error:#}"
+        );
+
+        apply_change(
+            root.path(),
+            &l,
+            &actor(&node, "r2"),
+            &pin_authoring(SignerScope::authoring_default()),
+        )
+        .unwrap();
+        let error = apply_change(
+            root.path(),
+            &l,
+            &actor(&node, "r3"),
+            &Change::Scope {
+                fingerprint: fp.clone(),
+                scope: wide,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("trust_authoring_scope_retired"),
+            "{error:#}"
+        );
+
+        let reset = apply_change(
+            root.path(),
+            &l,
+            &actor(&node, "r4"),
+            &Change::Scope {
+                fingerprint: fp,
+                scope: SignerScope::authoring_default(),
+            },
+        )
+        .unwrap();
+        assert_eq!(reset.events_written, 0, "already the authoring scope");
     }
 
     #[test]

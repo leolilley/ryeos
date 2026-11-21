@@ -114,7 +114,7 @@ pub fn compose_runtime_snapshot_qualification_binding(
     let settings = producer.settings().clone();
     let document = QualificationDocument {
         kind: "node".into(),
-        schema: 5,
+        schema: 6,
         protocol: QUALIFICATION_PROTOCOL.into(),
         production_binding_id: producer.id().to_owned(),
         production_binding_digest: producer.digest().to_owned(),

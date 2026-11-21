@@ -34,6 +34,11 @@ mod reservation;
 pub const MAX_FINALIZATION_ATTEMPTS: u8 = 4;
 
 pub use account::NativeCapacityAccountBinding;
+#[cfg(test)]
+pub(crate) use account::cut_retirement::{
+    CutStep, downgrade_to_pre_cut_for_test, retire_with_fault_for_test,
+};
+pub use account::cut_retirement::{NativeCapacityCutReport, retire_pre_cut_identity_records};
 pub(crate) use account::prepare_initial_capacity_binding;
 pub use account::reanchor::{
     CapacityPolicyAmendmentCheck, CapacityPolicyAmendmentEvidence, CapacityPolicyAmendmentReport,
@@ -47,6 +52,8 @@ pub use account::reissue::{
     CapacityReissueEvidence, ReissueReport, ReissueRequest, read_capacity_reissuances,
     reissue_capacity,
 };
+#[cfg(test)]
+pub(crate) use account::startup_seams;
 pub use account::{CapacityAccountSummary, inspect_capacity_account};
 pub(crate) use account::{OperatorLineage, load_existing_capacity_binding};
 pub use factory::{
@@ -483,6 +490,17 @@ impl RetainedInput {
 }
 
 impl LiveNativeCapacityInputs {
+    /// The exclusive state lock the composition took BEFORE these inputs
+    /// existed: `capture` verifies the lease protects the app root before any
+    /// state is read, and this value keeps it held for as long as `self`
+    /// lives. Classifying a previous incarnation through it therefore happens
+    /// under the lock actually held across the classification and the
+    /// decision that follows it, never one taken afterwards or released
+    /// between.
+    pub(super) fn state_lock_proof(&self) -> &StateLockLease {
+        &self.exclusion
+    }
+
     /// Called from the real composition after signed bootstrap and before its
     /// first SQLite call. Capture has no signing, journal publication or native
     /// SQLite effects. The composition keeps an alias of the returned owner

@@ -7,6 +7,14 @@
 //! Uses `flock(LOCK_EX | LOCK_NB)` for non-blocking exclusive access. The lock
 //! is automatically released when the file descriptor is closed (process exit,
 //! including panic).
+//!
+//! The lock is a real `flock` on a file of the data volume. Holding it proves
+//! that no other incarnation holds it (and so that a previous holder, in this
+//! or another container, has exited) only on a volume where `flock` is real
+//! and shared by every incarnation. A shared network volume (NFS) or an
+//! object-store mount does not give that; such a volume must not rely on the
+//! lock-proof liveness path (`process_has_ended`). No typed volume kind is
+//! recorded for the state directory, so nothing here refuses such a volume.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -89,6 +97,27 @@ impl StateLock {
         self.inner.ensure_path_binding(&default_lock_path(app_root))
     }
 
+    /// Whether `process` has ended, resolving an incarnation recorded in
+    /// another pid namespace as ended: this guard proves the exclusive state
+    /// lock is held now, so the previous holder that recorded it has exited.
+    /// See [`lillux::ExactProcessIdentity::has_ended_holding_exclusive_lock`].
+    pub fn process_has_ended(
+        &self,
+        process: &lillux::ExactProcessIdentity,
+    ) -> std::result::Result<bool, String> {
+        let witness = self.inner.witness().map_err(|error| error.to_string())?;
+        process.has_ended_holding_exclusive_lock(&witness)
+    }
+
+    /// The typed proof that this process holds the exclusive state lock now.
+    /// Stopped-node operations that already hold the lock pass it down so a
+    /// previous incarnation recorded in another pid namespace is classified
+    /// as ended through [`lillux::ExactProcessIdentity::has_ended_holding_exclusive_lock`].
+    /// The witness borrows this guard, so it cannot outlive the lock.
+    pub fn witness(&self) -> Result<lillux::ExclusiveLockWitness<'_>> {
+        self.inner.witness()
+    }
+
     /// Retain only the live controller's exclusion lifetime. The returned
     /// lease cannot be promoted into stopped-node mutation authority.
     pub fn retain(&self) -> StateLockLease {
@@ -105,6 +134,16 @@ impl std::fmt::Debug for StateLockLease {
 }
 
 impl StateLockLease {
+    /// As [`StateLock::process_has_ended`], through the retained lease of the
+    /// same exclusive lock.
+    pub fn process_has_ended(
+        &self,
+        process: &lillux::ExactProcessIdentity,
+    ) -> std::result::Result<bool, String> {
+        let witness = self.inner.witness().map_err(|error| error.to_string())?;
+        process.has_ended_holding_exclusive_lock(&witness)
+    }
+
     /// Retain the SAME concrete exclusion owner for an outside inventory while
     /// this lease still protects admitted work and durable account settlement.
     /// This supplies no stopped-node mutation authority or retirement evidence.

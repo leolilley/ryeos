@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-20T23:17:05Z:be2b12929b0b97c68ed757daccf9d083dda7a62b3ef484e1ac00ae6e3c46e82c:e4R+FTRo80U3sxaUaWhiUT4OgmR2CO1Nia1A+tnq76lAlam3q+TSGwXpVYhDiFmafrU6Yd+/lg16qCcMELz7Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-21T02:47:00Z:c7a189a3acb7e0643a0a8766f1c68beb91e3c53690929dc7f90373679fdc8be5:iJcbV3sRrnJJgLeHfOWFJZV5H4LkJdS8RsgnjbXBVlZA+iNXLivuTVM3Si8OCEELe7CVkmpo+78cGDX5FlapBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [item-authoring, runtime-authority, manifest, capabilities, author_item]
@@ -224,23 +224,32 @@ node, which creates and pins it. Nothing creates the key for an existing node
 except re-running `ryeos init`.
 
 Because the pinned scope admits no kind, an authored item is out of scope for
-every kind until the operator widens it. In project space an out-of-scope item
-resolves as `untrusted_project` and is refused at launch; it is a machine draft
-to read, not to run. Widening the scope per kind is the deliberate exception:
+every kind, and that scope is the only one the key may hold. In project space an
+out-of-scope item resolves as `untrusted_project` and is refused at launch; it
+is a machine draft to read, not to run. An operator makes a draft trusted by
+endorsing it, which leaves the item and its authoring signature untouched:
 
 ```bash
 ryeos trust show <authoring-fingerprint>           # the record and its events
-ryeos trust scope <authoring-fingerprint> --kind knowledge
+ryeos --project . endorse --item knowledge:notes/draft      # these exact bytes
+ryeos --project . endorse --standing --kind knowledge       # the kind, in this project
+ryeos endorse list
+ryeos endorse revoke --endorsement <digest>
 ```
 
-After that, authored `knowledge` items resolve as `trusted_project` and
-authored items of every other kind are still refused. The node key does not
+After a per-change endorsement the item resolves as `trusted_project` for those
+exact bytes; one changed byte returns it to `untrusted_project`. A standing
+endorsement covers the named kinds in that project and nothing else. Revoking
+returns the covered items to `untrusted_project`. `ryeos trust scope` refuses to
+widen the authoring key (`trust_authoring_scope_retired`). The node key does not
 sign project items: its own scope is the node space only. The operator's
-signature (`ryeos sign`) stays the trusted path for everything else.
+signature (`ryeos sign`) stays the trusted path for everything else. See
+[Signing and Trust](../core/signing.md) for what an endorsement carries.
 
 The authoring key rotates with `ryeos node authoring rotate` (stopped node):
-the new key inherits the old key's scope, the old key is retired and the items
-it signed keep verifying. See [Identity Model](../core/identity-model.md).
+the new key takes the authoring scope, the old key is retired and the items
+it signed keep verifying; endorsements name digests and kinds, not keys, so they
+keep covering them. See [Identity Model](../core/identity-model.md).
 
 ### How authored items resolve and show up
 

@@ -12072,6 +12072,7 @@ mod tests {
             target_start_time_ticks: 11,
             group_leader_pid: pid,
             group_leader_start_time_ticks: 11,
+            pid_namespace: lillux::current_pid_namespace().unwrap(),
             process_scope: None,
             resource_selections: Vec::new(),
             resource_settlement_authority: None,

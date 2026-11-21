@@ -132,7 +132,13 @@ impl RetainedAnchor {
         let identity = pin.identity()?;
         let mut bytes = [0; ANCHOR_BYTES];
         pin.read_exact_stable_into(&mut bytes, deadline)?;
-        let redo = AccountRedo::decode(&bytes, policy, issuance)?;
+        let redo = AccountRedo::decode(&bytes, policy, issuance).map_err(|error| {
+            if super::cut_retirement::is_pre_cut_anchor(&bytes) {
+                error.context(super::cut_retirement::PRE_CUT_CURE)
+            } else {
+                error
+            }
+        })?;
         self.parent
             .require_pinned_regular_entry_fixed(&pin)
             .map_err(anyhow::Error::msg)?;

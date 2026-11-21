@@ -409,11 +409,11 @@ impl BindingDocument {
             self.kind == "node"
                 && self.schema
                     == match &self.controller_transport {
-                        ExternalControllerTransportSelection::HttpJson(_) => 17,
+                        ExternalControllerTransportSelection::HttpJson(_) => 20,
                         ExternalControllerTransportSelection::ControllerFileRelay(_) =>
                             match &self.workload {
-                                ExternalWorkloadBinding::QualificationStructuredSession(_) => 18,
-                                ExternalWorkloadBinding::StructuredSession(_) => 19,
+                                ExternalWorkloadBinding::QualificationStructuredSession(_) => 21,
+                                ExternalWorkloadBinding::StructuredSession(_) => 22,
                                 ExternalWorkloadBinding::DirectCommand {} => 0,
                             },
                     },
@@ -874,7 +874,7 @@ impl RetainedExternalExecutionBinding {
         };
         let document = BindingDocument {
             kind: "node".into(),
-            schema: 17,
+            schema: 20,
             protocol: ryeos_state::external_execution::admission::PROTOCOL.into(),
             workload: ExternalWorkloadBinding::StructuredSession(
                 ExternalStructuredSessionBinding {
@@ -1570,12 +1570,12 @@ impl NodeConfigSection for ExternalExecutionSection {
         ctx: &NodeItemContext,
         body: &Value,
     ) -> Result<Box<dyn CompiledNodeConfigItem>> {
-        // Schemas 17, 18 and 19 are the transport/workload shapes
+        // Schemas 20, 21 and 22 are the transport/workload shapes
         // `BindingDocument::validate` admits.
         crate::node_config::coherence::require_admitted_binding_schema(
             SECTION_NAME,
             body,
-            &[17, 18, 19],
+            &[20, 21, 22],
             ryeos_state::external_execution::admission::PROTOCOL,
         )?;
         let document: BindingDocument =
@@ -1598,7 +1598,7 @@ mod workload_binding_tests {
 
     fn ordinary_relay_document() -> BindingDocument {
         let mut document = document();
-        document.schema = 19;
+        document.schema = 22;
         document.backend = "example-backend".into();
         document.settings = serde_json::json!({"owner_id":"owner-a"});
         document.settings_digest = adapter_settings_digest(&document.settings).unwrap();
@@ -1658,23 +1658,23 @@ mod workload_binding_tests {
     }
 
     #[test]
-    fn ordinary_relay_binding_uses_schema_19_and_refuses_cross_pairs() {
+    fn ordinary_relay_binding_uses_schema_22_and_refuses_cross_pairs() {
         let document = ordinary_relay_document();
         document.validate().unwrap();
         assert!(document.workload.structured_session().is_ok());
 
         let mut q_schema = document.clone();
-        q_schema.schema = 18;
+        q_schema.schema = 21;
         assert!(q_schema.validate().is_err());
 
-        let mut http_schema_19 = document.clone();
+        let mut http_schema_22 = document.clone();
         let mut http = RetainedExternalExecutionBinding::test_fixture().document;
-        http.schema = 19;
-        http_schema_19.controller_transport = http.controller_transport;
-        http_schema_19.controller_tls_root_certificates_der_base64 =
+        http.schema = 22;
+        http_schema_22.controller_transport = http.controller_transport;
+        http_schema_22.controller_tls_root_certificates_der_base64 =
             http.controller_tls_root_certificates_der_base64;
-        http_schema_19.network_policy = "supervisor_pinned_owner_only_candidate_denied_v1".into();
-        assert!(http_schema_19.validate().is_err());
+        http_schema_22.network_policy = "supervisor_pinned_owner_only_candidate_denied_v1".into();
+        assert!(http_schema_22.validate().is_err());
     }
 
     #[test]
@@ -2092,7 +2092,7 @@ mod workload_binding_tests {
         let session = document();
         session.validate().unwrap();
         let value = serde_json::to_value(&session).unwrap();
-        assert_eq!(value["schema"], 17);
+        assert_eq!(value["schema"], 20);
         assert_eq!(value["workload"]["kind"], "structured_session");
         assert!(value.get("provider_declaration_id").is_none());
         assert!(value.get("runtime_selection_identity").is_none());

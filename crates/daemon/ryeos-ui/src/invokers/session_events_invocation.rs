@@ -3,7 +3,12 @@
 //! Reads from `SessionBus::subscribe(session_id)` and yields envelopes.
 //! The SSE transport layer in `event_stream_mode` converts them to wire frames.
 //! The browser's `/ui/events/session/{id}` route uses this invoker.
+//!
+//! Opening passes the node's seat read policy for this route, and every event
+//! passes the disclosure half of the admitting entry before it reaches the
+//! seat.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ryeos_api::route_error::{RouteConfigError, RouteDispatchError};
@@ -17,7 +22,11 @@ use ryeos_api::routes::response_modes::event_stream_mode::{
 use ryeos_app::route_raw::RawRouteSpec;
 use tokio_stream::Stream;
 
+use crate::seat_stream_policy::{FrameMode, admit_open, shape_events};
 use crate::state::UiState;
+
+/// The one request parameter of this stream, as a policy entry names it.
+const SESSION_ID_PARAM: &str = "session_id";
 
 pub struct CompiledSessionEventsInvocation {
     pub ui: Arc<UiState>,
@@ -147,6 +156,26 @@ impl CompiledRouteInvocation for CompiledSessionEventsInvocation {
             }
         }
 
+        // The policy judges the request. The stream is the seat's own session
+        // bus: a pin may not point it anywhere else.
+        let admitted = admit_open(
+            &ctx.state,
+            &ctx.route_id,
+            &session,
+            serde_json::json!({ SESSION_ID_PARAM: session_id }),
+            &BTreeMap::from([(SESSION_ID_PARAM.to_owned(), "string".to_owned())]),
+        )?;
+        if admitted
+            .params
+            .get(SESSION_ID_PARAM)
+            .and_then(serde_json::Value::as_str)
+            != Some(session_id)
+        {
+            return Err(RouteDispatchError::Forbidden(
+                "a seat reads only its own session's events".into(),
+            ));
+        }
+
         // Replay from Last-Event-ID if present.
         let replay = ctx
             .headers
@@ -212,7 +241,7 @@ impl CompiledRouteInvocation for CompiledSessionEventsInvocation {
         };
 
         Ok(RouteInvocationResult::Stream(RouteEventStream {
-            events: stream,
+            events: shape_events(stream, admitted, FrameMode::KeepEventName),
             keep_alive_secs,
         }))
     }

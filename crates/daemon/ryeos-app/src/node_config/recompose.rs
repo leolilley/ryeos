@@ -11,6 +11,11 @@
 //! account) and generation, neither of which a re-pin changes, so the
 //! provisioned secret stays valid.
 //!
+//! A binding signed under a schema this node retired cannot be decoded and
+//! so cannot be re-pinned. It is set aside by id, never silently: the report
+//! lists each skipped id with the retire verb that clears it, and every other
+//! decode failure stays fatal.
+//!
 //! What a re-pin cannot decide is refused, typed, before anything is
 //! published: an artifact role nothing installed fills, a settings schema the
 //! carried settings were not stated under, and consumer selections whose
@@ -31,7 +36,7 @@ use crate::node_config::coherence::{
 use crate::node_config::sections::external_execution::InstalledExternalExecutionBinding;
 use crate::node_config::sections::external_execution::compose::{
     ProviderArtifactFacts, load_node_identity, publish_signed_document, read_installed_binding,
-    repin_placement,
+    read_installed_document, repin_placement, validate_document_id, verify_node_signed,
 };
 use crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding;
 use crate::node_config::sections::runtime_snapshot_production::compose::{
@@ -60,6 +65,10 @@ pub const RECOMPOSE_CONSUMER_SELECTION_MISSING: &str = "recompose_consumer_selec
 /// A named binding is not installed, or a qualification names a production
 /// binding that is not.
 pub const RECOMPOSE_BINDING_NOT_INSTALLED: &str = "recompose_binding_not_installed";
+/// A named binding, or the production binding a qualification names, is
+/// signed under a retired schema: it cannot be re-pinned, only retired and
+/// composed again.
+pub const RECOMPOSE_BINDING_STALE: &str = "recompose_binding_stale";
 
 /// The sections whose bindings pin installed artifacts.
 const PINNING_SECTIONS: [&str; 3] = [
@@ -244,6 +253,32 @@ pub struct RecomposeReport {
     pub unchanged: Vec<BindingRef>,
     /// Credential findings recompose does not answer: provision the secret.
     pub credentials_absent: Vec<BindingRef>,
+    /// Installed bindings signed under a retired schema. They were not
+    /// decoded and not recomposed: each is retired, then composed again.
+    #[serde(default)]
+    pub stale_skipped: Vec<SkippedStaleBinding>,
+}
+
+/// A retired binding a recompose skipped, with the cure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct SkippedStaleBinding {
+    pub binding: BindingRef,
+    pub schema: u64,
+    pub file: String,
+    /// The retire verb for exactly this binding, then compose again.
+    pub fix: String,
+}
+
+fn skipped_stale(stale: &[coherence::StaleBinding]) -> Vec<SkippedStaleBinding> {
+    stale
+        .iter()
+        .map(|binding| SkippedStaleBinding {
+            binding: binding_ref(&binding.section, &binding.id),
+            schema: binding.schema,
+            file: binding.file.clone(),
+            fix: binding.fix(),
+        })
+        .collect()
 }
 
 /// Where a placement re-pin reads installed lifecycle generations and
@@ -345,25 +380,85 @@ fn installed_ids(app_root: &Path, section: &str) -> Result<Vec<String>> {
     Ok(ids)
 }
 
+/// One installed id of a section: current, or signed under a retired schema.
+/// The signature is verified either way; only the retired schema number sets
+/// an id aside, so every other decode failure stays fatal.
+fn classify_installed(
+    app_root: &Path,
+    section: &'static str,
+    id: &str,
+    identity: &ryeos_node_runtime::identity::NodeIdentity,
+) -> Result<Option<coherence::StaleBinding>> {
+    validate_document_id(id, "binding")?;
+    let signed = read_installed_document(app_root, section, id)?;
+    let body = verify_node_signed(&signed, identity, &format!("binding `{section}/{id}`"))?;
+    Ok(
+        coherence::retired_binding_schema(section, &body).map(|schema| coherence::StaleBinding {
+            section: section.to_owned(),
+            id: id.to_owned(),
+            schema,
+            file: app_root
+                .join(ryeos_engine::AI_DIR)
+                .join("node")
+                .join(section)
+                .join(format!("{id}.yaml"))
+                .display()
+                .to_string(),
+            reason: coherence::StaleBinding::retired_reason(schema),
+        }),
+    )
+}
+
+/// The installed bindings of one section, current ones read with `read` and
+/// retired ones set aside into `stale`.
+fn installed_in_section<T>(
+    app_root: &Path,
+    section: &'static str,
+    identity: &ryeos_node_runtime::identity::NodeIdentity,
+    stale: &mut Vec<coherence::StaleBinding>,
+    read: impl Fn(&Path, &str, &ryeos_node_runtime::identity::NodeIdentity) -> Result<T>,
+) -> Result<Vec<T>> {
+    let mut current = Vec::new();
+    for id in installed_ids(app_root, section)? {
+        match classify_installed(app_root, section, &id, identity)? {
+            Some(binding) => stale.push(binding),
+            None => current.push(read(app_root, &id, identity)?),
+        }
+    }
+    Ok(current)
+}
+
 /// The installed bindings that pin artifacts, each admitted the way the
-/// loader admits it.
+/// loader admits it. A binding signed under a retired schema is returned in
+/// `stale_bindings` and not decoded.
 fn installed_bindings(
     app_root: &Path,
     identity: &ryeos_node_runtime::identity::NodeIdentity,
 ) -> Result<NodeConfigSnapshot> {
-    let production = installed_ids(app_root, runtime_snapshot_production::SECTION_NAME)?
-        .iter()
-        .map(|id| installed_production_binding(app_root, id, identity))
-        .collect::<Result<Vec<_>>>()?;
-    let qualification = installed_ids(app_root, runtime_snapshot_qualification::SECTION_NAME)?
-        .iter()
-        .map(|id| installed_qualification_binding(app_root, id, identity))
-        .collect::<Result<Vec<_>>>()?;
-    let placement = installed_ids(app_root, external_execution::SECTION_NAME)?
-        .iter()
-        .map(|id| read_installed_binding(app_root, id, identity))
-        .collect::<Result<Vec<_>>>()?;
+    let mut stale_bindings = Vec::new();
+    let production = installed_in_section(
+        app_root,
+        runtime_snapshot_production::SECTION_NAME,
+        identity,
+        &mut stale_bindings,
+        installed_production_binding,
+    )?;
+    let qualification = installed_in_section(
+        app_root,
+        runtime_snapshot_qualification::SECTION_NAME,
+        identity,
+        &mut stale_bindings,
+        installed_qualification_binding,
+    )?;
+    let placement = installed_in_section(
+        app_root,
+        external_execution::SECTION_NAME,
+        identity,
+        &mut stale_bindings,
+        read_installed_binding,
+    )?;
     Ok(NodeConfigSnapshot {
+        stale_bindings,
         external_execution: placement,
         runtime_snapshot_production: production,
         guest_runtime_materialization: Vec::new(),
@@ -417,6 +512,7 @@ pub(crate) struct PreparedRecompose {
     entries: Vec<PreparedEntry>,
     unchanged: Vec<BindingRef>,
     credentials_absent: Vec<BindingRef>,
+    stale_skipped: Vec<SkippedStaleBinding>,
 }
 
 struct PreparedEntry {
@@ -480,6 +576,18 @@ pub(crate) fn prepare_recompose(
         stranded(&findings)
     } else {
         for binding in named {
+            if let Some(stale) = snapshot
+                .stale_bindings
+                .iter()
+                .find(|stale| stale.section == binding.section && stale.id == binding.id)
+            {
+                return Err(refusal(
+                    RECOMPOSE_BINDING_STALE,
+                    binding.clone(),
+                    format!("it is signed under retired schema {}", stale.schema),
+                    stale.fix(),
+                ));
+            }
             if !installed.contains(binding) {
                 return Err(refusal(
                     RECOMPOSE_BINDING_NOT_INSTALLED,
@@ -570,6 +678,22 @@ pub(crate) fn prepare_recompose(
         if !selected.contains(&binding) && !follows_producer {
             continue;
         }
+        if producer.is_none()
+            && let Some(stale) = snapshot.stale_bindings.iter().find(|stale| {
+                stale.section == runtime_snapshot_production::SECTION_NAME
+                    && stale.id == qualification.production_binding_id()
+            })
+        {
+            return Err(refusal(
+                RECOMPOSE_BINDING_STALE,
+                binding.clone(),
+                format!(
+                    "the production binding `{}` it names is signed under retired schema {}",
+                    stale.id, stale.schema
+                ),
+                format!("{}, then recompose", stale.fix()),
+            ));
+        }
         let producer = producer.ok_or_else(|| {
             refusal(
                 RECOMPOSE_BINDING_NOT_INSTALLED,
@@ -653,6 +777,7 @@ pub(crate) fn prepare_recompose(
         entries,
         unchanged,
         credentials_absent,
+        stale_skipped: skipped_stale(&snapshot.stale_bindings),
     })
 }
 
@@ -790,6 +915,7 @@ pub(crate) fn publish_prepared(
         dry_run,
         unchanged: prepared.unchanged,
         credentials_absent: prepared.credentials_absent,
+        stale_skipped: prepared.stale_skipped,
         ..RecomposeReport::default()
     };
     for entry in prepared.entries {

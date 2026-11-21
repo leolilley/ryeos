@@ -774,6 +774,7 @@ mod tests {
             target_start_time_ticks: 100,
             group_leader_pid: 40,
             group_leader_start_time_ticks: 100,
+            pid_namespace: lillux::current_pid_namespace().unwrap(),
             group_basis: lillux::GroupBasis::ProcessGroup,
         };
         let worker = crate::process::execution_process_identity_from_lillux(leader, None).unwrap();
@@ -783,6 +784,7 @@ mod tests {
             target_start_time_ticks: 110,
             group_leader_pid: 40,
             group_leader_start_time_ticks: 100,
+            pid_namespace: lillux::current_pid_namespace().unwrap(),
             group_basis: lillux::GroupBasis::ProcessGroup,
         };
         require_trusted_peer_group(&worker, &peer).unwrap();
@@ -804,7 +806,7 @@ mod tests {
             serde_json::from_value(serde_json::json!({
                 "schema_version": crate::process::PROCESS_IDENTITY_SCHEMA_VERSION,
                 "boot_id": boot, "target_pid": 40, "target_start_time_ticks": 100,
-                "group_leader_pid": 39, "group_leader_start_time_ticks": 90,
+                "group_leader_pid": 39, "group_leader_start_time_ticks": 90, "pid_namespace": lillux::current_pid_namespace().unwrap(),
                 "process_scope": {
                     "version": 5, "control_timeout": {"secs": 5, "nanos": 0},
                     "configuration": {"version": 3, "backend": {"implementation": "pid_namespace_init"}},
@@ -825,6 +827,7 @@ mod tests {
             target_start_time_ticks: 500,
             group_leader_pid: 77,
             group_leader_start_time_ticks: 500,
+            pid_namespace: lillux::current_pid_namespace().unwrap(),
             group_basis: lillux::GroupBasis::ProcessGroup,
         };
         require_trusted_peer_group(&worker, &detached).unwrap();
@@ -851,6 +854,7 @@ mod tests {
                 target_start_time_ticks: 100,
                 group_leader_pid: 40,
                 group_leader_start_time_ticks: 100,
+                pid_namespace: lillux::current_pid_namespace().unwrap(),
                 group_basis: lillux::GroupBasis::ProcessGroup,
             },
             None,

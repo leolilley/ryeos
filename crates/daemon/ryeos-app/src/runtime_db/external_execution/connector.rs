@@ -788,6 +788,7 @@ mod tests {
             target_start_time_ticks: ticks,
             group_leader_pid: pid,
             group_leader_start_time_ticks: ticks,
+            pid_namespace: lillux::current_pid_namespace().unwrap(),
             group_basis: lillux::GroupBasis::ProcessGroup,
         }
     }
@@ -810,6 +811,7 @@ mod tests {
                 target_start_time_ticks: 10,
                 group_leader_pid: 5000,
                 group_leader_start_time_ticks: 10,
+                pid_namespace: lillux::current_pid_namespace().unwrap(),
                 resource_selections: Vec::new(),
                 resource_settlement_authority: None,
                 resource_operations: Vec::new(),

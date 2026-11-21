@@ -29,6 +29,7 @@ pub struct Captured {
     pub execution_history: Option<ExecutionHistoryResetReport>,
     pub scratch: Option<ExecutionHistoryScratchRepairReport>,
     pub replay_indexes: Option<ryeos_state::operational::ReplayIndexResetReport>,
+    pub native_capacity_cut: Option<ryeos_node::native_capacity::NativeCapacityCutReport>,
 }
 
 pub struct CliHost {
@@ -163,6 +164,7 @@ impl OfflineHost for CliHost {
                 captured.scratch = Some(report.clone());
             }
             TypedReport::ReplayIndexes(report) => captured.replay_indexes = Some(*report),
+            TypedReport::NativeCapacityCut(report) => captured.native_capacity_cut = Some(*report),
         }
     }
 

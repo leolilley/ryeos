@@ -2268,9 +2268,20 @@ pub struct RootExecutionAdmission {
     authenticated_content_qualification_digest: Option<ContentQualificationAttachment>,
     admitted_request_snapshot: Option<Arc<ryeos_engine::engine::AdmittedRequestAuthoritySnapshot>>,
     selected_executor_route: Option<AdmittedExecutorRoute>,
+    /// The trust view this request froze at admission: its endorsement index
+    /// never changes for the life of the request. Every signer list the
+    /// request builds for a config loader (execution limits, method runtime
+    /// config, context composition) and its runtime comes from this one view,
+    /// so a revocation mid-request never gives two parts of it two trusts.
+    request_trust: ryeos_engine::trust::TrustStore,
 }
 
 impl RootExecutionAdmission {
+    /// The request's frozen trust view.
+    pub fn request_trust(&self) -> &ryeos_engine::trust::TrustStore {
+        &self.request_trust
+    }
+
     fn require_fresh_qualification_attachment(&self) -> Result<()> {
         if let Some(attachment) = &self.authenticated_content_qualification_digest {
             attachment.require_fresh()?;
@@ -7997,6 +8008,10 @@ fn admit_verified_root_execution_inner(
         candidate_evaluation: None,
         qualification: None,
         authenticated_content_qualification_digest: None,
+        request_trust: match admitted_request_snapshot.as_ref() {
+            Some(admitted) => admitted.trust_store().clone(),
+            None => engine.trust_store.snapshot(),
+        },
         admitted_request_snapshot,
         selected_executor_route: None,
     };
