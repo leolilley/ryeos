@@ -6070,7 +6070,7 @@ mod tests {
             format!("{error:#}").contains("not initialized"),
             "{error:#}"
         );
-        assert!(!root.path().join(".ai/state").exists());
+        assert!(!root.path().join(".ai/node/native-capacity").exists());
     }
 
     #[test]
