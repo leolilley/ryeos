@@ -577,10 +577,10 @@ async fn restarted_over(
     let log = rig.log();
     real_adapter::counts_line(&log)?;
     report_lease_lines(&log);
-    rig.harness
-        .stop_gracefully()
-        .await
-        .context("stop the node")?;
+    // A hard kill, not an orderly stop: with a lease still pending the node
+    // keeps the seeded predecessor worker fenced and does not stop within the
+    // harness's two minutes. Every row read below was committed before it.
+    rig.harness.kill_daemon().await.context("kill the node")?;
     let held = rig.held()?;
     let observations = rig.stored_observations()?;
     Ok((rig, log, held, observations))
