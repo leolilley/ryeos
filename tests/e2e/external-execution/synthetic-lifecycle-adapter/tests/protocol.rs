@@ -21,10 +21,11 @@ use ryeos_external_execution_contract::{
     GuestMountAccess, GuestMountInput, GuestMountKind, GuestMountRole, LIFECYCLE_ADAPTER_PROTOCOL,
     LIFECYCLE_BOOTSTRAP_FD_ENV, LIFECYCLE_CREDENTIAL_FD_ENV, LIFECYCLE_GUEST_PACKAGE_FD_ENV,
     LIFECYCLE_LAUNCHER_FD_ENV, LIFECYCLE_SETTINGS_FD_ENV, LIFECYCLE_SUPERVISOR_FD_ENV,
-    LifecycleAdapterInspectionRequest, LifecycleAdapterInspectionResponse, LifecycleAdapterRequest,
-    LifecycleAdapterResponse, LifecycleArtifactInspection, LifecycleArtifactRole,
-    LifecycleCapability, LifecycleOperationCommon, MAX_LIFECYCLE_RESPONSE_BYTES,
-    SupervisorActivationIntent, TerminationIntent, from_json_slice_strict,
+    LatestLeaseEnd, LifecycleAdapterInspectionRequest, LifecycleAdapterInspectionResponse,
+    LifecycleAdapterRequest, LifecycleAdapterResponse, LifecycleArtifactInspection,
+    LifecycleArtifactRole, LifecycleCapability, LifecycleOperationCommon,
+    MAX_LIFECYCLE_RESPONSE_BYTES, SupervisorActivationIntent, TerminationIntent,
+    from_json_slice_strict,
 };
 use ryeos_state::external_execution::admission::{
     AdmittedExternalCandidateProgram, ExternalCandidateExecutionRoute,
@@ -7181,6 +7182,7 @@ fn exercise_activation_fault(fault: &str) {
         ));
         let termination = TerminationIntent {
             termination_request_digest: "7".repeat(64),
+            latest_lease_end: LatestLeaseEnd::Unbounded {},
         };
         let terminate = LifecycleAdapterRequest::Terminate {
             common: common("terminate"),
@@ -7309,6 +7311,7 @@ fn exercise_activation_fault(fault: &str) {
 
     let termination = TerminationIntent {
         termination_request_digest: "7".repeat(64),
+        latest_lease_end: LatestLeaseEnd::Unbounded {},
     };
     let terminate = LifecycleAdapterRequest::Terminate {
         common: common("terminate"),
