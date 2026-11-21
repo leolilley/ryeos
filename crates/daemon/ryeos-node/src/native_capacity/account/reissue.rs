@@ -2262,7 +2262,8 @@ mod controls {
         sectors[2048..].copy_from_slice(&debited[2048..]);
         // The repair's own overwrite stopped after a prefix of the target,
         // over the torn bytes it was replacing.
-        for cut in [1usize, 700, 1500] {
+        // Every cut lies inside the span where the two images differ.
+        for cut in [1usize, 30, 150, 300] {
             let mut midway = sectors;
             midway[..cut].copy_from_slice(&debited[..cut]);
             std::fs::write(f.account_path(), midway).unwrap();

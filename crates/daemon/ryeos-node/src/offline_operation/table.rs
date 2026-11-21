@@ -466,10 +466,12 @@ static OPERATIONS: &[OperationSpec] = &[
     },
     OperationSpec {
         id: "node.capacity.repair-account",
-        // Re-derives an account the sound anchor already admitted: it changes
-        // neither what the node trusts nor what it runs, so a delegation can
-        // never cover it. Only the local operator may sign it.
-        authority_bearing: false,
+        // Local operator only, like re-issuance: the table requires a
+        // local-signer-only operation to be authority-bearing. The repair
+        // grants nothing new (the sound anchor already admitted the image it
+        // writes), but it overwrites the node's capacity record, so only the
+        // node's own operator may request it and no delegation can cover it.
+        authority_bearing: true,
         local_signer_only: true,
         alone: false,
         inputs: NO_INPUTS,
@@ -1092,6 +1094,7 @@ mod tests {
                 "node.external-execution.recompose",
                 "node.external-execution.retire",
                 "node.capacity.reissue",
+                "node.capacity.repair-account",
                 "node.capacity.reanchor",
                 "node.authorize-client",
                 "node.remote.pin",
