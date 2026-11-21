@@ -872,6 +872,25 @@ impl BrowserSessionStore {
             .collect()
     }
 
+    /// Every live session with the attachments that authorize its reads, in
+    /// one lock. Unlike [`Self::get_session`] this does not move any idle
+    /// deadline: a hint fan-out must not keep an unused session alive. An
+    /// expired session is not listed.
+    pub fn hint_audiences(&self) -> Vec<(String, Vec<Arc<AdmittedBindingAttachment>>)> {
+        let sessions = self.sessions.lock().expect("sessions mutex poisoned");
+        let now = Instant::now();
+        sessions
+            .values()
+            .filter(|session| session.expires_at >= now)
+            .map(|session| {
+                (
+                    session.session_id.clone(),
+                    session.attachments.values().cloned().collect(),
+                )
+            })
+            .collect()
+    }
+
     pub fn get_session(&self, session_id: &str) -> Option<BrowserSession> {
         let mut sessions = self.sessions.lock().unwrap();
         let now = Instant::now();

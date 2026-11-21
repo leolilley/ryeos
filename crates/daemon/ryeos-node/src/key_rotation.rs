@@ -726,7 +726,7 @@ pub fn key_ages(app_root: &Path, now_unix: u64) -> Result<Vec<KeyAge>> {
 mod tests {
     use super::*;
     use crate::trust_registry::{Actor, Change, apply_change, load_view};
-    use ryeos_engine::trust::{SignerScope, SignerSpace, TrustStore};
+    use ryeos_engine::trust::{SignerScope, TrustStore};
     use ryeos_node_runtime::state_lock::{StateLock, default_lock_path};
 
     struct Node {
@@ -837,14 +837,6 @@ mod tests {
         }
     }
 
-    fn knowledge_scope() -> SignerScope {
-        SignerScope {
-            spaces: vec![SignerSpace::Project],
-            kinds: vec!["knowledge".to_owned()],
-            projects: Vec::new(),
-        }
-    }
-
     fn error_code(error: &anyhow::Error) -> &'static str {
         error
             .downcast_ref::<KeyRotationError>()
@@ -880,7 +872,7 @@ mod tests {
     #[test]
     fn authoring_rotation_retires_the_old_key_and_the_new_one_keeps_its_scope() {
         let node = Node::new();
-        let old_fp = node.with_key(RotatedKey::Authoring, knowledge_scope());
+        let old_fp = node.with_key(RotatedKey::Authoring, SignerScope::authoring_default());
         let prepared = prepare_rotation(node.path(), RotatedKey::Authoring).unwrap();
         let statement = String::from_utf8(prepared.statement).unwrap();
         let result = node
@@ -900,7 +892,7 @@ mod tests {
         assert_eq!(old.status, SignerStatus::Retired);
         assert_eq!(new.status, SignerStatus::Active);
         assert_eq!(new.role, SignerRole::Authoring);
-        assert_eq!(new.scope, knowledge_scope());
+        assert_eq!(new.scope, SignerScope::authoring_default());
         assert!(
             store.is_trusted(&old_fp),
             "items the retired key signed still verify"

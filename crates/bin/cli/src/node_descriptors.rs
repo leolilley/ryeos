@@ -124,6 +124,7 @@ mod tests {
     #[test]
     fn exposes_snapshot_commands_without_legacy_alias_conversion() {
         let snapshot = NodeConfigSnapshot {
+            stale_bindings: Vec::new(),
             external_execution: Vec::new(),
             runtime_snapshot_production: Vec::new(),
             guest_runtime_materialization: Vec::new(),

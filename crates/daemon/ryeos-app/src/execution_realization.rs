@@ -58,20 +58,104 @@ pub(crate) fn verify_persistent_session_selected(
         resource_authority,
         selected_resources.selections(),
     )?;
-    if existing.launch_authority_digest != authority.digest()?
-        || existing.effective_definition_digest != effective_definition_digest
-        || existing.artifact_identity_digest != authority.artifact_identity_digest()?
-        || existing.execution_closure_digest != authority.execution_closure_digest()?
-        || existing.contract_ref != contract_ref
-        || existing.contract_digest != contract_digest
-        || existing.components != execution_components(state, resolution)?
-        || existing.properties != properties
-    {
-        anyhow::bail!("persistent-session execution realization contradicts its admitted capsule");
+    let live = LiveRealization {
+        launch_authority_digest: authority.digest()?,
+        effective_definition_digest: effective_definition_digest.to_owned(),
+        artifact_identity_digest: authority.artifact_identity_digest()?,
+        execution_closure_digest: authority.execution_closure_digest()?,
+        contract_ref: contract_ref.to_owned(),
+        contract_digest: contract_digest.to_owned(),
+        components: execution_components(state, resolution)?,
+        properties,
+    };
+    let contradicted = realization_contradictions(&existing, &live)?;
+    if !contradicted.is_empty() {
+        anyhow::bail!(
+            "persistent-session execution realization contradicts its admitted capsule:\n{}",
+            contradicted.join("\n")
+        );
     }
     verify_realization_node_evidence(state, &existing)?;
     verify_realization_components(state, &existing)?;
     Ok(selected_resources)
+}
+
+/// What the live node recomputes for one recovered persistent session.
+struct LiveRealization {
+    launch_authority_digest: String,
+    effective_definition_digest: String,
+    artifact_identity_digest: String,
+    execution_closure_digest: String,
+    contract_ref: String,
+    contract_digest: String,
+    components: Vec<ExecutionComponentReference>,
+    properties: BTreeMap<String, serde_json::Value>,
+}
+
+/// One line per contradicting field, stored then live. Every compared value is
+/// a digest, a contract reference, or a node property derived from the
+/// isolation inspection; none is a secret.
+fn realization_contradictions(
+    existing: &AdmittedExecutionRealization,
+    live: &LiveRealization,
+) -> Result<Vec<String>> {
+    let mut contradicted: Vec<String> = Vec::new();
+    let mut compare = |field: &str, stored: String, live: String| {
+        if stored != live {
+            contradicted.push(format!("{field}: stored={stored} live={live}"));
+        }
+    };
+    compare(
+        "launch_authority_digest",
+        existing.launch_authority_digest.clone(),
+        live.launch_authority_digest.clone(),
+    );
+    compare(
+        "effective_definition_digest",
+        existing.effective_definition_digest.clone(),
+        live.effective_definition_digest.clone(),
+    );
+    compare(
+        "artifact_identity_digest",
+        existing.artifact_identity_digest.clone(),
+        live.artifact_identity_digest.clone(),
+    );
+    compare(
+        "execution_closure_digest",
+        existing.execution_closure_digest.clone(),
+        live.execution_closure_digest.clone(),
+    );
+    compare(
+        "contract_ref",
+        existing.contract_ref.clone(),
+        live.contract_ref.clone(),
+    );
+    compare(
+        "contract_digest",
+        existing.contract_digest.clone(),
+        live.contract_digest.clone(),
+    );
+    compare(
+        "components",
+        serde_json::to_string(&existing.components)?,
+        serde_json::to_string(&live.components)?,
+    );
+    for name in existing
+        .properties
+        .keys()
+        .chain(live.properties.keys())
+        .collect::<std::collections::BTreeSet<_>>()
+    {
+        let render = |value: Option<&serde_json::Value>| {
+            value.map_or_else(|| "<absent>".to_owned(), |value| value.to_string())
+        };
+        compare(
+            &format!("properties.{name}"),
+            render(existing.properties.get(name)),
+            render(live.properties.get(name)),
+        );
+    }
+    Ok(contradicted)
 }
 
 pub fn persistent_session_execution_authority(
@@ -405,4 +489,90 @@ pub fn verify_attestation(
         anyhow::bail!("execution substrate attestation is expired");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn properties_with_policy_digest(digest: &str) -> BTreeMap<String, serde_json::Value> {
+        let isolation = ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring();
+        let mut inspection = isolation.inspection().clone();
+        inspection.digest = Some(digest.to_owned());
+        execution_properties_from_inspection(
+            &inspection,
+            isolation.is_enforced(),
+            IsolationFilesystemAuthorityCeiling::CapturedExecution,
+            IsolationNetworkAuthorityCeiling::Isolated,
+            None,
+            ryeos_engine::contracts::ExecutionResourceAuthorityCeiling::NodePolicy,
+            &[],
+        )
+        .unwrap()
+    }
+
+    fn stored(properties: BTreeMap<String, serde_json::Value>) -> AdmittedExecutionRealization {
+        AdmittedExecutionRealization {
+            schema: ryeos_state::objects::EXECUTION_REALIZATION_SCHEMA_VERSION,
+            kind: ryeos_state::objects::ADMITTED_EXECUTION_REALIZATION_KIND.to_owned(),
+            substrate_identity_hash: "a".repeat(64),
+            substrate_attestation_hash: "b".repeat(64),
+            launch_authority_digest: "c".repeat(64),
+            effective_definition_digest: "d".repeat(64),
+            artifact_identity_digest: "e".repeat(64),
+            execution_closure_digest: "f".repeat(64),
+            contract_ref: "execution:test/fixture".to_owned(),
+            contract_digest: "1".repeat(64),
+            components: vec![],
+            properties,
+        }
+    }
+
+    fn live(properties: BTreeMap<String, serde_json::Value>) -> LiveRealization {
+        LiveRealization {
+            launch_authority_digest: "c".repeat(64),
+            effective_definition_digest: "d".repeat(64),
+            artifact_identity_digest: "e".repeat(64),
+            execution_closure_digest: "f".repeat(64),
+            contract_ref: "execution:test/fixture".to_owned(),
+            contract_digest: "1".repeat(64),
+            components: vec![],
+            properties,
+        }
+    }
+
+    #[test]
+    fn a_recovered_realization_verifies_while_the_isolation_section_digest_is_unchanged() {
+        // Another policy section was edited, so the node-policy generation
+        // digest moved; the isolation section's own digest did not, and that is
+        // the digest the realization binds.
+        let digest = format!("sha256:{}", "7".repeat(64));
+        let contradicted = realization_contradictions(
+            &stored(properties_with_policy_digest(&digest)),
+            &live(properties_with_policy_digest(&digest)),
+        )
+        .unwrap();
+        assert!(contradicted.is_empty(), "{contradicted:?}");
+    }
+
+    #[test]
+    fn a_changed_isolation_section_digest_contradicts_and_names_both_values() {
+        let before = format!("sha256:{}", "7".repeat(64));
+        let after = format!("sha256:{}", "8".repeat(64));
+        let contradicted = realization_contradictions(
+            &stored(properties_with_policy_digest(&before)),
+            &live(properties_with_policy_digest(&after)),
+        )
+        .unwrap();
+        assert_eq!(contradicted.len(), 1, "{contradicted:?}");
+        let line = &contradicted[0];
+        assert!(
+            line.starts_with("properties.isolation_policy_digest: "),
+            "{line}"
+        );
+        assert!(line.contains(&before) && line.contains(&after), "{line}");
+        // The refusal carries digests and the field name only.
+        assert!(!line.to_ascii_lowercase().contains("secret"), "{line}");
+        assert!(!line.contains("SECRET"), "{line}");
+    }
 }

@@ -15,6 +15,7 @@ use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::handler_error::HandlerError;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
+use ryeos_node_runtime::node_policy::sections::ui_seat_reads::{SeatClass, UiSeatReadsPolicy};
 
 use crate::browser_session::{LaunchContext, SessionTiming};
 use crate::compiled_binding::{
@@ -151,7 +152,13 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
 
     let (compiled_binding, presentation) = {
         let _timing = crate::phase_timing::PhaseTimer::start("launch_mint", "binding_compile");
-        compile_session_binding(&req, &session_ctx, &state, project_authority.as_deref())?
+        compile_session_binding(
+            &req,
+            &session_ctx,
+            &state,
+            project_authority.as_deref(),
+            SeatClass::of_session(user_principal_id.as_deref()),
+        )?
     };
     let _project_registry_gate = match (
         registered_project_id.as_deref(),
@@ -247,6 +254,7 @@ pub(crate) fn compile_session_binding(
     ctx: &HandlerContext,
     state: &AppState,
     project_authority: Option<&lillux::PinnedDirectory>,
+    seat_class: SeatClass,
 ) -> Result<(
     SessionCompiledUiBinding,
     ryeos_client_base::presentation::UiCompositionPresentation,
@@ -294,6 +302,7 @@ pub(crate) fn compile_session_binding(
                 project_authority,
             )?;
             let project_authoring = load_project_authoring_config(generation)?;
+            let seat_reads = state.node_policy.require::<UiSeatReadsPolicy>()?;
             let binding = SessionCompiledUiBinding::compile(
                 BindingCompileContext {
                     contract_revision: crate::UI_BINDING_CONTRACT_REVISION,
@@ -303,6 +312,8 @@ pub(crate) fn compile_session_binding(
                     node_policy_generation_digest: state.node_policy.generation_digest(),
                     identities: composition.identities.clone(),
                     project_source_ceiling: &project_authoring.sources,
+                    seat_reads,
+                    seat_class,
                 },
                 &composition.compile_body,
                 |target_ref| compile_target(generation, &prepared, target_ref),

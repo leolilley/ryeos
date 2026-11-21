@@ -100,8 +100,40 @@ struct GraphRunFact {
     graph_run_id: String,
     definition_ref: String,
     effective_definition_digest: String,
+    /// `running` until the graph runtime reports its end, `settling` after
+    /// that (the daemon may still change the thread's settled result), and a
+    /// terminal word only once the daemon-authored thread terminal event for
+    /// the owning thread has been seen.
     status: Option<String>,
+    /// The graph runtime's own report of how the run ended. It is a
+    /// candidate: the daemon can settle the thread differently.
+    candidate_status: Option<String>,
     evidence: Vec<FieldEventRef>,
+}
+
+impl GraphRunFact {
+    /// The graph runtime reported the end of its walk: a still-running run
+    /// moves to `settling`; a run the daemon already settled keeps its
+    /// terminal status regardless of event arrival order.
+    fn settle_candidate(&mut self) {
+        if self.status.as_deref() == Some("running") {
+            self.status = Some("settling".to_string());
+        }
+    }
+}
+
+/// Run status for a daemon-authored thread terminal event type.
+fn graph_run_terminal_status(event_type: &str) -> Option<&'static str> {
+    use ryeos_state::event_types as et;
+    match event_type {
+        et::THREAD_COMPLETED => Some("completed"),
+        et::THREAD_FAILED => Some("failed"),
+        et::THREAD_CANCELLED => Some("cancelled"),
+        et::THREAD_KILLED => Some("killed"),
+        et::THREAD_TIMED_OUT => Some("timed_out"),
+        et::THREAD_CONTINUED => Some("continued"),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -166,6 +198,9 @@ struct ExecutionAssembler {
     project_observations: BTreeMap<String, ProjectObservationFact>,
     provider_call_observations: BTreeMap<String, ProviderCallObservationFact>,
     current_graph: BTreeMap<String, (String, String, String)>,
+    /// The graph run that most recently emitted an event on each thread; the
+    /// run a daemon thread terminal event settles.
+    last_graph_run: BTreeMap<String, String>,
     manifest_verifications: BTreeMap<String, (FieldManifestVerification, Option<String>)>,
 }
 
@@ -914,6 +949,7 @@ impl ExecutionAssembler {
             project_observations: BTreeMap::new(),
             provider_call_observations: BTreeMap::new(),
             current_graph: BTreeMap::new(),
+            last_graph_run: BTreeMap::new(),
             manifest_verifications: BTreeMap::new(),
         }
     }
@@ -1111,6 +1147,19 @@ impl ExecutionAssembler {
             .as_object_mut()
             .expect("event attributes are an object")
             .insert("thread".to_string(), thread_context);
+
+        if let Some(status) = graph_run_terminal_status(&event.event_type)
+            && let Some(run_id) = self.last_graph_run.get(&event.thread_id)
+            && let Some(run) = self
+                .graph_runs
+                .get_mut(&(event.thread_id.clone(), run_id.clone()))
+        {
+            // A thread executes one graph run; when it has held several,
+            // only the run that emitted last settles with the thread.
+            if matches!(run.status.as_deref(), Some("running" | "settling")) {
+                run.status = Some(status.to_string());
+            }
+        }
 
         let graph_identity =
             match event_graph_identity(&event, self.current_graph.get(&event.thread_id)) {
@@ -1575,6 +1624,7 @@ impl ExecutionAssembler {
                 definition_ref: definition_ref.to_string(),
                 effective_definition_digest: effective_definition_digest.to_string(),
                 status: Some("running".to_string()),
+                candidate_status: None,
                 evidence: Vec::new(),
             });
         if run.definition_ref != definition_ref
@@ -1583,13 +1633,15 @@ impl ExecutionAssembler {
             bail!("graph run `{graph_run_id}` has divergent definition identity");
         }
         if event.event_type == ryeos_state::event_types::GRAPH_COMPLETED {
-            run.status = event
+            run.candidate_status = event
                 .payload
                 .get("status")
                 .and_then(Value::as_str)
-                .map(str::to_string)
-                .or_else(|| Some("completed".to_string()));
+                .map(str::to_string);
+            run.settle_candidate();
         }
+        self.last_graph_run
+            .insert(event.thread_id.clone(), graph_run_id.to_string());
         push_evidence(&mut run.evidence, event_ref.clone());
 
         let Some(step) = bounded_u32(&event.payload, "step") else {
@@ -1650,9 +1702,9 @@ impl ExecutionAssembler {
         if occurrence.owner_kind != "graph" {
             return Ok(());
         }
-        let terminal_status = match occurrence.event() {
-            "graph_started" | "graph_step_completed" => None,
-            "graph_completed" => Some("completed"),
+        let run_ended = match occurrence.event() {
+            "graph_started" | "graph_step_completed" => false,
+            "graph_completed" => true,
             _ => return Ok(()),
         };
         let Some(graph_run_id) = occurrence.text_coordinate("graph_run_id") else {
@@ -1676,6 +1728,7 @@ impl ExecutionAssembler {
                 definition_ref: definition_ref.clone(),
                 effective_definition_digest: effective_definition_digest.clone(),
                 status: Some("running".to_string()),
+                candidate_status: None,
                 evidence: Vec::new(),
             });
         if run.definition_ref != *definition_ref
@@ -1683,9 +1736,14 @@ impl ExecutionAssembler {
         {
             bail!("hook graph run `{graph_run_id}` has divergent definition identity");
         }
-        if let Some(status) = terminal_status {
-            run.status = Some(status.to_string());
+        // The hook occurrence only says the graph runtime ended its walk. It
+        // never settles the run, and it leaves a status the thread terminal
+        // event already wrote alone.
+        if run_ended {
+            run.settle_candidate();
         }
+        self.last_graph_run
+            .insert(occurrence_thread_id.to_string(), graph_run_id.to_string());
         push_evidence(&mut run.evidence, event_ref.clone());
 
         if occurrence.event() != "graph_step_completed" {
@@ -1752,6 +1810,7 @@ impl ExecutionAssembler {
                 definition_ref: observation.source_definition_ref.clone(),
                 effective_definition_digest: observation.source_effective_definition_digest.clone(),
                 status: Some("running".to_string()),
+                candidate_status: None,
                 evidence: Vec::new(),
             });
         if run.definition_ref != observation.source_definition_ref
@@ -2012,6 +2071,7 @@ impl ExecutionAssembler {
                 attributes: json!({
                     "thread": self.thread_context(&run.thread_id),
                     "graph_run_id": run.graph_run_id,
+                    "candidate_status": run.candidate_status,
                 }),
                 provenance: self.builder.provenance(event_evidence(&run.evidence)),
             })?;
@@ -3213,6 +3273,149 @@ mod tests {
             prev_thread_event_hash: None,
             payload,
         }
+    }
+
+    fn graph_event(seq: i64, event_type: &str, status: Option<&str>) -> PersistedEventRecord {
+        let mut payload = json!({
+            "graph_run_id": "G-1",
+            "definition_ref": "graph:test/build",
+            "effective_definition_digest": "d".repeat(64),
+        });
+        if let Some(status) = status {
+            payload["status"] = json!(status);
+        }
+        event(seq, event_type, payload)
+    }
+
+    fn run_status(facts: &super::super::ui_field::FieldFactsDocument) -> Option<String> {
+        facts
+            .entities
+            .iter()
+            .find(|entity| entity.kind == "graph_run")
+            .expect("graph run entity")
+            .status
+            .clone()
+    }
+
+    fn graph_completed_hook() -> ryeos_runtime::callback::HookDispatchOccurrence {
+        ryeos_runtime::callback::HookDispatchOccurrence::new(
+            "graph",
+            "graph_completed",
+            "graph:test/build",
+            "r".repeat(64),
+            "d".repeat(64),
+        )
+        .with_text_coordinate("graph_run_id", "G-1")
+    }
+
+    #[test]
+    fn graph_completed_is_a_candidate_never_a_terminal_run_status() {
+        let mut assembler = assembler();
+        assembler
+            .add_event(graph_event(1, "graph_started", None))
+            .unwrap();
+        assembler
+            .add_event(graph_event(2, "graph_completed", Some("error")))
+            .unwrap();
+        let facts = assembler.finish().unwrap();
+        assert_eq!(run_status(&facts).as_deref(), Some("settling"));
+        let run = facts
+            .entities
+            .iter()
+            .find(|entity| entity.kind == "graph_run")
+            .unwrap();
+        assert_eq!(run.attributes["candidate_status"], "error");
+
+        let mut assembler = self::assembler();
+        assembler
+            .add_event(graph_event(1, "graph_completed", Some("ok")))
+            .unwrap();
+        let facts = assembler.finish().unwrap();
+        assert_eq!(run_status(&facts).as_deref(), Some("settling"));
+    }
+
+    #[test]
+    fn running_graph_run_stays_running_without_a_thread_terminal() {
+        let mut assembler = assembler();
+        assembler
+            .add_event(graph_event(1, "graph_started", None))
+            .unwrap();
+        let facts = assembler.finish().unwrap();
+        assert_eq!(run_status(&facts).as_deref(), Some("running"));
+    }
+
+    #[test]
+    fn graph_run_is_terminal_only_after_the_thread_terminal_event() {
+        for (thread_event, expected) in [
+            (ryeos_state::event_types::THREAD_COMPLETED, "completed"),
+            (ryeos_state::event_types::THREAD_FAILED, "failed"),
+            (ryeos_state::event_types::THREAD_CANCELLED, "cancelled"),
+            (ryeos_state::event_types::THREAD_KILLED, "killed"),
+            (ryeos_state::event_types::THREAD_TIMED_OUT, "timed_out"),
+            (ryeos_state::event_types::THREAD_CONTINUED, "continued"),
+        ] {
+            let mut assembler = assembler();
+            assembler
+                .add_event(graph_event(1, "graph_completed", Some("ok")))
+                .unwrap();
+            assembler
+                .add_event(event(2, thread_event, json!({})))
+                .unwrap();
+            let facts = assembler.finish().unwrap();
+            assert_eq!(run_status(&facts).as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn failed_finalization_after_graph_completed_ok_ends_failed() {
+        let mut assembler = assembler();
+        assembler
+            .add_event(graph_event(1, "graph_completed", Some("ok")))
+            .unwrap();
+        assembler
+            .add_event(event(
+                2,
+                ryeos_state::event_types::THREAD_FAILED,
+                json!({"error": "accounting integrity"}),
+            ))
+            .unwrap();
+        let facts = assembler.finish().unwrap();
+        assert_eq!(run_status(&facts).as_deref(), Some("failed"));
+        let run = facts
+            .entities
+            .iter()
+            .find(|entity| entity.kind == "graph_run")
+            .unwrap();
+        assert_eq!(run.attributes["candidate_status"], "ok");
+    }
+
+    #[test]
+    fn graph_completed_hook_after_event_does_not_overwrite_status() {
+        let mut assembler = assembler();
+        assembler
+            .add_event(graph_event(1, "graph_completed", Some("error")))
+            .unwrap();
+        let event_ref = field_event_ref(&event(9, "hook_observation_recorded", json!({}))).unwrap();
+        assembler
+            .record_hook_occurrence("T-root", &graph_completed_hook(), &event_ref, None)
+            .unwrap();
+        let facts = assembler.finish().unwrap();
+        assert_eq!(run_status(&facts).as_deref(), Some("settling"));
+
+        // The hook arriving after the thread terminal leaves the terminal
+        // status alone.
+        let mut assembler = self::assembler();
+        assembler
+            .add_event(graph_event(1, "graph_completed", Some("ok")))
+            .unwrap();
+        assembler
+            .add_event(event(2, ryeos_state::event_types::THREAD_FAILED, json!({})))
+            .unwrap();
+        assembler
+            .record_hook_occurrence("T-root", &graph_completed_hook(), &event_ref, None)
+            .unwrap();
+        let facts = assembler.finish().unwrap();
+        assert_eq!(run_status(&facts).as_deref(), Some("failed"));
     }
 
     #[test]

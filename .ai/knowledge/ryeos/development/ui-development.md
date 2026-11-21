@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-20T23:17:59Z:55d92b1eb77044112cdb8a13c31b4abba18c74cb172d921eaf329ad3dcd7fdbf:uOX2raP6WJ1hQN6kymvo9gxvbVO/R3lsFuv9ELXyqRFdMam5EvXnY6nGqsq6yBfKkVpqdN7cmGX5wZvQyfedAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-21T16:53:50Z:313f1de5b5e7aa0875d9b0ed626bc8a282f97c3e80084f0d92d3d12c9be74542:BvHRf3ZrpaOZpdifPQFAxZ0GO45++fnZgQ2trlKc9q9oWyrl2sji5GWTVwbVroJi+I4D+eWBmyrOcuKL1tiQAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-development"
@@ -274,6 +274,28 @@ admitted attachment and composition, rather than replacing the browser session.
 Late results must still match their original attachment and mounted view before
 updating presentation. Current policy and attachment admission are also checked
 by the daemon; client checks do not grant authority.
+
+A source a Surface binds is read by a seat only when the node's signed
+`ui_seat_reads` policy has an entry for its service that admits the seat's class
+(`local_operator` or `hosted_principal`, from whether the session carries a
+hosted principal). A service with no entry is attenuated at mint and refused at
+dispatch; services under `ui/ryeos-ui/` scope their own results and are exempt.
+An entry can pin parameters to session values, forbid parameters, condition on
+parameter values, and keep only listed result fields (`keep` is an allowlist, so
+fields a later release adds are dropped) within a byte and item bound; a result
+over its bound is refused, never cut. The policy only narrows: it grants no
+capability. Adding a new read to a shipped Surface means adding its entry to
+every init profile; nodes that predate the section need
+`ryeos node reset policy-generation`.
+
+The event streams a seat opens (`/ui/events/chain/{chain_root_id}` and
+`/ui/events/session/{session_id}`) pass the same policy under the target
+`route:` plus the route's id (`route:ui/events/chain`). Opening judges the
+request parameters like a read; the chain stream also requires the seat to own
+the chain's signed root subject, and answers an absent or unauthorized chain
+with not found. Every event is then shaped by the admitting entry's `keep`
+list and bounds, and an event that cannot be shaped ends the stream with a
+`stream_error` refusal frame instead of being cut or skipped.
 
 Attachment count is bounded by the signed `ui_browser_sessions` node policy.
 There is no daemon fallback value. Test fixtures must supply that policy too.

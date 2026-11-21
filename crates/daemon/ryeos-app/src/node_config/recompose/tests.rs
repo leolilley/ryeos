@@ -349,6 +349,107 @@ fn an_uninstalled_role_or_binding_is_refused_typed() {
     assert!(BindingRef::parse("bundles/core").is_err());
 }
 
+fn write_stale(node: &StoppedNode, section: &str, id: &str, schema: u64) -> std::path::PathBuf {
+    let identity = load_node_identity(node.root.path()).unwrap();
+    let dir = node.root.path().join(".ai/node").join(section);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{id}.yaml"));
+    let body = serde_json::json!({"kind": "node", "schema": schema, "protocol": "old"});
+    std::fs::write(
+        &path,
+        ryeos_node_runtime::node_document::render_signed_item(section, id, &body, &identity)
+            .unwrap(),
+    )
+    .unwrap();
+    path
+}
+
+#[test]
+fn a_stale_id_is_skipped_and_reported_while_the_others_recompose() {
+    let node = stopped_node();
+    install_production(&node, PRODUCER);
+    write_stale(&node, external_execution::SECTION_NAME, "old-placement", 19);
+    write_stale(
+        &node,
+        runtime_snapshot_qualification::SECTION_NAME,
+        "old-qualification",
+        5,
+    );
+    let prepared = prepare(&node, &replaced(), &[], None).unwrap();
+    let report = publish_prepared(node.root.path(), prepared, false).unwrap();
+    assert_eq!(report.recomposed.len(), 1);
+    assert!(report.recomposed[0].published);
+    let mut skipped = report
+        .stale_skipped
+        .iter()
+        .map(|stale| (stale.binding.to_string(), stale.schema, stale.fix.clone()))
+        .collect::<Vec<_>>();
+    skipped.sort();
+    assert_eq!(skipped.len(), 2);
+    assert_eq!(skipped[0].0, "external_execution/old-placement");
+    assert_eq!(skipped[0].1, 19);
+    assert!(
+        skipped[0]
+            .2
+            .contains("ryeos node external-execution retire external_execution/old-placement"),
+        "{}",
+        skipped[0].2
+    );
+    assert!(skipped[0].2.contains("compose it again"));
+    assert_eq!(
+        skipped[1].0,
+        "runtime_snapshot_qualification/old-qualification"
+    );
+    // The stale files are untouched: recompose never removes them.
+    assert!(
+        node.root
+            .path()
+            .join(".ai/node/external_execution/old-placement.yaml")
+            .exists()
+    );
+}
+
+#[test]
+fn naming_a_stale_binding_or_one_that_depends_on_it_is_refused_with_the_cure() {
+    let node = stopped_node();
+    write_stale(
+        &node,
+        runtime_snapshot_production::SECTION_NAME,
+        PRODUCER,
+        1,
+    );
+    let named = [BindingRef::parse(&format!("runtime_snapshot_production/{PRODUCER}")).unwrap()];
+    let error = prepare(&node, &installed(), &named, None).err().unwrap();
+    let refusal = error.downcast_ref::<RecomposeRefusal>().unwrap();
+    assert_eq!(refusal.code, RECOMPOSE_BINDING_STALE);
+    assert!(refusal.fix.contains(&format!(
+        "ryeos node external-execution retire runtime_snapshot_production/{PRODUCER}"
+    )));
+}
+
+#[test]
+fn a_corrupt_non_retired_file_or_a_bad_signature_stays_fatal() {
+    let node = stopped_node();
+    let identity = load_node_identity(node.root.path()).unwrap();
+    write_stale(&node, external_execution::SECTION_NAME, "unlisted", 16);
+    let error = installed_bindings(node.root.path(), &identity)
+        .err()
+        .unwrap();
+    assert!(
+        error.chain().any(|cause| cause
+            .downcast_ref::<coherence::BindingSchemaUnsupported>()
+            .is_some()),
+        "{error:#}"
+    );
+    let path = write_stale(&node, external_execution::SECTION_NAME, "unlisted", 19);
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, text.replace("protocol: old", "protocol: new")).unwrap();
+    let error = installed_bindings(node.root.path(), &identity)
+        .err()
+        .unwrap();
+    assert!(format!("{error:#}").contains("signature"), "{error:#}");
+}
+
 #[test]
 fn changed_fields_name_nested_leaves() {
     let old = serde_json::json!({"a": 1, "b": {"c": 2, "d": 3}});

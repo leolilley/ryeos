@@ -197,7 +197,7 @@ pub(super) fn with_execution_schema_cutover_hint(error: anyhow::Error) -> anyhow
     {
         error.context(format!(
             "authoritative execution history predates the exact current contract; RyeOS will not reinterpret or rewrite it in place. Stop the daemon and run `{}` to retire that history epoch, then restart",
-            crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND
+            crate::execution_history_reset::OBJECT_SCHEMA_CUTOVER_COMMAND
         ))
     } else {
         error

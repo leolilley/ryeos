@@ -11,6 +11,7 @@ pub mod authorize;
 pub mod build_bundle;
 pub mod content_pin;
 pub mod doctor;
+pub mod endorse;
 pub mod hosted_policy;
 pub mod inspect;
 pub mod install;

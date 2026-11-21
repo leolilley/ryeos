@@ -1139,6 +1139,7 @@ mod release_failure_controls {
             target_start_time_ticks: 10,
             group_leader_pid: 4242,
             group_leader_start_time_ticks: 10,
+            pid_namespace: lillux::current_pid_namespace().unwrap(),
             process_scope: None,
             resource_selections: Vec::new(),
             resource_settlement_authority: None,

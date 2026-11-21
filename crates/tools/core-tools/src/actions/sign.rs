@@ -501,7 +501,7 @@ struct PreparedSignTarget {
     pending_source_units: Vec<PendingProjectSourceUnit>,
 }
 
-fn looks_path_arg(arg: &str) -> bool {
+pub(crate) fn looks_path_arg(arg: &str) -> bool {
     arg.contains('/') && (Path::new(arg).exists() || Path::new(arg).extension().is_some())
 }
 
@@ -920,7 +920,7 @@ pub(crate) fn parse_sign_target(item_ref: &str) -> Result<SignTarget> {
 /// doesn't look like a path, isn't under the source `.ai/` root, or doesn't
 /// match a known kind directory + extension. A path under the project `.ai/`
 /// maps to exactly one ref, so the caller signs the resolved ref directly.
-fn resolve_path_to_ref(
+pub(crate) fn resolve_path_to_ref(
     arg: &str,
     source: SignSource,
     project_path: Option<&Path>,
@@ -959,7 +959,7 @@ fn is_glob_ref(s: &str) -> bool {
     s.contains('*') || s.contains('?')
 }
 
-fn is_glob(s: &str) -> bool {
+pub(crate) fn is_glob(s: &str) -> bool {
     s.contains('*') || s.contains('?')
 }
 
@@ -969,7 +969,7 @@ fn is_glob(s: &str) -> bool {
 ///     `kind_dir`)
 ///   * pattern without `/` → `**/{pattern}{ext}` (recursive)
 ///   * literal `*` → `**/*{ext}` (every item)
-fn glob_match_items(
+pub(crate) fn glob_match_items(
     kind_dir: &Path,
     kind_schema: &KindSchema,
     pattern: &str,
@@ -1019,7 +1019,11 @@ fn glob_match_items(
 
 /// Reverse the file's path back to a `bare_id` for reporting.
 /// `<kind_dir>/<bare_id><ext>` → `<bare_id>`.
-fn derive_bare_id(file_path: &Path, kind_dir: &Path, kind_schema: &KindSchema) -> Option<String> {
+pub(crate) fn derive_bare_id(
+    file_path: &Path,
+    kind_dir: &Path,
+    kind_schema: &KindSchema,
+) -> Option<String> {
     let rel = file_path.strip_prefix(kind_dir).ok()?;
     let s = rel.to_string_lossy().to_string();
     for spec in &kind_schema.extensions {
@@ -1030,7 +1034,7 @@ fn derive_bare_id(file_path: &Path, kind_dir: &Path, kind_schema: &KindSchema) -
     None
 }
 
-fn source_kind_dir(
+pub(crate) fn source_kind_dir(
     kind_schema: &KindSchema,
     source: SignSource,
     project_path: Option<&Path>,
@@ -1039,7 +1043,7 @@ fn source_kind_dir(
     Ok(ai_root.join(&kind_schema.directory))
 }
 
-fn source_ai_root(source: SignSource, project_path: Option<&Path>) -> Result<PathBuf> {
+pub(crate) fn source_ai_root(source: SignSource, project_path: Option<&Path>) -> Result<PathBuf> {
     match source {
         SignSource::Project => {
             let p =

@@ -29,6 +29,8 @@ pub struct ImageSeed {
 pub enum TypedReport<'a> {
     ExecutionHistoryReset(&'a ExecutionHistoryResetReport),
     ExecutionHistoryScratch(&'a ExecutionHistoryScratchRepairReport),
+    /// What the schema cut did to pre-cut native-capacity records.
+    NativeCapacityCut(&'a crate::native_capacity::NativeCapacityCutReport),
     ReplayIndexes(&'a ryeos_state::operational::ReplayIndexResetReport),
 }
 

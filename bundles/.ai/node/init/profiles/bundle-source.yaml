@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-19T05:44:26Z:6e934ee94bc2252a0ef0028f28374d7c685152603414d0cb4b0456c10563b2d0:hlszOSNz2dfHOpvM3S+rlJodoegTU/Gkwu1h3CINk5pjuz1p6AwoaARnUjzsFpr/B5h/634Tpt9CiZcW0x5jBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-20T12:21:41Z:167846509652072a0f967fb888e59a644016c8299d3753224b3ab899076c95ce:2iJutTiaQr01oQ9Cq1ciJAWrimAMTWS3zDD/yarq2EbZiKHOXnJIxkBD/OLwD5CjhJAT/yGg/kOjOc4ztgm4CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - bundle-source
@@ -478,3 +478,221 @@ policies:
     max_facet_page_bytes: 524288
     max_facet_pages_per_thread: 8
     max_facet_pages_total: 64
+  # What a UI seat may read through a bound source. A service with no entry is
+  # not readable by a seat. A service under ui/ryeos-ui/ scopes its own result
+  # and is outside this list. Each keep list is an allowlist of result fields.
+  # Filesystem paths and operator-only fields are left out, and so is any field
+  # a later release adds until an entry names it.
+  ui_seat_reads:
+    schema: 1
+    reads:
+      - target: service:node/status
+        classes: [local_operator, hosted_principal]
+        keep:
+          - /node_id
+          - /version
+          - /revision
+          - /build_date
+          - /started_at
+          - /uptime_seconds
+          - /bind
+          - /active_threads
+          - /isolation/mode
+          - /isolation/filesystem_mode
+          - /isolation/network_mode
+          - /isolation/version
+          - /isolation/policy_digest
+          - /isolation/backend
+          - /isolation/process_scopes
+          - /thread_projection
+          - /pending_head_transitions
+          - /accounting
+        max_result_bytes: 65536
+        max_items: 64
+      - target: service:bundle/list
+        classes: [local_operator, hosted_principal]
+        keep:
+          - /bundles/*/name
+        max_result_bytes: 65536
+        max_items: 512
+      - target: service:projects/list
+        classes: [local_operator, hosted_principal]
+        keep:
+          - /version
+          - /projects/*/local_id
+          - /projects/*/name
+          - /projects/*/root
+          - /projects/*/added_at
+          - /projects/*/tags
+          - /projects/*/exists
+          - /projects/*/current
+          - /projects/*/registered
+        max_result_bytes: 1048576
+        max_items: 1024
+      - target: service:commands/list
+        classes: [local_operator, hosted_principal]
+        keep:
+          - /commands/*/name
+          - /commands/*/tokens
+          - /commands/*/description
+          - /commands/*/arguments
+          - /commands/*/forms
+          - /commands/*/defaults
+          - /commands/*/parameter_binding
+          - /commands/*/control_flags
+          - /commands/*/project
+          - /commands/*/invocable
+        max_result_bytes: 4194304
+        max_items: 4096
+      - target: service:threads/list
+        classes: [local_operator, hosted_principal]
+        keep:
+          - /next_cursor
+          - /threads/*/thread_id
+          - /threads/*/chain_root_id
+          - /threads/*/kind
+          - /threads/*/status
+          - /threads/*/item_ref
+          - /threads/*/launch_mode
+          - /threads/*/current_site_id
+          - /threads/*/origin_site_id
+          - /threads/*/upstream_thread_id
+          - /threads/*/successor_thread_id
+          - /threads/*/created_at
+          - /threads/*/updated_at
+          - /threads/*/execution
+          - /threads/*/follow
+          - /threads/*/pending
+          - /threads/*/facets
+          - /threads/*/current_node
+          - /threads/*/error
+        max_result_bytes: 4194304
+        max_items: 2048
+      - target: service:scheduler/list
+        classes: [local_operator, hosted_principal]
+        keep:
+          - /identity_filtered
+          - /node_owned_included
+          - /anonymous
+          - /note
+          - /schedules/*/schedule_id
+          - /schedules/*/item_ref
+          - /schedules/*/schedule_type
+          - /schedules/*/expression
+          - /schedules/*/timezone
+          - /schedules/*/enabled
+          - /schedules/*/registered_at
+          - /schedules/*/misfire_policy
+          - /schedules/*/overlap_policy
+          - /schedules/*/lateness_grace_secs
+          - /schedules/*/last_scheduled_at
+          - /schedules/*/last_reserved_at
+          - /schedules/*/last_dispatched_at
+          - /schedules/*/last_fire_status
+          - /schedules/*/last_fire_reason
+          - /schedules/*/last_fire_outcome
+          - /schedules/*/current_due_at
+          - /schedules/*/current_due_within_grace
+          - /schedules/*/misfire_horizon_exclusive
+          - /schedules/*/next_fire_at
+          - /schedules/*/cursor_last_scheduled_at
+          - /schedules/*/cursor_next_fire_at
+          - /schedules/*/cursor_updated_at
+          - /schedules/*/cursor_fresh
+          - /schedules/*/decision
+          - /schedules/*/decision_reason
+          - /schedules/*/lifetime_exhausted
+          - /schedules/*/total_fires
+        max_result_bytes: 1048576
+        max_items: 2048
+      - target: service:items/effective
+        classes: [local_operator, hosted_principal]
+        # A seat resolves bundle items only; it does not choose a project path.
+        deny_params: [project_path]
+        keep:
+          - /requested_ref
+          - /canonical_ref
+          - /kind
+          - /trusted
+          - /trust_class
+          - /root_trust_class
+          - /shadows_bundle_item
+          - /policy_facts
+          - /diagnostics
+          - /provenance/root/requested_id
+          - /provenance/root/resolved_ref
+          - /provenance/root/source_space
+          - /provenance/root/trust_class
+          - /provenance/root/signer_fingerprint
+          - /provenance/root/raw_content_digest
+          - /provenance/ancestors/*/requested_id
+          - /provenance/ancestors/*/resolved_ref
+          - /provenance/ancestors/*/source_space
+          - /provenance/ancestors/*/trust_class
+          - /provenance/ancestors/*/signer_fingerprint
+          - /provenance/ancestors/*/raw_content_digest
+          - /authorship
+          - /as_launched
+        max_result_bytes: 1048576
+        max_items: 2048
+      - target: service:node/locality/groups
+        classes: [local_operator, hosted_principal]
+        keep:
+          - /schema
+          - /as_of
+          - /groups
+          - /invalid_declarations/*/label
+          - /invalid_declarations/*/code
+        max_result_bytes: 1048576
+        max_items: 1024
+      # The event streams a seat opens are named by their route. A frame is the
+      # event name beside the event record, and an entry keeps only the
+      # identifiers and live text a client reads. Ledger hashes, sequence
+      # numbers, stored payloads and error text are left out, and so is any
+      # field a later release adds until an entry names it.
+      - target: route:ui/events/chain
+        classes: [local_operator, hosted_principal]
+        keep:
+          - /event_type
+          - /payload/chain_root_id
+          - /payload/thread_id
+          - /payload/event_type
+          - /payload/payload/delta
+          - /payload/payload/tool_use_partial/delta
+          - /payload/code
+        max_result_bytes: 65536
+        max_items: 16
+      # The session stream carries thread hints. Thread lifecycle hints keep
+      # the thread, its event name, status and time. Activity hints keep only
+      # their kind, so no thread list rides on them.
+      - target: route:ui/events/session
+        classes: [local_operator, hosted_principal]
+        keep:
+          - /event_type
+          - /payload/kind
+          - /payload/thread_id
+          - /payload/event_type
+          - /payload/status
+          - /payload/updated_at
+        max_result_bytes: 4096
+        max_items: 4
+      # The pending approvals of a hosted work chain, as the Approvals view
+      # reads them. The service already answers only for a chain the caller
+      # owns. Each approval keeps its identifiers, digest, state, times and the
+      # public part of its requested authority.
+      - target: service:worker-executions/approvals
+        classes: [local_operator, hosted_principal]
+        keep:
+          - /approvals/*/chain_root_id
+          - /approvals/*/placement_thread_id
+          - /approvals/*/approval_id
+          - /approvals/*/worker_boot_epoch
+          - /approvals/*/request_digest
+          - /approvals/*/operation_class
+          - /approvals/*/requested_authority/accept_allowed
+          - /approvals/*/requested_authority/display
+          - /approvals/*/state
+          - /approvals/*/expires_at_ms
+          - /approvals/*/created_at_ms
+        max_result_bytes: 262144
+        max_items: 256

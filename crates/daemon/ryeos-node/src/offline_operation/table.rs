@@ -431,6 +431,23 @@ static OPERATIONS: &[OperationSpec] = &[
         },
     },
     OperationSpec {
+        id: "node.external-execution.retire",
+        authority_bearing: true,
+        local_signer_only: false,
+        alone: false,
+        inputs: NO_INPUTS,
+        preconditions: &[FACT_RUNTIME_SNAPSHOTS, FACT_EXTERNAL_EXECUTION],
+        expected_result: &[],
+        required_expected_result: &[],
+        validate_request: arguments_of::<handlers::RetireArguments>,
+        handler: Handler::EffectThenReceipt(handlers::retire),
+        recovery: Recovery {
+            record: "the installed binding tree: the binding file is absent once it is retired",
+            rerun: Rerun::ConvergesOverEffect,
+            why: "the request pins the binding tree it was signed against, so a rerun after the file is gone is refused on the changed fact before the handler runs, and a rerun before the removal removes the same file; nothing else is touched",
+        },
+    },
+    OperationSpec {
         id: "node.capacity.reissue",
         authority_bearing: true,
         local_signer_only: true,
@@ -989,6 +1006,7 @@ mod tests {
             "node.external-execution.snapshot-compose",
             "node.external-execution.snapshot-qualification-compose",
             "node.external-execution.recompose",
+            "node.external-execution.retire",
             "node.capacity.reissue",
             "node.capacity.reanchor",
             "node.allow-restart",
@@ -1015,7 +1033,7 @@ mod tests {
         ] {
             assert!(lookup(id).is_some(), "{id}");
         }
-        assert_eq!(operations().len(), 30);
+        assert_eq!(operations().len(), 31);
     }
 
     #[test]
@@ -1051,6 +1069,7 @@ mod tests {
                 "node.external-execution.snapshot-compose",
                 "node.external-execution.snapshot-qualification-compose",
                 "node.external-execution.recompose",
+                "node.external-execution.retire",
                 "node.capacity.reissue",
                 "node.capacity.reanchor",
                 "node.authorize-client",

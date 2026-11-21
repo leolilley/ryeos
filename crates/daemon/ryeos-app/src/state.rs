@@ -571,6 +571,7 @@ pub mod test_support {
             services: Arc::new(crate::service_registry::ServiceRegistry::new()),
             service_descriptors: &[],
             node_config: Arc::new(crate::node_config::NodeConfigSnapshot {
+                stale_bindings: Vec::new(),
                 external_execution: Vec::new(),
                 runtime_snapshot_production: Vec::new(),
                 guest_runtime_materialization: Vec::new(),

@@ -130,7 +130,7 @@ fn decode_retained_protocol_descriptor(
     serde_json::from_value(value).with_context(|| {
         format!(
             "decode retained session protocol descriptor; a descriptor admitted before the current contract cannot be reinterpreted: stop the daemon and run `{}` before restarting",
-            crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND
+            crate::execution_history_reset::OBJECT_SCHEMA_CUTOVER_COMMAND
         )
     })
 }

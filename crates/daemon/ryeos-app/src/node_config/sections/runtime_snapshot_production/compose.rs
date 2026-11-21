@@ -249,7 +249,7 @@ pub(crate) fn compose_with_facts(
     });
     let document = ProductionDocument {
         kind: "node".into(),
-        schema: 1,
+        schema: 2,
         protocol: PRODUCTION_PROTOCOL.into(),
         backend: facts.backend,
         account: facts.account,

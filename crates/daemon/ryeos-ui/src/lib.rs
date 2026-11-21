@@ -13,12 +13,15 @@ pub mod handlers;
 pub mod invokers;
 mod phase_timing;
 pub mod seat_auth;
+pub mod seat_read_policy;
+mod seat_stream_policy;
 pub mod session_authority;
 pub mod session_bus;
 pub mod state;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 mod thread_authorization;
+pub mod thread_hints;
 pub mod transfer_store;
 
 pub use browser_session::{
@@ -26,6 +29,7 @@ pub use browser_session::{
 };
 pub use session_bus::SessionBus;
 pub use state::UiState;
+pub use thread_hints::ThreadHintFanout;
 
 /// Exact signed UI binding contract served by this daemon build.
 ///

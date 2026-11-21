@@ -5770,6 +5770,10 @@ fn ready_process_registered(
         ));
     }
     gate.stage.set(AdmittedStartStage::Readiness);
+    tracing::info!(
+        ready_timeout_ms = lifecycle.ready_timeout_ms,
+        "persistent-session worker is running; waiting for its readiness frame"
+    );
     let deadline = MonotonicDeadline::after(timeout);
     let mut reader = FrameReader::default();
     let frame = match loop {

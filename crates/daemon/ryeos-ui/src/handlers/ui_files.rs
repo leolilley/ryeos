@@ -4,8 +4,8 @@
 //! All file access is constrained to allowed roots derived from the
 //! browser session's project path. No arbitrary absolute path reads.
 //! Browser renderers reach these services only through compiled binding
-//! coordinates. The direct HTTP route is a signed-operator lane; either lane
-//! is converted to a pinned project directory before any traversal.
+//! coordinates, and the project path is converted to a pinned project
+//! directory before any traversal.
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -502,30 +502,39 @@ mod tests {
     }
 
     #[test]
-    fn bundled_file_routes_require_a_signed_principal() {
-        // Browser renderers use compiled binding coordinates. These direct
-        // routes are the explicit operator lane and therefore require a
-        // signed caller; their project root is pinned before traversal.
-        let routes = [
-            "bundles/ryeos-ui/.ai/node/routes/ui/ryeos-ui/files-list.yaml",
-            "bundles/ryeos-ui/.ai/node/routes/ui/ryeos-ui/files-read.yaml",
-            "bundles/ryeos-ui/.ai/node/routes/ui/ryeos-ui/files-tree.yaml",
+    fn bundled_ui_routes_leave_reads_to_seat_dispatch() {
+        // Every UI read is admitted by one point: seat dispatch. The only UI
+        // routes that authenticate with a bare signed principal are the one
+        // that creates a seat and the two that list and revoke seats.
+        let routes_dir = workspace_root().join("bundles/ryeos-ui/.ai/node/routes/ui");
+        let allowed = [
+            "launch/mint.yaml",
+            "sessions/list.yaml",
+            "sessions/revoke.yaml",
         ];
-        let service_refs = [
-            "service:ui/ryeos-ui/files/list",
-            "service:ui/ryeos-ui/files/read",
-            "service:ui/ryeos-ui/files/tree",
-        ];
-
-        for (route, service_ref) in routes.into_iter().zip(service_refs) {
-            let contents = std::fs::read_to_string(workspace_root().join(route))
-                .unwrap_or_else(|err| panic!("read {route}: {err}"));
-            let yaml: Value = serde_yaml::from_str(&contents)
-                .unwrap_or_else(|err| panic!("parse {route}: {err}"));
-
-            assert_eq!(yaml["auth"], "ryeos_signed", "{route}");
-            assert_eq!(yaml["response"]["source"], service_ref, "{route}");
+        let mut stack = vec![routes_dir.clone()];
+        let mut seen_signed = Vec::new();
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let contents = std::fs::read_to_string(&path).unwrap();
+                let yaml: Value = serde_yaml::from_str(&contents).unwrap();
+                if yaml["auth"] == "ryeos_signed" {
+                    seen_signed.push(
+                        path.strip_prefix(&routes_dir)
+                            .unwrap()
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
+                }
+            }
         }
+        seen_signed.sort();
+        assert_eq!(seen_signed, allowed);
     }
 
     #[test]

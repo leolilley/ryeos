@@ -468,17 +468,38 @@ async fn run_graph(
         tokio::time::sleep(Duration::from_millis(200)).await;
     };
 
-    let (status, thread) = daemon
-        .post_execute(
-            "service:threads/get",
-            project.to_str().context("project path is not UTF-8")?,
-            json!({ "thread_id": successor }),
-        )
-        .await?;
-    anyhow::ensure!(
-        status.is_success(),
-        "threads/get failed: {status} {thread:#}"
-    );
+    // `graph_completed` is authored by the graph runtime just before it calls
+    // the daemon's finalize callback (accounting fence, sealing the retained
+    // project generation, state-store writer lock), which on a loaded runner
+    // lands seconds later. Reading the record on that event alone saw a
+    // still-`running` thread with no result. The daemon's own `thread_*`
+    // terminal event is committed with the terminal snapshot, so wait for it,
+    // then keep a bounded poll for the record leaving `running` as the fallback.
+    daemon
+        .wait_for_thread_terminal_event(&successor, Duration::from_secs(60))
+        .await;
+    let settle_deadline = Instant::now() + Duration::from_secs(60);
+    let thread = loop {
+        let (status, thread) = daemon
+            .post_execute(
+                "service:threads/get",
+                project.to_str().context("project path is not UTF-8")?,
+                json!({ "thread_id": successor }),
+            )
+            .await?;
+        anyhow::ensure!(
+            status.is_success(),
+            "threads/get failed: {status} {thread:#}"
+        );
+        let running = thread
+            .pointer("/result/thread/status")
+            .and_then(Value::as_str)
+            == Some("running");
+        if !running || Instant::now() >= settle_deadline {
+            break thread;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
     // Shown by the test runner only when the test fails: the settled child
     // threads' own records and the daemon's log, which carry the reason a
     // worker turn failed when the graph only reports the redirect.

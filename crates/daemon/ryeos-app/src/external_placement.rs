@@ -2771,7 +2771,7 @@ pub fn preflight_external_candidate_program(
     Option<ryeos_state::objects::RetainedExternalRuntimeQualification>,
     Option<ryeos_state::objects::RetainedExternalRuntimeContentQualification>,
 )> {
-    let binding = select_binding(&state.node_config.external_execution, program)?;
+    let binding = select_installed_binding(&state.node_config, program)?;
     let contract = binding.backend_contract();
     let runtime_proof = admit_current_runtime_qualification(state, &contract, binding.digest())?;
     let retained_content = match require_current_runtime_content_qualification(
@@ -3042,7 +3042,13 @@ pub fn prepare_content_candidate_program(
     // binding; there is no fallback after an authority failure.
     let binding = match eligible.as_slice() {
         [binding] => *binding,
-        [] => bail!("no signed placement binding selects this activated runtime"),
+        [] => {
+            return Err(state.node_config.absent_binding_error(
+                crate::node_config::sections::external_execution::SECTION_NAME,
+                None,
+                "no signed placement binding selects this activated runtime",
+            ));
+        }
         _ => bail!("multiple signed placement bindings select this activated runtime"),
     };
     let contract = binding.backend_contract();
@@ -6245,7 +6251,7 @@ impl<'a> ExternalPlacementOwner<'a> {
             (binding, contract, access)
         } else {
             require_fresh_contact_owner(&session, &workspace)?;
-            let installed = select_binding(&self.state.node_config.external_execution, program)?;
+            let installed = select_installed_binding(&self.state.node_config, program)?;
             let binding = installed.retained_generation()?;
             let contract = installed.backend_contract();
             let access = installed.credential_access()?;
@@ -8238,6 +8244,29 @@ fn select_binding<'a>(
     }
 }
 
+/// `select_binding` over the node's snapshot. When nothing current admits the
+/// program and the node holds placement bindings set aside as retired, the
+/// refusal is the typed retired-schema refusal naming them and the fix.
+fn select_installed_binding<'a>(
+    config: &'a crate::node_config::NodeConfigSnapshot,
+    program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
+) -> Result<&'a InstalledExternalExecutionBinding> {
+    select_binding(&config.external_execution, program).map_err(|error| {
+        if config
+            .external_execution
+            .iter()
+            .any(|binding| binding.check_program(program).is_ok())
+        {
+            return error;
+        }
+        config.absent_binding_error(
+            crate::node_config::sections::external_execution::SECTION_NAME,
+            None,
+            &format!("{error:#}"),
+        )
+    })
+}
+
 fn require_current_contact_binding<'a>(
     bindings: &'a [InstalledExternalExecutionBinding],
     program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
@@ -10119,6 +10148,7 @@ pub mod test_support {
             ),
         )?;
         state.node_config = Arc::new(crate::node_config::NodeConfigSnapshot {
+            stale_bindings: Vec::new(),
             external_execution: vec![binding],
             runtime_snapshot_production: state.node_config.runtime_snapshot_production.clone(),
             guest_runtime_materialization: state.node_config.guest_runtime_materialization.clone(),
@@ -11111,6 +11141,7 @@ pub mod test_support {
                     target_start_time_ticks: 100,
                     group_leader_pid: 41,
                     group_leader_start_time_ticks: 100,
+                    pid_namespace: lillux::current_pid_namespace().unwrap(),
                     resource_selections: Vec::new(),
                     resource_settlement_authority: None,
                     resource_operations: Vec::new(),

@@ -36,7 +36,7 @@ pub use ryeos_accounting::UsdNanos;
 /// and the runtime would have no way to tell which to trust. Now there
 /// is exactly one root snapshot — `resolution.root` — and every consumer
 /// reads `path` / `digest` / `kind` / `item_id` from there.
-pub const MANAGED_LAUNCH_ENVELOPE_SCHEMA_VERSION: u32 = 5;
+pub const MANAGED_LAUNCH_ENVELOPE_SCHEMA_VERSION: u32 = 6;
 
 fn deserialize_required_nullable<'de, D, T>(
     deserializer: D,
@@ -295,7 +295,8 @@ pub struct EnvelopeRoots {
 }
 
 impl EnvelopeRoots {
-    /// Build roots from a signer list, computing the sealed digest.
+    /// Build roots from a signer list, computing the sealed digest. The list
+    /// carries the launch's frozen endorsements on its authoring signers.
     pub fn new(
         project_root: PathBuf,
         bundle_roots: Vec<PathBuf>,
@@ -324,7 +325,11 @@ impl EnvelopeRoots {
     }
 }
 
-/// Scoped signer entries for a trust store, in the form launch envelopes carry.
+/// Scoped signer entries for a trust store, without endorsements. A launch of
+/// a project builds its list with `TrustStore::launch_signer_entries` instead,
+/// so its authoring signers carry the request's frozen endorsements; this plain
+/// form is for trees that are not an operator's project (a release source
+/// generation, whose configs are publisher-signed and never authored).
 pub fn trusted_signer_entries(store: &TrustStore) -> Vec<TrustedSignerEntry> {
     store.signer_entries()
 }

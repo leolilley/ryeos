@@ -325,7 +325,9 @@ async fn project_authored_view_sets_are_held_to_the_trust_gate_and_the_compositi
             .map(|seed| seed.id.as_str())
             .collect::<Vec<_>>(),
         ["work", "mine"],
-        "the bundle set and the signed project set are shown, in listed order"
+        "the bundle set and the signed project set are shown, in listed order: {:?} {:?}",
+        attachment.compiled_binding.binding.attenuated,
+        attachment.compiled_binding.binding.view_sets
     );
 
     let binding = &attachment.compiled_binding.binding;

@@ -91,7 +91,7 @@ fn original_mutation_refuses_newer_operator_epoch_without_mutation() {
         assert!(refusal.contains("newer operator epoch"), "{refusal}");
         assert!(refusal.contains("destructive reset refused"), "{refusal}");
         assert!(
-            !refusal.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND),
+            !refusal.contains(crate::execution_history_reset::EXECUTION_HISTORY_RESET_COMMAND),
             "{refusal}"
         );
         assert_eq!(
@@ -254,7 +254,7 @@ fn stored_launch_contract_versions_and_runtime_epoch_move_together() {
             RUNTIME_OPERATOR_SCHEMA_EPOCH,
             ryeos_state::external_execution::transport::EXTERNAL_CONTROLLER_TRANSPORT_CONTRACT_SCHEMA,
         ),
-        (38, 39, 141, 3),
+        (38, 39, 142, 3),
         "a change to a stored launch or transport contract version needs a runtime operator epoch bump"
     );
 }
@@ -283,7 +283,7 @@ fn original_mutation_refuses_newer_project_authority_without_mutation() {
             "an older daemon must not erase newer runtime authority: {refusal}"
         );
         assert!(
-            !refusal.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND),
+            !refusal.contains(crate::execution_history_reset::EXECUTION_HISTORY_RESET_COMMAND),
             "{refusal}"
         );
         let retained: String = host.with_existing(
@@ -440,14 +440,14 @@ fn a_predecessor_operator_epoch_refusal_names_the_reset_command() {
         super::incompatible_runtime_operator_schema(super::RUNTIME_OPERATOR_SCHEMA_EPOCH - 1);
     assert!(
         format!("{predecessor:#}")
-            .contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND),
+            .contains(crate::execution_history_reset::EXECUTION_HISTORY_RESET_COMMAND),
         "{predecessor:#}"
     );
     let newer =
         super::incompatible_runtime_operator_schema(super::RUNTIME_OPERATOR_SCHEMA_EPOCH + 1);
     assert!(
         !format!("{newer:#}")
-            .contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND),
+            .contains(crate::execution_history_reset::EXECUTION_HISTORY_RESET_COMMAND),
         "{newer:#}"
     );
 }

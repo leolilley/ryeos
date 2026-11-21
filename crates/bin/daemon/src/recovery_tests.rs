@@ -522,6 +522,7 @@ fn unattached_resource_owner_startup_releases_hold_and_fences_without_relaunch()
         target_start_time_ticks: 11,
         group_leader_pid: 999_990,
         group_leader_start_time_ticks: 11,
+        pid_namespace: lillux::current_pid_namespace().unwrap(),
         resource_selections: Vec::new(),
         resource_settlement_authority: None,
         resource_operations: Vec::new(),
@@ -693,6 +694,7 @@ fn unattached_resource_owner_without_settlement_authority_remains_quarantined() 
         target_start_time_ticks: 11,
         group_leader_pid: 999_990,
         group_leader_start_time_ticks: 11,
+        pid_namespace: lillux::current_pid_namespace().unwrap(),
         process_scope: None,
         resource_selections: Vec::new(),
         resource_settlement_authority: None,
@@ -755,6 +757,7 @@ fn resource_owner_startup_reconciliation_retries_settlement_after_cleanup() {
         target_start_time_ticks: 11,
         group_leader_pid: 999_991,
         group_leader_start_time_ticks: 11,
+        pid_namespace: lillux::current_pid_namespace().unwrap(),
         resource_selections: Vec::new(),
         resource_settlement_authority: None,
         resource_operations: Vec::new(),
@@ -1043,6 +1046,7 @@ fn build_test_state() -> (
         events.clone(),
     ));
     let node_config = ryeos_app::node_config::NodeConfigSnapshot {
+        stale_bindings: Vec::new(),
         external_execution: Vec::new(),
         runtime_snapshot_production: Vec::new(),
         runtime_snapshot_qualification: Vec::new(),
@@ -1389,6 +1393,74 @@ async fn periodic_recovery_waits_only_the_thread_with_a_missing_live_root() {
             ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS,
         ))
         .expect("unrelated project remains usable during the authority wait");
+}
+
+/// The root of a dedicated session whose lease ended while the node was down:
+/// the session settled terminal, the root is a running row with a dead process
+/// and a native-resume declaration. Startup recovery must finalize it failed
+/// with the typed `dedicated_session_settled` outcome, collect no resume
+/// intent, and leave the session terminal.
+#[tokio::test]
+async fn startup_recovery_does_not_resume_the_root_of_a_terminal_dedicated_session() {
+    let (_tmpdir, _state_owner, state) = build_test_state();
+    let projects = tempfile::tempdir().unwrap();
+    let project = projects.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    std::fs::create_dir(project.join(ryeos_engine::AI_DIR)).unwrap();
+    seed_live_recovery(&state, "T-ended-session-root", &project);
+    let db = &state.state_store;
+    db.create_credential_profile(NewCredentialProfile {
+        activation: ryeos_app::runtime_db::CredentialActivation::Ceremony,
+        profile_id: "profile-ended-session",
+        owner_principal: "fp:test",
+        home_id: "home-ended-session",
+    })
+    .unwrap();
+    let generation = db
+        .acquire_credential_profile("profile-ended-session", "fp:test", "worker-ended")
+        .unwrap();
+    db.admit_dedicated_session(NewDedicatedSession {
+        placement_thread_id: "T-ended-session-root",
+        chain_root_id: "T-ended-session-root",
+        owner_principal: "fp:test",
+        admitted_capsule_hash: &"a".repeat(64),
+        workspace_id: "W-ended-session",
+        candidate_required: false,
+        candidate_disposition: DedicatedCandidateDisposition::OwnerDecision,
+        credential_profile_id: "profile-ended-session",
+        credential_generation: generation,
+        credential_lock_owner: "worker-ended",
+    })
+    .unwrap();
+    db.fail_dedicated_session_start(
+        "T-ended-session-root",
+        "worker-ended",
+        1,
+        "lease ended",
+        true,
+    )
+    .unwrap();
+
+    let report = super::reconcile::reconcile_active_threads(&state)
+        .await
+        .unwrap();
+
+    assert!(report.resume_intents.is_empty());
+    let root = db.get_thread("T-ended-session-root").unwrap().unwrap();
+    assert_eq!(root.status, "failed");
+    let result = db
+        .get_thread_result("T-ended-session-root")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        result.outcome_code.as_deref(),
+        Some("dedicated_session_settled")
+    );
+    let session = db
+        .dedicated_session("T-ended-session-root")
+        .unwrap()
+        .unwrap();
+    assert_eq!(session.state, "terminal");
 }
 
 #[tokio::test]
@@ -2462,6 +2534,7 @@ async fn hosted_startup_replays_root_outboxes_before_detaching_the_old_worker_ep
                 target_start_time_ticks: 1,
                 group_leader_pid: 999_999,
                 group_leader_start_time_ticks: 1,
+                pid_namespace: lillux::current_pid_namespace().unwrap(),
                 resource_selections: Vec::new(),
                 resource_settlement_authority: None,
                 resource_operations: Vec::new(),

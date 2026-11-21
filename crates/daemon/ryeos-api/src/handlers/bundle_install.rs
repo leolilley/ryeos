@@ -625,7 +625,7 @@ pub(crate) fn admit_completed_staging(
         &prospective_roots,
         node_trust_store,
         policy_snapshot.require::<ryeos_engine::isolation::IsolationPolicy>()?,
-        policy_snapshot.generation_digest(),
+        policy_snapshot.section_digest::<ryeos_engine::isolation::IsolationPolicy>()?,
     )
     .context("prospective bundle set failed node definition admission")?;
     let prospective = prospective_records
@@ -1071,6 +1071,7 @@ mod tests {
     fn staged_binding_refusal_is_a_typed_conflict() {
         let admitted = AdmittedStaging {
             snapshot: ryeos_app::node_config::NodeConfigSnapshot {
+                stale_bindings: Vec::new(),
                 external_execution: Vec::new(),
                 runtime_snapshot_production: Vec::new(),
                 guest_runtime_materialization: Vec::new(),

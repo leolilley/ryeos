@@ -174,7 +174,7 @@ mod tests {
             "process-identity": {
                 "boot_id": "00000000-0000-0000-0000-000000000001",
                 "target_pid": 200, "target_start_time_ticks": 1,
-                "group_leader_pid": 100, "group_leader_start_time_ticks": 1
+                "group_leader_pid": 100, "group_leader_start_time_ticks": 1, "pid_namespace": crate::current_pid_namespace().unwrap()
             },
             "held-mount": {
                 "schema": 1, "owned_child_pid": 200, "mount_count": 0,

@@ -1,0 +1,7 @@
+# ryeos:signed:2026-11-20T23:16:10Z:2aa7bf7075cdcd747d89728cb59681c317e0195b13c1db647e22e800bbd1e449:+R3leBcaLm1QfopD3l24c51186dnOshh297IW6gTHqAAePDYlu3TmYY0um931lkWvLheldKDSGQc93vZ2ewyBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: endorsements.list
+required_caps: ["ryeos.execute.service.endorsements/list"]
+schema:
+  project: string?
+description: "List the recorded endorsements with their targets, endorsers, times and whether each is in force or revoked, and the current ledger head."

@@ -26,7 +26,7 @@ use ryeos_node_runtime::identity::NodeIdentity;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::lifecycle_marker::{LaunchRoute, UncleanExit};
+use crate::lifecycle_marker::{InferredExit, LaunchRoute, UncleanExit, UnknownExit};
 use crate::offline_operation::contract::{
     CanonicalInstant, canonical_bytes, decode_signature, digest_of, encode_signature,
 };
@@ -61,6 +61,15 @@ pub enum JournalType {
     NodeExited,
     #[serde(rename = "node.exit_inferred_unclean")]
     NodeExitInferredUnclean,
+    /// The previous run's end could not be judged: its recorded process
+    /// identity was neither provably gone nor provably live, or its marker
+    /// was a retired pre-identity record. Neither clean nor unclean.
+    #[serde(rename = "node.exit_unknown")]
+    NodeExitUnknown,
+    #[serde(rename = "endorsement.accepted")]
+    EndorsementAccepted,
+    #[serde(rename = "endorsement.revoked")]
+    EndorsementRevoked,
 }
 
 impl JournalType {
@@ -69,6 +78,9 @@ impl JournalType {
             Self::NodeStarted => "node.started",
             Self::NodeExited => "node.exited",
             Self::NodeExitInferredUnclean => "node.exit_inferred_unclean",
+            Self::NodeExitUnknown => "node.exit_unknown",
+            Self::EndorsementAccepted => "endorsement.accepted",
+            Self::EndorsementRevoked => "endorsement.revoked",
         }
     }
 }
@@ -412,43 +424,65 @@ impl NodeJournal {
             .map_err(JournalError::Write)
     }
 
-    /// Record a daemon start. When the previous run left a `running` marker
-    /// whose process is gone, first record that run's inferred unclean exit,
-    /// unless the journal already holds that exact run's (the same start time
-    /// and pid): one lost run is one record, however many starts follow.
+    /// Record a daemon start. When the previous run's marker shows an end no
+    /// handled exit recorded, first record it: an inferred unclean exit when
+    /// the recorded exact process identity is proven gone, an unknown exit
+    /// when it cannot be judged. Unless the journal already holds that exact
+    /// record (same type and same facts, the whole recorded identity
+    /// included): one lost run is one record, however many starts follow.
     pub fn record_start(
         &self,
-        unclean: Option<&UncleanExit>,
+        inferred: Option<&InferredExit>,
         started: &StartFacts<'_>,
     ) -> Result<(), JournalError> {
         self.create_dir().map_err(JournalError::Write)?;
+        let inferred_draft = inferred.map(|inferred| match inferred {
+            InferredExit::Unclean(unclean) => unclean_draft(unclean),
+            InferredExit::Unknown(unknown) => unknown_draft(unknown),
+        });
         let mut already = false;
         let tip = self
             .chain()
             .walk(|record, _| {
-                if let Some(unclean) = unclean
-                    && record.body.record_type == JournalType::NodeExitInferredUnclean
-                    && record.body.detail.get("started_at").and_then(Value::as_str)
-                        == Some(unclean.started_at.as_str())
-                    && record.body.detail.get("pid").and_then(Value::as_u64)
-                        == Some(u64::from(unclean.pid))
+                if let Some(draft) = &inferred_draft
+                    && record.body.record_type == draft.record_type
+                    && record.body.detail == draft.detail
                 {
                     already = true;
                 }
             })
             .map_err(JournalError::Integrity)?;
         let mut state = Self::state_of(tip);
-        if let Some(unclean) = unclean
+        if let Some(draft) = inferred_draft
             && !already
         {
             let (_, next) = self
-                .append_after(&state, unclean_draft(unclean))
+                .append_after(&state, draft)
                 .map_err(JournalError::Write)?;
             state = next;
         }
         self.append_after(&state, started_draft(started))
             .map_err(JournalError::Write)?;
         Ok(())
+    }
+
+    /// Record that an endorsement was accepted. `subject_ref` is the
+    /// endorsement digest, `actor` the endorser, and `detail` the flat
+    /// mechanical facts of what it covers.
+    pub fn record_endorsement_accepted(
+        &self,
+        facts: &EndorsementFacts<'_>,
+    ) -> Result<SignedJournalRecord, JournalError> {
+        self.append(endorsement_draft(JournalType::EndorsementAccepted, facts))
+    }
+
+    /// Record that an endorsement was revoked. `actor` is the operator that
+    /// revoked it.
+    pub fn record_endorsement_revoked(
+        &self,
+        facts: &EndorsementFacts<'_>,
+    ) -> Result<SignedJournalRecord, JournalError> {
+        self.append(endorsement_draft(JournalType::EndorsementRevoked, facts))
     }
 
     /// Record a handled exit.
@@ -474,6 +508,41 @@ pub struct ExitFacts<'a> {
     pub pid: u32,
     pub started_at: &'a str,
     pub launch_route: LaunchRoute,
+}
+
+/// What the journal records about an endorsement event.
+pub struct EndorsementFacts<'a> {
+    /// Digest of the endorsement.
+    pub digest: &'a str,
+    /// The endorser for an acceptance, the revoking operator for a revocation
+    /// (`fp:<fingerprint>`).
+    pub actor: &'a str,
+    pub project: &'a str,
+    /// `items` or `standing`.
+    pub target: &'a str,
+    /// Items named, or kinds named.
+    pub count: u64,
+    /// The node ledger head after the change.
+    pub ledger_head: &'a str,
+    /// The delegation digest the endorser signed under, when it did.
+    pub delegation: Option<&'a str>,
+    /// Revocation reason.
+    pub reason: Option<&'a str>,
+}
+
+fn endorsement_draft(record_type: JournalType, facts: &EndorsementFacts<'_>) -> JournalDraft {
+    let mut draft = JournalDraft::new(record_type)
+        .with("project", bounded(facts.project))
+        .with("target", facts.target)
+        .with("count", facts.count)
+        .with("ledger_head", facts.ledger_head);
+    if let Some(reason) = facts.reason {
+        draft = draft.with("reason", bounded(reason));
+    }
+    draft.subject_ref = Some(facts.digest.to_owned());
+    draft.actor = Some(facts.actor.to_owned());
+    draft.attested_by = facts.delegation.map(str::to_owned);
+    draft
 }
 
 fn launch_route_name(route: LaunchRoute) -> &'static str {
@@ -520,11 +589,41 @@ fn exited_draft(facts: &ExitFacts<'_>) -> JournalDraft {
     draft
 }
 
+/// The recorded incarnation as flat journal facts: boot, pid namespace, pid
+/// and birth ticks together name one process; the pid alone does not.
+fn with_identity(
+    draft: JournalDraft,
+    identity: &lillux::process_control::ExactProcessIdentity,
+) -> JournalDraft {
+    draft
+        .with("pid", identity.target_pid)
+        .with("start_time_ticks", identity.target_start_time_ticks)
+        .with("boot_id", bounded(&identity.boot_id))
+        .with("pid_namespace", bounded(&identity.pid_namespace))
+}
+
 fn unclean_draft(unclean: &UncleanExit) -> JournalDraft {
-    let mut draft = JournalDraft::new(JournalType::NodeExitInferredUnclean)
-        .with("pid", unclean.pid)
-        .with("started_at", unclean.started_at.as_str());
+    let mut draft = with_identity(
+        JournalDraft::new(JournalType::NodeExitInferredUnclean),
+        &unclean.identity,
+    )
+    .with("started_at", unclean.started_at.as_str());
     if let Some(route) = unclean.launch_route {
+        draft = draft.with("launch_route", launch_route_name(route));
+    }
+    draft
+}
+
+fn unknown_draft(unknown: &UnknownExit) -> JournalDraft {
+    let mut draft =
+        JournalDraft::new(JournalType::NodeExitUnknown).with("reason", bounded(&unknown.reason));
+    if let Some(identity) = &unknown.identity {
+        draft = with_identity(draft, identity);
+    }
+    if let Some(started_at) = &unknown.started_at {
+        draft = draft.with("started_at", started_at.as_str());
+    }
+    if let Some(route) = unknown.launch_route {
         draft = draft.with("launch_route", launch_route_name(route));
     }
     draft

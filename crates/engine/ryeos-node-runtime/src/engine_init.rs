@@ -353,7 +353,10 @@ fn load_registered_generation_under_lock(
         app_root,
         policy,
         crate::node_policy::generation::policy_directory(app_root).join("isolation.yaml"),
-        format!("sha256:{}", policy_generation.digest()),
+        format!(
+            "sha256:{}",
+            policy_snapshot.section_digest::<ryeos_engine::isolation::IsolationPolicy>()?
+        ),
         backend,
     )
     .map_err(anyhow::Error::from)?;
@@ -436,7 +439,7 @@ pub fn load_prospective_isolation(
     bundle_roots: &[PathBuf],
     node_trust_store: &TrustStore,
     policy: &ryeos_engine::isolation::IsolationPolicy,
-    policy_generation_digest: &str,
+    isolation_policy_digest: &str,
 ) -> Result<Arc<ryeos_engine::isolation::IsolationRuntime>> {
     let backend = resolve_isolation_backend_for_roots(
         bundle_roots,
@@ -448,7 +451,7 @@ pub fn load_prospective_isolation(
         app_root,
         policy.clone(),
         crate::node_policy::generation::policy_directory(app_root).join("isolation.yaml"),
-        format!("sha256:{policy_generation_digest}"),
+        format!("sha256:{isolation_policy_digest}"),
         backend,
     )
     .map(Arc::new)
@@ -1024,14 +1027,14 @@ pub fn admit_node_bundle_roots(
     bundle_roots: &[PathBuf],
     node_trust_store: &TrustStore,
     policy: &ryeos_engine::isolation::IsolationPolicy,
-    policy_generation_digest: &str,
+    isolation_policy_digest: &str,
 ) -> Result<Arc<ryeos_engine::isolation::IsolationRuntime>> {
     let prospective = load_prospective_isolation(
         app_root,
         bundle_roots,
         node_trust_store,
         policy,
-        policy_generation_digest,
+        isolation_policy_digest,
     )?;
     build_node_bundle_admission(bundle_roots, node_trust_store, prospective.clone())?;
     Ok(prospective)
