@@ -16193,7 +16193,10 @@ mod tests {
         let authority = bounded_resource_authority();
         let operation = digest_of("j4-lost-ack-original-operation");
         let request = digest_of("j4-lost-ack-original-request");
-        let deadline = MonotonicDeadline::after(Duration::from_millis(100));
+        // The reservation must commit before the deadline and only the
+        // acknowledgement may outlive it, so the deadline has to cover the
+        // commit on a loaded runner; the closure then sleeps past it.
+        let deadline = MonotonicDeadline::after(Duration::from_secs(3));
         let result = db.with_conn_until(deadline, |conn| {
             immediate_transaction(conn, "test original committed hold", || {
                 db.reserve_resource_operation_in_transaction(
