@@ -337,17 +337,12 @@ async fn successors_keep_the_pinned_prefix_and_a_well_formed_start() {
 /// proves what the event carried.
 const CAPPED_HEADER: &str = "continuation:\n  carry_turns: 2\nhooks:\n  - id: on-handoff\n    event: continuation\n    result: observation\n    condition: \"event.threshold_tokens == 32000\"\n    action:\n      primary: execute\n      item_id: \"tool:marker/marker\"\n      ref_bindings: {}\n      params: {}\n";
 
-/// The model's hand-off cap, not the window fraction, decides where a run
-/// hands off. The window is 100,000 tokens (a 90,000 ratio point) and the
-/// entry caps the point at 32,000, and the first hand-off must come before the
-/// ratio point. The successor starts under the carry budget, and the
-/// continuation event records the effective point.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_capped_model_hands_off_at_the_cap_not_the_ratio() {
-    const CAP: u64 = 32_000;
-    // One 8,000-character result a turn, 60 turns: far more than the 32,000
-    // cap, so the hand-off must come from the cap; the assertions below check
-    // it came before the 90,000 ratio point.
+/// Run the 60-turn large-result script on a 100,000-token window (a 90,000
+/// ratio point) and return the estimated size of the request before the first
+/// hand-off (None when the run never hands off), the size each successor
+/// starts at, and how many times the continuation hook saw a 32,000 point.
+/// Each result differs, so the duplicate-result guard keeps all of them.
+async fn run_large_result_chain(provider_top_extra: String) -> (Option<u64>, Vec<u64>, usize) {
     let script = "steps:\n  - repeat: 60\n    tool_calls:\n      - { id: \"call_{n}\", name: bigbulk_bigbulk, arguments: {} }\n  - repeat: 5\n    text: done\n";
     let rig = start_rig(
         script,
@@ -355,7 +350,7 @@ async fn a_capped_model_hands_off_at_the_cap_not_the_ratio() {
             context_window: 100_000,
             header_extra: CAPPED_HEADER,
             limits: Some((600, 600)),
-            provider_top_extra: format!("handoff_token_cap: {CAP}\n"),
+            provider_top_extra,
             marker_sleep_seconds: 0,
             ..RigOptions::default()
         },
@@ -371,41 +366,65 @@ async fn a_capped_model_hands_off_at_the_cap_not_the_ratio() {
         .into_iter()
         .map(|r| r.body)
         .collect();
-    let starts = successor_starts(&bodies);
-    let carried_tokens = |body: &Value| {
-        messages_of(body)
+    let size = |body: &Value| {
+        (messages_of(body)
             .iter()
             .map(|m| m.to_string().len())
             .sum::<usize>()
-            / 4
+            / 4) as u64
     };
-    let sizes: Vec<usize> = bodies.iter().map(carried_tokens).collect();
+    let sizes: Vec<u64> = bodies.iter().map(size).collect();
+    let starts = successor_starts(&bodies);
     assert!(
-        !starts.is_empty(),
-        "the cap should force a hand-off; chain={chain:?} requests={} sizes={sizes:?}",
-        bodies.len()
+        sizes.iter().copied().max().unwrap_or(0) > 32_000,
+        "the script must carry more than the cap; chain={chain:?} sizes={sizes:?}"
     );
-    // The request before the first hand-off is at the cap (a serialised-size
-    // estimate runs above the runtime's own), and well under the 90,000 ratio point.
-    let before = carried_tokens(&bodies[starts[0] - 1]) as u64;
+    (
+        starts.first().map(|s| sizes[s - 1]),
+        starts.iter().map(|s| sizes[*s]).collect(),
+        rig.marker_count(),
+    )
+}
+
+/// The model's hand-off cap, not the window fraction, decides where a run
+/// hands off. The window is 100,000 tokens (a 90,000 ratio point) and the
+/// entry caps the point at 32,000. The successor starts under the carry
+/// budget, and every continuation event records the effective point.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_capped_model_hands_off_at_the_cap_not_the_ratio() {
+    const CAP: u64 = 32_000;
+    let (before, successor_sizes, marked) =
+        run_large_result_chain(format!("handoff_token_cap: {CAP}\n")).await;
+    // Request sizes here are serialised-JSON estimates, a little above the
+    // runtime's own, so the bounds are loose.
+    let before = before.expect("the cap forces a hand-off");
     assert!(
-        (CAP / 2..90_000).contains(&before),
-        "the first hand-off came after {before} estimated tokens; sizes={sizes:?}"
+        (CAP / 2..60_000).contains(&before),
+        "first hand-off after {before} estimated tokens"
     );
-    // The successor starts under the carry budget (16,000 tokens), far under the cap.
-    for &start in &starts {
+    for size in &successor_sizes {
         assert!(
-            carried_tokens(&bodies[start]) < 20_000,
-            "successor request {start} starts at {} estimated tokens",
-            carried_tokens(&bodies[start])
+            *size < 20_000,
+            "a successor starts at {size} estimated tokens"
         );
     }
-    // Every continuation event recorded the effective point as the cap.
     assert_eq!(
-        rig.marker_count(),
-        starts.len(),
+        marked,
+        successor_sizes.len(),
         "each hand-off's event records threshold_tokens = {CAP}"
     );
+}
+
+/// Control: the same script without a cap hands off only near the ratio point.
+#[tokio::test(flavor = "multi_thread")]
+async fn without_a_cap_the_hand_off_stays_at_the_ratio() {
+    let (before, _, marked) = run_large_result_chain(String::new()).await;
+    let before = before.expect("the ratio point is reached within the script");
+    assert!(
+        before > 60_000,
+        "uncapped, the first hand-off came after only {before} estimated tokens"
+    );
+    assert_eq!(marked, 0, "no event recorded a 32,000 point");
 }
 
 /// E5. An operator follow-up is pinned: after it, a chain longer than

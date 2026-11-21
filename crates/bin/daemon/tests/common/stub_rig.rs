@@ -517,7 +517,7 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
     plant_python_tool(
         root,
         "bigbulk",
-        "print(json.dumps({'ok': True, 'data': 'x' * 8000}))",
+        "print(json.dumps({'ok': True, 'data': 'x' * 8000 + str(time.time_ns())}))",
         &fixture.publisher,
     )?;
     plant_python_tool(
