@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-20T23:17:05Z:e420e5ab4251a4fea12dbb840127ba8ef48357cc780076037c219ee3e262beaa:RpDfoi31YkcL4cgAXOaHRH6njw3gal0EMFD6SXXacknQiNNVxApOq2iVky+Ld2kQyC5IdaUHVIs77C2mX+3YDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-21T16:57:42Z:ca1eb1494ada73d95985d6392bed0f3dd97f9b60553c0b2ce4829d0dd071ac96:uBZhfClY0x9l93jZKK4gmQ8yNXZBv9MaxTknDV0jdRKbZ2Co5nzFfUW7f78UGDhOeT4hxl0DBuhvvRfqZP5rDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: revisions.get
 availability: both
@@ -6,4 +6,9 @@ ui_read_only: true
 state_access: read_only_existing
 record_thread: false
 required_caps: ["ryeos.execute.service.revisions/get"]
+schema:
+  project_path: string
+  item_ref: string
+  seq: integer
+  include_unverified: boolean?
 description: "Read one signed revision record of a project item with its signed item bytes and what was checked. A record that fails verification is withheld"
