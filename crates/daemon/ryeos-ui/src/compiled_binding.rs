@@ -3008,7 +3008,7 @@ mod tests {
 
     #[test]
     fn view_set_identities_are_part_of_the_binding_digest() {
-        let surface = serde_json::json!({"view_sets": [embedded_set("one")]});
+        let surface = serde_json::json!({"capabilities": {"sources": [], "affordances": []}, "view_sets": [embedded_set("one")]});
         let resolved = |byte| {
             BTreeMap::from([(
                 "view_set:test/one".to_string(),
@@ -3030,13 +3030,13 @@ mod tests {
 
     #[test]
     fn a_refused_view_set_is_named_in_the_binding_and_the_surface_still_compiles() {
-        let surface = serde_json::json!({"view_sets": [embedded_set("kept")]});
+        let surface = serde_json::json!({"capabilities": {"sources": [], "affordances": []}, "view_sets": [embedded_set("kept")]});
         let compiled = compile_with_view_sets(
             BTreeMap::from([
                 (
                     "view_set:test/kept".to_string(),
                     EmbeddedViewIdentity::Resolved {
-                        identity: identity("view_set:test/kept", 'k'),
+                        identity: identity("view_set:test/kept", 'e'),
                     },
                 ),
                 (
@@ -3061,7 +3061,7 @@ mod tests {
     fn an_unresolved_view_set_ref_in_the_compile_body_is_refused() {
         let error = try_compile_with_view_sets(
             BTreeMap::new(),
-            &serde_json::json!({"view_sets": ["view_set:test/x"]}),
+            &serde_json::json!({"capabilities": {"sources": [], "affordances": []}, "view_sets": ["view_set:test/x"]}),
         )
         .unwrap_err();
         assert!(error.to_string().contains("unresolved"));
