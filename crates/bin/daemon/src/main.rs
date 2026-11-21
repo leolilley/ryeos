@@ -10342,6 +10342,7 @@ mod shutdown_custody_tests {
             "target_start_time_ticks": 1,
             "group_leader_pid": 4242,
             "group_leader_start_time_ticks": 1,
+            "pid_namespace": lillux::current_pid_namespace().unwrap(),
             "process_scope": null,
             "resource_selections": [],
             "resource_settlement_authority": null,

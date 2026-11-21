@@ -2833,6 +2833,7 @@ fn invariant_test_identity(pid: i64) -> crate::process::ExecutionProcessIdentity
         target_start_time_ticks: 11,
         group_leader_pid: pid,
         group_leader_start_time_ticks: 11,
+        pid_namespace: lillux::current_pid_namespace().unwrap(),
         resource_selections: Vec::new(),
         resource_settlement_authority: None,
         resource_operations: Vec::new(),

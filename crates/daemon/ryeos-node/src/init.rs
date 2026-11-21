@@ -5026,8 +5026,8 @@ mod tests {
         };
         // A helper that outlives its parent exits by itself.
         std::thread::spawn(|| {
-            std::thread::sleep(std::time::Duration::from_secs(60));
-            eprintln!("state-lock helper process: 60 s cap reached; exiting");
+            std::thread::sleep(std::time::Duration::from_secs(240));
+            eprintln!("state-lock helper process: 240 s cap reached; exiting");
             std::process::exit(3);
         });
         let _lock = ryeos_node_runtime::state_lock::StateLock::acquire(std::path::Path::new(&path))
@@ -5060,10 +5060,14 @@ mod tests {
                 .stderr(std::process::Stdio::null())
                 .spawn()
                 .unwrap();
-            // Readiness is the helper's own announcement, read on a thread so
-            // a helper that never announces fails the test instead of
-            // blocking it. libtest prints `test <name> ... ` without a newline
-            // before the helper announces itself on the same line.
+            // Readiness is the helper's own announcement, read on a thread.
+            // There is no wall-clock deadline here: a loaded runner can take
+            // minutes just to start a second copy of this test binary, and
+            // that delay says nothing about the lock. The wait ends when the
+            // helper announces, or when its stdout closes (it exited or hit
+            // its own cap), and the test's watchdog bounds the whole test.
+            // libtest prints `test <name> ... ` without a newline before the
+            // helper announces itself on the same line.
             let stdout = child.stdout.take().unwrap();
             let (ready, announced) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
@@ -5075,13 +5079,10 @@ mod tests {
                     }
                 }
             });
-            if announced
-                .recv_timeout(std::time::Duration::from_secs(30))
-                .is_err()
-            {
+            if announced.recv().is_err() {
                 let _ = child.kill();
                 let _ = child.wait();
-                panic!("the helper process did not take the state lock within 30 s");
+                panic!("the helper process exited without taking the state lock");
             }
             Self { child }
         }
