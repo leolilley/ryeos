@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-19T18:09:46Z:a05ff8f0767def416ceea26c62dc81d19ab884dedb849f8f967cb89d2ec5d9fc:fvY3YMzLYM/W9TYHdwcn9PBdkjN/a0Oc6Rs3Gm1yLkd3KtI9VxjP4zGc7bPF9bNPuAWb/iLBt2BWPgMI0ReDAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-21T05:55:52Z:04affd2a7a5e2bc5ba7dc99256044357e20418d253398d9193888c454148fbd7:l/nkGq/eeRLsKc3xzL7VEvvJlNRbp96HCGp97xdNr7W7d3b4UPPxlkF7j4KVE88YUwer7n9lK1jqtNt2faSQDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [fundamentals, directives, workflows, prompts]
 version: "2.1.0"
@@ -149,6 +149,12 @@ removes that subtree's authority.
 - `limits.deadline.reserve_seconds` — time this directive keeps for itself to
   settle after its work is stopped (see Run deadline). Defaults to the signed
   directive limits config.
+  Choose it from the worst-case settle time under load, not the idle case: the
+  runtime must notice its hard stop, settle itself over the callback and exit
+  inside this window. On a saturated node a short reserve (5 s, for example) can
+  be too short. The node then kills the runtime at `E` before it settles itself,
+  and the thread records a plain `timed_out` without the deadline `phase` and
+  `stopped_at_ms`. The PLE directives use 30.
 - `limits.wrap_up_seconds` — how long before the hard stop the model is told
   time is short. `0` never tells it. Only meaningful for a run with a deadline.
 
