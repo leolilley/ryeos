@@ -339,15 +339,16 @@ const CAPPED_HEADER: &str = "continuation:\n  carry_turns: 2\nhooks:\n  - id: on
 
 /// The model's hand-off cap, not the window fraction, decides where a run
 /// hands off. The window is 100,000 tokens (a 90,000 ratio point) and the
-/// entry caps the point at 32,000; the script's bulk calls reach only about
-/// 80,000 tokens, so no hand-off here can be the ratio's. The successor starts under the carry budget, and the
+/// entry caps the point at 32,000, and the first hand-off must come before the
+/// ratio point. The successor starts under the carry budget, and the
 /// continuation event records the effective point.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_capped_model_hands_off_at_the_cap_not_the_ratio() {
     const CAP: u64 = 32_000;
-    // One 8,000-character result a turn is about 2,000 estimated tokens: the
-    // 40 turns total about 80,000 tokens, under the 90,000 ratio point.
-    let script = "steps:\n  - repeat: 40\n    tool_calls:\n      - { id: \"call_{n}\", name: bigbulk_bigbulk, arguments: {} }\n  - repeat: 5\n    text: done\n";
+    // One 8,000-character result a turn, 60 turns: far more than the 32,000
+    // cap, so the hand-off must come from the cap; the assertions below check
+    // it came before the 90,000 ratio point.
+    let script = "steps:\n  - repeat: 60\n    tool_calls:\n      - { id: \"call_{n}\", name: bigbulk_bigbulk, arguments: {} }\n  - repeat: 5\n    text: done\n";
     let rig = start_rig(
         script,
         RigOptions {
@@ -371,14 +372,6 @@ async fn a_capped_model_hands_off_at_the_cap_not_the_ratio() {
         .map(|r| r.body)
         .collect();
     let starts = successor_starts(&bodies);
-    assert!(
-        !starts.is_empty(),
-        "the cap should force a hand-off before the script ends; chain={chain:?} requests={}",
-        bodies.len()
-    );
-    // The script alone stays under the ratio point, so a hand-off here is the cap's.
-    // The request before the hand-off is at the cap, not far past it.
-    let before = messages_of(&bodies[starts[0] - 1]);
     let carried_tokens = |body: &Value| {
         messages_of(body)
             .iter()
@@ -386,10 +379,18 @@ async fn a_capped_model_hands_off_at_the_cap_not_the_ratio() {
             .sum::<usize>()
             / 4
     };
+    let sizes: Vec<usize> = bodies.iter().map(carried_tokens).collect();
     assert!(
-        carried_tokens(&bodies[starts[0] - 1]) as u64 >= CAP / 2,
-        "{} messages before the hand-off",
-        before.len()
+        !starts.is_empty(),
+        "the cap should force a hand-off; chain={chain:?} requests={} sizes={sizes:?}",
+        bodies.len()
+    );
+    // The request before the first hand-off is at the cap (a serialised-size
+    // estimate runs above the runtime's own), and well under the 90,000 ratio point.
+    let before = carried_tokens(&bodies[starts[0] - 1]) as u64;
+    assert!(
+        (CAP / 2..90_000).contains(&before),
+        "the first hand-off came after {before} estimated tokens; sizes={sizes:?}"
     );
     // The successor starts under the carry budget (16,000 tokens), far under the cap.
     for &start in &starts {
