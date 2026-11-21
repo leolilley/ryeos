@@ -15257,13 +15257,37 @@ mod native_terminal_existing_wait_tests {
         Vec<u8>,
         ChildRelease,
     ) {
+        selected_live_child_with_testimony_within(Duration::from_secs(4))
+    }
+
+    fn selected_live_child_with_testimony_within(
+        original_window: Duration,
+    ) -> (
+        RunningProcess,
+        InheritedDescriptorAuthority,
+        Vec<u8>,
+        ChildRelease,
+    ) {
         let (running, writer, frame, sender, applied, release) =
-            selected_child_with_receipt_sender();
+            selected_child_with_receipt_sender_within(original_window);
         sender.send(Ok(applied)).unwrap();
         (running, writer, frame, release)
     }
 
     fn selected_child_with_receipt_sender() -> (
+        RunningProcess,
+        InheritedDescriptorAuthority,
+        Vec<u8>,
+        std::sync::mpsc::Sender<Result<crate::LinuxSandboxAppliedLaunchReceipt, String>>,
+        crate::LinuxSandboxAppliedLaunchReceipt,
+        ChildRelease,
+    ) {
+        selected_child_with_receipt_sender_within(Duration::from_secs(4))
+    }
+
+    fn selected_child_with_receipt_sender_within(
+        original_window: Duration,
+    ) -> (
         RunningProcess,
         InheritedDescriptorAuthority,
         Vec<u8>,
@@ -15312,7 +15336,7 @@ mod native_terminal_existing_wait_tests {
             .unwrap();
         let writer = held
             .prepare_native_settlement_channel(crate::time::MonotonicDeadline::after(
-                Duration::from_secs(4),
+                original_window,
             ))
             .unwrap();
         running.native_settlement = held.reader.native_settlement.take();
@@ -15755,38 +15779,30 @@ mod native_terminal_existing_wait_tests {
 
     #[test]
     fn timely_collected_reentry_after_original_expiry_preserves_historical_result() {
-        let (mut running, writer, frame, release) = selected_live_child_with_testimony();
-        // The original deadline is an explicit far-future instant, so
-        // collection is timely by construction on any runner load.
-        let deadline = crate::time::MonotonicDeadline::after(Duration::from_secs(600));
-        running
-            .native_settlement
-            .as_mut()
-            .unwrap()
-            .original_deadline = deadline;
+        // The one test that lets the real original expiry elapse end to end.
+        // The deadline is copied into the settlement writer and reader as
+        // well as the channel, so overwriting the channel's copy would leave
+        // those untouched and prove nothing about a genuinely expired
+        // original. The window is short to keep CI fast; the child is held
+        // alive by its release handle, so identity capture cannot race its
+        // exit however long the runner stalls.
+        let (running, writer, frame, release) =
+            selected_live_child_with_testimony_within(Duration::from_secs(2));
         writer.file().write_all(&frame).unwrap();
         drop(writer);
         release.release();
-        let mut running = match selected_wait(running, Duration::from_secs(30)) {
+        let running = match selected_wait(running, Duration::from_secs(2)) {
             SelectedNativeTerminalWaitOutcome::Collected(owner) => owner,
             _ => panic!("fixture must collect before original expiry"),
         };
-        assert!(!deadline.has_elapsed());
-        // Expire the original deadline by explicit injection after the
-        // collection, not by sleeping.
-        running
+        let deadline = running
             .native_settlement
-            .as_mut()
+            .as_ref()
             .unwrap()
-            .original_deadline = crate::time::MonotonicDeadline::after(Duration::ZERO);
-        assert!(
-            running
-                .native_settlement
-                .as_ref()
-                .unwrap()
-                .original_deadline
-                .has_elapsed()
-        );
+            .original_deadline;
+        // Expire the actual original clock, never replace it with test metadata.
+        thread::sleep(deadline.remaining() + Duration::from_millis(1));
+        assert!(deadline.has_elapsed());
         let running = match selected_wait(running, Duration::ZERO) {
             SelectedNativeTerminalWaitOutcome::Collected(owner) => owner,
             _ => panic!("historical timely collection must remain Collected"),
