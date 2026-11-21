@@ -342,6 +342,11 @@ jobs:
           python3 -I -B tests/development/ci_gate_scripts.py
           python3 -I -B .ai/tools/ryeos/development/browser-assets-production/lib/web-package-source-digest.py --check
 
+      # The manifest's ui_binding_revision mirrors the client code constant; the registry
+      # script derives it and fails here when the committed manifest or generated table differs.
+      - name: Check the browser asset registry matches the code
+        run: python3 -I -B crates/daemon/ryeos-ui/generate_asset_registry.py --check
+
       # The browser renderer is its own Cargo workspace; every package its lock shares with the
       # root lock must resolve identically.
       - name: Check the browser renderer lock agrees with the root lock
@@ -874,6 +879,45 @@ jobs:
   # The UI-only merge gate's tests (see the classify job): the client crates and the UI
   # daemon crate. The Rune workspace tests run in rust-policy and the package freshness
   # check in static-policy, both of which every merge gate runs.
+  # Every merge_gates dispatch, in both gate modes, builds ryeos-ui and runs its embedded-asset
+  # tests: the full gate skips the test shards and the ui-only gate is the only other place
+  # that runs this crate, so without this job a manifest/code disagreement passed the gate.
+  ui-assets:
+    name: Browser asset registry tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.merge_gates }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      # Read the crate cache the other jobs save; never save from here.
+      - name: Restore cargo artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: workspace-crates-v1
+          cache-workspace-crates: true
+          save-if: false
+
+      - name: Check the browser asset registry matches the code
+        run: python3 -I -B crates/daemon/ryeos-ui/generate_asset_registry.py --check
+
+      - name: Test the embedded browser assets
+        run: cargo test --locked -p ryeos-ui --lib assets::
+
   ui-gate:
     name: UI targeted tests
     needs: [classify]
