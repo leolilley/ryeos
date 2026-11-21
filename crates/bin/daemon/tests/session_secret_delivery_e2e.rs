@@ -16,9 +16,9 @@
 //!    `session_secret_unbounded`;
 //! 6. recovery after the recipient rule is withdrawn refuses with
 //!    `session_secret_revoked`, and no worker respawns;
-//! 6b. a session whose lease ended before the restart is not resumed and its
-//!    root ends in a typed terminal state;
-//! 7. the workload holds no sealed descriptor.
+//! 7. the workload holds no sealed descriptor;
+//! 8. a session whose lease ended before the restart is not resumed and its
+//!    root ends in a typed terminal state.
 //!
 //! The session worker here is a script that plays the bridge's part for this
 //! boundary: it adopts and closes the sealed descriptor before anything else,
