@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-05T00:45:30Z:bcf699c1cb11497554beef26e67e2e49bf63e6ab12a4dc0d02ad193f4ed43964:lbz4hg1+JlqCMI90XIxdYPGrBbAzYE2y9uhYLUYL9kmyxFPn77l8pcMuqawGxi+9FITlwLUhFUYbjd/26wJsDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-21T02:35:18Z:c72cb05c8cb1240ed9f0e7c174d3bb030888f56861f5574d08b854ae43fc52aa:ZAEawJplVw88I5pd0QIOpiQfF1mYgw/89wWguUH+5UdWPyNBDNcA8wLLHJSWkKUomssOFHace4K25GOQHqojCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [platform, linux, containers, compatibility, portability, support]
@@ -34,6 +34,16 @@ numeric-PID signal fallback. It also requires atomic bundle replacement through
 selected registered bundle must provide a trusted adapter and artifacts for the
 host triple. RyeOS does not ship one by default. The host must permit every
 kernel operation required by the selected backend's declared capabilities.
+Executable captures are sealed memfds. The node probes `memfd_create(MFD_EXEC)`
+once and requests the flag when the kernel accepts it (Linux 6.3 and newer).
+Where the kernel does not know the flag (older kernels, gVisor), a memfd is
+executable by construction, so it is created without the flag; the node reports
+this as `exec:sealed_memfd` with basis `memfd_exec_flag=unsupported_executable_by_default`
+(`memfd_exec_flag=supported` otherwise). The choice always comes from that
+probe, never from retrying a failed create. Under `vm.memfd_noexec=2` the
+kernel refuses `MFD_EXEC` with `EACCES`, no executable memfd can exist, and the
+node reports `exec:sealed_memfd` as missing (`memfd_exec_forbidden`) and refuses
+executable captures with that code.
 Setuid, setgid, and file-capability executables are refused before RyeOS copies
 the verified bytes into an immutable private capture. See [Execution
 Isolation](node/execution-isolation.md).
