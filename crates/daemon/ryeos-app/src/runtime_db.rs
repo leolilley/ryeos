@@ -2744,6 +2744,10 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // signed section, so a recovered session survives edits to other sections. A
 // realization stored before the cut carries the old value and would contradict
 // its capsule on recovery; the reset clears the retained sessions it belongs to.
+// The same digest is the `policy_digest` of the isolation launch provenance kept in
+// thread launch metadata and scoped-child grants in this database; those rows are
+// compared with the live admission class, so pre-cut rows would stop matching and
+// the reset clears them. Nothing outside this database stores it.
 const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 142;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0

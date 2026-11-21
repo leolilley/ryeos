@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-20T22:52:41Z:021d3e7c6cd8415de8978d6ee13216d33aea3bf98609a4a60b84440f42af2544:sE4seecK53H+BNjdJ6EF+AXiWu6W6NPMdxUog9O7aqbUyBCJOCakh13008OfrLrdgLMOb/bi6bSees86MKwDDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-21T02:18:05Z:e1f945db353359eb7aeb1eb4d86eb183c37f3cb090c5e1949256f6ce7c2691a0:NwfwJXetzTtaUTilV7hbQJuFN973zAIEcqd3j9stlR+EfzfyeltBYhfxSnPxHYWF7QGtYU9/hzObcrcNI2E0CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -346,6 +346,16 @@ property from the digest of the whole node-policy generation to the digest of th
 isolation policy's own section, so a recovered session now survives edits to
 other policy sections; a session retained before the cut would contradict its
 realization on recovery, and the reset clears it.
+The same value is the `policy_digest` of the isolation launch provenance stored
+in each thread's runtime launch metadata and in the retained scoped-child grants
+(runtime database rows); the live node compares them with its current
+admission class when it prepares a machine successor or starts a scoped
+producer. Rows written before the cut carry the generation digest and would no
+longer match, and the reset clears them with the rest of the runtime database.
+The digest is not stored in the init completion, the bundle-root admission
+(`admit_node_bundle_roots` returns a validation-only runtime), a registered
+definition record or any signed document: those compositions only compare live
+values, so nothing outside the runtime database holds the old meaning.
 This is the command the daemon's start refusal names, with the stored and
 current epochs filled in. It does not retire project HEADs, so candidates
 retained against them keep their base fences; no epoch cut needs
