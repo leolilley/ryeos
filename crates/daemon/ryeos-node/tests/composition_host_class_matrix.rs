@@ -202,6 +202,8 @@ fn facts(storage: RootStorageFacts) -> HostFacts {
             reason: "EPERM".to_owned(),
         },
         pidfd: ProbeOutcome::Allowed,
+        peer_pidfd: ProbeOutcome::Allowed,
+        pidfd_signal_process_group: ProbeOutcome::Allowed,
         subreaper: ProbeOutcome::Allowed,
         memfd_exec: ProbeOutcome::Allowed,
         resident_bytes: 64 << 20,

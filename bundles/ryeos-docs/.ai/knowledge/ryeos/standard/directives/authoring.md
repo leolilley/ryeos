@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-17T16:21:24Z:49b689537b8f7d2a416a55045b84b6f37b5adebdc93fb1deb72e0d6faa49b565:QteIA6kQWfcdwOOtEEYORBi/7g9NxP+pGiJydiR+YpgY7A8qyjeZNDoaPWf7CY1ftUDUHuHJnaY4ebgvyT3NCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-21T05:55:52Z:3c06f202efc9d5ecd6732c0558834e862ea12032c6175c577a5177042e83874b:pVaQYY+kOCfVldJSP20hDscDjDWxBlb6cwmBw/lmu/UIk35YjiF+rCjQkAoavUhi8drnaXEzlGz5QaVqLnI9AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/directives
 tags: [directive, authoring, frontmatter]
@@ -54,7 +54,11 @@ Instructions for the runtime.
   once and refused before ledger admission or provider contact if it exceeds
   the signed value; RyeOS does not truncate or rewrite the transcript to fit.
   `wrap_up_seconds` and `deadline.reserve_seconds` shape the run deadline a
-  caller sets with `run_timeout`; see the directives reference.
+  caller sets with `run_timeout`; see the directives reference. Size the
+  reserve from the worst-case settle time on a loaded node, not the idle case: a
+  reserve that is too short (5 s on a saturated node) lets the node kill the
+  runtime before it settles itself, which records a plain `timed_out` without
+  the deadline phase and stop time. The PLE directives use 30.
   Directive-specific numeric dimensions are declared by the signed directive
   runtime descriptor. The engine/executor transport and clamp them as opaque
   keys and do not assign directive semantics to their names.
