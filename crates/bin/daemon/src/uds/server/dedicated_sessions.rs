@@ -1155,10 +1155,21 @@ pub(super) async fn start(
         &request.thread_id,
     )
     .await?;
-    let _credential_operation = ryeos_app::hosted_operation::acquire_credential_profile_operation(
-        &request.credential_profile_id,
-    )
-    .await?;
+    tracing::info!(
+        thread_id = %request.thread_id,
+        credential_profile_id = %request.credential_profile_id,
+        "dedicated-session start: waiting for the credential profile operation gate"
+    );
+    let _credential_operation =
+        ryeos_app::hosted_operation::acquire_credential_profile_operation_within(
+            &request.credential_profile_id,
+            ryeos_app::hosted_operation::CREDENTIAL_PROFILE_START_GATE_TIMEOUT,
+        )
+        .await?;
+    tracing::info!(
+        thread_id = %request.thread_id,
+        "dedicated-session start: operation gates held, admitting the session"
+    );
     ryeos_engine::protocol_vocabulary::validate_env_name(&request.credential_home_env)?;
     ryeos_engine::protocol_vocabulary::validate_env_name(&request.workspace_env)?;
     if request.route_set.is_empty()
@@ -1734,6 +1745,12 @@ pub(super) async fn start(
             serde_json::to_string(&route_fixed_params)?,
         ),
     ]);
+    tracing::info!(
+        thread_id = %request.thread_id,
+        worker_instance_id = %worker_instance_id,
+        boot_epoch,
+        "dedicated-session start: admitted, starting the worker process"
+    );
     let start_state = state.clone();
     let start_capsule = capsule_hash.clone();
     let start_workspace = workspace_path.clone();
@@ -1799,6 +1816,10 @@ pub(super) async fn start(
         .await
         .context("join dedicated-session worker start")?;
     started?;
+    tracing::info!(
+        thread_id = %request.thread_id,
+        "dedicated-session start: worker ready and bound"
+    );
     let session = state
         .state_store
         .dedicated_session(&request.thread_id)?

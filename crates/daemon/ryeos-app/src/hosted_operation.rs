@@ -194,6 +194,37 @@ pub async fn acquire_credential_profile_operation(
         .map_err(|error| anyhow::anyhow!("join credential-profile operation acquisition: {error}"))
 }
 
+/// Longest a dedicated-session start waits for the credential profile's
+/// operation gate. The gate is held for the length of every worker contact and
+/// of every other exclusive profile operation, so a start queued behind one
+/// that never returns would otherwise wait with no log and no outcome.
+pub const CREDENTIAL_PROFILE_START_GATE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(120);
+
+/// Acquire the profile's exclusive operation ownership, refusing with the
+/// typed code `credential_profile_gate_timeout` when `timeout` elapses first.
+/// The wait runs on a blocking owner, so an async caller keeps its executor
+/// thread.
+pub async fn acquire_credential_profile_operation_within(
+    profile_id: &str,
+    timeout: std::time::Duration,
+) -> Result<CredentialProfileOperationLease> {
+    let owned = profile_id.to_owned();
+    let deadline = lillux::time::MonotonicDeadline::after(timeout);
+    tokio::task::spawn_blocking(move || {
+        acquire_credential_profile_operation_until(&owned, deadline)
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("join credential-profile operation acquisition: {error}"))?
+    .map_err(|error| {
+        anyhow::anyhow!(
+            "credential_profile_gate_timeout: the credential profile's operation gate stayed \
+             held for {} s ({error:#})",
+            timeout.as_secs()
+        )
+    })
+}
+
 pub fn acquire_credential_profile_operation_sync(
     profile_id: &str,
 ) -> CredentialProfileOperationLease {
@@ -645,6 +676,29 @@ pub async fn begin_hosted_root_handoff_recovery_async(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_start_behind_a_held_profile_gate_refuses_with_the_typed_code() {
+        let held = acquire_credential_profile_operation_sync("gate-timeout-fixture");
+        let refusal = acquire_credential_profile_operation_within(
+            "gate-timeout-fixture",
+            std::time::Duration::from_millis(150),
+        )
+        .await
+        .err()
+        .expect("a held gate must refuse the bounded wait");
+        assert!(
+            format!("{refusal:#}").starts_with("credential_profile_gate_timeout:"),
+            "{refusal:#}"
+        );
+        drop(held);
+        acquire_credential_profile_operation_within(
+            "gate-timeout-fixture",
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        .expect("the gate is free again after the holder drops");
+    }
 
     #[test]
     fn qualification_contact_gate_releases_after_refusal() {
