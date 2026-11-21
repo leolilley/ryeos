@@ -127,6 +127,7 @@ pub mod remote_vault_list;
 pub mod remote_vault_set;
 pub mod remote_worker_workflows;
 pub mod renew_key;
+pub mod revisions;
 pub mod revoke_key;
 #[cfg(feature = "scheduling")]
 pub mod scheduler_deregister;
@@ -306,6 +307,8 @@ pub const ALL: &[ServiceDescriptor] = &[
     records::GET_DESCRIPTOR,
     records::LIST_DESCRIPTOR,
     records::KINDS_DESCRIPTOR,
+    revisions::LIST_DESCRIPTOR,
+    revisions::GET_DESCRIPTOR,
     trust_list::SHOW_DESCRIPTOR,
     bundle_remove::DESCRIPTOR,
     bundle_catalog_publish::DESCRIPTOR,

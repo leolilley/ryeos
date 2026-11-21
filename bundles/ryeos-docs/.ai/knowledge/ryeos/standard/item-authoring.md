@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-20T23:21:17Z:ec269fdcf9882cb619845fe6672a001dc852a774e60b5f7cb1cfd750acfa92f7:vJ7td1TFjSyxUpkMz4GcKmeOfW9373Y/rkJ2G3xIs4Sa6W1cToDFI+t7/Che+jfRC8S4QSNNR7CSpqevZ7ePDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-21T02:47:00Z:c7a189a3acb7e0643a0a8766f1c68beb91e3c53690929dc7f90373679fdc8be5:iJcbV3sRrnJJgLeHfOWFJZV5H4LkJdS8RsgnjbXBVlZA+iNXLivuTVM3Si8OCEELe7CVkmpo+78cGDX5FlapBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [item-authoring, runtime-authority, manifest, capabilities, author_item]
@@ -118,18 +118,21 @@ Request params:
 - `item_ref` — the canonical target `kind:bare_id` (no ref suffix).
 - `content` — the **unsigned** item body. It must not contain a signature line or
   a `ryeos:authored:` provenance marker; both are daemon-owned.
-- `mode` — `create` (default; fails if the item already exists) or `upsert`
-  (replaces the existing file, or creates it when there is none).
+- `mode` — `create` (default; fails if the item already exists), `upsert`
+  (replaces the existing file, or creates it when there is none) or `remove`
+  (removes a runtime-authored item; takes no `content`).
 - `format_ext` — the file extension (e.g. `.md`); required when creating a new
   item.
-- `expected_digest` — compare-and-swap guard for `upsert`. **Required when the
-  item already exists**: the upsert commits only if the incumbent's authored
+- `expected_digest` — compare-and-swap guard for `upsert` and `remove`.
+  **Required when the item already exists**: the write commits only if the incumbent's authored
   `content_digest` (from its provenance, and from the response that wrote it)
   equals this value, and fails with an `author_item conflict` otherwise. An
   upsert without it over an existing item is refused with code
   `author_item_expected_digest_required`, naming the incumbent's
   `content_digest` to resend with. An item with no runtime provenance (one the
-  operator signed) cannot be replaced through `author_item` at all.
+  operator signed) cannot be replaced or removed through `author_item` at all;
+  an operator-authored item is removed only with `ryeos item remove`, which the
+  operator runs in their own process.
 
 On success the daemon:
 
@@ -144,7 +147,33 @@ On success the daemon:
 - signs with the daemon identity and writes atomically.
 
 Response: `{ item_ref, path, mode, signer_fingerprint, content_digest,
-required_capability }`.
+required_capability, revision, revision_digest, previous_digest }`.
+
+A kind whose signed schema declares `runtime_authoring: refused` (the `revision`
+kind) cannot be written through the callback by any run, whatever it holds
+(`author_item_kind_not_authorable`).
+
+### Revision history
+
+Every write and removal is also recorded as a **revision**: a signed record of
+the core `revision` kind in the project, at
+`.ai/revisions/<kind>/<bare-id>/<seq>.yaml`. The chain of one item is numbered
+from 1; each record is signed by the key that made the change (the node's
+authoring key for a runtime-authored change, the operator's key for one made
+with `ryeos sign` or `ryeos item remove`), and carries the signed item bytes,
+the digest of the previous record, the item file's digest before and after, and
+the provenance (thread, run, acting principal, capability) and `recorded_at`,
+all inside the signed body. A removal is a tombstone record with no
+`after_digest`. The history travels with the project.
+
+The chain is provenance and undo, never authority: the loader reads the file on
+disk. A file whose digest is not the last record's `after_digest` is reported
+as an `unrecorded_change`. The node also keeps a node-signed head per project
+naming the newest record it has attested for each chain; a chain shorter than
+or different from its head is reported as `truncated` or `diverged`, and
+`author_item` refuses to extend it (`revision_chain_truncated`,
+`revision_chain_diverged`). Read a chain with `service:revisions/list` and
+`service:revisions/get`, which return each record with its verification.
 
 v1 supports live-filesystem project provenance only.
 

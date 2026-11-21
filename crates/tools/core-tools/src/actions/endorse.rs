@@ -5,7 +5,9 @@
 //! reviewed. This module resolves the refs (or `.ai` file paths) the operator
 //! typed to the facts that statement carries: the item's canonical ref, its
 //! kind and the digest of its signed bytes after the signature line, which is
-//! what the engine recomputes when it judges trust. It refuses an item that is
+//! what the engine recomputes when it judges trust. That is the signature
+//! header's `content_hash`, not a revision record's `after_digest` (which
+//! hashes the whole file, signature line included). It refuses an item that is
 //! unsigned, changed since it was signed, or signed by anything but a pinned
 //! authoring key: only those need an endorsement.
 

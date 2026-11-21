@@ -466,6 +466,33 @@ pub(crate) async fn sign_items(app_root: &Path, parameters: &Value) -> Result<Va
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ItemRemoveParameters {
+    item_ref: String,
+    project_path: String,
+}
+
+/// Remove a project item with the operator key, in this process, and record
+/// the removal as a tombstone revision signed by that key. The node never
+/// holds the key; the node need not be running.
+pub(crate) async fn item_remove(app_root: &Path, parameters: &Value) -> Result<Value, CliError> {
+    let params: ItemRemoveParameters = serde_json::from_value(parameters.clone())
+        .map_err(|error| local(format!("item remove parameters are invalid: {error}")))?;
+    let app_root = app_root.to_path_buf();
+    let report = tokio::task::spawn_blocking(move || {
+        ryeos_core_tools::actions::revision::run_item_remove(
+            &app_root,
+            &params.item_ref,
+            Path::new(&params.project_path),
+        )
+    })
+    .await
+    .map_err(|error| local(format!("item remove worker stopped: {error}")))?
+    .map_err(|error| local(format!("{error:#}")))?;
+    serde_json::to_value(report).map_err(local_error)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ContentPinParameters {
     item_ref: String,
     project_path: String,
