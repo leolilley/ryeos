@@ -341,12 +341,13 @@ async fn continuations_share_one_deadline() {
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-    assert!(chain.len() >= 2, "a continuation happened: {chain:?}");
+    let dump = failure_dump(&rig, &id).await;
+    assert!(chain.len() >= 2, "a continuation happened: {chain:?}{dump}");
     let statuses: Vec<&str> = chain.iter().map(|(_, s)| s.as_str()).collect();
     let timed_out = statuses.iter().filter(|s| **s == "timed_out").count();
     assert_eq!(
         timed_out, 1,
-        "one deadline stop ends the chain: {statuses:?}"
+        "one deadline stop ends the chain: {statuses:?}{dump}"
     );
     // Every segment ran under one recorded deadline (no restarted clock), and
     // the last segment's stop names it.
@@ -363,7 +364,7 @@ async fn continuations_share_one_deadline() {
         .expect("a timed-out segment");
     let result = deadline_result(&rig.h, &last)
         .await
-        .unwrap_or_else(|| panic!("no deadline result on {last}"));
+        .unwrap_or_else(|| panic!("no deadline result on {last}{dump}"));
     assert_eq!(result["deadline_at_ms"], deadlines[0], "{result}");
     // The last segment either stopped itself inside the deadline, or found its
     // end already passed at launch and settled as the typed elapsed stop (which
