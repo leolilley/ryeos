@@ -714,7 +714,7 @@ mod tests {
 
     fn seed() -> serde_json::Value {
         json!({ "schema": 2, "id": "work", "title": "Work", "root": {
-            "type": "split", "axis": "horizontal", "ratio": 0.7,
+            "type": "split", "axis": "horizontal", "ratio": 0.5,
             "first": { "type": "group", "label": "Worker", "views": ["view:test/conversation", "view:test/evidence"], "active": 1 },
             "second": { "type": "group", "label": "Changes", "views": ["view:test/changes"], "active": 0 }
         } })
