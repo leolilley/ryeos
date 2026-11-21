@@ -222,9 +222,9 @@ mod real_adapter {
 
     use super::*;
 
-    pub const PLACEMENT: &str = "T-leased-real-adapter";
-    pub const WORKSPACE: &str = "W-leased-real-adapter";
-    pub const WORKER: &str = "worker-leased-real-adapter";
+    pub const PLACEMENT: &str = super::PLACEMENT;
+    pub const WORKSPACE: &str = super::WORKSPACE;
+    pub const WORKER: &str = super::WORKER;
     const BINDING_ID: &str = "leased-session-rig";
     const CREDENTIAL: &str = "leased-session-rig-credential";
     /// The reservation's own lease lifetime and the binding's timeout.
@@ -563,6 +563,7 @@ async fn restarted_over(
     rig.restart().await?;
     let log = rig.log();
     real_adapter::counts_line(&log)?;
+    report_lease_lines(&log);
     rig.harness
         .stop_gracefully()
         .await
@@ -570,6 +571,16 @@ async fn restarted_over(
     let held = rig.held()?;
     let observations = rig.stored_observations()?;
     Ok((rig, log, held, observations))
+}
+
+/// Print the start's lines about leases, so a run's log shows what the node
+/// decided.
+fn report_lease_lines(log: &str) {
+    for line in log.lines().filter(|line| {
+        line.contains("lease") || line.contains("external") || line.contains("predecessor")
+    }) {
+        eprintln!("node: {line}");
+    }
 }
 
 fn require_unsettled(held: &Held, log: &str) {
