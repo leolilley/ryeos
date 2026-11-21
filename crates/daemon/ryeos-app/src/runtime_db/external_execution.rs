@@ -5050,65 +5050,65 @@ pub(crate) mod tests {
         }
     }
 
+    /// Decode stored observation text the way a retained row is decoded: the
+    /// strict canonical-evidence reader, over a scratch table.
+    fn read_stored_observation(
+        db: &crate::runtime_db::test_native::TestRuntime,
+        stored: &str,
+    ) -> Result<Option<ExternalTerminalObservation>> {
+        db.conn
+            .with_sql(|connection| {
+                connection.execute_batch(
+                    "DROP TABLE IF EXISTS temp.obs;
+                     CREATE TEMP TABLE obs (placement_thread_id TEXT PRIMARY KEY, observation_json TEXT NOT NULL)",
+                )?;
+                connection.execute("INSERT INTO temp.obs VALUES('T-one',?1)", [stored])?;
+                Ok(read_canonical_evidence(
+                    connection,
+                    "temp.obs",
+                    "observation_json",
+                    "T-one",
+                ))
+            })
+            .unwrap()
+    }
+
     #[test]
     fn terminal_observation_stores_its_basis_in_canonical_form() {
         use ryeos_external_execution_contract::TerminalBasis;
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&dir.path().join("r.sqlite3"));
         let observation = basis_fixture_observation(TerminalBasis::PastLatestLeaseEndNotFound);
         let canonical =
             lillux::canonical_json(&serde_json::to_value(&observation).unwrap()).unwrap();
         let value: serde_json::Value = serde_json::from_str(&canonical).unwrap();
         assert_eq!(value["basis"], "past_latest_lease_end_not_found");
-
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute(
-            "CREATE TABLE obs (placement_thread_id TEXT PRIMARY KEY, observation_json TEXT NOT NULL)",
-            [],
-        )
-        .unwrap();
-        conn.execute("INSERT INTO obs VALUES('T-one',?1)", [&canonical])
-            .unwrap();
-        let read: Option<ExternalTerminalObservation> =
-            read_canonical_evidence(&conn, "obs", "observation_json", "T-one").unwrap();
-        assert_eq!(read, Some(observation));
-
-        // A stored row whose JSON is not the canonical form of the record is
-        // refused even though it decodes.
+        assert_eq!(
+            read_stored_observation(&db, &canonical).unwrap(),
+            Some(observation)
+        );
+        // Text that decodes but is not the canonical form of the record is refused.
         let spaced = canonical.replacen(',', ", ", 1);
-        conn.execute("INSERT INTO obs VALUES('T-two',?1)", [&spaced])
-            .unwrap();
-        let refused: Result<Option<ExternalTerminalObservation>> =
-            read_canonical_evidence(&conn, "obs", "observation_json", "T-two");
-        assert!(refused.is_err());
+        assert!(read_stored_observation(&db, &spaced).is_err());
     }
 
     #[test]
     fn terminal_observation_without_basis_is_refused_on_read() {
         use ryeos_external_execution_contract::TerminalBasis;
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::runtime_db::test_native::TestRuntime::open(&dir.path().join("r.sqlite3"));
         let mut value =
             serde_json::to_value(basis_fixture_observation(TerminalBasis::ObservedTerminated))
                 .unwrap();
         value.as_object_mut().unwrap().remove("basis");
         let predecessor = lillux::canonical_json(&value).unwrap();
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute(
-            "CREATE TABLE obs (placement_thread_id TEXT PRIMARY KEY, observation_json TEXT NOT NULL)",
-            [],
-        )
-        .unwrap();
-        conn.execute("INSERT INTO obs VALUES('T-one',?1)", [&predecessor])
-            .unwrap();
-        let refused: Result<Option<ExternalTerminalObservation>> =
-            read_canonical_evidence(&conn, "obs", "observation_json", "T-one");
-        assert!(refused.is_err(), "a pre-cut observation must not decode");
-        // An unknown basis is refused too.
-        let mut value = value;
+        assert!(
+            read_stored_observation(&db, &predecessor).is_err(),
+            "a pre-cut observation must not decode"
+        );
         value["basis"] = "guessed".into();
         let unknown = lillux::canonical_json(&value).unwrap();
-        conn.execute("INSERT INTO obs VALUES('T-two',?1)", [&unknown])
-            .unwrap();
-        let refused: Result<Option<ExternalTerminalObservation>> =
-            read_canonical_evidence(&conn, "obs", "observation_json", "T-two");
-        assert!(refused.is_err());
+        assert!(read_stored_observation(&db, &unknown).is_err());
     }
 
     #[test]
