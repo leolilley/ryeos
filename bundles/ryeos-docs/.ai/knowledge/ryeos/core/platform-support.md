@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-21T02:35:18Z:c72cb05c8cb1240ed9f0e7c174d3bb030888f56861f5574d08b854ae43fc52aa:ZAEawJplVw88I5pd0QIOpiQfF1mYgw/89wWguUH+5UdWPyNBDNcA8wLLHJSWkKUomssOFHace4K25GOQHqojCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-21T03:12:19Z:e67214b605d8d78302a825d61af648b7a8fc8fc5ed6bf3a13abcc571f1a687c7:HMOJFxzMyY5KHoVhpSYunhXTm5BtJHP4YDdtIt4Ea8LPmpg+n87pZwaGj4KquaY2VOwoN2OOJYB7GyHS1wOQBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [platform, linux, containers, compatibility, portability, support]
@@ -40,10 +40,13 @@ Where the kernel does not know the flag (older kernels, gVisor), a memfd is
 executable by construction, so it is created without the flag; the node reports
 this as `exec:sealed_memfd` with basis `memfd_exec_flag=unsupported_executable_by_default`
 (`memfd_exec_flag=supported` otherwise). The choice always comes from that
-probe, never from retrying a failed create. Under `vm.memfd_noexec=2` the
-kernel refuses `MFD_EXEC` with `EACCES`, no executable memfd can exist, and the
-node reports `exec:sealed_memfd` as missing (`memfd_exec_forbidden`) and refuses
-executable captures with that code.
+probe, never from retrying a failed create. The probe also creates one memfd
+without the flag. Under `vm.memfd_noexec=2` the kernel (`mm/memfd.c`,
+`check_sysctl_memfd_noexec`) refuses a memfd without `MFD_NOEXEC_SEAL` with
+`EACCES` (Linux 6.3 refuses a flagless memfd with `EINVAL` but passes
+`MFD_EXEC`). Either way no executable memfd can exist, and the node reports
+`exec:sealed_memfd` as missing (`memfd_exec_forbidden`) and refuses executable
+captures with that code.
 Setuid, setgid, and file-capability executables are refused before RyeOS copies
 the verified bytes into an immutable private capture. See [Execution
 Isolation](node/execution-isolation.md).
