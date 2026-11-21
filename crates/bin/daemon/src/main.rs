@@ -4478,7 +4478,7 @@ async fn run(
                     .lifecycle_exit
                     .as_mut()
                     .context("daemon lifecycle owner is absent")?;
-                let unclean = lifecycle_marker::inferred_unclean_exit(previous_exit.as_ref());
+                let inferred = lifecycle_marker::inferred_exit(previous_exit.as_ref());
                 let version = build.version.to_string();
                 let revision = build.revision.to_string();
                 let profile = build.profile.to_string();
@@ -4490,7 +4490,7 @@ async fn run(
                     started_at: &guard.started_at,
                     launch_route: guard.launch_route,
                 };
-                match journal.record_start(unclean.as_ref(), &started) {
+                match journal.record_start(inferred.as_ref(), &started) {
                     Ok(()) => {}
                     Err(JournalError::Integrity(error)) => {
                         return Err(error).context(

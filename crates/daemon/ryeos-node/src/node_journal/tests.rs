@@ -49,9 +49,21 @@ fn started_facts(pid: u32) -> StartFacts<'static> {
     }
 }
 
+fn identity_at(pid: u32, ticks: u64) -> lillux::process_control::ExactProcessIdentity {
+    lillux::process_control::ExactProcessIdentity {
+        boot_id: "00000000-dead-beef-0000-000000000000".into(),
+        target_pid: pid,
+        target_start_time_ticks: ticks,
+        group_leader_pid: pid,
+        group_leader_start_time_ticks: ticks,
+        pid_namespace: "pid:[4026531836]".into(),
+        group_basis: Default::default(),
+    }
+}
+
 fn unclean(pid: u32) -> UncleanExit {
     UncleanExit {
-        pid,
+        identity: identity_at(pid, 5),
         started_at: "2026-11-19T00:00:00Z".into(),
         launch_route: Some(LaunchRoute::Supervised),
     }
@@ -344,7 +356,7 @@ fn a_handled_exit_records_reason_and_cleanliness() {
 fn an_inferred_unclean_exit_is_written_once_before_the_start() {
     let fx = Fixture::new();
     let journal = fx.journal();
-    let lost = unclean(77);
+    let lost = InferredExit::Unclean(unclean(77));
     journal
         .record_start(Some(&lost), &started_facts(41))
         .unwrap();
@@ -370,10 +382,15 @@ fn an_inferred_unclean_exit_is_written_once_before_the_start() {
     );
     let inferred = &journal.read().unwrap().records[0].body;
     assert_eq!(inferred.detail["pid"], 77);
+    assert_eq!(inferred.detail["start_time_ticks"], 5);
+    assert_eq!(inferred.detail["pid_namespace"], "pid:[4026531836]");
     assert_eq!(inferred.detail["started_at"], "2026-11-19T00:00:00Z");
     // A different lost run is a different record.
     journal
-        .record_start(Some(&unclean(78)), &started_facts(43))
+        .record_start(
+            Some(&InferredExit::Unclean(unclean(78))),
+            &started_facts(43),
+        )
         .unwrap();
     assert_eq!(
         journal
@@ -407,4 +424,76 @@ fn a_start_over_a_tampered_journal_is_an_integrity_error() {
         journal.record_start(None, &started_facts(42)),
         Err(JournalError::Integrity(_))
     ));
+}
+
+#[test]
+fn the_same_pid_at_another_birth_is_a_different_lost_run() {
+    let fx = Fixture::new();
+    let journal = fx.journal();
+    let first = InferredExit::Unclean(unclean(77));
+    let mut reborn = unclean(77);
+    reborn.identity.target_start_time_ticks = 6;
+    let reborn = InferredExit::Unclean(reborn);
+    for exit in [&first, &reborn, &first, &reborn] {
+        journal
+            .record_start(Some(exit), &started_facts(41))
+            .unwrap();
+    }
+    let unclean_records = journal
+        .read()
+        .unwrap()
+        .records
+        .iter()
+        .filter(|record| record.body.record_type == JournalType::NodeExitInferredUnclean)
+        .count();
+    assert_eq!(unclean_records, 2);
+}
+
+fn unknown(reason: &str, identity: Option<u32>) -> InferredExit {
+    InferredExit::Unknown(UnknownExit {
+        reason: reason.into(),
+        identity: identity.map(|pid| identity_at(pid, 5)),
+        started_at: identity.map(|_| "2026-11-19T00:00:00Z".into()),
+        launch_route: identity.map(|_| LaunchRoute::Direct),
+    })
+}
+
+#[test]
+fn an_unknown_exit_is_recorded_once_and_is_never_unclean() {
+    let fx = Fixture::new();
+    let journal = fx.journal();
+    let gap = unknown("indeterminate:probe refused", Some(77));
+    journal
+        .record_start(Some(&gap), &started_facts(41))
+        .unwrap();
+    journal
+        .record_start(Some(&gap), &started_facts(42))
+        .unwrap();
+    let retired = unknown("retired_stale_running:absent", None);
+    journal
+        .record_start(Some(&retired), &started_facts(43))
+        .unwrap();
+    let records = journal.read().unwrap().records;
+    let types: Vec<JournalType> = records.iter().map(|r| r.body.record_type).collect();
+    assert_eq!(
+        types,
+        vec![
+            JournalType::NodeExitUnknown,
+            JournalType::NodeStarted,
+            JournalType::NodeStarted,
+            JournalType::NodeExitUnknown,
+            JournalType::NodeStarted,
+        ]
+    );
+    assert_eq!(
+        records[0].body.detail["reason"],
+        "indeterminate:probe refused"
+    );
+    assert_eq!(records[0].body.detail["pid"], 77);
+    assert_eq!(
+        records[3].body.detail["reason"],
+        "retired_stale_running:absent"
+    );
+    assert!(!records[3].body.detail.contains_key("pid"));
+    assert_eq!(JournalType::NodeExitUnknown.as_str(), "node.exit_unknown");
 }
