@@ -1035,7 +1035,7 @@ async fn recovery_after_the_recipient_rule_is_withdrawn_is_refused_as_revoked() 
         !report_path.exists(),
         "a revoked delivery must never reach worker contact, yet a worker reported"
     );
-    let log = strip_ansi_escapes(&daemon.stderr_so_far());
+    let log = daemon.stderr_so_far();
     anyhow::ensure!(
         !log.contains("dedicated-session start: worker ready and bound"),
         "a worker was respawned over a revoked secret:\n{log}"
@@ -1107,7 +1107,7 @@ async fn a_session_whose_lease_ended_is_not_resumed_and_its_root_ends_typed_term
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    let log = strip_ansi_escapes(&daemon.stderr_so_far());
+    let log = daemon.stderr_so_far();
     anyhow::ensure!(
         status == "failed",
         "the root of an ended session ended `{status}`, not failed:\n{log}"
