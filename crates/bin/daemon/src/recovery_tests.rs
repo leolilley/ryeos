@@ -1432,8 +1432,14 @@ async fn startup_recovery_does_not_resume_the_root_of_a_terminal_dedicated_sessi
         credential_lock_owner: "worker-ended",
     })
     .unwrap();
-    db.fail_dedicated_session_start("T-ended-session-root", "worker-ended", 1, "lease ended", true)
-        .unwrap();
+    db.fail_dedicated_session_start(
+        "T-ended-session-root",
+        "worker-ended",
+        1,
+        "lease ended",
+        true,
+    )
+    .unwrap();
 
     let report = super::reconcile::reconcile_active_threads(&state)
         .await
@@ -1451,7 +1457,10 @@ async fn startup_recovery_does_not_resume_the_root_of_a_terminal_dedicated_sessi
         result.outcome_code.as_deref(),
         Some("dedicated_session_settled")
     );
-    let session = db.dedicated_session("T-ended-session-root").unwrap().unwrap();
+    let session = db
+        .dedicated_session("T-ended-session-root")
+        .unwrap()
+        .unwrap();
     assert_eq!(session.state, "terminal");
 }
 

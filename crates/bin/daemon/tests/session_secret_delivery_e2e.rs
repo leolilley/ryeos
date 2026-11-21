@@ -1126,7 +1126,10 @@ async fn a_session_whose_lease_ended_is_not_resumed_and_its_root_ends_typed_term
         .get_thread_result(&chain_root_id)?
         .context("the settled root has no result")?;
     anyhow::ensure!(
-        result.outcome_code.as_deref().is_some_and(|code| !code.is_empty()),
+        result
+            .outcome_code
+            .as_deref()
+            .is_some_and(|code| !code.is_empty()),
         "the root settled without a typed outcome: {result:?}"
     );
     let session = store
