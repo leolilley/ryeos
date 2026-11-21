@@ -1608,6 +1608,25 @@ jobs:
             grep -E 'node capability report recorded' "$log" | head -n 1 || true
           done
 
+      - name: Collect the per-test daemon logs and suite output
+        if: ${{ always() }}
+        run: |
+          # The suites run as root, so their logs are root-owned; make the
+          # copy readable before the artifact upload.
+          mkdir -p "$RUNNER_TEMP/e2e-evidence"
+          sudo -n cp -a "$RYEOSD_TEST_STDERR_DIR" "$RUNNER_TEMP/e2e-evidence/daemon-stderr" || true
+          cp "$RUNNER_TEMP"/*_e2e.log "$RUNNER_TEMP/e2e-evidence/" || true
+          sudo -n chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/e2e-evidence"
+
+      - name: Upload the per-test daemon logs and suite output
+        if: ${{ always() }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: process-scope-e2e-evidence-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/e2e-evidence
+          retention-days: 3
+          if-no-files-found: warn
+
       - name: Show daemon stderr of a failed run
         if: ${{ failure() }}
         run: |
