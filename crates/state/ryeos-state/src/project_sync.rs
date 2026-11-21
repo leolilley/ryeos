@@ -422,8 +422,8 @@ impl SyncInclude {
         Self::new(entries)
     }
 
-    /// The 17 rows of the former `PROJECT_AI_SURFACES` constant, for tests that
-    /// need a populated table without composing one from bundles.
+    /// The 18 rows the core bundle's manifest composes to, for tests that need
+    /// a populated table without composing one from bundles.
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_tests() -> Self {
         let mut entries = vec![
@@ -439,6 +439,7 @@ impl SyncInclude {
                 ".ai/parsers",
                 ".ai/handlers",
                 ".ai/protocols",
+                ".ai/revisions",
                 ".ai/node/engine/kinds",
                 ".ai/node/commands",
                 ".ai/config/agent",
@@ -1385,7 +1386,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_is_exactly_the_former_const_rows() {
+    fn test_table_is_exactly_the_core_rows() {
         let mut expected: Vec<(&str, SyncIncludeShape)> = vec![
             (".ai/manifest.source.yaml", SyncIncludeShape::File),
             (".ai/manifest.yaml", SyncIncludeShape::File),
@@ -1396,6 +1397,7 @@ mod tests {
             (".ai/parsers", SyncIncludeShape::Directory),
             (".ai/handlers", SyncIncludeShape::Directory),
             (".ai/protocols", SyncIncludeShape::Directory),
+            (".ai/revisions", SyncIncludeShape::Directory),
             (".ai/node/engine/kinds", SyncIncludeShape::Directory),
             (".ai/node/commands", SyncIncludeShape::Directory),
             (".ai/config/agent", SyncIncludeShape::Directory),
@@ -1414,7 +1416,7 @@ mod tests {
             .collect();
         assert_eq!(actual, expected, "the table is ordered by root");
         assert!(table.entries().iter().all(|e| e.materialize_to_project));
-        assert_eq!(table.materialized().count(), 17);
+        assert_eq!(table.materialized().count(), 18);
     }
 
     fn refusal(entries: Vec<SyncIncludeEntry>) -> String {
