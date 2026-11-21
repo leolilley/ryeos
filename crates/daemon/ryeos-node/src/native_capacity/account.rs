@@ -37,6 +37,8 @@ mod persistence_controls;
 pub(super) mod reanchor;
 mod redo;
 pub(super) mod reissue;
+pub(super) mod repair;
+pub(super) mod torn;
 
 // The account keeps its issued inode. The anchor is an atomically replaced
 // bounded redo role in the issued private directory. Only its exact committed
@@ -974,6 +976,18 @@ impl std::fmt::Display for CapacityRecordRefusal {
     }
 }
 impl std::error::Error for CapacityRecordRefusal {}
+
+/// The torn-file defect a record refusal names. A record whose marker or
+/// checksum fails is a tear; any other refusal has a valid checksum.
+fn refusal_defect(refusal: &CapacityRecordRefusal) -> torn::TornDefect {
+    match refusal {
+        CapacityRecordRefusal::Format | CapacityRecordRefusal::Schema => {
+            torn::TornDefect::ForeignFormat
+        }
+        CapacityRecordRefusal::Checksum => torn::TornDefect::ChecksumMismatch,
+        _ => torn::TornDefect::Malformed,
+    }
+}
 impl From<NativeCapacityUnitsRefusal> for CapacityRecordRefusal {
     fn from(error: NativeCapacityUnitsRefusal) -> Self {
         Self::Units(error)
@@ -1420,10 +1434,9 @@ impl RetainedStore {
             self.pinned.identity()? == self.identity,
             "capacity account differs from issued inode"
         );
-        ensure!(
-            self.pinned.observation()?.size() == RECORD_BYTES as u64,
-            "capacity account size changed"
-        );
+        if self.pinned.observation()?.size() != RECORD_BYTES as u64 {
+            return Err(torn::account_wrong_size());
+        }
         Ok(())
     }
 
@@ -1440,6 +1453,25 @@ impl RetainedStore {
         Ok(bytes)
     }
 
+    /// Overwrite exactly `torn` with `target`, the image the sound anchor
+    /// published. The compare-and-write refuses if the account is not those
+    /// bytes any more, and the result is read back and fsynced by Lillux.
+    fn overwrite_torn(
+        &self,
+        torn: &[u8; RECORD_BYTES],
+        target: &[u8; RECORD_BYTES],
+        deadline: lillux::time::MonotonicDeadline,
+        pay: &dyn Fn(u64) -> Result<()>,
+    ) -> Result<()> {
+        pay(ACCOUNT_WRITE_WORK)?;
+        self.require_original()?;
+        let mut scratch = [0; RECORD_BYTES];
+        self.pinned
+            .overwrite_fixed_if_matches(torn, target, &mut scratch, deadline)?;
+        self.require_original()?;
+        Ok(())
+    }
+
     fn apply_redo(
         &self,
         redo: &redo::AccountRedo,
@@ -1447,10 +1479,9 @@ impl RetainedStore {
         pay: &dyn Fn(u64) -> Result<()>,
     ) -> Result<()> {
         let before = self.read_bytes(deadline, pay)?;
-        ensure!(
-            redo.accepts_account_bytes(&before)?,
-            "account is outside its exact durable redo transition"
-        );
+        if !redo.accepts_account_bytes(&before)? {
+            return Err(torn::account_outside_redo(&before));
+        }
         let target = encode(redo.target())?;
         pay(ACCOUNT_WRITE_WORK)?;
         self.require_original()?;
@@ -1902,10 +1933,25 @@ impl RetainedCapacityAccount {
             .as_ref()
             .map(|a| &a.budget)
             .unwrap_or(&self.bootstrap);
-        self.anchor
-            .load(&inputs.policy, &self.issuance, budget.deadline, &|steps| {
-                budget.spend(inputs, steps)
-            })?;
+        if let Err(error) =
+            self.anchor
+                .load(&inputs.policy, &self.issuance, budget.deadline, &|steps| {
+                    budget.spend(inputs, steps)
+                })
+        {
+            // A torn anchor is refused with the cure the account proves. The
+            // account read is best effort: without it no verb is promised.
+            let account = self
+                .account
+                .read_bytes(budget.deadline, &|steps| budget.spend(inputs, steps))
+                .ok();
+            return Err(torn::with_anchor_cure(
+                error,
+                account.as_ref(),
+                &inputs.policy,
+                &self.issuance,
+            ));
+        }
         let current = *self.anchor.current()?;
         // An operator re-issuance anchor is admissible only while the document
         // that authorised it is present and verifies; this runs before any
@@ -1922,10 +1968,9 @@ impl RetainedCapacityAccount {
         if !accepted && cut_retirement::account_awaits_cut(&bytes, &encode(current.target())?) {
             anyhow::bail!(cut_retirement::PRE_CUT_CURE);
         }
-        ensure!(
-            accepted,
-            "capacity account corruption has no permitted redo"
-        );
+        if !accepted {
+            return Err(torn::account_outside_redo(&bytes));
+        }
         let needs_repair = bytes != encode(current.target())?;
         if !needs_repair && current.target().outstanding.is_none() {
             self.record = Some(*current.target());
@@ -2482,16 +2527,40 @@ pub fn inspect_capacity_account(app_root: &Path) -> Result<Option<CapacityAccoun
         .open_pinned_regular(OsStr::new("anchor"), false)?
         .context("capacity redo is unresolved; only its live owner recovers it")?;
     anchor.require_effective_user_owned()?;
-    ensure!(
-        anchor.observation()?.size() == redo::ANCHOR_BYTES as u64,
-        "capacity redo size changed"
-    );
+    // The account is read only to name the cure of a torn anchor, never to
+    // judge the account itself: a running owner may be writing it.
+    let account = || -> Option<[u8; RECORD_BYTES]> {
+        let file = directory
+            .open_pinned_regular(OsStr::new("account"), false)
+            .ok()??;
+        let mut bytes = [0; RECORD_BYTES];
+        let observation = file.observation().ok()?;
+        (observation.size() == RECORD_BYTES as u64).then_some(())?;
+        file.read_exact_stable_into(
+            &mut bytes,
+            lillux::time::MonotonicDeadline::after(Duration::from_millis(
+                policy.recovery.maximum_duration_ms,
+            )),
+        )
+        .ok()?;
+        Some(bytes)
+    };
+    if anchor.observation()?.size() != redo::ANCHOR_BYTES as u64 {
+        return Err(torn::with_anchor_cure(
+            torn::anchor_wrong_size(),
+            account().as_ref(),
+            policy,
+            &issuance,
+        ));
+    }
     let deadline = lillux::time::MonotonicDeadline::after(Duration::from_millis(
         policy.recovery.maximum_duration_ms,
     ));
     let mut bytes = [0; redo::ANCHOR_BYTES];
     anchor.read_exact_stable_into(&mut bytes, deadline)?;
-    let current = redo::AccountRedo::decode(&bytes, policy, &issuance)?;
+    let current = redo::AccountRedo::decode(&bytes, policy, &issuance)
+        .map_err(torn::classify_anchor_decode)
+        .map_err(|error| torn::with_anchor_cure(error, account().as_ref(), policy, &issuance))?;
     Ok(Some(summarize(&current, policy)?))
 }
 

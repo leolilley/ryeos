@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-11-21T09:06:06Z:40d056629d882ec8a108a6f7c4c47b04afcfb6a97ceb403018d4da32d1e1fa82:onkx2FZ8Kb+OpSuEpXxesUWiptPxkqT2ai+VGm9piS091wdBhgI9ICgeMoDsqKSC/AuoZ5BzgEzDSAp54JVeDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-21T16:24:56Z:29359a57a62d1a60352ef5fea6685963cb1d771ff12b2d43eb5cce5abe965820:MVNvq23Ri+gJzMFjANN7xUR9xdtYs1zKtrkY7BN++5velWyMjTmDRmTkqY/G+6gE+gc1RUebzxtYKNqtG6rBCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
-version: "3.7.0"
+version: "3.8.0"
 description: >
   Complete reference for the ryeos CLI: local lifecycle verbs, local
   operator verbs, daemon-backed verbs, aliases, and arguments.
@@ -433,6 +433,61 @@ Its `ui_browser_sessions` row checks that the signed browser-session policy is
 present and valid (schema 5: session lifetime, idle timeout, launch-token
 lifetime and the `session_scopes` ceiling). The live session count needs the
 running node, so the row reports it as not available offline.
+
+### `ryeos node capacity repair-account`
+
+```
+ryeos node capacity repair-account --reason "<why>" [--app-root <dir>] [--json]
+```
+
+Re-derives a stopped node's native-capacity account from its redo anchor.
+The capacity directory holds two files. The anchor is published first and
+names the image the account must hold; the account is then overwritten in
+place. A host crash or a failing device can leave the account in bytes no
+interrupted write produces (for example a mixture of sectors of the old and
+new image). A start refuses such an account and names this command as the
+cure, as `ryeos node doctor` does; the typed refusal reads "capacity account
+is torn (...)". The command overwrites exactly those bytes with the anchor's
+target image, fsyncs and reads back, and appends one line to the
+`native-capacity-repairs.jsonl` evidence log under the node's `.ai/state`
+(the anchor digest, the digest of the torn bytes, the digest of the image
+written, the reason and the acting account). The line is written before the
+account, so an interrupted run converges on rerun with one line per torn
+state.
+
+It acts only under the operator's own signed request (it is local-signer
+only and is never delegable) and only with the node stopped: it refuses while
+a daemon holds the state lock. It refuses, writing nothing:
+
+- when the anchor is itself torn (the refusal names `ryeos node capacity
+  reissue`, which can open the next epoch from the account record when the
+  signed policy pre-authorises operator re-issuance, and otherwise says to
+  hold the node stopped and restore it or re-provision it);
+- when the account already verifies as the anchor's image (reported as
+  already current, nothing written);
+- when the account is within the anchor's own write model, the unapplied redo
+  or a prefix of the target (the next start applies it and charges the
+  recovery attempt it owes);
+- when the account is a whole, verifiable record that is neither image of the
+  redo (a replaced or restored file is never rewritten silently);
+- when the account is the pre-cut shape the execution-history schema cut
+  re-records (the refusal names the cut).
+
+It settles no incarnation debit and renews nothing: an outstanding debit is
+classified by the next start, or by `ryeos node capacity reissue`, under the
+state lock. Restart inhibition is not cleared.
+
+When only the anchor is torn (a wrong size, a foreign marker or a failed
+checksum) and the account verifies for this issuance, `ryeos node capacity
+reissue --reason "..."` opens the next epoch from the account record instead
+of from the anchor, under the same signed document, epoch bound, liveness
+proof and evidence as an ordinary re-issuance. The torn epoch is never
+rebuilt: its recovery counter and authorisation are not in the account, so
+the rest of its allowance is forgiven. The torn anchor may have led the
+account by one debit, so the new epoch's debit sequence skips two numbers and
+never reuses one. The report says `from_account_record`.
+When both files are torn, or the policy forbids re-issuance, nothing renews
+the node and the refusal says to hold it stopped.
 
 ### `ryeos node reset execution-history`
 
