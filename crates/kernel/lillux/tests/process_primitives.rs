@@ -52,6 +52,30 @@ fn run_captures_stdout_and_zero_exit() {
     assert!(!r.timed_out);
 }
 
+/// A child that writes and exits at once races the capture drain's stop
+/// against its final read. Every run must return the whole output on both
+/// streams.
+#[test]
+fn run_never_loses_output_of_a_child_that_exits_immediately() {
+    for round in 0..200 {
+        let r = run(sh(&["-c", "printf hello; printf oops >&2"]));
+        assert_eq!(r.stdout, "hello", "stdout lost on round {round}");
+        assert_eq!(r.stderr, "oops", "stderr lost on round {round}");
+        assert!(r.success);
+    }
+}
+
+#[test]
+fn run_never_loses_the_tail_of_larger_output_from_an_immediate_exit() {
+    for round in 0..20 {
+        let mut request = sh(&["-c", "head -c 300000 /dev/zero | tr '\\0' x; printf END"]);
+        request.envs = path_env();
+        let r = run(request);
+        assert_eq!(r.stdout.len(), 300_003, "short capture on round {round}");
+        assert!(r.stdout.ends_with("xEND"), "tail lost on round {round}");
+    }
+}
+
 #[test]
 fn run_can_preserve_argv0_while_executing_another_path() {
     let mut request = sh(&["-c", "printf %s \"$0\""]);
