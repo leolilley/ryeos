@@ -2,10 +2,9 @@
 //! scripted chat stub.
 //!
 //! The attempt's outcome is unknown: the request may have reached the
-//! provider and its answer was never recorded. A directive that does not
-//! declare `provider_contact: repeatable` must not repeat the contact, so the
-//! resumed run fails with the typed code `provider_attempt_outcome_unknown`
-//! and the stub sees exactly one request. They need populated bundles
+//! provider and its answer was never recorded. Resuming after a restart is not
+//! supported, so the resumed run fails with the typed code
+//! `provider_attempt_outcome_unknown` and the stub sees exactly one request. They need populated bundles
 //! (`-f bundles=branch`, or `-f bundles=next` on a branch with the same
 //! bundles).
 
@@ -86,9 +85,17 @@ async fn a_kill_while_a_provider_attempt_is_issued_fails_typed_without_a_second_
         detail.contains("\"code\":\"provider_attempt_outcome_unknown\""),
         "the failure carries the typed code, not directive_failed: {detail}"
     );
+    for expected in [
+        "the provider outcome is unknown because the node restarted during the call",
+        "charged its reserved maximum",
+        "this turn cannot be resumed",
+        "Resuming after a restart is not supported for any directive yet",
+    ] {
+        assert!(detail.contains(expected), "missing `{expected}`: {detail}");
+    }
     assert!(
-        detail.contains("provider_contact: repeatable"),
-        "the failure names the cure: {detail}"
+        !detail.contains("repeatable"),
+        "the failure offers no repeatable cure: {detail}"
     );
     assert_eq!(
         rig.stub.requests().await.len(),

@@ -1180,10 +1180,10 @@ impl std::fmt::Display for ProviderOutcomeUnknown {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
-            "provider attempt coordinate {}/{}/{} was {} under predecessor launch generation {}; \
-             whether the provider acted on that request is unknown, so contacting it again is \
-             refused. If a repeat of the provider contact is harmless for this directive, \
-             declare `provider_contact: repeatable` in its header",
+            "the provider outcome is unknown because the node restarted during the call \
+             (attempt coordinate {}/{}/{} was {} under predecessor launch generation {}); the \
+             attempt was charged its reserved maximum and this turn cannot be resumed. \
+             Resuming after a restart is not supported for any directive yet",
             self.thread_id,
             self.turn,
             self.attempt_number,
@@ -15619,7 +15619,7 @@ mod tests {
         let message = format!("{error:#}");
         assert!(message.contains("is unknown"), "{message}");
         assert!(
-            message.contains("provider_contact: repeatable"),
+            message.contains("Resuming after a restart is not supported"),
             "{message}"
         );
         assert_eq!(

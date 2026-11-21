@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-21T19:37:35Z:e5261e1d724928562641eed4b2a72eab92f6205113ae6f12511968fe10fc13af:NonIGapJ2aRa1akolEjuCbsgpLhqeSFlingWG5uu9AWl3ExzmrzavUpGDEfxLfsV1c+SmpPFQ10L1aMa0Of2BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-21T21:46:02Z:e7cb05b486972e86ab0845bdcc6f3dffcbc25dd96be5a03704027f5bd3eddfaa:Px8rx3pNBn21hrwaZdevRKF2BJzhLI1yREwNs0i+PUr+GxtUZW6plGvBtSMzX7yOfg3XcJgQTtPdwQ4pdzRTDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 tags: [reference, execution, retry, timeout, config]
@@ -73,11 +73,10 @@ removed `retry_on_timeout` and `retry_mid_stream` keys are refused.
 
 These retries cover a failure the running process observed. If the node stops
 while a model call is in flight (a kill, a crash, a planned rollover that cuts
-the run), the call's outcome is never recorded, and the resumed run does not
-repeat it: the thread fails with `provider_attempt_outcome_unknown`, whose
-message names the attempt coordinate and the cure. Declaring `provider_contact:
-repeatable` is the author's statement that a repeat is harmless; the failure is
-not retried by that declaration alone today.
+the run), the call's outcome is never recorded. The attempt is charged its
+reserved maximum, the turn cannot be resumed, and the thread fails with
+`provider_attempt_outcome_unknown`. Resuming after a restart is not supported
+for any directive yet; no header declaration changes this.
 
 ### Output limit
 
