@@ -145,6 +145,7 @@ mod tests {
                         id: "empty".into(),
                         title: "Empty".into(),
                         root: None,
+                        ..Default::default()
                     },
                     focused_view: None,
                     mounts: vec![],

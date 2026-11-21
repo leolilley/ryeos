@@ -307,6 +307,10 @@ pub enum RyeOsMotionEventVm {
     },
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsViewSetVm {
     pub view_set_id: crate::ids::ViewSetId,
@@ -335,6 +339,19 @@ pub struct RyeOsViewSetVm {
     /// focused view's own title stands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lens_label: Option<String>,
+    /// Authored drawing mode of this set. Renderers that implement page
+    /// presentation read it here; the others draw the tiled form.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::surface::view_sets::ViewSetPresentation::is_tiled"
+    )]
+    pub presentation: crate::surface::view_sets::ViewSetPresentation,
+    /// Authored page scrolling.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub scroll: bool,
+    /// Authored step identifier of this set, when it is part of a sequence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<String>,
 }
 
 /// The projection of a view instance's active input buffer, sourced from the
@@ -1346,6 +1363,9 @@ fn view_set_vm(core: &RyeOsCore) -> Option<RyeOsViewSetVm> {
         focused_tile: tile_id_text(view_set.focused_tile),
         center_is_empty,
         tile_count: view_set.tile_ids().len(),
+        presentation: view_set.presentation,
+        scroll: view_set.scroll,
+        sequence: view_set.sequence.clone(),
         lens_trail: core
             .focused_view_instance_key()
             .and_then(|instance| core.retained_lens_frames.get(&instance))
@@ -5171,7 +5191,15 @@ mod tests {
             ])
         );
         assert_eq!(observe["capabilities"]["affordances"], json!([]));
-        assert_eq!(observe["view_sets"][0]["id"], "overview");
+        assert_eq!(observe["view_sets"][0], "view_set:ryeos/ui/home-overview");
+        let landing: serde_json::Value = serde_yaml::from_str(
+            &std::fs::read_to_string(
+                surfaces.join("../../../view_sets/ryeos/ui/home-overview.yaml"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(landing["id"], "overview");
     }
 
     #[test]

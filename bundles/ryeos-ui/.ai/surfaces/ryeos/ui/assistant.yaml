@@ -1,7 +1,7 @@
-# ryeos:signed:2026-11-12T10:40:20Z:2e9bc47f03906bce8d62959f03a696416b3f89ef96762e4352b634a94bcf01be:WQ3j4FOkPLpNxGlgDjFxZ5EWds+4PhBtHWxbxfeUd4q93h0ptj/3jSuI+wl1gSnjtSX0KJ+4Agb9cTDEoccuAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-20T23:17:59Z:2b7fdf3c94160912c88cf8b4555c70fbc2a2f067c99d334dc876ea70439f4c80:/Gj2TMYwDpfqdV+Ey1WoOFM27/DPqyR0W0LbVHAbOHeypghg+2gZEMsGqo6VUuYVvbn6o7w5/7b5DZYjYa/mAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-assistant
 title: Assistant
-version: "3.2.0"
+version: "4.0.0"
 description: Named tiled RyeOS view sets with contextual views
 
 extends: surface:ryeos/ui/lens
@@ -15,77 +15,11 @@ style:
   view_set_tabs: true
 
 view_sets:
-  # The first authored set is the initial set for a fresh seat. Keep the
-  # principal's durable work list at the left. Inspection is shared by the
-  # changes and execution groups through the view-set-scoped selection owner;
-  # the conversation keeps its independently explicit input route. No
-  # renderer-owned sample project or thread is used.
-  - schema: 2
-    id: development
-    title: Development
-    root:
-      type: split
-      axis: horizontal
-      ratio: 0.13
-      first:
-        type: group
-        label: Explorer
-        views: ["view:ryeos/development/explorer", "view:ryeos/projects/list", "view:ryeos/project/files", "view:ryeos/sites/list"]
-        active: 0
-      second:
-        type: split
-        axis: horizontal
-        ratio: 0.7
-        first:
-          type: group
-          label: Worker
-          views: ["view:ryeos/thread/conversation", "view:ryeos/thread/transcript", "view:ryeos/work/evidence", "view:ryeos/project/document"]
-          active: 0
-        second:
-          type: split
-          axis: vertical
-          ratio: 0.55
-          first:
-            type: group
-            label: Changes
-            views: ["view:ryeos/development/changes", "view:ryeos/work/candidate", "view:ryeos/work/approvals"]
-            active: 0
-          second:
-            type: group
-            label: Execution
-            views: ["view:ryeos/development/execution", "view:ryeos/development/occurrence", "view:ryeos/work/children", "view:ryeos/thread/tree"]
-            active: 0
-  - schema: 2
-    id: overview
-    title: Overview
-    root:
-      type: group
-      views: ["view:ryeos/home/overview", "view:ryeos/sites/list", "view:ryeos/programs/list"]
-      active: 0
-  - schema: 2
-    id: work
-    title: Work
-    root:
-      type: split
-      axis: horizontal
-      ratio: 0.22
-      first:
-        type: group
-        label: Work
-        views: ["view:ryeos/work/list"]
-        active: 0
-      second:
-        type: group
-        label: Detail
-        views: ["view:ryeos/work/overview", "view:ryeos/work/children", "view:ryeos/work/evidence", "view:ryeos/work/candidate", "view:ryeos/work/approvals"]
-        active: 0
-  - schema: 2
-    id: review
-    title: Review
-    root:
-      type: group
-      views: ["view:ryeos/review/pending", "view:ryeos/review/history"]
-      active: 0
+  # Tab order. The first is the initial set for a fresh seat.
+  - view_set:ryeos/ui/development
+  - view_set:ryeos/ui/overview
+  - view_set:ryeos/ui/work
+  - view_set:ryeos/ui/review
 
 library:
   - group: View sets

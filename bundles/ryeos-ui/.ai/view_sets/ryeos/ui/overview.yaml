@@ -1,0 +1,8 @@
+# ryeos:signed:2026-11-20T23:17:59Z:e3f845e866ad427159eb1b968acbcb9bee2628b2cc996ca7a828e6de3f2d94f6:K7a495jIld1bNcsKYEp7OGHKzx3plIp+prHoWMOyIChqHXSwVetIa4LkaZ/VQUYoYCzqZdBsSPSoOupBfzOACQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+schema: 2
+id: overview
+title: Overview
+root:
+  type: group
+  views: ["view:ryeos/home/overview", "view:ryeos/sites/list", "view:ryeos/programs/list"]
+  active: 0

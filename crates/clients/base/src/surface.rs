@@ -968,6 +968,7 @@ impl SurfaceSpec {
             id: "main".into(),
             title: self.display_title().to_owned(),
             root,
+            ..Default::default()
         }];
         view_sets::validate_seeds(&seeds)?;
         Ok(seeds)

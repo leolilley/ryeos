@@ -8,6 +8,7 @@
 use crate::ids::ViewGroupId;
 use crate::ids::{RyeOsViewInstanceKey, TileId};
 use crate::layout::{LayoutTree, Rect, SplitAxis, layout_rects};
+use crate::surface::view_sets::ViewSetPresentation;
 use crate::surface::{ArrangeSpec, SideSpec, TilingModeSpec, TilingSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -315,6 +316,10 @@ fn arrange_region(ids: &[TileId], arrange: ArrangeSpec) -> Option<LayoutTree> {
 // ViewSet
 // ---------------------------------------------------------------------------
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ViewSet {
     /// Presentation identity, independent of tab order or authored label.
@@ -335,6 +340,16 @@ pub struct ViewSet {
     /// Presentation-only isolation of one mounted tile. The canonical layout
     /// remains intact, so restore is exact and distinct from master promotion.
     pub maximized_tile: Option<TileId>,
+    /// Authored drawing mode of this set's tile tree. Carried from the seed;
+    /// renderers read it from the view model.
+    #[serde(default, skip_serializing_if = "ViewSetPresentation::is_tiled")]
+    pub presentation: ViewSetPresentation,
+    /// Authored page scrolling (page presentations only).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub scroll: bool,
+    /// Authored step identifier, when this set is a step of a sequence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<String>,
 }
 
 impl ViewSet {
@@ -379,6 +394,9 @@ impl ViewSet {
             tiles,
             focused_tile,
             maximized_tile: None,
+            presentation: ViewSetPresentation::Tiled,
+            scroll: false,
+            sequence: None,
         }
     }
 

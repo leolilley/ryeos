@@ -904,6 +904,7 @@ mod tests {
                             views: vec![ViewKindSpec("view:test/one".into())],
                             active: 0,
                         }),
+                        ..Default::default()
                     },
                     focused_view: Some(0),
                     mounts: vec![UiTransferMountExport {

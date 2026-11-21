@@ -223,6 +223,7 @@ impl RyeOsCore {
                             views: vec![crate::surface::ViewKindSpec(view_ref)],
                             active: 0,
                         }),
+                        ..Default::default()
                     },
                     relationships: vec![SavedViewSelectionRelationship {
                         mount: SavedViewMountRef::Tile { index: 0 },
@@ -356,6 +357,7 @@ impl RyeOsCore {
                         views: vec![crate::surface::ViewKindSpec(view_ref)],
                         active: 0,
                     }),
+                    ..Default::default()
                 },
                 relationships: vec![SavedViewSelectionRelationship {
                     mount: SavedViewMountRef::Tile { index: 0 },

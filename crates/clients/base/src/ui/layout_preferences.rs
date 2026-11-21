@@ -112,6 +112,10 @@ pub(crate) fn capture_view_set(
             .as_ref()
             .map(|root| capture_layout(root, view_set))
             .transpose()?,
+        presentation: view_set.presentation,
+        scroll: view_set.scroll,
+        sequence: view_set.sequence.clone(),
+        ..Default::default()
     })
 }
 
