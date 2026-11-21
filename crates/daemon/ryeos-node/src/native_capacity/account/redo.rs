@@ -539,7 +539,7 @@ pub(super) mod controls {
             target_start_time_ticks: 71,
             group_leader_pid: pid,
             group_leader_start_time_ticks: 71,
-            pid_namespace: "pid:[4026531836]".into(),
+            pid_namespace: lillux::current_pid_namespace().unwrap(),
             group_basis: lillux::GroupBasis::ProcessGroup,
         }
     }

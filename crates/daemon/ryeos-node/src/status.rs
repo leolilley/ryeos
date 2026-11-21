@@ -883,7 +883,7 @@ mod tests {
                 target_start_time_ticks: 5,
                 group_leader_pid: u32::MAX - 1,
                 group_leader_start_time_ticks: 5,
-                pid_namespace: "pid:[4026531836]".into(),
+                pid_namespace: lillux::current_pid_namespace().unwrap(),
                 group_basis: Default::default(),
             }),
         )

@@ -132,6 +132,7 @@ pub fn reissue_capacity(request: ReissueRequest<'_>) -> Result<ReissueReport> {
         state,
         binding.issuance_digest()?,
         &identity.policy,
+        state_lock.witness()?,
     )?;
     state_lock.ensure_protects_app_root(app_root)?;
     owner.reissue(
@@ -172,7 +173,10 @@ enum Step {
 /// The record owners of a stopped node, opened under the operator's lock.
 /// Work and time are bounded by the policy's recovery envelope even though
 /// nothing is charged durably: an operator command is still finite work.
-pub(super) struct StoppedCapacityAccount {
+pub(super) struct StoppedCapacityAccount<'lock> {
+    /// The proof that this stopped node's state lock is held; the only way
+    /// an incarnation recorded in another pid namespace counts as ended.
+    state_lock: lillux::ExclusiveLockWitness<'lock>,
     account: RetainedStore,
     anchor: RetainedAnchor,
     onboarding: PinnedDirectory,
@@ -204,7 +208,7 @@ impl Budget {
     }
 }
 
-impl StoppedCapacityAccount {
+impl<'lock> StoppedCapacityAccount<'lock> {
     pub(super) fn open(
         directory: PinnedDirectory,
         account_identity: lillux::PinnedRegularFileIdentity,
@@ -212,12 +216,14 @@ impl StoppedCapacityAccount {
         state: PinnedDirectory,
         issuance: [u8; 32],
         policy: &NodeNativeCapacityPolicy,
+        state_lock: lillux::ExclusiveLockWitness<'lock>,
     ) -> Result<Self> {
         policy.validate()?;
         let directory_identity = directory.identity()?;
         let account = RetainedStore::open(directory.try_clone()?, account_identity)?;
         let anchor = RetainedAnchor::retain(directory, directory_identity)?;
         Ok(Self {
+            state_lock,
             account,
             anchor,
             onboarding,
@@ -231,6 +237,25 @@ impl StoppedCapacityAccount {
             },
             fail_after: Cell::new(None),
         })
+    }
+
+    /// Require that a recorded incarnation has ended, classified under the
+    /// state lock this stopped node's operator holds: a previous daemon
+    /// recorded in another pid namespace has released the exclusive lock by
+    /// exiting, so it counts as ended. Every other indeterminate still fails
+    /// closed.
+    fn require_ended(
+        &self,
+        process: &lillux::process_control::ExactProcessIdentity,
+        live_message: &str,
+    ) -> Result<()> {
+        ensure!(
+            process
+                .has_ended_holding_exclusive_lock(&self.state_lock)
+                .map_err(anyhow::Error::msg)?,
+            "{live_message}"
+        );
+        Ok(())
     }
 
     /// Load the anchor and refuse unless the stopped account carries no
@@ -300,19 +325,15 @@ impl StoppedCapacityAccount {
         let Some(debit) = current.target().outstanding else {
             return Ok(torn);
         };
-        ensure!(
-            debit
-                .process
-                .exact()?
-                .has_ended()
-                .map_err(anyhow::Error::msg)?,
-            "outstanding native incarnation remains live or unproved; stop it first"
-        );
+        self.require_ended(
+            &debit.process.exact()?,
+            "outstanding native incarnation remains live or unproved; stop it first",
+        )?;
         if let Some(previous) = current.recovery_process() {
-            ensure!(
-                previous.exact()?.has_ended().map_err(anyhow::Error::msg)?,
-                "previous capacity recovery process remains live or unproved"
-            );
+            self.require_ended(
+                &previous.exact()?,
+                "previous capacity recovery process remains live or unproved",
+            )?;
         }
         let process = lillux::process_control::capture_current_process_identity()
             .map_err(anyhow::Error::msg)?;
@@ -516,14 +537,10 @@ impl StoppedCapacityAccount {
         // settlement can be folded into the renewal. Liveness is never
         // inferred from a numeric pid; only the exact incarnation decides.
         if let Some(debit) = current.target().outstanding {
-            ensure!(
-                debit
-                    .process
-                    .exact()?
-                    .has_ended()
-                    .map_err(anyhow::Error::msg)?,
-                "outstanding native incarnation remains live or unproved; stop it first"
-            );
+            self.require_ended(
+                &debit.process.exact()?,
+                "outstanding native incarnation remains live or unproved; stop it first",
+            )?;
         }
         if bytes != encode(current.target())? {
             self.account
@@ -711,6 +728,7 @@ pub(crate) fn leave_outstanding_debit(
     app_root: &Path,
     binding: &NativeCapacityAccountBinding,
     process: &lillux::process_control::ExactProcessIdentity,
+    state_lock: &StateLock,
 ) -> Result<()> {
     let open = |path: &str| -> Result<PinnedDirectory> {
         PinnedDirectory::open(&app_root.join(path))?.with_context(|| format!("{path} absent"))
@@ -724,7 +742,19 @@ pub(crate) fn leave_outstanding_debit(
         open(".ai/state")?,
         issuance,
         policy,
+        state_lock.witness()?,
     )?;
+    leave_debit(&mut owner, policy, issuance, process)
+}
+
+/// [`leave_outstanding_debit`] on an already open stopped-node owner.
+#[cfg(test)]
+pub(super) fn leave_debit(
+    owner: &mut StoppedCapacityAccount<'_>,
+    policy: &NodeNativeCapacityPolicy,
+    issuance: [u8; 32],
+    process: &lillux::process_control::ExactProcessIdentity,
+) -> Result<()> {
     let deadline = owner.budget.deadline;
     owner.anchor.load(policy, &issuance, deadline, &|steps| {
         owner.budget.pay(steps)
@@ -774,6 +804,8 @@ mod controls {
 
     struct Fixture {
         _temporary: tempfile::TempDir,
+        /// The stopped node's state lock, held for the fixture's lifetime.
+        lock: StateLock,
         directory: PinnedDirectory,
         onboarding: PinnedDirectory,
         state: PinnedDirectory,
@@ -846,8 +878,10 @@ mod controls {
                 )
                 .unwrap()
                 .unwrap();
+            let lock = StateLock::acquire(&temporary.path().join("operator.lock")).unwrap();
             Self {
                 _temporary: temporary,
+                lock,
                 directory,
                 onboarding,
                 state,
@@ -874,7 +908,7 @@ mod controls {
             }
         }
 
-        fn owner(&self) -> StoppedCapacityAccount {
+        fn owner(&self) -> StoppedCapacityAccount<'_> {
             StoppedCapacityAccount::open(
                 self.directory.try_clone().unwrap(),
                 self.account_identity,
@@ -882,6 +916,7 @@ mod controls {
                 self.state.try_clone().unwrap(),
                 self.issuance,
                 &self.policy,
+                self.lock.witness().unwrap(),
             )
             .unwrap()
         }
@@ -1509,6 +1544,56 @@ mod controls {
         drop(owner);
         let before = f.current();
         let error = f.owner().settle_cold(&f.policy).expect_err("a live debit");
+        assert!(
+            format!("{error:#}").contains("remains live or unproved"),
+            "{error:#}"
+        );
+        assert_eq!(f.current(), before);
+    }
+
+    /// A previous daemon recorded in another pid namespace: a real identity
+    /// of this process with its namespace rewritten, so only the namespace
+    /// says it is not this observer's.
+    fn foreign_process() -> lillux::process_control::ExactProcessIdentity {
+        let mut process = lillux::process_control::capture_current_process_identity().unwrap();
+        process.pid_namespace = "pid:[1]".to_owned();
+        process
+    }
+
+    #[test]
+    fn a_foreign_namespace_debit_is_settled_through_the_lock_witness_as_a_dead_one() {
+        let f = Fixture::new();
+        // Without a proof the only classification fails closed.
+        let error = foreign_process().has_ended().unwrap_err();
+        assert!(error.contains("pid:[1]"), "{error}");
+        leave_debit(&mut f.owner(), &f.policy, f.issuance, &foreign_process()).unwrap();
+        assert!(f.owner().owes_cold_settlement(&f.policy).unwrap());
+        let report = f.run(None).unwrap();
+        assert_eq!(report.to_epoch, 2);
+        assert!(
+            report.settled_incarnation.is_some(),
+            "reissue settles the foreign incarnation as it settles a dead one"
+        );
+        assert!(f.current().0.target().outstanding.is_none());
+    }
+
+    #[test]
+    fn the_lock_witness_does_not_end_a_live_incarnation_of_this_namespace() {
+        let f = Fixture::new();
+        leave_debit(
+            &mut f.owner(),
+            &f.policy,
+            f.issuance,
+            &lillux::process_control::capture_current_process_identity().unwrap(),
+        )
+        .unwrap();
+        let before = f.current();
+        let error = f.owner().owes_cold_settlement(&f.policy).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("remains live or unproved"),
+            "{error:#}"
+        );
+        let error = f.run(None).unwrap_err();
         assert!(
             format!("{error:#}").contains("remains live or unproved"),
             "{error:#}"

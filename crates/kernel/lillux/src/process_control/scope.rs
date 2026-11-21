@@ -3243,7 +3243,7 @@ fn host_lifetime_witness_is_strict_and_does_not_claim_same_boot_cleanup() {
         group_leader_pid: 101,
         group_leader_start_time_ticks: 1,
         group_basis: crate::GroupBasis::ProcessGroup,
-        pid_namespace: "pid:[4026531836]".to_owned(),
+        pid_namespace: crate::current_pid_namespace().unwrap(),
     };
     assert!(current.contains_process(&process).unwrap());
     let mut stale = process.clone();
@@ -3452,7 +3452,7 @@ mod pid_namespace_containment {
             group_leader_pid: 2,
             group_leader_start_time_ticks: 3,
             group_basis: crate::GroupBasis::ProcessGroup,
-            pid_namespace: "pid:[4026531836]".to_owned(),
+            pid_namespace: crate::current_pid_namespace().unwrap(),
         };
         recovery.validate_for_process(&identity(4242, 77)).unwrap();
         // A reused PID, another birth, or another boot is another process.

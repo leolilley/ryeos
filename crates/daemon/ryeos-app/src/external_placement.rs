@@ -11141,7 +11141,7 @@ pub mod test_support {
                     target_start_time_ticks: 100,
                     group_leader_pid: 41,
                     group_leader_start_time_ticks: 100,
-                    pid_namespace: "pid:[4026531836]".into(),
+                    pid_namespace: lillux::current_pid_namespace().unwrap(),
                     resource_selections: Vec::new(),
                     resource_settlement_authority: None,
                     resource_operations: Vec::new(),
