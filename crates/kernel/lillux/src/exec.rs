@@ -15251,8 +15251,12 @@ mod native_terminal_existing_wait_tests {
         }
     }
 
-    fn selected_live_child_with_testimony(
-    ) -> (RunningProcess, InheritedDescriptorAuthority, Vec<u8>, ChildRelease) {
+    fn selected_live_child_with_testimony() -> (
+        RunningProcess,
+        InheritedDescriptorAuthority,
+        Vec<u8>,
+        ChildRelease,
+    ) {
         let (running, writer, frame, sender, applied, release) =
             selected_child_with_receipt_sender();
         sender.send(Ok(applied)).unwrap();
