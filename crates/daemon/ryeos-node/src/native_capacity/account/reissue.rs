@@ -21,9 +21,9 @@ use sha2::Digest as _;
 
 use super::OperatorLineage;
 use super::anchor::RetainedAnchor;
-use super::redo::Operation;
+use super::redo::{AccountRedo, Operation};
 use super::{
-    CapacityRecord, NativeCapacityAccountBinding, REISSUANCE_DOCUMENT_BOUND,
+    CapacityRecord, NativeCapacityAccountBinding, RECORD_BYTES, REISSUANCE_DOCUMENT_BOUND,
     REISSUANCE_DOCUMENT_NAME, REISSUANCE_SCHEMA, ReissuanceBody, ReissuanceDocument, RetainedStore,
     encode, genesis_consumed, hex_digest, verify_reissuance_document,
 };
@@ -61,6 +61,9 @@ pub struct ReissueReport {
     /// The anchor already carried this document's digest: nothing new was
     /// written beyond repairing a torn account or a missing evidence line.
     pub already_applied: bool,
+    /// The redo anchor was torn and could not be read, so the epoch opened
+    /// from the account record instead of from the anchor.
+    pub from_account_record: bool,
 }
 
 /// One line of the bounded evidence log.
@@ -162,12 +165,38 @@ struct ReissueIdentity<'a> {
     policy: NodeNativeCapacityPolicy,
 }
 
+/// What an epoch is renewed from: the readable anchor with the account it
+/// leads, or, when the anchor is torn, the verified account record alone.
+enum Predecessor {
+    Anchor {
+        current: AccountRedo,
+        bytes: [u8; RECORD_BYTES],
+    },
+    Account {
+        record: CapacityRecord,
+        bytes: [u8; RECORD_BYTES],
+    },
+}
+
+impl Predecessor {
+    fn record(&self) -> CapacityRecord {
+        match self {
+            Self::Anchor { current, .. } => *current.target(),
+            Self::Account { record, .. } => *record,
+        }
+    }
+}
+
 /// Crash boundaries the controls inject after; production never sets one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Step {
+pub(super) enum Step {
     Document,
     Anchor,
     Account,
+    /// A repair has recorded its evidence and not yet written the account.
+    RepairEvidence,
+    /// A repair has written the account.
+    RepairAccount,
 }
 
 /// The record owners of a stopped node, opened under the operator's lock.
@@ -177,23 +206,23 @@ pub(super) struct StoppedCapacityAccount<'lock> {
     /// The proof that this stopped node's state lock is held; the only way
     /// an incarnation recorded in another pid namespace counts as ended.
     state_lock: lillux::ExclusiveLockWitness<'lock>,
-    account: RetainedStore,
-    anchor: RetainedAnchor,
+    pub(super) account: RetainedStore,
+    pub(super) anchor: RetainedAnchor,
     onboarding: PinnedDirectory,
-    state: PinnedDirectory,
-    issuance: [u8; 32],
-    budget: Budget,
-    fail_after: Cell<Option<Step>>,
+    pub(super) state: PinnedDirectory,
+    pub(super) issuance: [u8; 32],
+    pub(super) budget: Budget,
+    pub(super) fail_after: Cell<Option<Step>>,
 }
 
 /// Finite work and time for one command run; nothing here is durable.
-struct Budget {
-    deadline: MonotonicDeadline,
+pub(super) struct Budget {
+    pub(super) deadline: MonotonicDeadline,
     work: Cell<u64>,
 }
 
 impl Budget {
-    fn pay(&self, steps: u64) -> Result<()> {
+    pub(super) fn pay(&self, steps: u64) -> Result<()> {
         ensure!(
             !self.deadline.has_elapsed(),
             "operator re-issuance interval exhausted"
@@ -239,6 +268,46 @@ impl<'lock> StoppedCapacityAccount<'lock> {
         })
     }
 
+    /// Refuse, typed, an account the sound anchor's redo cannot account for.
+    /// An account the cut has not reached yet names the cut, not a repair.
+    pub(super) fn require_account_in_redo(
+        &self,
+        current: &super::redo::AccountRedo,
+        bytes: &[u8; super::RECORD_BYTES],
+    ) -> Result<()> {
+        if current.accepts_account_bytes(bytes)? {
+            return Ok(());
+        }
+        if super::cut_retirement::account_awaits_cut(bytes, &encode(current.target())?) {
+            anyhow::bail!(super::cut_retirement::PRE_CUT_CURE);
+        }
+        Err(super::torn::account_outside_redo(bytes))
+    }
+
+    /// Load the anchor. A torn one is refused with the cure the account
+    /// proves under `policy`; the account is read best effort for that.
+    pub(super) fn load_anchor(&mut self, policy: &NodeNativeCapacityPolicy) -> Result<()> {
+        match self
+            .anchor
+            .load(policy, &self.issuance, self.budget.deadline, &|steps| {
+                self.budget.pay(steps)
+            }) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let account = self
+                    .account
+                    .read_bytes(self.budget.deadline, &|steps| self.budget.pay(steps))
+                    .ok();
+                Err(super::torn::with_anchor_cure(
+                    error,
+                    account.as_ref(),
+                    policy,
+                    &self.issuance,
+                ))
+            }
+        }
+    }
+
     /// Require that a recorded incarnation has ended, classified under the
     /// state lock this stopped node's operator holds: a previous daemon
     /// recorded in another pid namespace has released the exclusive lock by
@@ -271,18 +340,12 @@ impl<'lock> StoppedCapacityAccount<'lock> {
         &mut self,
         policy: &NodeNativeCapacityPolicy,
     ) -> Result<super::reanchor::AccountPosition> {
-        self.anchor
-            .load(policy, &self.issuance, self.budget.deadline, &|steps| {
-                self.budget.pay(steps)
-            })?;
+        self.load_anchor(policy)?;
         let current = *self.anchor.current()?;
         let bytes = self
             .account
             .read_bytes(self.budget.deadline, &|steps| self.budget.pay(steps))?;
-        ensure!(
-            current.accepts_account_bytes(&bytes)?,
-            "capacity account corruption has no permitted redo"
-        );
+        self.require_account_in_redo(&current, &bytes)?;
         ensure!(
             bytes == encode(current.target())?,
             "capacity account has an unapplied redo; start the node or re-issue to settle it first"
@@ -309,18 +372,12 @@ impl<'lock> StoppedCapacityAccount<'lock> {
         &mut self,
         policy: &NodeNativeCapacityPolicy,
     ) -> Result<bool> {
-        self.anchor
-            .load(policy, &self.issuance, self.budget.deadline, &|steps| {
-                self.budget.pay(steps)
-            })?;
+        self.load_anchor(policy)?;
         let current = *self.anchor.current()?;
         let bytes = self
             .account
             .read_bytes(self.budget.deadline, &|steps| self.budget.pay(steps))?;
-        ensure!(
-            current.accepts_account_bytes(&bytes)?,
-            "capacity account corruption has no permitted redo"
-        );
+        self.require_account_in_redo(&current, &bytes)?;
         let torn = bytes != encode(current.target())?;
         let Some(debit) = current.target().outstanding else {
             return Ok(torn);
@@ -418,7 +475,7 @@ impl<'lock> StoppedCapacityAccount<'lock> {
             .map(hex_digest))
     }
 
-    fn crash_after(&self, step: Step) -> Result<()> {
+    pub(super) fn crash_after(&self, step: Step) -> Result<()> {
         ensure!(
             self.fail_after.get() != Some(step),
             "injected re-issuance interruption after {step:?}"
@@ -469,21 +526,22 @@ impl<'lock> StoppedCapacityAccount<'lock> {
             require_owned_evidence_log(&log)?;
         }
         let policy = &identity.policy;
-        self.anchor
-            .load(policy, &self.issuance, self.budget.deadline, &|steps| {
-                self.budget.pay(steps)
-            })?;
-        let current = *self.anchor.current()?;
-        let bytes = self
-            .account
-            .read_bytes(self.budget.deadline, &|steps| self.budget.pay(steps))?;
-        ensure!(
-            current.accepts_account_bytes(&bytes)?,
-            "capacity account corruption has no permitted redo"
-        );
+        let predecessor = match self.load_anchor(policy) {
+            Ok(()) => {
+                let current = *self.anchor.current()?;
+                let bytes = self
+                    .account
+                    .read_bytes(self.budget.deadline, &|steps| self.budget.pay(steps))?;
+                self.require_account_in_redo(&current, &bytes)?;
+                Predecessor::Anchor { current, bytes }
+            }
+            Err(error) => self.account_predecessor(error)?,
+        };
         let existing = self.existing_document()?;
 
-        if current.operation() == Operation::OperatorReissue {
+        if let Predecessor::Anchor { current, bytes } = &predecessor
+            && current.operation() == Operation::OperatorReissue
+        {
             // The anchor already opened an epoch under a document. Only the
             // document it names may complete it; a rerun repairs and reports.
             let (_, document_bytes) = existing.as_ref().context(
@@ -504,9 +562,9 @@ impl<'lock> StoppedCapacityAccount<'lock> {
                 body.to_epoch == current.epoch(),
                 "operator re-issuance document names another epoch"
             );
-            if bytes != encode(current.target())? {
+            if *bytes != encode(current.target())? {
                 self.account
-                    .apply_redo(&current, self.budget.deadline, &|steps| {
+                    .apply_redo(current, self.budget.deadline, &|steps| {
                         self.budget.pay(steps)
                     })?;
             }
@@ -526,6 +584,7 @@ impl<'lock> StoppedCapacityAccount<'lock> {
                 document_digest: evidence.document_digest,
                 settled_incarnation: evidence.settled_incarnation,
                 already_applied: true,
+                from_account_record: false,
             });
         }
 
@@ -536,19 +595,21 @@ impl<'lock> StoppedCapacityAccount<'lock> {
         // Whatever the anchor still carries must be proven dead before its
         // settlement can be folded into the renewal. Liveness is never
         // inferred from a numeric pid; only the exact incarnation decides.
-        if let Some(debit) = current.target().outstanding {
+        let before = predecessor.record();
+        if let Some(debit) = before.outstanding {
             self.require_ended(
                 &debit.process.exact()?,
                 "outstanding native incarnation remains live or unproved; stop it first",
             )?;
         }
-        if bytes != encode(current.target())? {
+        if let Predecessor::Anchor { current, bytes } = &predecessor
+            && *bytes != encode(current.target())?
+        {
             self.account
-                .apply_redo(&current, self.budget.deadline, &|steps| {
+                .apply_redo(current, self.budget.deadline, &|steps| {
                     self.budget.pay(steps)
                 })?;
         }
-        let before = *current.target();
         let from_epoch = before.epoch;
         let to_epoch = from_epoch
             .checked_add(1)
@@ -560,7 +621,13 @@ impl<'lock> StoppedCapacityAccount<'lock> {
             );
         }
 
-        let anchor_bytes = current.encode(policy)?;
+        // The document names the image the epoch is renewed from: the anchor
+        // when it is readable, else the account record, whose own length keeps
+        // the two digests apart.
+        let anchor_bytes: Vec<u8> = match &predecessor {
+            Predecessor::Anchor { current, .. } => current.encode(policy)?.to_vec(),
+            Predecessor::Account { bytes, .. } => bytes.to_vec(),
+        };
         let body = ReissuanceBody {
             schema: REISSUANCE_SCHEMA.to_owned(),
             operator_fingerprint: identity.operator_fingerprint.clone(),
@@ -605,14 +672,32 @@ impl<'lock> StoppedCapacityAccount<'lock> {
             outstanding: None,
             ..before
         };
-        let next = current.renew(Operation::OperatorReissue, target, document_digest, policy)?;
-        self.anchor.publish(
-            next,
-            policy,
-            &self.issuance,
-            self.budget.deadline,
-            &|steps| self.budget.pay(steps),
-        )?;
+        let from_account_record = matches!(predecessor, Predecessor::Account { .. });
+        let next = match &predecessor {
+            Predecessor::Anchor { current, .. } => {
+                current.renew(Operation::OperatorReissue, target, document_digest, policy)?
+            }
+            Predecessor::Account { record, .. } => {
+                AccountRedo::renew_from_account(*record, target, document_digest, policy)?
+            }
+        };
+        if from_account_record {
+            self.anchor.replace_torn(
+                next,
+                policy,
+                &self.issuance,
+                self.budget.deadline,
+                &|steps| self.budget.pay(steps),
+            )?;
+        } else {
+            self.anchor.publish(
+                next,
+                policy,
+                &self.issuance,
+                self.budget.deadline,
+                &|steps| self.budget.pay(steps),
+            )?;
+        }
         self.crash_after(Step::Anchor)?;
         self.account
             .apply_redo(self.anchor.current()?, self.budget.deadline, &|steps| {
@@ -627,7 +712,13 @@ impl<'lock> StoppedCapacityAccount<'lock> {
             settled_incarnation: next.settled_incarnation().as_ref().map(hex_digest),
             recorded_at: lillux::time::iso8601_now(),
             actor,
-            command: command.to_owned(),
+            command: if from_account_record {
+                format!(
+                    "{command}; the redo anchor was torn and the epoch opened from the account record"
+                )
+            } else {
+                command.to_owned()
+            },
         };
         append_evidence(&self.state, &evidence)?;
         Ok(ReissueReport {
@@ -636,7 +727,34 @@ impl<'lock> StoppedCapacityAccount<'lock> {
             document_digest: evidence.document_digest,
             settled_incarnation: evidence.settled_incarnation,
             already_applied: false,
+            from_account_record,
         })
+    }
+
+    /// The account record to renew from when the anchor is torn. Only a torn
+    /// anchor whose cure is re-issuance qualifies: the account must verify
+    /// and belong to this issuance and the signed policy must permit the
+    /// re-issuance. Any other refusal is returned unchanged, so a file of
+    /// another issuance or a node whose policy forbids re-issuance holds.
+    fn account_predecessor(&self, error: anyhow::Error) -> Result<Predecessor> {
+        let qualifies = error
+            .downcast_ref::<super::torn::CapacityRecordTorn>()
+            .is_some_and(|torn| {
+                torn.file == super::torn::CapacityFile::Anchor
+                    && torn.cure == super::torn::CapacityCure::ReissueFromAccount
+            });
+        if !qualifies {
+            return Err(error);
+        }
+        let bytes = self
+            .account
+            .read_bytes(self.budget.deadline, &|steps| self.budget.pay(steps))?;
+        let record = super::decode(&bytes).map_err(|refusal| anyhow::anyhow!("{refusal}"))?;
+        ensure!(
+            record.issuance_digest == self.issuance,
+            "capacity account belongs to another issuance"
+        );
+        Ok(Predecessor::Account { record, bytes })
     }
 
     /// A rerun after an interruption between the account write and the log
@@ -1814,5 +1932,457 @@ mod controls {
                 .len()
                 <= REISSUE_EVIDENCE_LOG_BOUND as u64
         );
+    }
+
+    // ── Torn account and anchor ──────────────────────────────────────────
+
+    use super::super::repair::{CapacityRepairEvidence, REPAIR_EVIDENCE_LOG};
+    use super::super::torn::{CapacityCure, CapacityFile, CapacityRecordTorn, TornDefect};
+
+    impl Fixture {
+        fn account_path(&self) -> std::path::PathBuf {
+            self._temporary.path().join("native-capacity/account")
+        }
+
+        fn anchor_path(&self) -> std::path::PathBuf {
+            self._temporary.path().join("native-capacity/anchor")
+        }
+
+        fn mutate(path: &std::path::Path, change: impl FnOnce(&mut Vec<u8>)) {
+            let mut bytes = std::fs::read(path).unwrap();
+            change(&mut bytes);
+            std::fs::write(path, bytes).unwrap();
+        }
+
+        fn repair(&self, fail_after: Option<Step>) -> Result<super::super::repair::RepairReport> {
+            let mut owner = self.owner();
+            owner.fail_after.set(fail_after);
+            owner.repair_account(
+                &self.policy,
+                lillux::process_control::ControllerAccount::current(),
+                "controls",
+                "ryeos node capacity repair-account",
+            )
+        }
+
+        fn repairs(&self) -> Vec<CapacityRepairEvidence> {
+            super::super::reanchor::read_log(&self.state, REPAIR_EVIDENCE_LOG, "account repair")
+                .unwrap()
+        }
+
+        /// The account image a debit leaves after its redo, and the image
+        /// before it, for tears that mix the two.
+        fn debited_images(&self) -> ([u8; RECORD_BYTES], [u8; RECORD_BYTES]) {
+            let (_, genesis) = self.current();
+            self.debit_dead_incarnation();
+            let (_, debited) = self.current();
+            (genesis, debited)
+        }
+    }
+
+    fn torn_of(error: &anyhow::Error) -> CapacityRecordTorn {
+        *error
+            .downcast_ref::<CapacityRecordTorn>()
+            .unwrap_or_else(|| panic!("not a typed torn refusal: {error:#}"))
+    }
+
+    fn load_error(f: &Fixture) -> anyhow::Error {
+        let mut owner = f.owner();
+        owner.load_anchor(&f.policy).unwrap_err()
+    }
+
+    #[test]
+    fn every_torn_anchor_shape_is_typed_and_names_reissue_while_the_account_is_sound() {
+        let shapes: [(&str, TornDefect, fn(&mut Vec<u8>)); 3] = [
+            ("checksum", TornDefect::ChecksumMismatch, |bytes| {
+                bytes[2000] ^= 0xff
+            }),
+            ("marker", TornDefect::ForeignFormat, |bytes| {
+                bytes[..8].fill(0)
+            }),
+            ("size", TornDefect::WrongSize, |bytes| bytes.truncate(5000)),
+        ];
+        for (name, defect, tear) in shapes {
+            let f = Fixture::new();
+            Fixture::mutate(&f.anchor_path(), tear);
+            let torn = torn_of(&load_error(&f));
+            assert_eq!(
+                (torn.file, torn.defect, torn.cure),
+                (
+                    CapacityFile::Anchor,
+                    defect,
+                    CapacityCure::ReissueFromAccount
+                ),
+                "{name}"
+            );
+            let text = load_error(&f).to_string();
+            assert!(text.contains("capacity reissue"), "{name}: {text}");
+            assert!(!text.contains("repair-account"), "{name}: {text}");
+        }
+    }
+
+    #[test]
+    fn a_torn_anchor_holds_when_the_account_is_torn_or_policy_forbids_reissue() {
+        // Both files torn: nothing derives the record.
+        let f = Fixture::new();
+        Fixture::mutate(&f.anchor_path(), |bytes| bytes[2000] ^= 0xff);
+        Fixture::mutate(&f.account_path(), |bytes| bytes[40] ^= 0xff);
+        let torn = torn_of(&load_error(&f));
+        assert_eq!(torn.cure, CapacityCure::Hold);
+        assert!(torn.to_string().contains("restore"), "{torn}");
+        let error = f.run(None).unwrap_err();
+        assert_eq!(torn_of(&error).cure, CapacityCure::Hold);
+        assert!(!f.document_path().exists());
+
+        // Account sound but the signed policy forbids re-issuance.
+        let mut f = Fixture::new();
+        Fixture::mutate(&f.anchor_path(), |bytes| bytes[2000] ^= 0xff);
+        f.policy.renewal.operator_reissue = false;
+        assert_eq!(torn_of(&load_error(&f)).cure, CapacityCure::Hold);
+        assert_eq!(torn_of(&f.run(None).unwrap_err()).cure, CapacityCure::Hold);
+        assert!(!f.document_path().exists());
+    }
+
+    #[test]
+    fn an_anchor_of_another_issuance_is_not_a_tear_and_offers_no_cure() {
+        let f = Fixture::new();
+        // The issuance digest sits at bytes 13..45; the checksum is remade so
+        // the file is a whole, valid record of another node.
+        Fixture::mutate(&f.anchor_path(), |bytes| {
+            bytes[13] ^= 0xff;
+            let checksum: [u8; 32] =
+                sha2::Sha256::digest(&bytes[..redo::ANCHOR_PAYLOAD_BYTES]).into();
+            bytes[redo::ANCHOR_PAYLOAD_BYTES..].copy_from_slice(&checksum);
+        });
+        let error = load_error(&f);
+        assert!(
+            error.downcast_ref::<CapacityRecordTorn>().is_none(),
+            "{error:#}"
+        );
+        assert!(error.to_string().contains("another issuance"), "{error:#}");
+        let error = f.run(None).unwrap_err();
+        assert!(
+            error.downcast_ref::<CapacityRecordTorn>().is_none(),
+            "{error:#}"
+        );
+        assert!(!f.document_path().exists());
+    }
+
+    #[test]
+    fn every_torn_account_shape_is_typed_and_names_repair_while_the_anchor_is_sound() {
+        let f = Fixture::new();
+        let (genesis, debited) = f.debited_images();
+        let mut sectors = genesis;
+        // A power-loss mixture: the head of the old image, the tail of the new.
+        sectors[2048..].copy_from_slice(&debited[2048..]);
+        let mut flipped = debited;
+        flipped[40] ^= 0xff;
+        let mut zeroed = debited;
+        zeroed[..8].fill(0);
+        for (name, bytes, defect) in [
+            ("sectors", sectors, TornDefect::ChecksumMismatch),
+            ("flip", flipped, TornDefect::ChecksumMismatch),
+            ("marker", zeroed, TornDefect::ForeignFormat),
+        ] {
+            std::fs::write(f.account_path(), bytes).unwrap();
+            let mut owner = f.owner();
+            let error = owner.require_no_outstanding_debit(&f.policy).unwrap_err();
+            let torn = torn_of(&error);
+            assert_eq!(
+                (torn.file, torn.defect, torn.cure),
+                (CapacityFile::Account, defect, CapacityCure::RepairAccount),
+                "{name}"
+            );
+            assert!(
+                error.to_string().contains("repair-account"),
+                "{name}: {error}"
+            );
+            // Re-issuance refuses it the same way, naming the same cure.
+            assert_eq!(
+                torn_of(&f.run(None).unwrap_err()).cure,
+                CapacityCure::RepairAccount,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_verifiable_account_outside_the_redo_is_never_offered_repair() {
+        let f = Fixture::new();
+        let (genesis, _debited) = f.debited_images();
+        // A whole, valid record that is neither image of the redo: replaced,
+        // not torn by a write.
+        let older = {
+            let mut copy = genesis;
+            copy[12..20].copy_from_slice(&2u64.to_le_bytes());
+            let checksum: [u8; 32] =
+                sha2::Sha256::digest(&copy[..super::super::PAYLOAD_BYTES]).into();
+            copy[super::super::PAYLOAD_BYTES..].copy_from_slice(&checksum);
+            decode(&copy).unwrap();
+            copy
+        };
+        std::fs::write(f.account_path(), older).unwrap();
+        let error = f.repair(None).unwrap_err();
+        let torn = torn_of(&error);
+        assert_eq!(
+            (torn.defect, torn.cure),
+            (TornDefect::ReplacedRecord, CapacityCure::Hold)
+        );
+        assert_eq!(std::fs::read(f.account_path()).unwrap(), older);
+        assert!(f.repairs().is_empty());
+    }
+
+    #[test]
+    fn an_account_of_the_wrong_size_holds_at_open() {
+        let f = Fixture::new();
+        Fixture::mutate(&f.account_path(), |bytes| bytes.truncate(100));
+        let error = StoppedCapacityAccount::open(
+            f.directory.try_clone().unwrap(),
+            f.account_identity,
+            f.onboarding.try_clone().unwrap(),
+            f.state.try_clone().unwrap(),
+            f.issuance,
+            &f.policy,
+            f.lock.witness().unwrap(),
+        )
+        .err()
+        .expect("a resized account is refused");
+        let torn = torn_of(&error);
+        assert_eq!(
+            (torn.file, torn.defect, torn.cure),
+            (
+                CapacityFile::Account,
+                TornDefect::WrongSize,
+                CapacityCure::Hold
+            )
+        );
+    }
+
+    #[test]
+    fn repair_rederives_a_torn_account_from_the_anchor_and_records_one_line() {
+        let f = Fixture::new();
+        let (genesis, debited) = f.debited_images();
+        let mut sectors = genesis;
+        sectors[2048..].copy_from_slice(&debited[2048..]);
+        std::fs::write(f.account_path(), sectors).unwrap();
+        let report = f.repair(None).unwrap();
+        assert!(report.repaired);
+        assert_eq!((report.epoch, report.sequence), (1, 1));
+        assert_eq!(std::fs::read(f.account_path()).unwrap(), debited);
+        let torn_digest = hex_digest(&sha2::Sha256::digest(sectors).into());
+        assert_eq!(
+            report.torn_account_digest.as_deref(),
+            Some(torn_digest.as_str())
+        );
+        let evidence = f.repairs();
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].torn_account_digest, torn_digest);
+        assert_eq!(evidence[0].repaired_account_digest, report.account_digest);
+        assert_eq!(evidence[0].command, "ryeos node capacity repair-account");
+        // The anchor is untouched and the debit is left for start to settle.
+        let (current, bytes) = f.current();
+        assert_eq!(bytes, debited);
+        assert!(current.target().outstanding.is_some());
+        // A rerun finds nothing to do and writes nothing.
+        let again = f.repair(None).unwrap();
+        assert!(!again.repaired);
+        assert_eq!(f.repairs().len(), 1);
+    }
+
+    #[test]
+    fn repair_refuses_what_start_repairs_and_leaves_it_unwritten() {
+        let f = Fixture::new();
+        let (genesis, debited) = f.debited_images();
+        // The unapplied redo: the account still holds the before image.
+        std::fs::write(f.account_path(), genesis).unwrap();
+        let error = f.repair(None).unwrap_err();
+        assert!(error.to_string().contains("write model"), "{error:#}");
+        assert_eq!(std::fs::read(f.account_path()).unwrap(), genesis);
+        // A prefix tear of the write itself.
+        let mut prefix = genesis;
+        prefix[..300].copy_from_slice(&debited[..300]);
+        std::fs::write(f.account_path(), prefix).unwrap();
+        assert!(
+            f.repair(None)
+                .unwrap_err()
+                .to_string()
+                .contains("write model")
+        );
+        assert_eq!(std::fs::read(f.account_path()).unwrap(), prefix);
+        assert!(f.repairs().is_empty());
+    }
+
+    #[test]
+    fn repair_never_touches_a_torn_anchor() {
+        let f = Fixture::new();
+        f.debit_dead_incarnation();
+        Fixture::mutate(&f.anchor_path(), |bytes| bytes[2000] ^= 0xff);
+        let anchor = std::fs::read(f.anchor_path()).unwrap();
+        let account = std::fs::read(f.account_path()).unwrap();
+        let error = f.repair(None).unwrap_err();
+        assert_eq!(torn_of(&error).file, CapacityFile::Anchor);
+        assert_eq!(std::fs::read(f.anchor_path()).unwrap(), anchor);
+        assert_eq!(std::fs::read(f.account_path()).unwrap(), account);
+        assert!(f.repairs().is_empty());
+    }
+
+    #[test]
+    fn repair_interrupted_at_each_step_converges_on_one_line_per_torn_state() {
+        for step in [Step::RepairEvidence, Step::RepairAccount] {
+            let f = Fixture::new();
+            let (genesis, debited) = f.debited_images();
+            let mut sectors = genesis;
+            sectors[2048..].copy_from_slice(&debited[2048..]);
+            std::fs::write(f.account_path(), sectors).unwrap();
+            let error = f.repair(Some(step)).unwrap_err();
+            assert!(
+                error.to_string().contains("injected"),
+                "{step:?}: {error:#}"
+            );
+            assert_eq!(f.repairs().len(), 1, "{step:?}");
+            let report = f.repair(None).unwrap();
+            assert_eq!(report.repaired, step == Step::RepairEvidence, "{step:?}");
+            assert_eq!(
+                std::fs::read(f.account_path()).unwrap(),
+                debited,
+                "{step:?}"
+            );
+            assert_eq!(f.repairs().len(), 1, "{step:?}");
+        }
+    }
+
+    #[test]
+    fn a_repair_write_that_dies_midway_is_repaired_again() {
+        let f = Fixture::new();
+        let (genesis, debited) = f.debited_images();
+        let mut sectors = genesis;
+        sectors[2048..].copy_from_slice(&debited[2048..]);
+        // The repair's own overwrite stopped after a prefix of the target.
+        for cut in [1usize, 700, 4000] {
+            let mut midway = sectors;
+            midway[..cut].copy_from_slice(&debited[..cut]);
+            std::fs::write(f.account_path(), midway).unwrap();
+            let report = f.repair(None).unwrap();
+            assert!(report.repaired, "cut {cut}");
+            assert_eq!(
+                std::fs::read(f.account_path()).unwrap(),
+                debited,
+                "cut {cut}"
+            );
+        }
+    }
+
+    #[test]
+    fn repair_refuses_an_unrecordable_actor_and_an_oversized_reason_before_any_write() {
+        let f = Fixture::new();
+        let (_, debited) = f.debited_images();
+        let mut torn = debited;
+        torn[40] ^= 0xff;
+        std::fs::write(f.account_path(), torn).unwrap();
+        let mut owner = f.owner();
+        let error = owner
+            .repair_account(&f.policy, Err("root".to_owned()), "x", "x")
+            .unwrap_err();
+        assert!(error.to_string().contains("before any write"), "{error:#}");
+        let mut owner = f.owner();
+        let error = owner
+            .repair_account(
+                &f.policy,
+                lillux::process_control::ControllerAccount::current(),
+                &"r".repeat(1025),
+                "x",
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("bound"), "{error:#}");
+        assert_eq!(std::fs::read(f.account_path()).unwrap(), torn);
+        assert!(f.repairs().is_empty());
+    }
+
+    #[test]
+    fn reissue_from_the_account_record_opens_one_epoch_when_the_anchor_is_torn() {
+        for tear in [
+            (|bytes: &mut Vec<u8>| bytes[2000] ^= 0xff) as fn(&mut Vec<u8>),
+            |bytes| bytes[..8].fill(0),
+            |bytes| bytes.truncate(5000),
+        ] {
+            let f = Fixture::new();
+            f.debit_dead_incarnation();
+            let (debit, debit_bytes) = f.current();
+            Fixture::mutate(&f.anchor_path(), tear);
+            let report = f.run(None).unwrap();
+            assert!(report.from_account_record && !report.already_applied);
+            assert_eq!((report.from_epoch, report.to_epoch), (1, 2));
+            let expected = hex_digest(&f.dead.process_digest);
+            assert_eq!(
+                report.settled_incarnation.as_deref(),
+                Some(expected.as_str())
+            );
+            let (current, bytes) = f.current();
+            assert_eq!(current.operation(), Operation::OperatorReissue);
+            assert_eq!(current.epoch(), 2);
+            assert_eq!(current.recovery_attempts(), 0);
+            assert_eq!(current.target().sequence, debit.target().sequence);
+            assert_eq!(current.target().consumed, genesis_consumed());
+            assert!(current.target().outstanding.is_none());
+            assert_eq!(bytes, encode(current.target()).unwrap());
+            // The document names the account image it renewed from.
+            let document = std::fs::read(f.document_path()).unwrap();
+            let body = verify_reissuance_document(
+                &document,
+                &f.identity().lineage,
+                &f.identity().node_fingerprint,
+                &f.issuance,
+            )
+            .unwrap();
+            assert_eq!(
+                body.anchor_digest,
+                hex_digest(&sha2::Sha256::digest(debit_bytes).into())
+            );
+            let evidence = f.evidence();
+            assert_eq!(evidence.len(), 1);
+            assert!(evidence[0].command.contains("anchor was torn"));
+            // Rerun is the ordinary already-applied path.
+            let again = f.run(None).unwrap();
+            assert!(again.already_applied && !again.from_account_record);
+            assert_eq!(f.evidence().len(), 1);
+        }
+    }
+
+    #[test]
+    fn reissue_from_the_account_record_converges_after_an_interruption_at_each_step() {
+        for step in [Step::Document, Step::Anchor, Step::Account] {
+            let f = Fixture::new();
+            f.debit_dead_incarnation();
+            Fixture::mutate(&f.anchor_path(), |bytes| bytes[2000] ^= 0xff);
+            let error = f.run(Some(step)).unwrap_err();
+            assert!(
+                error.to_string().contains("injected"),
+                "{step:?}: {error:#}"
+            );
+            let report = f.run(None).unwrap();
+            assert_eq!((report.from_epoch, report.to_epoch), (1, 2), "{step:?}");
+            assert_eq!(report.already_applied, step != Step::Document, "{step:?}");
+            let (current, bytes) = f.current();
+            assert_eq!(current.epoch(), 2, "{step:?}");
+            assert_eq!(bytes, encode(current.target()).unwrap(), "{step:?}");
+            assert_eq!(f.evidence().len(), 1, "{step:?}");
+            let digest: [u8; 32] =
+                sha2::Sha256::digest(std::fs::read(f.document_path()).unwrap()).into();
+            assert_eq!(digest, current.authorization(), "{step:?}");
+            assert!(f.run(None).unwrap().already_applied);
+            assert_eq!(f.evidence().len(), 1, "{step:?}");
+        }
+    }
+
+    #[test]
+    fn reissue_from_the_account_record_keeps_the_epoch_bound_and_the_liveness_proof() {
+        let mut f = Fixture::new();
+        Fixture::mutate(&f.anchor_path(), |bytes| bytes[2000] ^= 0xff);
+        f.policy.renewal.maximum_epochs = Some(1);
+        let error = f.run(None).unwrap_err();
+        assert!(error.to_string().contains("epoch bound"), "{error:#}");
+        assert!(!f.document_path().exists());
+        // The torn anchor is exactly as it was.
+        assert_eq!(torn_of(&load_error(&f)).file, CapacityFile::Anchor);
     }
 }

@@ -14,6 +14,7 @@
 //!   - `ryeos node offline-operation submit` — send a signed request to a running node's route
 //!   - `ryeos node offline-operation list` — show what a node has queued, applied and refused
 //!   - `ryeos node capacity reissue` — open the next native-capacity epoch on a stopped node
+//!   - `ryeos node capacity repair-account` — re-derive a stopped node's torn native-capacity account from its sound redo anchor
 //!   - `ryeos node capacity reanchor` — sign a stopped node's native-capacity account onto the filesystem its data moved to
 //!   - `ryeos node reset execution-history` — explicit offline epoch retirement
 //!   - `ryeos node reset execution-history-scratch` — clear stranded reset scratch
@@ -139,6 +140,11 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
     LocalCommandDescriptor {
         tokens: &["node", "capacity", "reissue"],
         summary: "Open the next native-capacity epoch on a stopped node, under the operator key",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "capacity", "repair-account"],
+        summary: "Re-derive a stopped node's torn native-capacity account from its sound redo anchor, under the operator key",
         category: "lifecycle",
     },
     LocalCommandDescriptor {
@@ -417,6 +423,10 @@ pub async fn try_dispatch(
         }
         ("node", Some("capacity")) if argv.get(2).map(String::as_str) == Some("reissue") => {
             run_node_capacity_reissue_command(&argv[3..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("capacity")) if argv.get(2).map(String::as_str) == Some("repair-account") => {
+            run_node_capacity_repair_account_command(&argv[3..], console).map_err(map_local_err)?;
             Ok(true)
         }
         ("node", Some("capacity")) if argv.get(2).map(String::as_str) == Some("reanchor") => {
@@ -2505,8 +2515,106 @@ fn capacity_reissue_banner(
             settled.clone(),
         ));
     }
+    if report.from_account_record {
+        banner.rows.push(crate::tty::Row::text(
+            "the redo anchor was torn: this epoch opened from the account record",
+        ));
+    }
     banner.rows.push(crate::tty::Row::text(
         "restart inhibition is not cleared; run `ryeos node allow-restart` when the cause is resolved",
+    ));
+    banner
+}
+
+// ── ryeos node capacity repair-account ──────────────────────────────
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ryeos node capacity repair-account",
+    about = "Re-derive a stopped node's torn native-capacity account from its sound redo \
+             anchor. Refuses while a daemon holds the state lock, when the anchor is itself \
+             torn, and for any account that verifies or that start repairs by itself. \
+             Settles no incarnation debit and renews nothing.",
+    no_binary_name = true
+)]
+struct NodeCapacityRepairAccountArgs {
+    /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    #[arg(long)]
+    app_root: Option<PathBuf>,
+
+    /// Why the operator repairs the account; recorded in the evidence log.
+    #[arg(long)]
+    reason: String,
+
+    /// Emit JSON instead of human-readable text.
+    #[arg(long)]
+    json: bool,
+}
+
+fn run_node_capacity_repair_account_command(
+    argv: &[String],
+    console: &crate::tty::Console,
+) -> Result<()> {
+    let Some(args) = parse_or_render_help::<NodeCapacityRepairAccountArgs>(argv, console)? else {
+        return Ok(());
+    };
+    let controller = LifecycleController::from_env(local_env(args.app_root)?);
+    let app_root = controller.config().app_root.clone();
+    let host = crate::offline_apply::CliHost::new();
+    let applied = host.apply(
+        &app_root,
+        "node.capacity.repair-account",
+        serde_json::to_value(ryeos_node::offline_operation::handlers::CapacityArguments {
+            reason: args.reason.clone(),
+        })?,
+        std::collections::BTreeMap::new(),
+        std::collections::BTreeMap::new(),
+    )?;
+    let report: ryeos_node::native_capacity::RepairReport =
+        serde_json::from_value(applied.result).context("read the account repair report")?;
+    if args.json {
+        crate::tty::write_json(&serde_json::json!({ "app_root": app_root, "repair": report }))?;
+        return Ok(());
+    }
+    console.status(&capacity_repair_banner(&app_root, &report))?;
+    Ok(())
+}
+
+fn capacity_repair_banner(
+    app_root: &std::path::Path,
+    report: &ryeos_node::native_capacity::RepairReport,
+) -> crate::tty::StatusBanner {
+    let mut banner = if report.repaired {
+        crate::tty::StatusBanner::new(
+            crate::tty::Tone::Success,
+            format!(
+                "CAPACITY ACCOUNT REPAIRED: epoch {}, debit sequence {}",
+                report.epoch, report.sequence
+            ),
+        )
+    } else {
+        let mut banner = crate::tty::StatusBanner::new(
+            crate::tty::Tone::Neutral,
+            "ACCOUNT ALREADY CURRENT: nothing was written".to_owned(),
+        );
+        banner.detail = Some("the account already holds its anchor's image".to_owned());
+        banner
+    };
+    banner.rows.push(crate::tty::Row::key_value(
+        "app root",
+        app_root.display().to_string(),
+    ));
+    if let Some(torn) = &report.torn_account_digest {
+        banner
+            .rows
+            .push(crate::tty::Row::key_value("replaced bytes", torn.clone()));
+    }
+    banner.rows.push(crate::tty::Row::key_value(
+        "account image",
+        report.account_digest.clone(),
+    ));
+    banner.rows.push(crate::tty::Row::text(
+        "no incarnation debit was settled and restart inhibition is not cleared; start the node",
     ));
     banner
 }
@@ -4208,6 +4316,23 @@ fn native_capacity_check(
                 "fix": "re-provision the node under a policy that pre-authorises renewal",
             }),
         ),
+        Err(error)
+            if error
+                .downcast_ref::<ryeos_node::native_capacity::CapacityRecordTorn>()
+                .is_some() =>
+        {
+            let torn = error
+                .downcast_ref::<ryeos_node::native_capacity::CapacityRecordTorn>()
+                .expect("checked by the guard");
+            check(
+                "native_capacity",
+                FAIL,
+                serde_json::json!({
+                    "error": format!("{error:#}"),
+                    "fix": torn.instruction(),
+                }),
+            )
+        }
         Err(error) => check(
             "native_capacity",
             FAIL,
@@ -6113,6 +6238,7 @@ mod tests {
             document_digest: "d".repeat(64),
             settled_incarnation: Some("e".repeat(64)),
             already_applied: false,
+            from_account_record: false,
         };
         let banner = capacity_reissue_banner(std::path::Path::new("/srv/node"), &report);
         assert_eq!(banner.heading, "CAPACITY RE-ISSUED: epoch 3 → 4");

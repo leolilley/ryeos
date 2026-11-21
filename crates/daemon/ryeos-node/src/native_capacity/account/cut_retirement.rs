@@ -26,6 +26,7 @@ use super::redo::{
     ANCHOR_BYTES, ANCHOR_PAYLOAD_BYTES, BEFORE_START, MAGIC, PROCESS_STORAGE_BYTES,
     RECOVERY_PROCESS_END, RECOVERY_PROCESS_START, SCHEMA, StoredProcess, TARGET_START,
 };
+use super::torn::AnchorDecodeRefusal;
 use super::{PAYLOAD_BYTES, PROCESS_END, PROCESS_START, RECORD_BYTES, RECORD_MAGIC};
 use anyhow::{Context, Result, ensure};
 use lillux::process_control::ExactProcessIdentity;
@@ -175,14 +176,12 @@ fn anchor_checksum(bytes: &[u8; ANCHOR_BYTES]) -> [u8; 32] {
 /// Re-record every identity the redo anchor carries (its recovery process
 /// and the debit of its before and target images), if any is pre-cut.
 fn upgrade_anchor(bytes: &mut [u8; ANCHOR_BYTES]) -> Result<bool> {
-    ensure!(
-        &bytes[..8] == MAGIC && bytes[8..12] == SCHEMA.to_le_bytes(),
-        "capacity redo has an unknown format"
-    );
-    ensure!(
-        bytes[ANCHOR_PAYLOAD_BYTES..] == anchor_checksum(bytes),
-        "capacity redo checksum mismatch"
-    );
+    if &bytes[..8] != MAGIC || bytes[8..12] != SCHEMA.to_le_bytes() {
+        return Err(AnchorDecodeRefusal::Format.into());
+    }
+    if bytes[ANCHOR_PAYLOAD_BYTES..] != anchor_checksum(bytes) {
+        return Err(AnchorDecodeRefusal::Checksum.into());
+    }
     let mut changed = false;
     match bytes[53] {
         0 => {}
@@ -298,6 +297,41 @@ pub(super) fn account_awaits_cut(
     ) && account != anchor_target
 }
 
+/// Name the cure of a torn anchor the cut met, from what the account and the
+/// signed policy prove. Best effort: without the completion record no verb is
+/// promised.
+fn anchor_cure_from_files(
+    app_root: &Path,
+    directory: &lillux::PinnedDirectory,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    let Ok(Some(report)) = crate::init::verify_init_completion(app_root) else {
+        return error;
+    };
+    let Ok(issuance) = report.capacity_account.issuance_digest() else {
+        return error;
+    };
+    let account = (|| -> Option<[u8; RECORD_BYTES]> {
+        let file = directory
+            .open_pinned_regular(OsStr::new("account"), false)
+            .ok()??;
+        let mut bytes = [0u8; RECORD_BYTES];
+        (file.observation().ok()?.size() == RECORD_BYTES as u64).then_some(())?;
+        file.read_exact_stable_into(
+            &mut bytes,
+            MonotonicDeadline::after(Duration::from_secs(60)),
+        )
+        .ok()?;
+        Some(bytes)
+    })();
+    super::torn::with_anchor_cure(
+        error,
+        account.as_ref(),
+        &report.capacity_account.policy,
+        &issuance,
+    )
+}
+
 /// The points at which the cut can be interrupted, for the fault parameter of
 /// [`retire_with`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -365,7 +399,9 @@ pub(crate) fn retire_with(
     let mut anchor_before = [0u8; ANCHOR_BYTES];
     anchor.read_exact_stable_into(&mut anchor_before, deadline)?;
     let mut anchor_after = anchor_before;
-    let anchor_changed = upgrade_anchor(&mut anchor_after)?;
+    let anchor_changed = upgrade_anchor(&mut anchor_after)
+        .map_err(super::torn::classify_anchor_decode)
+        .map_err(|error| anchor_cure_from_files(app_root, &directory, error))?;
     let target_of = |bytes: &[u8; ANCHOR_BYTES]| -> Result<[u8; RECORD_BYTES]> {
         Ok(bytes[TARGET_START..TARGET_START + RECORD_BYTES].try_into()?)
     };
@@ -385,9 +421,20 @@ pub(crate) fn retire_with(
     account.require_effective_user_owned()?;
     let mut account_before = [0u8; RECORD_BYTES];
     account.read_exact_stable_into(&mut account_before, deadline)?;
-    let rewrite_account = match classify_account(&account_before, &target_old, &target_new)? {
-        AccountState::Current => false,
-        AccountState::AwaitsCut => true,
+    let rewrite_account = match classify_account(&account_before, &target_old, &target_new) {
+        Ok(AccountState::Current) => false,
+        Ok(AccountState::AwaitsCut) => true,
+        // Neither the pre-cut image nor a tear toward the target. With the
+        // anchor already current, repair re-derives the account from it; with
+        // a pre-cut anchor nothing is written yet and no verb reads it.
+        Err(_) => {
+            let refusal = super::torn::account_outside_redo(&account_before);
+            return Err(if anchor_changed {
+                super::torn::without_cure(refusal)
+            } else {
+                refusal
+            });
+        }
     };
     fault(CutStep::Planned)?;
 
@@ -722,6 +769,36 @@ mod interruption_tests {
         let before = node.files();
         let error = node.cut().expect_err("not the pre-cut shape");
         assert!(format!("{error:#}").contains("checksum"), "{error:#}");
+        assert_eq!(node.files(), before);
+    }
+
+    #[test]
+    fn a_cut_over_a_torn_anchor_or_a_torn_account_refuses_typed_with_nothing_written() {
+        use super::super::torn::{CapacityCure, CapacityFile, CapacityRecordTorn};
+        // A torn anchor: no completion record here, so no verb is promised.
+        let node = Node::pre_cut();
+        let directory = node.root.join(".ai/node/native-capacity");
+        let mut anchor = std::fs::read(directory.join("anchor")).unwrap();
+        anchor[2000] ^= 0xff;
+        std::fs::write(directory.join("anchor"), &anchor).unwrap();
+        let before = node.files();
+        let error = node.cut().unwrap_err();
+        let torn = error.downcast_ref::<CapacityRecordTorn>().expect("typed");
+        assert_eq!(torn.file, CapacityFile::Anchor);
+        assert_eq!(torn.cure, CapacityCure::Hold);
+        assert_eq!(node.files(), before);
+
+        // The cut has run; the account then tears outside any write model.
+        let node = Node::pre_cut();
+        node.cut().unwrap();
+        let (_, mut account) = node.files();
+        account[40] ^= 0xff;
+        node.write_account(&account);
+        let before = node.files();
+        let error = node.cut().unwrap_err();
+        let torn = error.downcast_ref::<CapacityRecordTorn>().expect("typed");
+        assert_eq!(torn.file, CapacityFile::Account);
+        assert_eq!(torn.cure, CapacityCure::RepairAccount);
         assert_eq!(node.files(), before);
     }
 }
