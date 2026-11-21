@@ -43,7 +43,6 @@ fn ledger_states(h: &DaemonHarness) -> Vec<(String, Option<i64>)> {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     })
-    .unwrap_or_default()
 }
 
 #[tokio::test(flavor = "multi_thread")]
