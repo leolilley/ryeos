@@ -1606,6 +1606,35 @@ mod tests {
         }
     }
 
+    /// A launch's signer list for a project with no endorsement attaches no
+    /// snapshot; an authoring-role entry without one means nothing is
+    /// endorsed, so every loader built from it refuses the key's items.
+    #[test]
+    fn authoring_entry_without_an_endorsement_snapshot_is_untrusted_in_project_space() {
+        let (sk, vk, fp) = gen_key();
+        let (_, node_vk, _) = gen_key2();
+        let record = SignerRecord::new(
+            &vk,
+            "authoring",
+            SignerRole::Authoring,
+            SignerScope::authoring_default(),
+            SignerStatus::Active,
+        );
+        let live = TrustStore::from_registry(node_vk, vec![record]).unwrap();
+        let entries = live.launch_signer_entries(&live, Some(Path::new("/work/p")));
+        assert!(entries.iter().all(|entry| entry.endorsements.is_none()));
+        let store = TrustStore::from_signer_entries(&entries).unwrap();
+        let (content, envelope, header) = signed_with_header(&sk, &fp);
+        for kind in ["knowledge", "directive", "tool", "config"] {
+            for root in [Some(Path::new("/work/p")), None] {
+                let ctx = SignerContext::project(kind, root);
+                let (class, _) =
+                    verify_item_signature(&content, &header, &envelope, &store, &ctx).unwrap();
+                assert_eq!(class, TrustClass::Untrusted, "{kind} {root:?}");
+            }
+        }
+    }
+
     #[test]
     fn authoring_record_with_a_widened_scope_is_refused_at_load() {
         let (_, vk, fp) = gen_key();

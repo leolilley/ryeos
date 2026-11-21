@@ -378,7 +378,7 @@ pub fn load_limits_config_from_loader(
         return Ok(None);
     };
     let config = loader
-        .load_config_strict::<LimitsConfig>(config_identity)
+        .load_config_strict_signed::<LimitsConfig>(config_identity)
         .map_err(|e| anyhow::anyhow!("limits config: {e}"))?;
     if let Some(config) = &config {
         config.validate(declaration)?;
@@ -1035,14 +1035,34 @@ mod tests {
             .config()
             .join("example-runtime");
         std::fs::create_dir_all(&config_dir).unwrap();
+        let key = lillux::crypto::SigningKey::from_bytes(&[9u8; 32]);
         std::fs::write(
             config_dir.join("limits.yaml"),
-            "defaults: {}\ncaps:\n  spend_usd: -1.0\n",
+            lillux::signature::sign_content(
+                "defaults: {}\ncaps:\n  spend_usd: -1.0\n",
+                &key,
+                "#",
+                None,
+            ),
         )
         .unwrap();
 
+        let verifying_key = key.verifying_key();
+        let entries = [ryeos_engine::trust::TrustedSignerEntry {
+            fingerprint: lillux::signature::compute_fingerprint(&verifying_key),
+            public_key: format!(
+                "ed25519:{}",
+                base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    verifying_key.to_bytes()
+                )
+            ),
+            label: "test".to_string(),
+            scope: ryeos_engine::trust::SignerScope::everywhere(),
+            endorsements: None,
+        }];
         let loader =
-            ryeos_runtime::verified_loader::VerifiedLoader::new(project, vec![], &[]).unwrap();
+            ryeos_runtime::verified_loader::VerifiedLoader::new(project, vec![], &entries).unwrap();
         let err = load_limits_config_from_loader(&loader, &runtime_declaration()).unwrap_err();
         assert!(
             err.to_string().contains("canonical decimal string"),
