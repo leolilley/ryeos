@@ -296,13 +296,19 @@ impl ExternalHostRuntime {
     }
 }
 
-/// Privileged external-supervisor entry. The administrator-selected pathname
-/// is opened only through a root-owned hierarchy, converted to descriptor
-/// authority, and never passed to the unprivileged daemon.
-pub fn exec_external_controller(
+struct ExternalLaunchInputs {
+    binding: HostRuntimeBinding,
+    app_root: PinnedDirectory,
+    executable: lillux::PinnedRegularFile,
+    document: InheritedReadonlyDocument,
+}
+
+/// Open and validate the administrator-owned launch inputs of an external
+/// controller: the binding snapshot, the exact app root and the daemon image.
+fn external_launch_inputs(
     binding_path: &Path,
     daemon_executable: &Path,
-) -> Result<std::convert::Infallible> {
+) -> Result<ExternalLaunchInputs> {
     lillux::require_administrator()?;
     if !binding_path.is_absolute() {
         bail!("external host-runtime binding requires an absolute path");
@@ -350,11 +356,37 @@ pub fn exec_external_controller(
         .context("external controller daemon image is absent")?;
     executable.require_owner(0)?;
     executable.require_executable()?;
+    Ok(ExternalLaunchInputs {
+        binding,
+        app_root,
+        executable,
+        document,
+    })
+}
+
+fn external_app_root_argument(binding: &HostRuntimeBinding) -> Result<[String; 2]> {
     let root = binding
         .app_root
         .to_str()
         .context("external host-runtime app root is not UTF-8")?;
-    let arguments = ["--app-root".to_owned(), root.to_owned()];
+    Ok(["--app-root".to_owned(), root.to_owned()])
+}
+
+/// Privileged external-supervisor entry. The administrator-selected pathname
+/// is opened only through a root-owned hierarchy, converted to descriptor
+/// authority, and never passed to the unprivileged daemon.
+pub fn exec_external_controller(
+    binding_path: &Path,
+    daemon_executable: &Path,
+) -> Result<std::convert::Infallible> {
+    let inputs = external_launch_inputs(binding_path, daemon_executable)?;
+    let ExternalLaunchInputs {
+        binding,
+        app_root,
+        executable,
+        document,
+    } = inputs;
+    let arguments = external_app_root_argument(&binding)?;
     match &binding.oci_lifecycle {
         Some(lifecycle) => binding
             .process_scopes
@@ -384,6 +416,37 @@ pub fn exec_external_controller(
             )
             .map_err(anyhow::Error::msg),
     }
+}
+
+/// Test-only: the launch of [`exec_external_controller`] as a prepared command
+/// the caller spawns as its own child. The node receives the same inherited
+/// binding and the same controller-leaf placement and credential drop; the
+/// caller may add the arguments, environment and descriptors the protected
+/// entry never carries. Compiled only under `test-support`.
+#[cfg(feature = "test-support")]
+pub fn spawn_external_controller_command(
+    binding_path: &Path,
+    daemon_executable: &Path,
+) -> Result<std::process::Command> {
+    let inputs = external_launch_inputs(binding_path, daemon_executable)?;
+    anyhow::ensure!(
+        inputs.binding.oci_lifecycle.is_none(),
+        "the test controller spawn does not carry an OCI lifecycle"
+    );
+    let arguments = external_app_root_argument(&inputs.binding)?;
+    inputs
+        .binding
+        .process_scopes
+        .spawn_controller_with_inherited_document(
+            &inputs.binding.account,
+            inputs.binding.node_resources,
+            &inputs.executable,
+            &arguments,
+            &inputs.app_root,
+            inputs.document,
+            HOST_RUNTIME_AUTHORITY_FD_ENV,
+        )
+        .map_err(anyhow::Error::msg)
 }
 
 #[cfg(test)]
