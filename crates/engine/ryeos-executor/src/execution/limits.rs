@@ -878,6 +878,35 @@ mod tests {
         assert_eq!(hard.depth, default_depth());
     }
 
+    fn limits_test_key() -> lillux::crypto::SigningKey {
+        lillux::crypto::SigningKey::from_bytes(&[91u8; 32])
+    }
+
+    fn trusted_signers_for(
+        key: &lillux::crypto::SigningKey,
+    ) -> Vec<ryeos_engine::trust::TrustedSignerEntry> {
+        use base64::Engine as _;
+        let verifying_key = key.verifying_key();
+        vec![ryeos_engine::trust::TrustedSignerEntry {
+            fingerprint: lillux::signature::compute_fingerprint(&verifying_key),
+            public_key: format!(
+                "ed25519:{}",
+                base64::engine::general_purpose::STANDARD.encode(verifying_key.to_bytes())
+            ),
+            label: "limits-test".to_string(),
+            scope: ryeos_engine::trust::SignerScope::everywhere(),
+            endorsements: None,
+        }]
+    }
+
+    fn write_limits_config(project: &std::path::Path, document: &str) {
+        let config_dir = ryeos_engine::roots::RuntimeRoot::new(project.to_path_buf())
+            .config()
+            .join("example-runtime");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("limits.yaml"), document).unwrap();
+    }
+
     #[test]
     fn load_limits_config_missing_file_returns_none() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1031,43 +1060,72 @@ mod tests {
     fn load_limits_config_rejects_invalid_spend_cap() {
         let tmp = tempfile::tempdir().unwrap();
         let project = tmp.path().join("project");
-        let config_dir = ryeos_engine::roots::RuntimeRoot::new(project.clone())
-            .config()
-            .join("example-runtime");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        let key = lillux::crypto::SigningKey::from_bytes(&[9u8; 32]);
-        std::fs::write(
-            config_dir.join("limits.yaml"),
-            lillux::signature::sign_content(
+        let key = limits_test_key();
+        write_limits_config(
+            &project,
+            &lillux::signature::sign_content(
                 "defaults: {}\ncaps:\n  spend_usd: -1.0\n",
                 &key,
                 "#",
                 None,
             ),
+        );
+
+        let loader = ryeos_runtime::verified_loader::VerifiedLoader::new(
+            project,
+            vec![],
+            &trusted_signers_for(&key),
         )
         .unwrap();
-
-        let verifying_key = key.verifying_key();
-        let entries = [ryeos_engine::trust::TrustedSignerEntry {
-            fingerprint: lillux::signature::compute_fingerprint(&verifying_key),
-            public_key: format!(
-                "ed25519:{}",
-                base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    verifying_key.to_bytes()
-                )
-            ),
-            label: "test".to_string(),
-            scope: ryeos_engine::trust::SignerScope::everywhere(),
-            endorsements: None,
-        }];
-        let loader =
-            ryeos_runtime::verified_loader::VerifiedLoader::new(project, vec![], &entries).unwrap();
         let err = load_limits_config_from_loader(&loader, &runtime_declaration()).unwrap_err();
         assert!(
             err.to_string().contains("canonical decimal string"),
             "got {err}"
         );
+    }
+
+    #[test]
+    fn load_limits_config_accepts_trusted_signed_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let key = limits_test_key();
+        write_limits_config(
+            &project,
+            &lillux::signature::sign_content("defaults: {}\ncaps: {}\n", &key, "#", None),
+        );
+        let loader = ryeos_runtime::verified_loader::VerifiedLoader::new(
+            project,
+            vec![],
+            &trusted_signers_for(&key),
+        )
+        .unwrap();
+        let config = load_limits_config_from_loader(&loader, &runtime_declaration()).unwrap();
+        assert!(config.is_some());
+    }
+
+    #[test]
+    fn load_limits_config_refuses_unsigned_and_untrusted_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let key = limits_test_key();
+        let stranger = lillux::crypto::SigningKey::from_bytes(&[92u8; 32]);
+        let loader = ryeos_runtime::verified_loader::VerifiedLoader::new(
+            project.clone(),
+            vec![],
+            &trusted_signers_for(&key),
+        )
+        .unwrap();
+
+        write_limits_config(&project, "defaults: {}\ncaps: {}\n");
+        let err = load_limits_config_from_loader(&loader, &runtime_declaration()).unwrap_err();
+        assert!(err.to_string().contains("is unsigned"), "got {err}");
+
+        write_limits_config(
+            &project,
+            &lillux::signature::sign_content("defaults: {}\ncaps: {}\n", &stranger, "#", None),
+        );
+        let err = load_limits_config_from_loader(&loader, &runtime_declaration()).unwrap_err();
+        assert!(err.to_string().contains("not trusted"), "got {err}");
     }
 
     #[test]
