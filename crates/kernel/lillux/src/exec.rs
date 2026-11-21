@@ -16551,7 +16551,6 @@ mod executable_memfd_flag_tests {
 #[cfg(all(test, target_os = "linux"))]
 mod capture_drain_stop_race_tests {
     use super::*;
-    use std::io::Write as _;
 
     /// Reader whose first read reports an empty pipe and, in that same
     /// instant, lets the child write its output and the stop be raised. That
