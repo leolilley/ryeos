@@ -1097,6 +1097,23 @@ mod tests {
         .unwrap()
     }
 
+    #[tokio::test]
+    async fn a_change_is_announced_only_to_a_node_that_is_running() {
+        // No node runs under a fresh directory: the announcement is skipped and
+        // says so, and nothing is raised, because the change is already made.
+        if std::env::var_os("RYEOSD_URL").is_some() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let outcome = announce_revised(
+            root.path(),
+            json!({ "project_path": "/nowhere", "item_refs": ["graph:a/b"] }),
+        )
+        .await;
+        assert_eq!(outcome["status"], "skipped", "{outcome}");
+        assert_eq!(outcome["reason"], "the node is not running", "{outcome}");
+    }
+
     #[test]
     fn the_cli_signs_only_the_testimony_it_asked_for() {
         let operator = "b".repeat(64);
