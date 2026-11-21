@@ -1583,8 +1583,8 @@ mod tests {
             .iter()
             .map(|name| {
                 let text = std::fs::read_to_string(directory.join(name)).unwrap();
-                let body = lillux::signature::strip_signature_lines_with_envelope(&text, "#", None);
-                serde_yaml::from_str(&body).unwrap()
+                let (_, body) = text.split_once('\n').unwrap();
+                serde_yaml::from_str(body).unwrap()
             })
             .collect()
     }

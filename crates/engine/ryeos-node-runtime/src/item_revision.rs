@@ -577,9 +577,22 @@ fn verify_record_bytes(
     }
 }
 
+/// The body a signature line covers: everything after the first line. Only
+/// that line is the record's own signature; a signed item carried inline in the
+/// body has a signature line of its own that must stay.
+fn signed_body(content: &str) -> Result<&str> {
+    let (first, body) = content
+        .split_once('\n')
+        .ok_or_else(|| anyhow!("the document has no body after its signature line"))?;
+    ensure!(
+        first.starts_with(&format!("# {}", lillux::signature::SIGNATURE_PREFIX)),
+        "the document does not start with its signature line"
+    );
+    Ok(body)
+}
+
 fn parse_body(content: &str) -> Result<RevisionBody> {
-    let stripped = lillux::signature::strip_signature_lines_with_envelope(content, "#", None);
-    serde_yaml::from_str(&stripped).context("parse the revision record body")
+    serde_yaml::from_str(signed_body(content)?).context("parse the revision record body")
 }
 
 /// Walk and verify a chain from record `from` (1 for the whole chain) through
@@ -785,10 +798,8 @@ impl RevisionHeads {
             &self.node_key,
         )
         .context("the head document is not signed by this node")?;
-        let document: HeadDocument = serde_yaml::from_str(
-            &lillux::signature::strip_signature_lines_with_envelope(content, "#", None),
-        )
-        .context("parse the head document")?;
+        let document: HeadDocument =
+            serde_yaml::from_str(signed_body(content)?).context("parse the head document")?;
         ensure!(
             document.schema == HEAD_SCHEMA
                 && document.project == project

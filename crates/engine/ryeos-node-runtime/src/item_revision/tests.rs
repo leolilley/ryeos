@@ -213,8 +213,8 @@ fn a_record_re_signed_by_another_key_is_not_pinned() {
     f.authored("value: 1\n");
     let path = f.record_path(1);
     let content = std::fs::read_to_string(&path).unwrap();
-    let body = lillux::signature::strip_signature_lines_with_envelope(&content, "#", None);
-    let forged = lillux::signature::sign_content(&body, &key(99), "#", None);
+    let (_, body) = content.split_once('\n').unwrap();
+    let forged = lillux::signature::sign_content(body, &key(99), "#", None);
     std::fs::write(&path, forged).unwrap();
 
     let view = f.read();
@@ -468,4 +468,30 @@ fn an_oversized_item_is_refused_before_anything_is_written() {
 #[test]
 fn revision_records_have_no_chain_of_their_own() {
     assert!(ChainItem::parse("revision:directive/greet/00000001").is_err());
+}
+
+#[test]
+fn an_inline_signed_item_round_trips_with_its_own_signature_line() {
+    let f = fixture();
+    let item = ChainItem::parse("directive:greet").unwrap();
+    let signed_item = lillux::signature::sign_content("value: 1\n", &f.authoring, "#", None);
+    assert!(signed_item.starts_with("# ryeos:signed:"));
+    append(
+        f.root(),
+        &f.authoring,
+        ActorRole::Authoring,
+        Change {
+            item: &item,
+            file_ext: ".yaml",
+            before: None,
+            after: Some(&signed_item),
+            provenance: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    let view = f.read();
+    assert!(view.is_sound(), "{view:#?}");
+    let body = view.records[0].body.as_ref().unwrap();
+    assert_eq!(body.content.as_deref(), Some(signed_item.as_str()));
+    assert_eq!(body.after_digest, Some(file_digest(signed_item.as_bytes())));
 }
